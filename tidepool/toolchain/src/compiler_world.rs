@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use sha2::{Digest, Sha256};
 use tidepool_extract_cmd::{InspectionNamespace, InspectionScope, StructuredInspection};
 
+use crate::artifact_inventory::CanonicalProducerIdentity;
 use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
 use crate::declaration_context::ExactDeclarationContext;
@@ -310,8 +311,6 @@ impl PublicModuleQuestion {
 /// Historical compiler/native support in a row is custody, not selected roots.
 pub struct CompilerWorldOpenInputs {
     primary_context: Arc<ExactDeclarationContext>,
-    primary_root: ContextRoot,
-    primary_blocks: ReachableBlocks,
     visible_rows: Vec<Arc<CheckedValueArtifact>>,
     sources: Arc<CapturedCompilerSources>,
     visibility: Arc<[u8]>,
@@ -326,32 +325,8 @@ impl CompilerWorldOpenInputs {
         visibility: Arc<[u8]>,
         directory: Arc<tempfile::TempDir>,
     ) -> Result<Self, CompileError> {
-        let snapshot = primary_context.snapshot();
-        let store = fvm_ipld_blockstore::MemoryBlockstore::new();
-        let mut materializer = Materializer::new(&store);
-        let context = materializer
-            .materialize_context(None, &snapshot)
-            .map_err(|error| source_failure(error.to_string()))?;
-        let primary_root = context.root().clone();
-        let staged = materializer
-            .finish()
-            .map_err(|error| source_failure(error.to_string()))?;
-        let primary_blocks = ReachableBlocks::default()
-            .replace_roots(&staged, vec![*primary_root.cid()])
-            .map_err(|error| source_failure(error.to_string()))?;
-        let work = primary_blocks.work();
-        crate::host_work::record_host_work(
-            crate::host_work::HostWorkCounter::SemanticDigestInputByte,
-            work.verified_bytes,
-        );
-        crate::host_work::record_host_work(
-            crate::host_work::HostWorkCounter::MaterializationGraphVisit,
-            work.link_visits.saturating_add(work.unlink_visits),
-        );
         Ok(Self {
             primary_context,
-            primary_root,
-            primary_blocks,
             visible_rows,
             sources,
             visibility,
@@ -364,6 +339,8 @@ pub struct CompilerWorldRestoration {
     logical_id: [u8; 32],
     inputs: CompilerWorldOpenInputs,
     product: Arc<[u8]>,
+    primary_root: ContextRoot,
+    primary_blocks: ReachableBlocks,
     producer: [u8; 32],
     profile: [u8; 32],
     descriptor: PathBuf,
@@ -374,7 +351,8 @@ impl fmt::Debug for CompilerWorldRestoration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CompilerWorldRestoration")
             .field("logical_id", &self.logical_id)
-            .field("primary_root", &self.inputs.primary_root)
+            .field("primary_root", &self.primary_root)
+            .field("primary_frontier_work", &self.primary_blocks.work())
             .finish_non_exhaustive()
     }
 }
@@ -645,6 +623,7 @@ struct WorldColdRows {
     images: BTreeMap<(String, String, String), ciborium::value::Value>,
     rows: BTreeMap<(String, String, String), ciborium::value::Value>,
     arenas: crate::declaration_context::original_inputs::OriginalInputArenaTable,
+    diagnostics: Option<crate::artifacts::InputArtifactDiagnostics>,
 }
 impl WorldColdRows {
     fn row(
@@ -671,6 +650,16 @@ impl WorldColdRows {
             return Err(source_failure(
                 "world row has a different compiler producer",
             ));
+        }
+        if let Some(capture) = &mut self.diagnostics {
+            if let Err(error) = capture.original_parts(
+                &self.producer,
+                &entry.descriptor.owner.unit,
+                &entry.descriptor.owner.module,
+                &parts,
+            ) {
+                tracing::warn!(%error,"compiler world input diagnostics are incomplete");
+            }
         }
         let find = |kind| {
             parts
@@ -837,20 +826,54 @@ fn world_semantic_row(
 }
 
 impl CompilerWorldOpenInputs {
+    fn materialize_primary(
+        &self,
+        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+    ) -> Result<(Arc<ExactDeclarationContext>, ContextRoot, ReachableBlocks), CompileError> {
+        let producer = CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256();
+        let primary_context = Arc::new((*self.primary_context).clone().admit_producer(producer)?);
+        let snapshot = primary_context.snapshot();
+        let store = fvm_ipld_blockstore::MemoryBlockstore::new();
+        let mut materializer = Materializer::new(&store);
+        let context = materializer
+            .materialize_context(None, &snapshot)
+            .map_err(|error| source_failure(error.to_string()))?;
+        let primary_root = context.root().clone();
+        let staged = materializer
+            .finish()
+            .map_err(|error| source_failure(error.to_string()))?;
+        let primary_blocks = ReachableBlocks::default()
+            .replace_roots(&staged, vec![*primary_root.cid()])
+            .map_err(|error| source_failure(error.to_string()))?;
+        let work = primary_blocks.work();
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::SemanticDigestInputByte,
+            work.verified_bytes,
+        );
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::MaterializationGraphVisit,
+            work.link_visits.saturating_add(work.unlink_visits),
+        );
+        Ok((primary_context, primary_root, primary_blocks))
+    }
+
     fn prepare(
-        self,
-        identity: &tidepool_extract_cmd::CompilerIdentity,
+        mut self,
+        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
     ) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
         use crate::declaration_context::original_inputs::{
             OriginalInputKind as K, OriginalInputPart,
         };
-        let producer = *identity.producer_bytes();
+        let identity = endpoint.identity();
+        let producer = CanonicalProducerIdentity::from_compiler(identity).sha256();
         let profile = *identity
             .package_source_association()
             .ok_or_else(|| {
                 source_failure("compiler world requires a retained service package source")
             })?
             .profile_id();
+        let (primary_context, primary_root, primary_blocks) = self.materialize_primary(endpoint)?;
+        self.primary_context = primary_context;
         crate::host_work::record_host_work(
             crate::host_work::HostWorkCounter::InputFdEnumeration,
             1,
@@ -861,9 +884,11 @@ impl CompilerWorldOpenInputs {
             images: BTreeMap::new(),
             rows: BTreeMap::new(),
             arenas: Default::default(),
+            diagnostics: crate::artifacts::CompilerDiagnosticCapture::input_artifacts(
+                self.directory.path(),
+            ),
         };
-        let block_bytes = self
-            .primary_blocks
+        let block_bytes = primary_blocks
             .blocks()
             .try_fold(0u64, |total, (cid, body)| {
                 total
@@ -942,13 +967,16 @@ impl CompilerWorldOpenInputs {
             references.push(world_semantic_row(&row, &producer)?);
             visible.push(row);
         }
-        let blocks = self
-            .primary_blocks
+        if let Some(capture) = &rows.diagnostics {
+            if let Err(error) = capture.finish_original_parts() {
+                tracing::warn!(%error,"compiler world input diagnostic manifest is incomplete");
+            }
+        }
+        let blocks = primary_blocks
             .blocks()
             .map(|(cid, body)| world_array(vec![world_blob(cid.to_bytes()), world_blob(body)]))
             .collect();
-        let seals = self
-            .primary_blocks
+        let seals = primary_blocks
             .blocks()
             .map(|(cid, body)| {
                 world_array(vec![
@@ -962,7 +990,7 @@ impl CompilerWorldOpenInputs {
         let product = world_bytes(&world_array(vec![
             world_text("TPCWREST"),
             2u64.into(),
-            world_blob(self.primary_root.cid().to_bytes()),
+            world_blob(primary_root.cid().to_bytes()),
             world_blob(self.sources.seal()),
             world_blob(producer),
             world_blob(profile),
@@ -989,7 +1017,7 @@ impl CompilerWorldOpenInputs {
             world_array(vec![world_array(base), world_array(visible)]),
             acquisition,
             world_blob(&self.visibility),
-            world_blob(self.primary_root.cid().to_bytes()),
+            world_blob(primary_root.cid().to_bytes()),
             world_array(blocks),
         ]))?;
         std::fs::write(&descriptor, encoded)?;
@@ -997,6 +1025,8 @@ impl CompilerWorldOpenInputs {
             logical_id,
             inputs: self,
             product: product.into(),
+            primary_root,
+            primary_blocks,
             producer,
             profile,
             descriptor,
@@ -1052,7 +1082,7 @@ fn ensure_world(
         EnsureExactInputsOutcome as O, ExactInputsAcquisition as A, ExactInputsRequest,
     };
     let restoration = &world.restoration;
-    if identity.producer_bytes() != &restoration.producer
+    if CanonicalProducerIdentity::from_compiler(identity).sha256() != restoration.producer
         || identity
             .package_source_association()
             .map(|s| s.profile_id())
@@ -1114,7 +1144,18 @@ fn ensure_world(
                 crate::host_work::HostWorkCounter::WorldEnsureComplete,
                 1,
             );
+            let diagnostics = crate::artifacts::CompilerDiagnosticCapture::start(
+                restoration.inputs.directory.path(),
+                &cmd,
+            );
             let run = world_execute(&cmd, endpoint, restoration.input_files.clone())?;
+            diagnostics.completed(
+                restoration.inputs.directory.path(),
+                &cmd,
+                run.success(),
+                &run.output.stderr,
+            );
+
             match O::decode(&run.output.stdout).map_err(|_| world_response_error(false))? {
                 O::Ready { world, realization } if world == root => {
                     crate::host_work::record_host_work(
@@ -1153,7 +1194,7 @@ pub fn open_world(
     question: PublicModuleQuestion,
 ) -> Result<WorldQueryResult, CompileError> {
     scoped_world_action(|| {
-        let restoration = cold.prepare(endpoint.identity())?;
+        let restoration = cold.prepare(endpoint)?;
         let world = Arc::new(CompilerWorld {
             restoration,
             realization: Arc::new(Mutex::new(None)),
@@ -1704,6 +1745,58 @@ mod answer_tests {
             seal(vec![second, original])
         );
     }
+    #[test]
+    fn cold_primary_binds_actual_admitted_producer_before_root_sealing() {
+        use fvm_ipld_blockstore::Blockstore;
+        let configured = crate::toolchain::CompilerDeploymentConfiguration::from_env()
+            .expect("declared compiler deployment");
+        let (endpoint, _, _) = crate::toolchain::bind_admitted_extract_endpoint(&configured)
+            .expect("actual configured compiler endpoint");
+        let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(endpoint)
+            .expect("actual admitted endpoint");
+        let canonical = CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256();
+        let raw = *endpoint.identity().producer_bytes();
+        assert_ne!(canonical, raw);
+        let sources = Arc::new(sources(b"module Module where\n", b"module Module where\n"));
+        let cold = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
+            None,
+            Vec::new(),
+            Arc::from(&b"published empty namespace"[..]),
+            Arc::clone(&sources),
+        )
+        .unwrap();
+        assert_eq!(cold.primary_context.snapshot().producer_sha256(), [0; 32]);
+        let (bound, root, blocks) = cold.materialize_primary(&endpoint).unwrap();
+        assert_eq!(bound.snapshot().producer_sha256(), canonical);
+        // The original published owner remains unchanged. Inspect the actual
+        // production materializer's root through its independent reader.
+        assert_eq!(cold.primary_context.snapshot().producer_sha256(), [0; 32]);
+        let store = fvm_ipld_blockstore::MemoryBlockstore::new();
+        for (cid, body) in blocks.blocks() {
+            store.put_keyed(cid, body).unwrap();
+        }
+        let restored = crate::exact_context::hydrate_context(&store, &root).unwrap();
+        assert_eq!(restored.snapshot().producer_sha256(), canonical);
+        let issued = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
+            Some(bound),
+            Vec::new(),
+            Arc::from(&b"published empty namespace"[..]),
+            Arc::clone(&sources),
+        )
+        .unwrap();
+        assert_eq!(issued.materialize_primary(&endpoint).unwrap().1, root);
+        let wrong = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
+            Some(Arc::new(
+                (*cold.primary_context).clone().admit_producer(raw).unwrap(),
+            )),
+            Vec::new(),
+            Arc::from(&b"published empty namespace"[..]),
+            sources,
+        )
+        .unwrap();
+        assert!(wrong.materialize_primary(&endpoint).is_err());
+    }
+
     #[test]
     fn cold_visibility_rejects_oversize_before_clone_or_allocation() {
         assert!(check_world_visibility_size(usize::MAX, 0).is_err());

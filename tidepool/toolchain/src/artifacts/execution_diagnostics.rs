@@ -10,6 +10,11 @@ const BYTE_LIMIT: u64 = 128 << 20;
 const ENTRY_LIMIT: usize = 4096;
 const DEPTH_LIMIT: usize = 16;
 
+fn diagnostic_path(path: &Path) -> io::Result<&str> {
+    path.to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "diagnostic path is not UTF-8"))
+}
+
 /// Diagnostic copies of already admitted input bytes. In particular, a sealed
 /// transport path may cease to exist when its transaction closes; it is never
 /// reopened to reconstruct the input observed by the compiler.
@@ -17,6 +22,8 @@ pub(crate) struct InputArtifactDiagnostics {
     directory: PathBuf,
     remaining: u64,
     saved: std::collections::BTreeSet<String>,
+    part_records: usize,
+    incomplete: bool,
 }
 
 impl InputArtifactDiagnostics {
@@ -26,6 +33,8 @@ impl InputArtifactDiagnostics {
             directory,
             remaining: BYTE_LIMIT,
             saved: Default::default(),
+            part_records: 0,
+            incomplete: false,
         })
     }
 
@@ -51,6 +60,122 @@ impl InputArtifactDiagnostics {
             self.saved.insert(name.clone());
         }
         Ok(serde_json::json!({"file": name, "sha256": sha256, "bytes": bytes.len()}))
+    }
+
+    /// Observe the issued sealed ranges through their retained file owners,
+    /// before transaction END can close descriptors. Paths are labels only.
+    pub(crate) fn original_parts(
+        &mut self,
+        producer: &[u8; 32],
+        unit: &str,
+        module: &str,
+        parts: &[crate::declaration_context::original_inputs::OriginalInputPart],
+    ) -> io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{FileExt, MetadataExt};
+        let result = (|| {
+            for part in parts {
+                let receiving_alias = diagnostic_path(&part.path)?;
+                let transport_endpoint = diagnostic_path(part.transport.endpoint())?;
+                if self.part_records >= ENTRY_LIMIT || part.bytes > self.remaining {
+                    return Err(io::Error::other(
+                        "owned input observations exceed diagnostic bound",
+                    ));
+                }
+                // JSON escapes at most six bytes per input byte. Bound all
+                // borrowed labels and fixed keys/numbers before copying them.
+                let labels = [
+                    unit.len(),
+                    module.len(),
+                    part.sha256.len(),
+                    part.kind.wire_tag().len(),
+                    part.path.as_os_str().as_encoded_bytes().len(),
+                    part.transport
+                        .endpoint()
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .len(),
+                ]
+                .into_iter()
+                .try_fold(0u64, |n, len| n.checked_add(len as u64))
+                .and_then(|n| n.checked_mul(6))
+                .and_then(|n| n.checked_add(2048))
+                .ok_or_else(|| io::Error::other("owned input diagnostic metadata overflows"))?;
+                if part
+                    .bytes
+                    .checked_add(labels)
+                    .is_none_or(|needed| needed > self.remaining)
+                {
+                    return Err(io::Error::other(
+                        "owned input bytes and metadata exceed diagnostic bound",
+                    ));
+                }
+                let file = part.transport.compiler_file_lease();
+                let meta = file.metadata()?;
+                let offset = part.transport.offset();
+                if meta.len() != part.transport.arena_len()
+                    || offset
+                        .checked_add(part.bytes)
+                        .is_none_or(|end| end > meta.len())
+                    || part.bytes != part.transport.len()
+                {
+                    return Err(io::Error::other(
+                        "issued input range differs from its actual file",
+                    ));
+                }
+                let mut bytes = vec![0; usize::try_from(part.bytes).map_err(io::Error::other)?];
+                file.read_exact_at(&mut bytes, offset)?;
+                if crate::checked_cell::hash(&bytes) != part.sha256 {
+                    return Err(io::Error::other(
+                        "issued input observation has a different hash",
+                    ));
+                }
+                let body = self.bytes(part.kind.wire_tag(), &bytes)?;
+                let record = serde_json::json!({"schema":1,"authority":false,
+                    "producer":producer,"unit":unit,"module":module,"kind":part.kind.wire_tag(),
+                    "receiving_alias":receiving_alias,"transport_endpoint":transport_endpoint,
+                    "device":meta.dev(),"inode":meta.ino(),"arena_bytes":meta.len(),
+                    "offset":offset,"length":part.bytes,"expected_sha256":part.sha256,
+                    "captured":body});
+                let mut encoded = serde_json::to_vec(&record).map_err(io::Error::other)?;
+                encoded.push(b'\n');
+                if encoded.len() as u64 > self.remaining {
+                    return Err(io::Error::other(
+                        "owned input metadata exceeds diagnostic bound",
+                    ));
+                }
+                let mut output = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(self.directory.join("issued-parts.jsonl"))?;
+                output.write_all(&encoded)?;
+                self.remaining -= encoded.len() as u64;
+                self.part_records += 1;
+            }
+            Ok(())
+        })();
+        if let Err(error) = &result {
+            self.incomplete = true;
+            let message = error.to_string().chars().take(1024).collect::<String>();
+            let _ = std::fs::write(
+                self.directory.join("incomplete.json"),
+                serde_json::to_vec(&serde_json::json!({"schema":1,"authority":false,
+                    "complete":false,"error":message,"part_records":self.part_records}))
+                .unwrap_or_default(),
+            );
+        }
+        result
+    }
+
+    pub(crate) fn finish_original_parts(&self) -> io::Result<()> {
+        std::fs::write(
+            self.directory.join("manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({"schema":1,"authority":false,
+                "complete":!self.incomplete,"part_records":self.part_records,
+                "captured_bytes":self.bytes_written(),"byte_limit":BYTE_LIMIT,
+                "entry_limit":ENTRY_LIMIT}))
+            .map_err(io::Error::other)?,
+        )
     }
 
     pub(crate) fn canonical(
@@ -186,6 +311,18 @@ impl CompilerDiagnosticCapture {
         Self { directory }
     }
 
+    pub(crate) fn input_artifacts(source: &Path) -> Option<InputArtifactDiagnostics> {
+        let capture = Self::new(source);
+        let directory = capture.directory?;
+        match InputArtifactDiagnostics::new(directory.join("issued-inputs")) {
+            Ok(inputs) => Some(inputs),
+            Err(error) => {
+                tracing::warn!(%error,"could not retain issued compiler inputs");
+                None
+            }
+        }
+    }
+
     pub fn start(source: &Path, command: &ExtractCmd) -> Self {
         let capture = Self::new(source);
         capture.write(source, command, DiagnosticStage::Started);
@@ -284,7 +421,7 @@ impl CompilerDiagnosticCapture {
             "diagnostic snapshot counts");
         let report = serde_json::json!({
             "schema": 1, "kind": "compiler-execution-diagnostics", "authority": false,
-            "original_directory": source, "phase": stage.phase(),
+            "original_directory": diagnostic_path(source)?, "phase": stage.phase(),
             "submission": match stage { DiagnosticStage::Preparing | DiagnosticStage::Prepared | DiagnosticStage::Refused(_) => "not_attempted", DiagnosticStage::Started => "not_observed", DiagnosticStage::Completed { .. } => "observed" },
             "primary_error": match stage { DiagnosticStage::Refused(error) => Some(error.to_string()), _ => None },
             "compiler_process_success": match stage { DiagnosticStage::Completed { success, .. } => Some(success), _ => None },
@@ -368,8 +505,10 @@ impl Snapshot {
                     continue;
                 }
                 self.remaining -= bytes.len() as u64;
+                let path = entry.path();
+                let path = diagnostic_path(&path)?;
                 self.files.push(
-                    serde_json::json!({"original_path": entry.path(), "retained_path": entry.path(),
+                    serde_json::json!({"original_path": path, "retained_path": path,
                     "bytes": bytes.len(), "sha256": crate::checked_cell::hash(&bytes)}),
                 );
             } else {
@@ -490,6 +629,74 @@ mod tests {
         assert_eq!(snapshot.issues.len(), 2);
         assert!(!retained.path().join("large").exists());
         assert!(!retained.path().join("linked").exists());
+    }
+
+    #[test]
+    fn issued_slice_observation_survives_actual_file_owner_release() {
+        use crate::declaration_context::original_inputs::{OriginalInputKind, OriginalInputPart};
+        let retained = tempfile::tempdir().unwrap();
+        let mut builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(1024).unwrap();
+        builder.append(b"prefix").unwrap();
+        let selected = builder.append(b"exact selected bytes").unwrap();
+        builder.append(b"suffix").unwrap();
+        let arena = builder.finish().unwrap();
+        let slice = arena.issue_slice(selected).unwrap();
+        let weak = std::sync::Arc::downgrade(&arena);
+        let mut part = OriginalInputPart {
+            kind: OriginalInputKind::Interface,
+            path: PathBuf::from("/receiving/alias/that/does/not/exist"),
+            sha256: crate::checked_cell::hash(b"exact selected bytes"),
+            bytes: slice.len(),
+            transport: slice,
+        };
+        let mut capture = InputArtifactDiagnostics::new(retained.path().to_owned()).unwrap();
+        capture
+            .original_parts(&[7; 32], "main", "Module", std::slice::from_ref(&part))
+            .unwrap();
+        capture.finish_original_parts().unwrap();
+        let record: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(retained.path().join("issued-parts.jsonl"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        assert_eq!(record["offset"], 6);
+        assert_eq!(record["length"], 20);
+        let file = record["captured"]["file"].as_str().unwrap().to_owned();
+        // A non-UTF8 receiving label must become incomplete diagnostics,
+        // never a serde_json::json! panic replacing the compiler's refusal.
+        use std::os::unix::ffi::OsStringExt;
+        let before = capture.bytes_written();
+        part.path = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/receiving/invalid-\xff".to_vec(),
+        ));
+        let error = capture
+            .original_parts(&[7; 32], "main", "Module", std::slice::from_ref(&part))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(capture.bytes_written(), before);
+        // Oversized advertised input must fail before allocating or reopening
+        // its nonexistent receiving alias, with an explicit incomplete result.
+        part.path = PathBuf::from("/receiving/alias/that/does/not/exist");
+        part.bytes = BYTE_LIMIT + 1;
+        let error = capture
+            .original_parts(&[7; 32], "main", "Module", &[part])
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        capture.finish_original_parts().unwrap();
+        drop(arena);
+        assert!(weak.upgrade().is_none());
+        drop(capture);
+        assert_eq!(
+            std::fs::read(retained.path().join(file)).unwrap(),
+            b"exact selected bytes"
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(retained.path().join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["complete"], false);
+        assert_eq!(manifest["part_records"], 1);
+        assert!(retained.path().join("incomplete.json").is_file());
     }
 
     #[test]
