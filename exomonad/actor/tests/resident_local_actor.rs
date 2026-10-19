@@ -473,6 +473,44 @@ async fn wait_for_armed_call<T: std::fmt::Debug>(
     .expect("original workbench wait arms within the preparation bound")
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct FixtureServiceStopped;
+
+async fn while_fixture_service_live<T>(
+    mut service: tokio::sync::watch::Receiver<()>,
+    operation: impl std::future::Future<Output = T>,
+) -> Result<T, FixtureServiceStopped> {
+    tokio::select! {
+        biased;
+        stopped = service.changed() => {
+            assert!(stopped.is_err(), "service lifetime carries no updates");
+            Err(FixtureServiceStopped)
+        }
+        result = operation => Ok(result),
+    }
+}
+
+#[tokio::test]
+async fn fixture_service_failure_interrupts_pending_operation() {
+    let (lifetime, service) = tokio::sync::watch::channel(());
+    assert_eq!(
+        while_fixture_service_live(service.clone(), async { 42 }).await,
+        Ok(42)
+    );
+    let owner = tokio::spawn(async move {
+        let _lifetime = lifetime;
+        panic!("fixture service failure");
+    });
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        while_fixture_service_live(service, std::future::pending::<()>()),
+    )
+    .await
+    .expect("service failure must interrupt an unsettled operation");
+    assert_eq!(result, Err(FixtureServiceStopped));
+    assert!(owner.await.expect_err("service failed").is_panic());
+}
+
 struct ConcurrentResident {
     forest: ResidentForest<NoHandlers, TestSink>,
     actor: exomonad_actor::LocalActorRef,
@@ -480,6 +518,7 @@ struct ConcurrentResident {
     backend: std::sync::Arc<DelayedCommandBackend>,
     started: tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
     deployment_task: tokio::task::JoinHandle<()>,
+    deployment_lifetime: tokio::sync::watch::Receiver<()>,
     _root: tempfile::TempDir,
 }
 
@@ -648,7 +687,9 @@ impl ConcurrentResident {
         });
         let owner = actor.identity();
         let supplied = backend.clone();
+        let (deployment_owner, deployment_lifetime) = tokio::sync::watch::channel(());
         let deployment_task = tokio::spawn(async move {
+            let _deployment_owner = deployment_owner;
             while let Some(deployment) = deployments.recv().await {
                 match deployment {
                     LocalResidentDeployment::CommandBackend(request) => {
@@ -679,6 +720,7 @@ impl ConcurrentResident {
             backend,
             started,
             deployment_task,
+            deployment_lifetime,
             _root: root,
         }
     }
@@ -686,14 +728,18 @@ impl ConcurrentResident {
     fn spawn_cell(&self, key: &str, source: String) -> ResidentCellCall {
         let policy = self.policy.clone();
         let context = Self::cell_context(key);
+        let service = self.deployment_lifetime.clone();
         tokio::spawn(async move {
-            policy
-                .dispatch_json_boxed(ToolInvocation {
+            while_fixture_service_live(
+                service,
+                policy.dispatch_json_boxed(ToolInvocation {
                     context: Some(context),
                     name: exomonad_actor::HASKELL_TOOL.into(),
                     arguments: ToolArguments::Raw(source),
-                })
-                .await
+                }),
+            )
+            .await
+            .expect("deployment owner stopped while a cell was pending")
         })
     }
 
