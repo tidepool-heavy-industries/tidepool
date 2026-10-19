@@ -512,6 +512,30 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             reporter.require_claim({"schema": 2}, "unknown-kind", scope="harness-eight-phase")
 
+    def test_persona_behavior_success_does_not_supply_cleanup_or_diagnostics(self):
+        record = self.make_complete_case('persona-workbench')
+        payload = json.loads(record.read_text())
+        self.assertTrue(payload['passed'])
+        self.assertEqual(payload['execution']['executed_test_count'], 1)
+        self.assertEqual(payload['execution']['exit_code'], 0)
+        baseline = reporter.analyze(record)
+        self.assertTrue(baseline['runner']['cleanup']['complete'])
+        payload['execution'].update(compiler_cleanup_status='not_observed',
+                                    compiler_cleanup_observation_complete=False,
+                                    diagnostic_evidence_complete=False)
+        self.write_json(record, payload)
+        report = reporter.analyze(record)
+        self.assertTrue(report['runner']['passed'])
+        self.assertEqual(report['runner']['executed_test_count'], 1)
+        self.assertTrue(report['assessment']['prerequisites']['counted_behavior_passed'])
+        self.assertFalse(report['runner']['cleanup']['complete'])
+        self.assertEqual(report['runner']['cleanup']['compiler_cleanup_status'], 'not_observed')
+        self.assertFalse(report['runner']['diagnostic_evidence_complete'])
+        self.assertEqual(report['assessment']['status'], 'insufficient_observations')
+        self.assertFalse(report['assessment']['prerequisites']['cleanup_confirmed'])
+        with self.assertRaises(ValueError):
+            reporter.require_claim(report, 'workload_timing', scope='persona-workbench')
+
     def test_report_cli_serialization_and_requested_claim_have_distinct_outcomes(self):
         record = self.make_case()
         for options, expected in (([], 0), (["--require-claim", "workload_timing", "--workload-scope", "harness-eight-phase"], 1)):

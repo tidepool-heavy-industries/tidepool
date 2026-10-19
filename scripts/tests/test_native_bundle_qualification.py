@@ -1373,15 +1373,18 @@ class NativeQualificationTests(unittest.TestCase):
         self.assertEqual(cohort['tests'], [
             'actor_host::startup_persona_acceptance_tests::actual_persona_arrives_refreshes_and_retires_without_judgment',
             'actor_host::startup_persona_acceptance_tests::persona_web_selection_retains_native_judgment_and_empty_control',
+            'actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_lookup_and_later_cells_usable',
             'actor_host::embedded_recovery_tests::production_persona_crash_preserves_edited_context_without_reinitialization',
             'actor_host::coherent_reload_acceptance_tests::coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_issued_work',
             'actor_host::embedded_recovery_tests::production_coherent_reload_recovers_published_configuration_without_recapturing_draft',
             'actor_host::embedded_recovery_tests::production_coherent_reload_recovery_refuses_corrupt_selected_installer'])
-        self.assertEqual(cohort['expected_count'], 6)
+        self.assertEqual(cohort['expected_count'], 7)
         self.assertFalse(cohort['ignored'])
         self.assertEqual(cohort['max_jobs'], 1)
         self.assertEqual(cohort['compiler_mode'], 'owned-resident')
-        for mutation in ('control', 'missing', 'duplicate', 'zero', 'unknown', 'failed', 'nonzero_exit'):
+        shared_history = 'actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_lookup_and_later_cells_usable'
+        crash_history = 'actor_host::embedded_recovery_tests::production_persona_crash_preserves_edited_context_without_reinitialization'
+        for mutation in ('control', 'missing', 'missing_shared_history', 'duplicate', 'zero', 'unknown', 'failed', 'nonzero_exit'):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 descriptor_path = root / 'qualification.json'
@@ -1401,7 +1404,7 @@ class NativeQualificationTests(unittest.TestCase):
                                                    '/frozen/runner', '/frozen/libtest'])
                     self.assertEqual([command[i + 1] for i, word in enumerate(command)
                                       if word == '--exact'], cohort['tests'])
-                    self.assertEqual(command[command.index('--expected-count') + 1], '6')
+                    self.assertEqual(command[command.index('--expected-count') + 1], '7')
                     self.assertIn('--retain-artifacts', command)
                     self.assertNotIn('--ignored', command)
                     for name, path in resources.items():
@@ -1412,6 +1415,8 @@ class NativeQualificationTests(unittest.TestCase):
                     names = list(cohort['tests'])
                     if mutation == 'missing':
                         names.pop()
+                    elif mutation == 'missing_shared_history':
+                        names.remove(shared_history)
                     elif mutation == 'duplicate':
                         names[-1] = names[0]
                     for index, name in enumerate(names):
@@ -1421,7 +1426,7 @@ class NativeQualificationTests(unittest.TestCase):
                             'execution': {'executed_test_count': count,
                                           'exit_code': 101 if mutation == 'nonzero_exit' else 0,
                                           'process_cleanup_status': 'confirmed',
-                                          'hosted_cleanup_status': 'not_observed' if index == 2 else 'confirmed',
+                                          'hosted_cleanup_status': 'not_observed' if name == crash_history else 'confirmed',
                                           'compiler_cleanup_status': 'confirmed'}})
                     return subprocess.CompletedProcess(command, 0)
 
@@ -1433,10 +1438,10 @@ class NativeQualificationTests(unittest.TestCase):
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(code, int(mutation != 'control'))
                 self.assertEqual(report['behavior_selection_completed'], mutation == 'control')
-                self.assertEqual(report['expected_count'], 6)
+                self.assertEqual(report['expected_count'], 7)
                 if mutation == 'control':
                     crash = next(record for record in report['tests']
-                                 if record['test'] == cohort['tests'][2])
+                                 if record['test'] == crash_history)
                     self.assertEqual(crash['execution']['hosted_cleanup_status'], 'not_observed')
 
     def test_persona_startup_refuses_unmatched_resources_and_parallel_execution(self):

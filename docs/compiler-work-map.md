@@ -1,6 +1,8 @@
 # Compiler work and authority map
 
-Source checked at `8245fa800aec17fd7fd37fbe64cd4a35aa3efcde` (reviewed release checkpoint).
+Production workflow map checked at `8245fa800aec17fd7fd37fbe64cd4a35aa3efcde`;
+campaign qualification observations below use base
+`5b74c2f1fe010c5c343e0c6f331d54328fbd5090` and their named joined revision.
 This is the current production workflow, not a list of proposed optimizations.
 Stage names identify ownership boundaries; their timings are not additive.
 Use [compiler profiling](compiler-profiling.md) for measurement and
@@ -135,6 +137,37 @@ needed to establish how many
 chosen inputs, unique groups, immutable facts or permission environments exist.
 
 ## Evidence and qualification boundary
+
+The shared warm compiler campaign starts from the imported peer repair at
+`70a92c65a02a591f76590daf4e5bfa3e6fcbf723`, followed by the planning commit
+above. This is a source prerequisite, not a newly qualified compiler rewrite.
+The stronger shared-workspace Persona regression executed once at exact `70a`:
+one selected/executed case passed, exit 0, direct compiler, minimal trace.
+Process and hosted cleanup were confirmed; compiler cleanup was `not_observed`
+with its observation complete, and diagnostic evidence was incomplete. The
+[retained case report](/srv/swarm/evidence/inanna/admission-analysis-review-20261018/overnight-70a-strong-persona/host-cases/e27eec134184eea75959071896799d075b55b040628a49a0e25165b9be2fab4e.json)
+therefore establishes focused behavior, not frozen timing or compiler cleanup.
+Its shared workspace Gitlink is `ce60f76888c94e9d7229615f27762d02933549b1`;
+the live failure's `457d7d` workspace is a distinct source identity.
+
+The [campaign acceptance matrix](../plans/shared-warm-compiler/qualification/ACCEPTANCE.md)
+tracks exact joined folds separately from semantic, work-counter, performance,
+frozen-release and deployment claims. A reference hit alone cannot establish
+eliminated physical input work: `ExactCompilationRequest::input_transport_files`
+and its export consumers must also avoid baseline part/FD enumeration. Work
+moved into root publication or commit remains part of the same workflow.
+
+The qualification-only join `64636e485a901a289b2edf8d85abcc919538f581`
+seals the stronger shared-root case into the next frozen `persona-startup` roster
+and repairs reuse reporting for invalid physical requests. Aggregate and cycle
+reuse counts become unknown on missing/duplicate/failed physical boundaries;
+raw events remain available, and a valid completed earlier cycle remains visible
+when a later cycle is incomplete. Workload promotion requires the exact request's
+observed status as well as exit 0. Both declared script targets executed at that
+clean join: 89 reporter/profile cases and 436 qualification/report cases passed.
+These controls establish observer sensitivity and roster selection. Current
+native compiler/host execution, work elimination, paired performance and frozen
+release qualification remain pending.
 
 Historical **b108** scripted Persona13 measurements include 389 retained input
 references across 13 offers (not 389 distinct graphs), 64 native-item
