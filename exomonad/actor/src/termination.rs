@@ -1513,16 +1513,16 @@ impl RetainedActorExit {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn root_preparation_refuses_borrowed_outer_end_before_factory() {
+    fn root_preparation_refuses_foreign_outer_before_factory() {
         let calls = std::cell::Cell::new(0);
         let outer = tidepool_runtime::with_compiler_transaction(
             |_| {},
-            |_| {
+            || {
                 let origin = tidepool_runtime::CompilerTransactionOrigin::current().unwrap();
                 let failure = super::CompilerPreparationOwner::new()
                     .prepare_resident_root::<frunk::HNil, tidepool_mcp::CapturedOutput, ()>(|_| {
                         calls.set(calls.get() + 1);
-                        Err(std::io::Error::other("borrowed factory must not run").into())
+                        Err(std::io::Error::other("nested factory must not run").into())
                     })
                     .err()
                     .expect("root phases cannot borrow an unsettled outer END");
