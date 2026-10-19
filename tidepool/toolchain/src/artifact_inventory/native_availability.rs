@@ -440,7 +440,7 @@ fn bind_input_demand(
                         NativeDemandSource::Certified(_) => {
                             NativeAdmissionSource::CertifiedSelection
                         }
-                        NativeDemandSource::Catalog(_) => {
+                        NativeDemandSource::Catalog { .. } => {
                             NativeAdmissionSource::NativeDependencyCatalog
                         }
                     },

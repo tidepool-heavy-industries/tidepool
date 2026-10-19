@@ -47,14 +47,21 @@ A canonical-only projection can retain group custody without selecting code;
 `select_roots(OriginalId)` can add available Group roots. Empty native permission
 and absent decisions remain distinct.
 
-Dependency consumption and Full qualification are separate decisions. The
-`ee0dc086` repair carries the effective consumed namespace into native dependency
-binding: a canonical-only role can consume an already-issued historical closure
-with matching canonical bytes while preserving its exact group/carrier edges.
-It cannot mint Full availability, substitute an explicit Original selection, or
+Dependency consumption and Full qualification are separate decisions. Native
+binding consults the effective compiler role from its request owner, both when
+acquiring catalogue dependencies and when admitting a certified target. A
+canonical-only role can consume an already-issued historical closure with
+matching canonical bytes while preserving its exact group/carrier edges. It
+cannot mint Full availability, substitute an explicit Original selection, or
 resolve competing group candidates by payload equality. Looking only at the
-parent namespace misses incoming Original roles. This repair is source-reviewed;
-its native controls and actual retained-command rerun are pending.
+parent namespace misses incoming Original roles. Unfinished product dependency
+proofs do not qualify for this historical-offer path.
+
+The first repair (`ee0dc086`) passed its component control but the real retained
+command failed at the later certified-target consumer. `27511a55` unifies that
+role observation and extends the control through a real prepared request,
+certified selection and bound target. Its joined execution is pending. This is
+why catalogue-only evidence cannot establish the whole continuation contract.
 
 ## P1–P10: producer, consumer and remaining work
 
