@@ -75,11 +75,11 @@ direct children per area; reserved grants persist through event-bound yields.
 
 | Area | Leaves | Current exact state and next owner action |
 | --- | ---: | --- |
-| host_inputs | 2 | Approved service contract implemented in isolated host-world checkout/baseebb; first direct key/catalog invalidation runtime tranche is compiling under14GiB allowance. Source counter checkpoint f7c37211 is independently reviewed next; source/workspace owned-byte capture and actual actor hot branch active. Old02A patch remains preserved/unintegrated. |
-| owned_inputs | 2 | Prior f330 immutable rows are integrated and joined verified. New service-source branch/base923 has early schema/admission checkpoint00744, dependent on actual warm source-association types. Rows implements qualifier/provider/package BUCK/toolchain schema; source_lifetime independently reviews full history. New8GiB native lane waits fresh capacity; bounded scripts/source work active. |
-| warm_workers | 1 | Prior protocol9/9 is integrated and joined verified. Approved world client/wire/Haskell implementation active; early actual code8acf33c49a minimal extract-cmd production+unitbinary build session40170 is observed under4GiB allowance. Source/package/world constructors and exact public resolver are active implementation, not qualified Ready. |
-| reload | 2 | Foundation f147 four-target compilation passed; initial runtime4/5 and actor7/11 exposed consumer/fixture/original-context defects. Joined345 compile passed26local actions; focused runtime3 executed2pass/1 inherited-facade setup failure, Ready refusal now passes. Sleep fixture failed template-import provenance before target; bounded correction/rerun next. Actual preparation-END/canonical-lease source owner and deferred compile/declaration boundary repairs active under accepted C6; R2/R3 not wired and force=true fails closed. |
-| qualification | 1 | Immutable6d3 AABA/Persona13 passed. Reviewed e6 fixture prod/cfgtest and2controls passed and merged; e6 freeze/verify passed, strongerPersona failed real native lookup with exact required/selected artifact conflict. Leaf derives minimal issuer/edge counterexample; baseline6d3 actor3 discriminator compile is observed. No matched candidate speedup or frozen release acceptance. |
+| host_inputs | 2 | Reviewed key70120 and producer counters8424 are area-folded9f and campaign-foldede1cfc49. Area production/cfgtest and four exact controls passed. Campaign joined toolchain/runtime compilation is observed in session49150; actual source capture0aa and actor world consumer remain pending real shared factory/compile. Old02A patch preserved. |
+| owned_inputs | 2 | Prior f330 rows integrated and joined verified. New83ad early14-label compile failed E0061 at two production_entry archive consumers, tests0; terminal and source retained. Approved successor separates finite archive provenance from live service authority, repairs root-route/provider trust and explicitly refuses old authority formats. Same rows/reviewer grants implement/review; native retry requires fresh accounting. |
+| warm_workers | 1 | Prior protocol9/9 integrated. Shared association8acf production/unitbinary compile passed, tests0. Real profile boot24b worker-only GHC build is observed in session43382 under6GiB/2GiB allowance. Revised cold carrier keeps current selection separate from unmerged historical binding-row custody; real query/Ready is unqualified. |
+| reload | 2 | Prior345 four-target compilation and corrected Sleep d9 execution passed; three unchanged6d3 actor prerequisites independently fail. Canonical owner core519/a82 is in complete independent review before earlycompile. Review found missing target-B custody on uncertain A→B and a metadata hold cycle; these require bounded lifecycle repair, no C6 acceptance yet. Force=true refuses; remaining R1/R2/R3 pending. |
+| qualification | 1 | Immutable6d3 AABA/Persona13 passed; e6 fixture2/2/freeze passed but stronger Persona fails real exact native conflict. All3 baseline actor discriminators executed/failed before target controls, no assertion waiver. Authentic frozen constructor fixture unavailable; reserved leaf implements bounded opt-in production stage tracing, independent review before12GiB/32GiB native lane and separate frozen rerun. |
 
 All leaves use isolated real checkouts. Only the responsible area parent folds
 its branch; campaign owns shared contracts and final integration. Full base-to-
@@ -96,8 +96,14 @@ request. Controlling DEMAND-SERVICE.md is accepted after host, worker and indepe
 HLS review. Existing supervisors resumed with exact ebb98b3f25; paired concrete
 API/resolver/source-owner packets received independent and campaign review and
 were accepted. Implementation is active under SERVICE-API.md. Routine signatures require no further root approval.
-The actual runtime capture_value_interfaces Vec and checked_value_context support
-fold remain unfinished critical-path work. Persistent maps alone do not establish
+Ordinary cell preparation, publication and recovery must migrate to the persistent
+logical compiler-world client; this is a required campaign outcome. Root is
+preparing the controlling migration addendum. The actual runtime
+capture_value_interfaces Vec and checked_value_context support fold remain
+unfinished critical-path deletion work. Cold world issuance must also avoid
+checked_value_context: current primary published selection remains separate from
+unmerged binding-row references and their historical support/native custody.
+Those historical graphs cannot implicitly become current Original selection. Persistent maps alone do not establish
 borrowed complete-root capture. The first revised vertical slice must traverse an
 actual runtime lookup/repeated cell, pre-export service request and private worker
 world, with explicit cold recovery and zero old-row/hash/FD work on a hit.
@@ -151,7 +157,9 @@ checks were not reached. Qualification's reserved leaf is deriving the exact
 issuer/edge/selection counterexample; no policy or oracle weakened. e6 production
 is baseline6d3 plus test fixtures, so historical70a direct success is not a matched
 frozen control or evidence of a campaign regression. Controlled immutable6d3
-actor discriminator is running with qualification as observer.
+actor discriminators have all settled: three executed failures, with baseline
+NativeGroup8 at start1060 and quoted semantic-context identity at resident19882.
+They establish pre-existing prerequisites, not a cause or waived oracle.
 
 The first source-domain fast path supports captured non-CPP/no external
 preprocessor modules and the fixed package profile. Existing source-v2 revision
@@ -175,15 +183,17 @@ Campaign/Persona outputs and live hosts/workers were untouched.
 Installed swarm-build remains the older launcher; staged reservation switches are
 unsupported. Use the established pinned local-only workflow, verified bind mounts,
 fresh disk/RAM/cgroup observations and prospective growth; preserve100GiB free.
-Current native allowances: campaign joined12GiB memory/32GiB growth (terminal); reload14 for future actor-unit compilation after measured13.41GB cumulative peak exceeded12GiB estimate;
-qualification baseline actor14 within its24 aggregate allowance; current frozen
-host workload is terminal. Host first direct-key lane14 is admitted. New heavy
-owned/warm lanes must fit fresh remaining projections or wait for gate completion. Host and
-owned row/baseline lanes are terminal; idle daemon usage remains accounted. Admission uses actual per-scope current plus remaining expected
-increments below80GiB pressure threshold; idle daemon memory remains in global
-current. No new lane may reuse an obsolete concurrent-admission snapshot.
-Warm native lane settled; own output~2.665GB, incremental~1.733GB within3GiB.
-Baseline output~8.676GB/peak~10.666GB is within declared32/24GiB allowances.
+Current native lanes: campaign joined fact-key/counter toolchain/runtime10GiB
+memory/32GiB growth, session49150 observed by campaign; warm production worker6/2,
+session43382 observed by warm. Reload14/32 is authorized after exact source review;
+qualification new bounded toolchain12/32 after trace review. Owned83ad8, hostkey14,
+hostcounter6 and qualification baseline actor14 are terminal/released; idle daemon
+usage remains in global current. No owned retry is currently running. Fresh sample
+before campaign launch: build.slice36,067,119,104B, MemAvailable98,861,940,736B,
+/srv/build452,975,124,480B available. Admission accounts actual global usage plus
+remaining expected increments below80GiB; each new lane refreshes the samples.
+Staged reservation switches remain unavailable and no wrapper is invented.
+
 No output deletion, shared-daemon restart or admission bypass by campaign.
 
 Event-driven continuation: no periodic supervisor polling or status-only wakes.
@@ -194,14 +204,13 @@ running recipient→send_message, dormant non-root→followup_task. Automatic co
 notification supports delivery, never replaces resumption. Process owners collect
 terminal results; no orphan commands. Area parents reconcile review/fold disposition.
 
-Public checkpoint923fd554a0 includes the accepted demand-service and C6 contracts;
+Published checkpoint278cd12c95 includes the accepted demand-service and C6 contracts;
 its compiler production foundation is exact tested f088 (36/36). The reviewed
 e6 fixture repair is now merged at466d715ae9; campaign joined host cfgtest compile
 is pending the first service slice/resource admission. Area e6 compile2/2 does
 not qualify the later joined production tree. All campaign-owned commands settled.
 
-Campaign next actions: review early actual shared constructors and direct-key
-code/native receipts; join the first actual PublicModule question under fresh
+Campaign next actions: collect joined key/counter compile and exact four controls; review revised raw world constructors; join the first actual PublicModule question under fresh
 source authority; derive/repair exact frozen native conflict without weakening
 issued edges; integrate repaired reload owner and production consumers; run
 joined histories and frozen candidate qualification. No hard strategy stop is
@@ -210,10 +219,11 @@ drain every other approved independent successor, review, repair, fold and
 running check before MORNING handoff.
 
 Event owners: host, warm and owned produce actual code plus exact independent
-reviews/native receipts under SERVICE-API.md; campaign reviews and folds. Host
-observes its early runtime gate, warm observes minimal Rust40170, qualification
-observes baseline actor compilation and native-failure investigation, reload
-observes its repaired focused controls. Every producer status-checks campaign
+reviews/native receipts under SERVICE-API.md; campaign reviews and folds. Campaign observes joined49150; warm observes worker GHC43382. Host owns actual
+capture/actor integration successors; qualification owns the native issuer trace
+and exact frozen counterexample; reload owns canonical core review, first compile
+and lifecycle repairs. Owned rows owns repaired source/provider/archive migration
+and exact re-review. No terminal lane remains assigned as running. Every producer status-checks campaign
 and uses followup_task if dormant. No root routine approval is awaited; no
 campaign process lacks an observer and no periodic wake is set.
 
