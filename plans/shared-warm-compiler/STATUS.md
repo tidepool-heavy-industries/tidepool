@@ -48,16 +48,17 @@ Its origin/main observation is cached local provenance, not public freshness.
 Subtree ceiling14 including campaign: five supervisors and eight reserved leaves.
 All use gpt-6.1-sol high except owned_inputs/rows medium; fresh contexts.
 Grants persist through event-bound yields, maximum2direct children per area.
-Actual10running/4completed at last concrete roster reconciliation; completed
-contexts are waiting dispositions, not permission to duplicate their assignments.
+Leaf grants remain reserved during dependency waits. Host and qualification have
+settled their current source/reconciliation work; owned rows, warm repair and
+reload R1 remain active. Completed contexts are not duplicate-task capacity.
 
 | Area/task under campaign | Reserved leaves | Current concrete state / next event owner |
 | --- | ---: | --- |
-| host_inputs | 2 | Supervisor + selected_root + selection_oracle active. Area08feadc4ea source-reviewed OrdMap/lazy-P6/borrowed-selected rows, native0/0. Same-context input-Arc reuse implementation and adversarial source-support adoption review active. Group/package rechecks retained after mutable external.hi counterexample. |
-| owned_inputs | 2 | rows active repairing26e0f31d; supervisor and source_lifetime yielded with grants reserved. Rows MUST followup_task dormant reviewer AND supervisor with repaired exact candidate/evidence/next action. Two findings: certificate-bound promotion owner; same-view immutable leaf overlay. Area4bdf767772 records review; no accepted product fold/native check. |
-| warm_workers | 1 | Supervisor + protocol audit active. Rust codef3a386310b compiled and4counted controls passed. Haskell production code2b62169cdf compiled after bounded syntax repair; independent review found standalone decoder-policy regression, repaired07c8efbe50 awaits recompile. Supervisor owns exact command observation; no Haskell execution accepted. Exact-root Ready implementation waits host/owned owners; global-retainer audit independent. |
-| reload | 2 | Supervisor + generation_admission active; authority_review yielded reserved awaiting repair. Supervisor MUST followup_task reviewer with exact repaired checkpoint after typed NotStarted/Unconfirmed lifecycle-loss repair. Directory/generation source gate and force schema foundations unqualified; no force publication wired. |
-| qualification | 1 | Supervisor active on exact Haskell graph/resource census; capture_sensitivity completed/integrated. Terminal graph receipt delivered warm; next compiled checkpoint or final frontier-settled event owns reactivation. Final scratch audit not yet ready. |
+| host_inputs | 2 | Source frontier settled at b449632676 (code ff2c4577), cumulative independent review accepted, native0/0. Campaign reactivated supervisor to prepare the smallest issuer production/test gate. Warm terminal plus real admission triggers that gate; broad02/03 remains held. |
+| owned_inputs | 2 | Rows implements dedicated value-row issuance at the original generic materializer. Supervisor/source_lifetime reserved awaiting exact repair; producer must reactivate both. Rejected26e association and6d42 complete-parent/backing retention; no accepted product fold/native checks. |
+| warm_workers | 1 | Exact07c8 production and all five Haskell consumers compiled; Rust4/4 passed, Haskell execution0. Supervisor/protocol repair nested decoder/raw-owner commit atomicity without full snapshot forks. They own exact repair/review, then serial admitted recompilation and maintained counted wrappers. |
+| reload | 2 | Directory/schema source8dca6d6a and report a0d293d2, std-only generator/snapshot checks passed (execution0). generation_admission implements coherentR1; authority_review reserved for exact rereview. Initial-publication uncertainty stays unavailable and existing explicit reopen recovery obtains actual head; no new live reconciliation API. BroadR2/R3 held at native gate. |
+| qualification | 1 | Current reconciliation settled; all five Haskell hashes and four Rust passes independently verified at07c8. Supervisor/capture grant reserved for exact new checkpoint or campaign frontier-settled final scratch analysis. |
 
 Every leaf has an isolated real checkout/index and per-area HANDOFF. Campaign alone
 edits shared STATUS/CONTRACTS. Only owning parent integrates its branch. Full
@@ -66,39 +67,44 @@ acceptance; source-only reviewed candidates remain explicitly unqualified.
 
 ## Native evidence and current storage admission
 
-Warm exactf3a386310bf8be9f93720e165d5e33c80d39bd64:
-`swarm-build just build -j1 //tidepool/extract-cmd:tidepool_extract_cmd` exit0,
-216local/0cached actions54.5s; unit binary target151local/0cached49.4s.
-Counted protocol/END controls selected4/executed4/passed4 exit0; actual libtestSHA
-`6e58cbee2bf8b02538c6334349117f58ed3e907992ebd98c50a93f84d8977bb5`.
-Process cleanup confirmed; no GHC used, compiler cleanup not_observed.
-Evidence warm-workers/RUST-VALIDATION.json and protocol-rust-tests.log.
-Transport code only: source-free Unsupported route, no realization/Ready/hit claim.
+Warm exact `07c8efbe507a0624317e458f0e687e9d55410934`:
+production Rust and cfg(test) compiled, selected4/executed4/passed4, exit0.
+All five Haskell compile-only targets passed: tidepool_extract_bin,
+worker_response_child, worker_response_test_bin, cell_splitter_test_bin and
+source_boot_product_reuse_test_bin. **Haskell execution0**. Transport source-free
+route refuses Unsupported; no realized exact-root Ready/hit or speedup claim.
+Receipt `warm-workers/NATIVE-VALIDATION-07c8.json` under the campaign evidence root;
+independent reconciliation `/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/NATIVE-RECONCILIATION-07c8.json`.
 
-Warm buck-out~663.5MB after Rust; daemon3810824/fork3810865 retained in its
-admitted build.slice scope, peak1946890240B. Campaign script daemon also retained.
-All live parent Persona hosts/shared workers untouched. Mounts provisioned/verified.
+Haskell lane actual incremental output268353536B within640MiB prospective budget;
+final warm buck-out931864576B; observed enclosing MemoryPeak3156279296B.
+Warm daemon3810824/fork3810865 remains in admitted build.slice. Live GHC PID/cgroup
+sample was not captured; no stronger process-accounting claim is made.
+The first production attempt caught a local guard syntax error; subsequent compile
+caught no errors, and independent review repaired a standalone-decoder policy
+regression. Current staged atomicity repair remains uncompiled/unexecuted.
 
-Installed swarm-build is the older scope launcher, with no disk-reservation
-switches; `--storage-status` failed, so no staged rollout assumed. Preserve100GiB
-unreserved including expected growth. No deletion/unmount/GC/restart/bypass.
-Recent free108268392448B (~853MiB abovefloor) admitted ONE Haskell compile-only
-lane prospective640MiB (measured historical retained outputs306618368B plus
-serialized scratch allowance; expected estimate, not proven peak). Production
-`//bridge/haskell:tidepool_extract_bin` runs first; warm observes terminal and
-re-evaluates before worker_response_test_bin/worker_response_child/cell_splitter_test_bin.
-Those exact compile-only graphs have no Rust generator dependency.
-First Haskell compile889 failed on an introduced local guard parse error; corrected
-before retry. Production2b62169cdf compiled exit0, own output805949440B (Haskell
-growth142438400B), scopepeak3083128832B. Independent adjacent review then found
-standalone decoder reuse changed by the pruning repair;07c8efbe50 separates the
-standalone decoder owner and is the next exact production/test compile candidate.
-No source inputs change while their build action runs. The source-boot test bin
-adds44,146,688B historical retained output; conditional96MiB prospective allowance
-may spend only remaining original640MiB lane after actual four-target growth.
-The counted Haskell wrapper includes effects_generated→Rust runtime/toolchain/mcp;
-retained owner census~1.816GB with unresolved/absent outputs, not admitted.
-Broad host/toolchain/reload compilation and frozen runs remain disk-blocked.
+Reload source8dca6d6a compiled its std-only protocol generator (4local actions)
+and owning generated-snapshot check (3local actions), exit0, execution0.
+Artifact6598656B SHA143f28f99a457a86aad2bbb52269a8f432bd95670bbe1d84b07e7f6911a047f4;
+own output56938496B, observed MemoryPeak836239360B. Receipt
+`reload/protocol-generator-receipt.json`; idle daemon3835600 retained in its
+admitted build.slice. Actor/runtime/R1 production and tests remain uncompiled.
+
+Installed swarm-build is the older scope launcher; --storage-status is unsupported.
+No replacement admission wrapper or staged reservation interface was invented.
+Preserve100GiB unreserved including expected output/scratch growth. All campaign
+commands have settled; live Persona hosts/shared workers remain untouched.
+
+The coordinator owns the user's newly authorized broad storage cleanup. Its first
+verified idle self-service retirement, tidepool-inline-after-tool-20261014,
+preserved source/Git/evidence and raised actual free100.54→105.80GiB. Further
+cleanup is not presumed complete. Recheck actual df/memory before every new lane.
+Warm owns the next single native lane after atomicity repair/review: prospective
+3GiB additional, only while real free covers100GiB+that allowance plus other live
+growth. Its maintained wrappers include declared Rust/runtime fixture producers;
+no direct test-bin bypass. Campaign observes warm terminal before the host issuer
+lane. Broader host/toolchain/reload gates remain pending actual capacity/admission.
 
 ## Shared decisions, remaining frontier and acceptance limits
 
@@ -140,24 +146,24 @@ throughout work. Final bundle/performance qualification and deployment remain se
 
 ## Campaign continuation handoff
 
-Campaign has no running commands; its configure, script checks and authorized
-publication all settled. Public github branch `campaign/shared-warm-compiler`
-contains a6e395d3317c3ec1cc57e232130d6a13753b7334 (tested code6d3b ancestor).
-Next awaited events, not periodic wakes:
+Campaign has no running commands. Public github campaign/shared-warm-compiler
+contains313f62bc0e6f5f8848016d975c0a3610335b88c0 (tested code6d3b ancestor);
+this snapshot supersedes that documentation state. Next actionable event owners:
 
-- warm_workers owns current Haskell production/test compilation, its terminal
-  artifacts/resources and bounded decoder review repair; deliver exact candidate
-  and checks to campaign, using followup_task if campaign dormant.
-- host_inputs owns final exact da4be05f input-Arc reuse review/area fold. After that,
-  broad02/03/source-adoption implementation is held until native issuer production
-  and tests compile plus focused controls execute. Bridge design only is retained.
-- owned rows owns exact repaired physical-frontier proposal/candidate. It must
-  reactivate source_lifetime and owned_inputs supervisor; no accepted physical
-  candidate exists. Current reviewc29f5187d6 rejects old-complete parent retention.
-- reload supervisor owns typed cleanup uncertainty repair and reactivation of
-  authority_review, then current bounded R1 source checkpoint. Broad force
-  publication/migration is held at compile gate. Actual current handoff required.
+- warm_workers owns staged decoder/raw retention atomic commit, exact independent
+  review and admitted native compilation/counting. Terminal candidate/results
+  reactivate campaign; campaign then admits host issuer gate if capacity permits.
+- host_inputs owns pending issuer gate preparation at b449/ff2c. Broad02/03 and
+  source-adoption implementation stay held until production/tests compile and
+  focused controls execute. Source-adoption bridge design only is retained.
+- owned rows owns repaired original value-row factory and full retention controls;
+  reactivate source_lifetime and owned_inputs for exact review/repair/fold.
+- reload owns coherentR1 and exact independent review, then actual actor/runtime
+  native gate. Unknown bootstrap publication uses unavailable truth and explicit
+  existing run reopen recovery; no same-actor recovery is claimed.
+- coordinator owns further settled storage receipts; campaign must recheck real
+  headroom before admitting succeeding lanes. Qualification owns final analysis
+  only after every approved campaign frontier has settled.
 
-Campaign continues independent cumulative review/folds on those actionable events.
-No source-only native candidate is claimed qualified because storage blocks its
-checks. Event-bound yield preserves grants and does not complete the campaign.
+Campaign continues review/repairs/folds on those events. Event-bound yield retains
+ownership/grants and does not mark this incomplete campaign complete.

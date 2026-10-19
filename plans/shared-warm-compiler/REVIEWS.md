@@ -50,5 +50,5 @@ Reviews checked contracts, source entry points, counterexamples, ownership,
 sequencing and verification strategy. No implementation or performance result is
 implied. The frontend experiment, exact package-source association, quantitative
 retention and current speedup remain matters for the specified execution gates.
-The peer's stronger Persona gate remains pending unless its actual later
-evidence is acquired at kickoff.
+The peer's later stronger Persona gate was acquired at kickoff: executed1/pass1/exit0,
+with compiler cleanup unobserved and diagnostic evidence incomplete; see EVIDENCE.md.

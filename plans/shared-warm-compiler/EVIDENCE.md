@@ -35,7 +35,11 @@ expected the incorrect refusal. Preserve intended semantics, not those mistakes.
 
 The stronger hosted selector is
 `actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_lookup_and_later_cells_usable`
-in `exomonad-host`. It was **running, not accepted**, at peer handoff. Evidence:
+in `exomonad-host`. It was running at peer handoff; kickoff inspected the later
+actual result: **executed1/passed1/exit0**. Process and hosted cleanup confirmed;
+compiler cleanup not_observed with observation complete, diagnostic evidence
+incomplete. This is focused prerequisite evidence, not campaign release qualification.
+Exact case report `host-cases/e27eec134184eea75959071896799d075b55b040628a49a0e25165b9be2fab4e.json`. Evidence:
 `/srv/swarm/evidence/inanna/admission-analysis-review-20261018/overnight-70a-strong-persona/`.
 Its shared-source identity and startup-derived JSON/Jev support matter. Byte-equal
 local copies do not establish the same source/custody history. Earlier hosted
