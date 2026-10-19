@@ -2069,7 +2069,7 @@ mod normalized_dependency_tests {
             .into_iter()
             .map(|witness| witness.product)
             .collect::<Vec<_>>();
-        let inputs = OriginalCompilerInputs::from_checked_support_products(
+        let inputs = OriginalCompilerInputs::issue_candidate_from_support(
             &CompilerSourceSupport::empty(),
             producer.sha256(),
             &products,
@@ -2279,7 +2279,7 @@ mod normalized_dependency_tests {
             .into_iter()
             .map(|witness| witness.product)
             .collect::<Vec<_>>();
-        let inputs = OriginalCompilerInputs::from_checked_support_products(
+        let inputs = OriginalCompilerInputs::issue_candidate_from_support(
             &CompilerSourceSupport::empty(),
             producer.sha256(),
             &products,

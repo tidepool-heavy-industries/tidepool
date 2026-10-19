@@ -1383,7 +1383,7 @@ impl CompilerSourceSupport {
             return Ok(self.clone());
         }
         let fragment =
-            crate::declaration_context::OriginalCompilerInputs::from_checked_support_products(
+            crate::declaration_context::OriginalCompilerInputs::issue_candidate_from_support(
                 self, producer, products,
             )?;
         let (artifacts, projection, decisions) =

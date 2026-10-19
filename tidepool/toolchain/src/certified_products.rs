@@ -12797,7 +12797,7 @@ pub(crate) mod tests {
                 source.artifacts().selected_native_groups(),
                 input_only.issued_artifacts().selected_native_groups()
             );
-            let source_result = OriginalCompilerInputs::from_checked_support_products(
+            let source_result = OriginalCompilerInputs::issue_candidate_from_support(
                 &source,
                 producer.sha256(),
                 std::slice::from_ref(fresh),
@@ -14723,7 +14723,7 @@ pub(crate) mod tests {
             // Full availability comes from the existing explicit offer issuer,
             // never from the later output's broader artifact custody.
             let private = full.then(|| {
-                OriginalCompilerInputs::from_native_availability(
+                OriginalCompilerInputs::issue_candidate_from_context(
                     &context,
                     producer,
                     std::slice::from_ref(dependency),

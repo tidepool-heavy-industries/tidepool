@@ -14245,9 +14245,10 @@ mod tests {
                     &[],
                 )
                 .unwrap();
-                let inputs =
-                    OriginalCompilerInputs::from_native_availability(&context, producer, products)
-                        .unwrap();
+                let inputs = OriginalCompilerInputs::issue_candidate_from_context(
+                    &context, producer, products,
+                )
+                .unwrap();
                 let scratch = tempfile::tempdir().unwrap();
                 let request =
                     crate::declaration_context::ExactCompileContext::new(Arc::new(context))

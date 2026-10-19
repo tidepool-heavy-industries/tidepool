@@ -820,7 +820,7 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
         )])),
     );
     let consumer = recovered_witness_fixtures(&[consumer]).remove(0).product;
-    let private = OriginalCompilerInputs::from_native_availability(
+    let private = OriginalCompilerInputs::issue_candidate_from_context(
         &baseline,
         producer,
         std::slice::from_ref(&consumer),
@@ -1316,7 +1316,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         let expected_roots =
             scoped_execution_roots(if supplied.is_empty() { &right } else { &left });
         assert_eq!(scoped_execution_roots(source.artifacts()), expected_roots);
-        let input = OriginalCompilerInputs::from_checked_support_products(
+        let input = OriginalCompilerInputs::issue_candidate_from_support(
             source.compiler_source_support(),
             producer.sha256(),
             std::slice::from_ref(consumer),
@@ -1450,7 +1450,7 @@ fn private_native_availability_preserves_partial_baseline_and_exact_advertised_c
                     if unrelated {
                         offers.push(extra.clone());
                     }
-                    let input = OriginalCompilerInputs::from_native_availability(
+                    let input = OriginalCompilerInputs::issue_candidate_from_context(
                         &context,
                         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
                         &offers,
@@ -2297,7 +2297,7 @@ fn advertised_unselected_body_preserves_historical_generation_identity_only() {
     let context = Arc::new(Arc::unwrap_or_clone(context).rebuild(|facts| {
         facts.compiler_support = support;
     }));
-    let private = OriginalCompilerInputs::from_native_availability(
+    let private = OriginalCompilerInputs::issue_candidate_from_context(
         &context,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
         &[mixed],
@@ -3469,7 +3469,7 @@ fn direct_native_advertisement_uses_descendant_contribution_without_sibling_cust
         .into_iter()
         .map(|witness| witness.product)
         .collect::<Vec<_>>();
-    let inputs = OriginalCompilerInputs::from_checked_support_products(
+    let inputs = OriginalCompilerInputs::issue_candidate_from_support(
         &crate::artifact_inventory::CompilerSourceSupport::empty(),
         producer,
         &products,
@@ -3729,7 +3729,7 @@ fn unchanged_native_availability_merge_preserves_indirect_permissions() {
         .into_iter()
         .map(|witness| witness.product)
         .collect::<Vec<_>>();
-    let inputs = OriginalCompilerInputs::from_checked_support_products(
+    let inputs = OriginalCompilerInputs::issue_candidate_from_support(
         &crate::artifact_inventory::CompilerSourceSupport::empty(),
         producer.sha256(),
         &products,
@@ -4331,15 +4331,18 @@ fn private_native_availability_requires_complete_explicit_same_owner_upgrade() {
     let context = partial_context(&baseline, &get("RequiredNative"), &unused, None);
     let before = context.as_ref().clone();
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
-    assert!(OriginalCompilerInputs::from_native_availability(
+    assert!(OriginalCompilerInputs::issue_candidate_from_context(
         &context,
         producer,
         std::slice::from_ref(&baseline),
     )
     .is_err());
-    let input =
-        OriginalCompilerInputs::from_native_availability(&context, producer, &[baseline, unused])
-            .unwrap();
+    let input = OriginalCompilerInputs::issue_candidate_from_context(
+        &context,
+        producer,
+        &[baseline, unused],
+    )
+    .unwrap();
     let root = tempfile::tempdir().unwrap();
     let request = ExactCompileContext::new(context.clone())
         .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(input))
@@ -4616,7 +4619,7 @@ fn selected_authored_availability_refuses_source_original_spelling_with_full_gro
     );
     // A separately issued configured offer remains legitimate. Full custody
     // and a session-like module name cannot issue that offer implicitly.
-    assert!(OriginalCompilerInputs::from_native_availability(
+    assert!(OriginalCompilerInputs::issue_candidate_from_context(
         &context,
         producer,
         std::slice::from_ref(&native),
@@ -4638,7 +4641,7 @@ fn initial_private_native_offer_reaches_wire_without_lexical_or_instance_authori
             Some(text("same-authorization")),
         )
         .unwrap();
-    let input = OriginalCompilerInputs::from_native_availability(
+    let input = OriginalCompilerInputs::issue_candidate_from_context(
         &context,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
         std::slice::from_ref(&native),
@@ -4743,7 +4746,7 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
         view,
     );
     changed = changed.rebuild(|facts| facts.compiler_support = support);
-    assert!(OriginalCompilerInputs::from_native_availability(
+    assert!(OriginalCompilerInputs::issue_candidate_from_context(
         &changed,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
         std::slice::from_ref(&first),
@@ -4795,7 +4798,7 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
         .metadata_snapshot()
         .ambiguous_native_owners
         .contains(&identity("fixture", "AmbiguousNative"),));
-    assert!(OriginalCompilerInputs::from_native_availability(
+    assert!(OriginalCompilerInputs::issue_candidate_from_context(
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
         std::slice::from_ref(&first),
@@ -4860,13 +4863,13 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
     .unwrap();
     ambiguous = ambiguous.rebuild(|facts| facts.compiler_support = support);
     assert_eq!(ambiguous.compiler_input_projection(), &projection);
-    OriginalCompilerInputs::from_native_availability(
+    OriginalCompilerInputs::issue_candidate_from_context(
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
         std::slice::from_ref(&first),
     )
     .expect("explicit issued original remains usable beside historical custody");
-    assert!(OriginalCompilerInputs::from_native_availability(
+    assert!(OriginalCompilerInputs::issue_candidate_from_context(
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
         std::slice::from_ref(&second),
@@ -5086,7 +5089,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             "body custody alone does not grant a selected authored root"
         );
         assert!(
-            OriginalCompilerInputs::from_native_availability(
+            OriginalCompilerInputs::issue_candidate_from_context(
                 &context,
                 producer,
                 std::slice::from_ref(current),
@@ -5110,7 +5113,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             unissued = unissued.rebuild(|facts| facts.compiler_support = support);
         }
         assert!(
-            OriginalCompilerInputs::from_native_availability(
+            OriginalCompilerInputs::issue_candidate_from_context(
                 &unissued,
                 producer,
                 std::slice::from_ref(current),
@@ -5140,14 +5143,14 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
         .unwrap();
         context = context.rebuild(|facts| facts.compiler_support = support);
         context.compiler_metadata_snapshot().unwrap();
-        let private = OriginalCompilerInputs::from_native_availability(
+        let private = OriginalCompilerInputs::issue_candidate_from_context(
             &context,
             producer,
             std::slice::from_ref(current),
         )
         .expect("an exact issued native winner distinguishes same-canonical bodies");
         assert!(
-            OriginalCompilerInputs::from_native_availability(
+            OriginalCompilerInputs::issue_candidate_from_context(
                 &context,
                 producer,
                 std::slice::from_ref(&products[1]),
@@ -5336,7 +5339,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             .is_err(),
             "a genuine unique authored private claim cannot be replaced by a fresh same-owner candidate",
         );
-        let other = OriginalCompilerInputs::from_native_availability(
+        let other = OriginalCompilerInputs::issue_candidate_from_context(
             &type_context(std::slice::from_ref(&products[1])),
             producer,
             std::slice::from_ref(&products[1]),
@@ -5540,7 +5543,7 @@ fn availability_refuses_wrong_external_group_before_advertising_binders() {
     )
     .unwrap();
     let context = type_context(&[wrong.clone(), required.clone()]);
-    assert!(OriginalCompilerInputs::from_native_availability(
+    assert!(OriginalCompilerInputs::issue_candidate_from_context(
         &context,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
         &[wrong, required],
@@ -6418,7 +6421,7 @@ fn replay_native_transport_history(
             .as_ref()
             .clone()
             .rebuild(|facts| facts.compiler_support = support);
-        OriginalCompilerInputs::from_native_availability(
+        OriginalCompilerInputs::issue_candidate_from_context(
             &context,
             producer,
             std::slice::from_ref(&products[index + 1]),
@@ -6616,7 +6619,7 @@ fn replay_native_transport_history(
     let actual_request = ProtectedScaffoldRequirements::default()
         .compiler_inputs(&actual_context, Some(&private[0]))
         .unwrap();
-    let produced = OriginalCompilerInputs::from_checked_support_products(
+    let produced = OriginalCompilerInputs::issue_candidate_from_support(
         &actual_request.shared_compiler_source_support(),
         producer.sha256(),
         std::slice::from_ref(&dependent),
@@ -8988,7 +8991,7 @@ fn candidate_reuse_preserves_selected_issuer_beside_historical_offer() {
     let parent_entry = Arc::new(ArtifactEntry::original(producer.sha256(), parent).unwrap());
     let support =
         recover_fixture_compiler_support(projection.clone(), left.clone(), [a.clone()]).unwrap();
-    let parent_input = OriginalCompilerInputs::from_checked_support_products(
+    let parent_input = OriginalCompilerInputs::issue_candidate_from_support(
         &support,
         producer.sha256(),
         std::slice::from_ref(match &parent_entry.payload {
@@ -9474,7 +9477,7 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
         ],
     )
     .unwrap();
-    let old_input = OriginalCompilerInputs::from_native_availability(
+    let old_input = OriginalCompilerInputs::issue_candidate_from_context(
         &type_context(std::slice::from_ref(&historical)),
         producer,
         std::slice::from_ref(&historical),
@@ -9566,7 +9569,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
     let dependency = products[0].product.clone();
     let fresh = products[1].product.clone();
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
-    let output = OriginalCompilerInputs::from_checked_support_products(
+    let output = OriginalCompilerInputs::issue_candidate_from_support(
         &crate::artifact_inventory::CompilerSourceSupport::empty(),
         producer.sha256(),
         std::slice::from_ref(&dependency),
@@ -10476,7 +10479,7 @@ fn fresh_fragment_does_not_issue_empty_permissions_for_baseline_originals() {
             )
             .unwrap(),
         );
-        let fragment = OriginalCompilerInputs::from_native_availability(
+        let fragment = OriginalCompilerInputs::issue_candidate_from_context(
             &baseline,
             producer,
             std::slice::from_ref(&fresh),
@@ -10637,7 +10640,7 @@ fn replay_fresh_fragment_obligations(
         .unwrap(),
     );
     let source_before = context.artifact_view().capture_graph_selection();
-    let candidate = OriginalCompilerInputs::from_native_availability(
+    let candidate = OriginalCompilerInputs::issue_candidate_from_context(
         &context,
         producer,
         std::slice::from_ref(fresh),
@@ -10933,7 +10936,7 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     ), Err(CompileError::ExtractFailed(detail)) if detail.contains("native product has another canonical producer"))
     );
     let candidate_calls = original_entry_construction_calls();
-    OriginalCompilerInputs::from_checked_support_products(
+    OriginalCompilerInputs::issue_candidate_from_support(
         &crate::artifact_inventory::CompilerSourceSupport::empty(),
         producer.sha256(),
         &[native.clone()],

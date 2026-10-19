@@ -696,7 +696,7 @@ fn original_role_preview_keeps_exact_native_identity_and_refuses_substitution() 
     assert_ne!(selected[0].product_bytes(), substitute.product_bytes());
     assert!(!selected[0].same_durable_artifact(substitute));
     assert!(
-        crate::declaration_context::OriginalCompilerInputs::from_native_availability(
+        crate::declaration_context::OriginalCompilerInputs::issue_candidate_from_context(
             &original,
             CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
             std::slice::from_ref(substitute),

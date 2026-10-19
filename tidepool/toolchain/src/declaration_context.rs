@@ -536,8 +536,11 @@ impl OriginalCompilerInputs {
         &self.native_availability
     }
 
+    /// Issue a fresh candidate owner from checked products and source support.
+    /// Equal payloads do not preserve a prior offer's exact issuance. Transfer
+    /// an existing selected issuance with `from_selection` instead.
     #[cfg(test)]
-    pub(crate) fn from_checked_support_products(
+    pub(crate) fn issue_candidate_from_support(
         support: &crate::artifact_inventory::CompilerSourceSupport,
         producer: [u8; 32],
         products: &[CertifiedRecoveryProduct],
@@ -872,15 +875,17 @@ impl OriginalCompilerInputs {
         })
     }
 
-    /// Supply compatible immutable code privately. Exact canonical equality
-    /// upgrades an issued type role; it grants no lexical or instance authority.
+    /// Issue fresh candidate availability against this context's checked support.
+    /// Exact canonical equality permits the private type-role upgrade, but does
+    /// not preserve an earlier offer's issuance or grant lexical/instance authority.
+    /// Use `from_selection` to transfer an existing selected issuance.
     #[cfg(test)]
-    pub(crate) fn from_native_availability(
+    pub(crate) fn issue_candidate_from_context(
         context: &ExactDeclarationContext,
         producer: CanonicalProducerIdentity,
         products: &[CertifiedRecoveryProduct],
     ) -> Result<Self, CompileError> {
-        Self::from_checked_support_products(
+        Self::issue_candidate_from_support(
             context.compiler_source_support(),
             producer.sha256(),
             products,
@@ -12858,7 +12863,7 @@ mod tests {
             .first()
             .and_then(|product| product.module_interface())
             .map_or([2; 32], |interface| interface.producer_sha256());
-        let output = OriginalCompilerInputs::from_checked_support_products(
+        let output = OriginalCompilerInputs::issue_candidate_from_support(
             &crate::artifact_inventory::CompilerSourceSupport::empty(),
             producer,
             products,
@@ -16118,7 +16123,7 @@ mod tests {
         let delta =
             scaffold_native_fixture(ancestor.owner.facts.producer, "fixture", "LatePrivate", 1);
         let producer_identity = CanonicalProducerIdentity::from_producer_bytes(&producer);
-        let private = OriginalCompilerInputs::from_native_availability(
+        let private = OriginalCompilerInputs::issue_candidate_from_context(
             &ancestor,
             producer_identity,
             std::slice::from_ref(&delta),
@@ -16151,9 +16156,12 @@ mod tests {
                 .extend_checked_original_products(descendant.owner.facts.producer, &[epsilon])
                 .unwrap(),
         );
-        let private =
-            OriginalCompilerInputs::from_native_availability(&next, producer_identity, &[delta])
-                .unwrap();
+        let private = OriginalCompilerInputs::issue_candidate_from_context(
+            &next,
+            producer_identity,
+            &[delta],
+        )
+        .unwrap();
         let private_support =
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&private)
                 .unwrap();
@@ -17981,7 +17989,7 @@ mod tests {
         let support = if sparse {
             issue_fixture_compiler_support(projection, artifacts).unwrap()
         } else {
-            let output = OriginalCompilerInputs::from_checked_support_products(
+            let output = OriginalCompilerInputs::issue_candidate_from_support(
                 &crate::artifact_inventory::CompilerSourceSupport::empty(),
                 [7; 32],
                 &products,
@@ -20579,7 +20587,7 @@ mod tests {
             .unwrap()
             .descriptor
             .id;
-        let hidden_output = OriginalCompilerInputs::from_checked_support_products(
+        let hidden_output = OriginalCompilerInputs::issue_candidate_from_support(
             &crate::artifact_inventory::CompilerSourceSupport::empty(),
             [2; 32],
             &[hidden],
@@ -22241,7 +22249,7 @@ mod tests {
         );
         // Opaque availability survives type-only roles independently of
         // executable group demand. A redundant private support offer is optional.
-        OriginalCompilerInputs::from_native_availability(
+        OriginalCompilerInputs::issue_candidate_from_context(
             &dependent_context,
             producer,
             &configured_support,
@@ -22360,7 +22368,7 @@ mod tests {
             "changed fixture must require one exact selected support group"
         );
         let required_support_ordinal = *required_support_ordinals.first().unwrap();
-        let missing_support = OriginalCompilerInputs::from_native_availability(
+        let missing_support = OriginalCompilerInputs::issue_candidate_from_context(
             &type_only,
             producer,
             std::slice::from_ref(changed.product()),
