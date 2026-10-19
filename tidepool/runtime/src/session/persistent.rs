@@ -4687,14 +4687,32 @@ mod checkpoint_scope_tests {
                 crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
             let mut session = publication_session(&recovery, root.path(), 417);
             let scope = session.mint_isolated_scope();
-            for index in 0..count {
-                let entry = super::super::prepared::tests::rooted_publication_fixture(
-                    &mut session,
-                    &format!("value{index}"),
-                    900 + index,
-                );
-                session.bind_in(scope, entry).unwrap();
-            }
+            let source = session.adopt_initial_notebook_scope(scope).unwrap();
+            let settled = session
+                .with_source_compiler_transaction(
+                    source.clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, _| {
+                        for index in 0..count {
+                            let entry = super::super::prepared::tests::rooted_publication_fixture(
+                                session,
+                                &format!("value{index}"),
+                                900 + index,
+                            );
+                            session.bind_in(scope, entry)?;
+                        }
+                        Ok::<(), SessionError>(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                settled.close(),
+                &crate::CompilerTransactionClose::NotStarted
+            );
+            settled.into_outcome().action.unwrap();
             assert!(session.compile_views.lock().is_empty());
             let observation = tidepool_toolchain::timing::HostWorkObservation::new();
             let key = observation.scope(|| {
@@ -4757,19 +4775,54 @@ mod checkpoint_scope_tests {
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut session = publication_session(&recovery, root.path(), 418);
         let scope = session.mint_isolated_scope();
+        let source = session.adopt_initial_notebook_scope(scope).unwrap();
         let initial = session.compile_view_key_in(scope).unwrap();
         let tip = session.lib().scope_tip(scope);
-        let entry =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 1010);
-        session.bind_in(scope, entry).unwrap();
+        let settled = session
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let entry = super::super::prepared::tests::rooted_publication_fixture(
+                        session, "value", 1010,
+                    );
+                    session.bind_in(scope, entry)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &crate::CompilerTransactionClose::NotStarted
+        );
+        settled.into_outcome().action.unwrap();
         let bound = session.compile_view_key_in(scope).unwrap();
         assert!(bound != initial);
         assert_eq!(session.lib().scope_tip(scope), tip);
         let child = session.mint_scope(scope).unwrap();
         let inherited = session.compile_view_key_in(child).unwrap();
-        let entry =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 1011);
-        session.bind_in(scope, entry).unwrap();
+        let settled = session
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let entry = super::super::prepared::tests::rooted_publication_fixture(
+                        session, "value", 1011,
+                    );
+                    session.bind_in(scope, entry)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &crate::CompilerTransactionClose::NotStarted
+        );
+        settled.into_outcome().action.unwrap();
         let shadowed = session.compile_view_key_in(scope).unwrap();
         assert!(shadowed != bound);
         assert!(
@@ -4777,12 +4830,29 @@ mod checkpoint_scope_tests {
             "a captured child retains its original binding world"
         );
         let sibling = session.mint_isolated_scope();
-        let entry = super::super::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "unrelated",
-            1012,
+        let sibling_source = session.adopt_initial_notebook_scope(sibling).unwrap();
+        let settled = session
+            .with_source_compiler_transaction(
+                sibling_source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let entry = super::super::prepared::tests::rooted_publication_fixture(
+                        session,
+                        "unrelated",
+                        1012,
+                    );
+                    session.bind_in(sibling, entry)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &crate::CompilerTransactionClose::NotStarted
         );
-        session.bind_in(sibling, entry).unwrap();
+        settled.into_outcome().action.unwrap();
         assert!(session.compile_view_key_in(scope).as_ref() == Some(&shadowed));
         session.set_catalog_selection(Default::default());
         let catalog = session.compile_view_key_in(scope).unwrap();
