@@ -10,8 +10,10 @@
 //! observe, because `ActorCompileView` exposes no compiler-world handle, so a
 //! handler must never synthesize one. Comparing the full triple is what makes
 //! `ScopeChanged` meaningful; correlating it with world-publication identity is
-//! a runtime-owner follow-up. Until a request pins an expected provenance, only
-//! movement observed during a query is refused.
+//! a runtime-owner follow-up. A caller may pin the view it expects: `Nothing`
+//! observes the entry view, while `Just p` is refused at entry when `p` is no
+//! longer current. Every answer is also rechecked before the reply, so a view
+//! that moves during a query is refused whether or not the request was pinned.
 //!
 //! Enumeration maps to the existing browse queries. `currentScopeView` never
 //! enters the compiler path; the remaining verbs reuse the admitted inspection
@@ -25,8 +27,8 @@ use tidepool_bridge::FromHaskell;
 use tidepool_bridge_derive::DeriveFromHaskell;
 use tidepool_runtime::session::{
     IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionResult,
-    NameScope, QueryError, ScopeProvenance, TypeMatch as RuntimeTypeMatch,
-    TypeMatchQuality as RuntimeTypeMatchQuality,
+    NameNamespace, NameQuery, NameScope, QueryError, ScopeProvenance,
+    TypeMatch as RuntimeTypeMatch, TypeMatchQuality as RuntimeTypeMatchQuality,
 };
 
 use super::structured_introspection::{
@@ -40,6 +42,8 @@ use super::*;
 /// returned rows bounded and report the observed count beside the applied
 /// limit, so truncation is visible instead of being mistaken for the whole
 /// scope. Calibrate from retained query evidence if the boundary budget moves.
+/// The decoder collects the complete list first; counting happens before this
+/// limit is applied, never from the retained prefix.
 pub(super) const QUERY_RESULT_LIMIT: usize = 256;
 
 /// A decoded compiler question. The wire enum lives in
@@ -48,22 +52,49 @@ pub(super) const QUERY_RESULT_LIMIT: usize = 256;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CompilerQuery {
     CurrentScopeView,
-    ScopeBindings,
-    ModuleExports(String),
-    RowFit(IdentifierRef),
-    TypeOfExpression(String),
-    TypeSearch(String),
+    ScopeBindings {
+        expected_scope: Option<ScopeProvenance>,
+    },
+    ModuleExports {
+        expected_scope: Option<ScopeProvenance>,
+        module: String,
+    },
+    RowFit {
+        expected_scope: Option<ScopeProvenance>,
+        identifier: IdentifierRef,
+    },
+    TypeOfExpression {
+        expected_scope: Option<ScopeProvenance>,
+        expression: String,
+    },
+    TypeSearch {
+        expected_scope: Option<ScopeProvenance>,
+        pattern: String,
+    },
 }
 
 impl CompilerQuery {
     pub(super) fn operation(&self) -> &'static str {
         match self {
             Self::CurrentScopeView => "currentScopeView",
-            Self::ScopeBindings => "scopeBindings",
-            Self::ModuleExports(_) => "moduleExports",
-            Self::RowFit(_) => "rowFit",
-            Self::TypeOfExpression(_) => "typeOfExpression",
-            Self::TypeSearch(_) => "typeSearch",
+            Self::ScopeBindings { .. } => "scopeBindings",
+            Self::ModuleExports { .. } => "moduleExports",
+            Self::RowFit { .. } => "rowFit",
+            Self::TypeOfExpression { .. } => "typeOfExpression",
+            Self::TypeSearch { .. } => "typeSearch",
+        }
+    }
+
+    /// The view the caller pinned, if any. `None` asks about whatever view the
+    /// actor holds at entry.
+    pub(super) fn expected_scope(&self) -> Option<&ScopeProvenance> {
+        match self {
+            Self::CurrentScopeView => None,
+            Self::ScopeBindings { expected_scope }
+            | Self::ModuleExports { expected_scope, .. }
+            | Self::RowFit { expected_scope, .. }
+            | Self::TypeOfExpression { expected_scope, .. }
+            | Self::TypeSearch { expected_scope, .. } => expected_scope.as_ref(),
         }
     }
 
@@ -76,7 +107,10 @@ impl CompilerQuery {
     /// The probes compile a generated expression; every other verb asks a
     /// question about the held environment.
     pub(super) fn compiles_probe(&self) -> bool {
-        matches!(self, Self::TypeOfExpression(_) | Self::TypeSearch(_))
+        matches!(
+            self,
+            Self::TypeOfExpression { .. } | Self::TypeSearch { .. }
+        )
     }
 
     /// The exact queries submitted for this verb. `currentScopeView` has none.
@@ -93,16 +127,16 @@ impl CompilerQuery {
     pub(super) fn inspection_queries(&self) -> Vec<InspectionQuery> {
         match self {
             Self::CurrentScopeView => Vec::new(),
-            Self::ScopeBindings => vec![InspectionQuery::ScopeBrowse],
-            Self::ModuleExports(module) => vec![InspectionQuery::Browse {
+            Self::ScopeBindings { .. } => vec![InspectionQuery::ScopeBrowse],
+            Self::ModuleExports { module, .. } => vec![InspectionQuery::Browse {
                 module: module.clone(),
                 expanded: false,
             }],
-            Self::RowFit(identifier) => vec![row_fit_query(identifier)],
-            Self::TypeOfExpression(expression) => {
+            Self::RowFit { identifier, .. } => vec![row_fit_query(identifier)],
+            Self::TypeOfExpression { expression, .. } => {
                 vec![InspectionQuery::TypeOf(expression.clone())]
             }
-            Self::TypeSearch(pattern) => vec![InspectionQuery::TypeSearch(pattern.clone())],
+            Self::TypeSearch { pattern, .. } => vec![InspectionQuery::TypeSearch(pattern.clone())],
         }
     }
 }
@@ -118,7 +152,7 @@ impl CompilerQuery {
 /// Lookup excision removes `InspectionQuery::ExactName`; until a keyed,
 /// non-enumerating availability query lands, this reads the browsed entries.
 fn row_fit_query(identifier: &IdentifierRef) -> InspectionQuery {
-    if is_session_module(&identifier.module) {
+    if tidepool_repr::SessionModule::is_reserved_name(&identifier.module) {
         InspectionQuery::ScopeBrowse
     } else {
         InspectionQuery::Browse {
@@ -128,22 +162,14 @@ fn row_fit_query(identifier: &IdentifierRef) -> InspectionQuery {
     }
 }
 
-/// `inspectModule` refuses compiler-generated session modules
-/// (`parseSessionModule` in `Tidepool.Introspection`). Asking anyway would be
-/// a guaranteed `ModuleNotFound`, so route those references to the scope.
-fn is_session_module(module: &str) -> bool {
-    module.starts_with("Tidepool.Session.")
-}
-
 /// The compile-view identity an answer is relative to.
 ///
 /// Reuse the structured-introspection identity so `currentScopeView`, `info`,
-/// and `typeOf` name the same snapshot for one view. This is still a
-/// compile-view digest, not the service-issued world identity: the contract's
-/// `fingerprint = hex(CompilerWorld::logical_id())` requires a runtime accessor
-/// to the published world association that avoids a cold bootstrap. Until that
-/// lands this digest detects a moved view and must not be presented as
-/// `logical_id`.
+/// and `typeOf` name the same snapshot for one view. The triple (scope,
+/// generation, content fingerprint) is the only identity the actor can observe:
+/// `ActorCompileView` has no world/publication accessor, and synthesizing a
+/// `compiler-world:` fingerprint would fabricate one. Correlating this triple
+/// with world-publication identity is a separate runtime-owner follow-up.
 fn current_scope_provenance(
     compile_view: &crate::ActorCompileView,
     source: &ActorWorkbenchSource,
@@ -153,16 +179,16 @@ fn current_scope_provenance(
 }
 
 /// Whether a callable's effects fit the inspecting actor's row. Mirrors the
-/// protocol `Fit` constructors.
+/// protocol `FitAvailability` constructors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Fit {
+pub(super) enum FitAvailability {
     Available,
     Polymorphic,
     Unavailable,
     Unknown,
 }
 
-impl From<InspectionAvailability> for Fit {
+impl From<InspectionAvailability> for FitAvailability {
     fn from(availability: InspectionAvailability) -> Self {
         match availability {
             InspectionAvailability::Available => Self::Available,
@@ -173,14 +199,25 @@ impl From<InspectionAvailability> for Fit {
     }
 }
 
+/// One `rowFit` answer: the measured availability together with the identifier
+/// it describes and the compile view it was measured in. The view is the entry
+/// snapshot, never a re-read after the query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Fit {
+    availability: FitAvailability,
+    identifier: IdentifierRef,
+    provenance: ScopeProvenance,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct NameEntry {
     name: String,
     module: Option<String>,
     kind: String,
     display: String,
-    availability: Fit,
+    availability: FitAvailability,
     references: Vec<IdentifierRef>,
+    reference: IdentifierRef,
 }
 
 impl From<InfoEntry> for NameEntry {
@@ -192,6 +229,7 @@ impl From<InfoEntry> for NameEntry {
             display: entry.display,
             availability: entry.availability.into(),
             references: entry.references,
+            reference: entry.identity,
         }
     }
 }
@@ -201,10 +239,13 @@ pub(super) struct NameList {
     entries: Vec<NameEntry>,
     observed: usize,
     limit: usize,
+    provenance: ScopeProvenance,
 }
 
 impl NameList {
-    fn from_entries(entries: Vec<InfoEntry>) -> Self {
+    fn from_entries(entries: Vec<InfoEntry>, provenance: ScopeProvenance) -> Self {
+        // `entries` is the decoder's complete list. Measure the observed count
+        // before truncation and never recompute it from the retained prefix.
         let observed = entries.len();
         let entries = entries
             .into_iter()
@@ -215,6 +256,7 @@ impl NameList {
             entries,
             observed,
             limit: QUERY_RESULT_LIMIT,
+            provenance,
         }
     }
 }
@@ -240,8 +282,9 @@ pub(super) struct TypeMatch {
     module: Option<String>,
     signature: String,
     quality: TypeMatchQuality,
-    availability: Fit,
+    availability: FitAvailability,
     references: Vec<IdentifierRef>,
+    reference: IdentifierRef,
 }
 
 impl From<RuntimeTypeMatch> for TypeMatch {
@@ -253,6 +296,7 @@ impl From<RuntimeTypeMatch> for TypeMatch {
             quality: found.quality.into(),
             availability: found.availability.into(),
             references: found.references,
+            reference: found.identity,
         }
     }
 }
@@ -262,10 +306,13 @@ pub(super) struct TypeMatches {
     matches: Vec<TypeMatch>,
     observed: usize,
     limit: usize,
+    provenance: ScopeProvenance,
 }
 
 impl TypeMatches {
-    fn from_matches(matches: Vec<RuntimeTypeMatch>) -> Self {
+    fn from_matches(matches: Vec<RuntimeTypeMatch>, provenance: ScopeProvenance) -> Self {
+        // The decoder returns every match; count before applying the limit so
+        // the answer reports the complete observation, not the retained prefix.
         let observed = matches.len();
         let matches = matches
             .into_iter()
@@ -276,6 +323,7 @@ impl TypeMatches {
             matches,
             observed,
             limit: QUERY_RESULT_LIMIT,
+            provenance,
         }
     }
 }
@@ -284,7 +332,7 @@ impl TypeMatches {
 pub(super) struct ExpressionType {
     source: String,
     display: String,
-    availability: Fit,
+    availability: FitAvailability,
     provenance: ScopeProvenance,
 }
 
@@ -356,8 +404,24 @@ pub(super) enum BatchOutcome {
     Infrastructure(String),
 }
 
-/// Project one verb's answer. Staleness is decided first: a view that moved
-/// while the query ran is a refusal, never an empty or stale success.
+/// A pinned view that no longer matches the entry snapshot is refused before
+/// any compiler work. `before` is the view the caller pinned; `after` is the
+/// view the actor actually holds at entry.
+pub(super) fn entry_scope_refusal(
+    query: &CompilerQuery,
+    entry: &ScopeProvenance,
+) -> Option<CompilerQueryAnswer> {
+    query.expected_scope().and_then(|expected| {
+        (expected != entry).then(|| CompilerQueryAnswer::ScopeChanged {
+            before: expected.clone(),
+            after: entry.clone(),
+        })
+    })
+}
+
+/// Project one verb's answer. Staleness is decided first: a pinned view that
+/// never matched at entry, or a view that moved while the query ran, is a
+/// refusal, never an empty or stale success.
 pub(super) fn compiler_query_answer(
     query: &CompilerQuery,
     before: ScopeProvenance,
@@ -366,6 +430,9 @@ pub(super) fn compiler_query_answer(
 ) -> CompilerQueryAnswer {
     if matches!(query, CompilerQuery::CurrentScopeView) {
         return CompilerQueryAnswer::ScopeView(before);
+    }
+    if let Some(refusal) = entry_scope_refusal(query, &before) {
+        return refusal;
     }
     if before != current {
         return CompilerQueryAnswer::ScopeChanged {
@@ -386,15 +453,19 @@ pub(super) fn compiler_query_answer(
         BatchOutcome::Answer(Ok(result)) => result,
     };
     match (query, result) {
-        (CompilerQuery::ScopeBindings, InspectionResult::Browse { entries, .. })
-        | (CompilerQuery::ModuleExports(_), InspectionResult::Browse { entries, .. }) => {
-            CompilerQueryAnswer::Names(NameList::from_entries(entries))
+        (CompilerQuery::ScopeBindings { .. }, InspectionResult::Browse { entries, .. })
+        | (CompilerQuery::ModuleExports { .. }, InspectionResult::Browse { entries, .. }) => {
+            CompilerQueryAnswer::Names(NameList::from_entries(entries, before))
         }
-        (CompilerQuery::RowFit(identifier), InspectionResult::Browse { entries, .. }) => {
-            CompilerQueryAnswer::Fit(fit_from_entries(identifier, &entries))
+        (CompilerQuery::RowFit { identifier, .. }, InspectionResult::Browse { entries, .. }) => {
+            CompilerQueryAnswer::Fit(Fit {
+                availability: fit_from_entries(identifier, &entries),
+                identifier: identifier.clone(),
+                provenance: before,
+            })
         }
         (
-            CompilerQuery::TypeOfExpression(_),
+            CompilerQuery::TypeOfExpression { .. },
             InspectionResult::Type {
                 expression,
                 display,
@@ -406,15 +477,25 @@ pub(super) fn compiler_query_answer(
             availability: availability.into(),
             provenance: before,
         }),
-        (CompilerQuery::TypeOfExpression(_), InspectionResult::Rejected { diagnostic })
-        | (CompilerQuery::TypeSearch(_), InspectionResult::Rejected { diagnostic }) => {
+        (CompilerQuery::TypeOfExpression { .. }, InspectionResult::Rejected { diagnostic })
+        | (CompilerQuery::TypeSearch { .. }, InspectionResult::Rejected { diagnostic }) => {
             CompilerQueryAnswer::ExpressionRejected(vec![Diagnostic::error(diagnostic)])
         }
-        (CompilerQuery::TypeSearch(_), InspectionResult::TypeMatches { matches, .. }) => {
-            CompilerQueryAnswer::Matches(TypeMatches::from_matches(matches))
+        (CompilerQuery::TypeSearch { .. }, InspectionResult::TypeMatches { matches, .. }) => {
+            CompilerQueryAnswer::Matches(TypeMatches::from_matches(matches, before))
+        }
+        (_, InspectionResult::NotFound { query: missing }) => CompilerQueryAnswer::QueryError(
+            QueryError::Unknown(refusal_query(query, &before, &missing)),
+        ),
+        (_, InspectionResult::Ambiguous { query: ambiguous, entries }) => {
+            let candidates = entries.into_iter().map(|entry| entry.identity).collect();
+            CompilerQueryAnswer::QueryError(QueryError::Ambiguous(
+                refusal_query(query, &before, &ambiguous),
+                candidates,
+            ))
         }
         (
-            CompilerQuery::ModuleExports(_) | CompilerQuery::RowFit(_),
+            CompilerQuery::ModuleExports { .. } | CompilerQuery::RowFit { .. },
             InspectionResult::ModuleNotFound { module, .. },
         ) => {
             CompilerQueryAnswer::QueryError(QueryError::UnknownModule(module))
@@ -426,13 +507,51 @@ pub(super) fn compiler_query_answer(
     }
 }
 
-/// Project availability from the entries that can *be* this identifier. Prefer
-/// the requested defining module: a re-export reports the defining module,
-/// which legitimately differs from the module the caller named. When a module
-/// exports both a type and its constructor under the same spelling, the
-/// requested namespace picks between them. `InfoEntry` does not carry a
-/// namespace, so its `kind` string is compared against the one this namespace
-/// can produce.
+/// The identity of the question an `Unknown`/`Ambiguous` refusal answers. The
+/// enumeration and probe queries do not carry a `NameQuery`, so reconstruct
+/// only the fields the error payload needs from the request itself.
+fn refusal_query(query: &CompilerQuery, before: &ScopeProvenance, name: &str) -> NameQuery {
+    let scope = match query {
+        CompilerQuery::ModuleExports { module, .. } => NameScope::PublicModule(module.clone()),
+        CompilerQuery::RowFit { identifier, .. }
+            if !tidepool_repr::SessionModule::is_reserved_name(&identifier.module) =>
+        {
+            NameScope::PublicModule(identifier.module.clone())
+        }
+        _ => before.scope.clone(),
+    };
+    let namespace = match query {
+        CompilerQuery::RowFit { identifier, .. } => match identifier.namespace {
+            IdentifierNamespace::Value => NameNamespace::Value,
+            IdentifierNamespace::Type => NameNamespace::Type,
+            IdentifierNamespace::Constructor => NameNamespace::Constructor,
+            // `NameNamespace` has no field case for record-selector identity.
+            // The refusal payload therefore widens to `Any` rather than
+            // inventing a wire variant; the typed `IdentifierRef` already
+            // carries the lost distinction for programmatic consumers.
+            IdentifierNamespace::Field => NameNamespace::Any,
+        },
+        _ => NameNamespace::Any,
+    };
+    NameQuery {
+        scope,
+        namespace,
+        name: name.to_owned(),
+    }
+}
+
+/// Project availability from the entries that can *be* this identifier. A
+/// candidate must match the requested identity's namespace and name; its
+/// `identity` is the entry's canonical resolved declaration, so a value and a
+/// type that share a spelling remain distinct without consulting `kind`.
+/// Prefer the requested defining module: a re-export reports the defining
+/// module, which legitimately differs from the module the caller named, so an
+/// exact module match narrows the candidates but is not required.
+///
+/// Namespaces never share a spelling space: when no candidate serves the
+/// requested namespace, the answer is `Unknown`. Falling back to a same-spelled
+/// entry from another namespace would report a value's row fit for a
+/// `TypeIdentifier`, or the reverse.
 ///
 /// References are not identity: `infoReferences` are the entry's parent and
 /// component references, not the entry itself, so a reference hit can name a
@@ -440,52 +559,38 @@ pub(super) fn compiler_query_answer(
 /// all agree on; a convenient first row cannot stand in for a row observation.
 /// Absence means the executing environment did not expose the identifier —
 /// report `Unknown`, never `Unavailable`.
-fn fit_from_entries(identifier: &IdentifierRef, entries: &[InfoEntry]) -> Fit {
-    let named = entries
+fn fit_from_entries(identifier: &IdentifierRef, entries: &[InfoEntry]) -> FitAvailability {
+    let candidates = entries
         .iter()
-        .filter(|entry| entry.name == identifier.name)
+        .filter(|entry| {
+            entry.identity.name == identifier.name
+                && entry.identity.namespace == identifier.namespace
+        })
         .collect::<Vec<_>>();
-    let namespaced = named
-        .iter()
-        .copied()
-        .filter(|entry| kind_serves_namespace(&entry.kind, identifier.namespace))
-        .collect::<Vec<_>>();
-    let candidates = if namespaced.is_empty() {
-        named
-    } else {
-        namespaced
-    };
     if candidates.is_empty() {
-        return Fit::Unknown;
+        return FitAvailability::Unknown;
     }
     let defining = candidates
         .iter()
         .copied()
-        .filter(|entry| entry.module.as_deref() == Some(identifier.module.as_str()))
+        .filter(|entry| entry.identity.module == identifier.module)
         .collect::<Vec<_>>();
     let candidates = if defining.is_empty() {
         candidates
     } else {
         defining
     };
-    let mut fits = candidates.iter().map(|entry| Fit::from(entry.availability));
+    let mut fits = candidates
+        .iter()
+        .map(|entry| FitAvailability::from(entry.availability));
     let first = fits.next().expect("candidates is nonempty");
     if fits.all(|fit| fit == first) {
         first
     } else {
-        Fit::Unknown
+        FitAvailability::Unknown
     }
 }
 
-/// `thingKind` spellings that can carry each wire namespace.
-fn kind_serves_namespace(kind: &str, namespace: IdentifierNamespace) -> bool {
-    match namespace {
-        IdentifierNamespace::Value => matches!(kind, "value" | "class-method"),
-        IdentifierNamespace::Type => matches!(kind, "type" | "coercion"),
-        IdentifierNamespace::Constructor => kind == "constructor",
-        IdentifierNamespace::Field => kind == "record-selector",
-    }
-}
 
 impl tidepool_bridge::sealed::ToHaskellSealed for CompilerQueryAnswer {}
 
@@ -513,7 +618,7 @@ impl ToHaskell for CompilerQueryAnswer {
                     visit_introspection_provenance(table, visitor, provenance)
                 }
                 Self::Names(names) => visit_name_list(table, visitor, names),
-                Self::Fit(fit) => visit_fit(table, visitor, *fit),
+                Self::Fit(fit) => visit_fit(table, visitor, fit),
                 Self::Expression(expression) => visit_expression_type(table, visitor, expression),
                 Self::Matches(matches) => visit_type_matches(table, visitor, matches),
                 Self::QueryError(error) => visit_introspection_query_error(table, visitor, error),
@@ -543,16 +648,28 @@ impl ToHaskell for CompilerQueryAnswer {
 fn visit_fit(
     table: &DataConTable,
     visitor: &mut dyn HaskellVisitor,
-    fit: Fit,
+    fit: &Fit,
+) -> Result<(), BridgeError> {
+    visit_core(table, visitor, "Fit", |visitor| {
+        visit_fit_availability(table, visitor, fit.availability)?;
+        visit_introspection_identifier(table, visitor, &fit.identifier)?;
+        visit_introspection_provenance(table, visitor, &fit.provenance)
+    })
+}
+
+fn visit_fit_availability(
+    table: &DataConTable,
+    visitor: &mut dyn HaskellVisitor,
+    availability: FitAvailability,
 ) -> Result<(), BridgeError> {
     visit_core(
         table,
         visitor,
-        match fit {
-            Fit::Available => "FitAvailable",
-            Fit::Polymorphic => "FitPolymorphic",
-            Fit::Unavailable => "FitUnavailable",
-            Fit::Unknown => "FitUnknown",
+        match availability {
+            FitAvailability::Available => "FitAvailable",
+            FitAvailability::Polymorphic => "FitPolymorphic",
+            FitAvailability::Unavailable => "FitUnavailable",
+            FitAvailability::Unknown => "FitUnknown",
         },
         |_| Ok(()),
     )
@@ -581,10 +698,11 @@ fn visit_name_entry(
         visit_optional_text(table, visitor, entry.module.as_ref())?;
         entry.kind.visit(table, visitor)?;
         entry.display.visit(table, visitor)?;
-        visit_fit(table, visitor, entry.availability)?;
+        visit_fit_availability(table, visitor, entry.availability)?;
         visit_structural_list(table, visitor, &entry.references, |reference, visitor| {
             visit_introspection_identifier(table, visitor, reference)
-        })
+        })?;
+        visit_introspection_identifier(table, visitor, &entry.reference)
     })
 }
 
@@ -598,7 +716,8 @@ fn visit_name_list(
             visit_name_entry(table, visitor, entry)
         })?;
         actor_haskell_int(names.observed as u64, "observed name count")?.visit(table, visitor)?;
-        actor_haskell_int(names.limit as u64, "name list limit")?.visit(table, visitor)
+        actor_haskell_int(names.limit as u64, "name list limit")?.visit(table, visitor)?;
+        visit_introspection_provenance(table, visitor, &names.provenance)
     })
 }
 
@@ -610,7 +729,7 @@ fn visit_expression_type(
     visit_core(table, visitor, "ExpressionType", |visitor| {
         expression.source.visit(table, visitor)?;
         expression.display.visit(table, visitor)?;
-        visit_fit(table, visitor, expression.availability)?;
+        visit_fit_availability(table, visitor, expression.availability)?;
         visit_introspection_provenance(table, visitor, &expression.provenance)
     })
 }
@@ -633,10 +752,11 @@ fn visit_type_match(
             },
             |_| Ok(()),
         )?;
-        visit_fit(table, visitor, found.availability)?;
+        visit_fit_availability(table, visitor, found.availability)?;
         visit_structural_list(table, visitor, &found.references, |reference, visitor| {
             visit_introspection_identifier(table, visitor, reference)
-        })
+        })?;
+        visit_introspection_identifier(table, visitor, &found.reference)
     })
 }
 
@@ -651,7 +771,8 @@ fn visit_type_matches(
         })?;
         actor_haskell_int(matches.observed as u64, "observed type match count")?
             .visit(table, visitor)?;
-        actor_haskell_int(matches.limit as u64, "type match limit")?.visit(table, visitor)
+        actor_haskell_int(matches.limit as u64, "type match limit")?.visit(table, visitor)?;
+        visit_introspection_provenance(table, visitor, &matches.provenance)
     })
 }
 
@@ -744,6 +865,100 @@ impl From<IntrospectionIdentifier> for IdentifierRef {
     }
 }
 
+/// Decode the `Maybe ScopeProvenance` a request pins.
+pub(super) fn expected_scope_from_value(
+    value: &HaskellValue,
+    table: &DataConTable,
+) -> Result<Option<ScopeProvenance>, BridgeError> {
+    Option::<IntrospectionProvenance>::from_value(value, table)
+        .map(|provenance| provenance.map(ScopeProvenance::from))
+}
+
+/// The scope generation's nominal Haskell type is not settled across the
+/// surfaces this value crosses: the effect schema declares `Int`, the
+/// hand-written `Tidepool.Introspection` record says `Word64`, and the
+/// bridge's own `u64` decoder only unwraps `Word`'s `W#`. A caller may also
+/// pass back a provenance this actor previously emitted, which the structured
+/// answer path encodes with `actor_haskell_int` (an `I#`). Accept every boxed
+/// spelling the bridge can observe — `I#`, `W#`, and `W64#` — and narrow to
+/// the runtime's `u64` after decoding. Remove the tolerance once the schema
+/// and the Haskell record agree.
+struct GenerationWord(u64);
+
+impl tidepool_bridge::sealed::FromHaskellSealed for GenerationWord {}
+
+impl FromHaskell for GenerationWord {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
+        if let Ok(word) = u64::from_value(value, table) {
+            return Ok(Self(word));
+        }
+        if let Ok(int) = i64::from_value(value, table) {
+            return u64::try_from(int)
+                .map(Self)
+                .map_err(|_| tidepool_bridge::type_mismatch("non-negative scope generation", value));
+        }
+        if let Some(payload) = word64_payload(value, table) {
+            return u64::from_value(payload, table).map(Self);
+        }
+        Err(tidepool_bridge::type_mismatch(
+            "Int, Word, or Word64 scope generation",
+            value,
+        ))
+    }
+}
+
+/// The `Word#` inside a boxed `Word64` (`W64#`); `None` for every other
+/// shape. Kept separate so the decoder reads as three deliberate attempts
+/// rather than nested conditionals.
+fn word64_payload<'a>(
+    value: &'a HaskellValue,
+    table: &DataConTable,
+) -> Option<&'a HaskellValue> {
+    match value {
+        HaskellValue::Con(id, fields)
+            if table.name_of(*id) == Some("W64#") && fields.len() == 1 =>
+        {
+            Some(&fields[0])
+        }
+        _ => None,
+    }
+}
+
+/// Decode the wire `ScopeProvenance` a request pins. Positional, matching the
+/// Haskell record order `scope, generation, fingerprint`.
+#[derive(DeriveFromHaskell)]
+#[haskell(name = "ScopeProvenance")]
+pub(super) struct IntrospectionProvenance {
+    provenance_scope: IntrospectionNameScope,
+    #[haskell(hs = "provenanceGeneration", hs_type = "Int")]
+    provenance_generation: GenerationWord,
+    provenance_fingerprint: String,
+}
+
+#[derive(DeriveFromHaskell)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "variant names are the wire truth: FromHaskell matches them \
+              verbatim against Haskell constructor names"
+)]
+pub(super) enum IntrospectionNameScope {
+    CurrentScope,
+    PublicModule(String),
+}
+
+impl From<IntrospectionProvenance> for ScopeProvenance {
+    fn from(provenance: IntrospectionProvenance) -> Self {
+        Self {
+            scope: match provenance.provenance_scope {
+                IntrospectionNameScope::CurrentScope => NameScope::Current,
+                IntrospectionNameScope::PublicModule(module) => NameScope::PublicModule(module),
+            },
+            generation: provenance.provenance_generation.0,
+            fingerprint: provenance.provenance_fingerprint,
+        }
+    }
+}
+
 impl<H, O> ResidentActorWorkbench<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -752,6 +967,10 @@ where
     /// Service one compiler-query verb without holding the resident machine
     /// while the compiler runs. The suspended continuation remains the actor's
     /// exclusive turn, mirroring `resume_structured_introspection`.
+    ///
+    /// `currentScopeView` returns the entry snapshot and never re-reads it. A
+    /// publication that lands between admission and reply is therefore
+    /// detectable only by a later pinned request, not by this answer.
     pub(crate) async fn resume_compiler_query(
         &self,
         context: crate::ActorSessionContext,
@@ -778,6 +997,17 @@ where
             })
             .await?;
         let (compile_view, provenance, inputs) = snapshot;
+
+        if let Some(refusal) = entry_scope_refusal(&query, &provenance) {
+            return self
+                .access
+                .with_continuation_machine(context, move |session, _, _, settlement| {
+                    session
+                        .resume_classified(hole, refusal, settlement)
+                        .map_err(classify_resumption)
+                })
+                .await;
+        }
 
         if !query.plans_compiler_work() {
             return self
@@ -886,7 +1116,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_runtime::session::IdentifierNamespace;
+    use tidepool_repr::SessionModule;
 
     fn provenance(generation: u64, fingerprint: &str) -> ScopeProvenance {
         ScopeProvenance {
@@ -904,14 +1134,43 @@ mod tests {
         }
     }
 
+    fn typed_identifier(namespace: IdentifierNamespace) -> IdentifierRef {
+        IdentifierRef {
+            module: "Data.Thing".into(),
+            name: "Thing".into(),
+            namespace,
+        }
+    }
+
     fn entry(name: &str, module: &str, availability: InspectionAvailability) -> InfoEntry {
+        entry_with(
+            name,
+            module,
+            "value",
+            IdentifierNamespace::Value,
+            availability,
+        )
+    }
+
+    fn entry_with(
+        name: &str,
+        module: &str,
+        kind: &str,
+        namespace: IdentifierNamespace,
+        availability: InspectionAvailability,
+    ) -> InfoEntry {
         InfoEntry {
             name: name.into(),
             module: Some(module.into()),
-            kind: "value".into(),
+            kind: kind.into(),
             display: format!("{name} :: Int"),
             availability,
-            references: vec![identifier(module, name)],
+            references: Vec::new(),
+            identity: IdentifierRef {
+                module: module.into(),
+                name: name.into(),
+                namespace,
+            },
         }
     }
 
@@ -923,24 +1182,50 @@ mod tests {
         }
     }
 
+    fn compiler_verbs_with(expected: Option<ScopeProvenance>) -> Vec<CompilerQuery> {
+        vec![
+            CompilerQuery::ScopeBindings {
+                expected_scope: expected.clone(),
+            },
+            CompilerQuery::ModuleExports {
+                expected_scope: expected.clone(),
+                module: "Data.Thing".into(),
+            },
+            CompilerQuery::RowFit {
+                expected_scope: expected.clone(),
+                identifier: identifier("Data.Thing", "thing"),
+            },
+            CompilerQuery::TypeOfExpression {
+                expected_scope: expected.clone(),
+                expression: "1 + 1".into(),
+            },
+            CompilerQuery::TypeSearch {
+                expected_scope: expected,
+                pattern: "Int -> Int".into(),
+            },
+        ]
+    }
+
+    fn compiler_verbs() -> Vec<CompilerQuery> {
+        compiler_verbs_with(None)
+    }
+
     fn successful_result(query: &CompilerQuery) -> InspectionResult {
         match query {
             CompilerQuery::CurrentScopeView => unreachable!("no compiler result"),
-            CompilerQuery::ScopeBindings
-            | CompilerQuery::ModuleExports(_)
-            | CompilerQuery::RowFit(_) => {
-                browse(vec![entry(
-                    "thing",
-                    "Data.Thing",
-                    InspectionAvailability::Available,
-                )])
-            }
-            CompilerQuery::TypeOfExpression(source) => InspectionResult::Type {
-                expression: source.clone(),
+            CompilerQuery::ScopeBindings { .. }
+            | CompilerQuery::ModuleExports { .. }
+            | CompilerQuery::RowFit { .. } => browse(vec![entry(
+                "thing",
+                "Data.Thing",
+                InspectionAvailability::Available,
+            )]),
+            CompilerQuery::TypeOfExpression { expression, .. } => InspectionResult::Type {
+                expression: expression.clone(),
                 display: "Int".into(),
                 availability: InspectionAvailability::Available,
             },
-            CompilerQuery::TypeSearch(_) => InspectionResult::TypeMatches {
+            CompilerQuery::TypeSearch { .. } => InspectionResult::TypeMatches {
                 query: "Int -> Int".into(),
                 matches: vec![RuntimeTypeMatch {
                     name: "succ".into(),
@@ -949,19 +1234,10 @@ mod tests {
                     quality: RuntimeTypeMatchQuality::Exact,
                     availability: InspectionAvailability::Available,
                     references: vec![identifier("Prelude", "succ")],
+                    identity: identifier("Prelude", "succ"),
                 }],
             },
         }
-    }
-
-    fn compiler_verbs() -> Vec<CompilerQuery> {
-        vec![
-            CompilerQuery::ScopeBindings,
-            CompilerQuery::ModuleExports("Data.Thing".into()),
-            CompilerQuery::RowFit(identifier("Data.Thing", "thing")),
-            CompilerQuery::TypeOfExpression("1 + 1".into()),
-            CompilerQuery::TypeSearch("Int -> Int".into()),
-        ]
     }
 
     #[test]
@@ -970,33 +1246,56 @@ mod tests {
             .inspection_queries()
             .is_empty());
         assert_eq!(
-            CompilerQuery::ScopeBindings.inspection_queries(),
+            CompilerQuery::ScopeBindings {
+                expected_scope: None
+            }
+            .inspection_queries(),
             vec![InspectionQuery::ScopeBrowse]
         );
         assert_eq!(
-            CompilerQuery::ModuleExports("Data.Thing".into()).inspection_queries(),
+            CompilerQuery::ModuleExports {
+                expected_scope: None,
+                module: "Data.Thing".into()
+            }
+            .inspection_queries(),
             vec![InspectionQuery::Browse {
                 module: "Data.Thing".into(),
                 expanded: false
             }]
         );
         assert_eq!(
-            CompilerQuery::RowFit(identifier("Data.Thing", "thing")).inspection_queries(),
+            CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier: identifier("Data.Thing", "thing")
+            }
+            .inspection_queries(),
             vec![InspectionQuery::Browse {
                 module: "Data.Thing".into(),
                 expanded: true
             }]
         );
         assert_eq!(
-            CompilerQuery::RowFit(identifier("Tidepool.Session.Val.G3", "x")).inspection_queries(),
+            CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier: identifier("Tidepool.Session.Val.G3", "x")
+            }
+            .inspection_queries(),
             vec![InspectionQuery::ScopeBrowse]
         );
         assert_eq!(
-            CompilerQuery::TypeOfExpression("1 + 1".into()).inspection_queries(),
+            CompilerQuery::TypeOfExpression {
+                expected_scope: None,
+                expression: "1 + 1".into()
+            }
+            .inspection_queries(),
             vec![InspectionQuery::TypeOf("1 + 1".into())]
         );
         assert_eq!(
-            CompilerQuery::TypeSearch("a -> a".into()).inspection_queries(),
+            CompilerQuery::TypeSearch {
+                expected_scope: None,
+                pattern: "a -> a".into()
+            }
+            .inspection_queries(),
             vec![InspectionQuery::TypeSearch("a -> a".into())]
         );
     }
@@ -1060,6 +1359,51 @@ mod tests {
     }
 
     #[test]
+    fn stale_expected_scope_is_refused_at_entry_even_when_the_query_would_succeed() {
+        let entry_view = provenance(7, "world-a");
+        let stale = provenance(3, "world-old");
+        for query in compiler_verbs_with(Some(stale.clone())) {
+            let answer = compiler_query_answer(
+                &query,
+                entry_view.clone(),
+                entry_view.clone(),
+                BatchOutcome::Answer(Ok(successful_result(&query))),
+            );
+            assert!(
+                matches!(
+                    answer,
+                    CompilerQueryAnswer::ScopeChanged { before: ref seen_before, after: ref seen_after }
+                        if *seen_before == stale && *seen_after == entry_view
+                ),
+                "{query:?} accepted a stale pin"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stale_pin_wins_over_a_view_that_moved_during_the_query() {
+        let stale = provenance(3, "world-old");
+        let entry_view = provenance(7, "world-a");
+        let after = provenance(9, "world-b");
+        for query in compiler_verbs_with(Some(stale.clone())) {
+            let answer = compiler_query_answer(
+                &query,
+                entry_view.clone(),
+                after.clone(),
+                BatchOutcome::Answer(Ok(successful_result(&query))),
+            );
+            assert!(
+                matches!(
+                    answer,
+                    CompilerQueryAnswer::ScopeChanged { before: ref seen_before, after: ref seen_after }
+                        if *seen_before == stale && *seen_after == entry_view
+                ),
+                "{query:?} reported the moved view instead of refusing the stale pin at entry"
+            );
+        }
+    }
+
+    #[test]
     fn current_scope_view_reports_its_snapshot_without_compiler_work() {
         let before = provenance(7, "world-a");
         let later = provenance(9, "world-b");
@@ -1073,16 +1417,52 @@ mod tests {
     }
 
     #[test]
+    fn a_matching_pin_answers_against_the_entry_view() {
+        let entry_view = provenance(7, "world-a");
+        let requested = identifier("Data.Thing", "thing");
+        let answer = compiler_query_answer(
+            &CompilerQuery::RowFit {
+                expected_scope: Some(entry_view.clone()),
+                identifier: requested.clone(),
+            },
+            entry_view.clone(),
+            entry_view.clone(),
+            BatchOutcome::Answer(Ok(browse(vec![entry(
+                "thing",
+                "Data.Thing",
+                InspectionAvailability::Polymorphic,
+            )]))),
+        );
+        match answer {
+            CompilerQueryAnswer::Fit(fit) => {
+                assert_eq!(fit.availability, FitAvailability::Polymorphic);
+                assert_eq!(fit.identifier, requested);
+                assert_eq!(fit.provenance, entry_view);
+            }
+            other => panic!("expected a row fit, got {}", answer_name(&other)),
+        }
+    }
+
+    #[test]
     fn row_fit_projects_observed_availability() {
-        let identifier = identifier("Data.Thing", "thing");
+        let requested = identifier("Data.Thing", "thing");
         for (availability, expected) in [
-            (InspectionAvailability::Available, Fit::Available),
-            (InspectionAvailability::Polymorphic, Fit::Polymorphic),
-            (InspectionAvailability::Unavailable, Fit::Unavailable),
-            (InspectionAvailability::Unknown, Fit::Unknown),
+            (InspectionAvailability::Available, FitAvailability::Available),
+            (
+                InspectionAvailability::Polymorphic,
+                FitAvailability::Polymorphic,
+            ),
+            (
+                InspectionAvailability::Unavailable,
+                FitAvailability::Unavailable,
+            ),
+            (InspectionAvailability::Unknown, FitAvailability::Unknown),
         ] {
             let answer = compiler_query_answer(
-                &CompilerQuery::RowFit(identifier.clone()),
+                &CompilerQuery::RowFit {
+                    expected_scope: None,
+                    identifier: requested.clone(),
+                },
                 provenance(1, "world"),
                 provenance(1, "world"),
                 BatchOutcome::Answer(Ok(browse(vec![entry(
@@ -1092,15 +1472,72 @@ mod tests {
                 )]))),
             );
             assert!(
-                matches!(answer, CompilerQueryAnswer::Fit(fit) if fit == expected),
+                matches!(answer, CompilerQueryAnswer::Fit(fit) if fit.availability == expected),
                 "{availability:?} projected incorrectly"
             );
         }
     }
 
     #[test]
+    fn row_fit_refuses_a_same_spelled_name_from_another_namespace() {
+        let answer = compiler_query_answer(
+            &CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier: typed_identifier(IdentifierNamespace::Type),
+            },
+            provenance(1, "world"),
+            provenance(1, "world"),
+            BatchOutcome::Answer(Ok(browse(vec![entry(
+                "Thing",
+                "Data.Thing",
+                InspectionAvailability::Available,
+            )]))),
+        );
+        assert!(matches!(
+            answer,
+            CompilerQueryAnswer::Fit(fit)
+                if fit.availability == FitAvailability::Unknown
+        ));
+    }
+
+    #[test]
+    fn row_fit_matches_identity_namespace_not_the_rendered_kind() {
+        let fit = |kind: &str, identity_namespace: IdentifierNamespace| {
+            compiler_query_answer(
+                &CompilerQuery::RowFit {
+                    expected_scope: None,
+                    identifier: typed_identifier(IdentifierNamespace::Type),
+                },
+                provenance(1, "world"),
+                provenance(1, "world"),
+                BatchOutcome::Answer(Ok(browse(vec![entry_with(
+                    "Thing",
+                    "Data.Thing",
+                    kind,
+                    identity_namespace,
+                    InspectionAvailability::Available,
+                )]))),
+            )
+        };
+
+        // A `type`-looking kind whose canonical identity is a value must not
+        // answer a type query.
+        assert!(matches!(
+            fit("type", IdentifierNamespace::Value),
+            CompilerQueryAnswer::Fit(ref answer) if answer.availability == FitAvailability::Unknown
+        ));
+        // Identity is authoritative in the other direction too: a value-shaped
+        // kind does not veto a type identity.
+        assert!(matches!(
+            fit("value", IdentifierNamespace::Type),
+            CompilerQueryAnswer::Fit(ref answer)
+                if answer.availability == FitAvailability::Available
+        ));
+    }
+
+    #[test]
     fn row_fit_reports_ambiguity_as_unknown_unless_every_candidate_agrees() {
-        let identifier = identifier("Data.Thing", "thing");
+        let requested = identifier("Data.Thing", "thing");
         let ambiguous = |availabilities: &[InspectionAvailability]| {
             browse(
                 availabilities
@@ -1111,7 +1548,10 @@ mod tests {
         };
         let answer = |result| {
             compiler_query_answer(
-                &CompilerQuery::RowFit(identifier.clone()),
+                &CompilerQuery::RowFit {
+                    expected_scope: None,
+                    identifier: requested.clone(),
+                },
                 provenance(1, "world"),
                 provenance(1, "world"),
                 BatchOutcome::Answer(Ok(result)),
@@ -1123,21 +1563,24 @@ mod tests {
                 InspectionAvailability::Available,
                 InspectionAvailability::Available,
             ])),
-            CompilerQueryAnswer::Fit(Fit::Available)
+            CompilerQueryAnswer::Fit(fit) if fit.availability == FitAvailability::Available
         ));
         assert!(matches!(
             answer(ambiguous(&[
                 InspectionAvailability::Available,
                 InspectionAvailability::Unavailable,
             ])),
-            CompilerQueryAnswer::Fit(Fit::Unknown)
+            CompilerQueryAnswer::Fit(fit) if fit.availability == FitAvailability::Unknown
         ));
     }
 
     #[test]
     fn missing_row_fit_entry_is_unknown_not_unavailable() {
         let answer = compiler_query_answer(
-            &CompilerQuery::RowFit(identifier("Data.Thing", "absent")),
+            &CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier: identifier("Data.Thing", "absent"),
+            },
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(browse(vec![entry(
@@ -1146,56 +1589,67 @@ mod tests {
                 InspectionAvailability::Available,
             )]))),
         );
-        assert!(matches!(answer, CompilerQueryAnswer::Fit(Fit::Unknown)));
+        assert!(matches!(
+            answer,
+            CompilerQueryAnswer::Fit(fit)
+                if fit.availability == FitAvailability::Unknown
+        ));
     }
 
     #[test]
     fn row_fit_reads_the_named_entry_not_an_entry_that_references_it() {
-        let constructor = InfoEntry {
-            name: "MkThing".into(),
-            module: Some("Data.Thing".into()),
-            kind: "constructor".into(),
-            display: "MkThing :: Int -> Thing".into(),
-            availability: InspectionAvailability::Available,
-            references: vec![IdentifierRef {
-                module: "Data.Thing".into(),
-                name: "Thing".into(),
-                namespace: IdentifierNamespace::Type,
-            }],
-        };
-        let ty = InfoEntry {
-            name: "Thing".into(),
-            module: Some("Data.Thing".into()),
-            kind: "type".into(),
-            display: "data Thing".into(),
-            availability: InspectionAvailability::Unavailable,
-            references: Vec::new(),
-        };
+        let constructor = entry_with(
+            "MkThing",
+            "Data.Thing",
+            "constructor",
+            IdentifierNamespace::Constructor,
+            InspectionAvailability::Available,
+        );
+        let ty = entry_with(
+            "Thing",
+            "Data.Thing",
+            "type",
+            IdentifierNamespace::Type,
+            InspectionAvailability::Unavailable,
+        );
         let answer = compiler_query_answer(
-            &CompilerQuery::RowFit(IdentifierRef {
-                module: "Data.Thing".into(),
-                name: "Thing".into(),
-                namespace: IdentifierNamespace::Type,
-            }),
+            &CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier: typed_identifier(IdentifierNamespace::Type),
+            },
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(browse(vec![constructor, ty]))),
         );
-        assert!(matches!(answer, CompilerQueryAnswer::Fit(Fit::Unavailable)));
+        assert!(matches!(
+            answer,
+            CompilerQueryAnswer::Fit(fit)
+                if fit.availability == FitAvailability::Unavailable
+        ));
     }
 
     #[test]
     fn row_fit_distinguishes_missing_from_unknown_module() {
         let missing = compiler_query_answer(
-            &CompilerQuery::RowFit(identifier("Data.Thing", "absent")),
+            &CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier: identifier("Data.Thing", "absent"),
+            },
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(browse(Vec::new()))),
         );
-        assert!(matches!(missing, CompilerQueryAnswer::Fit(Fit::Unknown)));
+        assert!(matches!(
+            missing,
+            CompilerQueryAnswer::Fit(fit)
+                if fit.availability == FitAvailability::Unknown
+        ));
 
         let unknown_module = compiler_query_answer(
-            &CompilerQuery::RowFit(identifier("Data.Missing", "thing")),
+            &CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier: identifier("Data.Missing", "thing"),
+            },
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(InspectionResult::ModuleNotFound {
@@ -1212,27 +1666,36 @@ mod tests {
 
     #[test]
     fn row_fit_accepts_a_reexport_from_the_named_module() {
-        let reexport = InfoEntry {
-            name: "thing".into(),
-            module: Some("Internal.Thing".into()),
-            kind: "value".into(),
-            display: "thing :: Int".into(),
-            availability: InspectionAvailability::Unavailable,
-            references: Vec::new(),
-        };
+        let reexport = entry_with(
+            "thing",
+            "Internal.Thing",
+            "value",
+            IdentifierNamespace::Value,
+            InspectionAvailability::Unavailable,
+        );
         let answer = compiler_query_answer(
-            &CompilerQuery::RowFit(identifier("Data.Thing", "thing")),
+            &CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier: identifier("Data.Thing", "thing"),
+            },
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(browse(vec![reexport]))),
         );
-        assert!(matches!(answer, CompilerQueryAnswer::Fit(Fit::Unavailable)));
+        assert!(matches!(
+            answer,
+            CompilerQueryAnswer::Fit(fit)
+                if fit.availability == FitAvailability::Unavailable
+        ));
     }
 
     #[test]
     fn module_not_found_is_a_typed_refusal() {
         let answer = compiler_query_answer(
-            &CompilerQuery::ModuleExports("Data.Missing".into()),
+            &CompilerQuery::ModuleExports {
+                expected_scope: None,
+                module: "Data.Missing".into(),
+            },
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(InspectionResult::ModuleNotFound {
@@ -1248,9 +1711,62 @@ mod tests {
     }
 
     #[test]
+    fn not_found_is_a_typed_unknown_not_infrastructure() {
+        let answer = compiler_query_answer(
+            &CompilerQuery::ModuleExports {
+                expected_scope: None,
+                module: "Data.Thing".into(),
+            },
+            provenance(1, "world"),
+            provenance(1, "world"),
+            BatchOutcome::Answer(Ok(InspectionResult::NotFound {
+                query: "thing".into(),
+            })),
+        );
+        match answer {
+            CompilerQueryAnswer::QueryError(QueryError::Unknown(search)) => {
+                assert_eq!(search.scope, NameScope::PublicModule("Data.Thing".into()));
+                assert_eq!(search.namespace, NameNamespace::Any);
+                assert_eq!(search.name, "thing");
+            }
+            other => panic!("expected a typed unknown, got {}", answer_name(&other)),
+        }
+    }
+
+    #[test]
+    fn ambiguous_is_a_typed_refusal_not_infrastructure() {
+        let answer = compiler_query_answer(
+            &CompilerQuery::ScopeBindings {
+                expected_scope: None,
+            },
+            provenance(1, "world"),
+            provenance(1, "world"),
+            BatchOutcome::Answer(Ok(InspectionResult::Ambiguous {
+                query: "thing".into(),
+                entries: vec![
+                    entry("thing", "Data.A", InspectionAvailability::Available),
+                    entry("thing", "Data.B", InspectionAvailability::Available),
+                ],
+            })),
+        );
+        match answer {
+            CompilerQueryAnswer::QueryError(QueryError::Ambiguous(search, candidates)) => {
+                assert_eq!(search.scope, NameScope::Current);
+                assert_eq!(search.name, "thing");
+                assert_eq!(candidates.len(), 2);
+                assert_eq!(candidates[0].module, "Data.A");
+            }
+            other => panic!("expected a typed ambiguity, got {}", answer_name(&other)),
+        }
+    }
+
+    #[test]
     fn a_rejected_probe_is_a_typed_diagnostic() {
         let answer = compiler_query_answer(
-            &CompilerQuery::TypeOfExpression("1 +".into()),
+            &CompilerQuery::TypeOfExpression {
+                expected_scope: None,
+                expression: "1 +".into(),
+            },
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Err("parse error on input `+'".into())),
@@ -1270,7 +1786,10 @@ mod tests {
     fn type_of_expression_projects_the_probe_and_its_view() {
         let before = provenance(4, "world");
         let answer = compiler_query_answer(
-            &CompilerQuery::TypeOfExpression("1 + 1".into()),
+            &CompilerQuery::TypeOfExpression {
+                expected_scope: None,
+                expression: "1 + 1".into(),
+            },
             before.clone(),
             before.clone(),
             BatchOutcome::Answer(Ok(InspectionResult::Type {
@@ -1283,7 +1802,7 @@ mod tests {
             CompilerQueryAnswer::Expression(expression) => {
                 assert_eq!(expression.source, "1 + 1");
                 assert_eq!(expression.display, "Int");
-                assert_eq!(expression.availability, Fit::Polymorphic);
+                assert_eq!(expression.availability, FitAvailability::Polymorphic);
                 assert_eq!(expression.provenance, before);
             }
             other => panic!("expected an expression type, got {}", answer_name(&other)),
@@ -1293,7 +1812,10 @@ mod tests {
     #[test]
     fn probe_infrastructure_failure_is_not_an_expression_rejection() {
         let answer = compiler_query_answer(
-            &CompilerQuery::TypeSearch("a -> a".into()),
+            &CompilerQuery::TypeSearch {
+                expected_scope: None,
+                pattern: "a -> a".into(),
+            },
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Infrastructure("worker exited".into()),
@@ -1306,6 +1828,7 @@ mod tests {
 
     #[test]
     fn enumeration_bounds_rows_and_preserves_the_observed_count() {
+        let entry_view = provenance(1, "world");
         let entries = (0..QUERY_RESULT_LIMIT + 3)
             .map(|index| {
                 entry(
@@ -1316,9 +1839,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let answer = compiler_query_answer(
-            &CompilerQuery::ScopeBindings,
-            provenance(1, "world"),
-            provenance(1, "world"),
+            &CompilerQuery::ScopeBindings {
+                expected_scope: None,
+            },
+            entry_view.clone(),
+            entry_view.clone(),
             BatchOutcome::Answer(Ok(browse(entries))),
         );
         match answer {
@@ -1326,6 +1851,7 @@ mod tests {
                 assert_eq!(names.entries.len(), QUERY_RESULT_LIMIT);
                 assert_eq!(names.observed, QUERY_RESULT_LIMIT + 3);
                 assert_eq!(names.limit, QUERY_RESULT_LIMIT);
+                assert_eq!(names.provenance, entry_view);
             }
             other => panic!("expected a name list, got {}", answer_name(&other)),
         }
@@ -1333,47 +1859,85 @@ mod tests {
 
     #[test]
     fn module_exports_projects_browse_entries() {
+        let entry_view = provenance(2, "world");
+        let listed = entry("thing", "Data.Thing", InspectionAvailability::Unknown);
+        let identity = listed.identity.clone();
         let answer = compiler_query_answer(
-            &CompilerQuery::ModuleExports("Data.Thing".into()),
-            provenance(1, "world"),
-            provenance(1, "world"),
-            BatchOutcome::Answer(Ok(browse(vec![entry(
-                "thing",
-                "Data.Thing",
-                InspectionAvailability::Available,
-            )]))),
+            &CompilerQuery::ModuleExports {
+                expected_scope: None,
+                module: "Data.Thing".into(),
+            },
+            entry_view.clone(),
+            entry_view.clone(),
+            BatchOutcome::Answer(Ok(browse(vec![listed]))),
         );
         match answer {
             CompilerQueryAnswer::Names(names) => {
                 assert_eq!(names.entries.len(), 1);
-                assert_eq!(names.entries[0].name, "thing");
+                assert_eq!(names.entries[0].reference, identity);
                 assert_eq!(names.observed, 1);
                 assert_eq!(names.limit, QUERY_RESULT_LIMIT);
+                assert_eq!(names.provenance, entry_view);
             }
             other => panic!("expected a name list, got {}", answer_name(&other)),
         }
     }
 
     #[test]
-    fn type_search_projects_quality_and_availability() {
+    fn type_search_projects_quality_identity_and_view() {
+        let entry_view = provenance(3, "world");
+        let found = RuntimeTypeMatch {
+            name: "succ".into(),
+            module: Some("Prelude".into()),
+            signature: "Int -> Int".into(),
+            quality: RuntimeTypeMatchQuality::Usable,
+            availability: InspectionAvailability::Available,
+            references: vec![identifier("Prelude", "succ")],
+            identity: identifier("Prelude", "succ"),
+        };
         let answer = compiler_query_answer(
-            &CompilerQuery::TypeSearch("Int -> Int".into()),
-            provenance(1, "world"),
-            provenance(1, "world"),
-            BatchOutcome::Answer(Ok(successful_result(&CompilerQuery::TypeSearch(
-                "Int -> Int".into(),
-            )))),
+            &CompilerQuery::TypeSearch {
+                expected_scope: None,
+                pattern: "Int -> Int".into(),
+            },
+            entry_view.clone(),
+            entry_view.clone(),
+            BatchOutcome::Answer(Ok(InspectionResult::TypeMatches {
+                query: "Int -> Int".into(),
+                matches: vec![found],
+            })),
         );
         match answer {
             CompilerQueryAnswer::Matches(matches) => {
                 assert_eq!(matches.observed, 1);
                 assert_eq!(matches.limit, QUERY_RESULT_LIMIT);
-                assert_eq!(matches.matches.len(), 1);
-                assert_eq!(matches.matches[0].quality, TypeMatchQuality::Exact);
-                assert_eq!(matches.matches[0].availability, Fit::Available);
+                assert_eq!(matches.provenance, entry_view);
+                assert_eq!(matches.matches[0].quality, TypeMatchQuality::Usable);
+                assert_eq!(
+                    matches.matches[0].availability,
+                    FitAvailability::Available
+                );
+                assert_eq!(
+                    matches.matches[0].reference,
+                    identifier("Prelude", "succ")
+                );
             }
             other => panic!("expected type matches, got {}", answer_name(&other)),
         }
+    }
+
+    #[test]
+    fn reserved_session_prefix_matches_the_haskell_owner() {
+        // `bridge/haskell/src/Tidepool/Session.hs` defines
+        // `isReservedSessionModuleName = isPrefixOf "Tidepool.Session."`.
+        // `SessionModule::is_reserved_name` is the Rust owner of that spelling;
+        // this pin fails if either boundary drifts. The exact string
+        // `Tidepool.Session` (no trailing dot) is not reserved on either side.
+        assert!(SessionModule::is_reserved_name("Tidepool.Session."));
+        assert!(SessionModule::is_reserved_name("Tidepool.Session.Val.G1"));
+        assert!(SessionModule::is_reserved_name("Tidepool.Session.Lib.G12"));
+        assert!(!SessionModule::is_reserved_name("Tidepool.Session"));
+        assert!(!SessionModule::is_reserved_name("Tidepool.SessionX.Val.G1"));
     }
 
     fn answer_name(answer: &CompilerQueryAnswer) -> &'static str {

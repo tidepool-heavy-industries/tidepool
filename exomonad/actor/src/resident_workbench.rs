@@ -10861,42 +10861,81 @@ where
                         query: compiler_query::CompilerQuery::CurrentScopeView,
                     }),
                     ResidentRequest::Introspection(
-                        crate::generated::introspection::IntrospectionReq::ScopeBindings,
+                        crate::generated::introspection::IntrospectionReq::ScopeBindings(
+                            expected_scope,
+                        ),
                     ) => Ok(ResidentActorBoundary::CompilerQuery {
                         continuation: hole,
-                        query: compiler_query::CompilerQuery::ScopeBindings,
+                        query: compiler_query::CompilerQuery::ScopeBindings {
+                            expected_scope: compiler_query::expected_scope_from_value(
+                                &expected_scope,
+                                session.data_con_table(),
+                            )?,
+                        },
                     }),
                     ResidentRequest::Introspection(
-                        crate::generated::introspection::IntrospectionReq::ModuleExports(module),
+                        crate::generated::introspection::IntrospectionReq::ModuleExports(
+                            expected_scope,
+                            module,
+                        ),
                     ) => Ok(ResidentActorBoundary::CompilerQuery {
                         continuation: hole,
-                        query: compiler_query::CompilerQuery::ModuleExports(module),
+                        query: compiler_query::CompilerQuery::ModuleExports {
+                            expected_scope: compiler_query::expected_scope_from_value(
+                                &expected_scope,
+                                session.data_con_table(),
+                            )?,
+                            module,
+                        },
                     }),
                     ResidentRequest::Introspection(
-                        crate::generated::introspection::IntrospectionReq::RowFit(identifier),
+                        crate::generated::introspection::IntrospectionReq::RowFit(
+                            expected_scope,
+                            identifier,
+                        ),
                     ) => Ok(ResidentActorBoundary::CompilerQuery {
                         continuation: hole,
-                        query: compiler_query::CompilerQuery::RowFit(
-                            compiler_query::IntrospectionIdentifier::from_value(
+                        query: compiler_query::CompilerQuery::RowFit {
+                            expected_scope: compiler_query::expected_scope_from_value(
+                                &expected_scope,
+                                session.data_con_table(),
+                            )?,
+                            identifier: compiler_query::IntrospectionIdentifier::from_value(
                                 &identifier,
                                 session.data_con_table(),
                             )?
                             .into(),
-                        ),
+                        },
                     }),
                     ResidentRequest::Introspection(
                         crate::generated::introspection::IntrospectionReq::TypeOfExpression(
+                            expected_scope,
                             expression,
                         ),
                     ) => Ok(ResidentActorBoundary::CompilerQuery {
                         continuation: hole,
-                        query: compiler_query::CompilerQuery::TypeOfExpression(expression),
+                        query: compiler_query::CompilerQuery::TypeOfExpression {
+                            expected_scope: compiler_query::expected_scope_from_value(
+                                &expected_scope,
+                                session.data_con_table(),
+                            )?,
+                            expression,
+                        },
                     }),
                     ResidentRequest::Introspection(
-                        crate::generated::introspection::IntrospectionReq::TypeSearch(type_pattern),
+                        crate::generated::introspection::IntrospectionReq::TypeSearch(
+                            expected_scope,
+                            type_pattern,
+                        ),
                     ) => Ok(ResidentActorBoundary::CompilerQuery {
                         continuation: hole,
-                        query: compiler_query::CompilerQuery::TypeSearch(type_pattern),
+                        query: compiler_query::CompilerQuery::TypeSearch {
+                            expected_scope: compiler_query::expected_scope_from_value(
+                                &expected_scope,
+                                session.data_con_table(),
+                            )?,
+                            pattern: type_pattern,
+                        },
                     }),
                     ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
