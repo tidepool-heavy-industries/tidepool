@@ -276,7 +276,7 @@ import Tidepool.ExactScope
   , scopeAvailableOriginalProducts
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
   , WorldInputFacts, readWorldInputsWithOwner, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
-  , worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256
+  , worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints
   , WorldInputsFailure(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
@@ -1306,7 +1306,7 @@ data HeldCompilerWorld = HeldCompilerWorld WorldInputFacts String WorldMateriali
 
 data WorldHomeSource = WorldHomeSource Int FilePath FilePath BS.ByteString
 data WorldMaterialization = WorldMaterialization FilePath [FilePath]
-  (Map.Map ModuleName WorldHomeSource) (Map.Map FilePath WorldHomeSource)
+  (Map.Map ModuleName WorldHomeSource) (Map.Map FilePath WorldHomeSource) (Set.Set String)
 data WorldPreparedModules = WorldPreparedModules HomePackageTable (Map.Map Module WorldHomeSource)
 
 data WorldQueryFailure = WorldQueryUnsupported | WorldQueryUnavailable | WorldQueryCorrupt deriving Show
@@ -1332,7 +1332,11 @@ materializeWorldSources parent facts = do
       names = foldr (Map.union . sourceNames . snd) Map.empty roots
       paths = Map.fromList [(physical,source) | (_,entries) <- roots
         , (_,source@(WorldHomeSource _ _ physical _)) <- entries]
-  pure (WorldMaterialization products (map fst roots) names paths)
+  -- Build refusal hints once on acquisition, never enumerate passive custody
+  -- on a resident query or turn it into a selected compiler interface set.
+  let hints = worldInputsSourceModuleHints facts
+  _ <- evaluate (Set.size hints)
+  pure (WorldMaterialization products (map fst roots) names paths hints)
 
 -- This path starts from captured source selection, never the universe's most
 -- recent HPT or a raw-custody module inventory. The universe supplies only its
@@ -1340,7 +1344,7 @@ materializeWorldSources parent facts = do
 runWorldPublicModule :: Maybe CompilerProducerIdentity -> CompilerUniverse -> HscEnv -> Bool
   -> HeldCompilerWorld -> CompilerExecutionGrant -> CompilerExecutor -> WorldPublicModuleRequest -> Ghc BS.ByteString
 runWorldPublicModule producer universe baseEnv timing
-    (HeldCompilerWorld facts _ (WorldMaterialization products roots sources paths) preparedRef) grant executor question =
+    (HeldCompilerWorld facts _ (WorldMaterialization products roots sources paths sourceHints) preparedRef) grant executor question =
   handleWorldQueryFailure facts question $ do
     requested <- case structuredScope (worldQueryInspection question) of
       StructuredPublicModule name | not (isReservedSessionModuleName name) -> pure name
@@ -1389,6 +1393,9 @@ runWorldPublicModule producer universe baseEnv timing
             pure (Just (owner,completed))
           _ -> liftIO (throwIO WorldQueryCorrupt)
       Nothing -> do
+        -- A known source name without a captured finder-representable path
+        -- cannot become a package answer or an asserted closed-domain miss.
+        when (Set.member requested sourceHints) (liftIO (throwIO WorldQueryUnavailable))
         env <- getSession
         found <- liftIO (findImportedModule env (mkModuleName requested) NoPkgQual)
         case found of

@@ -35,6 +35,7 @@ module Tidepool.ExactScope
   , originalGroupFromProjected, originalGroupFromCandidate
   , WorldInputFacts, CapturedWorldSources, WorldSourceRoot
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
+  , worldInputsSourceModuleHints
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
   , readWorldInputsWithOwner
   , WorldInputsFailure(..), WorldInputsFailureCause(..)
@@ -2181,6 +2182,14 @@ data CapturedWorldSources = CapturedWorldSources
   }
 
 newtype WorldSourceRoot = WorldSourceRoot { worldSourceFiles :: Map.Map FilePath BS.ByteString }
+
+-- Passive authenticated source rows can prevent an unsound absence result.
+-- They do not identify a selected source version or authorize HPT hydration.
+worldInputsSourceModuleHints :: WorldInputFacts -> Set.Set String
+worldInputsSourceModuleHints facts = Set.fromList
+  [exactModule iface
+  | ScopeInterfaceInput (iface,_,_) (ModuleInterfaceEvidence proof) <- worldInputsBaseRows facts
+  , isSourceOriginal (canonicalOrigin proof)]
 
 data WorldInputsFailureCause = WorldInputsUnavailable | WorldInputsCorrupt deriving (Eq,Show)
 data WorldInputsFailure = WorldInputsFailure WorldInputsFailureCause String deriving Show
