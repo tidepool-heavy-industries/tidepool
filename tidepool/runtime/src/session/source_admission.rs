@@ -25,6 +25,8 @@ pub enum SourceAdmissionError {
     ForeignTransaction,
     #[error("source lexical lease belongs to a stale issuing epoch")]
     StaleSourceLease,
+    #[error("source work has no live canonical target lease for scope {scope:?}")]
+    MissingTargetLease { scope: ScopeId },
     #[error("source-dependent admission has no issuing world")]
     Unqualified,
     #[error("initial source publication is unavailable")]
@@ -500,11 +502,12 @@ pub struct RuntimeSourceCompilerTransaction {
 struct SourceCompilerHolds {
     hook_admitted: bool,
     claims: Vec<(RuntimeSourceAdmission, RuntimeSourceClaim)>,
+    leases: Vec<Arc<super::RuntimeLexicalScopeLease>>,
 }
 impl RuntimeSourceCompilerTransaction {
     pub(super) fn admit(
         &self,
-        target: Option<RuntimeSourceAdmission>,
+        target: Option<Arc<super::RuntimeLexicalScopeLease>>,
     ) -> Result<(), SourceAdmissionError> {
         if self.closed.load(std::sync::atomic::Ordering::Acquire)
             || crate::CompilerTransactionOrigin::current().as_ref() != Some(&self.origin)
@@ -519,14 +522,21 @@ impl RuntimeSourceCompilerTransaction {
             }
             holds.hook_admitted = true;
         }
-        for admission in std::iter::once(self.source.source_admission().clone()).chain(target) {
+        for lease in std::iter::once(self.source.clone()).chain(target) {
+            lease.validate_source_issuer()?;
+            let admission = lease.source_admission();
             if !holds
                 .claims
                 .iter()
-                .any(|(held, _)| held.same_owner(&admission))
+                .any(|(held, _)| held.same_owner(admission))
             {
                 let claim = admission.admit()?;
-                holds.claims.push((admission, claim));
+                holds.claims.push((admission.clone(), claim));
+            }
+            lease.validate_source_issuer()?;
+            // Captured scopes can share admission but own distinct native roots.
+            if !holds.leases.iter().any(|held| Arc::ptr_eq(held, &lease)) {
+                holds.leases.push(lease);
             }
         }
         self.source.validate_source_issuer()?;
@@ -535,14 +545,18 @@ impl RuntimeSourceCompilerTransaction {
     fn settle(&self, confirmed: bool) {
         self.closed
             .store(true, std::sync::atomic::Ordering::Release);
-        if !confirmed && !self.holds.lock().claims.is_empty() {
-            self.source.retain_unconfirmed_source_custody();
+        let mut holds = self.holds.lock();
+        if !confirmed {
+            for lease in &holds.leases {
+                lease.retain_unconfirmed_source_custody();
+            }
         }
-        for (_, claim) in self.holds.lock().claims.drain(..) {
+        for (_, claim) in holds.claims.drain(..) {
             if !confirmed {
                 claim.retain_unconfirmed();
             }
         }
+        holds.leases.clear();
     }
 }
 

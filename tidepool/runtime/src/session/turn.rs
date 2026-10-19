@@ -2725,7 +2725,7 @@ pub fn compile_activation_renderer(
     ActivationRendererFailure,
 > {
     source
-        .admit(Some(admission.source_lease().source_admission().clone()))
+        .admit(Some(admission.source_lease()))
         .map_err(super::PreparedRuntimeError::from)?;
     super::resident::PreparedRenderer::prepare(|| {
         compile_activation_renderer_inner(admission, template_source, budget, includes, settlement)
@@ -3062,7 +3062,7 @@ pub fn prepare_cell_program_admitted(
     admission: Arc<super::RuntimeCellAdmission>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
-    source.admit(Some(admission.source_lease().source_admission().clone()))?;
+    source.admit(Some(admission.source_lease()))?;
     prepare_cell_program_admitted_inner(
         admission,
         #[cfg(test)]

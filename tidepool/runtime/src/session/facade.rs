@@ -357,7 +357,10 @@ impl super::PersistentSession {
             .source_transaction
             .as_ref()
             .ok_or(super::SourceAdmissionError::MissingTransaction)?;
-        owner.admit(self.source_admission_in(scope))?;
+        let target = (scope != tidepool_codegen::scope::ScopeId::ROOT)
+            .then(|| self.source_lease_in(scope))
+            .transpose()?;
+        owner.admit(target)?;
         Ok(None)
     }
 
