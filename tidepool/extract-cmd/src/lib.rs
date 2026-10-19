@@ -43,6 +43,7 @@ pub use endpoint::{
     with_compiler_transaction, with_compiler_transaction_cancellable,
     with_compiler_transaction_cancellable_for_workload, with_compiler_transaction_for_workload,
     CompilerEndpoint, CompilerFrontendCloseReport, CompilerIdentity, CompilerIoCause,
+    CompilerPackageSourceAssociation,
     CompilerScratchFailure, CompilerScratchRetirement, CompilerTermination, CompilerTransaction,
     CompilerTransactionCancellation, CompilerTransactionClose, CompilerTransactionCloseEvidence,
     CompilerTransactionCloseFailure, CompilerTransactionClosePhase, CompilerTransactionCloseReason,
