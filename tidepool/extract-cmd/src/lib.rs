@@ -965,11 +965,11 @@ mod tests {
         let refused = command.world_cell_plan(WorldCellPlanRequest {
             world: "a".repeat(64),
             realization: "held".into(),
-            recipe: WorldCellRecipe {
+            recipe: std::sync::Arc::new(WorldCellRecipe {
                 source: "pure ()".into(),
                 template: "template".into(),
                 turn_templates: vec![],
-            },
+            }),
             output: "plan.cbor".into(),
         });
         assert!(matches!(refused, Err(ProtocolError::InvalidWorldCell)));

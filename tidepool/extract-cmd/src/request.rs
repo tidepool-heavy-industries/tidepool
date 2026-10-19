@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v24";
 const MAGIC: &[u8; 8] = b"TPREQ024";
@@ -174,7 +175,7 @@ impl WorldCellRecipe {
 pub struct WorldCellPlanRequest {
     pub world: String,
     pub realization: String,
-    pub recipe: WorldCellRecipe,
+    pub recipe: Arc<WorldCellRecipe>,
     pub output: PathBuf,
 }
 
@@ -185,10 +186,11 @@ fn valid_cell_path(path: &Path) -> bool {
 
 impl WorldCellPlanRequest {
     fn valid(&self) -> bool {
-        self.check_transport().is_ok()
+        self.validate_transport().is_ok()
     }
 
-    fn check_transport(&self) -> Result<(), ProtocolError> {
+    /// Check the existing encoded frame budget without copying source bodies.
+    pub fn validate_transport(&self) -> Result<(), ProtocolError> {
         if !valid_world_identity(&self.world)
             || !valid_reference(&self.realization)
             || !self.recipe.valid()
@@ -235,7 +237,7 @@ impl PlannedCellSlot {
 pub struct WorldCellPrepareRequest {
     pub world: String,
     pub realization: String,
-    pub recipe: WorldCellRecipe,
+    pub recipe: Arc<WorldCellRecipe>,
     pub plan: Vec<u8>,
     pub admission: [u8; 32],
     pub slots: Vec<(u64, PlannedCellSlot)>,
@@ -276,10 +278,11 @@ impl WorldCellPrepareRequest {
             && valid_cell_path(&self.output)
     }
     fn valid(&self) -> bool {
-        self.check_transport().is_ok()
+        self.validate_transport().is_ok()
     }
 
-    fn check_transport(&self) -> Result<(), ProtocolError> {
+    /// Check the existing encoded frame budget without copying source bodies.
+    pub fn validate_transport(&self) -> Result<(), ProtocolError> {
         if !self.valid_fields() {
             return Err(ProtocolError::InvalidWorldCell);
         }
@@ -1141,7 +1144,7 @@ impl ExtractRequest {
                     check_world_cell_bytes(bytes.len())?;
                     let world = decoder.cell_string(64)?;
                     let realization = decoder.string()?;
-                    let recipe = decoder.world_cell_recipe()?;
+                    let recipe = Arc::new(decoder.world_cell_recipe()?);
                     let output = PathBuf::from(decoder.cell_string(65536)?);
                     Field::WorldCellPlan(WorldCellPlanRequest {
                         world,
@@ -1154,7 +1157,7 @@ impl ExtractRequest {
                     check_world_cell_bytes(bytes.len())?;
                     let world = decoder.cell_string(64)?;
                     let realization = decoder.string()?;
-                    let recipe = decoder.world_cell_recipe()?;
+                    let recipe = Arc::new(decoder.world_cell_recipe()?);
                     let plan = decoder.cell_frame(8 << 20)?.to_vec();
                     let admission = decoder.fixed()?;
                     let count = decoder.count(17)?;
@@ -1554,7 +1557,7 @@ impl ExtractRequest {
         if !self.fields.is_empty() {
             return Err(ProtocolError::InvalidWorldCell);
         }
-        request.check_transport()?;
+        request.validate_transport()?;
         self.fields.push(Field::WorldCellPlan(request));
         Ok(self)
     }
@@ -1566,7 +1569,7 @@ impl ExtractRequest {
         if !self.fields.is_empty() {
             return Err(ProtocolError::InvalidWorldCell);
         }
-        request.check_transport()?;
+        request.validate_transport()?;
         self.fields.push(Field::WorldCellPrepare(request));
         Ok(self)
     }
@@ -3448,11 +3451,11 @@ mod tests {
 
     #[test]
     fn world_cell_wire_is_exclusive_bounded_and_matches_haskell() {
-        let recipe = WorldCellRecipe {
+        let recipe = Arc::new(WorldCellRecipe {
             source: "x <- pure 1".into(),
             template: "{{CELL_IMPORTS}}\n{{CELL_BODY}}".into(),
             turn_templates: vec![("bind".into(), "module Bind where".into())],
-        };
+        });
         let plan = WorldCellPlanRequest {
             world: "a".repeat(64),
             realization: "held".into(),
@@ -3478,6 +3481,8 @@ mod tests {
             directory: "operation".into(),
             output: "prepared.cbor".into(),
         };
+        assert!(Arc::ptr_eq(&plan.recipe, &prepare.recipe));
+        assert!(Arc::ptr_eq(&plan.recipe, &plan.clone().recipe));
         let plan_bytes = unhex("5450524551303234000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72").unwrap();
         let prepare_bytes = unhex("5450524551303234000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72").unwrap();
         let mut plan_request = ExtractRequest::default();
@@ -3520,13 +3525,13 @@ mod tests {
         }
         let mut bad_recipes = Vec::new();
         let mut value = plan.clone();
-        value.recipe.source = "λ".repeat((1 << 20) + 1);
+        Arc::make_mut(&mut value.recipe).source = "λ".repeat((1 << 20) + 1);
         bad_recipes.push(value);
         let mut value = plan.clone();
-        value
-            .recipe
+        let duplicate = value.recipe.turn_templates[0].clone();
+        Arc::make_mut(&mut value.recipe)
             .turn_templates
-            .push(value.recipe.turn_templates[0].clone());
+            .push(duplicate);
         bad_recipes.push(value);
         let mut value = plan.clone();
         value.output = "x".repeat(65537).into();
@@ -3570,11 +3575,11 @@ mod tests {
         // Four existing 2MiB fields already exceed the SAME daemon ceiling
         // after typed framing and hex. No 256-field/512MiB fixture is needed.
         let body = "x".repeat(2 << 20);
-        let recipe = WorldCellRecipe {
+        let recipe = Arc::new(WorldCellRecipe {
             source: body.clone(),
             template: body.clone(),
             turn_templates: vec![("one".into(), body.clone()), ("two".into(), body)],
-        };
+        });
         let mut request = ExtractRequest::default();
         let refused = match request.world_cell_plan(WorldCellPlanRequest {
             world: "a".repeat(64),
@@ -3595,11 +3600,11 @@ mod tests {
         let refused = match request.world_cell_prepare(WorldCellPrepareRequest {
             world: "a".repeat(64),
             realization: "held".into(),
-            recipe: WorldCellRecipe {
+            recipe: Arc::new(WorldCellRecipe {
                 source: String::new(),
                 template: String::new(),
                 turn_templates: vec![],
-            },
+            }),
             plan: vec![0; 8 << 20],
             admission: [1; 32],
             slots: vec![],

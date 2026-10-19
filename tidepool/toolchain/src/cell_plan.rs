@@ -153,6 +153,117 @@ impl ParsedCellPlan {
     }
 }
 
+/// A service parser receipt bound to a held logical world and authored recipe.
+/// It carries no runtime publication or checked value permission.
+#[derive(Debug)]
+pub struct CompilerWorldCellPlan {
+    world: Arc<crate::compiler_world::CompilerWorld>,
+    recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+    producer_sha256: [u8; 32],
+    items: Vec<ParsedCellPlanItem>,
+    receipt: Arc<[u8]>,
+    observations: Arc<[u8]>,
+    digest: [u8; 32],
+}
+
+impl CompilerWorldCellPlan {
+    pub fn world(&self) -> &crate::compiler_world::CompilerWorld {
+        &self.world
+    }
+    pub fn recipe(&self) -> &tidepool_extract_cmd::WorldCellRecipe {
+        &self.recipe
+    }
+    pub fn items(&self) -> &[ParsedCellPlanItem] {
+        &self.items
+    }
+    pub fn receipt(&self) -> &[u8] {
+        &self.receipt
+    }
+    pub fn observations(&self) -> &[u8] {
+        &self.observations
+    }
+    pub fn producer_sha256(&self) -> &[u8; 32] {
+        &self.producer_sha256
+    }
+    pub fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+}
+
+pub(crate) fn admit_world_plan(
+    world: Arc<crate::compiler_world::CompilerWorld>,
+    recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+    producer: [u8; 32],
+    receipt: Vec<u8>,
+) -> Result<Arc<CompilerWorldCellPlan>, CompileError> {
+    let facts = admit_world_parser_receipt(world.logical_id(), &recipe, producer, &receipt)?;
+    Ok(Arc::new(CompilerWorldCellPlan {
+        world,
+        recipe,
+        producer_sha256: producer,
+        items: facts.items,
+        observations: facts.observations,
+        receipt: receipt.into(),
+        digest: facts.digest,
+    }))
+}
+
+struct WorldParserFacts {
+    items: Vec<ParsedCellPlanItem>,
+    observations: Arc<[u8]>,
+    digest: [u8; 32],
+}
+
+fn admit_world_parser_receipt(
+    expected_world: &[u8; 32],
+    recipe: &tidepool_extract_cmd::WorldCellRecipe,
+    producer: [u8; 32],
+    receipt: &[u8],
+) -> Result<WorldParserFacts, CompileError> {
+    let value = decode(&receipt)?;
+    let fields = crate::checked_cell::row(&value, 8)?;
+    let hash = |value: &Value| -> Result<[u8; 32], CompileError> {
+        match value {
+            Value::Bytes(bytes) => bytes.as_slice().try_into().map_err(failure),
+            _ => Err(failure("world parser hash")),
+        }
+    };
+    if text(&fields[0])? != "TPCELLPLAN4"
+        || hash(&fields[1])? != *expected_world
+        || hash(&fields[2])? != producer
+        || hash(&fields[3])? != <[u8; 32]>::from(Sha256::digest(recipe.source.as_bytes()))
+        || hash(&fields[4])? != <[u8; 32]>::from(Sha256::digest(recipe.template.as_bytes()))
+    {
+        return Err(failure(
+            "world parser source, template, world or producer differs",
+        ));
+    }
+    let templates = list(&fields[5], 256)?;
+    if templates.len() != recipe.turn_templates.len() {
+        return Err(failure("world parser template count"));
+    }
+    for (value, (kind, source)) in templates.iter().zip(&recipe.turn_templates) {
+        let row = crate::checked_cell::row(value, 2)?;
+        if text(&row[0])? != kind
+            || hash(&row[1])? != <[u8; 32]>::from(Sha256::digest(source.as_bytes()))
+        {
+            return Err(failure("world parser template differs"));
+        }
+    }
+    let Value::Bytes(observations) = &fields[6] else {
+        return Err(failure("world parser observations"));
+    };
+    let items = admit_parser_items(observations, &fields[7])?;
+    let mut digest = Sha256::new();
+    digest.update(b"TidepoolWorldCellPlan1\0");
+    digest.update(&receipt);
+    Ok(WorldParserFacts {
+        items,
+        observations: observations.clone().into(),
+        digest: digest.finalize().into(),
+    })
+}
+
 pub(crate) fn parse(
     specification: Arc<CheckedCellSpecification>,
     include_paths: &[PathBuf],
@@ -263,6 +374,30 @@ fn admit(
     let Value::Bytes(observations) = &fields[6] else {
         return Err(failure("parser observations"));
     };
+    let items = admit_parser_items(observations, &fields[7])?;
+    let producer_sha256 =
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+            .sha256();
+    let mut digest = Sha256::new();
+    digest.update(b"TidepoolParsedCellPlan1");
+    digest.update(producer_sha256);
+    digest.update(specification.specification_digest());
+    digest.update(&receipt);
+    Ok(Arc::new(ParsedCellPlan {
+        specification,
+        include_paths: include_paths.to_vec(),
+        producer_sha256,
+        items,
+        observations: observations.clone().into(),
+        receipt: receipt.into(),
+        digest: digest.finalize().into(),
+    }))
+}
+
+fn admit_parser_items(
+    observations: &[u8],
+    binding_forms: &Value,
+) -> Result<Vec<ParsedCellPlanItem>, CompileError> {
     let observations_value = decode(observations)?;
     let observed = crate::checked_cell::cell_observations(&observations_value)?;
     if !list(&observed[1], 0)?.is_empty()
@@ -285,7 +420,7 @@ fn admit(
         span(&row[0])?;
         text(&row[1])?;
     }
-    let binding_forms = texts(&fields[7], ITEM_LIMIT)?;
+    let binding_forms = texts(binding_forms, ITEM_LIMIT)?;
     if binding_forms.len() != list(&observed[0], ITEM_LIMIT)?.len() {
         return Err(failure("parser binding form inventory differs"));
     }
@@ -377,23 +512,7 @@ fn admit(
             source_ordinals,
         });
     }
-    let producer_sha256 =
-        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
-            .sha256();
-    let mut digest = Sha256::new();
-    digest.update(b"TidepoolParsedCellPlan1");
-    digest.update(producer_sha256);
-    digest.update(specification.specification_digest());
-    digest.update(&receipt);
-    Ok(Arc::new(ParsedCellPlan {
-        specification,
-        include_paths: include_paths.to_vec(),
-        producer_sha256,
-        items,
-        observations: observations.clone().into(),
-        receipt: receipt.into(),
-        digest: digest.finalize().into(),
-    }))
+    Ok(items)
 }
 
 fn decode(bytes: &[u8]) -> Result<Value, CompileError> {
@@ -504,9 +623,74 @@ mod tests {
         (specification, vec![PathBuf::from("/original")], receipt)
     }
     #[test]
+    fn world_parser_receipt_binds_world_canonical_producer_and_authored_recipe() {
+        let (specification, _, legacy) = fixture();
+        let recipe = tidepool_extract_cmd::WorldCellRecipe {
+            source: specification.cell_source.clone(),
+            template: specification.template_source.clone(),
+            turn_templates: specification.turn_templates.clone(),
+        };
+        let producer =
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&[1; 32])
+                .sha256();
+        let world = [9; 32];
+        let hash = |bytes: &[u8]| Value::Bytes(Sha256::digest(bytes).to_vec());
+        let fields = legacy.as_array().unwrap();
+        let receipt = Value::Array(vec![
+            Value::Text("TPCELLPLAN4".into()),
+            Value::Bytes(world.to_vec()),
+            Value::Bytes(producer.to_vec()),
+            hash(recipe.source.as_bytes()),
+            hash(recipe.template.as_bytes()),
+            Value::Array(
+                recipe
+                    .turn_templates
+                    .iter()
+                    .map(|(kind, source)| {
+                        Value::Array(vec![Value::Text(kind.clone()), hash(source.as_bytes())])
+                    })
+                    .collect(),
+            ),
+            fields[6].clone(),
+            fields[7].clone(),
+        ]);
+        let admitted =
+            admit_world_parser_receipt(&world, &recipe, producer, &encoded(&receipt)).unwrap();
+        assert_eq!(admitted.items[0].binders(), ["owned"]);
+        assert!(admit_world_parser_receipt(&world, &recipe, [1; 32], &encoded(&receipt)).is_err());
+        assert!(
+            admit_world_parser_receipt(&[8; 32], &recipe, producer, &encoded(&receipt)).is_err()
+        );
+        for index in 0..8 {
+            let mut changed = receipt.clone();
+            changed.as_array_mut().unwrap()[index] = Value::Null;
+            assert!(
+                admit_world_parser_receipt(&world, &recipe, producer, &encoded(&changed)).is_err()
+            );
+        }
+        let mut other = receipt.clone();
+        let other_producer =
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&[2; 32])
+                .sha256();
+        other.as_array_mut().unwrap()[2] = Value::Bytes(other_producer.to_vec());
+        let other =
+            admit_world_parser_receipt(&world, &recipe, other_producer, &encoded(&other)).unwrap();
+        assert_ne!(admitted.digest, other.digest);
+        assert!(admit_world_parser_receipt(&world, &recipe, producer, &encoded(&legacy)).is_err());
+    }
+
+    #[test]
     fn parser_receipt_binds_source_recipes_roots_and_unchecked_ordinals() {
         let (specification, include, receipt) = fixture();
         let plan = admit(specification.clone(), &include, &[1; 32], encoded(&receipt)).unwrap();
+        let canonical =
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&[1; 32])
+                .sha256();
+        assert_ne!(canonical, [1; 32]);
+        assert_eq!(plan.producer_sha256(), canonical);
+        let other = admit(specification.clone(), &include, &[2; 32], encoded(&receipt)).unwrap();
+        assert_ne!(other.producer_sha256(), plan.producer_sha256());
+        assert_ne!(other.digest(), plan.digest());
         assert_eq!(plan.items()[0].binders(), ["owned"]);
         assert_eq!(
             plan.items()[0].binding_form(),

@@ -1589,20 +1589,20 @@ fn ensure_world(
     Ok(realized)
 }
 
-/// Open exact published primary/source facts, then ask the actual service. The
-/// public handle is returned only after the service has accepted those facts.
+/// Acquire the exact published logical world independently of its next demand.
+/// Runtime source admission owns the current physical transaction and its END.
 pub fn open_world(
     cold: CompilerWorldOpenInputs,
     endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
-    question: PublicModuleQuestion,
-) -> Result<WorldQueryResult, CompileError> {
+) -> Result<Arc<CompilerWorld>, CompileError> {
     scoped_world_action(|| {
         let restoration = cold.prepare(endpoint)?;
         let world = Arc::new(CompilerWorld {
             restoration,
             realization: Arc::new(Mutex::new(None)),
         });
-        query_world_inner(endpoint.identity(), world, question)
+        ensure_world(&world, endpoint.identity())?;
+        Ok(world)
     })
 }
 
@@ -1615,6 +1615,59 @@ pub fn query_public_module(
 ) -> Result<WorldQueryResult, CompileError> {
     scoped_world_action(|| {
         query_world_inner(endpoint.identity(), Arc::new(world.clone()), question)
+    })
+}
+
+/// Parse current authored input in the logical world. Source authority and
+/// physical END remain with the caller's runtime source compiler transaction.
+pub fn plan_cell(
+    endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+    world: &CompilerWorld,
+    recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+) -> Result<Arc<crate::cell_plan::CompilerWorldCellPlan>, CompileError> {
+    scoped_world_action(|| {
+        let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
+        let output = directory.path().join("cell-plan.cbor");
+        if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(&directory)) {
+            return Err(source_failure(
+                "world cell planning requires its compiler scope",
+            ));
+        }
+        let mut request = tidepool_extract_cmd::WorldCellPlanRequest {
+            world: world_hex(world.logical_id()),
+            realization: "not-resident".into(),
+            recipe: Arc::clone(&recipe),
+            output: output.clone(),
+        };
+        request
+            .validate_transport()
+            .map_err(|error| source_failure(error.to_string()))?;
+        request.realization = ensure_world(world, endpoint.identity())?;
+        let (mut command, bound) = world_command(endpoint.identity())?;
+        command
+            .world_cell_plan(request)
+            .map_err(|error| source_failure(error.to_string()))?;
+        let diagnostics =
+            crate::artifacts::CompilerDiagnosticCapture::start(directory.path(), &command);
+        let result = world_execute(&command, bound, Vec::new())?;
+        diagnostics.completed(
+            directory.path(),
+            &command,
+            result.success(),
+            &result.output.stderr,
+        );
+        crate::diag::decode_extract_result(
+            result.success(),
+            &result.output.stdout,
+            &result.output.stderr,
+        )?;
+        let receipt = crate::checked_cell::read(output, 8 << 20)?;
+        crate::cell_plan::admit_world_plan(
+            Arc::new(world.clone()),
+            recipe,
+            CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256(),
+            receipt,
+        )
     })
 }
 
