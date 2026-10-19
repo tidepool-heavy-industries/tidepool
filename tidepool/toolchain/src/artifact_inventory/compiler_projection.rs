@@ -2527,6 +2527,7 @@ mod tests {
                 let fork_work = type_query_work::take();
                 proptest::prop_assert_eq!(fork_work.cloned_rows, 0);
                 let next = fork.admit_value_interfaces(&[value.clone()]).unwrap();
+                drop(fork);
                 let append_work = type_query_work::take();
                 eprintln!("selected-row-publication unrelated={unrelated} step={step} rows={} work={append_work:?}", expected.len());
                 // Count actual row clones, including the map's copy-on-write
