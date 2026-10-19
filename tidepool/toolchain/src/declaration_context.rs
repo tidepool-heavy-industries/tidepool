@@ -17212,6 +17212,8 @@ mod tests {
             .native_availability()
             .validate_role_coverage(&projection)
             .unwrap();
+        drop(narrowed);
+        drop(snapshot);
         drop(inventory);
         let mut next = context.as_ref().clone();
         next = next.rebuild(|facts| {
