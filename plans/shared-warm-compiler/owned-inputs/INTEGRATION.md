@@ -1,11 +1,13 @@
 # Owned row checkpoint integration packet
 
-Status: implementation/source review and component checks accepted; product
-fold held by campaign pending the fresh-worker baseline discriminator and its
-test-only oracle repair. No product source is merged into the area yet.
+Status: implementation/source review and component checks accepted; baseline
+reproduced the stale fresh-worker assertion. Product fold remains held until the
+reviewed test-only correction compiles and its complete case executes. No
+product source is merged into the area yet.
 
 Base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
-Full candidate: `29d6467c309e53dbd0c1e9c89961c2eff24259c4`.
+Full candidate: `a178a9d331ac560786925e3c443a5789e03c9358`, including accepted
+row implementation `29d6467c309e53dbd0c1e9c89961c2eff24259c4`.
 Branch: `feature/shared-warm/owned-rows`.
 Checkout: `/srv/swarm/checkouts/tidepool-shared-warm-owned-rows-20261019`.
 Area branch: `feature/shared-warm/owned-inputs` in the corresponding
@@ -73,12 +75,21 @@ the actual `library_import_module()` may differ under certified publication
 reuse. Host and independent source traces support a stale oracle, but
 qualification owns the exact baseline execution discriminator. Preserve its
 hidden-original, exact native-edge and subsequent real GHC/inspection controls
-in any scoped test-only correction. Failing cache:
-`/tmp/tidepool-libtest-cache-jv8erlca`. No assertion has been changed here.
+in any scoped test-only correction. Qualification subsequently reproduced the
+same assertion at exact baseline `6d3b1745b465b6d0fe14104cb4020ead282f1620`,
+selected/executed 1, failed 1, libtest exit 101 / runner exit 1. Its report is
+`/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/baseline-6d3/paired-join-case/8c6c6b90010c582d8e529fa11db53f1afac0ec1d8a11018970d3e83e32165b0b.json`,
+SHA-256 `4fff5a9e049235a69dff22cb6bad587f853ad7d9b79e472d66ebac940039b124`.
+Candidate a178 changes only this test's lexical-root oracle to the actual
+`library_import_module()`, with explicit reserved-versus-actual distinction.
+Supervisor and independent source review verified all later controls unchanged;
+no production runtime code changed. Compilation/full corrected execution are
+row-owned and pending. Failing original cache:
+`/tmp/tidepool-libtest-cache-jv8erlca`. The area has not folded that test repair.
 
 ## Resource and continuation ownership
 
-All row-owned compiler/test clients are terminal. Direct status observation
+All row-owned clients from the row implementation gates are terminal. Direct status observation
 found no active Buck commands. Retained daemon PID `3846846` and forkserver
 `3846887` are the only processes observed in
 `/build.slice/inanna-build-1792399526-3846769.scope`; that scope retained
@@ -89,7 +100,8 @@ shared service was deleted/restarted. Daemon/output next use is the owned
 test-only oracle repair and its exact checked-bind rerun after qualification's
 baseline result. Keep them warm until that gate settles; retirement is separate.
 
-Rows and source_lifetime are dormant under the existing two reserved grants.
+Rows is active for the corrected runtime case; source_lifetime completed its
+exact test-only source review. Both use the existing two reserved grants.
 Use status-aware `followup_task` for their next concrete assignment. The area
 supervisor owns the eventual full-candidate fold and campaign handoff. Campaign
 owns the receiving branch and joined integration gate. Qualification owns the

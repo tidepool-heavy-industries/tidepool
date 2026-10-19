@@ -138,3 +138,55 @@ Prior exact49 results remain separate17pass/1lexical-fail evidence. Runtime
 oracle repair and the complete fresh-worker checked-bind rerun remain with
 their owning area; no later workflow pass is inferred here. Producer reports
 all jobs terminal and holds further work for actual integration findings.
+
+## Adjacent runtime oracle repair assignment
+
+Area subsequently reports qualification's exact6d3 baseline executed the unchanged
+case and reproduced the same8693 pre-P6 assertion failure. Independently read
+the retained report and stderr: executed1, failed1, passed0, exit101, same
+assertion. Report SHA256 is
+`4fff5a9e049235a69dff22cb6bad587f853ad7d9b79e472d66ebac940039b124`,
+path `/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/baseline-6d3/paired-join-case/8c6c6b90010c582d8e529fa11db53f1afac0ec1d8a11018970d3e83e32165b0b.json`.
+Source attribution remains qualification's retained baseline contract; the
+individual case JSON itself does not contain a source OID. This corroborates the
+existing-oracle diagnosis without turning an expected failure into passing
+checked-bind evidence.
+
+Approved adjacent assignment is test-only: compare lexical graph with the actual
+`library_import_module`, explicitly distinguish that root from the reserved
+library generation on this certified reuse route, retain the original-generation
+inequality, hidden-original absence, exact native selections, all inspection and
+refusal controls, actual GHC checked bind, capture and input-work assertions.
+No production lexical authority or test authority factory changes are needed.
+At inspection the producer checkout was still clean exact29; no repair candidate
+was available to review. Producer rows will deliver an exact successor, then
+this reviewer checks its complete29-to-successor delta and unchanged later
+controls. Fullworker expected1 execution remains rows-owned. No reviewer native
+job or runtime source edit was made.
+
+## Exact adjacent test-only successor review
+
+Candidate `a178a9d331ac560786925e3c443a5789e03c9358` arrived after that inspection.
+Reviewed the exact29-to-a178 delta and cumulative whitespace check. Verdict:
+**source-only acceptance** of the approved adjacent oracle correction atop the
+accepted cumulative row implementation. The checkout is clean at that OID.
+
+Only `turn.rs` inside the existing paired test and its handoff changed. The test
+obtains `library_import_module().expect(...)`, requires the logical/native
+library module to differ in this certified-reuse fixture, and requires actual
+import membership in the lexical graph. This asserts the distinction rather
+than merely removing a failure. Existing logical-library versus original
+generation inequality, Text dependency, hidden-original lexical absence and
+textual-import refusal, exact native-group comparison and canonical interface
+role checks remain unchanged. The entire subsequent inspection, GHC checked
+bind/expression capture, receipt/admission mutation refusals, semantic digest,
+native identity and input-work assertions remain unchanged. No public API,
+production branch or test authority factory changed.
+
+The handoff preserves baseline failure provenance separately and explicitly
+requires production/cfg(test) runtime compilation plus the full fresh-worker
+selector with expected1. Those new exact-candidate outcomes are pending and
+rows-owned at this source receipt. Reaching a later assertion would be a new
+observation, not permission to weaken that oracle. Reviewer ran no native jobs.
+Next action is rows' pinned compile/full counted execution and retained artifact,
+count, failure/cleanup report; the joined owner consumes the resulting evidence.
