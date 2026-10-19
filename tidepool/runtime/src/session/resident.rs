@@ -3974,6 +3974,16 @@ where
         )
     }
 
+    pub fn admit_world_planned_cell_for_execution(
+        &mut self,
+        execution: Arc<super::PrivateExecutionAdmission>,
+        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state
+            .admit_world_planned_cell_for_execution(execution, plan)
+    }
+
     pub fn admit_checked_item(
         &mut self,
         prefix: Arc<super::RuntimeCheckedPrefix>,
@@ -3987,7 +3997,7 @@ where
         &mut self,
         admission: Arc<super::RuntimeCheckedItemAdmission>,
     ) -> Result<super::DeclarationPlaneCommit, SessionError> {
-        if admission.prefix().admission().visibility().scope != self.run_context.lexical_scope {
+        if admission.prefix().admission().lexical_scope() != self.run_context.lexical_scope {
             return Err(SessionError::StaleStagedDeclaration);
         }
         self.settle_dropped_custody();
@@ -5770,9 +5780,9 @@ where
             compiler,
             code: Arc::new(code),
             representation: carrier.representation,
-            authority_digest: admission.prefix().admission().authority_digest(),
-            include_paths: admission.prefix().admission().include_paths().to_vec(),
-            _source_owner: admission.prefix().admission().specification().clone(),
+            authority_digest: admission.prefix().admission().authority_digest()?,
+            include_paths: admission.prefix().admission().include_paths()?.to_vec(),
+            _source_owner: admission.prefix().admission().specification()?.clone(),
         });
         self.host_binding_prototypes
             .retain(|old| old.representation.host_type() != prototype.representation.host_type());
@@ -5883,7 +5893,7 @@ where
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
         self.settle_dropped_custody();
-        let scope = admission.prefix().admission().visibility().scope;
+        let scope = admission.prefix().admission().lexical_scope();
         let generation = admission.generation();
         if self.run_context.lexical_scope != scope {
             return Err(ResidentError::UnsupportedCheckedTurn);

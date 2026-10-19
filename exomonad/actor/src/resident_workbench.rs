@@ -28537,7 +28537,7 @@ pub(crate) mod request_tests {
                     Some(annotations.into()),
                 )
                 .unwrap();
-            let admitted = admission.view().exact_compile_context().unwrap();
+            let admitted = admission.view().unwrap().exact_compile_context().unwrap();
             let annotations = admitted.request_annotations().unwrap();
             assert!(Arc::ptr_eq(annotations.signatures(), &signatures));
             assert_eq!(annotations.helper_recipe(), helper);
@@ -31925,6 +31925,9 @@ pub(crate) mod request_tests {
             )
             .unwrap();
         assert!(admitted.private_execution().is_none());
-        assert_eq!(admitted.plan_reservation().unwrap().items().len(), 1);
+        assert_eq!(
+            admitted.plan_reservation().unwrap().unwrap().items().len(),
+            1
+        );
     }
 }
