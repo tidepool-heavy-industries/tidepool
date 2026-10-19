@@ -10,8 +10,8 @@ is prerequisite source, not a campaign result. No host deployment is authorized.
 | Native identity | Model / effort | Checkout / branch | State and outcome |
 | --- | --- | --- | --- |
 | `/root/warm_compiler_campaign/host_inputs` | Sol high | area checkout above | supervising issuer, admission and publication consumers |
-| `/root/warm_compiler_campaign/host_inputs/selected_root` | `gpt-6.1-sol` / high, fresh | `tidepool-shared-warm-selected-root-20261019`, `feature/shared-warm/selected-root` | running; actual root/transition constructor and consumer design at `08feadc4` |
-| `/root/warm_compiler_campaign/host_inputs/selection_oracle` | `gpt-6.1-sol` / high, fresh | read-only area source | running; independent adversarial root/transition design review |
+| `/root/warm_compiler_campaign/host_inputs/selected_root` | `gpt-6.1-sol` / high, fresh | `tidepool-shared-warm-selected-root-20261019`, `feature/shared-warm/selected-root` | running; approved exact-context input reuse implementation at `08feadc4` |
+| `/root/warm_compiler_campaign/host_inputs/selection_oracle` | `gpt-6.1-sol` / high, fresh | read-only area source | running; source-support adoption bridge and physical-refusal review |
 
 Two descendant grants retained; no deeper descendants permitted. Starts,
 reviewer settlement/reactivation and repaired candidate review were reported to
@@ -128,12 +128,30 @@ executed count exists for campaign changes yet.
 ## Next actions
 
 The two leaves now own a concrete root/transition constructor and consumer
-proposal, before code. Reuse the existing `Arc<DeclarationContextOwner>` for
+frontier. Reuse the existing `Arc<DeclarationContextOwner>` for
 the complete baseline context: support identity alone omits producer, lexical,
 template and original-instance facts. Effective private/protected selection
 remains with `RequestCompilerInputs.source_support`; runtime paired value/alias
 visibility and current admission remain separate. Do not add a second identity
 registry or wrap support just to mint an owner.
+
+The campaign approved a minimal real consumer first:
+`ProgramAdmissionContinuation::in_program_context` supplies no new private input
+and inherits the exact private/scaffold owner. A context-only
+`ExactRequestInputs` method may return its existing `Arc` on exact complete
+context-owner identity after producer/cancellation checks. Private arrivals and
+all changed owners still take checked admission. This bypasses repeated compiler
+input construction only; it does not bypass operation-local authority or demand.
+Implementation is running in `selected_root`; exact candidate/review is pending.
+
+Independent review caught an unsafe broader shortcut before acceptance:
+`with_inputs` freshly validates actual package-interface paths/digests through
+`PackageInterfaceValidation` on each continuation. Same immutable context owner
+does not own those mutable bytes. Remove/mutate an external `.hi` between two
+same-owner continuations and the second must still refuse. Owned-inputs confirms
+no immutable captured/pinned package lease is approved. The first reuse parcel
+therefore retains existing group/package validation unchanged; no group-path
+skip or new cross-operation package memo is authorized.
 
 Actual ordered cursor lag must be repaired at its issuing boundary:
 `admit_program_support` prepares `continued.inputs` before it publishes source
