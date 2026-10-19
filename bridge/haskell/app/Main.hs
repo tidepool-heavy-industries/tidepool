@@ -956,19 +956,19 @@ runWorldCellPrepareMode :: BoundCompilerRequest -> WorldCellPrepareRequest -> IO
 runWorldCellPrepareMode bound question = do
   admitted <- validateBoundWorldCell bound
   case admitted of
-    Left refusal -> writeResult (Left refusal) BS.empty [] []
+    Left refusal -> writeResult (Left refusal) BS.empty [] [] []
     Right initial
-      | null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "") [] []
+      | null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "") [] [] []
       | otherwise -> do
           attempted <- trySynchronous (prepareSegment initial)
           case attempted of
-            Right (items,observations,inputs,common,completion) -> do
-              writeResult (Right items) observations inputs common
+            Right (items,observations,inputs,common,plans,completion) -> do
+              writeResult (Right items) observations inputs common plans
               commitPreparedWorldDependencies bound completion
             Left failure -> case fromException failure of
-              Just refusal -> writeResult (Left refusal) BS.empty [] []
+              Just refusal -> writeResult (Left refusal) BS.empty [] [] []
               Nothing -> case fromException failure of
-                Just (WorldModulePolicyFailure _ _) -> writeResult (Left WorldCellUnsupported) BS.empty [] []
+                Just (WorldModulePolicyFailure _ _) -> writeResult (Left WorldCellUnsupported) BS.empty [] [] []
                 Nothing -> throwIO failure
   pure []
   where
@@ -985,8 +985,8 @@ runWorldCellPrepareMode bound question = do
     refusalTag WorldCellUnsupported = 0
     refusalTag WorldCellUnavailable = 1
     refusalTag WorldCellCorrupt = 2
-    writeResult outcome observations inputs common = BS.writeFile (worldCellPrepareOutput question) $
-      toStrictByteString (encodeListLen 8 <> text "TPCWPREP2" <> encodeBytes base
+    writeResult outcome observations inputs common plans = BS.writeFile (worldCellPrepareOutput question) $
+      toStrictByteString (encodeListLen 9 <> text "TPCWPREP3" <> encodeBytes base
         <> encodeBytes planDigest <> encodeBytes admission
         <> (case outcome of
           Left refusal -> encodeListLen 2 <> text "rejected" <> encodeWord64 (refusalTag refusal)
@@ -999,7 +999,8 @@ runWorldCellPrepareMode bound question = do
             <> text occurrence <> encodeSymbol symbol <> encodeWord64 variable <> encodeWord64 scope
             <> encodeWord64 generation <> encodeBytes row) inputs
         <> encodeListLen (fromIntegral (length common))
-        <> foldMap (\(path,sha) -> encodeListLen 2 <> text path <> encodeBytes sha) common)
+        <> foldMap (\(path,sha) -> encodeListLen 2 <> text path <> encodeBytes sha) common
+        <> encodeListLen (fromIntegral (length plans)) <> foldMap encodeTypedSegmentPlan plans)
     prepareSegment initial = do
       createDirectoryIfMissing True directory
       preparedBatch <- newIORef Nothing
@@ -1167,7 +1168,7 @@ runWorldCellPrepareMode bound question = do
           prefix = recordTypedSegment finalized typedPlan observations (concatMap snd signaturesByItem) rendered
             (initialProgramCellState (cellPlanPrologue initial) (worldCellPrepareIdentity question,planDigest) Map.empty)
       pure (descriptions,encodeCellOut finalized [] (programObservations prefix) (concat (programSources prefix))
-        ,worldCellInputReferences inputFacts,(sourceReceiptName,SHA256.hash sourceEnvelope):common,completion)
+        ,worldCellInputReferences inputFacts,(sourceReceiptName,SHA256.hash sourceEnvelope):common,[typedPlan],completion)
     rawWorldID [] = BS.empty
     rawWorldID (a:b:rest) = BS.cons (fromIntegral (16 * digitToInt a + digitToInt b)) (rawWorldID rest)
     rawWorldID _ = error "world identity left its admitted shape"
