@@ -44,7 +44,7 @@ import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
 import Tidepool.TypedSegment.Types (GeneratedSegmentOperations, generatedSegmentQualifier)
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterfaceBody, capturedSessionInterface, capturedSessionInterfaceEvidence)
 import Control.Monad (forM, forM_, unless)
-import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar, modifyMVarMasked)
 import GHC.Types.Name.Cache (NameCache(nsNames,nsUniqChar), OrigNameCache)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (mapAccumL, stripPrefix)
@@ -831,13 +831,15 @@ newRequestIfaceDecoder :: IO RequestIfaceDecoder
 newRequestIfaceDecoder = RequestIfaceDecoder <$> newMVar (UnrestrictedIfaceRetention,[])
 
 pruneRequestIfaceDecoder :: Set.Set String -> RequestIfaceDecoder -> IO Int
-pruneRequestIfaceDecoder selected (RequestIfaceDecoder state) = modifyMVar state $ \(_,universes) -> do
+pruneRequestIfaceDecoder selected (RequestIfaceDecoder state) = modifyMVarMasked state $ \(_,universes) -> do
   let retained = [(cache,chosen) | (cache,facts) <- universes
         , let chosen = Map.filterWithKey (\(_,_,sha) _ -> sha `Set.member` selected) facts
         , not (Map.null chosen)]
   -- Decoding follows scope acquisition. Later readers may use live captured
   -- inputs without reintroducing facts already excluded from inactive retention.
-  pure ((RetainedIfaceSeals selected,retained),sum [Map.size facts | (_,facts) <- retained])
+  count <- evaluate (sum [Map.size facts | (_,facts) <- retained])
+  _ <- evaluate (Set.size selected)
+  pure ((RetainedIfaceSeals selected,retained),count)
 
 readCapturedExactIfaceArtifacts :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO ArtifactBytes)
   -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact,ModIface)])
