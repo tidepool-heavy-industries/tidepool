@@ -97,6 +97,20 @@ Subsequent joined native evidence (separate from the original foundation):
   diagnostics_complete false. Receipt `sleep-binding-counted-receipt.json` and
   `sleep-binding-focus02/`. Preserve these limits despite the behavioral pass.
 
+Unchanged-baseline discriminator (qualification-owned): immutable `6d3` actor
+production/cfg(test)/declared resources compiled, then the maintained capture
+selector selected/executed 1 and failed at baseline `start.rs:1060` materialization
+with NativeGroupUnavailable ordinal 8 / CertifiedSelection candidate_count 1.
+The reload foundation fails later at augmented `start.rs:1183` mixed-grandchild
+checked compilation. The baseline reproduces a prerequisite failure class; it
+does not establish causal equivalence of these different failing construction
+steps or waive exact native selection. Report:
+`/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/baseline-6d3/reload-discriminators/capture/db2efc93ae350fd810806b1a4c1337a10f8488abd70e4524084d75835517cafd.json`.
+Baseline process cleanup is confirmed, compiler cleanup not_observed and
+diagnostics incomplete. No baseline edits. Qualification observer 26850 owns the
+two quoted-source baseline cases; await both terminal reports before selecting
+a repair. Canonical owner implementation proceeds independently.
+
 The std-only protocol generator, generated mirror refresh and snapshot check
 passed earlier (tests executed: 0); receipt `protocol-generator-receipt.json`.
 Generated consumers still require their owning gates. Pinned format/source-map
