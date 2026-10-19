@@ -250,7 +250,7 @@ pub struct PersistentSession {
     /// Immutable scoped semantics, keyed by witnesses from the mutation owners.
     /// Request counters and the ambient injection inventory are refreshed separately.
     compile_views: parking_lot::Mutex<HashMap<ScopeId, Arc<CachedCompileView>>>,
-    // Shared invalidation revision for stub and catalog input selection.
+    // Shared invalidation revision for stub/catalog inputs and resident hiding.
     // Zero permanently disables cached witnesses after counter exhaustion.
     compiler_input_revision: u64,
     #[cfg(test)]
@@ -420,7 +420,7 @@ impl PersistentSession {
         }
     }
 
-    fn advance_compiler_input_revision(&mut self) {
+    pub(super) fn advance_compiler_input_revision(&mut self) {
         self.compiler_input_revision = if self.compiler_input_revision == 0 {
             0
         } else {
