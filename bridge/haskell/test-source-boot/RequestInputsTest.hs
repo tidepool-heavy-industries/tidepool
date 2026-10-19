@@ -495,9 +495,11 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
             && total "exact_iface_decode_reuse.CanonicalSource" afterFailed == 0
             && total "exact_iface_decode_reuse.CanonicalDependency" afterFailed == 2)
           (fail ("failed " ++ kind ++ " acquisition split raw custody from decoder retention: " ++ afterFailed))
-        (_,stillPrevious) <- captureDiagnostics (readExactScopeWithOwner atomicOwner thirdPath >>= either fail pure)
+        -- Probe only Dependency after the decoder observations: aggregate
+        -- full-scope hit counts cannot distinguish retained Dependency/Source.
+        (_,stillPrevious) <- captureDiagnostics (readExactScopeWithOwner atomicOwner receiving >>= either fail pure)
         unless (total "original_inputs.certificate.hits" stillPrevious == 1
-            && total "original_inputs.certificate.misses" stillPrevious == 1)
+            && total "original_inputs.certificate.misses" stillPrevious == 0)
           (fail "failed acquisition discarded previous raw input facts")
       forM_ (scopeInterfaces live) $ \(iface,_,_) -> do
         bytes <- scopeInterfaceBytes live iface
