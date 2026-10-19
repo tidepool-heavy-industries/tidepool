@@ -139,9 +139,12 @@ The actual frozen428b trace now observes the first B Original promotion in the
 availability-only Candidate constructor, while an earlier Operators issuance retains
 required A7/A2. Strict refusal remains valid. Typed availability custody repair and
 finite fixture migration are under component qualification; exact joined frozen
-Persona still must execute successfully. At exact8ffc, production/cfg(test) compiled
-and five controls executed: two physical custody passes and three Request-history/
-compiled-permission failures. Exact8ed separately executed12 with2PASS/10FAIL. The passing Request matrix covers24 internal
+Persona still must execute successfully. At exact6d93, production/cfg(test) and the two changed publication/raw histories passed.
+Exacte47 separately passed full actual compiler source-proof pairing, retained-generation
+permissions and scoped historical-offer custody. Exact6be passed the actual Request-owned
+compiled A2 refusal/Full-positive control. The strict later publication-context equality
+still fails from unrelated InlineConsumer logical custody; its birth-offer owner repair
+and matched frozen rerun remain required. The passing Request matrix covers24 internal
 states, not24 maintained test executions. Exactef797 additionally passed the declared
 SOURCE boot reuse native-scope leaf1; empty-binder1 and a procedure refusal0 remain
 separate. No component count grants frontend, performance, release or deployment

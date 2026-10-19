@@ -194,30 +194,52 @@ fixture migrations use actual closed outputs and preserve refusal, physical owne
 retained-history and source-policy checks. NativeBinding closure is authenticated,
 not assumed from broad custody.
 
-Latest executed source `8ffc976b7550ac07e9da9c9bd768205babe3d6a5` compiled
-production and cfg(test), then selected/executed five controls: two passed and
-three failed. Both physical custody histories now pass with the authenticated
-Value type closure and only the newly issued C selected Original. Retained-generation
-permission reconstruction fails while finding its dependency row; the publication
-property shrinks to one Demand with a compiler-role mismatch; the real compiled
-Request permission companion does not yet reach its expected typed refusal.
-These exact outcomes remain under issuer/role classification. The earlier main
-pairing negative remains until that companion actually proves missing Input permission.
-Receipt `retry-8ffc/TERMINAL.json` SHA-256
-`8a0bd171b4d52b9f82ebb459c9758846c7264bb7c185ae24635904c79ddfae4d`
-binds the five reports to binary SHA-256
-`068832041300f6f66d7590d2e6da7428c6f235a3928f2ac7d93f243c9f542a5b`.
-Process cleanup is confirmed; compiler cleanup is not observed. GHC diagnostic
-evidence is incomplete; the four compiler-free reports are complete.
+Latest executed source `6d93cc5fac1474c3f4c1a4620b1299bbd67964e6` compiled
+production and cfg(test), then selected/executed/passed two maintained tests:
+the generated publication/recovery property and the repeated retained-core history.
+Receipt `retry-6d93/TERMINAL.json` SHA-256
+`312a9a77c914ee37076a25b870d7898e84115fbae9753e8903066c7a15dc582d`
+binds binary SHA-256 `293538c8b0a4853855b373c00d9a62ce9040ae1fac4c73ab14d9b09808a29646`.
+Property callbacks and internal histories are not additional test executions.
 
-Earlier exact `8ed8b1c43f3e6b177ebe36792660e5af2f93ce7e` compiled, then executed
-12 controls: two passed and ten failed. A mistyped graph selector first refused
-with zero execution; the corrected roster is separately retained. The passing
-Request permission matrix is ONE test with 24 internal states (16 accepted,
-8 typed refusals), including independent literal transport assertions. The A→Value
-closed-output fixture also passed. The intermediate `c2ea` test compile failed on
-one assertion-format error with zero executions; `8ffc` adds only its diagnostic.
-No failed assertion is waived by source review.
+Exact `e47c4e31a13f6fc3f39d326da4a65fa0721ade82` compiled and executed five:
+three passed (full real compiler source-proof pairing, retained-generation permissions,
+and selected-issuer/historical-offer custody), two failed at fixture assumptions
+subsequently corrected and executed at `6d93`. Its receipt SHA-256 is
+`e34ac89356ed440df82f76df56f60a8f44dc27dc41e844b255155c77d5d03f6f`.
+Exact `6be02773285fd4c4971cd66cf837e986ff8ce8b7` separately passed the real
+compiled Request native-permission test: one maintained test with two internal
+controls, exact required A2 typed refusal and independently issued Full-A success.
+Its receipt SHA-256 is
+`2ded3dd3c81c74c07ba0926343fd3cfc127a40f779c12d66b008d28822fdb7c1`.
+The paired test's old closed-C+A missing-Input premise was removed only after
+this actual replacement executed and received independent source review.
+
+Both physical custody histories passed at `8ffc`; exact-root deterministic and
+shrinking Request histories, physical source-graph lifetime and the 24-state
+independent literal-wire matrix passed at `d710`. The matrix is one maintained
+test with 16 accepted states and eight typed refusals. A mistyped selector earlier
+refused with zero execution; compile-format failures also remain separate.
+All cited process cleanup was confirmed; compiler cleanup was not observed.
+The real GHC reports retain incomplete diagnostic evidence. These component
+receipts do not establish a repaired frozen bundle or performance improvement.
+
+The strict publication-context test still fails. Actual `6be` reconstructs an older
+Alpha/Beta publication with later InlineConsumer canonical/original payloads and
+its Full-7 offer. Selected roles, normalized availability, decisions, lexical facts,
+templates and instance environment remain equal; logical custody, offers and
+semantic identity differ. Independent review confirmed the all-current-offers
+reattachment. A same-node Full-to-Partial witness proves graph membership cannot
+recover birth modes. The approved exact birth-owner repair is a separate,
+unimplemented production cone with Context6/role-native-authority codec work;
+its live capture must borrow maintained persistent facts without a domain fold.
+The immutable baseline and strict equality/native refusal remain unchanged.
+
+The available-custody foundation is being prepared independently of that later
+publication defect. Its alternate test issuers and obsolete caller migrations
+must be removed, compiled and receive complete-history independent review before
+an upward fold. No final area/frozen/service/ordinary-cell/performance acceptance
+follows from the component passes above.
 
 Earlier exact `ef797f477bb410c7fb98dad9b267cb32d93cfbc4` compiled and ran18 Rust
 controls (16passed,2failed). All13 finite main fixture consumers and actual physical

@@ -318,10 +318,15 @@ from explicitly selected compiler outputs. `OriginalCompilerInputs::from_candida
 authenticates and carries custody under receiving roles; it does not select every
 available catalog body as a new Original. Actual selected outputs retain the
 `CertifiedSourceSelection` / `from_selection` issuer and exact historical dependencies.
-This source observation is specific to the qualification probe (latest executed
-8ffc), whose five controls passed two physical ownership histories and failed three
-Request-history/compiled-permission assertions. Obsolete test-only strong issuers
-remain until their actual selected-output/Request replacements execute successfully. The actual frozen428b path remains a
+This source observation is specific to the qualification foundation: actual compiled
+Request permission refusal/Full positive and full source-proof pairing have executed;
+retained-generation, scoped-issuer, physical lifetime and independent generated histories
+have source-specific passing receipts in the qualification handoff. Alternate test issuers
+and obsolete callers still require removal, owning compilation and complete-history review.
+A separate strict publication-context failure remains: saved root reconstruction reattaches
+later unrelated offers as logical custody. Exact birth offer/mode/decision ownership and
+Context6 restoration are approved but unimplemented; no map entry claims they exist.
+The actual frozen428b path remains a
 required rerun after integration. No full-map, FD, encoding or hydration work reduction
 is inferred from this role correction; the service and actor migration rows above
 remain open until their actual consumers and counters execute.
