@@ -560,6 +560,115 @@ impl CompilerWorldRestoration {
     }
 }
 
+/// Transport aliases for one immutable captured namespace. Filesystem paths
+/// are receiving labels only: source bytes and negative facts belong to the
+/// captured roots, even after the worker materialization has retired.
+pub(crate) struct WorldSourcePathDomain<'a> {
+    sources: &'a CapturedCompilerSources,
+    aliases: &'a [PathBuf],
+    operation: &'a tidepool_repr::execution_schema::InventoryOperation,
+}
+
+impl<'a> WorldSourcePathDomain<'a> {
+    fn new(
+        sources: &'a CapturedCompilerSources,
+        aliases: &'a [PathBuf],
+        operation: &'a tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Self, CompileError> {
+        if aliases.len() != sources.roots.len() {
+            return Err(source_failure("world source root alias count differs"));
+        }
+        operation
+            .reserve::<[&PathBuf; 2]>(aliases.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        for alias in aliases {
+            crate::host_work::checkpoint()?;
+            operation
+                .charge(alias.as_os_str().len())
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            if !absolute_source_alias(alias) {
+                return Err(source_failure("world source root alias is not absolute"));
+            }
+        }
+        let mut ordered = aliases.iter().collect::<Vec<_>>();
+        ordered.sort_unstable();
+        if ordered.windows(2).any(|pair| pair[1].starts_with(pair[0])) {
+            return Err(source_failure("world source root aliases are ambiguous"));
+        }
+        Ok(Self {
+            sources,
+            aliases,
+            operation,
+        })
+    }
+
+    pub(crate) fn aliases(&self) -> &[PathBuf] {
+        self.aliases
+    }
+
+    fn relative<'p>(&self, path: &'p Path) -> Result<(usize, &'p Path), CompileError> {
+        if !absolute_source_alias(path) {
+            return Err(source_failure("world source path leaves its root alias"));
+        }
+        for (index, alias) in self.aliases.iter().enumerate() {
+            crate::host_work::checkpoint()?;
+            self.operation
+                .charge(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            if let Ok(relative) = path.strip_prefix(alias) {
+                if !relative.as_os_str().is_empty() {
+                    return Ok((index, relative));
+                }
+            }
+        }
+        Err(source_failure(
+            "world source path has no captured root alias",
+        ))
+    }
+
+    pub(crate) fn selected_source(
+        &self,
+        module: &str,
+        path: &Path,
+    ) -> Result<([u8; 32], usize), CompileError> {
+        let (index, relative) = self.relative(path)?;
+        match self.sources.selected_sources.get(module) {
+            Some(WorldModuleOrigin::Home {
+                root,
+                path,
+                source_sha256,
+            }) if *root as usize == index && Path::new(path) == relative => {
+                let body = self.sources.roots[index]
+                    .bodies
+                    .get(relative)
+                    .ok_or_else(|| source_failure("captured source selection has no body"))?;
+                Ok((*source_sha256, body.len()))
+            }
+            _ => Err(source_failure(
+                "world source selected another captured root or file",
+            )),
+        }
+    }
+
+    pub(crate) fn require_absent(&self, path: &Path) -> Result<(), CompileError> {
+        let (index, relative) = self.relative(path)?;
+        if self.sources.roots[index].bodies.contains_key(relative) {
+            return Err(source_failure("world source negative candidate is present"));
+        }
+        Ok(())
+    }
+}
+
+fn absolute_source_alias(path: &Path) -> bool {
+    path.is_absolute()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+}
+
 #[derive(Clone, Debug)]
 pub struct CompilerWorld {
     restoration: Arc<CompilerWorldRestoration>,
@@ -1832,6 +1941,17 @@ impl WorldCellOutputAdmission {
     pub(crate) fn segments(&self) -> &[Arc<crate::checked_cell::CheckedTypedSegmentPlan>] {
         &self.segments
     }
+
+    pub(crate) fn source_path_domain<'a>(
+        &'a self,
+        aliases: &'a [PathBuf],
+    ) -> Result<WorldSourcePathDomain<'a>, CompileError> {
+        WorldSourcePathDomain::new(
+            &self.reservation.plan().world().restoration.inputs.sources,
+            aliases,
+            &self.validation.inventory,
+        )
+    }
 }
 
 /// Bytes and their observed seal from the one named output acquisition. This
@@ -2790,6 +2910,68 @@ mod answer_tests {
             ]),
         ])
     }
+    #[test]
+    fn captured_source_aliases_survive_transport_directory_retirement() {
+        let first = b"module Module where\nvalue = (7 :: Int)\n";
+        let second = b"module Module where\nvalue = (8 :: Int)\n";
+        let captured = sources(first, second);
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let materialized = tempfile::tempdir().unwrap();
+        let aliases = vec![
+            materialized.path().join("root-0"),
+            materialized.path().join("root-1"),
+        ];
+        for (root, body) in aliases.iter().zip([first.as_slice(), second.as_slice()]) {
+            std::fs::create_dir_all(root).unwrap();
+            std::fs::write(root.join("Module.hs"), body).unwrap();
+        }
+        drop(materialized);
+        assert!(aliases.iter().all(|path| !path.exists()));
+        let domain = WorldSourcePathDomain::new(&captured, &aliases, &operation).unwrap();
+        assert_eq!(
+            domain
+                .selected_source("Module", &aliases[0].join("Module.hs"))
+                .unwrap(),
+            (world_digest(first), first.len())
+        );
+        // A lower root cannot win even when its own bytes and digest are valid.
+        assert!(domain
+            .selected_source("Module", &aliases[1].join("Module.hs"))
+            .is_err());
+        assert!(domain
+            .require_absent(&aliases[0].join("Module.hs"))
+            .is_err());
+        assert!(domain
+            .require_absent(&aliases[0].join("Missing.hs"))
+            .is_ok());
+        assert!(domain
+            .require_absent(&aliases[0].join("../escape.hs"))
+            .is_err());
+        assert!(WorldSourcePathDomain::new(&captured, &aliases[..1], &operation).is_err());
+        assert!(WorldSourcePathDomain::new(
+            &captured,
+            &[aliases[0].clone(), aliases[0].join("nested")],
+            &operation,
+        )
+        .is_err());
+        // Relocation changes receiving labels, never the captured selection.
+        let moved = vec![
+            PathBuf::from("/retired-copy/a"),
+            PathBuf::from("/retired-copy/b"),
+        ];
+        let moved_domain = WorldSourcePathDomain::new(&captured, &moved, &operation).unwrap();
+        assert_eq!(
+            moved_domain
+                .selected_source("Module", &moved[0].join("Module.hs"))
+                .unwrap(),
+            (world_digest(first), first.len())
+        );
+        assert!(moved_domain
+            .selected_source("Module", &aliases[0].join("Module.hs"))
+            .is_err());
+    }
+
     #[test]
     fn world_receipt_refuses_later_source_even_with_its_correct_hash() {
         let a = b"module Module where\nvalue = (1 :: Int)\n";

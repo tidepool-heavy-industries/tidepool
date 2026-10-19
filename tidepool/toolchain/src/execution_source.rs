@@ -94,6 +94,43 @@ pub(crate) fn validate_source_selected_originals_with_validation(
     context: SourceSelectionContext<'_>,
     package_validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<BTreeMap<ExactModuleIdentity, SourceSelectedOriginal>, CompileError> {
+    validate_source_selected_originals_in_domain(
+        claims,
+        evidence,
+        context,
+        package_validation,
+        None,
+    )
+}
+
+pub(crate) fn validate_world_source_selected_originals_with_validation(
+    claims: Vec<SourceSelectedOriginalClaim>,
+    evidence: &DependencyEvidence,
+    context: SourceSelectionContext<'_>,
+    domain: &crate::compiler_world::WorldSourcePathDomain<'_>,
+    package_validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Result<BTreeMap<ExactModuleIdentity, SourceSelectedOriginal>, CompileError> {
+    if context.include != domain.aliases() {
+        return Err(failure(
+            "world source roots differ from the bound alias domain",
+        ));
+    }
+    validate_source_selected_originals_in_domain(
+        claims,
+        evidence,
+        context,
+        package_validation,
+        Some(domain),
+    )
+}
+
+fn validate_source_selected_originals_in_domain(
+    claims: Vec<SourceSelectedOriginalClaim>,
+    evidence: &DependencyEvidence,
+    context: SourceSelectionContext<'_>,
+    package_validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    captured: Option<&crate::compiler_world::WorldSourcePathDomain<'_>>,
+) -> Result<BTreeMap<ExactModuleIdentity, SourceSelectedOriginal>, CompileError> {
     let refused = |detail: &str| failure(&format!("current source selection: {detail}"));
     if claims.is_empty()
         || claims.len() > OWNER_LIMIT
@@ -213,26 +250,34 @@ pub(crate) fn validate_source_selected_originals_with_validation(
         {
             return Err(refused("current source owner, path or digest changed"));
         }
-        let file = std::fs::File::open(&node.source)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() > SOURCE_BYTES_LIMIT as u64 {
-            return Err(refused("selected source exceeds its bound"));
-        }
-        package_validation
-            .inventory
-            .charge(metadata.len() as usize + 1)
-            .map_err(|error| failure(&error.to_string()))?;
-        let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
-        file.take(metadata.len() + 1).read_to_end(&mut bytes)?;
-        use std::os::unix::fs::MetadataExt;
-        let current_metadata = std::fs::metadata(&node.source)?;
-        if metadata.dev() != current_metadata.dev() || metadata.ino() != current_metadata.ino() {
-            return Err(refused("selected source path changed during capture"));
-        }
-        if bytes.len() as u64 != metadata.len()
-            || <[u8; 32]>::from(Sha256::digest(&bytes)) != claim.source_sha256
-        {
-            return Err(refused("selected original source changed"));
+        if let Some(domain) = captured {
+            let (digest, length) = domain.selected_source(&key.module, &node.source)?;
+            if length > SOURCE_BYTES_LIMIT || digest != claim.source_sha256 {
+                return Err(refused("selected original differs from captured source"));
+            }
+        } else {
+            let file = std::fs::File::open(&node.source)?;
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.len() > SOURCE_BYTES_LIMIT as u64 {
+                return Err(refused("selected source exceeds its bound"));
+            }
+            package_validation
+                .inventory
+                .charge(metadata.len() as usize + 1)
+                .map_err(|error| failure(&error.to_string()))?;
+            let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
+            file.take(metadata.len() + 1).read_to_end(&mut bytes)?;
+            use std::os::unix::fs::MetadataExt;
+            let current_metadata = std::fs::metadata(&node.source)?;
+            if metadata.dev() != current_metadata.dev() || metadata.ino() != current_metadata.ino()
+            {
+                return Err(refused("selected source path changed during capture"));
+            }
+            if bytes.len() as u64 != metadata.len()
+                || <[u8; 32]>::from(Sha256::digest(&bytes)) != claim.source_sha256
+            {
+                return Err(refused("selected original source changed"));
+            }
         }
         let exact_home = |edge: &ModuleImportEvidence| {
             let owner = ExactModuleIdentity {
@@ -431,7 +476,11 @@ pub(crate) fn validate_source_selected_originals_with_validation(
         }
         for path in &resolution.candidates {
             if Some(path) != resolution.selected.as_ref() {
-                validate_absent_source(path)?;
+                if let Some(domain) = captured {
+                    domain.require_absent(path)?;
+                } else {
+                    validate_absent_source(path)?;
+                }
             }
         }
     }
