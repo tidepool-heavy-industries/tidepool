@@ -228,7 +228,10 @@ data RequestField
   | InspectBrowse String
   | InspectBrowseExpanded String
   | InspectScopeBrowse
+  | InspectScopeBrowseBounded Int
+  | InspectBrowseBounded String Bool Int
   | InspectSearch String
+  | InspectSearchBounded String Int
   | InspectStructuredInfo StructuredInspection
   | InspectStructuredType StructuredInspection
   | InspectOut FilePath
@@ -483,8 +486,11 @@ data InspectionRequest
   = InspectTypeOf String
   | InspectNameInfo String
   | InspectModule String Bool
+  | InspectModuleBounded String Bool Int
   | InspectScope
+  | InspectScopeBounded Int
   | InspectTypeSearch String
+  | InspectTypeSearchBounded String Int
   | InspectStructuredInfoOf StructuredInspection
   | InspectStructuredTypeOf StructuredInspection
   deriving (Eq, Show)
@@ -571,8 +577,14 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
         { requestInspections = InspectModule name True : requestInspections request }
       InspectScopeBrowse -> request
         { requestInspections = InspectScope : requestInspections request }
+      InspectScopeBrowseBounded budget -> request
+        { requestInspections = InspectScopeBounded budget : requestInspections request }
+      InspectBrowseBounded name expanded budget -> request
+        { requestInspections = InspectModuleBounded name expanded budget : requestInspections request }
       InspectSearch query -> request
         { requestInspections = InspectTypeSearch query : requestInspections request }
+      InspectSearchBounded query budget -> request
+        { requestInspections = InspectTypeSearchBounded query budget : requestInspections request }
       InspectStructuredInfo query -> request
         { requestInspections = InspectStructuredInfoOf query : requestInspections request }
       InspectStructuredType query -> request
@@ -735,6 +747,10 @@ encodeField field = case field of
     <> BS.singleton (case worldQueryMode request of WorldStructuredInfo -> 0; WorldStructuredType -> 1)
     <> encodeStructuredInspection (worldQueryInspection request) <> textFrame (worldQueryOutput request)
   InspectScopeBrowse -> BS.singleton 43
+  InspectScopeBrowseBounded budget -> BS.singleton 61 <> putU32 budget
+  InspectBrowseBounded value expanded budget ->
+    BS.singleton 62 <> textFrame value <> BS.singleton (if expanded then 1 else 0) <> putU32 budget
+  InspectSearchBounded value budget -> BS.singleton 63 <> textFrame value <> putU32 budget
 
 encodeSymbolIdentity :: SymbolIdentity -> BS.ByteString
 encodeSymbolIdentity identity =
@@ -873,6 +889,22 @@ pField bytes = do
       if validExactInputsRequest request then Right (EnsureExactInputs request, afterValue)
         else Left "worker request: invalid exact input reference"
     43 -> Right (InspectScopeBrowse, rest)
+    61 -> do
+      (budget, afterBudget) <- pWord32 rest
+      bounded "scope browse" (InspectScopeBrowseBounded . fromIntegral) budget afterBudget
+    62 -> do
+      (name, afterName) <- pText rest
+      (expandedTag, afterExpanded) <- pWord8 afterName
+      expanded <- case expandedTag of
+        0 -> Right False
+        1 -> Right True
+        _ -> Left "worker request: invalid bounded-browse expansion flag"
+      (budget, afterBudget) <- pWord32 afterExpanded
+      bounded "module browse" (InspectBrowseBounded name expanded . fromIntegral) budget afterBudget
+    63 -> do
+      (query, afterQuery) <- pText rest
+      (budget, afterBudget) <- pWord32 afterQuery
+      bounded "type search" (InspectSearchBounded query . fromIntegral) budget afterBudget
     58 -> do
       (root, afterRoot) <- pText rest
       (reference, afterReference) <- pText afterRoot
@@ -911,6 +943,9 @@ pField bytes = do
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)
+    bounded label build budget afterBudget
+      | budget == 0 = Left ("worker request: " ++ label ++ " budget must be positive")
+      | otherwise = Right (build budget, afterBudget)
 
 -- Check operational bounds before decoding UTF-8 or allocating collections.
 pCellFrame :: Int -> Parser BS.ByteString

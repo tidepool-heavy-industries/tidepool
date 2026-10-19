@@ -838,14 +838,32 @@ impl ExtractCmd {
         self
     }
 
+    /// Enumerate the inspection scope, stopping the compiler at `budget` names.
+    pub fn inspect_scope_browse_bounded(&mut self, budget: u32) -> &mut Self {
+        self.request.inspect_scope_browse_bounded(budget);
+        self
+    }
+
     pub fn inspect_browse(&mut self, module: &str, expanded: bool) -> &mut Self {
         self.request.inspect_browse(module, expanded);
+        self
+    }
+
+    /// Enumerate a module's exports, stopping the compiler at `budget` names.
+    pub fn inspect_browse_bounded(&mut self, module: &str, expanded: bool, budget: u32) -> &mut Self {
+        self.request.inspect_browse_bounded(module, expanded, budget);
         self
     }
 
     /// Search the exact inspection scope for values compatible with a Haskell type.
     pub fn inspect_search(&mut self, query: &str) -> &mut Self {
         self.request.inspect_search(query);
+        self
+    }
+
+    /// Type search whose encoded match list stops at `budget`.
+    pub fn inspect_search_bounded(&mut self, query: &str, budget: u32) -> &mut Self {
+        self.request.inspect_search_bounded(query, budget);
         self
     }
 

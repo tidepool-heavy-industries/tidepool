@@ -18,10 +18,24 @@ pub enum InspectionQuery {
     TypeOf(String),
     Info(String),
     TypeSearch(String),
+    /// Type search whose encoded match list stops at `budget`. The search
+    /// itself still examines every candidate so an answer stays complete.
+    TypeSearchBounded {
+        pattern: String,
+        budget: usize,
+    },
     ScopeBrowse,
+    /// Scope enumeration whose rendered entry list stops at `budget` names.
+    ScopeBrowseBounded(usize),
     Browse {
         module: String,
         expanded: bool,
+    },
+    /// Module enumeration whose rendered entry list stops at `budget` names.
+    BrowseBounded {
+        module: String,
+        expanded: bool,
+        budget: usize,
     },
     StructuredInfo {
         query: NameQuery,
@@ -850,7 +864,9 @@ fn run_inspection_batch(
             query,
             InspectionQuery::Info(_)
                 | InspectionQuery::ScopeBrowse
+                | InspectionQuery::ScopeBrowseBounded(_)
                 | InspectionQuery::Browse { .. }
+                | InspectionQuery::BrowseBounded { .. }
                 | InspectionQuery::StructuredInfo { .. }
                 | InspectionQuery::StructuredType { .. }
         );
@@ -865,8 +881,11 @@ fn run_inspection_batch(
             InspectionQuery::TypeOf(expression) => std::slice::from_ref(expression),
             InspectionQuery::Info(_)
             | InspectionQuery::TypeSearch(_)
+            | InspectionQuery::TypeSearchBounded { .. }
             | InspectionQuery::ScopeBrowse
+            | InspectionQuery::ScopeBrowseBounded(_)
             | InspectionQuery::Browse { .. }
+            | InspectionQuery::BrowseBounded { .. }
             | InspectionQuery::StructuredInfo { .. }
             | InspectionQuery::StructuredType { .. } => &[],
         };
@@ -876,7 +895,12 @@ fn run_inspection_batch(
             source.push_str(effects.expression());
             source.push_str(")\n__tidepool_inspection_row = Data.Proxy.Proxy\n");
         }
-        if let InspectionQuery::TypeSearch(query) = query {
+        let type_search = match query {
+            InspectionQuery::TypeSearch(query) => Some(query),
+            InspectionQuery::TypeSearchBounded { pattern, .. } => Some(pattern),
+            _ => None,
+        };
+        if let Some(query) = type_search {
             source.push_str("\n__tidepool_type_search_query :: ");
             source.push_str(query);
             source.push_str("\n__tidepool_type_search_query = __tidepool_type_search_query\n");
@@ -895,11 +919,24 @@ fn run_inspection_batch(
                 InspectionQuery::TypeSearch(query) => {
                     command.inspect_search(query);
                 }
+                InspectionQuery::TypeSearchBounded { pattern, budget } => {
+                    command.inspect_search_bounded(pattern, budget_u32(*budget)?);
+                }
                 InspectionQuery::ScopeBrowse => {
                     command.inspect_scope_browse();
                 }
+                InspectionQuery::ScopeBrowseBounded(budget) => {
+                    command.inspect_scope_browse_bounded(budget_u32(*budget)?);
+                }
                 InspectionQuery::Browse { module, expanded } => {
                     command.inspect_browse(module, *expanded);
+                }
+                InspectionQuery::BrowseBounded {
+                    module,
+                    expanded,
+                    budget,
+                } => {
+                    command.inspect_browse_bounded(module, *expanded, budget_u32(*budget)?);
                 }
                 InspectionQuery::StructuredInfo { query, provenance } => {
                     command.inspect_structured_info(structured_request(query, provenance));
@@ -1661,6 +1698,17 @@ fn text<'a>(value: &'a CborValue, what: &str) -> Result<&'a str, CompileError> {
 
 fn invalid(detail: impl Into<String>) -> CompileError {
     CompileError::ExtractFailed(format!("inspection receipt: {}", detail.into()))
+}
+
+/// A query budget crosses the worker wire as a positive `u32`. Zero would be
+/// indistinguishable from an omitted budget, so an explicit zero is a caller
+/// bug rather than "return nothing".
+fn budget_u32(budget: usize) -> Result<u32, CompileError> {
+    match u32::try_from(budget) {
+        Ok(budget) if budget > 0 => Ok(budget),
+        Ok(_) => Err(invalid("inspection budget must be positive")),
+        Err(_) => Err(invalid("inspection budget exceeds the worker wire width")),
+    }
 }
 
 #[cfg(test)]
