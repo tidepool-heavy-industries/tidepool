@@ -1,9 +1,12 @@
 # Native admission: preserve issued facts and remove reconstruction
 
-The measured historical tail is 18.219 seconds across 13 scripted prepared
-workspace cells, including 12.013 seconds completing new native availability.
-It is not a per-cell cost or a post-integration speed claim. Source investigation
-used c7dc43bbd555ae58d46ac022467917ea4e9ec339; fresh qualification owns acceptance.
+The earlier proposal reported an 18.219-second tail across 13 scripted prepared
+workspace cells, including 12.013 seconds completing native availability. Those
+aggregates lack a linked measurement receipt and require confirmation; they are
+neither per-cell costs nor post-integration speed claims. The retained b108
+stage table measures 20.003934 seconds across 13 segment-certification calls at
+a broader boundary. Source investigation used
+c7dc43bbd555ae58d46ac022467917ea4e9ec339; fresh qualification owns acceptance.
 
 ## Approved parcels
 
