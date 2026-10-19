@@ -677,10 +677,12 @@ mod tests {
         assert_eq!(capture.bytes_written(), before);
         // Oversized advertised input must fail before allocating or reopening
         // its nonexistent receiving alias, with an explicit incomplete result.
+        part.path = PathBuf::from("/receiving/alias/that/does/not/exist");
         part.bytes = BYTE_LIMIT + 1;
-        assert!(capture
+        let error = capture
             .original_parts(&[7; 32], "main", "Module", &[part])
-            .is_err());
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
         capture.finish_original_parts().unwrap();
         drop(arena);
         assert!(weak.upgrade().is_none());
