@@ -267,13 +267,16 @@ impl WorldCellPrepareRequest {
                             _ => true,
                         }
                 })
-            && self
-                .slots
-                .iter()
-                .map(|(_, slot)| slot.generation())
-                .collect::<BTreeSet<_>>()
-                .len()
-                == self.slots.len()
+            && {
+                let mut declarations = BTreeSet::new();
+                let mut values = BTreeSet::new();
+                self.slots.iter().all(|(_, slot)| match slot {
+                    PlannedCellSlot::Prologue(generation)
+                    | PlannedCellSlot::Declaration(generation) => declarations.insert(*generation),
+                    PlannedCellSlot::Bind(generation)
+                    | PlannedCellSlot::Expression { generation, .. } => values.insert(*generation),
+                })
+            }
             && valid_cell_path(&self.directory)
             && valid_cell_path(&self.output)
     }
@@ -3563,6 +3566,32 @@ mod tests {
                 ProtocolError::InvalidWorldCell
             );
         }
+        let mut overlapping = prepare.clone();
+        overlapping.slots = vec![
+            (0, PlannedCellSlot::Declaration(1)),
+            (1, PlannedCellSlot::Bind(1)),
+        ];
+        let mut request = ExtractRequest::default();
+        request.world_cell_prepare(overlapping.clone()).unwrap();
+        assert_eq!(
+            ExtractRequest::decode(&request.encode()).unwrap().encode(),
+            request.encode()
+        );
+        overlapping.slots[1].1 = PlannedCellSlot::Prologue(1);
+        assert_eq!(
+            overlapping.validate_transport(),
+            Err(ProtocolError::InvalidWorldCell)
+        );
+        overlapping.slots[0].1 = PlannedCellSlot::Expression {
+            generation: 1,
+            observation: "it".into(),
+        };
+        overlapping.slots[1].1 = PlannedCellSlot::Bind(1);
+        assert_eq!(
+            overlapping.validate_transport(),
+            Err(ProtocolError::InvalidWorldCell)
+        );
+
         let mut empty = prepare;
         empty.slots.clear();
         let mut request = ExtractRequest::default();
