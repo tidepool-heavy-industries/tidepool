@@ -23,6 +23,9 @@ pub(crate) const BOOT_ENV: [&str; 6] = [
 ];
 const LIMIT: usize = 16 * 1024 * 1024;
 const HANDOFF: &str = "compiler-service-source.receipt.bin";
+const FINALIZATION: &str = "compiler-service-source.finalization.bin";
+const FINALIZED: &str = "compiler-service-source.finalized.bin";
+const COMPLETION: &str = "compiler-service-complete-retirement.json";
 
 fn invalid(message: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
@@ -128,6 +131,7 @@ fn capture_provider(file: &File, expected: &[u8; 32]) -> io::Result<File> {
 /// deployment. Merely choosing environment data cannot issue that admission.
 pub(crate) struct ConfiguredSource {
     python: File,
+    python_object: PathBuf,
     provider: File,
     record: PathBuf,
     record_sha: [u8; 32],
@@ -182,6 +186,7 @@ impl ConfiguredSource {
                 "service verifier Python must be its immutable declared Nix executable",
             ));
         }
+        let python_object = nix_object(&canonical)?;
         let mut python = File::open(canonical)?;
         let mut hasher = Sha256::new();
         let mut buffer = [0; 64 * 1024];
@@ -199,6 +204,7 @@ impl ConfiguredSource {
         let provider = capture_provider(&File::open(provider_path)?, &provider_sha)?;
         Ok(Self {
             python,
+            python_object,
             provider,
             record,
             record_sha,
@@ -366,12 +372,15 @@ impl ConfiguredSource {
     ) -> io::Result<()> {
         let bytes = read_bounded(&File::open(owner.join(HANDOFF))?)?;
         let source = self.decode_receipt_metadata(&bytes, epoch)?;
+        if source.receipt != owner.join("package-source/receipt.json") {
+            return Err(invalid("service receipt is outside the exact owner"));
+        }
         let completion = source
             .receipt
             .parent()
             .and_then(Path::parent)
             .ok_or_else(|| invalid("invalid receipt owner"))?
-            .join("compiler-service-complete-retirement.json");
+            .join(COMPLETION);
         let json = format!("{{\"schema\":1,\"kind\":\"compiler-service-complete-retirement\",\"service_epoch\":\"{}\",\"source_id\":\"{}\",\"profile_id\":\"{}\",\"receipt_sha256\":\"{}\",\"complete\":true}}\n",crate::endpoint::hex(&epoch),crate::endpoint::hex(&self.source),crate::endpoint::hex(&self.profile),crate::endpoint::hex(&source.receipt_sha));
         tidepool_atomic_write::write_durable(&completion, json.as_bytes())
             .map_err(io::Error::other)?;
@@ -383,17 +392,159 @@ impl ConfiguredSource {
             .arg("--receipt-sha256")
             .arg(crate::endpoint::hex(&source.receipt_sha))
             .arg("--complete-retirement")
-            .arg(completion)
+            .arg(&completion)
             .stdout(Stdio::inherit())
             .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(invalid(format!(
+        if !status.success() {
+            return Err(invalid(format!(
                 "service package source release failed: {status}"
-            )))
+            )));
         }
+        // Provider success means the package roots are durably settled while
+        // its Python closure remains pinned. Native recovery owns the last root.
+        let roots = owner.join("package-source/gc-roots");
+        if std::fs::canonicalize(&roots)? != roots {
+            return Err(invalid("guard directory is not owned in place"));
+        }
+        let guard = roots.join(crate::endpoint::hex(&digest(
+            self.python_object.as_os_str().as_encoded_bytes(),
+        )));
+        if std::fs::read_link(&guard)? != self.python_object {
+            return Err(invalid(
+                "provider did not retain the authenticated Python guard",
+            ));
+        }
+        let mut pending = b"TPSFN001".to_vec();
+        for hash in [
+            epoch,
+            self.source,
+            self.profile,
+            source.receipt_sha,
+            self.launch_sha,
+            digest(json.as_bytes()),
+            digest(&bytes),
+        ] {
+            pending.extend_from_slice(&hash);
+        }
+        let target = self.python_object.as_os_str().as_encoded_bytes();
+        let length = u32::try_from(target.len()).map_err(invalid)?;
+        pending.extend_from_slice(&length.to_le_bytes());
+        pending.extend_from_slice(target);
+        pending.extend_from_slice(&digest(&pending));
+        tidepool_atomic_write::write_durable(&owner.join(FINALIZATION), &pending)
+            .map_err(io::Error::other)?;
+        finish_retirement(owner)
     }
+}
+
+fn nix_object(path: &Path) -> io::Result<PathBuf> {
+    let relative = path.strip_prefix("/nix/store").map_err(invalid)?;
+    let first = relative
+        .components()
+        .next()
+        .ok_or_else(|| invalid("missing Nix object"))?;
+    let Component::Normal(name) = first else {
+        return Err(invalid("invalid Nix object"));
+    };
+    let text = name
+        .to_str()
+        .ok_or_else(|| invalid("non-UTF8 Nix object"))?;
+    if text.len() < 34
+        || text.as_bytes()[32] != b'-'
+        || !text[..32]
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return Err(invalid("invalid Nix object basename"));
+    }
+    Ok(Path::new("/nix/store").join(name))
+}
+
+/// Resume only the native final obligation. No provider, Python executable,
+/// environment configuration or released profile is opened on this path.
+pub(crate) fn finish_retirement(owner: &Path) -> io::Result<()> {
+    if !owner.is_absolute() || std::fs::canonicalize(owner)? != owner {
+        return Err(invalid("retirement owner must be its canonical directory"));
+    }
+    let pending = read_bounded(&File::open(owner.join(FINALIZATION))?)?;
+    let (body, seal) = pending
+        .split_at_checked(
+            pending
+                .len()
+                .checked_sub(32)
+                .ok_or_else(|| invalid("truncated finalization"))?,
+        )
+        .ok_or_else(|| invalid("truncated finalization"))?;
+    if digest(body).as_slice() != seal {
+        return Err(invalid("finalization seal differs"));
+    }
+    let mut decoder = Decoder(body);
+    if decoder.take(8)? != b"TPSFN001" {
+        return Err(invalid("unsupported finalization version"));
+    }
+    let epoch = decoder.hash()?;
+    let source = decoder.hash()?;
+    let profile = decoder.hash()?;
+    let receipt_sha = decoder.hash()?;
+    let _launch_sha = decoder.hash()?;
+    let complete_sha = decoder.hash()?;
+    let handoff_sha = decoder.hash()?;
+    let target = decoder.path()?;
+    decoder.end()?;
+    if nix_object(&target)? != target {
+        return Err(invalid("guard target is not a top-level Nix object"));
+    }
+    let handoff = read_bounded(&File::open(owner.join(HANDOFF))?)?;
+    if digest(&handoff) != handoff_sha {
+        return Err(invalid("finalization handoff differs"));
+    }
+    let mut receipt = Decoder(&handoff);
+    if receipt.take(8)? != b"TPSRC001"
+        || receipt.hash()? != epoch
+        || receipt.hash()? != source
+        || receipt.hash()? != profile
+        || receipt.path()? != owner.join("package-source/receipt.json")
+        || receipt.hash()? != receipt_sha
+    {
+        return Err(invalid("finalization receipt association differs"));
+    }
+    // Decode the unused profile locator as data, without reopening that object.
+    receipt.path()?;
+    receipt.hash()?;
+    receipt.end()?;
+    if digest(&read_bounded(&File::open(
+        owner.join("package-source/receipt.json"),
+    )?)?)
+        != receipt_sha
+        || digest(&read_bounded(&File::open(owner.join(COMPLETION))?)?) != complete_sha
+    {
+        return Err(invalid("finalization custody evidence differs"));
+    }
+    let roots = owner.join("package-source/gc-roots");
+    if std::fs::canonicalize(&roots)? != roots {
+        return Err(invalid("guard directory is not owned in place"));
+    }
+    let guard = roots.join(crate::endpoint::hex(&digest(
+        target.as_os_str().as_encoded_bytes(),
+    )));
+    match std::fs::read_link(&guard) {
+        Ok(actual) if actual == target => std::fs::remove_file(&guard)?,
+        Ok(_) => return Err(invalid("provider guard target differs")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // A durable pending record precedes unlink, so absent is a valid
+            // interrupted native-finalization state, independent of Nix GC.
+            match std::fs::symlink_metadata(&guard) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+                Ok(_) => return Err(invalid("provider guard is not a symlink")),
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    File::open(&roots)?.sync_all()?;
+    tidepool_atomic_write::write_durable(&owner.join(FINALIZED), &digest(&pending))
+        .map_err(io::Error::other)?;
+    Ok(())
 }
 
 struct ReceiptMetadata {
@@ -500,6 +651,85 @@ pub(crate) struct WorkerPackageBootReceipt {
 mod tests {
     use super::*;
 
+    fn pending_retirement() -> (tempfile::TempDir, PathBuf) {
+        let owner = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(owner.path()).unwrap();
+        std::fs::create_dir_all(root.join("package-source/gc-roots")).unwrap();
+        let target = PathBuf::from("/nix/store/00000000000000000000000000000000-python");
+        let receipt_bytes = b"exact issued acquisition";
+        let completion_bytes = b"complete actual process retirement";
+        std::fs::write(root.join("package-source/receipt.json"), receipt_bytes).unwrap();
+        std::fs::write(root.join(COMPLETION), completion_bytes).unwrap();
+        let mut handoff = b"TPSRC001".to_vec();
+        for part in [[1; 32], [2; 32], [3; 32]] {
+            handoff.extend_from_slice(&part);
+        }
+        let frame = |bytes: &mut Vec<u8>, path: &Path| {
+            let value = path.as_os_str().as_encoded_bytes();
+            bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(value);
+        };
+        frame(&mut handoff, &root.join("package-source/receipt.json"));
+        handoff.extend_from_slice(&digest(receipt_bytes));
+        // The profile does not exist: recovery must not need to reopen it.
+        frame(
+            &mut handoff,
+            Path::new("/nix/store/00000000000000000000000000000000-collected-profile"),
+        );
+        handoff.extend_from_slice(&[4; 32]);
+        std::fs::write(root.join(HANDOFF), &handoff).unwrap();
+        let mut pending = b"TPSFN001".to_vec();
+        for part in [
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            digest(receipt_bytes),
+            [5; 32],
+            digest(completion_bytes),
+            digest(&handoff),
+        ] {
+            pending.extend_from_slice(&part);
+        }
+        frame(&mut pending, &target);
+        pending.extend_from_slice(&digest(&pending));
+        tidepool_atomic_write::write_durable(&root.join(FINALIZATION), &pending).unwrap();
+        let guard = root
+            .join("package-source/gc-roots")
+            .join(crate::endpoint::hex(&digest(
+                target.as_os_str().as_encoded_bytes(),
+            )));
+        std::os::unix::fs::symlink(&target, &guard).unwrap();
+        (owner, guard)
+    }
+
+    #[test]
+    fn native_retirement_resumes_after_guard_unlink_without_provider_or_profile() {
+        let (owner, guard) = pending_retirement();
+        // Fail the final durable outcome after the actual guard was removed.
+        std::fs::create_dir(owner.path().join(FINALIZED)).unwrap();
+        assert!(finish_retirement(owner.path()).is_err());
+        assert!(std::fs::symlink_metadata(&guard).is_err());
+        std::fs::remove_dir(owner.path().join(FINALIZED)).unwrap();
+        finish_retirement(owner.path()).unwrap();
+        finish_retirement(owner.path()).unwrap();
+        assert!(owner.path().join(FINALIZED).is_file());
+    }
+
+    #[test]
+    fn native_retirement_refuses_changed_guard_and_custody_evidence() {
+        let (owner, guard) = pending_retirement();
+        std::fs::remove_file(&guard).unwrap();
+        std::os::unix::fs::symlink("/nix/store/11111111111111111111111111111111-other", &guard)
+            .unwrap();
+        assert!(finish_retirement(owner.path()).is_err());
+        assert!(std::fs::read_link(&guard).is_ok());
+        std::fs::remove_file(&guard).unwrap();
+        std::os::unix::fs::symlink("/nix/store/00000000000000000000000000000000-python", &guard).unwrap();
+        std::fs::write(owner.path().join(COMPLETION), b"unrelated completion").unwrap();
+        assert!(finish_retirement(owner.path()).is_err());
+        assert!(!owner.path().join(FINALIZED).exists());
+    }
+
     #[test]
     fn authenticated_provider_retains_sealed_captured_bytes() {
         let mut original = tempfile::tempfile().unwrap();
@@ -524,6 +754,7 @@ mod tests {
     fn source() -> Arc<ServicePackageSource> {
         Arc::new(ServicePackageSource {
             configuration: Arc::new(ConfiguredSource {
+                python_object: PathBuf::from("/nix/store/00000000000000000000000000000000-python"),
                 python: File::open("/dev/null").unwrap(),
                 provider: File::open("/dev/null").unwrap(),
                 record: "/unused".into(),

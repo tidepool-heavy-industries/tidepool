@@ -31,6 +31,18 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
     if args.is_empty() {
         return Err(FrontendError::Usage(USAGE.to_owned()));
     }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--finish-compiler-service-source-retirement")
+    {
+        let [_, owner] = args.as_slice() else {
+            return Err(FrontendError::Usage(
+                "--finish-compiler-service-source-retirement requires one owner directory".into(),
+            ));
+        };
+        crate::package_source::finish_retirement(Path::new(owner)).map_err(FrontendError::Io)?;
+        return Ok(0);
+    }
     if args.first().is_some_and(|arg| arg == "--owned-daemon-run") {
         return owned_daemon_run(&args[1..]);
     }
@@ -972,13 +984,21 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
         }
         Ok((code, stdout, stderr))
     })();
-    if result.is_ok() {
-        worker.shutdown_confirmed()?;
-    } else {
-        // A rejected frame can leave the worker blocked writing its unread
-        // body. Waiting for stdin EOF would not make that worker exit.
-        worker.abort();
-    }
+    let result = match result {
+        Ok(report) => match worker.shutdown_confirmed() {
+            Ok(()) => Ok(report),
+            Err(error) => {
+                received_before_failed_end = Some(report);
+                Err(error)
+            }
+        },
+        Err(error) => {
+            // A rejected frame can leave the worker blocked writing its unread
+            // body. Waiting for stdin EOF would not make that worker exit.
+            worker.abort();
+            Err(error)
+        }
+    };
     // A successful response releases the caller's direct endpoint, which can
     // immediately terminate this frontend. Reap and retire scratch ownership
     // before publishing that final response.
