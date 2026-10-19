@@ -245,7 +245,7 @@ fn indexed_model_witnesses_reject_wrong_family_and_coercion() {
 fn command_composition_documentation_compiles_against_authored_exports() {
     let surface = Surface::new();
     let fixture = std::fs::read_to_string(surface.fixtures.join("CommandComposition.hs")).unwrap();
-    let docs = tidepool_mcp::effect_documentation(&tidepool_mcp::commands_decl()).unwrap();
+    let docs = tidepool_mcp::effect_documentation(&tidepool_mcp::commands_decl());
     assert!(!docs.operations.is_empty());
     assert!(docs
         .operations

@@ -14,7 +14,7 @@ pub fn runtime_info_decl() -> crate::EffectDecl {
         ],
         type_defs: &[
             "data EffectDocsSnapshot = EffectDocsSnapshot { effectDocsInstall :: Int, effectDocsSource :: Text, effectDocsGeneration :: Maybe Int, effectDocsEffects :: [EffectDocumentation] } deriving (Show, Eq)",
-            "data EffectDocumentation = EffectDocumentation { effectDocumentationIdentity :: ActorEffectKey, effectDocumentationBody :: EffectDocumentationBody } deriving (Show, Eq)",
+            "data EffectDocumentation = EffectDocumentation { effectDocumentationIdentity :: ToolEffectKey, effectDocumentationBody :: EffectDocumentationBody } deriving (Show, Eq)",
             "data EffectDocumentationBody = EffectDocumentationMissing | EffectDocumentationAvailable EffectDocumentationFacts deriving (Show, Eq)",
             "data EffectDocumentationFacts = EffectDocumentationFacts { effectDocumentationDescription :: Text, effectDocumentationCard :: Maybe Text, effectDocumentationImports :: [Text], effectDocumentationOperations :: [EffectOperationDocumentation] } deriving (Show, Eq)",
             "data EffectOperationDocumentation = EffectOperationDocumentation { effectOperationName :: Text, effectOperationSignature :: Text, effectOperationContract :: [Text], effectOperationExamples :: [Text], effectOperationSource :: Maybe Text } deriving (Show, Eq)",
@@ -29,7 +29,7 @@ pub fn runtime_info_decl() -> crate::EffectDecl {
         extra_imports: &[],
         helpers: &[
             crate::effect_defs::helper_decl!(@ Some("getRuntimeInfo"), Public, { raw ["-- | Observe this execution's installed spec and configured inference, plus startup evidence as of the query. Safe during initialContext; no filesystem or memory-policy inference.\ngetRuntimeInfo :: forall effs. Member RuntimeInfo effs => Eff effs (Either RuntimeInfoError RuntimeInfoSnapshot)\ngetRuntimeInfo = send GetRuntimeInfoWith"] }),
-            crate::effect_defs::helper_decl!(@ Some("currentEffectDocs"), Public, { raw ["-- | Observe structured documentation for this execution's exact installed interpreter row. Safe during initialContext; uses the shipped catalogue without GHC lookup. Membership does not establish runtime grants or credential availability.\ncurrentEffectDocs :: forall effs. Member RuntimeInfo effs => Eff effs (Either RuntimeInfoError EffectDocsSnapshot)\ncurrentEffectDocs = send CurrentEffectDocsWith"] }),
+            crate::effect_defs::helper_decl!(@ Some("currentEffectDocs"), Public, { raw ["-- | Observe structured documentation for this execution's exact admitted endpoint or slot effect row. Safe during initialContext; uses the shipped catalogue without GHC lookup. Membership does not establish runtime grants or credential availability.\ncurrentEffectDocs :: forall effs. Member RuntimeInfo effs => Eff effs (Either RuntimeInfoError EffectDocsSnapshot)\ncurrentEffectDocs = send CurrentEffectDocsWith"] }),
         ],
         type_params: &[],
         default_row_args: &[],

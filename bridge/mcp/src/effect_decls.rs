@@ -323,10 +323,11 @@ pub struct EffectDocumentationFacts {
     pub operations: Vec<EffectOperationDocumentation>,
 }
 
-/// Project facts from the selected declaration; unavailable schema metadata is explicit.
+/// Project known facts from the selected declaration. Operation entries are
+/// available metadata, not an exhaustive claim about callable vocabulary.
 #[must_use]
-pub fn effect_documentation(decl: &EffectDecl) -> Option<EffectDocumentationFacts> {
-    Some(EffectDocumentationFacts {
+pub fn effect_documentation(decl: &EffectDecl) -> EffectDocumentationFacts {
+    EffectDocumentationFacts {
         description: decl.description.into(),
         prompt_card: decl.prompt_card.map(Into::into),
         imports: decl
@@ -335,7 +336,7 @@ pub fn effect_documentation(decl: &EffectDecl) -> Option<EffectDocumentationFact
             .map(|value| (*value).into())
             .collect(),
         operations: crate::generated::operation_documentation(decl.type_name).unwrap_or_default(),
-    })
+    }
 }
 
 /// Resolve a nominal selected row key through the existing declaration catalogue.
@@ -353,7 +354,7 @@ pub fn effect_documentation_for(
             declaration = declaration.for_model_permission(permission);
         }
     }
-    effect_documentation(&declaration)
+    Some(effect_documentation(&declaration))
 }
 
 #[cfg(test)]

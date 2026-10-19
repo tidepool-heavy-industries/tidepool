@@ -251,3 +251,34 @@ impl TryFrom<exomonad_tool::ActorEffectKey> for ActorEffectKeyWire {
         })
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell, tidepool_bridge_derive::ToHaskell)]
+pub enum ToolEffectKeyWire {
+    #[haskell(module = "Tidepool.Effects.Core")]
+    ActorEffect(ActorEffectKeyWire),
+    #[haskell(module = "Tidepool.Effects.Core")]
+    InvocationContextReadWrite,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    InvocationReload,
+}
+
+impl TryFrom<exomonad_tool::ToolEffectKey> for ToolEffectKeyWire {
+    type Error = &'static str;
+    fn try_from(key: exomonad_tool::ToolEffectKey) -> Result<Self, Self::Error> {
+        Ok(match key {
+            exomonad_tool::ToolEffectKey::Actor(actor) => Self::ActorEffect(actor.try_into()?),
+            exomonad_tool::ToolEffectKey::ContextReadWrite => Self::InvocationContextReadWrite,
+            exomonad_tool::ToolEffectKey::Reload => Self::InvocationReload,
+        })
+    }
+}
+
+impl From<ToolEffectKeyWire> for exomonad_tool::ToolEffectKey {
+    fn from(key: ToolEffectKeyWire) -> Self {
+        match key {
+            ToolEffectKeyWire::ActorEffect(actor) => Self::Actor(actor.into()),
+            ToolEffectKeyWire::InvocationContextReadWrite => Self::ContextReadWrite,
+            ToolEffectKeyWire::InvocationReload => Self::Reload,
+        }
+    }
+}
