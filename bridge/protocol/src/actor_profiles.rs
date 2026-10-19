@@ -476,14 +476,6 @@ pub const EFFECTS: &[NominalEffect] = &[
         "Tidepool.Effects.Core"
     ),
     nominal!(Source, EffectSource, 21, 28, 23, "Tidepool.Effects.Core"),
-    nominal!(
-        RuntimeInfo,
-        EffectRuntimeInfo,
-        27,
-        40,
-        39,
-        "Tidepool.Effects.Core"
-    ),
     nominal!(Journal, EffectJournal, 22, 24, 24, "Tidepool.Effects.Core"),
     nominal!(Web, EffectWeb, 23, 25, 25, "Tidepool.Effects.Core"),
     nominal!(
@@ -536,6 +528,14 @@ pub const EFFECTS: &[NominalEffect] = &[
         rust_order: 30,
         bridge_order: 29,
     },
+    nominal!(
+        RuntimeInfo,
+        EffectRuntimeInfo,
+        27,
+        40,
+        39,
+        "Tidepool.Effects.Core"
+    ),
 ];
 
 /// Forks was serialized as an actor key but never had a Haskell nominal type.
