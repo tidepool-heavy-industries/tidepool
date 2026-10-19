@@ -2,7 +2,10 @@
 
 Parent: `/root/warm_compiler_campaign`; supervisor:
 `/root/warm_compiler_campaign/owned_inputs`. Accepted contract/base:
-`5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. This includes peer prerequisite
+`5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. C2 amendment received and read:
+`e2bd2611102566085d0c573568d820a50ed62fb3`; physical work preserves the
+authenticated selected canonical/value/lexical module census separately from
+type-name home units, custody and demand. This includes peer prerequisite
 `70a92c65a02a591f76590daf4e5bfa3e6fcbf723`; that prerequisite is not campaign output.
 Area checkout: `/srv/swarm/checkouts/tidepool-shared-warm-owned-inputs-20261019`,
 branch `feature/shared-warm/owned-inputs`. No live host or deployment changes.
@@ -40,11 +43,26 @@ value paths to selected materialized rows. Implementation must reuse that owner
 instead of moving repeated copies into publication or making a second arena.
 Equal payloads remain distinct from issued receipt/binding authority.
 
-Package investigation found that admitted deployment currently retains
+WIP review found that inserting a singleton row into the complete-context cache
+would suppress inherited physical inputs, and reusing a broad old row would
+retain sibling backing. Directed repair extends the same materialization owner
+with typed complete/leaf keys and additive leaf collection, preserving parent
+frontiers and exact binding/acquisition guards. Collection precedence and stale
+inherited read caches remain review controls. Same produced output viewed through
+ordinary/prepared support must share its one promotion at the produced-output
+issuer, while each support retains its independently checked logical binding.
+The existing strong same-output equality assertion is retained as a detector.
+
+Package investigation at `e601175489` found that admitted deployment currently retains
 frontend/worker digests and a libdir path, without a retained package source
 owner. Existing EPS/lazy environments cannot gain provenance from a later fresh
 path/hash observation. Detailed source proof and bounded options are pending the
-independent report. Source-backed package pinning is not established.
+independent report in `PACKAGE-SOURCE-FINDINGS.md`. Source-backed package pinning
+is not established. Fresh per-request compiler scopes are an accepted fallback
+direction only with actual EPS/finder/NameCache and external interpreter reset;
+pure acquired bytes can survive separately. Process-global plugin/native loader
+state remains an untested boundary requiring source/loader proof or whole-worker
+replacement/refusal.
 
 ## Evidence and resource status
 

@@ -243,3 +243,106 @@ No checks executed: disk headroom was reported by the parent as approximately
 or bypass admission. The source trace establishes the missing ownership
 relationship and concrete retainers; runtime outcomes, growth measurements and
 joined package/row behavior remain pending at an exact implementation candidate.
+
+## In-progress row repair inspection
+
+Separately inspected uncommitted `feature/shared-warm/owned-rows` WIP in
+`/srv/swarm/checkouts/tidepool-shared-warm-owned-rows-20261019` at the same base.
+This is steering for the implementation owner, not an exact-candidate review.
+The initial `RetainedArtifactMaterialization::capture_checked_value` WIP had two
+concrete problems; the parent accepted directed repair and exact-candidate
+verification remains pending:
+
+1. It stores an incomplete value-only materialization in
+   `support.artifacts().retain_materialization`. Existing
+   `ViewLease::collect_materializations` (`artifact_inventory.rs:5646`) skips
+   inherited/fixed owners when the current cache is nonempty: completed entries
+   are assumed to cover their inherited physical closure. For value V with
+   required declaration A, inserting only V can make a later projected
+   descendant miss inherited A's physical row and rematerialize it. Meanwhile
+   the value's original support still owns A's fixed materialization, so its
+   backing remains retained. Do not install a singleton as a complete compiler
+   materialization. The existing owner must attach an issued leaf without
+   invalidating complete-closure cache semantics, or store an entry that also
+   carries exact required dependency physical owners. The latter still needs
+   backing retention measurement.
+2. The inherited-row shortcut checks only that selected facts contain V, then
+   detaches the row handle. It does not prove that row's directory/arena is a
+   value-sized leaf. If V was previously materialized beside large unrelated S,
+   this shortcut preserves V's broad arena and directory, keeping S alive.
+   Reuse must recognize actual leaf ownership through the issuing owner; row
+   count, digest or a singleton selected map cannot prove backing granularity.
+
+The helper also edits `RetainedArtifactMetadata` maps after deriving a complete
+snapshot while leaving dependency tuples and ambiguous-owner metadata intact.
+This makes a compiler-metadata value internally incomplete solely to select
+physical storage. Prefer a physical-row issuance boundary under the existing
+owner over synthetic semantic metadata. The checked certificate comparison is
+useful; it does not repair the cache-completeness or backing-size invariants.
+No concrete per-view absence bypass was established in this bounded pass.
+
+The subsequent WIP uses typed `Compilation` versus `CheckedValueLeaf` cache
+keys, validates namespace/acquired payload before a leaf hit, and makes leaves
+additive. Review must check both own and inherited cache collection: a leaf-only
+cache must preserve fixed/parent owners; ancestors must not be appended after a
+new leaf and override its physical row through last-wins collection. Existing
+`ViewReadCache.inherited_materializations` observations must not leave the
+published next-offer path blind to a newly issued leaf. Required controls are
+V requiring A (same original A row, no copy), plus V and huge unrelated S
+(value-sized V survives and S backing releases), including overlapping/diamond
+sources.
+
+A second WIP issue was the custom `CheckedValueArtifact` equality dropping
+original path/physical ownership while runtime `BindingIndex` uses equality as
+issued authority. The parent directed retaining all logical fields, path and
+exact row reference; source now includes them. The independent bounded analogue
+search found no additional confirmed changed-helper bypass. Interface-fact
+equality in `CheckedValueImportAuthority::matches_interface` is an intentional
+compatibility observation for a thin value's instance-free scaffold; it grants
+no replacement binding or native permission.
+
+Strict equality then exposed duplicate promotion of one output: ordinary and
+prepared capture use the same `ProducedValueTypeInterface` object/certificate,
+staging path and P6 receipt but derive separate support views. Per-view row
+caches promoted that same output twice. The parent approved the existing private
+produced-output owner retaining one successful `OnceLock<Arc<Row>>` promotion,
+then attaching that physical row under each support's independently checked
+exact binding. Preserve the original ordinary/prepared authority equality
+assertion; do not substitute comparison of receipt bytes alone. Separate output
+issuers keep independent rows even if their bytes match. No digest registry is
+needed.
+
+Read campaign amendment `e2bd2611102566085d0c573568d820a50ed62fb3` directly.
+Package negative dependencies consume the authenticated **selected module**
+census from canonical/value/lexical row issuers. The broader type-classification
+`home_units`, dormant custody and executable demand remain distinct; physical
+row presence cannot reconstruct that census.
+
+## Fresh-scope fallback refinement
+
+Warm-workers' bounded proposal moves `withResidentCompilerScopes` inside each
+complete user-operation handler. Fresh `runGhc` creates fresh package EPS,
+finder and NameCache. The existing outer cleanup must retire/reap the external
+iserv before a response or next operation; uncertain cleanup poisons/replaces
+the worker. Keep multi-stage compilation inside one complete operation so
+intermediate compiler state remains available to its own consumer.
+
+`ExactInputOwner` is not purely raw: it also retains `RequestIfaceDecoder`
+decoded `ModIface` packets keyed by the actual NameCache and pure decoded
+certificate/package/census/graph facts. The NameCache guard prevents old decoded
+interface reuse after a genuinely fresh cache, but retaining the whole owner
+still retains those old Names. Split/clear the decoder at the new scope boundary
+if claiming raw-only retention; keep authenticated captured bytes and pure wire
+facts under their existing owner. No `HscEnv`, `HomeModInfo`, `TcGblEnv`, derived
+package object or loader state may escape into the portable realization.
+
+Fresh `runGhc` plus iserv cleanup alone does not establish absence of
+process-global plugin/dlopen state. For arbitrary unproven package/native/plugin
+sources, full worker-process replacement is the robust fallback unless the
+owning GHC path and an executed control establish external-only loading. This
+is an implementable fallback condition, not a license to infer freshness from
+hashes. Transaction integration currently asserts cross-request module reuse;
+the explicit fallback mode must replace that expectation honestly and report
+decoded warm reuse unavailable. Low-level tests that explicitly open one shared
+`withResidentCompilerScopes` continue testing its fixed-source precondition,
+not production fallback freshness.
