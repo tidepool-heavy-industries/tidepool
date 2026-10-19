@@ -1726,6 +1726,59 @@ pub(crate) struct CheckedValueImportAuthority {
 }
 
 impl CheckedValueImportAuthority {
+    /// Borrow only the exact rows actually selected by this preparation. The
+    /// output owner has already correlated each input reference with its
+    /// current occurrence, runtime identity and original issuing row.
+    pub(crate) fn from_world_output(
+        output: &crate::compiler_world::WorldCellOutputAdmission,
+    ) -> Result<Self, CompileError> {
+        let operation = &output.validation.inventory;
+        let producer = output.reservation().plan().producer_sha256();
+        let mut values = BTreeMap::<String, CapturedValueInterface>::new();
+        for original in &output.demanded_rows {
+            crate::host_work::checkpoint()?;
+            operation
+                .charge(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            if &original.authority.0 != producer {
+                return Err(failure("world value import has another compiler producer"));
+            }
+            if let Some(CapturedValueInterface::Certified {
+                original: previous, ..
+            }) = values.get(&original.interface.module)
+            {
+                if !previous.same_world_type_row(original) {
+                    return Err(failure("world value import has competing issuing rows"));
+                }
+                continue;
+            }
+            operation
+                .reserve::<(String, CapturedValueInterface, [usize; 8])>(1)
+                .and_then(|()| {
+                    operation.charge(
+                        original
+                            .interface
+                            .module
+                            .len()
+                            .saturating_mul(2)
+                            .saturating_add(original.interface.path.as_os_str().len())
+                            .saturating_add(original.interface.digest.len()),
+                    )
+                })
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            values.insert(
+                original.interface.module.clone(),
+                CapturedValueInterface::Certified {
+                    input: original.interface.clone(),
+                    original: Arc::clone(original),
+                },
+            );
+        }
+        Ok(Self {
+            values: Arc::new(values),
+        })
+    }
+
     fn capture(values: impl Iterator<Item = CapturedValueInterface>) -> Self {
         Self {
             values: Arc::new(

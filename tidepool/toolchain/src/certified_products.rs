@@ -8357,19 +8357,21 @@ pub(crate) fn certify_products_with_validation(
                 })
                 .collect()
         });
-    let inherited_products = projected_metadata.map_or_else(Vec::new, |metadata| {
-        metadata
-            .retained
-            .artifacts
-            .values()
-            .filter_map(|entry| match &entry.payload {
-                crate::artifact_inventory::ArtifactPayload::Original(product) => {
-                    Some(product.clone())
+    let mut inherited_products = Vec::new();
+    if let Some(admission) = exact {
+        for entry in admission.retained_product_entries() {
+            if let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload {
+                if admission.is_world_compilation() {
+                    // Reserve capacity growth before copying a demanded product
+                    // handle. The exact legacy route keeps its existing budget.
+                    validation
+                        .inventory
+                        .reserve::<[crate::recovery_artifacts::CertifiedRecoveryProduct; 2]>(1)?;
                 }
-                _ => None,
-            })
-            .collect()
-    });
+                inherited_products.push(product.clone());
+            }
+        }
+    }
     let mut retained_seals = BTreeMap::new();
     for interface in inherited_module_interfaces.iter().chain(
         projected_originals
@@ -8386,9 +8388,9 @@ pub(crate) fn certify_products_with_validation(
             ));
         }
     }
-    if projected_metadata
+    if exact
         .into_iter()
-        .flat_map(|metadata| metadata.retained.artifacts.values())
+        .flat_map(|admission| admission.retained_product_entries())
         .any(|entry| entry.descriptor.producer_sha256 != producer_sha256)
     {
         return Err(CertificationError::Mismatch(

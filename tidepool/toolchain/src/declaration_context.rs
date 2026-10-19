@@ -6760,6 +6760,53 @@ impl<'a> ExactProductAdmission<'a> {
     pub(crate) fn context(&self) -> &'a Arc<ExactDeclarationContext> {
         self.facts.context
     }
+    /// Physical inherited payloads for this admission's actual compiler/native
+    /// selection. The cold continuation remains provenance, not a world-wide
+    /// inventory to enumerate during a world preparation.
+    pub(crate) fn retained_product_entries(&self) -> impl Iterator<Item = &Arc<ArtifactEntry>> {
+        let exact = match self.compilation_binding {
+            ProductCompilationBinding::Exact(_) => {
+                Some(self.facts.compiler.metadata.retained.artifacts.values())
+            }
+            ProductCompilationBinding::World(_) => None,
+        };
+        let world = match self.compilation_binding {
+            ProductCompilationBinding::Exact(_) => None,
+            ProductCompilationBinding::World(_) => Some(
+                self.facts
+                    .compiler
+                    .metadata
+                    .entries
+                    .values()
+                    .filter(|entry| !entry.is_native())
+                    .chain(
+                        self.facts
+                            .compiler
+                            .native_selection
+                            .availability
+                            .rows()
+                            .map(|row| &row.original),
+                    ),
+            ),
+        };
+        exact
+            .into_iter()
+            .flatten()
+            .chain(world.into_iter().flatten())
+            .inspect(|_| {
+                crate::host_work::record_host_work(
+                    crate::host_work::HostWorkCounter::ArtifactMetadataRowVisit,
+                    1,
+                );
+            })
+    }
+
+    pub(crate) fn is_world_compilation(&self) -> bool {
+        matches!(
+            self.compilation_binding,
+            ProductCompilationBinding::World(_)
+        )
+    }
     pub(crate) fn groups(&self) -> &[PendingCertifiedGroup] {
         self.facts.groups
     }
