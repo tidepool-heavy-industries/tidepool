@@ -3,17 +3,18 @@
 Reviewer: `/root/warm_compiler_campaign/reload/authority_review`.
 
 Current cumulative source review: campaign base
-`5b74c2f1fe010c5c343e0c6f331d54328fbd5090` through exact repair candidate
-`9bb4c1eb4bf5a0775dae68beb119446bb34d06b9`, read from committed objects in
+`5b74c2f1fe010c5c343e0c6f331d54328fbd5090` through exact frozen candidate
+`fc92605eb78c52284f90249f6e5dd1200ba060de`, read from committed objects in
 `/srv/swarm/checkouts/tidepool-shared-warm-reload-admission-20261019`.
-Disposition: BLOCKED on bootstrap continuation/native-END custody and the
-immutable actor-start facade compiler claim that drops before outer END,
-specified in the final checkpoint and adjacent producer audit below. The fe3
-runtime generation-claim loss, ownership enum and fixture lease findings have
-source repairs in this candidate. No source acceptance or integration readiness
-is issued. Compile/test execution remains 0: root's shared native lane is held
-elsewhere. Cumulative whitespace check passes. No build, cleanup experiment,
-product source edit or release qualification occurred.
+Disposition: cumulative source review complete with no new confirmed defect in
+the delivered admission/compiler foundation. Previous generation/bootstrap and
+immutable-facade native-END findings have source repairs in this candidate.
+This is NOT complete-R1 acceptance, compilation evidence, behavioral acceptance
+or integration readiness. Native production/unit compilation and native test
+execution remain 0. Cumulative whitespace check passes; the leaf's pinned
+formatting and generated source-mapping receipts are recorded separately.
+No product source edit, build, cleanup experiment or release qualification was
+performed by this reviewer.
 
 Required R1 WatchRoute/forms/reply-tool/display registration successors remain
 explicitly HELD until initial runtime and actor production/unit compilation.
@@ -1045,3 +1046,106 @@ the pending repair, not an executed regression. Awaited event: reload
 supervisor chooses bounded facade hook/handoff seam, leaf includes it in the
 exact stable lazy-hook repair checkpoint, then explicit exact review activation.
 No code/build/test execution and no periodic polling.
+
+
+### Exact frozen checkpoint fc92605eb78c: cumulative source review complete
+
+Reviewed full campaign base..fc92605 with the prior cumulative issuance map,
+focusing on exact 9bb..fc92605 compiler-hook and immutable-facade repair. The
+admission checkout was clean and HEAD exactly
+fc92605eb78c52284f90249f6e5dd1200ba060de. No WIP was used. No new confirmed
+source defect found in the delivered foundation; native behavior remains
+unqualified and required R1 successors remain incomplete.
+
+Confirmed source closure of the prior END findings:
+
+- CompilerWorkTicket now owns run_source_transaction. Every fresh and
+  continuation helper, including waiting forms, calls that function with the
+  actual original context dependency and actual ticket. Its hook captures the
+  SAME ticket's lazy SourceClaim collection. The per-operation success flag is
+  set only after dependency.claim succeeds and the affine claim is stored.
+  Both the hook closure and runtime admitted flag preserve failed admission.
+- PersistentSession::admit_source_work_in invokes the scoped hook before its
+  cached-runtime-claim early return and before source mutation/allocation.
+  A root/LLM bootstrap with runtime admission None therefore earns an actual
+  BootstrapClaim at its first source action. Typed bootstrap retains both its
+  own world and parent prerequisite. Pure continuation does not invoke the
+  hook, so it does not gain an eager source gate requirement.
+- Runtime admission/hook/previous claim are restored on return and unwind.
+  Concrete lazy RuntimeSourceClaim transfer remains inside the compiler action.
+  extract-cmd TransactionScopeGuard.finish/Drop performs the native END after
+  that action returns/rethrows; the actual ticket then preserves eager, lazy
+  actor-world and runtime claims on unknown/abandoned close. Clean/NotStarted
+  releases them after END. The hook's Arc custody is scoped and restored; no
+  registry, new generation gate or runtime-to-actor dependency was introduced.
+  Compiler transaction nesting remains explicitly prohibited by the existing
+  owner; nested lexical admission/hook restoration preserves prior owners.
+- ExactExportSurface::materialize and MaterializedFacade::select_exact_exports
+  are now private within runtime session. New Session/PersistentSession wrappers
+  invoke the same scoped hook immediately before actual projection issuance
+  or changed legacy source writes. Wrong-session/empty/unchanged selection
+  paths remain metadata/no-production controls. Actual
+  start::materialize_entry_facades uses these wrappers for both local and
+  narrowed inherited projections. Repository source search found no surviving
+  external consumer of the removed public object producer methods. The local
+  capture guard can drop before END because the actual producer hook has
+  already stored an independent affine claim in the same ticket.
+
+Other cumulative relationships remain intact: explicit Unqualified generic
+constructors; one canonical BootstrapWorld at real root/LLM/typed capture;
+typed parent A plus own C and replacement D excluding C; old bootstrap aliases
+forever first-C-bound; SourceCallback/from_context original dependency preserved
+even with generation() None; immutable selected snapshot separate from current
+installation; actual reservation/worker preparation provenance; RunOwned source
+membership separate from supervision lifetime; canonical runtime lexical gate
+retained independently of physical code/custody. Initial publication unknown
+retains private candidate facts and an unbound public owner, permanently closes
+old world aliases, and uses explicit enclosing host/run reopen into a NEW
+recovered context. No live native-store fence reset or fabricated bound owner.
+The earlier context-versus-different-target-gate and preleased-initial-target
+questions remain qualified: no actual production counterexample established.
+No speculative enclosing-actor dependency was added.
+
+Oracle assessment: the two new joined actor cases call the real owning
+run_source_transaction. A legacy Haskell Sleep binding suspends before
+completion; resumption actually binds under Generation, root Bootstrap(None)
+and typed Bootstrap(Some(parentA)); injected aggregate Unconfirmed then leaves
+the exact own owner uncertain. Pure continuation is checked claim-free, and
+bootstrap hook refusal precedes native export/binding changes. The augmented
+start capture control drives the real materialize_entry_facades helper with
+local and narrowed inherited selections; empty/unchanged selections stay open.
+Removing the actual wrapper/hook wiring would break these controls, unlike the
+earlier split manual-vector/runtime-transfer tests. These remain SOURCE tests:
+no native compilation, case execution or actual post-resume GHC END fault was
+observed by this review. A real hidden-retraction compiler history and hosted
+self-reload/Ready-renderer/independent-collateral behavior remain execution
+obligations, not inferred passing evidence.
+
+Evidence inspected:
+`/srv/swarm/evidence/inanna/persona-1895-launch-20261019/compiler-failure/reload-admission-20261019/HANDOFF.md`,
+`source-checks.json` and `DEFERRED-COMMANDS.txt`.
+The source-check receipt names exact fc92605 and records cumulative whitespace,
+pinned rustfmt check and first-party source-mapping check exits 0. Actor/runtime
+BUCK mappings include the new owning modules. Reviewer independently ran
+cumulative git diff --check base..fc92605, exit 0. All native compile/test counts
+are 0; no claim here depends on a zero-match selection or target linking.
+
+Deferred verification is concrete in DEFERRED-COMMANDS.txt: pinned configure,
+then runtime/actor production and unit targets, followed by the counted source
+admission, callback, joined continuation and actual facade selectors. Also
+retain the actor guide's affected hosted-consumer check and existing counted
+notebook integration cohort when the joined R1 tranche is ready. Required
+WatchRoute/forms/reply-tool/display registration successors remain HELD until
+first runtime+actor production/unit compilation. Their known absent provenance
+and execution evidence prevent complete-R1 acceptance; R2/R3 remain held.
+
+Campaign has now admitted the parent-owned runtime/actor production and unit
+native gate after this review, area fold and source generation, with 12 GiB
+memory and 32 GiB prospective disk growth. No native launch or result exists at
+this review receipt. Awaited producer/event: reload supervisor supplies the
+exact integrated source checkpoint, compiles actual production and unit
+consumers through that admitted gate, and executes recorded nonzero focused
+cases. Next reviewer
+action is concrete compile/test-failure repair review or cumulative review of
+an explicitly authorized R1 successor candidate. Until that event this source
+review is complete, not runtime acceptance. Yield without periodic polling.
