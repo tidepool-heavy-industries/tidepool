@@ -2475,12 +2475,10 @@ impl CompilerInputProjection {
         } else {
             self.roles.insert(owner.clone(), incoming);
         }
-        let fact = self
-            .roles
-            .get(&owner)
-            .expect("admitted role")
-            .recorded_fact();
-        self.recorded_roles.insert(owner, fact);
+        let role = self.roles.get(&owner).expect("admitted role");
+        if self.recorded_roles.get(&owner) != Some(role) {
+            self.recorded_roles.insert(owner, role.recorded_fact());
+        }
         Ok(())
     }
 
