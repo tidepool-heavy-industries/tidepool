@@ -15413,6 +15413,690 @@ mod tests {
             std::slice::from_ref(&publication),
             "source policy follows the selected consumer's lexical proof even when the published body has no remaining native call"
         );
+
+        // Encode the contaminated current context, not only the earlier birth.
+        // Its reader must carry the recorded birth domain through real native
+        // target admission without admitting InlineConsumer into that domain.
+        use crate::exact_context::{
+            hydrate_context, lookup_map, read_value, Materializer, SnapshotError, SnapshotMapRoot,
+        };
+        use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+        let store = MemoryBlockstore::new();
+        let mut writer = Materializer::new(&store);
+        let written = writer
+            .materialize_context(None, &context.snapshot())
+            .unwrap();
+        for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let recorded = hydrate_context(&store, written.root()).unwrap();
+        assert_eq!(recorded.snapshot().roles, context.snapshot().roles);
+        let root = identity("fixture", "Alpha");
+        let original_role = publication
+            .context()
+            .compiler_input_projection()
+            .snapshot_roles()[&root]
+            .clone();
+        let CompilerInputRole::PublishedSourceOriginal {
+            native_authority, ..
+        } = &original_role
+        else {
+            panic!("actual publication issuer owns the native birth domain")
+        };
+        let reissued = issuer
+            .issue_published_source_original("revision", "input", &root)
+            .unwrap();
+        let reissued_role = &reissued
+            .context()
+            .compiler_input_projection()
+            .snapshot_roles()[&root];
+        assert_eq!(reissued_role, &original_role);
+        // The same issuer may reconstruct an equal context; an identical reissue
+        // of the already-published context must reuse its existing fact owner.
+        let reissue_source = issuer
+            .clone()
+            .with_published_source_originals(&publication)
+            .unwrap();
+        let reissued_again = reissue_source
+            .issue_published_source_original("revision", "input", &root)
+            .unwrap();
+        let CompilerInputRole::PublishedSourceOriginal {
+            native_authority: same_authority,
+            ..
+        } = &reissued_again
+            .context()
+            .compiler_input_projection()
+            .snapshot_roles()[&root]
+        else {
+            unreachable!()
+        };
+        assert!(Arc::ptr_eq(
+            native_authority.facts(),
+            same_authority.facts()
+        ));
+
+        let view = context.artifact_view();
+        let graph = view.capture_graph_selection();
+        let assert_consumer = |acquired: &Arc<ExactDeclarationContext>| {
+            let actual = ProtectedScaffoldRequirements::default()
+                .compiler_inputs(acquired, None)
+                .unwrap();
+            let selected =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    &actual,
+                    &PackageInterfaceValidation::default().inventory,
+                )
+                .unwrap();
+            let mut segment = actual
+                .artifacts()
+                .inventory()
+                .bind_segment(actual.artifacts(), vec![], &selected)
+                .unwrap();
+            let demanded = actual
+                .artifacts()
+                .inventory()
+                .admit_bound_target(
+                    &mut segment,
+                    actual.artifacts(),
+                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
+                        &imports,
+                    ),
+                    vec![],
+                    &selected,
+                )
+                .unwrap()
+                .bind_target(None, imports.to_vec())
+                .resolve()
+                .unwrap()
+                .groups()
+                .clone();
+            assert!(!demanded.is_empty());
+            assert!(demanded
+                .iter()
+                .all(|group| group.binding.artifact() != original_role.original().unwrap()));
+            let survived = acquired
+                .published_source_original_selections_for_target(&demanded, &imports)
+                .unwrap();
+            assert_eq!(survived.as_slice(), std::slice::from_ref(&publication));
+        };
+        let mut restored = Vec::new();
+        let mut restored_births = Vec::new();
+        for _ in 0..2 {
+            // Both acquisitions intentionally consume the SAME hydrated Recorded
+            // facts. An acquired-owner memo attached to them would alias these.
+            let inventory = RecoveredArtifactInventory {
+                producer: context.owner.facts.producer,
+                entries: view
+                    .entries()
+                    .into_iter()
+                    .map(|entry| (entry.descriptor.id, Arc::new((*entry).clone())))
+                    .collect(),
+                recorded_inventory: true,
+                bindings: graph.bindings.iter().copied().collect(),
+                binding_edges: view.binding_dependencies(),
+                interfaces: view.interface_dependencies(),
+            };
+            let acquired = Arc::new(
+                inventory
+                    .context_for_expected_snapshot(recorded.root(), &recorded)
+                    .unwrap(),
+            );
+            assert_eq!(acquired.semantic_sha256(), context.semantic_sha256());
+            assert_eq!(
+                acquired.compiler_input_projection(),
+                context.compiler_input_projection()
+            );
+            let selections = acquired
+                .published_source_original_selections_for_target(&groups, &imports)
+                .unwrap();
+            assert_eq!(selections.as_slice(), std::slice::from_ref(&publication));
+            let born = selections[0].context();
+            assert_eq!(
+                born.semantic_sha256(),
+                publication.context().semantic_sha256()
+            );
+            assert_eq!(
+                born.compiler_source_support().input_decisions(),
+                publication
+                    .context()
+                    .compiler_source_support()
+                    .input_decisions()
+            );
+            assert_eq!(
+                born.compiler_source_support()
+                    .native_availability()
+                    .persistent_facts(),
+                publication
+                    .context()
+                    .compiler_source_support()
+                    .native_availability()
+                    .persistent_facts()
+            );
+            assert!(born.artifact_view().entries().iter().all(|entry| entry
+                .descriptor
+                .owner
+                .module
+                != "InlineConsumer"));
+            let born_offer = born
+                .compiler_source_support()
+                .native_offers()
+                .iter()
+                .find(|offer| offer.original() == original_role.original().unwrap())
+                .unwrap();
+            let original_offer = publication
+                .context()
+                .compiler_source_support()
+                .native_offers()
+                .iter()
+                .find(|offer| offer.original() == original_role.original().unwrap())
+                .unwrap();
+            assert!(
+                !born_offer.same_issuance(original_offer),
+                "recorded facts cannot borrow another acquired publication owner"
+            );
+            restored_births.push(Arc::clone(born));
+            assert_consumer(&acquired);
+            restored.push(acquired);
+        }
+        let original = original_role.original().unwrap();
+        let born_offers = restored_births
+            .iter()
+            .map(|born| {
+                born.compiler_source_support()
+                    .native_offers()
+                    .iter()
+                    .find(|offer| offer.original() == original)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(!born_offers[0].same_issuance(born_offers[1]));
+        drop(born_offers);
+        drop(restored_births);
+        let rows = restored
+            .iter()
+            .map(|context| {
+                context
+                    .compiler_source_support()
+                    .native_availability()
+                    .rows()
+                    .find(|row| row.original.descriptor.id == original)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(!Arc::ptr_eq(rows[0], rows[1]));
+        assert!(!Arc::ptr_eq(&rows[0].original, &rows[1].original));
+        let offers = restored
+            .iter()
+            .map(|context| {
+                context
+                    .compiler_source_support()
+                    .native_offers()
+                    .iter()
+                    .find(|offer| offer.original() == original)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(!offers[0].same_issuance(offers[1]));
+
+        // Inspect links emitted by the actual writer. These read-only partial
+        // structs extract links; they never construct a successful role/domain.
+        #[derive(serde::Deserialize)]
+        struct ContextLinks {
+            roles: SnapshotMapRoot,
+        }
+        #[derive(serde::Deserialize)]
+        struct RoleLinks {
+            native_authority: cid::Cid,
+        }
+        #[derive(serde::Deserialize)]
+        struct NativeLinks {
+            version: u32,
+            roles: SnapshotMapRoot,
+        }
+        // Generic role transport also decodes facts only. Its mandatory domain
+        // cannot become a default-empty publication policy.
+        let raw_role = serde_json::to_value(&original_role).unwrap();
+        let decoded_role: CompilerInputRole = serde_json::from_value(raw_role.clone()).unwrap();
+        assert_eq!(decoded_role, original_role);
+        let mut missing_authority = raw_role.clone();
+        assert!(missing_authority
+            .as_object_mut()
+            .unwrap()
+            .remove("native_authority")
+            .is_some());
+        assert!(serde_json::from_value::<CompilerInputRole>(missing_authority).is_err());
+        let mut malformed_authority = raw_role.clone();
+        malformed_authority["native_authority"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<CompilerInputRole>(malformed_authority).is_err());
+        let mut missing_roles = raw_role;
+        assert!(missing_roles["native_authority"]["maps"]
+            .as_object_mut()
+            .unwrap()
+            .remove("roles")
+            .is_some());
+        assert!(serde_json::from_value::<CompilerInputRole>(missing_roles).is_err());
+
+        let context_links: ContextLinks = read_value(&store, written.root().cid()).unwrap();
+        let role_cid: cid::Cid = lookup_map(&store, &context_links.roles, &root)
+            .unwrap()
+            .unwrap();
+        let role_links: RoleLinks = read_value(&store, &role_cid).unwrap();
+        let native_links: NativeLinks = read_value(&store, &role_links.native_authority).unwrap();
+        assert_eq!(native_links.version, 2);
+        assert_ne!(native_links.roles.cid(), &role_links.native_authority);
+        struct BrokenBlock<'a> {
+            store: &'a MemoryBlockstore,
+            blocked: cid::Cid,
+            corrupt: bool,
+        }
+        impl Blockstore for BrokenBlock<'_> {
+            fn get(&self, cid: &cid::Cid) -> anyhow::Result<Option<Vec<u8>>> {
+                if *cid != self.blocked {
+                    return self.store.get(cid);
+                }
+                if !self.corrupt {
+                    return Ok(None);
+                }
+                let mut bytes = self
+                    .store
+                    .get(cid)?
+                    .expect("actual writer emitted this authority");
+                bytes[0] ^= 1;
+                Ok(Some(bytes))
+            }
+            fn put_keyed(&self, _: &cid::Cid, _: &[u8]) -> anyhow::Result<()> {
+                unreachable!("reader never writes")
+            }
+        }
+        for blocked in [role_links.native_authority, *native_links.roles.cid()] {
+            let broken = BrokenBlock {
+                store: &store,
+                blocked,
+                corrupt: false,
+            };
+            assert!(
+                matches!(hydrate_context(&broken, written.root()), Err(SnapshotError::MissingBlock(cid)) if cid == blocked),
+                "missing actual authority or typed birth-role root must refuse"
+            );
+        }
+        let broken = BrokenBlock {
+            store: &store,
+            blocked: role_links.native_authority,
+            corrupt: true,
+        };
+        assert!(
+            matches!(hydrate_context(&broken, written.root()), Err(SnapshotError::Integrity(cid)) if cid == role_links.native_authority)
+        );
+
+        drop(rows);
+        drop(offers);
+        drop(restored.remove(0));
+        drop(context);
+        drop(recorded);
+        drop(written);
+        drop(store);
+        let remaining = restored.remove(0);
+        assert_consumer(&remaining);
+    }
+
+    #[test]
+    fn publication_birth_native_modes_distinguish_identical_proof_graphs() {
+        use crate::exact_context::{hydrate_context, Materializer, NativeOfferSnapshotBody};
+        use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+        let base = published_original_choice_history_fixture();
+        let root = identity("fixture", "Alpha");
+        let original = base.compiler_input_projection().snapshot_roles()[&root]
+            .original()
+            .unwrap();
+        let full = base
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == original)
+            .unwrap()
+            .clone();
+        assert!(full.is_full());
+        let partial = full
+            .within_projection(
+                base.compiler_input_projection(),
+                &ArtifactInventory::default().empty_view(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(!partial.is_full());
+        let (
+            NativeOfferSnapshotBody::Full(full_graph),
+            NativeOfferSnapshotBody::Partial(partial_graph),
+        ) = (full.snapshot_facts().body, partial.snapshot_facts().body)
+        else {
+            panic!("real Full withdrawal produces Partial")
+        };
+        assert_eq!(
+            full_graph.snapshot().as_ref(),
+            partial_graph.snapshot().as_ref()
+        );
+        assert_ne!(
+            full.snapshot_facts().identity().unwrap(),
+            partial.snapshot_facts().identity().unwrap()
+        );
+        let mut publications = Vec::new();
+        let mut sources = Vec::new();
+        for replacement in [full, partial] {
+            let offers = base
+                .compiler_source_support()
+                .native_offers()
+                .iter()
+                .map(|offer| {
+                    if offer.original() == original {
+                        replacement.clone()
+                    } else {
+                        offer.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let projection = base.compiler_input_projection().clone();
+            let support = recover_fixture_compiler_support(
+                projection.clone(),
+                base.artifact_view().clone(),
+                offers,
+            )
+            .unwrap();
+            let rows = RequestNativeAvailability::issue_checked(
+                &projection,
+                support.artifacts(),
+                support.native_offers(),
+            )
+            .unwrap();
+            let support = support.retain_normalized_availability(&rows).unwrap();
+            let source = ExactDeclarationContext::from_authenticated_execution_support(
+                base.owner.facts.producer,
+                support,
+                base.lexical_graph().to_vec(),
+                base.original_instance_target().unwrap().clone(),
+                &[],
+            )
+            .unwrap();
+            let published = source
+                .issue_published_source_original("same-revision", "same-input", &root)
+                .unwrap();
+            publications.push(published);
+            sources.push(source);
+        }
+        let full = publications.remove(0);
+        let partial = publications.remove(0);
+        let full_role = &full.context().compiler_input_projection().snapshot_roles()[&root];
+        let partial_role = &partial
+            .context()
+            .compiler_input_projection()
+            .snapshot_roles()[&root];
+        let (
+            CompilerInputRole::PublishedSourceOriginal {
+                selection: full_selection,
+                selection_sha256: full_digest,
+                ..
+            },
+            CompilerInputRole::PublishedSourceOriginal {
+                selection: partial_selection,
+                selection_sha256: partial_digest,
+                ..
+            },
+        ) = (full_role, partial_role)
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            full_selection.snapshot().as_ref(),
+            partial_selection.snapshot().as_ref(),
+            "the discriminator changes mode, not graph custody"
+        );
+        assert_ne!(
+            full_digest, partial_digest,
+            "publication policy commits exact born availability mode"
+        );
+        assert_ne!(full_role, partial_role);
+        assert_ne!(
+            full.context().semantic_sha256(),
+            partial.context().semantic_sha256()
+        );
+        let mode = |published: &PublishedSourceOriginalSelection| {
+            published
+                .context()
+                .compiler_source_support()
+                .native_availability()
+                .persistent_facts()[&original]
+                .mode
+                .clone()
+        };
+        assert_eq!(mode(&full), NativeTransportMode::Full);
+        assert_eq!(mode(&partial), NativeTransportMode::IssuedGroups);
+        let store = MemoryBlockstore::new();
+        let mut written = Vec::new();
+        for published in [&full, &partial] {
+            let mut writer = Materializer::new(&store);
+            let context = writer
+                .materialize_context(None, &published.context().snapshot())
+                .unwrap();
+            for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+                store.put_keyed(&cid, &bytes).unwrap();
+            }
+            let decoded = hydrate_context(&store, context.root()).unwrap();
+            let view = published.context().artifact_view();
+            let graph = view.capture_graph_selection();
+            let inventory = RecoveredArtifactInventory {
+                producer: base.owner.facts.producer,
+                entries: view
+                    .entries()
+                    .into_iter()
+                    .map(|entry| (entry.descriptor.id, entry))
+                    .collect(),
+                recorded_inventory: true,
+                bindings: graph.bindings.iter().copied().collect(),
+                binding_edges: view.binding_dependencies(),
+                interfaces: view.interface_dependencies(),
+            };
+            let acquired = inventory
+                .context_for_expected_snapshot(context.root(), &decoded)
+                .unwrap();
+            let selected = acquired.published_source_original_selections().unwrap();
+            assert_eq!(selected.as_slice(), std::slice::from_ref(published));
+            assert_eq!(mode(&selected[0]), mode(published));
+            written.push(context);
+        }
+        assert_ne!(written[0].root(), written[1].root());
+        let selected_full = sources[0]
+            .compiler_source_support()
+            .source_support(&BTreeSet::from([root.clone()]))
+            .unwrap();
+        let later = partial
+            .context()
+            .as_ref()
+            .clone()
+            .extend_issued_compiler_support(&selected_full)
+            .unwrap();
+        assert_eq!(
+            later
+                .compiler_source_support()
+                .native_availability()
+                .persistent_facts()[&original]
+                .mode,
+            NativeTransportMode::Full,
+            "the later current context really has the stronger Full row"
+        );
+        let selected = later.published_source_original_selections().unwrap();
+        assert_eq!(selected.as_slice(), std::slice::from_ref(&partial));
+        assert_eq!(
+            mode(&selected[0]),
+            NativeTransportMode::IssuedGroups,
+            "current Full cannot upgrade the recorded Partial birth"
+        );
+    }
+
+    #[test]
+    fn publication_birth_empty_beta_survives_later_full_beta_and_recovery() {
+        use crate::artifact_inventory::IssuedNativeOffer;
+        use crate::exact_context::{hydrate_context, Materializer, NativeOfferSnapshotBody};
+        use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+        let base = published_original_history_fixture();
+        let root = identity("fixture", "Alpha");
+        let beta = identity("fixture", "Beta");
+        let beta_original = base.compiler_input_projection().snapshot_roles()[&beta]
+            .original()
+            .unwrap();
+        let empty = IssuedNativeOffer::issue(beta_original, base.artifact_view(), None).unwrap();
+        assert!(matches!(
+            empty.snapshot_facts().body,
+            NativeOfferSnapshotBody::Empty(_)
+        ));
+        let full_beta = base
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == beta_original)
+            .unwrap();
+        assert!(full_beta.is_full());
+        let offers = base
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .map(|offer| {
+                if offer.original() == beta_original {
+                    empty.clone()
+                } else {
+                    offer.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let projection = base.compiler_input_projection().clone();
+        let support = recover_fixture_compiler_support(
+            projection.clone(),
+            base.artifact_view().clone(),
+            offers,
+        )
+        .unwrap();
+        let rows = RequestNativeAvailability::issue_checked(
+            &projection,
+            support.artifacts(),
+            support.native_offers(),
+        )
+        .unwrap();
+        let support = support.retain_normalized_availability(&rows).unwrap();
+        assert_eq!(
+            support.native_availability().persistent_facts()[&beta_original].mode,
+            NativeTransportMode::IssuedGroups
+        );
+        assert!(support
+            .native_availability()
+            .rows()
+            .find(|row| row.original.descriptor.id == beta_original)
+            .unwrap()
+            .issued_ordinals()
+            .is_empty());
+        let mut lexical = base.lexical_graph().to_vec();
+        lexical
+            .iter_mut()
+            .find(|node| node.owner == root)
+            .unwrap()
+            .imports
+            .push(beta.clone());
+        lexical.push(ExactLexicalNode {
+            owner: beta.clone(),
+            imports: vec![],
+        });
+        let source = ExactDeclarationContext::from_authenticated_execution_support(
+            base.owner.facts.producer,
+            support,
+            lexical,
+            base.original_instance_target().unwrap().clone(),
+            &[],
+        )
+        .unwrap();
+        let published = source
+            .issue_published_source_original("empty-beta-revision", "empty-beta-input", &root)
+            .unwrap();
+        let born = published.context().compiler_source_support();
+        assert!(born
+            .native_offers()
+            .iter()
+            .filter(|offer| offer.original() == beta_original)
+            .all(|offer| matches!(
+                offer.snapshot_facts().body,
+                NativeOfferSnapshotBody::Empty(_)
+            )));
+        assert!(
+            born.native_offers()
+                .iter()
+                .any(|offer| offer.original() == beta_original),
+            "the Empty birth observation is present, not absent"
+        );
+        let beta_full = base
+            .compiler_source_support()
+            .source_support(&BTreeSet::from([beta.clone()]))
+            .unwrap();
+        let later = published
+            .context()
+            .as_ref()
+            .clone()
+            .extend_issued_compiler_support(&beta_full)
+            .unwrap();
+        assert_eq!(
+            later
+                .compiler_source_support()
+                .native_availability()
+                .persistent_facts()[&beta_original]
+                .mode,
+            NativeTransportMode::Full
+        );
+        let selected = later.published_source_original_selections().unwrap();
+        assert_eq!(selected.as_slice(), std::slice::from_ref(&published));
+        let selected_beta = selected[0]
+            .context()
+            .compiler_source_support()
+            .native_availability()
+            .rows()
+            .find(|row| row.original.descriptor.id == beta_original)
+            .unwrap();
+        assert_eq!(selected_beta.mode, NativeTransportMode::IssuedGroups);
+        assert!(selected_beta.issued_ordinals().is_empty());
+        let store = MemoryBlockstore::new();
+        let mut writer = Materializer::new(&store);
+        let receipt = writer.materialize_context(None, &later.snapshot()).unwrap();
+        for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let decoded = hydrate_context(&store, receipt.root()).unwrap();
+        let view = later.artifact_view();
+        let graph = view.capture_graph_selection();
+        let inventory = RecoveredArtifactInventory {
+            producer: base.owner.facts.producer,
+            entries: view
+                .entries()
+                .into_iter()
+                .map(|entry| (entry.descriptor.id, entry))
+                .collect(),
+            recorded_inventory: true,
+            bindings: graph.bindings.iter().copied().collect(),
+            binding_edges: view.binding_dependencies(),
+            interfaces: view.interface_dependencies(),
+        };
+        let restored = inventory
+            .context_for_expected_snapshot(receipt.root(), &decoded)
+            .unwrap();
+        let restored_birth = restored.published_source_original_selections().unwrap();
+        assert_eq!(restored_birth.as_slice(), std::slice::from_ref(&published));
+        assert!(restored_birth[0]
+            .context()
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .filter(|offer| offer.original() == beta_original)
+            .all(|offer| matches!(
+                offer.snapshot_facts().body,
+                NativeOfferSnapshotBody::Empty(_)
+            )));
+        assert_eq!(
+            restored_birth[0].context().semantic_sha256(),
+            published.context().semantic_sha256()
+        );
     }
 
     #[test]
