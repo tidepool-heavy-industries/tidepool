@@ -147,23 +147,38 @@ groups remain finite. Generation and its focused functional test passed1.
 The existing adapter reads a fixed sibling CF digest as DATA; actual service
 association and the independent deployment expectation own admission.
 
-The two pending service cases currently call the production actor query method
-and real runtime CAS. They grow unrelated sibling-scope history; transferred cold
-capture separately observes three visible raw rows without support merge. These
-are component limits. The next extension must drive actual Info/Type effects
-through frontend dispatch, source transaction, service, END/CAS and hole answer.
-No fake world/service/lease proof or local source-owner bypass is permitted.
+The service cases now include the actual authored Info effect: prepare and begin
+one cell, capture its Introspection boundary, resume the structured query, settle
+the item, and inspect its installed binding and consumed answer. Direct helper
+queries carry explicit hot-work observations; the frontend emits settled counters
+under full tracing. These are separate measurement scopes, and no whole-frontend
+zero-work or speed claim follows from helper counts.
 
-Reserved selected_root is active in the isolated host-world checkout. It has
-merged full reviewed Reload69bf (own1f2da0eee9, nine owning consumers compiled) and
-is integrating Warm's owner-confirmed `e2cf815e647977735e1d66c99042e58c7fdf9b77`:
-matched FORMAT2, actual Ensure counters and observer/async repairs. Warm owns
-shared Haskell/protocol conflicts; only its overlapping hunks are replaced,
-retaining all nonconflicted Reload/owned/HOST changes. This branch contains no
-ordinary-cell/new-hash/profile APIs. Actual frontend/re-export and split counter
-controls follow source integration; source review and fresh native admission
-precede their execution. The existing service2 counted command remains:
-`swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --output-dir EVIDENCE`.
+The coherent isolated host-world candidate is
+`8642434e599259b54fb139c62bbc831b12979acf`, combining full reviewed Reload69bf and
+Warm e2cf histories, accepted key fixture source-owner repair855, frontend and
+re-export controls4fd, and generated fixture mappings864. Warm supplied only its
+three conflicting Haskell cache/boot hunks; nonconflicted changes were retained.
+Both production/cfg-test maps, the exported fixture and testing roster now include
+`fixtures/compiler-world-info.hs`, generated through the complete native graph.
+Independent source receipts `world-frontend-reexport-repair-review-4fd1a036.txt`
+and `world-fixture-roster-review-8642434e.txt` accept the owned changes.
+
+The re-export control captures home `GHC.Internal.Maybe` with distinct bodies,
+while Facade explicitly imports package base's Data.Maybe. It checks the actual
+package defining receipt and separately queries the same-spelling captured home.
+Pinned GHC9.12.2 metadata confirms Just's defining module GHC.Internal.Maybe;
+retained `pinned-base-maybe-interface.json` and `.txt` are metadata evidence only,
+not an executed service query.
+
+The approved next gate freezes864 for runtime/actor production and cfg-test
+compilation, then the two exact finite key controls. selected_root owns command
+observation and HOST LIVE admission/settlement. Actual frontend2 follows a full
+join of reviewed Reload `ce554a87d11c9a3f51834882e09d884fc5743c0b`, which fixes
+publication cleanup purpose; its actual notebook execution is still pending.
+No source merge occurs during the frozen early gate. The service command is:
+`swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --trace-profile full --output-dir EVIDENCE`.
+No ordinary-cell/new-hash/profile API is imported into this query candidate.
 
 Five observations extend the EXISTING host_work owner, with actual Warm producers:
 WorldEnsureResidentProbe/Hit, WorldEnsureNeedsAcquisition, WorldEnsureComplete,
@@ -183,7 +198,7 @@ on later refusal. Share current owned nodes, without predecessor replay chains,
 per-item snapshot/native-offer folds or full-world encoding hidden at commit.
 
 Two Sol-high descendants only: selected_root active implementation,
-selection_oracle settled after exact query/group repair review and reserved for
+selection_oracle settled after exact864 source review and reserved for
 subsequent joined candidates. No grandchildren/additional descendants. Paused old 02A is
 unchanged and not a dependency (patch SHA256
 `264bee547c2f497e44e69f29bd1bd76e66bf957c02a0650d562b439c972d5f1d`).
