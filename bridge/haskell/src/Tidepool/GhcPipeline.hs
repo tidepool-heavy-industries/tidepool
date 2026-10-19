@@ -2028,13 +2028,14 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   effective <- liftIO (templateParserFlags flags sourceText >>= either (throwIO . SourceRejection . renderCellSplitError) pure)
   liftIO (requireWorldModuleFlags path effective)
   plan <- maybe (liftIO (throwIO WorldCellCorrupt)) pure (typedPurposePlan purpose)
-  occurrences <- either (liftIO . throwIO) pure (typedSegmentInputOccurrences effective plan sourceText)
+  current <- getSession
+  demand <- liftIO (typedSegmentInputOccurrences (hscUpdateFlags (const effective) current) plan sourceText)
+  occurrences <- either (const (liftIO (throwIO WorldCellUnsupported))) pure demand
   let selected = [binding | name <- occurrences,Just binding <- [Map.lookup name (worldInputsBindings facts)]]
   -- The initial checked-value slice admits package-only native types. A home
   -- dependency requires its exact selected type closure, not passive custody.
   when (any (not . null . exactRequirements . worldBindingInterfaceArtifact) selected)
     (liftIO (throwIO WorldCellUnsupported))
-  current <- getSession
   let rejectValueImport reason = emitWorldAcquisitionRejection "world value import" path reason
         >> throwIO WorldCellCorrupt
   readback <- liftIO (readWorldBindingInputs current facts occurrences)

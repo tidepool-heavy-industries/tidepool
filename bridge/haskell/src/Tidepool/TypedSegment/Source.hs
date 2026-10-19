@@ -10,7 +10,12 @@ import Data.Generics (everything, mkQ)
 import Data.List (intersect, nub)
 import qualified Data.Set as Set
 import GHC (ParsedModule (..))
-import GHC.Driver.DynFlags (DynFlags)
+import GHC.Driver.DynFlags (DynFlags, GeneralFlag(Opt_HelpfulErrors,Opt_DeferOutOfScopeVariables), gopt_set, gopt_unset)
+import GHC.Driver.Env (HscEnv, hsc_dflags, hscUpdateFlags)
+import GHC.Rename.Expr (rnLExpr)
+import GHC.Rename.Unbound (isUnboundName)
+import GHC.Tc.Utils.Monad (initTcInteractive, discardErrs)
+import GHC.Types.Name (nameOccName)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Parser qualified as Parser
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
@@ -26,23 +31,46 @@ import GHC.Unit.Module.ModSummary (ms_hspp_opts)
 import GHC.Utils.Outputable (ppr, text, (<+>))
 import Tidepool.TypedSegment.Types
 
--- Lookup work follows the submitted root's syntax, not the size of the held
--- namespace. This conservative candidate set includes locally shadowed names;
--- ordinary GHC renaming still decides which imported aliases are actually used.
-typedSegmentInputOccurrences :: DynFlags -> TypedSegmentPlan -> String -> Either TypedSegmentFailure [String]
-typedSegmentInputOccurrences flags plan source = case unP Parser.parseModule parser of
-  PFailed _ -> Left UnprovedRootAbstraction
-  POk _ parsed -> Right (Set.toAscList (Set.fromList
-  [ name
-  | L _ (ValD _ binding@FunBind {fun_id=identifier}) <- hsmodDecls (unLoc parsed)
-  , occNameString (rdrNameOcc (unLoc identifier)) == typedSegmentPlanRoot plan
-  , name <- everything (++) (mkQ [] selected) (fun_matches binding)
-  ]))
+-- GHC owns lexical scope here, before any old binding is hydrated. An empty
+-- global environment leaves unresolved uses as HsUnboundVar, preserving the
+-- original qualifier; let/do/lambda/case binders become renamed local Names.
+-- Expected missing-global diagnostics are discarded only for this demand
+-- probe. Its syntax is never admitted or typechecked, and the real compiler
+-- still validates the complete submitted program through its normal owner.
+-- Callers must apply the world effective-flag/execution policy before entry.
+typedSegmentInputOccurrences :: HscEnv -> TypedSegmentPlan -> String -> IO (Either TypedSegmentFailure [String])
+typedSegmentInputOccurrences environment plan source = case rootExpression of
+  Left failure -> pure (Left failure)
+  Right expression -> do
+    let probeFlags = gopt_set (gopt_unset flags Opt_HelpfulErrors) Opt_DeferOutOfScopeVariables
+        probe = hscUpdateFlags (const probeFlags) environment
+    (_,renamed) <- initTcInteractive probe (discardErrs (fst <$> rnLExpr expression))
+    pure $ case renamed of
+      Nothing -> Left UnprovedRootAbstraction
+      Just result -> Right (Set.toAscList (Set.fromList
+        (everything (++) (mkQ [] selected) result)))
   where
+    flags = hsc_dflags environment
     parser = initParserState (initParserOpts flags) (stringToStringBuffer source)
       (mkRealSrcLoc (mkFastString "<held-world-segment>") 1 1)
-    selected :: RdrName -> [String]
-    selected name | isUnqual name && isVarOcc (rdrNameOcc name) = [occNameString (rdrNameOcc name)]
+    rootExpression = case unP Parser.parseModule parser of
+      PFailed _ -> Left UnprovedRootAbstraction
+      POk _ parsed -> case
+          [ expression
+          | L _ (ValD _ FunBind {fun_id=identifier,fun_matches=matches}) <- hsmodDecls (unLoc parsed)
+          , occNameString (rdrNameOcc (unLoc identifier)) == typedSegmentPlanRoot plan
+          , [L _ match] <- [unLoc (mg_alts matches)]
+          , [] <- [unLoc (m_pats match)]
+          , EmptyLocalBinds _ <- [grhssLocalBinds (m_grhss match)]
+          , [L _ (GRHS _ [] expression)] <- [grhssGRHSs (m_grhss match)]
+          ] of
+        [expression] -> Right expression
+        _ -> Left UnprovedRootAbstraction
+    selected :: HsExpr GhcRn -> [String]
+    selected (HsUnboundVar _ name)
+      | isUnqual name && isVarOcc (rdrNameOcc name) = [occNameString (rdrNameOcc name)]
+    selected (HsVar _ (L _ name))
+      | isUnboundName name && isVarOcc (nameOccName name) = [occNameString (nameOccName name)]
     selected _ = []
 
 rewriteParsedSegmentRoot :: GeneratedSegmentOperations -> TypedSegmentPlan -> ParsedModule -> IO ParsedModule
