@@ -4,7 +4,7 @@ Area: `/root/warm_compiler_campaign/warm_workers`, Sol high.
 Checkout: `/srv/swarm/checkouts/tidepool-shared-warm-warm-workers-20261019`.
 Branch: `feature/shared-warm/warm-workers`. Base:
 `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. Current compiled and executed
-source: `2aa1f61d830a6495bb2158232f9a0f6d48a665a9`.
+source: `cbef468ed5750ba6320cfff94c43440fac74c645`.
 The C2 amendment `e2bd2611102566085d0c573568d820a50ed62fb3` was imported as
 `6beec6fd58c5ae27ee47ff86fa5f2797895adb9c`, including its unchanged STATUS.
 The campaign owner alone edits shared CONTRACTS/STATUS.
@@ -48,21 +48,21 @@ The single descendant grant was reused throughout; no second descendant was spaw
 Actual native task ID: `/root/warm_compiler_campaign/warm_workers/protocol`, configured
 `gpt-6.1-sol`, high, fresh context. Initial implementation started at base5b74 in
 `tidepool-shared-warm-worker-protocol-20261019`; successive concrete review/audit
-reactivations used this same task. Its final source receipt settled at exact2aa1.
+reactivations used this same task. Its final source receipt settled at exact2aa1; the later cbef success-message correction changes no predicate.
 It independently reviewed area-authored publication/history repairs. Its authored
 protocol/encoder pieces received separate campaign-supervisor review. Native event
 history retains starts/settlements; no additional timestamp is inferred here.
 
 Campaign source review accepted the initial full protocol and later production
 atomicity. The only final source-review finding, an overly broad refusal predicate,
-is repaired at exact2aa1. Child exact receipts are retained in
+is repaired at exact2aa1, whose predicate is unchanged in cbef. Child exact receipts are retained in
 `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/protocol/WAVE2-OWNERS.md`.
 The campaign owns final cumulative review/fold disposition.
 
 Production worker, four affected Haskell binaries and Rust production/cfg(test)
 consumers compiled through pinned fast-dev, local-only Buck actions. The maintained
 wrappers, including their declared generator/runtime/fixture inputs, were built.
-Final exact2aa1 counted execution passed **9 selected / 9 executed / 9 passed**:
+Final exactcbef counted execution passed **9 selected / 9 executed / 9 passed**:
 
 - Worker response cleanup suppresses Ready: 1.
 - Matched source-free request wire: 1.
@@ -82,7 +82,7 @@ sensitivity. Positive execution covers both failures.
 
 Full exact commands, source/artifact hashes, selected/executed counts, actual exit
 statuses, negative-control identity and hashed logs:
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/NATIVE-VALIDATION-2aa1.json`.
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/NATIVE-VALIDATION-cbef.json`.
 Prior failures and reports are preserved, including the native-row adapter's
 pre-regression failure and the binder fixture's pre-ordinal failure. Compilation
 and execution are distinct in this receipt.
