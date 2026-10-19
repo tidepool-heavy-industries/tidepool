@@ -367,17 +367,19 @@ impl Fixture {
             )
             .await
             .expect("native actor admission");
-        let context = actor
+        let context = self
+            .forest
+            .directory
             .session_context(actor.identity())
             .await
             .expect("actual actor directory")
             .expect("admitted actor context");
-        let source = context
+        let source_lease = context
             .source_dependency()
             .source_lease()
             .expect("workbench issuer adopted its final canonical source scope");
-        assert_eq!(source.scope(), context.placement.lexical_scope);
-        source
+        assert_eq!(source_lease.scope(), context.placement.lexical_scope);
+        source_lease
             .validate_source_issuer()
             .expect("actual workbench source issuer remains live");
         let (reply, receive) = tokio::sync::oneshot::channel();
