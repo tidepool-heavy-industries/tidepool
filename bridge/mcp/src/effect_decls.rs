@@ -330,7 +330,7 @@ pub fn effect_documentation(decl: &EffectDecl) -> Option<EffectDocumentationFact
         description: decl.description.into(),
         prompt_card: decl.prompt_card.map(Into::into),
         imports: decl.extra_imports.iter().map(|value| (*value).into()).collect(),
-        operations: crate::generated::operation_documentation(decl.type_name)?,
+        operations: crate::generated::operation_documentation(decl.type_name).unwrap_or_default(),
     })
 }
 

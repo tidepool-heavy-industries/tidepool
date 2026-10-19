@@ -163,6 +163,11 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
         for helper in effect.helpers.iter().filter(|helper| !helper.substrate && effect.authored_surface.includes_helper(helper.name)) {
             contents.push_str(&format!("            crate::EffectOperationDocumentation {{ name: {}.into(), signature: {}.into(), contract: vec![{}], source: None, examples: vec![] }},\n", rust_string_literal(helper.name), rust_string_literal(&helper.signature(effect)), helper.doc.iter().map(|line| format!("{}.into()", rust_string_literal(line))).collect::<Vec<_>>().join(", ")));
         }
+        if effect.name == "Commands" {
+            for operation in crate::effects::commands::companion_operations() {
+                contents.push_str(&format!("            crate::EffectOperationDocumentation {{ name: {}.into(), signature: {}.into(), contract: vec![{}], source: Some({}.into()), examples: vec![{}.into()] }},\n", rust_string_literal(operation.name), rust_string_literal(&operation.signature()), operation.contract.iter().map(|line| format!("{}.into()", rust_string_literal(line))).collect::<Vec<_>>().join(", "), rust_string_literal(operation.source), rust_string_literal("do\n  result <- Cmd.run (Cmd.withMemory (Cmd.MiB 256) (Cmd.argv [\"printf\", \"hello\\n\"]))\n  pure (Cmd.failure result, Cmd.stdout result)")));
+            }
+        }
         contents.push_str("        ],\n");
     }
     contents.push_str("        _ => return None,\n    })\n}\n");

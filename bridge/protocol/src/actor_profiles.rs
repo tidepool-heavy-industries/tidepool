@@ -873,11 +873,11 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
         ));
     }
     bridge.push_str("        }\n    }\n}\n");
-    bridge.push_str("\nimpl From<exomonad_tool::ActorEffectKey> for ActorEffectKeyWire {\n    fn from(value: exomonad_tool::ActorEffectKey) -> Self {\n        match value {\n");
+    bridge.push_str("\nimpl TryFrom<exomonad_tool::ActorEffectKey> for ActorEffectKeyWire {\n    type Error = &'static str;\n    fn try_from(value: exomonad_tool::ActorEffectKey) -> Result<Self, Self::Error> {\n        Ok(match value {\n");
     for effect in &bridge_effects {
         bridge.push_str(&format!("            exomonad_tool::ActorEffectKey::{} => Self::{},\n", effect.identity.rust_wire, effect.constructor));
     }
-    bridge.push_str("        }\n    }\n}\n");
+    bridge.push_str("            _ => return Err(\"legacy actor effect has no nominal wire identity\"),\n        })\n    }\n}\n");
     let mut profiles = crate::gen::header("//! ", "Default actor effects");
     profiles.push_str(
         "\nuse crate::ActorEffectKey;\n\npub const DEFAULT_ACTOR_EFFECTS: &[ActorEffectKey] = &[\n",

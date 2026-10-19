@@ -240,3 +240,18 @@ fn indexed_model_witnesses_reject_wrong_family_and_coercion() {
         assert!(!refused.stderr.is_empty());
     }
 }
+
+#[test]
+fn command_composition_documentation_compiles_against_authored_exports() {
+    let surface = Surface::new();
+    let fixture = std::fs::read_to_string(surface.fixtures.join("CommandComposition.hs")).unwrap();
+    let docs = tidepool_mcp::effect_documentation(&tidepool_mcp::commands_decl()).unwrap();
+    assert!(!docs.operations.is_empty());
+    for operation in &docs.operations {
+        for example in &operation.examples {
+            assert!(fixture.contains(example), "{} example differs from compiled fixture", operation.name);
+        }
+    }
+    let compiled = surface.compile("CommandComposition.hs", false);
+    assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+}
