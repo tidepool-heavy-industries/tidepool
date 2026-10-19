@@ -2706,25 +2706,35 @@ data WorldSelection = WorldSelection
 data WorldCompilerRole
   = WorldInterfaceRole BS.ByteString
   | WorldReusableRole BS.ByteString BS.ByteString
-  | WorldPublishedRole BS.ByteString BS.ByteString String String BS.ByteString BS.ByteString
+  | WorldPublishedRole BS.ByteString BS.ByteString String String BS.ByteString BS.ByteString BS.ByteString
 
 worldRoleInterface :: WorldCompilerRole -> BS.ByteString
 worldRoleInterface role = case role of
   WorldInterfaceRole value -> value
   WorldReusableRole value _ -> value
-  WorldPublishedRole value _ _ _ _ _ -> value
+  WorldPublishedRole value _ _ _ _ _ _ -> value
 
 worldRoleOriginal :: WorldCompilerRole -> Maybe BS.ByteString
 worldRoleOriginal role = case role of
   WorldInterfaceRole _ -> Nothing
   WorldReusableRole _ value -> Just value
-  WorldPublishedRole _ value _ _ _ _ -> Just value
+  WorldPublishedRole _ value _ _ _ _ _ -> Just value
+
+-- Native-domain maps retain the Rust-issued birth provenance. Neither their
+-- presence nor a CID grants native execution or selects a compiler original.
+type WorldNativeProvenance =
+  (Map.Map BS.ByteString BS.ByteString,Map.Map BS.ByteString BS.ByteString,Map.Map (String,String) BS.ByteString)
+
+data WorldNativeAuthority = WorldNativeAuthority
+  { worldAuthorityRoles :: Map.Map (String,String) (WorldCompilerRole,Maybe (WorldSelection,WorldNativeAuthority))
+  , worldAuthorityNative :: WorldNativeProvenance
+  }
 
 data WorldContextFacts = WorldContextFacts
-  { worldContextRoles :: Map.Map (String,String) (WorldCompilerRole,Maybe WorldSelection)
+  { worldContextRoles :: Map.Map (String,String) (WorldCompilerRole,Maybe (WorldSelection,WorldNativeAuthority))
   , worldContextLexical :: Map.Map (String,String) [(String,String)]
   , worldContextSelection :: WorldSelection
-  , worldContextPassive :: (Map.Map BS.ByteString BS.ByteString,Map.Map BS.ByteString BS.ByteString,Map.Map (String,String) BS.ByteString)
+  , worldContextPassive :: WorldNativeProvenance
   , worldContextCharge :: (Integer,Integer)
   }
 
@@ -2843,7 +2853,7 @@ decodeWorldCompilerRole = do
       worldFactField "interface"
       interface <- worldArrayDigest
       pure (WorldReusableRole interface original)
-    ("published_source_original",7) -> do
+    ("published_source_original",8) -> do
       worldFactField "original"
       original <- worldArrayDigest
       worldFactField "interface"
@@ -2852,11 +2862,13 @@ decodeWorldCompilerRole = do
       selection <- worldCID
       worldFactField "source_revision"
       revision <- T.unpack <$> worldBindingText
+      worldFactField "native_authority"
+      authority <- worldCID
       worldFactField "selection_sha256"
       seal <- worldArrayDigest
       worldFactField "original_input_identity"
       identity <- T.unpack <$> worldBindingText
-      pure (WorldPublishedRole interface original revision identity selection seal)
+      pure (WorldPublishedRole interface original revision identity selection seal authority)
     _ -> fail "unsupported compiler world compiler role"
 
 decodeWorldLexicalFact :: Int -> Decoder s ((String,String),[(String,String)])
@@ -3130,24 +3142,68 @@ readWorldSelection frontier root = do
 -- Retain current role, lexical and scope facts under the same world owner.
 -- Offer/native decision links are passive custody; no native payload or group
 -- inventory is loaded merely to open a type/query world.
+readWorldNativeMaps :: Map.Map BS.ByteString BS.ByteString -> Map.Map String WorldDescriptorField
+  -> IO (WorldNativeProvenance,(Integer,Integer))
+readWorldNativeMaps frontier descriptor = do
+  offersCID <- worldDescriptorLink "offers" descriptor
+  (offers,offersCharge) <- worldHamtMapWithCharge frontier offersCID worldArrayDigest encodeWorldArrayDigest worldCID
+  availabilityCID <- worldDescriptorLink "native_availability" descriptor
+  (availability,availabilityCharge) <- worldHamtMapWithCharge frontier availabilityCID worldArrayDigest encodeWorldArrayDigest worldCID
+  decisionsCID <- worldDescriptorLink "input_decisions" descriptor
+  (decisions,decisionsCharge) <- worldHamtMapWithCharge frontier decisionsCID decodeWorldModuleKey encodeWorldModuleKey worldCID
+  pure ((offers,availability,decisions),foldl' addWorldCharge (0,0)
+    [worldMapCharge offers offersCharge,worldMapCharge availability availabilityCharge,worldMapCharge decisions decisionsCharge])
+
+type WorldAuthorityMemo = IORef (Map.Map BS.ByteString (Maybe WorldNativeAuthority))
+
+readWorldNativeAuthority :: WorldAuthorityMemo -> Map.Map BS.ByteString BS.ByteString -> BS.ByteString
+  -> IO (WorldNativeAuthority,(Integer,Integer))
+readWorldNativeAuthority memo frontier root = do
+  decoded <- readIORef memo
+  case Map.lookup root decoded of
+    Just Nothing -> worldCorrupt "cyclic compiler world publication authority"
+    Just (Just authority) -> pure (authority,(0,1))
+    Nothing -> do
+      modifyIORef' memo (Map.insert root Nothing)
+      (descriptor,descriptorBytes) <- readWorldDescriptor frontier root
+        (worldDescriptor ["roles","offers","native_availability","input_decisions"] False)
+      requireWorldDescriptorVersion 2 descriptor
+      rolesCID <- worldDescriptorLink "roles" descriptor
+      (roles,roleCharge) <- readWorldRoles memo frontier rolesCID
+      (facts,charge) <- readWorldNativeMaps frontier descriptor
+      let authority = WorldNativeAuthority roles facts
+      modifyIORef' memo (Map.insert root (Just authority))
+      -- One immutable decode per authority CID plus each retained reference.
+      pure (authority,foldl' addWorldCharge (descriptorBytes,2) [roleCharge,charge])
+
+-- Current and publication-birth domains share the same strict role decoder.
+-- A born role's own publication owner remains independent and is retained too.
+readWorldRoles :: WorldAuthorityMemo -> Map.Map BS.ByteString BS.ByteString -> BS.ByteString
+  -> IO (Map.Map (String,String) (WorldCompilerRole,Maybe (WorldSelection,WorldNativeAuthority)),(Integer,Integer))
+readWorldRoles memo frontier root = do
+  (links,hamtCharge) <- worldHamtMapWithCharge frontier root decodeWorldModuleKey encodeWorldModuleKey worldCID
+  roles <- forM links $ \cid -> do
+    (role,bytes) <- readWorldDescriptor frontier cid decodeWorldCompilerRole
+    (selection,charge) <- case role of
+      WorldPublishedRole _ _ _ _ selectedRoot _ authorityRoot -> do
+        (selected,selectedCharge) <- readWorldSelection frontier selectedRoot
+        (authority,authorityCharge) <- readWorldNativeAuthority memo frontier authorityRoot
+        pure (Just (selected,authority),addWorldCharge selectedCharge authorityCharge)
+      _ -> pure (Nothing,(0,0))
+    pure ((role,selection),addWorldCharge (bytes,1) charge)
+  pure (fmap fst roles,foldl' addWorldCharge (worldMapCharge links hamtCharge) (map snd (Map.elems roles)))
+
 readWorldContext :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString -> BS.ByteString -> IO WorldContextFacts
 readWorldContext frontier root producer = do
   (descriptor,descriptorBytes) <- readWorldDescriptor frontier root (worldDescriptor
     ["selection","roles","lexical","offers","native_availability","input_decisions"] True)
-  requireWorldDescriptorVersion 5 descriptor
+  requireWorldDescriptorVersion 6 descriptor
   case Map.lookup "producer" descriptor of
     Just (WorldDescriptorProducer actual) | actual == producer -> pure ()
     _ -> worldCorrupt "compiler world context producer differs"
   rolesCID <- worldDescriptorLink "roles" descriptor
-  (roleLinks,roleCharge) <- worldHamtMapWithCharge frontier rolesCID decodeWorldModuleKey encodeWorldModuleKey worldCID
-  roles <- forM roleLinks $ \cid -> do
-    (role,bytes) <- readWorldDescriptor frontier cid decodeWorldCompilerRole
-    (selection,charge) <- case role of
-      WorldPublishedRole _ _ _ _ root _ -> do
-        (value,cost) <- readWorldSelection frontier root
-        pure (Just value,cost)
-      _ -> pure (Nothing,(0,0))
-    pure ((role,selection),addWorldCharge (bytes,1) charge)
+  authorityMemo <- newIORef Map.empty
+  (roles,roleCharge) <- readWorldRoles authorityMemo frontier rolesCID
   lexicalCID <- worldDescriptorLink "lexical" descriptor
   (lexicalLinks,lexicalCharge) <- worldHamtMapWithCharge frontier lexicalCID decodeWorldModuleKey encodeWorldModuleKey worldCID
   lexical <- forM (Map.toAscList lexicalLinks) $ \(owner,cid) -> do
@@ -3161,17 +3217,11 @@ readWorldContext frontier root producer = do
     (worldCorrupt "compiler world lexical graph leaves selected roles or lexical facts")
   selectionCID <- worldDescriptorLink "selection" descriptor
   (selection,selectionCharge) <- readWorldSelection frontier selectionCID
-  offersCID <- worldDescriptorLink "offers" descriptor
-  (offers,offersCharge) <- worldHamtMapWithCharge frontier offersCID worldArrayDigest encodeWorldArrayDigest worldCID
-  availabilityCID <- worldDescriptorLink "native_availability" descriptor
-  (availability,availabilityCharge) <- worldHamtMapWithCharge frontier availabilityCID worldArrayDigest encodeWorldArrayDigest worldCID
-  decisionsCID <- worldDescriptorLink "input_decisions" descriptor
-  (decisions,decisionsCharge) <- worldHamtMapWithCharge frontier decisionsCID decodeWorldModuleKey encodeWorldModuleKey worldCID
+  (passive,passiveCharge) <- readWorldNativeMaps frontier descriptor
   let charge = foldl' addWorldCharge (descriptorBytes,1)
-        ([worldMapCharge roleLinks roleCharge,worldMapCharge lexicalLinks lexicalCharge,selectionCharge
-         ,worldMapCharge offers offersCharge,worldMapCharge availability availabilityCharge,worldMapCharge decisions decisionsCharge]
-         ++ map snd (Map.elems roles) ++ [cost | (_,(_,cost)) <- lexical])
-  pure (WorldContextFacts (fmap fst roles) lexicalFacts selection (offers,availability,decisions) charge)
+        ([roleCharge,worldMapCharge lexicalLinks lexicalCharge,selectionCharge,passiveCharge]
+         ++ [cost | (_,(_,cost)) <- lexical])
+  pure (WorldContextFacts roles lexicalFacts selection passive charge)
 
 readWorldPrimary :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString -> WorldContextFacts -> BS.ByteString
   -> [(OfferedWorldRow,ScopeInterfaceInput)] -> IO WorldPrimaryFacts

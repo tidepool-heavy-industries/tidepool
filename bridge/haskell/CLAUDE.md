@@ -149,6 +149,19 @@ passive row presence and module names cannot reconstruct that selection. Immutab
 decoded primary facts and their known backing/record charges stay with the same
 world/input owner. The receiver preserves private Rust artifact/scope receipts as
 provenance, and grants no native execution or completed value from them.
+Context descriptors use version 6. Each published source role requires its
+birth-native-authority descriptor2 and all four typed-role, offer, availability
+and decision HAMTs. An acquisition-local CID memo shares immutable decoded birth
+authorities and refuses active cycles; retained charges count unique decoded
+authorities plus references. It is discarded after cold admission. Those immutable
+facts remain passive Rust provenance under the same world
+owner and retention charge; current-context offers cannot replace birth facts.
+Old Context5, authority descriptor1 and published roles without that link refuse. Genuine source-publication fixtures use the explicit
+`TPSOURCEBOOTPUBLISHED1` intent on the existing OriginalProductsProducer completion:
+its completed target and unique publication roots are separate from ordinary
+candidate/interface/native/lexical selectors. Ordinary fixture delivery never
+implicitly endorses a source original. Haskell controls inspect the genuine
+issued Context and mutate only DATA; the Rust publication owner issues roles.
 `TPCWORLD` custody keeps base and unmerged
 value rows separate and names each owned image explicitly. Custody does not
 select compiler Originals or native groups. Cold block admission verifies the

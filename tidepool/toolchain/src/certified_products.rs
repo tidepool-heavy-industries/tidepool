@@ -2720,6 +2720,17 @@ impl NativeGroupCandidates {
 }
 
 impl CertifiedSourceSelection {
+    /// Encoding bases borrow immutable facts only; native decisions still come
+    /// from this selection's checked continuation and physical output.
+    pub(crate) fn native_fact_base(
+        &self,
+    ) -> Option<&Arc<crate::exact_context::PublicationNativeFacts>> {
+        match &self.input_origin {
+            CertifiedInputOrigin::Continuation(source) => Some(source.native_fact_owner()),
+            CertifiedInputOrigin::NewProducts => None,
+        }
+    }
+
     /// A validated output with no certified original rows carries no inherited
     /// input choice. This cannot construct a native role or availability.
     pub(crate) fn empty_product_output() -> Self {

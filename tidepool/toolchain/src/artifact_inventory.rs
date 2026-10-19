@@ -16,10 +16,13 @@ mod properties;
 
 mod compiler_projection;
 mod native_availability;
-pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
+pub use compiler_projection::{
+    CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority,
+};
 pub(crate) use compiler_projection::{
-    CompilerSourceSupport, DemandCompilerProjection, DemandCompilerProjectionWork, InputNativeDecision,
-    IssuedInputNativeDecisions, RecordedInputNativeDecision,
+    CompilerSourceSupport, DemandCompilerProjection, DemandCompilerProjectionWork,
+    InputNativeDecision, IssuedInputNativeDecisions, RecordedCompilerRole,
+    RecordedInputNativeDecision,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -1265,6 +1268,8 @@ pub enum ArtifactInventoryFailure {
     MetadataConflict { artifact: ArtifactId },
     #[error("compiler interface owner {owner:?} has differing artifacts")]
     OwnerConflict { owner: ExactModuleIdentity },
+    #[error("published source owner {owner:?} has a different acquired native birth domain")]
+    PublicationNativeDomainMismatch { owner: ExactModuleIdentity },
     #[error("owner {owner:?} selects multiple native implementations")]
     NativeOwnerAmbiguity { owner: ExactModuleIdentity },
     #[error("artifact {artifact:?} has multiple issued dependency bindings")]
@@ -7948,7 +7953,7 @@ impl ArtifactView {
             input_decisions.facts.insert(
                 owner.clone(),
                 compiler_projection::RecordedInputNativeDecision {
-                    role: role.clone(),
+                    role: role.recorded_fact(),
                     groups: chosen,
                 },
             );
@@ -18085,6 +18090,18 @@ mod tests {
                 },
             ),
             selection_sha256: [5; 32],
+            native_authority: crate::artifact_inventory::PublicationNativeAuthority::recorded(
+                crate::exact_context::PublicationNativeFacts::maintain(
+                    None,
+                    crate::exact_context::PublicationNativeMaps {
+                        roles: Default::default(),
+                        offers: Default::default(),
+                        native_availability: Default::default(),
+                        input_decisions: Default::default(),
+                    },
+                )
+                .unwrap(),
+            ),
         };
         let mut projection = CompilerInputProjection::default();
         projection

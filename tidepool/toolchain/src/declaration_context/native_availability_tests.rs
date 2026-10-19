@@ -1404,7 +1404,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         ],
     )
     .unwrap();
-    let receipt = transport.availability[&entries[1].descriptor.id].clone();
+    let receipt = transport.availability.0[&entries[1].descriptor.id].clone();
     assert_eq!(
         receipt.offers().len(),
         2,
@@ -1796,10 +1796,11 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         .entries
         .values()
         .any(|entry| entry.descriptor.id == replacement_a.descriptor.id));
-    assert!(!request.native_selection.availability.contains_key(&a_id));
+    assert!(!request.native_selection.availability.0.contains_key(&a_id));
     let offers = request
         .native_selection
         .availability
+        .0
         .values()
         .flat_map(|availability| availability.offers().cloned())
         .collect::<Vec<_>>();
@@ -1844,7 +1845,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([(b_id, 7)])
     );
-    assert!(!request.native_selection.availability[&b_id].permits(9001));
+    assert!(!request.native_selection.availability.0[&b_id].permits(9001));
     assert!(matches!(
         consume(&selected_view, &request_selection, &[denied_demand]),
         Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
@@ -1987,7 +1988,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         let baseline = ProtectedScaffoldRequirements::default()
             .compiler_inputs(&context, None)
             .unwrap();
-        let empty = &baseline.native_selection.availability[&entry.descriptor.id];
+        let empty = &baseline.native_selection.availability.0[&entry.descriptor.id];
         assert_eq!(empty.offers().len(), 1);
         let baseline_empty = empty.offers().next().unwrap().clone();
         assert!(!empty.permits(7));
@@ -2003,6 +2004,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         );
         for chosen in [&left, &right] {
             let private = OriginalCompilerInputs {
+            native_fact_base:None,
                 native_availability: RequestNativeAvailability::issue_checked(
                     &projection,
                     &retain_native_offers(&base, std::slice::from_ref(chosen)).unwrap(),
@@ -2156,6 +2158,7 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     let b = base.select_roots(vec![b_id]).unwrap();
     let offers = vec![a_offer, b_offer];
     let private = OriginalCompilerInputs {
+            native_fact_base:None,
         native_availability: RequestNativeAvailability::issue_checked(
             &projection,
             &retain_native_offers(&b, &offers).unwrap(),
@@ -2432,7 +2435,7 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
         .unwrap();
     let transport =
         NativeInputSelection::issue_checked(&projection, &metadata, &current, &[offer]).unwrap();
-    let support = transport.availability[&a_id]
+    let support = transport.availability.0[&a_id]
         .dependency_support(
             NativeGroupKey {
                 artifact: a_id,
@@ -2991,7 +2994,7 @@ fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
         let transport =
             NativeInputSelection::issue_checked(&projection, &metadata, &full, &offers).unwrap();
         assert!(
-            !transport.availability.contains_key(&entry.descriptor.id),
+            !transport.availability.0.contains_key(&entry.descriptor.id),
             "neither complete byte custody nor unions of subsets create a Full witness"
         );
         let ArtifactPayload::Original(original) = &entry.payload else {
@@ -3000,7 +3003,7 @@ fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
         assert!(transport
             .advertised
             .receipt_original(
-                &RequestNativeAvailability(Arc::clone(&transport.availability)),
+                &transport.availability,
                 &original.owner().unit,
                 &original.owner().module,
                 &original.owner().module_version
@@ -3155,7 +3158,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
             transport.advertised.0.is_empty(),
             "same canonical ID in another scope has no affine direct candidate"
         );
-        assert_eq!(transport.availability.len(), 2);
+        assert_eq!(transport.availability.0.len(), 2);
         let selected = complete[winner]
             .artifacts()
             .retain_custody(complete[1 - winner].artifacts())
@@ -3175,6 +3178,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
         assert_eq!(
             transport
                 .availability
+                .0
                 .keys()
                 .copied()
                 .collect::<BTreeSet<_>>(),
@@ -3345,6 +3349,221 @@ fn independently_cloned_availability(
     .unwrap()
 }
 
+// Cold independent oracle: rebuild durable facts from the actual row owners,
+// including freshly hashing each contribution rather than borrowing the map or
+// the production row-fact constructor.
+fn recompute_native_availability_facts(
+    rows: &RequestNativeAvailability,
+) -> imbl::OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts> {
+    rows.rows()
+        .map(|row| {
+            let ArtifactPayload::Original(product) = &row.original.payload else {
+                panic!("native row original payload")
+            };
+            let contributions = row
+                .contributions
+                .iter()
+                .map(|contribution| {
+                    let facts = contribution.snapshot_facts().unwrap();
+                    (facts.identity().unwrap(), facts)
+                })
+                .collect();
+            (
+                row.original.descriptor.id,
+                NativeAvailabilitySnapshotFacts {
+                    original: row.original.descriptor.id,
+                    owner: product.owner().clone(),
+                    mode: row.mode.clone(),
+                    contributions,
+                },
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn native_availability_snapshot_facts_follow_changed_rows_without_hot_census() {
+    let native = product("PersistentNativeFacts", 53);
+    let context = native_context(&native);
+    let support = context.compiler_source_support();
+    let rows = support.native_availability();
+    let before = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+    let facts = rows.snapshot_facts().unwrap();
+    for _ in 0..8 {
+        let snapshot = rows.snapshot_facts().unwrap();
+        assert!(facts.ptr_eq(&snapshot));
+        assert_eq!(snapshot, recompute_native_availability_facts(rows));
+    }
+    assert_eq!(
+        NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get),
+        before
+    );
+
+    let copied = independently_cloned_availability(rows);
+    assert_eq!(copied.snapshot_facts().unwrap(), facts);
+    assert!(!Arc::ptr_eq(&rows.0, &copied.0));
+    let before = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+    let unchanged = rows.merge(&copied).unwrap().into_rows();
+    assert!(Arc::ptr_eq(&rows.0, &unchanged.0));
+    assert!(facts.ptr_eq(&unchanged.snapshot_facts().unwrap()));
+    assert_eq!(
+        NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get),
+        before
+    );
+
+    let before = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+    let classified = rows
+        .for_compiler_roles(&support.projection().interface_only(), support.artifacts())
+        .unwrap();
+    assert!(classified
+        .rows()
+        .all(|row| row.classification == NativeInputClassification::PrivateInput));
+    assert!(facts.ptr_eq(&classified.snapshot_facts().unwrap()));
+    assert_eq!(
+        classified.snapshot_facts().unwrap(),
+        recompute_native_availability_facts(&classified)
+    );
+    assert_eq!(
+        NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get),
+        before
+    );
+
+    // An equal canonical payload in a different namespace binding withdraws
+    // Full qualification. This existing owner operation changes only one row.
+    let canonical = Arc::new(ArtifactEntry::canonical(
+        native.module_interface().unwrap().clone(),
+    ));
+    let projection = CompilerInputProjection::from_issued_entries(&[canonical.clone()]).unwrap();
+    let inventory = ArtifactInventory::default();
+    let rebound = inventory
+        .admit_shared(&inventory.empty_view(), vec![canonical])
+        .unwrap()
+        .retain_custody(support.artifacts())
+        .unwrap();
+    let before = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+    let downgraded = rows.for_compiler_roles(&projection, &rebound).unwrap();
+    let after = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+    assert_eq!(after, (before.0, before.1 + 1));
+    assert_eq!(
+        downgraded.rows().next().unwrap().mode,
+        NativeTransportMode::IssuedGroups
+    );
+    assert_eq!(
+        downgraded.snapshot_facts().unwrap(),
+        recompute_native_availability_facts(&downgraded)
+    );
+    assert_ne!(downgraded.snapshot_facts().unwrap(), facts);
+    let before = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+    let promoted = downgraded.merge(rows).unwrap().into_rows();
+    let after = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+    assert_eq!(after, (before.0, before.1 + 1));
+    assert_eq!(promoted.snapshot_facts().unwrap(), facts);
+    assert_eq!(
+        promoted.snapshot_facts().unwrap(),
+        recompute_native_availability_facts(&promoted)
+    );
+
+    // A one-row change beside an unchanged row updates one persistent path,
+    // rather than rebuilding facts for every row in the receiving domain.
+    let extra = native_context(&product("PersistentOtherNativeFacts", 52));
+    let extra_support = extra.compiler_source_support();
+    let extra_id = extra_support
+        .native_availability()
+        .rows()
+        .next()
+        .unwrap()
+        .original
+        .descriptor
+        .id;
+    let joined = rows
+        .merge(extra_support.native_availability())
+        .unwrap()
+        .into_rows();
+    let canonical = Arc::new(ArtifactEntry::canonical(
+        native.module_interface().unwrap().clone(),
+    ));
+    let mixed_roles = CompilerInputProjection::from_issued_entries(&[canonical.clone()])
+        .unwrap()
+        .merge(extra_support.projection())
+        .unwrap();
+    let mixed_view = extra_support
+        .artifacts()
+        .inventory()
+        .admit_shared_with_demand(
+            extra_support.artifacts(),
+            vec![canonical],
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap()
+        .retain_custody(support.artifacts())
+        .unwrap();
+    let before = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+    let mixed = joined
+        .for_compiler_roles(&mixed_roles, &mixed_view)
+        .unwrap();
+    assert_eq!(
+        NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get),
+        (before.0, before.1 + 1)
+    );
+    assert_eq!(mixed.rows().count(), 2);
+    assert!(Arc::ptr_eq(&joined.0[&extra_id], &mixed.0[&extra_id]));
+    assert!(joined.1[&extra_id]
+        .contributions
+        .ptr_eq(&mixed.1[&extra_id].contributions));
+    assert_eq!(
+        mixed.snapshot_facts().unwrap(),
+        recompute_native_availability_facts(&mixed)
+    );
+
+    // Acquisition authenticates the same facts against each actual input owner;
+    // sharing immutable facts cannot share the acquired rows or opaque offers.
+    let acquired_again = native_context(&native);
+    let mut restored = Vec::new();
+    let before = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+    for acquired in [support, acquired_again.compiler_source_support()] {
+        let offers = acquired
+            .native_offers()
+            .iter()
+            .map(|offer| (offer.snapshot_facts().identity().unwrap(), offer.clone()))
+            .collect();
+        let rows =
+            RequestNativeAvailability::restore(&facts, &offers, acquired.artifacts()).unwrap();
+        assert_eq!(
+            rows.snapshot_facts().unwrap(),
+            recompute_native_availability_facts(&rows)
+        );
+        assert!(facts.ptr_eq(&rows.snapshot_facts().unwrap()));
+        assert!(Arc::ptr_eq(
+            &rows.rows().next().unwrap().original,
+            &acquired.artifacts().metadata_snapshot().artifacts
+                [&rows.rows().next().unwrap().original.descriptor.id]
+        ));
+        restored.push(rows);
+    }
+    assert_eq!(
+        NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get),
+        (before.0 + 2, before.1)
+    );
+    assert!(!Arc::ptr_eq(&restored[0].0, &restored[1].0));
+    assert!(!Arc::ptr_eq(
+        restored[0].rows().next().unwrap(),
+        restored[1].rows().next().unwrap()
+    ));
+    assert!(!Arc::ptr_eq(
+        &restored[0].rows().next().unwrap().original,
+        &restored[1].rows().next().unwrap().original
+    ));
+    assert!(!restored[0].rows().next().unwrap().contributions[0]
+        .offer()
+        .same_issuance(restored[1].rows().next().unwrap().contributions[0].offer()));
+    drop(context);
+    drop(acquired_again);
+    drop(restored.remove(0));
+    let surviving = restored[0].rows().next().unwrap();
+    surviving.validate_full_evidence().unwrap();
+    assert!(surviving.permits(9001));
+}
+
 #[test]
 fn unchanged_native_availability_merge_keeps_qualified_rows() {
     let native = product("UnchangedNativeRows", 54);
@@ -3354,6 +3573,10 @@ fn unchanged_native_availability_merge_keeps_qualified_rows() {
     assert_eq!(rows.rows().count(), 1);
     assert_eq!(rows.rows().next().unwrap().mode, NativeTransportMode::Full);
     let independent = independently_cloned_availability(rows);
+    assert_eq!(
+        rows.snapshot_facts().unwrap(),
+        recompute_native_availability_facts(rows)
+    );
     let expected = rows
         .for_compiler_roles(support.projection(), support.artifacts())
         .unwrap();
@@ -3533,6 +3756,10 @@ fn unchanged_native_availability_merge_preserves_indirect_permissions() {
     assert_eq!(hidden_row.mode, NativeTransportMode::IssuedGroups);
     assert!(hidden_row.permits(7));
     assert!(!hidden_row.permits(9001));
+    assert_eq!(
+        rows.snapshot_facts().unwrap(),
+        recompute_native_availability_facts(rows)
+    );
     let expected = rows
         .for_compiler_roles(support.projection(), support.artifacts())
         .unwrap();
@@ -3699,9 +3926,9 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
         &[offers[0].clone(), offers[0].clone()],
     )
     .unwrap();
-    assert!(duplicate.availability[&entries[0].descriptor.id].permits(9001));
-    let original = duplicate.availability[&entries[0].descriptor.id].original_owner();
-    let private = RequestNativeAvailability(Arc::clone(&duplicate.availability));
+    assert!(duplicate.availability.0[&entries[0].descriptor.id].permits(9001));
+    let original = duplicate.availability.0[&entries[0].descriptor.id].original_owner();
+    let private = duplicate.availability.clone();
     let receipt_owner = duplicate
         .advertised
         .receipt_original(
@@ -3721,9 +3948,10 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
         let metadata = selected.project_metadata(view.metadata_snapshot()).unwrap();
         let transport =
             NativeInputSelection::issue_checked(&selected, &metadata, &view, &offers).unwrap();
-        assert!(transport.availability[&entries[index].descriptor.id].permits(9001));
+        assert!(transport.availability.0[&entries[index].descriptor.id].permits(9001));
         assert!(!transport
             .availability
+            .0
             .contains_key(&entries[1 - index].descriptor.id));
     }
     let wrong = Arc::new(ArtifactEntry::canonical(fixture_module_core(
@@ -3837,7 +4065,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
             let transport =
                 NativeInputSelection::issue_checked(&projection, &metadata, &namespace, &selected)
                     .unwrap();
-            let available = &transport.availability[&entry.descriptor.id];
+            let available = &transport.availability.0[&entry.descriptor.id];
             assert!(available.permits(9001));
             assert_eq!(available.offers().len(), 2);
             for offer in &offers {
@@ -3910,7 +4138,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
             let transport =
                 NativeInputSelection::issue_checked(&projection, &metadata, &namespace, &offers)
                     .unwrap();
-            assert!(transport.availability[&entry.descriptor.id].permits(9001));
+            assert!(transport.availability.0[&entry.descriptor.id].permits(9001));
         }
     }
 }
@@ -3973,7 +4201,7 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
         let transport =
             NativeInputSelection::issue_checked(&projection, &no_demand, &full, &offers).unwrap();
         assert_eq!(
-            transport.availability[&entry.descriptor.id].permits(7),
+            transport.availability.0[&entry.descriptor.id].permits(7),
             other
         );
         assert!(!offers[0].is_full());
@@ -3983,7 +4211,7 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
             .unwrap();
     let empty = NativeInputSelection::issue_checked(&projection, &no_demand, &full, &[empty_offer])
         .unwrap();
-    assert!(!empty.availability[&entry.descriptor.id].permits(7));
+    assert!(!empty.availability.0[&entry.descriptor.id].permits(7));
 }
 
 #[test]
@@ -6386,6 +6614,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         )
         .unwrap();
         let private = OriginalCompilerInputs {
+            native_fact_base:None,
             native_availability: RequestNativeAvailability::issue_checked(
                 &projection,
                 &custody,
@@ -6664,6 +6893,16 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                 template_imports: None,
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
             });
+            assert_eq!(
+                context
+                    .compiler_source_support()
+                    .native_availability()
+                    .snapshot_facts()
+                    .unwrap(),
+                recompute_native_availability_facts(
+                    context.compiler_source_support().native_availability()
+                )
+            );
             let snapshot = context.snapshot();
             let store = MemoryBlockstore::new();
             let mut materializer = Materializer::new(&store);
@@ -6693,6 +6932,16 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                 .context_for_expected_snapshot(receipt.root(), &receipt)
                 .unwrap();
             restored.bind_snapshot_baseline(&receipt).unwrap();
+            assert_eq!(
+                restored
+                    .compiler_source_support()
+                    .native_availability()
+                    .snapshot_facts()
+                    .unwrap(),
+                recompute_native_availability_facts(
+                    restored.compiler_source_support().native_availability()
+                )
+            );
             let restored_offer = &restored.owner.facts.compiler_support.native_offers()[0];
             assert_eq!(restored_offer.snapshot_facts(), offer.snapshot_facts());
             assert_eq!(restored_offer.is_full(), index == 0);
@@ -6714,11 +6963,17 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                     PRODUCER,
                 )
                 .unwrap();
+            let physical_rows = request.compiler_inputs().private_native_availability();
+            assert_eq!(
+                physical_rows.snapshot_facts().unwrap(),
+                recompute_native_availability_facts(&physical_rows)
+            );
             if interface_only && index != 0 {
                 assert!(!request
                     .compiler_inputs()
                     .native_selection
                     .availability
+                    .0
                     .contains_key(&entry.descriptor.id));
             } else {
                 assert_eq!(
@@ -7307,7 +7562,7 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
             .prepare_compilation(&root.path().join(format!("request-{index}")), PRODUCER)
             .unwrap();
         let availability =
-            &request.compiler_inputs().native_selection.availability[&entry.descriptor.id];
+            &request.compiler_inputs().native_selection.availability.0[&entry.descriptor.id];
         assert_eq!(
             &availability.mode,
             if index == 0 {
@@ -7768,7 +8023,8 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             .selected_native_groups()
                             .is_empty());
                         assert_eq!(request.compiler_inputs().projection(), &projection);
-                        let availability = &request.compiler_inputs().native_selection.availability;
+                        let availability =
+                            &request.compiler_inputs().native_selection.availability.0;
                         if mode == 2 && same_canonical_binding {
                             assert_eq!(
                                 availability.keys().copied().collect::<BTreeSet<_>>(),
