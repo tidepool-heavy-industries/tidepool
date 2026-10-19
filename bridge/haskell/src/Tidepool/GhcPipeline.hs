@@ -1548,7 +1548,7 @@ removeCompilerWorld root cache = case Map.lookup root (cachedCompilerWorlds cach
 admitCompilerWorld :: (Integer,Int) -> String -> HeldCompilerWorld -> CompilerWorldCache
   -> (CompilerWorldCache,[HeldCompilerWorld])
 admitCompilerWorld (byteLimit,countLimit) root world@(HeldCompilerWorld facts _ materialized _) cache
-  | charge+backingBytes > byteLimit || entries+backingNodes > countLimit = (cache,[])
+  | standaloneBytes > byteLimit || standaloneNodes > countLimit = (cache,[])
   | Map.member root (cachedCompilerWorlds cache) = throw WorldQueryCorrupt
   | otherwise = case Map.lookup key (compilerWorldBackingAccounts cache) of
       Just (WorldBackingAccounting live resident bytes nodes) -> trim [] cache
@@ -1562,6 +1562,7 @@ admitCompilerWorld (byteLimit,countLimit) root world@(HeldCompilerWorld facts _ 
       Nothing -> throw WorldQueryCorrupt
   where
     ticket = nextCompilerWorldTicket cache
+    (standaloneBytes,standaloneNodes) = compilerWorldCharge world
     key = worldMaterializationKey materialized
     (raw,rawEntries) = worldInputsRetainedCharge facts
     (charge,entries) = (raw,rawEntries+1)
