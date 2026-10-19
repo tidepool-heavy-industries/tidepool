@@ -14217,14 +14217,15 @@ mod tests {
                             Some(inputs),
                         )
                         .unwrap();
-                let facts = &request.compiler_inputs().native_original_requirements();
-                assert!(facts
-                    .iter()
-                    .any(|fact| fact.original == helper.descriptor.id));
-                for original in &originals {
-                    assert!(facts
-                        .iter()
-                        .any(|fact| fact.original == original.descriptor.id));
+                for original in std::iter::once(&helper).chain(originals.iter()) {
+                    let availability = request
+                        .compiler_inputs()
+                        .native_availability(original.descriptor.id)
+                        .unwrap();
+                    assert!(availability
+                        .offers()
+                        .any(|offer| offer.original() == original.descriptor.id
+                            && offer.proof().is_some()));
                 }
                 let request_group_roots = request
                     .compiler_inputs()
