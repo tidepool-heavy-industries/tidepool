@@ -19204,7 +19204,37 @@ pub(crate) mod tests {
         let mut prior = vec![initial.recovery_products[0].clone()];
         let mut context = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products(canonical_producer, &prior)
+            .extend_issued_compiler_support(&{
+                let inventory = crate::artifact_inventory::ArtifactInventory::default();
+                let entries = initial
+                    .recovery_products
+                    .iter()
+                    .cloned()
+                    .map(|product| {
+                        crate::artifact_inventory::ArtifactEntry::original(
+                            canonical_producer,
+                            product,
+                        )
+                        .map(Arc::new)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let physical = inventory
+                    .admit_certified_with_demand(
+                        &inventory.empty_view(),
+                        entries,
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                        &initial.source_selection,
+                    )
+                    .unwrap();
+                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                    &initial.source_selection,
+                    &physical,
+                )
+                .unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            })
             .unwrap();
 
         let native = prior[0].original_native().unwrap();
@@ -20062,7 +20092,37 @@ None,
         let mut prior = vec![initial.recovery_products[0].clone()];
         let mut context = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products(canonical_producer, &prior)
+            .extend_issued_compiler_support(&{
+                let inventory = crate::artifact_inventory::ArtifactInventory::default();
+                let entries = initial
+                    .recovery_products
+                    .iter()
+                    .cloned()
+                    .map(|product| {
+                        crate::artifact_inventory::ArtifactEntry::original(
+                            canonical_producer,
+                            product,
+                        )
+                        .map(Arc::new)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let physical = inventory
+                    .admit_certified_with_demand(
+                        &inventory.empty_view(),
+                        entries,
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                        &initial.source_selection,
+                    )
+                    .unwrap();
+                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                    &initial.source_selection,
+                    &physical,
+                )
+                .unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            })
             .unwrap();
         for index in 0..2 {
             let projection = context.compiler_input_projection().interface_only();
@@ -20838,10 +20898,40 @@ None,
             baseline
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(
-                    request.producer_sha256,
-                    &certified.recovery_products,
-                )
+                .extend_issued_compiler_support(&{
+                    let entries = certified
+                        .recovery_products
+                        .iter()
+                        .cloned()
+                        .map(|product| {
+                            crate::artifact_inventory::ArtifactEntry::original(
+                                request.producer_sha256,
+                                product,
+                            )
+                            .map(Arc::new)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                    let inputs = request.compiler_inputs();
+                    let physical = inputs
+                        .artifacts()
+                        .inventory()
+                        .admit_certified_with_demand(
+                            inputs.artifacts(),
+                            entries,
+                            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                            &certified.source_selection,
+                        )
+                        .unwrap();
+                    let output =
+                        crate::declaration_context::OriginalCompilerInputs::from_selection(
+                            &certified.source_selection,
+                            &physical,
+                        )
+                        .unwrap();
+                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                        .unwrap()
+                })
                 .unwrap(),
         );
         let effective = context
