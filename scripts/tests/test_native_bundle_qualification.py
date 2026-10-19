@@ -4075,7 +4075,7 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
 class CompilerServicePackageTests(unittest.TestCase):
     def profile_body(self, libdir):
         frame = qualification._package_frame
-        return (b'TPGHC001' + b''.join(frame(value) for value in
+        return (b'TPGHC002' + b''.join(frame(value) for value in
                 ('9.12.2', 'x86_64-linux', str(libdir), str(libdir / 'package.conf.d')))
                 + struct.pack('<I', 1) + frame('base-actual-unit') + frame('actual-abi')
                 + struct.pack('<I', 0) * 4)
@@ -4110,7 +4110,7 @@ class CompilerServicePackageTests(unittest.TestCase):
                 qualification.write_json(Path(command[-1]), {
                     'schema': 2, 'package_source': {'kind': 'observation-only'}, 'producer_identity': [1] * 32, 'consumed_worker_identity': [2] * 32,
                     'frontend_path': str(frontend), 'worker_path': str(worker), 'ghc_libdir': str(libdir)})
-            elif '--capture-supported-package-profile-v1' in command:
+            elif '--capture-supported-package-profile-v2' in command:
                 self.assertTrue(all(name not in kwargs['env'] for name in qualification.PACKAGE_ROOTED_ENVIRONMENT))
                 kwargs['stdout'].write(body)
             elif '--add-root' in command:
@@ -4301,25 +4301,27 @@ class CompilerServicePackageTests(unittest.TestCase):
             self.assertGreaterEqual(sum(call.args[0].name == 'gc-roots' for call in observed.call_args_list), 2)
             self.assertEqual(json.loads(settled.read_text())['status'], 'released')
 
-    def test_declaration_retains_alias_source_root_in_final_selection(self):
+    def test_declaration_refuses_noncanonical_top_level_objects(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with self.declared_provider(root, retain_alias=True) as provider:
-                self.assertIn(str(root / 'immutable-alias-fixture'), provider.record['nix_closure']['roots'])
-                self.assertIn(str(root / 'runtime-tools-fixture'), provider.record['nix_closure']['roots'])
-                acquire = provider.acquire_args()
-                qualification.acquire_compiler_service_source(acquire)
-                receipt = json.loads((acquire.owner_directory / 'package-source/receipt.json').read_text())
-                self.assertEqual(receipt['retained_root_count'], 3)
-                alias_root = next(item for item in receipt['roots'] if item['store_path'] == str(root / 'immutable-alias-fixture'))
-                self.assertEqual(Path(alias_root['path']).readlink(), root / 'immutable-alias-fixture')
-                settled = qualification.release_compiler_service_source(self.retirement_args(acquire))
-                self.assertEqual(json.loads(settled.read_text())['status'], 'released')
-                with patch.object(qualification, 'store_root', side_effect=lambda path: path.resolve(strict=True)):
-                    closure, pins = qualification.pin_nix_closure(
-                        root / 'frozen', root / 'runtime-tools-fixture', [root / 'runtime-tools-fixture', root / 'immutable-alias-fixture'])
-                self.assertIn(str(root / 'immutable-alias-fixture'), closure['roots'])
-                self.assertTrue(any(Path(item['path']).readlink() == root / 'immutable-alias-fixture' for item in pins))
+            with self.assertRaisesRegex(ValueError, 'canonical top-level Nix objects'):
+                with self.declared_provider(root, retain_alias=True):
+                    self.fail('noncanonical profile declaration succeeded')
+            self.assertFalse(list(root.glob('service-*/package-source')))
+            self.assertFalse((root / 'declaration/compiler-service-source.bin').exists())
+
+    def test_generic_pin_owner_preserves_root_object_alias(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.declared_provider(root) as provider:
+                alias = root / 'immutable-alias-fixture'
+                tools = root / 'runtime-tools-fixture'
+                # Mock only the external Nix route/collector boundary; the generic
+                # pin owner must preserve the exact immediate source object.
+                with patch.object(qualification, '_package_nix_roots', return_value=[tools, alias]):
+                    closure, pins = qualification.pin_nix_closure(root / 'frozen', tools, [alias])
+                self.assertEqual(set(closure['roots']), {str(tools), str(alias)})
+                self.assertTrue(any(Path(item['path']).readlink() == alias for item in pins))
 
     def test_changed_profile_refuses_before_service_side_effects(self):
         with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
@@ -4334,7 +4336,7 @@ class CompilerServicePackageTests(unittest.TestCase):
         unit = qualification._package_frame('base-actual-unit') + qualification._package_frame('actual-abi') + struct.pack('<I', 0) * 4
         duplicate = body[:-len(unit) - 4] + struct.pack('<I', 2) + unit * 2
         self.assertEqual(qualification.package_profile_facts(body)['units'][0]['unit_id'], 'base-actual-unit')
-        for invalid in (body[:-1], body + b'extra', duplicate, b'TPGHC001' + struct.pack('<I', 0xffffffff),
+        for invalid in (body[:-1], body + b'extra', duplicate, b'TPGHC002' + struct.pack('<I', 0xffffffff),
                         b'x' * (qualification.PACKAGE_PROFILE_LIMIT + 1)):
             with self.subTest(length=len(invalid)), self.assertRaises(ValueError):
                 qualification.package_profile_facts(invalid)

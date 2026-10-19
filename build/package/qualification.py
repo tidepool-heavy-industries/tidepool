@@ -847,7 +847,7 @@ def pin_nix_closure(root: Path, tools: Path, selected: list[Path]) -> tuple[dict
 
 # These are bounded service-control messages, not a package database format.
 PACKAGE_PROFILE_LIMIT = 16 * 1024 * 1024
-PACKAGE_PROFILE_DOMAIN = b"Tidepool GHC supported package profile v1\0"
+PACKAGE_PROFILE_DOMAIN = b"Tidepool GHC supported package profile v2\0"
 PACKAGE_SOURCE_DOMAIN = b"Tidepool compiler service package source v1\0"
 PACKAGE_ROOTED_ENVIRONMENT = (
     "TIDEPOOL_COMPILER_PACKAGE_PROFILE", "TIDEPOOL_COMPILER_PACKAGE_PROFILE_SHA256",
@@ -895,7 +895,7 @@ def _package_frame(value: bytes | str) -> bytes:
 def package_profile_facts(body: bytes) -> dict:
     """Read the actual worker's closed GHC facts; never guess package.conf expansion."""
     reader = _PackageProfileReader(body)
-    if reader.take(8) != b"TPGHC001":
+    if reader.take(8) != b"TPGHC002":
         raise ValueError("unsupported GHC package profile")
     result = dict(zip(("ghc_version", "target", "libdir", "global_database"),
                       (reader.text() for _ in range(4))))
@@ -1022,7 +1022,7 @@ def declare_compiler_service_source(args) -> Path:
             (("frontend_path", frontend), ("worker_path", worker), ("ghc_libdir", libdir)))):
         raise ValueError("compiler service declaration does not match actual frontend/worker/libdir")
     with tempfile.TemporaryFile() as captured:
-        subprocess.run([str(worker), "--capture-supported-package-profile-v1"], env=environment,
+        subprocess.run([str(worker), "--capture-supported-package-profile-v2"], env=environment,
                        stdout=captured, check=True, timeout=120)
         captured.seek(0)
         body = captured.read(PACKAGE_PROFILE_LIMIT + 1)
@@ -1037,6 +1037,10 @@ def declare_compiler_service_source(args) -> Path:
         raise ValueError(f"supported compiler lacks its fixed ghc-iserv: {iserv}")
     selected += [*_package_nix_roots(iserv), *_package_loader_roots([frontend, worker, iserv], environment)]
     roots = sorted({str(root) for path in selected for root in _package_nix_roots(path)})
+    # TPSPF001 admits canonical top-level objects; aliases within those objects
+    # retain their source and target roots through the single route validator.
+    if any(Path(root).resolve(strict=True) != Path(root) for root in roots):
+        raise ValueError("supported package profile requires canonical top-level Nix objects")
     closure = nix_metadata(tools, roots)
     wrapper = (b"TPSPF001" + _package_frame(body) + struct.pack("<I", len(closure["closure"]))
                + b"".join(_package_frame(path) for path in closure["closure"]))
