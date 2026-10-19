@@ -5,7 +5,7 @@ Checkout: `/srv/swarm/checkouts/tidepool-shared-warm-reload-20261019`, branch
 `feature/shared-warm/reload`. Original base:
 `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
 Current compiled source: `80adfe1d2e313bbf7adc004bbf236ac1729a72e8`.
-Current area source: `70f49ac62fb6f3a241fd565e904b2fd043751be5`, joining
+Current area source: `e0a4b7ff682ee8db09d8732018b24fa23aa430a9`, joining
 independently reviewed fixture029, close985, ancestry76, mutationb646 and durable
 positiveeae (its parent input now retains the exact lease). This needs native checks.
 Campaign owns shared contracts, joined acceptance and qualification. This file
@@ -59,6 +59,12 @@ Private evidence root:
   integration. `c6-owning-eight-target-pass-receipt.json` binds labels, actual
   binary hashes and `c6-owning-host-retry02-build.log`. Scope peak14,313,672,704B;
   compilation executed no tests.
+* Joined93 owning nine-target compile terminated exit3, tests0: new runtime
+  fixture import E0432 with downstream E0282. All sibling actions settled;
+  observer52844 collected. Scope peak14,587,494,400B (<14GiB). Exact one-line
+  import repair1bf uses crate::session; independent source review accepted.
+  `c6-joined-nine-build-receipt.json` retains complete source/command/log.
+  Next frozen retry includes all9 targets and the actual actor integration binary.
 * Exact80ad canonical wave selected/executed9: 5 passed, 4 failed.
   `c6-owner-wave1-receipt.json` binds all reports/commands. Passed: foreign equal
   ScopeId retirement, each exact-scope Unknown custody/last-drop, public facade,
@@ -119,7 +125,7 @@ Two retained Sol-high leaves, no descendants; grant unchanged:
   No full R1/C6 acceptance. Exact joined consumer review remains separate. Historical reviews are private evidence/Git, not acceptance counts.
 
 Supervisor owns source fixture029 and typed primary/close repair985, exact
-integration and next early owning compile. Next command is the frozen joined production/cfg(test)/actor-binary gate;
+integration and next early owning compile. Next command is the frozen joined production/cfg(test)/actor-binary retry;
   supervisor owns its terminal observation. No leaf native command runs. Durable positive eae remains source-only in the admission checkout:
 actual durable same-X retraction request must occur during resume, with actual
 Clean END and pure0-request control, across Generation/root/typed Bootstrap.
