@@ -4314,6 +4314,78 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
 }
 
 #[test]
+fn candidate_availability_preserves_interface_only_with_historical_dependency() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let dependency = product("AvailableDependency", 181);
+    let consumer = dependent_product(
+        "AvailableConsumer",
+        182,
+        vec![(3, vec![source_import(&dependency, 7)])],
+    );
+    let replacement = product("AvailableDependency", 183);
+    let recovered = recovered_witness_fixtures(&[dependency, consumer, replacement]);
+    let products = recovered.iter().map(|row| row.product.clone()).collect::<Vec<_>>();
+    let entries = products.iter().map(|product| {
+        Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap())
+    }).collect::<Vec<_>>();
+    assert_eq!(products[0].module_interface(), products[2].module_interface());
+    assert_ne!(entries[0].descriptor.id, entries[2].descriptor.id);
+    let inventory = ArtifactInventory::default();
+    let issued = inventory.admit_shared(&inventory.empty_view(), entries[..2].to_vec()).unwrap();
+    let complete = fixture_compiler_support(
+        CompilerInputProjection::from_issued_entries(&entries[..2]).unwrap(),
+        issued,
+    );
+    for selected_original in [false, true] {
+        let baseline = if selected_original {
+            complete.clone()
+        } else {
+            complete.selected_interfaces().unwrap()
+                .support_for_owners(vec![entries[0].descriptor.owner.clone(), entries[1].descriptor.owner.clone()])
+                .unwrap().retain_template_availability(&complete).unwrap()
+        };
+        let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            producer: producer.sha256(), compiler_support: baseline.clone(),
+            lexical: Default::default(), template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        });
+        let candidates = crate::module_candidates::CandidateSet {
+            manifest_path: PathBuf::from("availability-only-does-not-read-manifest"),
+            by_owner: BTreeMap::new(), native_availability: vec![products[2].clone()],
+            catalog_owner: None, input_transport: Vec::new(),
+        };
+        let input = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
+            .expect("available B cannot compete with the incoming compiler roles").unwrap();
+        assert_eq!(input.role_projection(), baseline.projection(), "custody cannot select B");
+        assert_eq!(input.native_availability(), baseline.native_availability(), "custody cannot issue Full B");
+        assert_eq!(input.issued_offers(), baseline.native_offers(), "custody cannot add an offer for B");
+        assert_eq!(input.issued_input_decisions(), Some(baseline.input_decisions()));
+        assert!(input.issued_artifacts().artifact_ids().contains(&entries[2].descriptor.id));
+        let directory = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(context))
+            .prepare_compilation_with_private_input(directory.path(), PRODUCER, None, Some(input))
+            .expect("the historical consumer remains usable beside available B");
+        let inputs = request.compiler_inputs();
+        assert_eq!(inputs.projection(), baseline.projection());
+        assert!(inputs.native_availability(entries[2].descriptor.id).is_none());
+        assert!(inputs.native_availability(entries[0].descriptor.id).unwrap().permits(7));
+        assert!(inputs.artifacts().binding_dependencies().iter().any(|(from, to, edge)| {
+            matches!((from, to, edge),
+                (crate::artifact_inventory::ArtifactBindingNode::Group(from),
+                 crate::artifact_inventory::ArtifactBindingNode::Group(to),
+                 crate::artifact_inventory::ArtifactDependency::NativeGroup { .. })
+                if from.binding.artifact() == entries[1].descriptor.id
+                    && from.original_ordinal == 3 && to.binding.artifact() == entries[0].descriptor.id
+                    && to.original_ordinal == 7)
+        }));
+        let availability = inputs.private_native_availability();
+        assert!(inputs.advertised_native_originals().receipt_original(
+            &availability, "main", "AvailableDependency", &products[2].owner().module_version,
+        ).unwrap().is_none(), "available B must not become a direct native advertisement");
+    }
+}
+
+#[test]
 fn private_transport_refuses_selected_dependency_product_and_interface_conflicts() {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let dependency = product("CurrentDependency", 86);
