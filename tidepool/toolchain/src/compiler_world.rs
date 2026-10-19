@@ -32,7 +32,7 @@ pub struct CapturedCompilerSources {
     _owner: Arc<dyn Any + Send + Sync>,
     encoded: Arc<[u8]>,
     seal: [u8; 32],
-    source_seals: Arc<[BTreeMap<PathBuf, [u8; 32]>]>,
+    selected_sources: Arc<BTreeMap<String, WorldModuleOrigin>>,
 }
 
 impl fmt::Debug for CapturedCompilerSources {
@@ -123,23 +123,45 @@ impl CapturedCompilerSources {
             }
         }
         let seal = Sha256::digest(&encoded).into();
-        let source_seals = roots
-            .iter()
-            .map(|root| {
-                root.bodies
-                    .iter()
-                    .map(|(path, body)| (path.clone(), Sha256::digest(body).into()))
-                    .collect()
-            })
-            .collect::<Vec<_>>()
-            .into();
+        // Restricted conventional filename precedence is a primary captured
+        // namespace fact. It is not a copy of GHC's hydrated HPT/import world.
+        let mut selected_sources = BTreeMap::new();
+        for (root, captured) in roots.iter().enumerate() {
+            for (path, body) in &captured.bodies {
+                crate::host_work::checkpoint()?;
+                if !matches!(
+                    path.extension().and_then(|s| s.to_str()),
+                    Some("hs" | "lhs")
+                ) {
+                    continue;
+                }
+                let module = path
+                    .with_extension("")
+                    .components()
+                    .map(|part| {
+                        part.as_os_str()
+                            .to_str()
+                            .expect("validated source path")
+                            .to_owned()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(".");
+                selected_sources
+                    .entry(module)
+                    .or_insert_with(|| WorldModuleOrigin::Home {
+                        root: root as u32,
+                        path: path.to_str().expect("validated source path").to_owned(),
+                        source_sha256: Sha256::digest(body).into(),
+                    });
+            }
+        }
         Ok(Self {
             roots: roots.into(),
             origin,
             _owner: owner,
             encoded: encoded.into(),
             seal,
-            source_seals,
+            selected_sources: Arc::new(selected_sources),
         })
     }
 
@@ -867,21 +889,14 @@ impl CompilerWorldOpenInputs {
 }
 
 fn scoped_world_action<T>(
-    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
     action: impl FnOnce() -> Result<T, CompileError>,
 ) -> Result<T, CompileError> {
-    use tidepool_extract_cmd::{CompilerTransactionClose as C, CompilerTransactionOrigin};
-    if CompilerTransactionOrigin::current().is_some() {
-        return action();
+    if tidepool_extract_cmd::CompilerTransactionOrigin::current().is_none() {
+        return Err(source_failure(
+            "compiler world requires the runtime source compiler transaction",
+        ));
     }
-    let result = tidepool_extract_cmd::with_compiler_transaction(settlement, action);
-    match result.close {
-        C::Clean | C::NotStarted => result.action,
-        C::Retired(evidence) => Err(CompileError::CompilerPreparationRetired(Box::new(evidence))),
-        C::Unconfirmed(evidence) => Err(CompileError::CompilerPreparationCloseUnconfirmed(
-            Box::new(evidence),
-        )),
-    }
+    action()
 }
 
 fn world_command(
@@ -991,9 +1006,8 @@ pub fn open_world(
     cold: CompilerWorldOpenInputs,
     endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
     question: PublicModuleQuestion,
-    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<WorldQueryResult, CompileError> {
-    scoped_world_action(settlement, || {
+    scoped_world_action(|| {
         let restoration = cold.prepare(endpoint.identity())?;
         let world = Arc::new(CompilerWorld {
             restoration,
@@ -1009,9 +1023,8 @@ pub fn query_public_module(
     endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
     world: &CompilerWorld,
     question: PublicModuleQuestion,
-    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<WorldQueryResult, CompileError> {
-    scoped_world_action(settlement, || {
+    scoped_world_action(|| {
         query_world_inner(endpoint.identity(), Arc::new(world.clone()), question)
     })
 }
@@ -1131,7 +1144,8 @@ fn namespace_text(namespace: InspectionNamespace) -> &'static str {
 }
 fn module_receipt(
     value: &ciborium::value::Value,
-    world: &CompilerWorld,
+    sources: &CapturedCompilerSources,
+    expected_profile: &[u8; 32],
 ) -> Result<WorldModuleReceipt, CompileError> {
     let v = answer_array(value, 4)?;
     if answer_text(&v[0])? != "resolved" {
@@ -1145,7 +1159,7 @@ fn module_receipt(
     let origin = match &v[3] {
         ciborium::value::Value::Array(o) if o.len() == 2 && answer_text(&o[0])? == "package" => {
             let profile = answer_hash(&o[1])?;
-            if profile != world.restoration.profile {
+            if &profile != expected_profile || sources.selected_sources.contains_key(&module) {
                 return Err(world_response_error(true));
             }
             WorldModuleOrigin::Package { profile }
@@ -1158,22 +1172,15 @@ fn module_receipt(
                 return Err(world_response_error(true));
             }
             let source_sha256 = answer_hash(&o[3])?;
-            if world
-                .restoration
-                .inputs
-                .sources
-                .source_seals
-                .get(root as usize)
-                .and_then(|s| s.get(Path::new(&path)))
-                != Some(&source_sha256)
-            {
-                return Err(world_response_error(true));
-            }
-            WorldModuleOrigin::Home {
+            let selected = WorldModuleOrigin::Home {
                 root,
                 path,
                 source_sha256,
+            };
+            if sources.selected_sources.get(&module) != Some(&selected) {
+                return Err(world_response_error(true));
             }
+            selected
         }
         _ => return Err(world_response_error(false)),
     };
@@ -1182,6 +1189,29 @@ fn module_receipt(
         module,
         origin,
     })
+}
+
+fn validate_identifier_namespace(
+    requested: InspectionNamespace,
+    actual: &str,
+) -> Result<(), CompileError> {
+    let actual = match actual {
+        "Value" => InspectionNamespace::Value,
+        "Type" => InspectionNamespace::Type,
+        "Constructor" => InspectionNamespace::Constructor,
+        "Field" => InspectionNamespace::Field,
+        _ => return Err(world_response_error(false)),
+    };
+    // GHC's value-name domain includes record selectors; the inspected
+    // identifier reports their more precise Field namespace.
+    if requested == InspectionNamespace::Any
+        || requested == actual
+        || (requested == InspectionNamespace::Value && actual == InspectionNamespace::Field)
+    {
+        Ok(())
+    } else {
+        Err(world_response_error(true))
+    }
 }
 
 fn validate_inspection(
@@ -1219,6 +1249,7 @@ fn validate_inspection(
             let identifier = answer_array(&details[0], 3)?;
             let definition = defining.ok_or_else(|| world_response_error(true))?;
             let name = answer_text(&identifier[1])?;
+            validate_identifier_namespace(question.namespace(), answer_text(&identifier[2])?)?;
             if answer_text(&identifier[0])? != definition.module
                 || !(question.name() == name
                     || question.name() == format!("{}.{}", definition.module, name))
@@ -1324,7 +1355,11 @@ fn decode_world_answer(
     )?;
     let resolution = match tag {
         "resolved" => {
-            let receipt = module_receipt(&v[5], &world)?;
+            let receipt = module_receipt(
+                &v[5],
+                &world.restoration.inputs.sources,
+                &world.restoration.profile,
+            )?;
             if receipt.module != question.module() {
                 return Err(world_response_error(true));
             }
@@ -1335,6 +1370,12 @@ fn decode_world_answer(
             let source_domain = answer_hash(&resolution[2])?;
             let package_profile = answer_hash(&resolution[3])?;
             if module != question.module()
+                || world
+                    .restoration
+                    .inputs
+                    .sources
+                    .selected_sources
+                    .contains_key(&module)
                 || source_domain != *world.restoration.inputs.sources.seal()
                 || package_profile != world.restoration.profile
             {
@@ -1359,7 +1400,11 @@ fn decode_world_answer(
     let defining = if matches!(v[6], ciborium::value::Value::Null) {
         None
     } else {
-        Some(module_receipt(&v[6], &world)?)
+        Some(module_receipt(
+            &v[6],
+            &world.restoration.inputs.sources,
+            &world.restoration.profile,
+        )?)
     };
     let inspection_payload = answer_blob(&v[7])?.to_vec();
     if matches!(resolution, WorldModuleResolution::Rejected(_)) {
@@ -1389,11 +1434,86 @@ pub fn restore_world(
     restoration: &Arc<CompilerWorldRestoration>,
     endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
     question: PublicModuleQuestion,
-    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<WorldQueryResult, CompileError> {
     let world = CompilerWorld {
         restoration: Arc::clone(restoration),
         realization: Arc::new(Mutex::new(None)),
     };
-    query_public_module(endpoint, &world, question, settlement)
+    query_public_module(endpoint, &world, question)
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::*;
+    fn sources(first: &[u8], second: &[u8]) -> CapturedCompilerSources {
+        let root = |body: &[u8]| CapturedCompilerSourceRoot {
+            manifest: SourceRootManifest::from_file_digests([(
+                PathBuf::from("Module.hs"),
+                blake3::hash(body).to_hex().to_string(),
+            )])
+            .unwrap(),
+            bodies: BTreeMap::from([(PathBuf::from("Module.hs"), Arc::<[u8]>::from(body))]),
+        };
+        CapturedCompilerSources::from_captured_roots(
+            vec![root(first), root(second)],
+            Arc::from(&b"retained-generation"[..]),
+            Arc::new(()),
+        )
+        .unwrap()
+    }
+    fn home(root: u64, body: &[u8]) -> ciborium::value::Value {
+        world_array(vec![
+            world_text("resolved"),
+            world_text("main"),
+            world_text("Module"),
+            world_array(vec![
+                world_text("home"),
+                root.into(),
+                world_text("Module.hs"),
+                world_blob(world_digest(body)),
+            ]),
+        ])
+    }
+    #[test]
+    fn world_receipt_refuses_later_source_even_with_its_correct_hash() {
+        let a = b"module Module where\nvalue = (1 :: Int)\n";
+        let b = b"module Module where\nvalue = True\n";
+        let ab = sources(a, b);
+        assert!(module_receipt(&home(0, a), &ab, &[7; 32]).is_ok());
+        assert!(module_receipt(&home(1, b), &ab, &[7; 32]).is_err());
+        let ba = sources(b, a);
+        assert!(module_receipt(&home(0, b), &ba, &[7; 32]).is_ok());
+        assert!(module_receipt(&home(1, a), &ba, &[7; 32]).is_err());
+        assert_ne!(ab.seal(), ba.seal());
+        let package = world_array(vec![
+            world_text("resolved"),
+            world_text("base"),
+            world_text("Module"),
+            world_array(vec![world_text("package"), world_blob([7; 32])]),
+        ]);
+        assert!(module_receipt(&package, &ab, &[7; 32]).is_err());
+    }
+    #[test]
+    fn world_identifier_namespace_is_checked_beyond_question_echo() {
+        use InspectionNamespace as N;
+        for actual in ["Value", "Type", "Constructor", "Field"] {
+            assert!(validate_identifier_namespace(N::Any, actual).is_ok());
+        }
+        assert!(validate_identifier_namespace(N::Type, "Type").is_ok());
+        assert!(validate_identifier_namespace(N::Type, "Value").is_err());
+        assert!(validate_identifier_namespace(N::Field, "Value").is_err());
+        assert!(validate_identifier_namespace(N::Value, "Field").is_ok());
+        assert!(validate_identifier_namespace(N::Constructor, "Type").is_err());
+        assert!(validate_identifier_namespace(N::Any, "Any").is_err());
+    }
+    #[test]
+    fn compiler_world_refuses_an_unscoped_action_before_preparation() {
+        let reached = std::cell::Cell::new(false);
+        assert!(scoped_world_action(|| {
+            reached.set(true);
+            Ok(())
+        })
+        .is_err());
+        assert!(!reached.get());
+    }
 }
