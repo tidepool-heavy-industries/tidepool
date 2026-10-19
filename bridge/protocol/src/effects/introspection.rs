@@ -61,7 +61,7 @@ pub fn introspection() -> Effect {
                 vec![
                     expected_scope_arg(),
                     Arg {
-                        name: "module",
+                        name: "moduleName",
                         ty: HsType::Text,
                         rust: RustBinding::Derived,
                     },
@@ -142,7 +142,7 @@ pub fn introspection() -> Effect {
                 ctor: Some("ModuleExports"),
                 substrate: false,
                 doc: &["List a public module's exports without checking a target. Generated session modules remain private. `Nothing` observes the actor's current compile view; `Just p` refuses with `ScopeChanged` if that compile view is no longer current."],
-                body: HelperBody::Applied(&["expectedScope", "module"]),
+                body: HelperBody::Applied(&["expectedScope", "moduleName"]),
             },
             Helper {
                 name: "rowFit",
