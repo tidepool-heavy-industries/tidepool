@@ -21766,6 +21766,21 @@ mod tests {
         assert!(request.compiler_original_products().unwrap().is_empty());
         assert!(request.generated_scaffold_imports.is_empty());
         assert!(public.lexical_graph().is_empty());
+        let request_availability = request.compiler_inputs().private_native_availability();
+        let mut issued = request_availability.rows();
+        let available = issued.next().expect("one retained private native row");
+        assert!(issued.next().is_none());
+        assert_eq!(available.original_owner().unit, "main");
+        assert_eq!(
+            available.original_owner().module,
+            "Tidepool.Internal.Resume"
+        );
+        assert!(matches!(&available.mode, NativeTransportMode::IssuedGroups));
+        assert!(available.issued_ordinals().is_empty());
+        assert_eq!(
+            available.classification,
+            NativeInputClassification::PrivateInput
+        );
         let manifest: Value =
             ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
                 .unwrap();
@@ -21778,7 +21793,10 @@ mod tests {
         assert_eq!(row[0], text("main"));
         assert_eq!(row[1], text("Tidepool.Internal.Resume"));
         assert!(row[6].as_array().unwrap().is_empty());
-        assert_eq!(row[8], Value::Array(vec![text("full-carrier")]));
+        assert_eq!(
+            row[8],
+            Value::Array(vec![text("issued-groups"), Value::Array(vec![])])
+        );
         assert_eq!(row[9], text("private-native"));
         assert!(public.artifact_view().selected_native_groups().is_empty());
         // A forged home resolution of the package import has no request-local
