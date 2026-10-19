@@ -4614,18 +4614,10 @@ mod tests {
             CompilerTransactionCancellation::new(),
         );
         let mut command = fixture.command();
-        let mut bytes = b"TPREQ022".to_vec();
-        bytes.push(0);
-        for count in [1u32, 1, 1] {
-            bytes.extend_from_slice(&count.to_le_bytes());
-        }
-        bytes.push(57);
-        bytes.extend_from_slice(&4u32.to_le_bytes());
-        bytes.extend_from_slice(b"root");
-        bytes.push(0);
-        bytes.extend_from_slice(&8u32.to_le_bytes());
-        bytes.extend_from_slice(b"realized");
-        command.request = ExtractRequest::decode(&bytes).unwrap();
+        command.ensure_exact_inputs(crate::ExactInputsRequest {
+            root: "a".repeat(64),
+            acquisition: crate::ExactInputsAcquisition::Resident("realized".into()),
+        });
         let settled = with_compiler_transaction(
             |_| {},
             || {
