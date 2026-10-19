@@ -266,6 +266,7 @@ pub(crate) struct CompilerWorkTicket {
     settled: bool,
     owner: crate::resident_workbench::CompilerCloseOwner,
     source_claim: Option<crate::resident_workbench::generation_admission::SourceClaim>,
+    runtime_source_claims: Arc<Mutex<Vec<tidepool_runtime::session::RuntimeSourceClaim>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -340,6 +341,7 @@ impl CompilerWorkTicket {
             settled: false,
             owner,
             source_claim: None,
+            runtime_source_claims: Arc::new(Mutex::new(Vec::new())),
         };
         if ticket.owner.register_receipt(registration, admission) {
             return Ok(ticket);
@@ -351,6 +353,12 @@ impl CompilerWorkTicket {
 
     pub(crate) fn control(&self) -> CompilerWorkControl {
         self.control.clone()
+    }
+
+    pub(crate) fn runtime_source_claims(
+        &self,
+    ) -> Arc<Mutex<Vec<tidepool_runtime::session::RuntimeSourceClaim>>> {
+        self.runtime_source_claims.clone()
     }
 
     pub(crate) fn with_source_claim(
@@ -406,6 +414,9 @@ impl CompilerWorkTicket {
 
     fn consume_close(mut self, close: tidepool_runtime::CompilerTransactionClose) {
         if !close.resources_retired() {
+            for claim in self.runtime_source_claims.lock().drain(..) {
+                claim.retain_unconfirmed();
+            }
             if let Some(claim) = self.source_claim.take() {
                 claim.retain_unconfirmed();
             }
@@ -419,6 +430,9 @@ impl CompilerWorkTicket {
 impl Drop for CompilerWorkTicket {
     fn drop(&mut self) {
         if !self.settled {
+            for claim in self.runtime_source_claims.lock().drain(..) {
+                claim.retain_unconfirmed();
+            }
             if let Some(claim) = self.source_claim.take() {
                 claim.retain_unconfirmed();
             }

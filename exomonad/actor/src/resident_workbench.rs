@@ -5810,6 +5810,27 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    fn run_source_transaction<T>(
+        session: &mut ResidentSession<H, O>,
+        ticket: crate::termination::CompilerWorkTicket,
+        action: impl FnOnce(
+            &mut ResidentSession<H, O>,
+            &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+        ) -> T,
+    ) -> T {
+        let claims = ticket.runtime_source_claims();
+        ticket.run(|settlement| {
+            session.with_source_claim_transfer(
+                |claim| {
+                    if let Some(claim) = claim {
+                        claims.lock().push(claim);
+                    }
+                },
+                |session| action(session, settlement),
+            )
+        })
+    }
+
     async fn with_machine<ResultValue>(
         &self,
         context: crate::ActorSessionContext,
@@ -5845,7 +5866,9 @@ where
         let owner = crate::capabilities::CompilerOwnerScope::current()?
             .with_source_dependency(context.source_dependency());
         self.with_machine(context, move |session, context, source| {
-            owner.run(|settlement| operation(session, context, source, settlement))?
+            Self::run_source_transaction(session, owner.admit_work()?, |session, settlement| {
+                operation(session, context, source, settlement)
+            })
         })
         .await
     }
@@ -5867,9 +5890,11 @@ where
     {
         let owner = crate::capabilities::CompilerOwnerScope::current()?;
         self.with_machine(context, move |session, context, source| {
-            owner
-                .admit_continuation()?
-                .run(|settlement| operation(session, context, source, settlement))
+            Self::run_source_transaction(
+                session,
+                owner.admit_continuation()?,
+                |session, settlement| operation(session, context, source, settlement),
+            )
         })
         .await
     }
@@ -5892,9 +5917,11 @@ where
     {
         let owner = crate::capabilities::CompilerOwnerScope::current()?;
         self.with_machine_wait(context, admission, move |session, context, source| {
-            owner
-                .admit_continuation()?
-                .run(|settlement| operation(session, context, source, settlement))
+            Self::run_source_transaction(
+                session,
+                owner.admit_continuation()?,
+                |session, settlement| operation(session, context, source, settlement),
+            )
         })
         .await
     }
@@ -5918,7 +5945,9 @@ where
         let owner = crate::capabilities::CompilerOwnerScope::current()?
             .with_source_dependency(context.source_dependency());
         self.with_machine_wait(context, admission, move |session, context, source| {
-            owner.run(|settlement| operation(session, context, source, settlement))?
+            Self::run_source_transaction(session, owner.admit_work()?, |session, settlement| {
+                operation(session, context, source, settlement)
+            })
         })
         .await
     }

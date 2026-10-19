@@ -676,6 +676,37 @@ mod tests {
         assert!(scope.admit_work().is_err());
     }
 
+    #[tokio::test]
+    async fn continuation_ticket_settles_lazily_transferred_source_claim() {
+        let mut history = History::new();
+        let dependency = generation(&mut history, NotebookGenerationId::INITIAL, None);
+        let services = crate::capabilities::WorkbenchServices::new();
+        let owner = services.with_compiler_owner(super::super::CompilerCloseOwner::ActorLifecycle(
+            crate::RetainedActorExit::new(),
+        ));
+        let ticket = owner.admit_continuation().unwrap();
+        let claims = ticket.runtime_source_claims();
+        claims
+            .lock()
+            .push(dependency.runtime_admission().admit().unwrap());
+        let fence = dependency.fence().unwrap();
+        ticket.run(|close| {
+            close(tidepool_runtime::CompilerTransactionClose::Unconfirmed(
+                tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                    tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
+                    tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                        disconnect: None,
+                    },
+                ),
+            ))
+        });
+        assert!(matches!(
+            fence.wait_for_claims().await,
+            Err(GenerationAdmissionError::Unconfirmed { .. })
+        ));
+        assert!(fence.reopen().is_err());
+    }
+
     #[test]
     fn source_callback_transfer_keeps_dependency_without_generation_metadata() {
         let mut session = History::new();

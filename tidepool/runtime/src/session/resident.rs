@@ -3526,6 +3526,23 @@ where
         }
     }
 
+    /// Transfer a lazily earned source claim to the actual compiler transaction
+    /// owner before its END settlement, including when the action unwinds.
+    pub fn with_source_claim_transfer<R>(
+        &mut self,
+        transfer: impl FnOnce(Option<super::RuntimeSourceClaim>),
+        action: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous = self.state.source_claim.take();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self)));
+        let claim = std::mem::replace(&mut self.state.source_claim, previous);
+        transfer(claim);
+        match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     /// Observe the interpreters installed on this exact machine. The caller
     /// holds the session checkout; this does not dispatch an effect or grant
     /// authority over any handler-owned resource.
@@ -9707,6 +9724,54 @@ mod authored_publication_tests {
         })
         .unwrap();
         (root, session)
+    }
+
+    #[test]
+    fn lazy_binding_claim_transfers_before_checkout_and_unwind_release() {
+        for unwind in [false, true] {
+            let (_root, mut session) = startup_session();
+            let scope = session.mint_isolated_scope_with_lease().unwrap();
+            let mut value = super::super::prepared::tests::rooted_publication_fixture(
+                &mut session.state,
+                "lazy",
+                870,
+            );
+            value.scope = scope.scope();
+            let mut transferred = None;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                session.with_source_admission(
+                    Ok(Some(scope.source_admission().clone())),
+                    |session| {
+                        session.with_source_claim_transfer(
+                            |claim| transferred = claim,
+                            |session| {
+                                session
+                                    .state
+                                    .bind_replacing_decls_in(
+                                        scope.scope(),
+                                        vec![value],
+                                        &mut |_| {},
+                                    )
+                                    .unwrap();
+                                if unwind {
+                                    panic!("compiler action unwind");
+                                }
+                            },
+                        )
+                    },
+                );
+            }));
+            assert_eq!(result.is_err(), unwind);
+            let fence = scope.source_admission().fence().unwrap();
+            assert_eq!(fence.pending_claims(), 1);
+            transferred
+                .expect("actual lazy binding admitted its claim")
+                .retain_unconfirmed();
+            assert!(matches!(
+                fence.reopen(),
+                Err(super::super::SourceAdmissionError::Unconfirmed { .. })
+            ));
+        }
     }
 
     #[test]

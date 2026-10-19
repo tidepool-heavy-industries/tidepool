@@ -211,7 +211,7 @@ pub(crate) enum SpawnOwnership {
 
 impl SpawnOwnership {
     pub(crate) fn is_independent(self) -> bool {
-        matches!(self, Self::World)
+        matches!(self, Self::Independent)
     }
 }
 
