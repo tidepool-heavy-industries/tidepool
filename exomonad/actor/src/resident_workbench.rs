@@ -5027,6 +5027,22 @@ fn source_operation(request: &crate::generated::source::SourceReq) -> &'static s
     }
 }
 
+fn introspection_operation(
+    request: &crate::generated::introspection::IntrospectionReq,
+) -> &'static str {
+    use crate::generated::introspection::IntrospectionReq;
+    match request {
+        IntrospectionReq::IntrospectionInfoWith(..) => "structured info",
+        IntrospectionReq::IntrospectionTypeOfWith(..) => "structured type",
+        IntrospectionReq::CurrentScopeView => "currentScopeView",
+        IntrospectionReq::ScopeBindings(_) => "scopeBindings",
+        IntrospectionReq::ModuleExports(_, _) => "moduleExports",
+        IntrospectionReq::RowFit(_, _) => "rowFit",
+        IntrospectionReq::TypeOfExpression(_, _) => "typeOfExpression",
+        IntrospectionReq::TypeSearch(_, _) => "typeSearch",
+    }
+}
+
 fn command_operation(request: &crate::generated::commands::CommandsReq) -> &'static str {
     use crate::generated::commands::CommandsReq;
     match request {
@@ -5084,12 +5100,7 @@ impl ResidentRequest {
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentForgetWith(..),
             ) => "forgetAgent",
-            Self::Introspection(
-                crate::generated::introspection::IntrospectionReq::IntrospectionInfoWith(..),
-            ) => "structured info",
-            Self::Introspection(
-                crate::generated::introspection::IntrospectionReq::IntrospectionTypeOfWith(..),
-            ) => "structured type",
+            Self::Introspection(request) => introspection_operation(request),
             Self::AgentLaunch(
                 crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReplaceSpecWith(..),
             ) => "replaceSpec",
@@ -10837,6 +10848,11 @@ where
                         .into(),
                         kind: StructuredInspectionKind::Type,
                     }),
+                    ResidentRequest::Introspection(request) => {
+                        Err(ResidentActorWorkbenchError::UnsupportedRequest {
+                            constructor: introspection_operation(&request).to_owned(),
+                        })
+                    }
                     ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
                     ) => Ok(ResidentActorBoundary::AgentList(hole)),

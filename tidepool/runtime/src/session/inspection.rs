@@ -558,16 +558,16 @@ fn run_admitted_world_inspection_inner(
     let NameScope::PublicModule(module) = &query.scope else {
         return Err(invalid("world inspection requires a public module").into());
     };
-    let exact = exact_name_request(&query);
+    let namespace = inspection_namespace(query.namespace);
     let question = match kind {
         PublicModuleQuestionKind::StructuredInfo => PublicModuleQuestion::structured_info(
             module.clone(),
-            exact.namespace,
+            namespace,
             query.name.clone(),
         ),
         PublicModuleQuestionKind::StructuredType => PublicModuleQuestion::structured_type(
             module.clone(),
-            exact.namespace,
+            namespace,
             query.name.clone(),
         ),
     };
@@ -1149,15 +1149,19 @@ fn structured_request(
 ) -> tidepool_extract_cmd::StructuredInspection {
     tidepool_extract_cmd::StructuredInspection {
         scope: request_scope(&query.scope),
-        namespace: match query.namespace {
-            NameNamespace::Any => tidepool_extract_cmd::InspectionNamespace::Any,
-            NameNamespace::Value => tidepool_extract_cmd::InspectionNamespace::Value,
-            NameNamespace::Type => tidepool_extract_cmd::InspectionNamespace::Type,
-            NameNamespace::Constructor => tidepool_extract_cmd::InspectionNamespace::Constructor,
-        },
+        namespace: inspection_namespace(query.namespace),
         name: query.name.clone(),
         generation: provenance.generation,
         fingerprint: provenance.fingerprint.clone(),
+    }
+}
+
+fn inspection_namespace(namespace: NameNamespace) -> tidepool_extract_cmd::InspectionNamespace {
+    match namespace {
+        NameNamespace::Any => tidepool_extract_cmd::InspectionNamespace::Any,
+        NameNamespace::Value => tidepool_extract_cmd::InspectionNamespace::Value,
+        NameNamespace::Type => tidepool_extract_cmd::InspectionNamespace::Type,
+        NameNamespace::Constructor => tidepool_extract_cmd::InspectionNamespace::Constructor,
     }
 }
 
