@@ -369,7 +369,10 @@ impl CompilerWorldBindings {
         bindings: impl IntoIterator<Item = CompilerWorldBinding<'a>>,
     ) -> Result<Self, CompileError> {
         let allowance = capture_allowance()?;
-        let mut remaining = allowance.checked_sub(128).ok_or_else(source_size_failure)?;
+        let mut reserved = 128u64;
+        if reserved > allowance {
+            return Err(binding_capture_refusal(reserved, allowance));
+        }
         let mut entries = imbl::OrdMap::new();
         for input in bindings {
             crate::host_work::checkpoint()?;
@@ -395,11 +398,12 @@ impl CompilerWorldBindings {
                 fields.map(str::len),
                 symbol.record_parent.as_ref().map_or(0, |p| p.len()),
             )?;
-            remaining = remaining.checked_sub(bytes).ok_or_else(|| {
-                source_failure(format!(
-                    "compiler binding metadata exceeds capture allowance {allowance} bytes"
-                ))
-            })?;
+            reserved = reserved
+                .checked_add(bytes)
+                .ok_or_else(source_size_failure)?;
+            if reserved > allowance {
+                return Err(binding_capture_refusal(reserved, allowance));
+            }
             if entries.contains_key(input.occurrence) {
                 return Err(source_failure("duplicate visible compiler occurrence"));
             }
@@ -416,7 +420,7 @@ impl CompilerWorldBindings {
         Ok(Self {
             query_scope,
             entries,
-            metadata_bytes: allowance - remaining,
+            metadata_bytes: reserved,
         })
     }
 
@@ -781,10 +785,18 @@ fn world_path(path: &Path) -> Result<ciborium::value::Value, CompileError> {
         .ok_or_else(|| source_failure("world input path must be absolute UTF-8"))
 }
 
+fn binding_capture_refusal(estimated: u64, allowance: u64) -> CompileError {
+    source_failure(format!("compiler binding capture/staging reservation requires {estimated} bytes; configured capture allowance is {allowance} bytes; actual encoded size UNKNOWN"))
+}
+
 // Bound the actual fixed HAMT representation before copying borrowed fields.
 // SHA256 has at most 52 five-bit routing levels. Charge each occurrence for an
 // entire private path: every node header plus a CID edge, even though real
-// paths share nodes. The separate row-fact check includes its exact requirements.
+// paths share nodes. This is 4759 bytes plus borrowed strings per occurrence,
+// roughly 0.9 million small occurrences under the default 4 GiB capture allowance.
+// It reserves staging work, not actual encoded bytes or optional cache retention.
+// The separate row-fact check includes its exact requirements. If real workloads
+// hit this pessimistic reservation, use actual-path preflight in Materializer.
 fn binding_metadata_bound(fields: [usize; 5], parent_bytes: usize) -> Result<u64, CompileError> {
     let cid_link = 9 + 9 + 39;
     let hamt_node = 9 + (9 + 4) + 9;
