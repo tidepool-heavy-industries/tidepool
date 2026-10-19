@@ -9,7 +9,7 @@ use crate::certified_products::{
 use crate::declaration_context::ExactCompileContext;
 use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 use crate::recovery_artifacts::CertifiedRecoveryProduct;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 

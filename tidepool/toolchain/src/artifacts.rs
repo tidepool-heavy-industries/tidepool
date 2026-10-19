@@ -10571,14 +10571,10 @@ mod source_proof_pairing_tests {
                     .unwrap(),
             );
             assert!(entry.requirements.is_empty());
-            assert!(
-                crate::certified_products::original_available_groups(product)
-                    .unwrap()
-                    .all(|group| group.imports().iter().all(|import| matches!(
-                        import,
-                        crate::certified_products::PendingImportOwner::Package { .. }
-                    )))
-            );
+            let requirements =
+                crate::certified_products::original_native_requirements(product).unwrap();
+            assert!(requirements.artifact_edges.is_empty());
+            assert!(requirements.retained_packages.is_empty());
             let inventory = crate::artifact_inventory::ArtifactInventory::default();
             let artifacts = inventory
                 .admit_shared_with_demand(
