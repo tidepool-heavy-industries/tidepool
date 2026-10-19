@@ -10358,7 +10358,7 @@ mod authored_publication_tests {
                 .unwrap();
             lib
         };
-        {
+        let predecessor_epoch = {
             let mut producer = PersistentSession::new(Some(library(SessionId(4503))), 1024 * 1024);
             let public = producer.mint_isolated_scope();
             assert!(matches!(
@@ -10367,7 +10367,11 @@ mod authored_publication_tests {
                     .unwrap(),
                 PublicManifestCommit::Durable
             ));
-        }
+            producer
+                .public_visibility_snapshot_in(public)
+                .unwrap()
+                .epoch
+        };
         let mut original = TestSession::unbootstrapped(
             frunk::HNil,
             EmptyOutput,
@@ -10488,6 +10492,8 @@ mod authored_publication_tests {
             original
                 .seal_recovery_initialization_scope(source.scope())
                 .unwrap();
+            assert_eq!(original.public_visibility_snapshot_in(source.scope()).unwrap(), original_before,
+                "sealing the fresh driver preserves its local visibility; it does not issue the durable predecessor");
             assert!(matches!(
                 original
                     .transfer_recovered_public_owner(
@@ -10508,7 +10514,7 @@ mod authored_publication_tests {
             let transferred = original
                 .public_visibility_snapshot_in(source.scope())
                 .unwrap();
-            assert_eq!(transferred.epoch, original_before.epoch + 1);
+            assert_eq!(transferred.epoch, predecessor_epoch + 1);
             assert!(original.state.scope_tree().is_live(source.scope()));
             assert!(matches!(
                 source.validate_source_issuer(),
