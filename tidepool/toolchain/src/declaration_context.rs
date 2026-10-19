@@ -15737,6 +15737,41 @@ mod tests {
         drop(store);
         let remaining = restored.remove(0);
         assert_consumer(&remaining);
+        let born_row = {
+            let selections = remaining.published_source_original_selections().unwrap();
+            let born = selections[0].context();
+            let row = born
+                .compiler_source_support()
+                .native_availability()
+                .rows()
+                .find(|row| row.original.descriptor.id == original)
+                .unwrap();
+            let expected_row = publication
+                .context()
+                .compiler_source_support()
+                .native_availability()
+                .rows()
+                .find(|row| row.original.descriptor.id == original)
+                .unwrap();
+            assert!(!Arc::ptr_eq(row, expected_row));
+            Arc::downgrade(row)
+        };
+        assert!(
+            born_row.upgrade().is_some(),
+            "the remaining acquired owner must retain its restored birth row"
+        );
+        let fact_only_snapshot = remaining.snapshot();
+        drop(remaining);
+        assert!(
+            born_row.upgrade().is_none(),
+            "fact-only snapshot roots must not retain acquired birth rows"
+        );
+        let fact_store = MemoryBlockstore::new();
+        let mut fact_writer = Materializer::new(&fact_store);
+        fact_writer
+            .materialize_context(None, &fact_only_snapshot)
+            .unwrap();
+        fact_writer.finish().unwrap();
     }
 
     #[test]
