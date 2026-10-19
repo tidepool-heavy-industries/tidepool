@@ -17113,7 +17113,7 @@ pub(crate) mod request_tests {
             assert!(matches!(refused, Err(ResidentActorWorkbenchError::WorldInspection(tidepool_runtime::session::WorldInspectionError::UnsupportedSource))));
             for counter in [HostWorkCounter::ActorCompileViewCapture, HostWorkCounter::StructuredProvenance,
                 HostWorkCounter::InspectionInputCapture, HostWorkCounter::ColdWorldBuilderRowVisit,
-                HostWorkCounter::InputFdEnumeration, HostWorkCounter::HashByte] {
+                HostWorkCounter::InputFdEnumeration, HostWorkCounter::CompileViewDigestInputByte, HostWorkCounter::SemanticDigestInputByte, HostWorkCounter::SemanticEncoding, HostWorkCounter::ScopeEncodedByte] {
                 assert_eq!(unsupported_work.snapshot().get(counter), 0, "unsupported source performed {counter:?}");
             }
             let (mismatched, _mismatched_owner) = world_query_test_source(&[Some("module Different where\nknown :: Int\nknown = 7\n")]);
