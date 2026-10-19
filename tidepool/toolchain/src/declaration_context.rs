@@ -13126,12 +13126,13 @@ mod tests {
             "continuation must retain every issued non-generated original role"
         );
         let hidden_issuance = support_offer(std::slice::from_ref(&hidden));
-        let hidden_support = recover_fixture_compiler_support(
-            hidden_issuance.projection().clone(),
-            support.clone(),
-            [],
-        )
-        .unwrap();
+        let CompilerSupportFixture::Complete(hidden_inputs) = hidden_issuance else {
+            panic!("hidden support fixture must retain its complete checked input owner");
+        };
+        let hidden_support = hidden_inputs
+            .compiler_source_support()
+            .retain_custody(&support)
+            .unwrap();
         let types = hidden_support
             .selected_interfaces()
             .unwrap()
