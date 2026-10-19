@@ -10754,3 +10754,170 @@ fn generated_fresh_native_obligations_ignore_unrelated_selected_history() {
         )
         .unwrap();
 }
+
+#[test]
+fn completed_request_carries_exact_entries_without_reconstruction() {
+    use crate::artifact_inventory::{original_entry_construction_calls, NativeArtifactDemand};
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let native = product("CarriedRequestEntry", 203);
+    let context = Arc::new(
+        ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products(producer.sha256(), &[native.clone()])
+            .unwrap(),
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let request = context
+        .prepare_compilation(scratch.path(), PRODUCER)
+        .unwrap();
+    let directory = request
+        .materialization
+        .as_ref()
+        .unwrap()
+        ._directory
+        .as_ref()
+        .unwrap();
+    let directory_owner = Arc::downgrade(directory);
+    let directory_path = directory.path().to_path_buf();
+    assert!(std::fs::read_dir(&directory_path).unwrap().next().is_some());
+    let inputs = request.compiler_inputs();
+    let projection = inputs.projection().clone();
+    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+        &projection,
+        &inputs.artifacts().metadata_snapshot(),
+        &operation,
+    )
+    .unwrap();
+    let view = inputs.artifacts().clone();
+    let continuation = ContinuationNativeInputs::from_selection(&selection, &projection).unwrap();
+    assert!(matches!(
+        selection.complete_native_entries(&ArtifactInventory::default().empty_view()),
+        Err(crate::certified_products::CertificationError::Mismatch(
+            "complete native selection payload"
+        ))
+    ));
+    let completed = continuation.complete_products(&view).unwrap();
+    assert_eq!(completed.entries.len(), 1);
+    let entry = Arc::clone(&completed.entries[0]);
+    let id = entry.descriptor.id;
+    let entry_owner = Arc::downgrade(&entry);
+    assert!(Arc::ptr_eq(
+        &entry,
+        &view.metadata_snapshot().artifacts[&id]
+    ));
+
+    // Equal payloads in a separately issued scope do not supply this request's binding.
+    let foreign_inventory = ArtifactInventory::default();
+    let foreign_entry =
+        Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+    let marker = Arc::new(
+        ArtifactEntry::original(producer.sha256(), product("ForeignMarker", 204)).unwrap(),
+    );
+    let foreign = foreign_inventory
+        .admit_shared_with_demand(
+            &foreign_inventory.empty_view(),
+            vec![foreign_entry.clone(), marker],
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    assert_eq!(entry.descriptor.id, foreign_entry.descriptor.id);
+    assert!(!Arc::ptr_eq(&entry, &foreign_entry));
+    assert_ne!(
+        view.selection_snapshot().namespace.get(&id),
+        foreign.selection_snapshot().namespace.get(&id)
+    );
+    let before = view.capture_graph_selection();
+
+    let mut reference_validation = PackageInterfaceValidation::default();
+    let calls = original_entry_construction_calls();
+    let reference = ArtifactEntry::original_with_validation(
+        producer.sha256(),
+        native.clone(),
+        &mut reference_validation,
+    )
+    .unwrap();
+    assert_eq!(
+        original_entry_construction_calls() - calls,
+        1,
+        "old construction work is observable even if inventory later interns equal facts"
+    );
+    assert_eq!(*entry, reference);
+    let calls = original_entry_construction_calls();
+    let issued = OriginalCompilerInputs::issue_complete_native_availability_with_source(
+        &view,
+        &projection,
+        producer.sha256(),
+        CompleteAvailabilitySource::Request(completed),
+    )
+    .unwrap();
+    assert_eq!(original_entry_construction_calls() - calls, 0);
+    assert!(Arc::ptr_eq(
+        &entry,
+        &issued.artifacts.metadata_snapshot().artifacts[&id]
+    ));
+    assert_eq!(view.capture_graph_selection(), before);
+    assert_eq!(
+        issued.artifacts.selection_snapshot().namespace.get(&id),
+        view.selection_snapshot().namespace.get(&id)
+    );
+    assert!(issued.artifacts.selected_native_groups().is_empty());
+    let availability = issued
+        .native_availability
+        .rows()
+        .find(|row| row.original.descriptor.id == id)
+        .unwrap();
+    assert_eq!(availability.mode, NativeTransportMode::Full);
+    assert!(availability.permits(7));
+    assert!(availability.permits(9001));
+    let expected_edges = view.binding_dependencies();
+    assert!(!expected_edges.is_empty());
+    assert!(expected_edges
+        .iter()
+        .all(|edge| issued.artifacts.binding_dependencies().contains(edge)));
+
+    let wrong = continuation.complete_products(&view).unwrap();
+    assert!(
+        matches!(OriginalCompilerInputs::issue_complete_native_availability_with_source(
+        &view, &projection, [255; 32], CompleteAvailabilitySource::Request(wrong),
+    ), Err(CompileError::ExtractFailed(detail)) if detail.contains("native product has another canonical producer"))
+    );
+    let candidate_calls = original_entry_construction_calls();
+    OriginalCompilerInputs::from_checked_support_products(
+        &crate::artifact_inventory::CompilerSourceSupport::empty(),
+        producer.sha256(),
+        &[native.clone()],
+    )
+    .unwrap();
+    assert!(
+        original_entry_construction_calls() > candidate_calls,
+        "Candidate retains ordinary construction"
+    );
+
+    drop(reference);
+    drop(reference_validation);
+    drop(entry);
+    drop(native);
+    drop(foreign_entry);
+    drop(foreign);
+    drop(foreign_inventory);
+    drop(continuation);
+    drop(selection);
+    drop(projection);
+    drop(view);
+    drop(request);
+    drop(context);
+    assert!(
+        entry_owner.upgrade().is_some(),
+        "the issued request retains the actual entry owner"
+    );
+    assert!(
+        directory_owner.upgrade().is_some(),
+        "the issued view retains physical materialization custody"
+    );
+    assert!(std::fs::read_dir(&directory_path).unwrap().next().is_some());
+    drop(issued);
+    assert!(entry_owner.upgrade().is_none());
+    assert!(directory_owner.upgrade().is_none());
+    assert!(!directory_path.try_exists().unwrap());
+}

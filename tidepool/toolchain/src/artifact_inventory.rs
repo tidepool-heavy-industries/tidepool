@@ -1766,6 +1766,16 @@ pub(crate) fn index_native_requirements(
     Ok(indexed)
 }
 
+#[cfg(test)]
+thread_local! {
+    static ORIGINAL_ENTRY_CONSTRUCTION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn original_entry_construction_calls() -> usize {
+    ORIGINAL_ENTRY_CONSTRUCTION_CALLS.with(std::cell::Cell::get)
+}
+
 impl ArtifactEntry {
     pub(crate) fn finalize_joined_requirements(
         self,
@@ -1898,6 +1908,8 @@ impl ArtifactEntry {
         product: CertifiedRecoveryProduct,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
+        #[cfg(test)]
+        ORIGINAL_ENTRY_CONSTRUCTION_CALLS.with(|calls| calls.set(calls.get() + 1));
         let product =
             crate::certified_products::finalize_original_for_inventory(product, validation)
                 .map_err(|error| failure(&format!("original facts: {error}")))?;
