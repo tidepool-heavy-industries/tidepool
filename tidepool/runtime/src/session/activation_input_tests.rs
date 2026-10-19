@@ -3803,6 +3803,22 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         !compiled.admission().is_consumed(),
         "generic-installer refusal must not spend the affine preview admission"
     );
+    // The purpose refusal precedes source-lease admission: outside any
+    // compiler transaction the generic installer still reports the
+    // unqualified purpose rather than a missing transaction.
+    assert!(
+        matches!(
+            resident.admit_turn_code_in(
+                compiled.admission().scope_lease.scope(),
+                compiled.renderer.compiled.code(),
+                TurnInstallationAdmission::Compilation,
+            ),
+            Err(ResidentError::Session(SessionError::SourceAdmission(
+                super::super::SourceAdmissionError::Unqualified
+            )))
+        ),
+        "generic-installer refusal precedes missing-transaction admission"
+    );
     let before_fault = resident.residency();
     {
         let incomplete = bundle.omitting_target_image();

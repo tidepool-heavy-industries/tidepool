@@ -2628,6 +2628,25 @@ enum TurnImageAcquisition<'a> {
     },
 }
 
+/// Refuse generic installation of activation-preview code.
+///
+/// Preview code installs only through its sealed original-A/target-B
+/// admission. This owner runs before any installation plan so the refusal
+/// precedes every other refusal for that purpose.
+fn refuse_generic_activation_preview_install(
+    certification: Option<&super::turn::TurnCertification>,
+) -> Result<(), ResidentError> {
+    if certification.is_some_and(|certification| {
+        matches!(certification.purpose(), TurnPurpose::ActivationPreview(_))
+    }) {
+        return Err(SessionError::SourceAdmission(
+            super::SourceAdmissionError::Unqualified,
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn checked_turn_plan(
     certification: &Option<super::turn::TurnCertification>,
     prepared: &PreparedProgram,
@@ -6893,17 +6912,7 @@ where
     ) -> Result<AdmittedTurnCode<'a>, ResidentError> {
         match authority {
             TurnInstallationAdmission::Compilation => {
-                // Preview code installs only through its opaque
-                // original-A/target-B admission. The generic source installer
-                // refuses that purpose before any source lease is admitted.
-                if code.certification().is_some_and(|certification| {
-                    matches!(certification.purpose(), TurnPurpose::ActivationPreview(_))
-                }) {
-                    return Err(SessionError::SourceAdmission(
-                        super::SourceAdmissionError::Unqualified,
-                    )
-                    .into());
-                }
+                refuse_generic_activation_preview_install(code.certification())?;
             }
             TurnInstallationAdmission::ActivationPreviewFresh(admission) => {
                 if admission.is_consumed() {
@@ -7162,6 +7171,13 @@ where
         drop(provenance_admission);
         self.state
             .validate_lexical_scope_lease(admission.scope_lease.scope(), &admission.scope_lease)?;
+        // The mounted original A is the source this preview renders. Bind its
+        // live lease to the active compiler transaction before the affine
+        // admission is spent, so a revoked original refuses while the
+        // admission is still intact.
+        self.state
+            .admit_source_work_in(mounted.scope)
+            .map_err(SessionError::SourceAdmission)?;
         // The authoritative spend follows every non-consuming admission and
         // lease check. A refusal after this point leaves the admission spent;
         // that is fail-closed and cannot be resealed.
@@ -7566,6 +7582,7 @@ where
     ) -> Result<PendingPreparedInstall, ResidentError> {
         self.state
             .validate_new_binding_ids(binding_ids_of(&mode.as_mode()))?;
+        refuse_generic_activation_preview_install(code.certification())?;
         let checked =
             tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.check")
                 .in_scope(|| {
