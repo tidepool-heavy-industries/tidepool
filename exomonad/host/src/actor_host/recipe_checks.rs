@@ -225,21 +225,24 @@ fn prepare_recipe(entry: &str, selected: &FrozenWorkspace) -> Result<PreparedRec
         tidepool_runtime::session::ExpressionLift::Effectful,
     );
     let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
-    let artifacts = super::run_compiler_preparation(|settlement| {
-        tidepool_runtime::compile_runtime_targets(
-            &tidepool_toolchain::artifacts::CompileInvocation {
-                source: &source,
-                targets: &[target],
-                include: &includes,
-                fallback_module_name: "Input",
-            },
-            |_, _, _| {},
-            settlement,
-        )
+    let mut preparation = exomonad_actor::CompilerPreparationOwner::new();
+    let outcome = preparation.compile_runtime_targets(
+        &tidepool_toolchain::artifacts::CompileInvocation {
+            source: &source,
+            targets: &[target],
+            include: &includes,
+            fallback_module_name: "Input",
+        },
+        |_, _, _| {},
+    );
+    if !outcome.cleanup.observation().is_confirmed() {
+        return Err(Box::new(super::PreparationCleanupUnconfirmed { outcome }));
+    }
+    let artifacts = outcome
+        .action?
         .map_err(|error| -> Box<dyn std::error::Error> {
-            Box::new(render_recipe_compile_error(error.into(), &source, entry))
-        })
-    })?;
+            Box::new(render_recipe_compile_error(error, &source, entry))
+        })?;
     Ok(PreparedRecipe {
         artifacts,
         source,
