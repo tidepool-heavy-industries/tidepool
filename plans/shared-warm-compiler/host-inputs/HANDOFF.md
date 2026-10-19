@@ -113,11 +113,18 @@ second timing-summary records truncate with raw logs intact. Source-domain case
 passed again; actual frontend/growing history remain unqualified.
 
 Warm owns canonical source-wire repair39754360 (old supplier) /5cbe50ce (new
-profile), independently source accepted and under native validation. No fixture
-filter, source-order guard waiver or root precedence change is allowed. A qualified
-supplier event triggers exact full-history query join/review/fresh native retry.
-All HOST clients are terminal, grant0/0; idle query407847 and typed509870 remain
-global. No additional HOST lane or source reset is active.
+profile). Exact397 production/cfg-test compilation and its wire-order regression
+passed; retained native hashes/counts were independently verified. Full old-profile
+history is now merged at area b4e4b7963000b1a3c8769a1b6197bdce732338b3. Independent
+joined review accepted all four incoming production blobs byte-identical397 and
+eight preserved HOST blobs; receipt `oracle/query-sort-supplier-join-review-b4e4b796.txt`.
+The query remains old four-argument source, without typed/new-profile API mixing.
+selected_root was reactivated for exactb4 owning four-target compile→Rooted2 under
+conditional fresh14GiB TOTAL/8GiB growth. Its fresh sample must include prospective
+campaign14 TOTAL, current Reload14 TOTAL, Warm8 ADD and known qualification8 ADD.
+Only HOST LIVE may be updated; an observer retains every command through terminal.
+No fixture filter, ordering-guard waiver, source precedence change or baseline
+reset is allowed. The exact joined native result remains pending.
 The unchanged service command is:
 `swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --trace-profile full --output-dir EVIDENCE`.
 Campaign's separate exact6f9 joined12699 also completed: ten labels compiled,
