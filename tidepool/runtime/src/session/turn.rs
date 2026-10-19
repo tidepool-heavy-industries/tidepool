@@ -8690,10 +8690,14 @@ mod tests {
             view.library(),
             Some(SessionModule::lib(original_generation))
         );
+        let library_import = view
+            .library_import_module()
+            .expect("certified joined projection has a lexical import module");
+        assert_ne!(view.library().unwrap().module_name(), library_import);
         assert!(context
             .lexical_graph()
             .iter()
-            .any(|node| node.owner.module == view.library().unwrap().module_name()));
+            .any(|node| node.owner.module == library_import));
         assert!(context
             .lexical_graph()
             .iter()
