@@ -853,4 +853,272 @@ mod tests {
             .selected_dependency()
             .is_err());
     }
+
+    struct PopulationBehavior {
+        start_entered: Option<tokio::sync::oneshot::Sender<()>>,
+        start_release: Option<tokio::sync::oneshot::Receiver<()>>,
+        stopped_entered: Option<tokio::sync::oneshot::Sender<()>>,
+        stopped_release: Option<tokio::sync::oneshot::Receiver<()>>,
+        realm: crate::CleanupComponentOutcome,
+    }
+
+    impl crate::KernelBehavior for PopulationBehavior {
+        fn start<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::KernelStep<()>, crate::KernelBehaviorError>,
+        > {
+            let entered = self.start_entered.take().unwrap();
+            let release = self.start_release.take().unwrap();
+            Box::pin(async move {
+                entered.send(()).unwrap();
+                release.await.unwrap();
+                Ok(crate::KernelStep::Stop {
+                    output: (),
+                    terminal: crate::ActorTerminal::new(
+                        crate::ActorExitKind::Completed,
+                        "population actor completed during startup",
+                    ),
+                })
+            })
+        }
+
+        fn cast<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _sender: crate::ActorRef,
+            _request: crate::MailboxValue,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::KernelStep<()>, crate::KernelBehaviorError>,
+        > {
+            unreachable!("population fixture runs only startup and cleanup")
+        }
+
+        fn call<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _caller: crate::ActorRef,
+            _ancestry: crate::CallAncestry,
+            _request: crate::MailboxValue,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::KernelStep<crate::MailboxValue>, crate::KernelBehaviorError>,
+        > {
+            unreachable!("population fixture runs only startup and cleanup")
+        }
+
+        fn tool<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _invocation: exomonad_tool::ToolInvocation,
+            _capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::KernelStep<serde_json::Value>, crate::KernelInvocationFailure>,
+        > {
+            unreachable!("population fixture runs only startup and cleanup")
+        }
+
+        fn dispatch_workbench(
+            &mut self,
+            _context: &crate::KernelContext,
+            _invocation: crate::ActorWorkbenchInvocation,
+            _control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        ) -> crate::WorkbenchDispatch<Self> {
+            unreachable!("population fixture runs only startup and cleanup")
+        }
+
+        fn external_application_failed<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _failure: crate::ExternalApplicationFailure,
+        ) -> futures_util::future::BoxFuture<'a, crate::ExternalFailureDisposition> {
+            unreachable!("population fixture has no external application")
+        }
+
+        fn shutdown<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _terminal: &'a crate::ActorTerminal,
+        ) -> futures_util::future::BoxFuture<'a, Result<(), crate::KernelBehaviorError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn shutdown_components<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _terminal: &'a crate::ActorTerminal,
+            _deadline: tokio::time::Instant,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            (
+                crate::CleanupComponentOutcome,
+                crate::CleanupComponentOutcome,
+            ),
+        > {
+            let realm = self.realm.clone();
+            // This native-only behavior allocates no runtime realm. Its
+            // configured component result is retained by the real wrapper.
+            Box::pin(async move { (crate::CleanupComponentOutcome::Confirmed, realm) })
+        }
+
+        fn stopped<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _terminal: &'a crate::ActorTerminal,
+        ) -> futures_util::future::BoxFuture<'a, ()> {
+            let entered = self.stopped_entered.take().unwrap();
+            let release = self.stopped_release.take().unwrap();
+            Box::pin(async move {
+                entered.send(()).unwrap();
+                release.await.unwrap();
+            })
+        }
+
+        fn child_exited(&mut self, _notice: crate::ChildExitNotice) {
+            unreachable!("population fixture owns no children")
+        }
+    }
+
+    #[tokio::test]
+    async fn generation_population_preserves_abandoned_source_reservation_uncertainty() {
+        use crate::local_actor::run_control::{
+            GenerationResourceIdentity as Identity, GenerationResourceState as State,
+        };
+        let mut history = History::new();
+        let dependency = generation(&mut history, NotebookGenerationId::INITIAL, None);
+        let (directory, task) = crate::LocalActorDirectory::start().await.unwrap();
+        let reservation = directory
+            .reserve_source_actor(
+                &SourceDependency::Generation(dependency.clone()),
+                crate::Incarnation::FIRST,
+            )
+            .await
+            .unwrap();
+        let actor = reservation.identity();
+        let terminal = reservation.terminal().clone();
+        let fence = dependency.fence().unwrap();
+        let ready = directory.generation_population(&fence).await.unwrap();
+        assert!(ready.dependency.same_owner(&dependency));
+        assert_eq!(ready.resources.len(), 1);
+        assert_eq!(ready.resources[0].identity, Identity::Actor(actor));
+        assert_eq!(ready.resources[0].state, State::Starting);
+
+        drop(reservation);
+        // Drop enqueues AbandonReservation before this observation on the
+        // same directory owner; no polling or direct phase writes are needed.
+        let abandoned = directory.generation_population(&fence).await.unwrap();
+        assert_eq!(abandoned.resources.len(), 1);
+        assert_eq!(abandoned.resources[0].identity, Identity::Actor(actor));
+        assert!(matches!(
+            abandoned.resources[0].state,
+            State::CleanupUnconfirmed(_)
+        ));
+        assert!(terminal.requested_shutdown().is_some());
+        assert!(terminal.get().is_none());
+        assert!(terminal.cleanup().is_none());
+        directory.stop_owner_for_test().await;
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn generation_population_observes_terminal_cleanup_before_executor_ack() {
+        use crate::local_actor::run_control::{
+            GenerationResourceIdentity as Identity, GenerationResourceState as State,
+        };
+        for realm in [
+            crate::CleanupComponentOutcome::Unsupported,
+            crate::CleanupComponentOutcome::Unconfirmed("native cleanup not confirmed".into()),
+            crate::CleanupComponentOutcome::Confirmed,
+        ] {
+            let mut history = History::new();
+            let dependency = generation(&mut history, NotebookGenerationId::INITIAL, None);
+            let (directory, directory_task) = crate::LocalActorDirectory::start().await.unwrap();
+            let reservation = directory
+                .reserve_source_actor(
+                    &SourceDependency::Generation(dependency.clone()),
+                    crate::Incarnation::FIRST,
+                )
+                .await
+                .unwrap();
+            let identity = reservation.identity();
+            let terminal = reservation.terminal().clone();
+            let (start_entered, starting) = tokio::sync::oneshot::channel();
+            let (start_release, continue_start) = tokio::sync::oneshot::channel();
+            let (stopped_entered, stopped) = tokio::sync::oneshot::channel();
+            let (stopped_release, continue_stop) = tokio::sync::oneshot::channel();
+            let spawning = tokio::spawn(crate::local_actor::spawn_reserved_local_actor(
+                None,
+                PopulationBehavior {
+                    start_entered: Some(start_entered),
+                    start_release: Some(continue_start),
+                    stopped_entered: Some(stopped_entered),
+                    stopped_release: Some(continue_stop),
+                    realm: realm.clone(),
+                },
+                reservation,
+                directory.clone(),
+            ));
+            tokio::time::timeout(std::time::Duration::from_secs(10), starting)
+                .await
+                .expect("real registered actor reaches start")
+                .unwrap();
+            assert!(!spawning.is_finished());
+            assert!(terminal.get().is_none());
+            let fence = dependency.fence().unwrap();
+            let live = directory.generation_population(&fence).await.unwrap();
+            assert!(live.dependency.same_owner(&dependency));
+            assert_eq!(live.resources.len(), 1);
+            assert_eq!(live.resources[0].identity, Identity::Actor(identity));
+            assert_eq!(live.resources[0].state, State::Starting);
+
+            start_release.send(()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+                .await
+                .expect("real cleanup and terminal publication reach stopped")
+                .unwrap();
+            assert!(!spawning.is_finished(), "executor ack has not been sent");
+            assert_eq!(
+                terminal.get().unwrap().kind,
+                crate::ActorExitKind::Completed
+            );
+            let cleanup = terminal.cleanup().expect("actual retained cleanup");
+            assert_eq!(cleanup.realm, realm);
+            assert_eq!(cleanup.hook, crate::CleanupComponentOutcome::Confirmed);
+            assert_eq!(cleanup.children, crate::CleanupComponentOutcome::Confirmed);
+            assert_eq!(
+                cleanup.is_confirmed(),
+                matches!(realm, crate::CleanupComponentOutcome::Confirmed)
+            );
+            let population = directory.generation_population(&fence).await.unwrap();
+            if matches!(realm, crate::CleanupComponentOutcome::Confirmed) {
+                assert!(population.resources.is_empty());
+            } else {
+                assert_eq!(population.resources.len(), 1);
+                assert_eq!(population.resources[0].identity, Identity::Actor(identity));
+                assert!(matches!(
+                    population.resources[0].state,
+                    State::CleanupUnconfirmed(_)
+                ));
+            }
+
+            stopped_release.send(()).unwrap();
+            let (actor, task) = spawning
+                .await
+                .unwrap()
+                .expect("successful completed startup");
+            assert_eq!(actor.identity(), identity);
+            task.await.unwrap();
+            let acknowledged = directory.generation_population(&fence).await.unwrap();
+            assert_eq!(acknowledged.resources, population.resources);
+            assert_eq!(terminal.cleanup(), Some(cleanup));
+            // Unknown remains an observed retained result; stopping this test's
+            // empty native owner is not a successful finish_run certificate.
+            directory.stop_owner_for_test().await;
+            directory_task.await.unwrap();
+        }
+    }
 }

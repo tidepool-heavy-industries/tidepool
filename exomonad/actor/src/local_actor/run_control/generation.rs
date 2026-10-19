@@ -68,6 +68,23 @@ impl RunState {
             }
             if let Some(entry) = self.entries.get(actor) {
                 if entry.actor.terminal().get().is_none() {
+                    let link_state = match record.executor_link {
+                        ExecutorLink::Confirmed => None,
+                        ExecutorLink::Pending => Some(GenerationResourceState::Starting),
+                        ExecutorLink::Unconfirmed => {
+                            Some(GenerationResourceState::CleanupUnconfirmed(
+                                "executor physical supervision differs from its issued reservation"
+                                    .into(),
+                            ))
+                        }
+                    };
+                    if let Some(state) = link_state {
+                        resources.push(GenerationResourceObservation {
+                            identity: GenerationResourceIdentity::Actor(*actor),
+                            state,
+                        });
+                        continue;
+                    }
                     resources.push(GenerationResourceObservation {
                         identity: GenerationResourceIdentity::Actor(*actor),
                         state: GenerationResourceState::Running,
@@ -228,24 +245,12 @@ impl RunControlClient {
         reservation: ActorRef,
         operation: RootOperation,
     ) -> Result<RootOperationResult, DirectoryError> {
-        let receiver = self
-            .ask(|reply| RunControlMessage::BeginPreparation {
-                reservation: Some(reservation),
-                intent: PreparationIntent::Creation,
-                operation,
-                reply,
-            })
-            .await??;
-        let delivery = receiver.await.map_err(|_| DirectoryError::Unavailable)?;
-        if delivery.is_error() {
-            return Ok(delivery.accept());
-        }
-        self.ask(|reply| RunControlMessage::AcceptPreparation {
-            id: delivery.id,
-            reply,
-        })
-        .await??;
-        Ok(delivery.accept())
+        self.prepare_owned_root(
+            RootPreparationOwner::Worker(reservation),
+            PreparationIntent::Creation,
+            operation,
+        )
+        .await
     }
 
     pub(crate) async fn generation_population(

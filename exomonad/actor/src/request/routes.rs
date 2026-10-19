@@ -1,11 +1,35 @@
 //! Watch-owned Haskell continuations. Readiness enqueues work on the exact
 //! existing actor; the request registry retains status and the root handle.
 
+use super::sources::CallbackExecution;
 use super::{
     ReplyError, RequestRegistry, WatchId, WatchNotification, WatchStateProjection, WatchTransition,
 };
+use crate::resident_workbench::generation_admission::GenerationAdmissionError;
 use crate::{ActorRef, LocalActorRef};
 use tidepool_runtime::session::RootCustody;
+
+#[derive(Debug)]
+pub(crate) enum RouteRegistrationError {
+    Source(GenerationAdmissionError),
+    Watch(ReplyError),
+}
+
+/// The registry issues this affine entry only when activation wins its gate.
+pub(crate) struct RouteEntry {
+    entry: RootCustody,
+    execution: CallbackExecution,
+}
+
+impl RouteEntry {
+    pub(crate) fn execution(&self) -> &CallbackExecution {
+        &self.execution
+    }
+
+    pub(crate) fn into_parts(self) -> (RootCustody, CallbackExecution) {
+        (self.entry, self.execution)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RouteState {
@@ -19,6 +43,7 @@ pub(crate) struct WatchRoute {
     owner: LocalActorRef,
     entry: Option<RootCustody>,
     state: RouteState,
+    execution: CallbackExecution,
 }
 
 impl WatchRoute {
@@ -38,12 +63,21 @@ impl WatchRoute {
             }
         }
     }
-    pub(crate) fn new(owner: LocalActorRef, entry: RootCustody) -> Self {
+    pub(crate) fn new(
+        owner: LocalActorRef,
+        entry: RootCustody,
+        execution: CallbackExecution,
+    ) -> Self {
         Self {
             owner,
             entry: Some(entry),
             state: RouteState::Waiting,
+            execution,
         }
+    }
+
+    pub(super) fn execution(&self) -> &CallbackExecution {
+        &self.execution
     }
 
     pub(super) fn schedule(&mut self, watch: WatchId) {
@@ -74,17 +108,76 @@ impl WatchRoute {
 }
 
 impl RequestRegistry {
-    pub(crate) fn take_route(&self, owner: ActorRef, watch: WatchId) -> Option<RootCustody> {
-        let mut state = self.state.lock();
-        let record = state.watches.get_mut(&watch)?;
-        if record.owner != owner {
-            return None;
+    pub(crate) fn register_watch_route(
+        &self,
+        owner: ActorRef,
+        label: String,
+        plan: super::readiness::Plan<super::ReadinessDependency>,
+        route: WatchRoute,
+    ) -> Result<(WatchId, Vec<WatchNotification>), RouteRegistrationError> {
+        if route.owner.identity() != owner {
+            return Err(RouteRegistrationError::Watch(ReplyError::Unauthorized));
         }
-        let route = record.route.as_mut()?;
-        if route.state != RouteState::Running {
-            return None;
+        let execution = route.execution().clone();
+        execution
+            .with_activation_admission(|| {
+                self.register_watch_plan_owned(owner, label, plan, Some(route), false)
+            })
+            .map_err(RouteRegistrationError::Source)?
+            .map_err(RouteRegistrationError::Watch)
+    }
+
+    pub(crate) fn take_route(
+        &self,
+        owner: ActorRef,
+        watch: WatchId,
+    ) -> Result<Option<RouteEntry>, GenerationAdmissionError> {
+        let execution = {
+            let state = self.state.lock();
+            let Some(route) = state
+                .watches
+                .get(&watch)
+                .filter(|record| record.owner == owner)
+                .and_then(|record| record.route.as_ref())
+                .filter(|route| route.state == RouteState::Running && route.entry.is_some())
+            else {
+                return Ok(None);
+            };
+            route.execution.clone()
+        };
+        let admitted = execution.with_activation_admission(|| {
+            let mut state = self.state.lock();
+            let route = state
+                .watches
+                .get_mut(&watch)
+                .filter(|record| record.owner == owner)
+                .and_then(|record| record.route.as_mut())
+                .filter(|route| route.state == RouteState::Running)?;
+            route.entry.take().map(|entry| RouteEntry {
+                entry,
+                execution: route.execution.clone(),
+            })
+        });
+        match admitted {
+            Ok(entry) => Ok(entry),
+            Err(error) => {
+                // A duplicate notice may lose to an already admitted callback.
+                // Only consume an entry that is still waiting to start; never
+                // fail or reactivate work whose root was already taken.
+                let mut state = self.state.lock();
+                let Some(route) = state
+                    .watches
+                    .get_mut(&watch)
+                    .filter(|record| record.owner == owner)
+                    .and_then(|record| record.route.as_mut())
+                    .filter(|route| route.state == RouteState::Running && route.entry.is_some())
+                else {
+                    return Ok(None);
+                };
+                drop(route.entry.take());
+                Err(error)
+            }
         }
-        route.entry.take()
     }
 
     pub(crate) fn finish_route(

@@ -1,6 +1,6 @@
 //! Interpret generated form operations through exact native frame ownership.
 use super::*;
-use crate::forms::{attempt_id, lease_id, FormCleanup, MountedForm};
+use crate::forms::{attempt_id, lease_id, FormAdmissionError, FormCleanup, MountedForm};
 use tidepool_bridge_effects::{FormAttempt, FormAttemptId, FormCause, FormLease, FormTransition};
 
 pub(crate) enum FormOperation {
@@ -96,25 +96,26 @@ where
             .await?;
         match operation {
             FormOperation::Open(descriptor) => {
-                let result: Result<FormLease, FormCause> = async {
+                let result: Result<FormLease, FormAdmissionError> = async {
                     let host = environment
                         .form_host
                         .clone()
                         .ok_or(FormCause::FormNotInstalled)?;
                     let work = work.as_ref().ok_or(FormCause::FormUnauthorized)?;
                     let mount = uuid::Uuid::new_v4().to_string();
-                    let cleanup = FormCleanup::new(context.actor, mount.clone(), host.clone());
-                    let open = || {
-                        work.admit_form(cleanup.clone(), || {
-                            host.open(&publication, &mount, &descriptor)
-                        })
-                    };
-                    match interaction_control.as_ref() {
-                        Some(control) => control
-                            .admit_interaction(open)
-                            .ok_or(FormCause::FormClosed)??,
-                        None => open()?,
-                    }
+                    let cleanup = FormCleanup::new(
+                        context.actor,
+                        mount.clone(),
+                        host,
+                        context.source_dependency().clone(),
+                    )
+                    .map_err(FormAdmissionError::Source)?;
+                    work.admit_form(
+                        cleanup.clone(),
+                        &publication,
+                        &descriptor,
+                        interaction_control.as_ref(),
+                    )?;
                     let mounted = Arc::new(MountedForm {
                         cleanup: cleanup.clone(),
                         session: context.placement.session,
@@ -132,11 +133,16 @@ where
                         .await
                         .map_err(|error| FormCause::FormTransportFailed(error.to_string()))?;
                     if cleanup.is_closed() {
-                        return Err(FormCause::FormClosed);
+                        return Err(FormCause::FormClosed.into());
                     }
                     Ok(FormLease::FormLeaseToken(mount))
                 }
                 .await;
+                let result = match result {
+                    Ok(lease) => Ok(lease),
+                    Err(FormAdmissionError::Form(cause)) => Err(cause),
+                    Err(FormAdmissionError::Source(source)) => return Err(source.into()),
+                };
                 environment
                     .runner
                     .resume_value(context, continuation, result)

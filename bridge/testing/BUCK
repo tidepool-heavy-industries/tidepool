@@ -166,6 +166,7 @@ filegroup(
         "exomonad/actor/src/request/fixtures/request-signature-progress.hs": "//exomonad/actor:haskell_test_fixture_7372632f726571756573742f66697874757265732f726571756573742d7369676e61747572652d70726f67726573732e6873",
         "exomonad/actor/src/request/fixtures/result-receiver.hs": "//exomonad/actor:haskell_test_fixture_7372632f726571756573742f66697874757265732f726573756c742d72656365697665722e6873",
         "exomonad/actor/src/request/fixtures/result-request.hs": "//exomonad/actor:haskell_test_fixture_7372632f726571756573742f66697874757265732f726573756c742d726571756573742e6873",
+        "exomonad/actor/src/request/fixtures/watch-route.hs": "//exomonad/actor:haskell_test_fixture_7372632f726571756573742f66697874757265732f77617463682d726f7574652e6873",
         "exomonad/actor/src/resident_actor/capture_workspace_child.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f636170747572655f776f726b73706163655f6368696c642e6873",
         "exomonad/actor/src/resident_actor/capture_workspace_declarations.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f636170747572655f776f726b73706163655f6465636c61726174696f6e732e6873",
         "exomonad/actor/src/resident_actor/capture_workspace_forged_spec.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f636170747572655f776f726b73706163655f666f726765645f737065632e6873",

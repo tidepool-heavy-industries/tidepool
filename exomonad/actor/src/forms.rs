@@ -48,36 +48,132 @@ pub trait FormHost: Send + Sync {
     ) -> Result<(), FormCause>;
 }
 
+#[derive(Debug)]
+pub(crate) enum FormAdmissionError {
+    Source(crate::resident_workbench::generation_admission::GenerationAdmissionError),
+    Form(FormCause),
+}
+impl From<FormCause> for FormAdmissionError {
+    fn from(cause: FormCause) -> Self {
+        Self::Form(cause)
+    }
+}
+
+#[derive(Debug)]
+enum FormPhase {
+    Unregistered,
+    ReservedNotStarted,
+    Attempted {
+        open: Option<Result<(), FormCause>>,
+        close: Option<Result<(), FormCause>>,
+    },
+    Closed(FormCloseProof),
+}
+
+#[derive(Debug)]
+enum FormCloseProof {
+    NotStarted,
+    HostClosed,
+    Committed,
+}
+
 /// Retained by invocation cleanup independently of the frame's ownership lease.
 pub(crate) struct FormCleanup {
     pub actor: crate::ActorRef,
     pub mount: String,
     pub host: Arc<dyn FormHost>,
-    result: parking_lot::Mutex<Option<Result<(), FormCause>>>,
+    source: crate::resident_workbench::generation_admission::SourceDependency,
+    // Retain the exact source-scope lease while the owning session is live,
+    // including when world publication becomes unavailable.
+    _source_scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    phase: parking_lot::Mutex<FormPhase>,
 }
 impl FormCleanup {
-    pub(crate) fn new(actor: crate::ActorRef, mount: String, host: Arc<dyn FormHost>) -> Arc<Self> {
-        Arc::new(Self {
+    pub(crate) fn new(
+        actor: crate::ActorRef,
+        mount: String,
+        host: Arc<dyn FormHost>,
+        source: crate::resident_workbench::generation_admission::SourceDependency,
+    ) -> Result<Arc<Self>, crate::resident_workbench::generation_admission::GenerationAdmissionError>
+    {
+        let scope = source.source_lease()?;
+        scope.validate_source_issuer()?;
+        Ok(Arc::new(Self {
             actor,
             mount,
             host,
-            result: parking_lot::Mutex::new(None),
-        })
+            source,
+            _source_scope: scope,
+            phase: parking_lot::Mutex::new(FormPhase::Unregistered),
+        }))
+    }
+    pub(crate) fn source_dependency(
+        &self,
+    ) -> &crate::resident_workbench::generation_admission::SourceDependency {
+        &self.source
+    }
+    /// Called only while the real invocation inserts this exact form under its
+    /// source/cancellation admission. No foreign host code runs here.
+    pub(crate) fn reserve(&self) -> Result<(), FormCause> {
+        let mut phase = self.phase.lock();
+        if !matches!(&*phase, FormPhase::Unregistered) {
+            return Err(FormCause::FormClosed);
+        }
+        *phase = FormPhase::ReservedNotStarted;
+        Ok(())
+    }
+    /// The actual interaction cutoff encloses this attempt. Cleanup serializes
+    /// on the same phase and can never close-before-open and then resurrect it.
+    pub(crate) fn open(
+        &self,
+        publication: &FormPublication,
+        descriptor: &serde_json::Value,
+    ) -> Result<(), FormCause> {
+        let mut phase = self.phase.lock();
+        if !matches!(&*phase, FormPhase::ReservedNotStarted) {
+            return Err(FormCause::FormClosed);
+        }
+        *phase = FormPhase::Attempted {
+            open: None,
+            close: None,
+        };
+        let result = self.host.open(publication, &self.mount, descriptor);
+        if let FormPhase::Attempted { open, .. } = &mut *phase {
+            *open = Some(result.clone());
+        }
+        result
     }
     pub(crate) fn close(&self) -> Result<(), FormCause> {
-        let mut result = self.result.lock();
-        if matches!(&*result, Some(Ok(()))) {
-            return Ok(());
+        let mut phase = self.phase.lock();
+        match &*phase {
+            FormPhase::Closed(_) => return Ok(()),
+            FormPhase::Unregistered | FormPhase::ReservedNotStarted => {
+                *phase = FormPhase::Closed(FormCloseProof::NotStarted);
+                return Ok(());
+            }
+            FormPhase::Attempted { .. } => {}
         }
         let closed = self.host.close(self.actor, &self.mount);
-        *result = Some(closed.clone());
+        match &closed {
+            Ok(()) => *phase = FormPhase::Closed(FormCloseProof::HostClosed),
+            Err(_) => {
+                if let FormPhase::Attempted { close, .. } = &mut *phase {
+                    *close = Some(closed.clone());
+                }
+            }
+        }
         closed
     }
     pub(crate) fn settled(&self) {
-        *self.result.lock() = Some(Ok(()));
+        *self.phase.lock() = FormPhase::Closed(FormCloseProof::Committed);
     }
     pub(crate) fn is_closed(&self) -> bool {
-        matches!(&*self.result.lock(), Some(Ok(())))
+        matches!(
+            &*self.phase.lock(),
+            FormPhase::Closed(
+                FormCloseProof::NotStarted | FormCloseProof::HostClosed | FormCloseProof::Committed
+            )
+        )
     }
 }
 
@@ -111,6 +207,7 @@ mod tests {
 
     #[derive(Default)]
     struct Host {
+        opens: AtomicUsize,
         closes: AtomicUsize,
         fail_closes: AtomicUsize,
     }
@@ -124,6 +221,7 @@ mod tests {
             _: &str,
             _: &serde_json::Value,
         ) -> Result<(), FormCause> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         fn attempt(&self, _: crate::ActorRef, _: &str) -> Result<Option<FormAttempt>, FormCause> {
@@ -174,9 +272,38 @@ mod tests {
     fn actor() -> crate::ActorRef {
         crate::ActorRef::first(crate::ActorId(1))
     }
-    fn lease(host: Arc<Host>, mount: &str) -> Arc<MountedForm> {
+    fn source() -> (
+        tidepool_runtime::session::PersistentSession,
+        crate::resident_workbench::generation_admission::SourceDependency,
+    ) {
+        use crate::resident_workbench::generation_admission::{BootstrapWorld, SourceDependency};
+        let mut session = tidepool_runtime::session::PersistentSession::new(None, 1024);
+        let scope = session.mint_notebook_scope_with_lease(None).unwrap();
+        let world = BootstrapWorld::new(None);
+        world.adopt_scope(scope).unwrap();
+        (session, SourceDependency::World(world))
+    }
+    fn lease(
+        host: Arc<Host>,
+        mount: &str,
+        source: &crate::resident_workbench::generation_admission::SourceDependency,
+    ) -> Arc<MountedForm> {
+        let cleanup = FormCleanup::new(actor(), mount.into(), host, source.clone()).unwrap();
+        source
+            .with_open_admission(|| cleanup.reserve())
+            .unwrap()
+            .unwrap();
+        cleanup
+            .open(
+                &FormPublication {
+                    actor: actor(),
+                    operation: None,
+                },
+                &serde_json::json!({}),
+            )
+            .unwrap();
         Arc::new(MountedForm {
-            cleanup: FormCleanup::new(actor(), mount.into(), host),
+            cleanup,
             session: tidepool_repr::SessionId(1),
             realm: tidepool_codegen::suspension::RealmId(1),
         })
@@ -184,9 +311,10 @@ mod tests {
 
     #[test]
     fn dropping_one_continuation_form_closes_once_and_preserves_sibling() {
+        let (_session, source) = source();
         let host = Arc::new(Host::default());
-        let one = lease(host.clone(), "one");
-        let sibling = lease(host.clone(), "sibling");
+        let one = lease(host.clone(), "one", &source);
+        let sibling = lease(host.clone(), "sibling", &source);
         let cleanup = one.cleanup.clone(); // Cleanup evidence does not retain ownership.
         let weak = Arc::downgrade(&one);
         drop(one);
@@ -202,15 +330,19 @@ mod tests {
 
     #[test]
     fn failed_durable_close_remains_observable_and_retries_at_cleanup() {
+        let (_session, source) = source();
         let host = Arc::new(Host::default());
         host.fail_closes.store(1, Ordering::SeqCst);
-        let mounted = lease(host.clone(), "one");
+        let mounted = lease(host.clone(), "one", &source);
         let cleanup = mounted.cleanup.clone();
         drop(mounted);
         assert!(!cleanup.is_closed());
         assert!(matches!(
-            &*cleanup.result.lock(),
-            Some(Err(FormCause::FormCleanupUnconfirmed(_)))
+            &*cleanup.phase.lock(),
+            FormPhase::Attempted {
+                close: Some(Err(FormCause::FormCleanupUnconfirmed(_))),
+                ..
+            }
         ));
         cleanup.close().unwrap();
         assert!(cleanup.is_closed());
@@ -218,9 +350,45 @@ mod tests {
     }
 
     #[test]
-    fn durable_commit_releases_live_lease_without_rewriting_answer() {
+    fn pending_close_prevents_late_open_without_host_io() {
+        let (_session, source) = source();
         let host = Arc::new(Host::default());
-        let mounted = lease(host.clone(), "one");
+        let cleanup =
+            FormCleanup::new(actor(), "pending".into(), host.clone(), source.clone()).unwrap();
+        source
+            .with_open_admission(|| cleanup.reserve())
+            .unwrap()
+            .unwrap();
+        cleanup.close().unwrap();
+        assert!(matches!(
+            &*cleanup.phase.lock(),
+            FormPhase::Closed(FormCloseProof::NotStarted)
+        ));
+        assert_eq!(
+            cleanup.open(
+                &FormPublication {
+                    actor: actor(),
+                    operation: None
+                },
+                &serde_json::json!({})
+            ),
+            Err(FormCause::FormClosed)
+        );
+        assert_eq!(host.opens.load(Ordering::SeqCst), 0);
+        assert_eq!(host.closes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn durable_commit_releases_live_lease_without_rewriting_answer() {
+        let (_session, source) = source();
+        let host = Arc::new(Host::default());
+        let mounted = lease(host.clone(), "one", &source);
+        let scope = source.source_lease().unwrap();
+        let _fence = scope.source_admission().fence().unwrap();
+        assert_eq!(
+            host.commit(actor(), "one", "attempt", &serde_json::json!({})),
+            Ok(FormTransition::FormApplied)
+        );
         mounted.cleanup.settled();
         let cleanup = mounted.cleanup.clone();
         drop(mounted);

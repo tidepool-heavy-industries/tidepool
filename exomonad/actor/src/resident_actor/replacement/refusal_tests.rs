@@ -84,7 +84,13 @@ impl Fixture {
         }
     }
 
-    fn machine(&self, id: SessionId, bind: bool) -> Session {
+    fn machine(
+        &self,
+        id: SessionId,
+    ) -> (
+        Session,
+        crate::resident_workbench::generation_admission::SourceDependency,
+    ) {
         let root = tempfile::tempdir().unwrap();
         let library = SessionLib::open(id, root.path(), ModuleEnv::standalone_default())
             .unwrap()
@@ -95,22 +101,43 @@ impl Fixture {
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(library),
         );
-        if bind {
-            assert!(matches!(
-                tidepool_testing::with_settlement(|settlement| session
-                    .run_projected_bind_with_sites(
-                        "replacement-refusal-inputs",
-                        self.compiled.code(),
-                        &self.bound,
-                        Generation(1),
-                        settlement
-                    ))
-                .unwrap(),
-                ResidentOutcome::BindingsCommitted { .. }
-            ));
-        }
+        let scope = session.mint_isolated_scope();
+        let dependency = ActorDescriptor::new(
+            "replacement fixture source",
+            crate::ActorPlacement {
+                session: id,
+                resource_scope: RealmId::ROOT,
+                lexical_scope: scope,
+            },
+        )
+        .admit_independent_world()
+        .source_dependency()
+        .clone();
+        dependency.adopt_final_scope(&mut session, scope).unwrap();
+        let owner = crate::capabilities::CompilerOwnerScope::current()
+            .unwrap()
+            .with_source_dependency(&dependency);
+        // Shared compiled fixture bindings keep their original ROOT domain;
+        // the actual transaction retains this machine's canonical source.
+        let bound = crate::termination::CompilerWorkTicket::run_source_transaction(
+            &mut session,
+            owner.admit_continuation().unwrap(),
+            &dependency,
+            |session, settlement| {
+                session.run_projected_bind_with_sites(
+                    "replacement-refusal-inputs",
+                    self.compiled.code(),
+                    &self.bound,
+                    Generation(1),
+                    settlement,
+                )
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(bound, ResidentOutcome::BindingsCommitted { .. }));
         self.roots.lock().push(root);
-        session
+        (session, dependency)
     }
 
     async fn behavior(&self) -> (Behavior, super::super::invocation_work::tests::Fixture) {
@@ -124,8 +151,13 @@ impl Fixture {
     ) -> (Behavior, super::super::invocation_work::tests::Fixture) {
         let mut owner = super::super::invocation_work::tests::Fixture::start().await;
         let id = SessionId(0xE201);
+        let (session, dependency) = owner
+            .environment
+            .compiler_lifecycle_scope(&owner.kernel)
+            .scope(async { self.machine(id) })
+            .await;
         let machines = Arc::new(ActorMachineRegistry::new());
-        machines.insert_idle(id, Box::new(self.machine(id, true)));
+        machines.insert_idle(id, Box::new(session));
         owner.environment.runner = ResidentActorRunner::new(
             machines,
             owner
@@ -144,10 +176,11 @@ impl Fixture {
             crate::ActorPlacement {
                 session: id,
                 resource_scope: RealmId::fresh(),
-                lexical_scope: ScopeId::ROOT,
+                lexical_scope: dependency.source_lease().unwrap().scope(),
             },
         )
-        .with_capabilities(capabilities);
+        .with_capabilities(capabilities)
+        .with_source_dependency(dependency);
         let mut behavior = Behavior::with_boot(
             descriptor,
             owner.environment.clone(),
@@ -278,7 +311,8 @@ impl Fixture {
                     requested_effects: behavior.descriptor.capabilities().effect_keys().to_vec(),
                     model_permissions: Vec::new(),
                     lifetime: crate::WorkerLifetime::ActorOwned,
-                    descriptor: ActorDescriptor::new("replacement-refusal-candidate", placement),
+                    descriptor: ActorDescriptor::new("replacement-refusal-candidate", placement)
+                        .with_source_dependency(behavior.descriptor.source_dependency().clone()),
                     spawn: None,
                     entry: MailboxValue::new(
                         parent,
@@ -444,6 +478,19 @@ async fn replacement_preserves_nonempty_authority_across_grant_order_and_refuses
     assert!(reordered.is_subset_of(capabilities.model_permissions()));
     assert!(capabilities.model_permissions().is_subset_of(&reordered));
     let (mut definition, placement) = fixture.definition(&behavior, parent).await;
+    assert!(Arc::ptr_eq(
+        &definition
+            .child
+            .descriptor
+            .source_dependency()
+            .source_lease()
+            .unwrap(),
+        &behavior
+            .descriptor
+            .source_dependency()
+            .source_lease()
+            .unwrap(),
+    ));
     definition.child.model_permissions = requests.clone();
     let staged = behavior
         .environment
@@ -523,12 +570,19 @@ async fn replacement_refusal_preserves_reserved_collision_and_materialized_place
         } else {
             candidate
         };
+        let mut collision_source = None;
         if mode == 2 {
+            let (machine, dependency) = behavior
+                .environment
+                .compiler_lifecycle_scope(&owner.kernel)
+                .scope(async { fixture.machine(candidate) })
+                .await;
+            collision_source = Some(dependency);
             behavior
                 .environment
                 .runner
                 .machines_for_test()
-                .insert_idle(candidate, Box::new(fixture.machine(candidate, true)));
+                .insert_idle(candidate, Box::new(machine));
         }
         let (definition, placement) = fixture.definition(&behavior, session).await;
         let result = if mode == 0 {
@@ -601,6 +655,7 @@ async fn replacement_refusal_preserves_reserved_collision_and_materialized_place
             .await;
         drop(behavior);
         owner.finish().await;
+        drop(collision_source);
     }
 }
 

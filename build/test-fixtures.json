@@ -37,6 +37,7 @@
     "exomonad/actor/src/request/fixtures/request-signature-progress.hs",
     "exomonad/actor/src/request/fixtures/result-receiver.hs",
     "exomonad/actor/src/request/fixtures/result-request.hs",
+    "exomonad/actor/src/request/fixtures/watch-route.hs",
     "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
     "exomonad/actor/src/resident_actor/capture_workspace_declarations.hs",
     "exomonad/actor/src/resident_actor/capture_workspace_forged_spec.hs",
