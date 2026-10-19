@@ -9,6 +9,7 @@ pub(crate) struct ReplyToolDefinition {
     pub(crate) installation: serde_json::Value,
     pub(crate) session: tidepool_repr::SessionId,
     pub(crate) installer: Arc<RootCustody>,
+    pub(crate) execution: crate::request::sources::CallbackExecution,
     schema: Arc<harness_schema::FunctionToolSchema>,
 }
 
@@ -17,6 +18,7 @@ impl ReplyToolDefinition {
         installation: serde_json::Value,
         session: tidepool_repr::SessionId,
         installer: Arc<RootCustody>,
+        execution: crate::request::sources::CallbackExecution,
         support: &[exomonad_tool::ToolEffectKey],
     ) -> Result<Self, crate::ResidentActorWorkbenchError> {
         let schema = Self::prepare_schema(installation.clone(), support)?;
@@ -24,6 +26,7 @@ impl ReplyToolDefinition {
             installation,
             session,
             installer,
+            execution,
             schema,
         })
     }

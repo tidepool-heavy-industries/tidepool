@@ -7670,11 +7670,26 @@ where
                 installation,
                 session,
                 installer,
-            } => Box::pin(async move {
-                let outcome = self
+                mut execution,
+            } => {
+                Box::pin(async move {
+                    let dependency = execution.source_dependency().clone();
+                    execution.snapshot = effect_owner.issued_snapshot().map(|snapshot| {
+                        crate::resident_workbench::ActorRequestSnapshot::SourceCallback(
+                            crate::InstalledToolLease::source_callback_custody(
+                                context.actor,
+                                snapshot.installation().source().clone(),
+                                dependency.clone(),
+                            ),
+                        )
+                    });
+                    execution.scope = effect_owner
+                        .callback_scope()
+                        .or(Some(dependency.source_lease()?));
+                    let outcome = self
                     .environment
                     .application_workbench()
-                    .prepare_reply_tool(context.clone(), installation, session, installer)
+                    .prepare_reply_tool(context.clone(), installation, session, installer, execution)
                     .await
                     .map_err(|error| {
                         crate::request_effect::RequestError::RequestReplyToolInvalid(
@@ -7685,13 +7700,21 @@ where
                         self.environment
                             .requests
                             .register_reply_tool(context.actor, request, Arc::new(definition))
-                            .map_err(crate::request_effect::RequestError::RequestSubmissionRejected)
+                            .map_err(|error| match error {
+                                crate::request::ReplyToolRegistrationError::Source(error) => {
+                                    crate::request_effect::RequestError::RequestReplyToolInvalid(error.to_string())
+                                }
+                                crate::request::ReplyToolRegistrationError::Request(error) => {
+                                    crate::request_effect::RequestError::RequestSubmissionRejected(error)
+                                }
+                            })
                     });
-                self.environment
-                    .runner
-                    .resume_value(context.clone(), continuation, outcome)
-                    .await
-            }),
+                    self.environment
+                        .runner
+                        .resume_value(context.clone(), continuation, outcome)
+                        .await
+                })
+            }
             ResidentActorBoundary::RequestSubmission(submission) => Box::pin(async move {
                 use crate::request_effect::RequestError;
                 if let Err(error) = self
