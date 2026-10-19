@@ -3578,17 +3578,19 @@ impl PersistentSession {
         use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
 
         let scope = execution.private_scope();
-        self.admit_source_work_in(scope)?;
-        let store = self.held_admission_store()?;
         self.reap_admission_leases();
         if !Arc::ptr_eq(&execution.owner, self.admission_owner())
             || execution.owner_epoch != self.admission_owner().epoch()
+            || !self.has_lib()
             || execution.session() != self.lib().session_id()
             || execution.library != self.lib().compile_view_identity
             || self.binding_tip_id(scope) != Some(execution.binding_tip())
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        self.validate_lexical_scope_lease(scope, &execution.scope_lease)?;
+        self.admit_source_work_in(scope)?;
+        let store = self.held_admission_store()?;
         let (world, private_key) = execution.world_basis()?;
         if self.compile_view_key_in(scope).as_ref() != Some(private_key)
             || !Arc::ptr_eq(plan.world().restoration(), world.restoration())
@@ -3603,12 +3605,14 @@ impl PersistentSession {
         }
         // Naming an expression capture must not enumerate historical names.
         // A service-owned collision witness is required before this path grows.
-        if plan
+        if let Some(item) = plan
             .items()
             .iter()
-            .any(|item| item.kind() == Kind::Expression)
+            .find(|item| item.kind() == Kind::Expression)
         {
-            return Err(SessionError::WorldCellExpressionReservationUnsupported);
+            return Err(SessionError::WorldCellExpressionReservationUnsupported {
+                ordinal: item.index(),
+            });
         }
         let private_key = private_key.clone();
         let declaration_count = plan
@@ -3695,7 +3699,9 @@ impl PersistentSession {
                     Slot::Bind { value }
                 }
                 Kind::Expression => {
-                    return Err(SessionError::WorldCellExpressionReservationUnsupported)
+                    return Err(SessionError::WorldCellExpressionReservationUnsupported {
+                        ordinal: item.index(),
+                    })
                 }
             };
             slots.push(slot);
