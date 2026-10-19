@@ -1979,7 +1979,7 @@ mod tests {
             }),
         };
         let terminal = ActorTerminal::failed(
-            "admission refused",
+            "admission refused".into(),
             Some(FailureEnvelope {
                 class: FailureClass::VersionSkew,
                 phase: Phase::Compile,
