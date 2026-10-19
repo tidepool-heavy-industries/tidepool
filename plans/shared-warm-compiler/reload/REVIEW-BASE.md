@@ -2,9 +2,9 @@
 
 Original campaign base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
 Current product compiled/tested source: `ce554a87d11c9a3f51834882e09d884fc5743c0b`.
-Owning9 passed; actual notebook4 and phase1 passed, runtime2/3 passed. Remaining
-strict retirement fixture requires its declared resident resource; exactb713 and
-fresh-joinfff are source accepted for the next native gate. Route eb15 is separately
+Owning9 passed; actual notebook4 and phase1 passed, runtime2/3 passed. The remaining
+strict retirement fixture passed on exact6543 with its declared resident resource;
+runtime production/cfg(test)/wrapper compiled and fresh-joinfff passed too. Route eb15 is separately
 source accepted and still uncompiled/unexecuted.
 Independent reviewer: `/root/warm_compiler_campaign/reload/authority_review`,
 retained Sol-high grant. Supervisor directly inspected canonical owner, source/
@@ -46,10 +46,12 @@ phase1=1PASS. Exact8 reports are bound by publication-owner-repair-receipt.json.
 * b713 declared-resident close control is independently source accepted:
   close-cancel-fixture-review-b713a8.md. Previous DIRECT cancellation could not
   satisfy strict daemon-confirmed Retired; prior failure retained, no production
-  cleanup waiver. Actual resident retry required.
+  cleanup waiver. Exact6543 resident retry passed1 with actual observed worker retirement; no
+  broad direct-cleanup waiver.
 * fff fresh-join control source accepted: fresh-join-control-review-fff09de.md.
   Actual authored declaration positive/open then same-source fence must refuse
-  before join high-water/public/private visibility/request changes; native pending.
+  before join high-water/public/private visibility/request changes; exact6543
+  executed1PASS.
 * Route eb15 source accepted after confirmed nested ambient-B fallback repaired:
   watch-route-exact-review-eb15de.md. Actual capture/registration/take/transfer and
   final canonical scope remain mandatory; early actor/host compile and controls

@@ -4,8 +4,9 @@ Owner `/root/warm_compiler_campaign/reload`; checkout
 `/srv/swarm/checkouts/tidepool-shared-warm-reload-20261019`, branch
 `feature/shared-warm/reload`. Original base
 `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. Current compiled/tested source
-`ce554a87d11c9a3f51834882e09d884fc5743c0b`. Current source also joins
-source-reviewed fresh-join fff09de and declared-resident close fixture b713a83. Campaign owns shared contracts,
+`ce554a87d11c9a3f51834882e09d884fc5743c0b`. Exact6543 also compiled runtime production/cfg(test)/declared wrapper and passed
+resident primary-close1 plus fenced fresh-join1. Fresh-joinfff and declared-resident
+close fixtureb713 have independent source reviews. Campaign owns shared contracts,
 joined acceptance and qualification. The prerequisite imported peer is not campaign output.
 
 ## Current result
@@ -46,7 +47,7 @@ Sol-high leaves, no descendants/native leaf jobs:
   and exact resident close fixtureb713. Receipts are indexed in REVIEW-BASE.
   Native0 reviewer; exact new candidate/results reactivate this reserved owner.
 
-The remaining ce554 failure is a resource-contract mismatch, before finisher
+The retained ce554 failure was a resource-contract mismatch, before finisher
 assertions in ActualRetired. Its actual report declares compiler_mode=direct.
 Direct cancellation deliberately returns Unconfirmed even after frontend reap,
 because worker/scratch settlement is not proven. The test expected daemon-confirmed
@@ -54,10 +55,14 @@ Retired. No dropped outer END is established. b713 declares ONLY that case owned
 resident through the canonical generator, requires its actual socket and prints
 request/endpoint/close traces. Strict Retired, primary diagnostics/items, exact
 same close sink, no-replay and custody assertions are unchanged. Prior Direct
-failure retained in primary-close-direct-resource-disposition.md; actual resident
-retry must pass before the Retired history is claimed. fff adds actual open/fenced
-fresh-join allocation control and also awaits native execution. Next native gate
-compiles runtime production/cfg(test)/declared wrapper then executes these two.
+failure is retained in primary-close-direct-resource-disposition.md. Exact6543
+resident retry passed1 with actual DaemonObserved admission12/slot0 workerReaped9
+and terminationOk; primary error and same actual close remain. Compiler/process
+cleanup confirmed. The labelled synthetic Unknown is separate. fff actual
+open/fenced fresh-join control also passed1; process cleanup confirmed, compiler
+not observed. resident-close-join-receipt.json binds both reports/hashes. All
+commands/observer49734 terminal, lane released. C6-FOUNDATION-6543.json is the
+bounded upward packet; source-native distinctions remain explicit.
 
 Durable Sleep positive remains blocked during initial turn compilation, before
 suspension/resume: MissingDependency Prelude62→Data.Text8. Qualification confirmed
@@ -118,9 +123,8 @@ fixture callers using explicit real canonical issuance before first source work;
 engine-only old rooted-helper callers remain unexecuted migration leads, never an
 argument to weaken the generic helper.
 
-Event-driven next action: supervisor refreshes LIVE and runs the source-reviewed
-resident close/fresh-join runtime gate, then emits bounded foundation evidence to
-campaign. Route eb15 receives early actor/host production+cfg(test) compilation
+Event-driven next action: supervisor emits bounded C6-FOUNDATION-6543 evidence to campaign.
+Route eb15 receives early actor/host production+cfg(test) compilation
 and actual captured-route controls next. Existing14GiB/32GiB grant remains conditional
 on fresh headroom; no broad R2 publication/schema migration is claimed. Producer
 wakes running recipients with send_message and dormant recipients with followup_task.
