@@ -5099,11 +5099,30 @@ fn selected_authored_availability_refuses_source_original_spelling_with_full_gro
         .is_none());
     // A separately issued configured offer remains legitimate. Full custody
     // and a session-like module name cannot issue that offer implicitly.
-    assert!(OriginalCompilerInputs::issue_candidate_from_context(
-        &context,
-        producer,
-        std::slice::from_ref(&native),
-    )
+    assert!((|| -> Result<OriginalCompilerInputs, CompileError> {
+        let producer = producer;
+        let entries = (std::slice::from_ref(&native))
+            .iter()
+            .map(|product| {
+                ArtifactEntry::original(producer.sha256(), product.clone()).map(Arc::new)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let inventory = ArtifactInventory::default();
+        let artifacts = inventory.admit_shared_with_demand(
+            &inventory.empty_view(),
+            entries.clone(),
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        )?;
+        let projection = CompilerInputProjection::from_issued_entries(&entries)?;
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &artifacts.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .map_err(compiler_evidence_failure)?;
+        OriginalCompilerInputs::from_selection(&selection, &artifacts)
+    })()
     .is_ok());
 }
 
@@ -5121,11 +5140,30 @@ fn initial_private_native_offer_reaches_wire_without_lexical_or_instance_authori
             Some(text("same-authorization")),
         )
         .unwrap();
-    let input = OriginalCompilerInputs::issue_candidate_from_context(
-        &context,
-        CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
-        std::slice::from_ref(&native),
-    )
+    let input = (|| -> Result<OriginalCompilerInputs, CompileError> {
+        let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+        let entries = (std::slice::from_ref(&native))
+            .iter()
+            .map(|product| {
+                ArtifactEntry::original(producer.sha256(), product.clone()).map(Arc::new)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let inventory = ArtifactInventory::default();
+        let artifacts = inventory.admit_shared_with_demand(
+            &inventory.empty_view(),
+            entries.clone(),
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        )?;
+        let projection = CompilerInputProjection::from_issued_entries(&entries)?;
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &artifacts.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .map_err(compiler_evidence_failure)?;
+        OriginalCompilerInputs::from_selection(&selection, &artifacts)
+    })()
     .unwrap();
     let request = compiler
         .prepare_compilation_with_private_input(
@@ -9949,11 +9987,30 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
         ],
     )
     .unwrap();
-    let old_input = OriginalCompilerInputs::issue_candidate_from_context(
-        &type_context(std::slice::from_ref(&historical)),
-        producer,
-        std::slice::from_ref(&historical),
-    )
+    let old_input = (|| -> Result<OriginalCompilerInputs, CompileError> {
+        let producer = producer;
+        let entries = (std::slice::from_ref(&historical))
+            .iter()
+            .map(|product| {
+                ArtifactEntry::original(producer.sha256(), product.clone()).map(Arc::new)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let inventory = ArtifactInventory::default();
+        let artifacts = inventory.admit_shared_with_demand(
+            &inventory.empty_view(),
+            entries.clone(),
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        )?;
+        let projection = CompilerInputProjection::from_issued_entries(&entries)?;
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &artifacts.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .map_err(compiler_evidence_failure)?;
+        OriginalCompilerInputs::from_selection(&selection, &artifacts)
+    })()
     .unwrap();
     assert!(old_input
         .native_offers()
