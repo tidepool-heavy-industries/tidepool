@@ -13852,6 +13852,37 @@ mod tests {
                 .product;
             Arc::new(ArtifactEntry::original(producer.sha256(), product).unwrap())
         });
+        // Source publication follows certified lexical imports, which are
+        // distinct from the canonical type-dependency requirements.
+        let mut source_imports = interfaces
+            .iter()
+            .filter_map(|entry| {
+                let ArtifactPayload::Canonical(interface) = &entry.payload else {
+                    panic!("recapture interfaces must be canonical");
+                };
+                Some((
+                    entry.descriptor.owner.clone(),
+                    interface
+                        .source_imports()?
+                        .iter()
+                        .filter_map(|edge| {
+                            Some(ExactModuleIdentity {
+                                unit: edge.home_unit.as_ref()?.clone(),
+                                module: edge.module.clone(),
+                            })
+                        })
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                ))
+            })
+            .collect::<BTreeMap<_, Vec<_>>>();
+        if helper.catalog_input_custody().is_none() {
+            // The synthetic helper above is explicitly authored without imports.
+            assert!(source_imports
+                .insert(helper.descriptor.owner.clone(), Vec::new())
+                .is_none());
+        }
         let mut entries = interfaces;
         entries.extend([helper.clone(), originals[0].clone(), originals[1].clone()]);
         let available = inventory
@@ -13948,71 +13979,62 @@ mod tests {
             "distinct group issuers retain the same exact carrier"
         );
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let issue_context = |index: usize, view: &ArtifactView| {
-            ExactDeclarationContext::from_authenticated_execution(
-                producer.sha256(),
-                view,
-                projection.clone(),
-                vec![
-                    crate::declaration_join::ExactLexicalNode {
-                        owner: originals[index].descriptor.owner.clone(),
-                        imports: vec![helper.descriptor.owner.clone()],
-                    },
-                    crate::declaration_join::ExactLexicalNode {
-                        owner: helper.descriptor.owner.clone(),
-                        imports: vec![],
-                    },
-                ],
-                originals[index].descriptor.owner.clone(),
-                &[
+        let helper_lexical = crate::declaration_join::source_lexical_closure(
+            std::slice::from_ref(&helper.descriptor.owner),
+            &source_imports,
+            &[],
+            &available.source_implementation_roles(),
+        )
+        .expect("recapture source graph must retain certified import evidence")
+        .lexical;
+        let issue_context =
+            |index: usize,
+             view: &ArtifactView,
+             helper_lexical: &[crate::declaration_join::ExactLexicalNode]| {
+                let mut lexical = vec![crate::declaration_join::ExactLexicalNode {
+                    owner: originals[index].descriptor.owner.clone(),
+                    imports: vec![helper.descriptor.owner.clone()],
+                }];
+                lexical.extend_from_slice(helper_lexical);
+                ExactDeclarationContext::from_authenticated_execution(
+                    producer.sha256(),
+                    view,
+                    projection.clone(),
+                    lexical,
                     originals[index].descriptor.owner.clone(),
-                    helper.descriptor.owner.clone(),
-                ],
-            )
-        };
-        // Target demand owns group selection; the original source view owns
-        // the broader canonical namespace needed to issue a source context.
-        let source_namespace = available.capture_graph_selection().namespace;
-        let role_ids = projection
-            .roles()
-            .iter()
-            .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
-            .collect::<BTreeSet<_>>();
-        let issuers = issuers.into_iter().enumerate().map(|(index, issuer)| {
-            if helper.catalog_input_custody().is_some() {
-                let incomplete = issue_context(index, &issuer);
-                assert!(matches!(&incomplete,
-                    Err(CompileError::ArtifactInventory(error)) if matches!(&error.failure,
-                        ArtifactInventoryFailure::MissingDependency { dependent, required, dependency: ArtifactDependency::Interface, .. }
-                        if dependent == &helper.descriptor.owner
-                            && required == &ExactModuleIdentity {
-                                unit: helper.descriptor.owner.unit.clone(),
-                                module: "Tidepool.Inspection.Tree".into(),
-                            })), "incomplete catalog namespace: {incomplete:?}");
-            }
-            let before = issuer.capture_graph_selection();
-            let exact = ExactNativeClosureModel {
-                groups: before.native_groups.iter().copied().collect(),
-                rows: issuer.binding_dependencies().into_iter().collect(),
+                    &[
+                        originals[index].descriptor.owner.clone(),
+                        helper.descriptor.owner.clone(),
+                    ],
+                )
             };
-            let group_roots = |view: &ArtifactView| view.roots().iter().filter_map(|node| {
-                if let InventoryNodeKey::Group(group) = node { Some(*group) } else { None }
-            }).collect::<BTreeSet<_>>();
-            let closed = issuer.merge_selected(&available, &projection).unwrap();
-            exact.check(&closed).expect("namespace closure preserves the original native issuer");
-            assert_eq!(group_roots(&closed), group_roots(&issuer));
-            for binding in closed.capture_graph_selection().namespace.iter()
-                .filter(|binding| !before.namespace.contains(binding)) {
-                assert!(source_namespace.contains(binding));
-                assert!(role_ids.contains(&binding.artifact));
-            }
-            closed
-        }).collect::<Vec<_>>();
+        if helper.catalog_input_custody().is_some() {
+            // A complete interface namespace cannot compensate for missing
+            // source imports when publication selects the lexical closure.
+            let missing_imports = [crate::declaration_join::ExactLexicalNode {
+                owner: helper.descriptor.owner.clone(),
+                imports: vec![],
+            }];
+            let incomplete = issue_context(0, &issuers[0], &missing_imports)
+                .expect("namespace admission precedes source publication")
+                .issue_published_source_original("issuer", "input", &helper.descriptor.owner);
+            assert!(
+                matches!(&incomplete,
+                Err(CompileError::ArtifactInventory(error)) if matches!(&error.failure,
+                    ArtifactInventoryFailure::MissingDependency { dependent, required, dependency: ArtifactDependency::Interface, .. }
+                    if dependent == &helper.descriptor.owner
+                        && required == &ExactModuleIdentity {
+                            unit: helper.descriptor.owner.unit.clone(),
+                            module: "Tidepool.Inspection.Tree".into(),
+                        })),
+                "incomplete catalog source imports: {incomplete:?}"
+            );
+        }
         let publications = issuers
             .iter()
             .enumerate()
             .map(|(index, issuer)| {
-                issue_context(index, issuer)
+                issue_context(index, issuer, &helper_lexical)
                     .unwrap()
                     .issue_published_source_original("issuer", "input", &helper.descriptor.owner)
                     .unwrap()
