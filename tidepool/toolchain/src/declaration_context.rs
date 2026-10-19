@@ -5981,6 +5981,8 @@ struct ProductInputFacts<'a> {
     groups: &'a [PendingCertifiedGroup],
     source_lexical: &'a [ExactLexicalNode],
     program_support: Option<&'a ProgramSourceSupport>,
+    source_selected_support: &'a BTreeSet<ExactModuleIdentity>,
+    source_search_include: Option<&'a [PathBuf]>,
     scaffold_imports: &'a [GeneratedScaffoldImportAuthority],
     checked_values: &'a crate::checked_cell::CheckedValueImportAuthority,
     producer: [u8; 32],
@@ -5999,6 +6001,8 @@ impl<'a> ProductInputFacts<'a> {
             groups,
             source_lexical: &program.program_source_lexical,
             program_support: program.program_support.as_ref(),
+            source_selected_support: &program.source_selected_support,
+            source_search_include: request.source_search_include.as_deref(),
             scaffold_imports: &request.generated_scaffold_imports,
             checked_values: &request.checked_value_imports,
             producer: request.producer_sha256,
@@ -7309,6 +7313,31 @@ impl<'a> ExactReceiptAdmission<'a> {
         context: &ExactDeclarationContext,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<ExactSourceAdmission, CompileError> {
+        let decoded = decode_exact_compilation_receipt_with_operation(
+            path,
+            Some((&self.physical.request_sha256, self.physical.semantic_sha256)),
+            &validation.inventory,
+        )?;
+        ProductInputFacts::from_exact(self.physical, self.inputs, self.program, self.groups)
+            .admit_source_facts(
+                ExactRequestIdentity::from_request(self.physical),
+                decoded,
+                planned,
+                context,
+                validation,
+            )
+    }
+}
+
+impl ProductInputFacts<'_> {
+    fn admit_source_facts(
+        &self,
+        request_identity: ExactRequestIdentity<'_>,
+        decoded: DecodedExactCompilationReceipt,
+        planned: Option<&ExactModuleIdentity>,
+        context: &ExactDeclarationContext,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<ExactSourceAdmission, CompileError> {
         let DecodedExactCompilationReceipt {
             source_path,
             source_sha256,
@@ -7318,11 +7347,7 @@ impl<'a> ExactReceiptAdmission<'a> {
             edges,
             claims,
             selection_evidence,
-        } = decode_exact_compilation_receipt_with_operation(
-            path,
-            Some((&self.physical.request_sha256, self.physical.semantic_sha256)),
-            &validation.inventory,
-        )?;
+        } = decoded;
         let evidence = crate::cache::CompletedSourceEvidence::from_worker_evidence(
             evidence,
             &source_path,
@@ -7346,7 +7371,7 @@ impl<'a> ExactReceiptAdmission<'a> {
         if let Some(planned) = planned {
             exact_owners.insert((planned.unit.as_str(), planned.module.as_str()));
         }
-        exact_owners.extend(self.physical.checked_value_imports.owners());
+        exact_owners.extend(self.checked_values.owners());
         let source_owners: BTreeSet<_> = evidence
             .modules
             .iter()
@@ -7366,9 +7391,7 @@ impl<'a> ExactReceiptAdmission<'a> {
             .map(|node| (node.owner.unit.as_str(), node.owner.module.as_str()))
             .collect();
         let support_entries = self
-            .program
             .program_support
-            .as_ref()
             .map(|support| support.compiler_support.artifacts().root_entries())
             .unwrap_or_default();
         selected.extend(
@@ -7376,7 +7399,6 @@ impl<'a> ExactReceiptAdmission<'a> {
                 .iter()
                 .filter(|entry| {
                     !self
-                        .program
                         .source_selected_support
                         .contains(&entry.descriptor.owner)
                 })
@@ -7387,7 +7409,7 @@ impl<'a> ExactReceiptAdmission<'a> {
                     )
                 }),
         );
-        selected.extend(self.physical.checked_value_imports.owners());
+        selected.extend(self.checked_values.owners());
         if let Some(planned) = planned {
             selected.insert((planned.unit.as_str(), planned.module.as_str()));
         }
@@ -7406,19 +7428,15 @@ impl<'a> ExactReceiptAdmission<'a> {
         let selected_originals = if claims.is_empty() {
             BTreeMap::new()
         } else {
-            let include = self
-                .physical
-                .source_search_include
-                .as_deref()
-                .ok_or_else(|| {
-                    failure("source-selected originals lack trusted current import roots")
-                })?;
+            let include = self.source_search_include.ok_or_else(|| {
+                failure("source-selected originals lack trusted current import roots")
+            })?;
             let selection_evidence = selection_evidence
                 .as_ref()
                 .ok_or_else(|| failure("selected originals lack source evidence"))?;
             // Earlier admitted program support carries the same original proof
             // as persisted context. This receipt cannot authorize itself.
-            let source_support = match &self.program.program_support {
+            let source_support = match self.program_support {
                 Some(support) => context
                     .compiler_source_support()
                     .merge(&support.compiler_support)?,
@@ -7472,7 +7490,7 @@ impl<'a> ExactReceiptAdmission<'a> {
                 claims,
                 selection_evidence,
                 crate::execution_source::SourceSelectionContext {
-                    producer: self.physical.producer_sha256,
+                    producer: self.producer,
                     interfaces: &canonical,
                     exact_interfaces: &exact_interfaces,
                     include,
@@ -7508,9 +7526,7 @@ impl<'a> ExactReceiptAdmission<'a> {
                 let boot = edge.boot;
                 let unit = edge.unit.as_str();
                 let mut scaffold_import = false;
-                for (index, authority) in
-                    self.physical.generated_scaffold_imports.iter().enumerate()
-                {
+                for (index, authority) in self.scaffold_imports.iter().enumerate() {
                     let permitted = evidence
                         .modules
                         .iter()
@@ -7577,10 +7593,10 @@ impl<'a> ExactReceiptAdmission<'a> {
         }
         validation
             .inventory
-            .charge(self.physical.request_sha256.len())
+            .charge(request_identity.request_sha256.len())
             .map_err(|error| compiler_evidence_failure(error.into()))?;
         Ok(ExactSourceAdmission {
-            request_identity: ExactRequestIdentity::from_request(self.physical).into_owned(),
+            request_identity: request_identity.into_owned(),
             witness: ExactSourceWitness {
                 source_path,
                 source_sha256,
