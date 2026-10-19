@@ -467,3 +467,266 @@ Current reviewed source tip: `804a4d3e2f253f69ef81ca76eacc6229cfe7deea`.
 Producer for the next event remains the reload supervisor: an explicit joined
 R1 candidate with generated source mappings/mirrors and actual compilation plus
 focused execution evidence. No periodic wake or poll loop.
+
+
+### R1 bootstrap-alias strategy review (source-only, 2026-10-19)
+
+Reviewed the admission checkout's actual uncommitted consumers at HEAD
+`dc2c85879579f5fa3543f4bde3d2c3fa2dce3b2b`, against campaign base
+`5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. This is an in-progress strategy
+review, not exact-candidate acceptance. The area source review remains through
+`804a4d3e2f253f69ef81ca76eacc6229cfe7deea`; subsequent report/document commits
+do not establish a joined source candidate.
+
+Confirmed counterexample: `resident_workbench/generation_admission.rs`
+`SourceDependency::Independent` currently returns `Ok(None)` from
+`runtime_admission` and executes `with_open_admission` without a fence. An
+independent descriptor/context captured before its first A publication keeps
+that exact world object after publication. `request/sources.rs`
+`CallbackExecution::from_context`, transferred SourceCallback snapshots and
+`activation_context` preserve the captured dependency, so checking current
+InstalledTools does not close these aliases. `capabilities.rs`
+`CompilerOwnerScope::source_claim` authorizes their compiler scope with no
+source claim. `ResidentActorMachineAccess::with_machine_wait` resolves the
+same optional admission before `ResidentSession::with_source_admission`;
+fresh runtime mutation/install claims can consequently also see None.
+
+Campaign accepted the bounded owner strategy: the existing IndependentWorld
+Arc owns first-publication Open/Publishing/Unavailable state and one-time
+binding to the first actually visible A gate. Begin Publishing at the actual
+initial publication claim before commit IO can become uncertain; do not bind
+on candidate preparation. Bind to A in actual visibility publication. Only
+confirmed nonpublication/no effects can reopen the unbound world. Unknown
+commit remains unavailable even if `InstalledToolsAvailability::Available`
+still holds and on_visible did not run. Future B copies only external
+`Option<GenerationDependency>` prerequisites, not its own bootstrap alias to A.
+This prevents A retirement from accidentally closing B. No new registry or
+lifetime authority is needed for that owner contract.
+
+Remaining implementation-critical atomicity condition: observing Open and
+returning None is insufficient. A concurrent publication cutoff may occur
+between that observation and the compiler/runtime source action. The unbound
+world must atomically admit and retain actual source-work custody, and first
+publication must either settle prebinding work before binding or preserve the
+same actual admission gate/claims in A. The current compiler scope
+`runtime_admission()?.map(admit)` and runtime checkout's cached optional gate
+are concrete consumers of this race. Rechecking at an earlier callback or
+context boundary cannot repair it. Send this condition to the leaf before
+accepting the publisher seam.
+
+Runtime publication ordering was inspected directly:
+`persistent.rs::commit_notebook_generation_with_completion` claims commit,
+performs `staged.commit`, calls on_visible after committed graph publication,
+then awaits `receipt.installed_blocking`. Both RecoveryRequired before
+on_visible and failure afterward require closed old aliases; the latter has
+already bound A. A proven StaleRevision rollback/rebuild refusal can settle
+previsibility, but rendered error text must not decide reopening. Restored and
+ephemeral publication paths need the same actual-world binding semantics.
+
+Independent LLM capture mints a distinct world in `start.rs::capture_spawn`;
+its first A must bind that child's aliases and must not bind its parent's
+world. Typed `capture_decoded` inherits the parent's source dependency; child
+P then needs parent external admission plus its own P gate. ActorOwned versus
+RunOwned remains a separate cleanup contract. The startup decoder
+`capture_startup_step` permits source/shutdown/attachment/readiness operations
+and rejects arbitrary child-start effects, so that startup phase does not
+supply a proven pre-parent-generation typed-child counterexample. Generic
+workbench/bootstrap operation histories remain unqualified: if they permit
+such children before parent A, extracting only generation() None would erase
+the future parent dependency, requiring an owner-level refusal or retained
+bootstrap prerequisite. Repeated `admit_independent_world` constructor sites
+must preserve an already issued canonical world across handoffs; fresh world
+issuance may not strand earlier legitimately qualified aliases.
+
+Required deterministic production-history controls, extending existing tests:
+
+- Capture descriptor context, compiler scope, from_context source binding and
+  transferred callback before first A. Publish A, fence it, and attempt fresh
+  compile, ready renderer install, completed binding continuation and resource
+  registration through each alias. All source work refuses; pure continuation,
+  readonly status/source observation and existing receipt settlement progress.
+- Pause independent compiler admission between selecting the world and actual
+  source action. Race initial publication cutoff. The action either belongs
+  to a counted pre-cutoff obligation or refuses; no uncounted None path.
+- Pause initial durable publication before actual IO and after visibility.
+  Confirmed previsibility refusal reopens only the original unbound world;
+  unknown commit before on_visible remains closed, and postvisibility install
+  failure keeps aliases bound to unavailable A.
+- Prepare then discard candidate A: this must not permanently bind old aliases
+  to an unpublished gate. Publish first A exactly once, then B: old bootstrap
+  aliases remain A-bound while B is open until its own/external gate closes.
+- Fresh/captured LLM child C publishes its own A independently of parent A;
+  typed child P retains parent plus own admission. Include a real pre-generation
+  child attempt to establish refusal or correct bootstrap dependency retention.
+
+Zero newly compiled targets or executed tests. The same measured disk blocker
+and source-only unqualified status apply. Awaited event: admission leaf produces
+an explicit joined candidate implementing the accepted bootstrap admission
+owner and publisher seam; reload supervisor supplies that exact source plus
+compile/focused execution evidence when resource admission permits. Next
+review: inspect atomic claims, unknown-commit state, actual alias histories and
+external prerequisite propagation cumulatively. No periodic polling.
+
+
+### Initial-publication uncertainty custody and recovery strategy
+
+Read-only bounded follow-up reviewed the admission checkout's uncommitted
+publisher, runtime and world-owner changes at HEAD
+`dc2c85879579f5fa3543f4bde3d2c3fa2dce3b2b` (campaign base `5b74c2f1`).
+No joined candidate or native execution is established by this review.
+
+Confirmed gap: the bootstrap world now retains the exact target dependency
+when WorldPublication drops uncertain, but the previsibility publisher still
+leaves InstalledTools Available. Its on_visible closure owns and drops the
+candidate's installation/context/scope/prompts/prepared public owner when the
+callback never runs. Subsequent preparation through that unavailable world
+refuses. This is a real missing retained-owner handoff, not evidence that the
+candidate became selected.
+
+Do not repair this by constructing prospective ActorGeneration and marking it
+GenerationUnavailable before actual publication. ActorGeneration carries a
+WorkbenchPublicOwner, and `PreparedWorkbenchGenerationOwner::bind(None)`
+creates an owner whose `is_current()` returns true because no native readiness
+is present. For a durable candidate, only actual runtime readiness can complete
+that owner. `prepare_generation` validates canonical identity and placement;
+it does not issue durable readiness. C2's actual-selection distinction applies
+even when a surrounding enum currently prevents use.
+
+Minimal retained type within the existing installation owner:
+`InitialPublicationUnconfirmed { previous_bootstrap, candidate, uncertainty }`.
+Candidate is affine, immutable preparation custody: exact installation,
+context, lexical scope lease and its original gate, prompts, configuration
+digest, exact prospective ActiveNotebookGeneration references, and the UNBOUND
+PreparedWorkbenchGenerationOwner. Split these facts from the consumed runtime
+PreparedNotebookGeneration rather than cloning publication authority or
+storing a fabricated bound public owner. Retain them before risky publication;
+on_visible consumes those same facts with actual readiness, binds the same
+world to the exact retained gate, and only then constructs ActorGeneration.
+If no callback runs, keep the remaining candidate facts in the uncertain
+installation state. Available/current_generation/snapshot and replacement
+must refuse source authority in this state; status may expose the previous
+bootstrap's tools as SourceUnavailable. The retained gate is never reminted
+from an ID or broader inventory.
+
+Known typed no-commit refusal restores the exact previous bootstrap and reopens
+only its existing world owner, allowing a different candidate to be prepared.
+Unknown commit cannot be converted to no commit by failure to observe selected
+state. Actual selected readback must equal the entire retained selection,
+including references, and native readiness must validate the exact retained
+scope before consuming the prepared public owner. A different selected head,
+missing/unreadable evidence or failed readiness leaves source unavailable.
+
+Important limit: there is no existing same-run reconciliation consumer for a
+real native RecoveryRequired result. `recovery_store/owner.rs` routes both
+ReadGeneration and Check through Command::Request; Phase::Fenced replies with
+the retained error to all such requests. Unknown commit and lost committed
+installation acknowledgement enter this permanent phase. Calling
+`active_notebook_generation` or `durable_public_readiness` again cannot recover
+that store. `persistent.rs::active_notebook_generation` uses the same store;
+`admission.rs::durable_public_readiness` validates the installed graph, public
+scope mapping, declaration root, epoch and retained run owner. It cannot safely
+manufacture missing graph installation after pre-on_visible uncertainty.
+
+Existing recovery evidence uses reopen: the production actor startup selection
+in `resident_actor.rs::select_initial_configuration` reads the actual selected
+head through startup_generation, validates exact installation/source/prompt
+references and restores that source. The runtime regression
+`recovery_store::tests::notebook_generation_commit_and_crash_recovery_select_one_complete_generation`
+explicitly drops the fenced store, opens it again, and reads actual selection.
+This is recovery of the enclosing runtime/actor lifetime; it does not reopen
+old captured aliases or bind a new same-ID gate into their world.
+
+Campaign decision: use EXISTING explicit host/run reopen recovery. No live
+native-store reconciliation is in scope. Unknown pre-on_visible publication
+leaves the old world Unavailable and all its bootstrap aliases permanently
+closed. Same-actor/same-store retry refuses. InitialPublicationUnconfirmed
+retains private facts for truth and custody only, never recovery authority.
+Explicit reopen selects the actual durable head, complete references and real
+readiness into a NEW recovered context. It does not reuse or rebind the old
+gate, construct a prospective ActorGeneration, or call bind(None) for a durable
+candidate. This resolves the recovery strategy; same-actor reconciliation is
+outside the bounded repair, not an unresolved blocker or promised behavior.
+
+Required controls: known no-commit refusal followed by a different candidate;
+unknown commit with no on_visible retaining the exact candidate and gate;
+unknown commit that actually selected A followed by real reopened-owner
+readback of A's complete references; post-on_visible install failure retaining
+actual GenerationUnavailable; never bind(None) for durable candidates; and
+assert all old uncertain context/callback/compiler aliases remain permanently
+closed even after a new recovered context progresses. Recovery tests must not
+swap store handles or clear a fence behind production owners.
+
+Status: source-only strategy findings delivered to reload supervisor and
+admission leaf; whitespace check passes, zero builds or tests executed. Native
+R1 compilation remains unqualified pending root's post-cleanup admission
+receipt. Recovery strategy is decided as above. Awaited event: admission leaf
+provides the exact candidate implementing retained uncertainty custody and the
+all-actor bootstrap wrapper below. Next review inspects candidate custody,
+actual visibility/readiness binding and known-refusal controls. No periodic
+polling.
+
+
+### Typed-child bootstrap aliases: approved parent-plus-own repair
+
+Confirmed against current admission WIP: `start.rs::capture_decoded` stores
+SourceDependency::Generation(parentA) directly in the typed child's descriptor.
+After child's first C is visible, a pre-C descriptor context, compiler scope or
+from_context source callback still carries A alone. Fencing C while A remains
+open therefore does not close those aliases. Snapshot callbacks that already
+carry C do not repair the independent old-descriptor path.
+
+Campaign approved one private BootstrapWorld for EVERY actor. The actual typed
+capture issuer creates it with external prerequisite Some(parentA). Root and
+independently captured/forked LLM issuers create external None. This is the same
+existing source-admission world owner generalized to typed actors, not a new
+registry or cleanup/lifetime authority. Preserve its exact Arc through
+Descriptor/session_context handoffs, initial tool lease and startup callbacks;
+constructor convenience paths must not remint an already admitted wrapper.
+
+Before C binds, actual source claims retain BOTH the child's own bootstrap
+obligation and external A's runtime claim. CompilerOwnerScope::source_claim,
+checkout_admission, registration_dependency and with_open_admission must all
+observe the same state. Unconfirmed native close preserves both obligations.
+The C publication owner bypasses only its own bootstrap checkout claim so it
+can establish the Publishing cutoff without self-deadlock; it still needs an
+actual external A claim through commit and installation settlement. A's earlier
+precheck alone cannot authorize C publication after an A fence.
+
+On actual first visibility, bind the wrapper once to C, whose runtime gate
+already depends on A. Every pre-C descriptor/context/compiler/callback alias
+then resolves C forever. Creating replacement D copies only external A; it
+must never inherit its own bootstrap wrapper's bound C. New D aliases use D,
+old bootstrap aliases remain C-bound. Child and parent identities, optional
+generation metadata and runtime SessionId are not substitutes for this owner
+chain. Independently captured LLM child E remains external None regardless of
+ActorOwned/RunOwned cleanup ownership; the earlier independent-collateral
+refusal contract still applies.
+
+Pending pre-C worker registration may project external A for the existing
+directory, while retaining its own bootstrap claim until actual enqueue and
+allowing the directory's A gate to recheck atomically. A root/independent
+bootstrap has external None but still retains the same own-world registration
+obligation. No bootstrap-to-None projection may silently discard an external
+prerequisite or prematurely drop its own claim.
+
+Add deterministic histories through the existing actual capture/publisher and
+callback/compiler consumers: parent A open, capture typed P and all pre-C
+aliases, publish C, fence C, then fresh work through every old alias refuses
+while A remains open. Independently fence A before C publication and verify
+C refuses without publication; race A fence against an admitted C commit and
+observe the real claim through settlement. Publish C then D, retire C, and
+check D remains usable under A while old bootstrap aliases refuse. Fence A
+and both C/D refuse fresh source work. Repeat own prebind busy/unconfirmed and
+unknown publication controls for typed actors as for root/LLM worlds. Fresh
+and captured LLM E must remain usable when A/C are fenced, subject to its own
+source gate and existing cleanup owner. Pure continuation/readonly receipt
+and status operations must remain usable under source refusal.
+
+Status: approved bounded strategy, implementation pending exact leaf candidate;
+read-only source advice sent to parent and leaf. No new code, framework, native
+build or test execution. Report whitespace check is the only new check.
+Awaited producer/event: admission leaf supplies the complete exact R1 candidate
+including generalized BootstrapWorld and private initial-uncertainty custody;
+parent supplies joined source/evidence when root admits native verification.
+Next action is cumulative exact-candidate review of these production aliases
+and parent/own claims. Yield without periodic polling.

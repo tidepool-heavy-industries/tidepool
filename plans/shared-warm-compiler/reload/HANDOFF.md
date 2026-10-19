@@ -62,9 +62,10 @@ an informed worker yields.
   reviews/folds it and requests cumulative independent review.
 - `/root/warm_compiler_campaign/reload/authority_review` is read-only except
   `REVIEW-BASE.md`. It reviewed the complete source delta through `804a4d3e2f`
-  and is active on the new bootstrap-world alias counterexample below. Awaited
-  event: bounded owner-strategy review, then the area owner supplies the exact
-  joined R1 candidate and actual compile/focused-gate evidence. The area owner
+  and completed the bootstrap-world/typed-child strategy review with the settled
+  reopen-only recovery contract. It is dormant awaiting the exact joined R1
+  candidate and actual compile/focused-gate evidence. The area owner uses
+  `followup_task` to supply that checkpoint for cumulative review, then
   repairs findings, requests exact rereview and owns the fold.
 
 Before yielding, retain the exact awaited event, producer/observer, recipient
@@ -91,10 +92,12 @@ renderers can install; those real consumers require the lower gate. Derived
 scopes and transferred SourceCallback contexts must preserve original source
 prerequisites separately from recipient placement.
 
-Typed dependent children retain parent prerequisites plus their own generation;
-a replacement excludes its own retired predecessor while keeping inherited
-prerequisites. Independent LLM captures receive a new world at their actual
-issuer. Missing provenance cannot establish independence.
+Every actual actor capture issues a private bootstrap-world wrapper. Typed
+dependent captures retain immutable external parent prerequisites; independent
+root/LLM captures have no external prerequisite. The wrapper binds once to that
+actor's first published generation. Its old aliases then retain the closed first
+generation, while replacement generations exclude their own predecessor and
+keep external prerequisites. Missing provenance cannot establish independence.
 
 Independent cleanup worlds also have explicit lifetime ownership. A dependent
 service P can own an independent ActorOwned LLM child C. Stopping P normally
@@ -128,10 +131,13 @@ returning None after a state precheck creates a race.
 Initial publication uncertainty must retain private candidate facts distinctly
 from a selected ActorGeneration: binding an owner with no runtime readiness
 would falsely grant current authority. The existing durable store remains fenced
-after unknown publication and has no live reconciliation API. Campaign is
-arbitrating explicit existing host/run reopen recovery versus a new lower-owner
-mechanism; safe source work retains unavailable truth and forbids new work.
-No fresh candidate/gate may be reconstructed from the old generation integer.
+after unknown publication and has no live reconciliation API. Campaign selected
+the existing explicit host/run reopen recovery path. Retry on the same actor and
+store refuses; old bootstrap aliases stay permanently closed. Reopening selects
+the actual durable head and issues a new recovered context from its real selected
+references and readiness. No live reconciliation mechanism, fresh gate from an
+old generation integer, or prospective generation bound without readiness is
+part of this repair. The leaf is implementing this settled contract.
 
 ## Verification admission and pending commands
 
@@ -165,13 +171,24 @@ observed global available bytes were 107,887,243,264, above the 100 GiB floor.
 Scratch peak and shared-cache attribution were not instrumented. Buck daemon
 PID 3835600 is retained idle in `/build.slice/inanna-build-1792398682-3835490.scope`;
 its enclosing observed MemoryPeak was 836,239,360 bytes. No commands are running.
-The serial native lane was released. Root owns new storage cleanup; no further
-admission is inferred until its settled receipts and refreshed df arrive.
+The serial native lane was released. Root owns new storage cleanup. Its first
+settled retirement reports 105.80 GiB real free; warm-workers owns the next
+serial lane. This is not admission for a larger reload graph. The R1 leaf owns
+the next source-candidate event; campaign/root owns the subsequent native-lane
+admission event. No reload command is running or awaiting terminal collection.
+
+After the coherent R1 candidate is joined and source maps are regenerated, the
+smallest first compilation stage is the runtime and actor production libraries
+plus their unit harnesses. Libraries are named explicitly to retain production
+and cfg(test) evidence separately. Host production and unit consumers follow
+with browser configuration before describing the parcel as integration-ready:
 
 ```sh
+swarm-build bash scripts/buck2-configure.sh --tests
+swarm-build just build -j1 //tidepool/runtime:tidepool_runtime //exomonad/actor:exomonad_actor //tidepool/runtime:tidepool_runtime_unit_tests //exomonad/actor:exomonad_actor_unit_tests
 swarm-build bash scripts/buck2-configure.sh --tests --browser
-swarm-build just build //tidepool/bridge-effects:tidepool_bridge_effects_unit_tests //bridge/mcp:tidepool_mcp_unit_tests //bridge/mcp:mcp
-swarm-build just build //exomonad/actor:exomonad_actor_unit_tests //exomonad/host:exomonad_host //exomonad/host:exomonad_host_unit_tests //tidepool/runtime:tidepool_runtime_unit_tests
+swarm-build just build -j1 //exomonad/host:exomonad_host //exomonad/host:exomonad_host_unit_tests
+swarm-build just build -j1 //tidepool/bridge-effects:tidepool_bridge_effects_unit_tests //bridge/mcp:tidepool_mcp_unit_tests //bridge/mcp:mcp
 swarm-build just test-lib tidepool-bridge-effects --exact tests::reload_options_and_typed_receipts_roundtrip_and_reject_wrong_arity --expected-count 1
 swarm-build just test-native //exomonad/actor:actor_notebook_contract_tests
 ```
