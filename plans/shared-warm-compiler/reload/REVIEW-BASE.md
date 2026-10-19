@@ -6,12 +6,14 @@ Current cumulative source review: campaign base
 `5b74c2f1fe010c5c343e0c6f331d54328fbd5090` through exact frozen candidate
 `fc92605eb78c52284f90249f6e5dd1200ba060de`, read from committed objects in
 `/srv/swarm/checkouts/tidepool-shared-warm-reload-admission-20261019`.
-Disposition: cumulative source review complete with no new confirmed defect in
-the delivered admission/compiler foundation. Previous generation/bootstrap and
-immutable-facade native-END findings have source repairs in this candidate.
-This is NOT complete-R1 acceptance, compilation evidence, behavioral acceptance
-or integration readiness. Native production/unit compilation and native test
-execution remain 0. Cumulative whitespace check passes; the leaf's pinned
+Disposition: actor same-ticket composition source review is complete; the
+subsequent root audit confirmed a public-runtime facade/native-END custody gap
+without the actor wrapper. The runtime-only counterexample and approved bounded
+owner repair are recorded in the final section. Previous actor generation,
+bootstrap and facade claim gaps are source-repaired, but the lower public
+boundary remains blocked pending an exact owner repair. This is NOT complete-R1
+acceptance, compilation evidence, behavioral acceptance or integration readiness. Native production/unit compilation and native test
+execution by this reviewer remain 0; parent now owns an admitted native gate, whose terminal receipt is not established by this source report. Cumulative whitespace check passes; the leaf's pinned
 formatting and generated source-mapping receipts are recorded separately.
 No product source edit, build, cleanup experiment or release qualification was
 performed by this reviewer.
@@ -1149,3 +1151,536 @@ cases. Next reviewer
 action is concrete compile/test-failure repair review or cumulative review of
 an explicitly authorized R1 successor candidate. Until that event this source
 review is complete, not runtime acceptance. Yield without periodic polling.
+
+
+### Public runtime owner boundary: exact counterexample and decision packet
+
+Root requested a bounded runtime-only audit at frozen fc92605 (area checkpoint
+7d), while parent native build 32799 runs. No code or build was touched. The
+prior actor same-ticket review remains valid for actual start.rs production
+consumers; it does not certify the separate PUBLIC runtime API contract.
+
+Minimal runtime-only counterexample: create a real leased lexical scope S and
+certified nonempty ExactExportSurface with its SessionCompileView. Enter the
+existing runtime-reexported settle_compiler_transaction_cancellable_for_workload.
+Inside its action, call PUBLIC PersistentSession::materialize_facade (or narrowed
+select_facade_exact_exports) with no actor ticket/hook. admit_facade_source
+obtains the concrete S RuntimeSourceClaim. The private object method drops it
+when projection issuance returns. Fence S before the OUTER action returns:
+pending_claims is zero and retirement can succeed while the compiler scope
+still owns physical work and has not performed END. If that END later becomes
+Unconfirmed, no S claim remains for its owner to retain. No forged actor grant
+or generation label is needed.
+
+Exact owner distinction: extract-cmd endpoint.rs around 1603 returns a borrowed
+operation outcome with close NotStarted whenever TRANSACTION_SCOPE already
+exists. That is not the enclosing physical END. TransactionScopeGuard.finish
+(2085) and Drop (2095) perform actual finish_scope after the outer action; its
+aggregate includes reported/admission uncertainty. CompilerTransactionOrigin
+is identity evidence only, not standalone source admission. Callback settlement
+reports and a current origin cannot replace ownership of that final callback.
+Unscoped one-shot invocation also needs to retain an uncertain close rather
+than drop its scope claim after observing it.
+
+Root/Astra approved the bounded direction: one runtime-owned source compiler
+transaction entry, bundling source admission, lower claim retention and actual
+END settlement. No new registry/gate/framework, foreign authority trait,
+runtime-to-actor edge or global source graph is required. Exact signature is to
+be coordinated by campaign BEFORE implementation and AFTER the frozen build.
+
+Minimal proposed shared seam (names illustrative, not implemented):
+
+- One public ResidentSession::with_source_compiler_transaction taking existing
+  workload, cancellation, original source selection, optional supplemental
+  issuer hook, actual-close sink and synchronous action. It returns the actual
+  CompilerTransactionSettled product from the EXISTING extract-cmd settle
+  owner. Keep with_source_admission, with_source_admission_hook and
+  with_source_claim_transfer private implementation details. The supplemental
+  hook is an additional restriction; absence or a callable Ok result cannot
+  waive concrete lower admission or manufacture an active owner.
+- A private active runtime transaction record binds the real current native
+  origin and session admission owner to the SAME lower-claim collector. The
+  runtime entry creates it inside its actual owning native scope, scopes it
+  through the action, and retains its collector in the actual close sink.
+  Claim settlement happens there: unknown/abandoned retains uncertainty;
+  clean/NotStarted releases after physical END. Metadata origin equality alone
+  cannot construct this record. Preserve prior lexical selection/owner on
+  unwind without discarding the collector.
+- Public facade producers require that actual active runtime owner or return
+  typed MissingSourceTransaction BEFORE compiler/source effects. They append
+  concrete claims to its collector instead of returning a local RAII claim.
+  Their private object producers receive no publicly replaceable Ok(None)
+  admission callback. Private fixture shortcuts must migrate to the real
+  public owner when claiming boundary coverage.
+- CompilerWorkTicket::run_source_transaction delegates to this runtime entry
+  rather than wrapping another ticket.run around it. The actor ticket keeps
+  actor/bootstrap obligations and cleanup; runtime owns lower source claims.
+  The runtime actual-close sink settles lower obligations then invokes the
+  SAME actor ticket's actual close callback exactly once. Existing workload,
+  cancellation and reported-close aggregation remain authoritative.
+
+Borrowed/nested discipline is essential: facade/projection calls inside the
+active source compiler transaction borrow its real native scope and retain
+claims through that OUTER END. Their local NotStarted observation never settles
+the collector. An owning source-entry call under a foreign raw compiler scope
+without a matching runtime source owner must typed-refuse, not create a nested
+native scope or fake an END. If explicit lexical reborrowing of the same source
+owner is supported, reuse the exact collector and do not issue a settled result
+before its outer close. A smaller enforceable API may reject nested owning
+entries entirely; ordinary inner producer borrowing must still work. Existing
+native transaction scopes already prohibit nesting. Do not loosen that
+contract to make a convenience wrapper appear compositional.
+
+Consumer/dependency scope: current non-test actor calls are only
+start::materialize_entry_facades local and narrowed inherited paths, already
+under the safe actor wrapper. Runtime facade/turn and actor mount/start fixture
+callers must migrate with the owning public API. The runtime already depends
+on extract-cmd and exports its compiler settlement primitives; the actor already
+depends on runtime. This repair moves existing lower custody to its correct
+native-close owner without an edge inversion. No change to serialization,
+source identity, resource lifetime, generation gate identity or independent
+LLM source semantics is implied. Source-selection arguments must preserve
+approved bootstrap independence without offering a public None/hook-absence
+route around applicable lower checks; campaign owns that exact API decision.
+
+Required public-owner controls: missing active owner refuses before compiler
+requests/files; real nonempty/narrowed facade under the owner keeps an observable
+pending S claim AFTER the producer returns but BEFORE outer END; clean END
+releases; actual owner Unknown/abandonment preserves; panic restores lexical
+state and keeps closure custody; retired scope refuses before effects. Exercise
+multiple borrowed producer calls and observe no early settlement from their
+local NotStarted reports. Keep synthetic aggregate-Unknown and actual physical
+END uncertainty evidence distinct. Empty/unchanged facade selections remain
+separate metadata controls, not substitutes for the claimed compiler boundary.
+
+Verdict: bounded repair within existing compiler/runtime ownership, not an
+architectural hard gap. Frozen fc92605 actor wrapper is source-safe, PUBLIC
+runtime boundary is not yet sufficient. Parent/campaign receive this decision
+packet; exact implementation review follows a separately frozen candidate.
+Only this authorized report changed, whitespace check passes; no new native
+commands or tests executed. Awaited event: campaign settles the shared source
+transaction signature after the current frozen gate, leaf/owner implements it,
+and parent supplies an exact review checkpoint. Yield without polling.
+
+
+#### Source-selection ambiguity: explicit non-optional option for campaign
+
+Parent requested an exact enforceable option rather than treating a public
+None plus absent/present callback as independence evidence. Minimal proposed
+selection is either just an existing RuntimeLexicalScopeLease reference, or
+`RuntimeCompilerSource::{Current, Retained(&RuntimeLexicalScopeLease)}`.
+Current resolves the canonical source lease for the actual selected runtime
+source owner; Retained validates that existing opaque lease against its ORIGINAL
+issuing session admission owner and epoch. A transferred callback can execute in
+a different recipient session; equality with the current recipient session would
+be incorrect. Validate recipient placement/root custody separately. Both select
+a real canonical gate and refuse absent/dead custody, without eagerly requiring
+the gate's Open phase for pure continuation.
+There is NO public Independent/Bootstrap/None permission variant. The optional
+actor hook remains a supplemental restriction, never an authority substitute.
+A naked Fn()->Ok cannot waive lower checks or issue an active source owner.
+
+This requires actual root/LLM bootstrap placement owners to obtain the initial
+canonical notebook lease BEFORE their first source compiler operation through
+EXISTING adopt_initial_notebook_scope_with_source (or the existing equivalent
+lexical lease issuer), and retain it through existing startup custody. Typed
+bootstrap uses external A; independent root/LLM uses external None at that
+actual issuer. Later first generation preparation reuses the SAME lease/gate;
+BootstrapWorld still binds its aliases only at actual visibility. No candidate
+is selected early, no additional gate domain/factory is introduced and no
+already leased gate is replaced. A captured unleased inherited record can be
+normalized only at the actual initial-world placement issuer before lower
+aliases are exposed, preserving the earlier canonical-owner rule. Native
+pre-world preparation stays under its actual existing preparation owner.
+
+This option changes existing issuance TIMING and startup lease custody and
+therefore needs explicit campaign approval before implementation. Without
+that option, the combination of actor-private bootstrap proof, no new runtime
+capability factory/type and a publicly constructible Fn hook does not yield an
+enforceable proof that runtime None means independent authority. That is a
+bounded unresolved source-selection decision; the rest of the runtime native
+END owner mechanism is not an architectural gap. Do not silently resolve it by
+adding enclosing parent dependencies or trusting callback presence alone.
+
+Raw with_machine read-only/pure context selection must also migrate
+deliberately: retain an observation-only placement/source selection that cannot
+issue compiler permission, separate from the owning compiler entry. Keep its
+selection setter private; route all actual source work through the source
+compiler transaction. The three stacked public composition helpers cannot
+remain an alternate native source-authority route after the owning entry lands.
+
+The leaf's separate public-facade fixture migration checkpoint
+89ceb83b785168fa855817d67863f586efce60e8 was RECEIVED, not reviewed here. Its
+real retired-scope/missing-owner/unknown-END tests must consume the final
+approved owner API; no mock Ok hook can certify that API. Exact parent/campaign
+signature decision is the awaited producer event before an implementation
+checkpoint is requested.
+
+
+#### Final placement-issuer feasibility packet: frozen fc92605 plus 426718622e
+
+This is the requested bounded SOURCE-SELECTION timing review, read from exact
+committed objects. Area 426718622e moves the public facade delegates into the
+ResidentSession state-owning module; it changes neither issuance nor settlement.
+No WIP, native command, or product source edit was used. The proposal below is
+NOT implemented or approved merely by this review.
+
+| Actual production path | Earliest existing canonical lease issuer and required custody |
+| --- | --- |
+| Operator/root workbench | `ResidentActorForest::new_workbench` (`resident_actor.rs:14963`), called by `exomonad/host/src/actor_host.rs:2320`, obtains its final non-ROOT isolated scope through `ResidentActorRunner::provision_root_scope_inner` (`resident_workbench.rs:12775`) and the existing RootPlacementMint custody. Existing `adopt_initial_notebook_scope_with_source(final_scope, None)` can issue here, before source work, or after actual placement admission and before boot. The resulting exact Arc must travel in existing placement/startup/behavior custody; a local temporary Arc is insufficient. Workbench boot installs bootstrap tools and publishes no first generation. |
+| Program root / program replay | `new_program_root_with_replay` (`resident_actor.rs:14794`) first calls `prepare_root_program_tracked` (`resident_workbench.rs:12642`). That function mints the final isolated scope and runs the authored root entry before constructing the actor descriptor/world. Adoption must occur at that mint before `run_with_sites`, with exact custody returned through existing RootPreparation/placement owner; adopting only in Behavior::start is too late. Pre-session/native setup remains under its actual preparation compiler owner. |
+| Host pending/recovered durable root | `actor_host.rs:3599–3617` mints the final isolated scope, prepares the startup entry and seals initialization. `admit_pending_root_inner` (`resident_actor.rs:15132`) retains actual reservation/startup custody, while Behavior::start deliberately does not execute the entry until `release_root_startup` (`15299`; host `2213`). On recovery the actual public-owner transfer (`actor_host.rs:2158`; runtime `persistent.rs:3043–3055`) advances RuntimeAdmissionOwner epoch. A lease retained before that transfer becomes stale; the canonical map will not safely replace that live lease. Earliest safe retained lease is AFTER confirmed public-owner transfer/application binding, BEFORE startup release/authored resume. Old pre-recovery lease aliases must remain stale. |
+| Independent fresh LLM on a new machine | `start::capture_spawn` can supply a different session and placeholder ScopeROOT. `child_launch::await_launch` (`365`, provision call `515`) invokes `provision_child_session` (`resident_workbench.rs:5015`). Its factory runs inside an existing CompilerWorkTicket::run before any machine/final scope exists; only afterward does `mint_isolated_scope` create the real target and `run_with_sites("child_session_bootstrap", ...)` run. ScopeROOT adoption is rejected. Adopt the actual newly minted target with external None before bootstrap/source aliases, and retain it through ProvisionedChildSession/actual startup custody. A nonoptional-lease transaction entry CANNOT cover the factory prefix unchanged: no such lease exists yet, and nested entry under the current ticket.run would borrow the wrong physical-END owner. |
+| Shared/captured independent LLM | Capture may mint a provisional scope, but `await_launch:486` can replace it via `remint_checkpoint_child_scope_from_lease` (`resident_workbench.rs:10055`), or `await_launch:502` via fallback provisioning (`12817`). Adopt only the resolved final placement, external None, after remint/fallback and BEFORE `transfer_mailbox_value` (`child_launch.rs:532`). Adopting the provisional scope then silently substituting another canonical gate strands aliases. Retain the exact lease through child placement/startup custody into Behavior. |
+| Typed child | Same final-placement/provisioning rules, but capture's `admit_dependent_world(parent.selected_dependency())` supplies external A. Its own canonical initial C gate must be issued with that external prerequisite. First generation C and later D preserve external A; D must not acquire C as an incidental enclosure prerequisite. Capture-time parent facade materialization belongs to the parent's owner before child placement exists; it does not issue the child's own gate. |
+
+Existing runtime issuer facts constrain these placements: `prepared_notebook_scope_lease`
+(`admission.rs:2025`) normalizes only an inherited record WITHOUT a live lease,
+then obtains the canonical scope lease. `prepared_lexical_scope_lease_with_source`
+(`1978`) returns an already live lease only at its original current epoch; it
+cannot replace a leased gate to change prerequisites. `retain_lexical_scope`
+(`1951`) mints a different retained scope, so it is not a substitute for adopting
+the actual notebook scope. Initial adoption in `persistent.rs:2397` rejects
+ScopeROOT. This packet relies on these actual final-scope issuers, not permission
+to mint authority merely from a scope identifier.
+
+The timing option is feasible for the final actor source phase, with changes to
+existing placement/startup custody. It is NOT a universal constructor-time entry
+without further work. The factory-before-machine prefix and recovered epoch
+advance above are concrete limits. Minimal alternatives for the factory prefix
+are (a) retain its existing explicit preparation owner, finish that physical
+transaction cleanly, then enter the runtime-owned source transaction after
+machine/scope adoption; or (b) approve an explicit handoff into the SAME existing
+physical transaction's actual final-close owner. This review does not certify
+that either is a drop-in API change: campaign must choose and the producer must
+show its actual returned custody/settlement before implementation acceptance.
+Do not turn an absent lease or optional hook into public independent permission.
+
+Earlier canonical issuance also changes the first-publication cutoff. At frozen
+fc92605 BootstrapWorld in `generation_admission.rs:63–116` accounts only its
+private bootstrap claims and optional external prerequisite; its lower admission
+selection at `208` is external/None until Bound. This is coherent only while
+no early public canonical bootstrap lease is exposed. With the timing option,
+World claims and runtime selection must use the SAME canonical C gate. Otherwise
+a public runtime caller can use C while World Publishing is closed, or World
+can admit after C has retained unknown work. `ActorGenerationPublisher::publish`
+(`resident_workbench.rs:1897–1923`) enters metadata checkout with continuation
+mode false, then begins publication before commit IO. It must fence that SAME
+C gate at begin-publication, after atomically stopping World issuance, without
+claiming C itself; retaining external A is valid. Outstanding C claims must
+settle or cause refusal before uncertain commit, rather than waiting on a
+publisher's own C claim. Keep the exact fence token closed through actual
+visibility and publication acknowledgement. Confirmed success reopens that
+same gate for initial A; proven no-effect/nonpublication may reopen the original
+bootstrap gate. Unknown commit retains the exact closed fence permanently.
+The current unknown-only `WorldPublication::drop` fence is insufficient for this
+new early-public-lease exposure. Candidate preparation must not bind World;
+visibility still binds old bootstrap aliases once. Reopen-only recovery creates
+a NEW context from actual selected head/readiness and never reuses the old gate,
+prospective ActorGeneration, or fabricated public-owner binding.
+
+Pure continuation needs exact strong custody, not eager Open validation.
+GenerationDependency currently retains a RuntimeSourceAdmission and source but
+not RuntimeLexicalScopeLease (`generation_admission.rs:373–412`). ActorGeneration
+owns the scope Arc, and CallbackExecution::transferred preserves a scope Arc
+from its explicit scope or Generation snapshot; however `from_context` has
+neither snapshot nor scope. Therefore there is no complete proof that all
+source-dependent immutable aliases retain a lease after the old generation
+wrapper is dropped. A minimal existing-owner repair is to retain the exact
+scope Arc in SourceDependency's immutable generation/bootstrap owner, without
+an ActorGeneration backreference or cycle. It must survive the startup custody
+handoff, first publication, replacement and callback transfer. Validate opaque
+identity and ORIGINAL owner's admission epoch at entry; inspect Open/Retired
+only at lazy fresh-source admission. Retired source admission can still retain
+live lexical/native custody needed for admitted continuing self-reload and pure
+callback progress.
+
+Actual cross-session counterexample to recipient-session equality:
+`resident_actor/replacement.rs:520` imports a dynamic source entry into recipient
+session B, then `CallbackExecution::transferred` preserves original dependency
+A while using recipient context B. Delivery and map_source use that mixed
+context. Requiring source lease A's admission owner to equal executing session
+B would reject a legitimate transferred callback even while A is open. Original
+source owner/epoch and recipient physical root placement are distinct checks.
+Keep read-only/pure with_machine context selection private and independent of
+fresh-source permission; no source claim is earned by metadata observation or
+pure continuation. Hidden binding/materialization must still earn the original
+source claim lazily under the actual runtime transaction's END owner.
+
+Required discriminating controls for the final owner implementation: each real
+issuer above must produce the exact lease subsequently used by first-generation
+preparation; recovered startup must show post-transfer epoch and stale old
+alias refusal; final remint must not reuse provisional scope; fresh factory
+prefix must expose its actual END owner before bootstrap work; typed A+C then
+A+D and independent LLM must retain exact prerequisites; direct public lower
+source admission must refuse during Publishing and forever after unknown
+publication; confirmed nonpublication may retry with the SAME gate; pure
+continuation and transferred generation-None/from_context callbacks must run
+with retired source admission but valid original custody, and hidden source
+work must refuse. Keep synthetic aggregate-Unknown controls separate from an
+actual physical END-loss history.
+
+Disposition: the accepted runtime-END owner direction remains a bounded repair.
+The nonoptional-lease source selection timing option is conditional on campaign's
+explicit prefix/handoff and publication/custody decision; it is not currently
+an implemented boundary. Frozen fc92605 still has the documented public-runtime
+END gap. This source-only task is complete; parent owns the running native
+compile gate and its evidence. Awaited event/producer: campaign decides this
+shared signature/timing cone, admission leaf implements the approved owner,
+and reload parent supplies an exact committed checkpoint for independent
+review. No periodic polling; no native execution was performed by this reviewer.
+
+
+### Executed Ready-install failure: independent analogue search at f147c79413
+
+Activation/base/candidate: authority_review, campaign base
+5b74c2f1fe010c5c343e0c6f331d54328fbd5090, exact area
+f147c794130203ff9bf21096cbf6f910f38ea62e. Parent reports the admitted runtime
+focus selected five cases: four passed and
+`session::resident::authored_publication_tests::source_fence_keeps_precompiled_plain_execution_and_refuses_ready_install`
+failed its typed-refusal assertion at resident.rs:9873. This reviewer inspected
+committed source only and launched no native command. The failed assertion did
+NOT print the actual Result, so it establishes failure to match the intended
+error, not whether the result was Ok, Ok(None), a different error, or a partial
+installation. The leaf owns the approved Ready gate/diagnostic repair. No final
+source-transaction API repair is implemented by this activation.
+
+Confirmed original route: public ResidentSession::revalidate_and_run_prepared
+(`resident.rs:7442–7522`) destructures the Ready capsule and calls
+PersistentSession::revalidate_and_install_prepared for Legacy. That method
+(`persistent.rs:1504–1530`) stages constructor metadata and calls
+PreparedEngine::revalidate_and_install without source admission. The engine
+(`prepared.rs:5369–5400`) compares imported facts, then calls the actual codegen
+PreparedMachine::install_shared and finish_program_install, publishing native
+facts/exports and pinning the program. Matching imports are not current source
+permission. The certified branch instead reaches install_certified_turn_in
+(`persistent.rs:904`) which earns a source claim before metadata and native
+installation. The ordinary install_prepared (`1435`) also earns a claim before
+metadata/bootstrap/install.
+
+A narrow repair must use the Ready capsule's actual `lexical_scope`, already
+available in resident.rs:7469. A check only against ScopeROOT in the persistent
+legacy helper can pass the existing test's explicit ambient source override
+while missing a direct PUBLIC resident call executing target S without that
+override. Validate/gate the actual selected source owner and target where
+applicable; do not reconstruct S from ROOT or treat an inherited parent as the
+child's own gate. The leaf acknowledged using explicit metadata lexical_scope.
+The direct-public no-with_source_admission control remains important alongside
+actor-wrapper controls.
+
+Confirmed adjacent production omission: off-checkout native compilation has no
+source owner. `begin_ready_block_split` (`resident_workbench.rs:8731`) snapshots
+with access.with_machine, then (`8746`) invokes public
+PendingPreparedInstall::compile_off_checkout on a blocking thread outside a
+compiler/source ticket. Runtime `snapshot_run_prepared` (`7396`) calls
+admit_turn_code_in (`6731`), which resolves immutable certification facts only;
+no fresh source claim is earned or retained in the pending capsule. The capsule
+(`2725`) calls PendingPreparedSource::compile_off_checkout: Legacy invokes
+PreparedEngine::compile_off_checkout; Certified invokes compile_scoped. The
+legacy lower method (`prepared.rs:5346`) uses a cached image when present, or
+calls snapshot.compile.compile / registry.get_or_compile on an actual cache
+miss. The capsule carries no source capability/lease/claim to check or retain
+at this new compilation. A real pending snapshot can outlive a fence and start
+fresh Cranelift compilation after it, even when final installation is repaired
+to refuse. A pre-fence admitted compiler action may finish, but this capsule
+currently carries no affine admission proving such an action through compile
+and settlement. This is the same fresh compiler/install category, not a new
+resource registry or R2 obligation. Parent and leaf received the exact path;
+leaf keeps the current patch bounded and retains this successor for the final
+actual-owner contract.
+
+Additional public-runtime ordering analogue, with the actual actor path
+protected: `mount_host_value_with_interface_in` (`resident.rs:6206`) calls
+CertifiedTargetImage::compile_scoped (`6231`) BEFORE install_certified_turn_in
+(`6234`) earns its source claim. Public mount_json_binding_in,
+mount_text_binding_in and mount_typed_binding_in reach this method with geometry
+and type checks only. A direct public call with a genuine compiled carrier can
+perform an uncached compile before later discovering a closed source gate.
+Actual production mount_checked_host_input at resident_workbench.rs:7667 is
+under with_compiler_machine, whose eager SourceDependency claim protects this
+actor route; do not report it as another unguarded actor-wrapper path. Legacy
+mount_carrier_in also writes its stub .hs before its later mount gate and
+removes it on error; refusal-after-write is not refusal-before-effects. Legacy
+workbench mount helpers found in this bounded search are cfg(test), whereas
+checked host input is the actual actor consumer. Public lower API ordering
+still needs an actual source-owner control; the Ready repair does not certify
+it. Checked host interface staging can write an interface before its later
+install, likewise protected by the actual actor wrapper and requiring the
+final public-runtime owner boundary if independently callable.
+
+Ready renderer/cache findings: run_activation_preview validates exact original
+mount/proof/session epoch and uses a retained detached scope; it then calls
+run_prepared_for_purpose with TurnImageAcquisition::Ready. That reaches
+install_admitted_turn (`resident.rs:7168`), which earns the source claim BEFORE
+lookup_scoped/cache-image access and certified install. Cache hits in ordinary
+PreparedEngine::compile_and_install (`prepared.rs:3680–3718`) are reached from
+the already gated persistent install; reuse of immutable code still performs a
+fresh install_shared, so it must remain gated. No second missing-gate ready
+renderer install route was confirmed in this search.
+
+Intentional pure paths: run_startup_entry consumes its already installed
+ProgramId and retained native custody without installing or compiling, then
+complete_prepared in Value mode releases the result handle. It must remain
+usable after source fencing while exact physical scope/root custody is live.
+Resumed pure/Value continuations likewise need no eager compiler/source claim.
+Binding/Projected completion reaches bind_prepared and the gated persistent
+bind owner; it is a fresh mutation and cannot borrow Value-mode neutrality.
+Do not add an eager gate to all resume/run_startup entry points to repair the
+installers. Retirement/cleanup releases and metadata observation remain
+separate from new source authority.
+
+Minimal discriminating controls for the owner repair:
+
+- Print Debug of the actual failing Ready Result. Keep a positive fresh Ready
+  install under open admission using an equivalent new affine capsule. Assert
+  the closed case's typed SourceAdmission refusal and compare constructor
+  metadata, exports, binding count and parked state before/after. This
+  distinguishes Ok execution, stale-import Ok(None), pre-existing fixture
+  failure and install refusal. The leaf explicitly acknowledged this diagnostic
+  and a positive control before the fence.
+- Run the same lower public Ready refusal without an ambient source override,
+  with actual capsule scope S fenced. Run certified and legacy variants and an
+  already warm image; all new installs require the applicable source claim.
+- Snapshot an uncached distinct turn under a real retained scope and actual
+  machine, fence before compile_off_checkout, and require a typed refusal
+  BEFORE compilation/cache publication unless the pending producer genuinely
+  owns a pre-fence claim through that whole operation. Observe compile/registry
+  work using the existing counters/identity, not elapsed time. Test both native
+  Legacy and Certified producer branches. A pre-fence admitted compile must
+  retain its actual owner through cancellation/unknown close as applicable.
+- Through the final public owner, materialize a real host carrier with an
+  uncached native target after fencing and require refusal before interface
+  files, compiler/image publication and native installs. Preserve its open
+  positive and no-effects invalid-carrier controls; do not fake a permissive
+  hook or call private producers to claim boundary coverage.
+- Preserve the existing installed startup Value result and resumed pure
+  continuation controls, including zero pending source claims. Pair with a
+  hidden Binding completion refusal so purity does not hide a source mutation.
+
+Untested boundaries: no analogue controls above were executed by this reviewer.
+The parent five-case receipt is not a suite pass, and its one failure is not a
+successful bypass execution receipt. Public raw PreparedEngine/codegen access
+is lower physical-machine authority, not by itself proof of an actor-generation
+route; install_certified_demand had no non-test consumer in this bounded call
+search. Pre-world preparation and PreparedSourceEntry standalone immutable
+original-code preparation remain distinct issuer contracts; no dependent actor
+bypass was inferred merely from their public visibility. Runtime/actor final
+transaction-owner, actual physical END uncertainty and registration successors
+remain unqualified as previously recorded.
+
+Disposition/next event: concrete same-category omissions were delivered to
+reload parent and admission leaf. Current bounded Ready repair is the leaf's
+producer; its exact committed candidate and parent-owned focused native receipt
+are the next review event. Final off-checkout/public mount owner migration needs
+the campaign's pending actual-END/source-selection contract. No code except
+this report changed, report whitespace check passes, and no reviewer build/test
+ran. Yield without periodic polling.
+
+
+### Partial source review f982716fdd901616d31e11b810024c766a41fbc3
+
+Exact leaf checkpoint reviewed from committed admission objects:
+f982716fdd901616d31e11b810024c766a41fbc3, full delta from frozen
+fc92605eb78c52284f90249f6e5dd1200ba060de, including public-facade fixture migration
+89ceb83b785168fa855817d67863f586efce60e8. Compared directly against area-only
+426718622e43577db1629a6e3040847ef39fe4bd (ResidentSession delegate placement),
+ab4cbfda55441090548f2145440ca448967a2a66 (fixture field/reexports) and
+f147c794130203ff9bf21096cbf6f910f38ea62e (unsupported force refusal). No product
+or fixture edit was performed by this reviewer. Leaf delta whitespace check
+fc92605..f982 passed. Parent reports all prior native commands settled: actor
+selection 7 pass / 4 fail (missing Sleep fixture minutes, NativeGroupUnavailable
+before the mixed-grandchild hook, two original-context commitment mismatches).
+Those failures remain real qualification blockers, not waived oracle outcomes;
+this source review did not execute or independently reproduce those commands.
+
+Product repair disposition: ACCEPTED for the bounded missing Legacy Ready
+scope-gate defect by source review only. Public
+ResidentSession::revalidate_and_run_prepared passes the Ready metadata's exact
+lexical_scope to the existing persistent legacy installer. It is the only
+production caller of revalidate_and_install_prepared. That lower owner now
+calls admit_source_work_in(scope) before stage_install_metadata, engine
+revalidation, install_shared, export/evidence publication or pinning. This
+closes the prior actual capsule-scope-vs-ROOT omission without adding a registry,
+new generation owner or eager pure-continuation gate. Certified Ready continues
+to use its already gated installer. The admission claim still follows the
+existing collector/local lifetime: the separately approved actual-END runtime
+owner repair remains necessary and is not certified by this patch.
+
+Confirmed fixture finding at exact f982: the strengthened test changes current
+placement to SessionRunContext::ROOT before fencing scope S, correctly forcing
+the negative path to consult the capsule's scope without ambient override. It
+then invokes run_startup_entry on the entry prepared under S without restoring
+that original placement. run_startup_entry compares current.scope against
+entry.admitted.scope and returns StaleStartupEntry before evaluation. Thus the
+final unwrap cannot demonstrate pure precompiled progress at this candidate.
+Small repair: restore the exact original S run context AFTER negative/no-effects
+assertions and BEFORE run_startup_entry, preserving the same fenced gate and
+retained scope. This finding was sent directly to leaf and parent immediately;
+no native failure for f982 was inferred or fabricated. The positive fresh Ready
+control and fresh negative snapshot ordering otherwise distinguish a working
+image/import path from stale-import Ok(None), and Debug output now preserves
+the actual Result on a mismatched typed refusal. Exports, constructor metadata,
+binding names and parked count comparisons are meaningful observable no-effects
+controls. Retain these after repairing the placement fixture.
+
+Public facade fixture migration disposition: ACCEPTED by bounded source review.
+The certified inherited/subset fixture retains a real notebook scope Arc,
+defines/extracts actual declarations there, and invokes public
+PersistentSession materialize_facade/select_facade_exact_exports for full,
+unchanged and narrowed interfaces. No private producer or permissive Ok(None)
+admission callback remains in its tests. After source retirement it keeps the
+physical scope live and requires exact typed Retired refusal for fresh
+materialization and narrowed selection. Unchanged exact selection returns the
+original projection Arc; empty selection returns None; wrong-session and
+unselected-export controls retain their distinct typed refusals. Source ordering
+shows each refusal occurs before issue_projection, with the settlement counter
+remaining zero. These are synchronous source/refusal/pure-selection controls;
+the counter alone is not an independent physical-END or disk-write oracle.
+No uncertainty retention/actual-END acceptance is claimed.
+
+The legacy facade test now constructs a real SessionLib/PersistentSession view
+and calls the public materializer instead of fabricating a view and calling a
+private producer. It checks rendered source/file content for an uncertified
+legacy facade. It does not retain a canonical generation scope or exercise a
+compiler transaction, so it is an honest legacy rendering control, not a
+certificate for the final source owner. The actual END/public source-owner
+migration must update the relevant tests again to enter that final owner; this
+checkpoint does not make the still-public local-claim boundary sufficient.
+
+Composition observations: f982 is based on fc926 and still places the unchanged
+ResidentSession delegate impl in facade.rs; area's 426718622e intentionally
+moves it into resident.rs to resolve sibling-private state access. Preserve that
+move when folding, without duplicating or restoring the old delegate impl.
+The new fixture edits do not require changing the delegate API. Area ab4's
+host_authority fixture field and reexport deletion and f147's pre-preparation
+force refusal are disjoint from this candidate's runtime gate and tests; do not
+lose them when integrating. Standalone leaf compilation is not established by
+this source comparison.
+
+Final partial disposition: product Legacy Ready repair and public fixture
+producer migration have no further confirmed source finding in this bounded
+review. The strengthened Ready test has the concrete placement defect above;
+its control is not source-accepted until repaired. No full R1 acceptance,
+compilation/test pass, physical-END custody acceptance or integrated readiness
+follows. Off-checkout pending compilation, public runtime owner/public mount
+ordering, the four parent actor failures and held registration/R2/R3 work remain
+as previously recorded. Awaited event/producer: leaf supplies exact fixture
+repair checkpoint, parent folds with area fixes and obtains native evidence;
+next runtime-owner implementation review remains reserved. No periodic polling
+and no reviewer native action.
+
+
+Exact bounded repair re-review: 4e790ab850f4df886fc185e15a7b28139f6bf530
+on f982 was supplied during this activation and read as committed objects. Its
+only product-tree delta restores SessionRunContext with lexical_scope S and the
+same ROOT resource/principal defaults originally used to create the startup
+entry, after negative/no-effects assertions and before pure entry execution.
+It preserves the exact existing source fence and scope Arc; no source gate is
+reopened and no product installer changes. This resolves the fixture finding
+above by source inspection. Full fc926..4e790 whitespace check passed. Bounded
+Legacy Ready repair, strengthened control and public-facade test migration are
+now SOURCE-ACCEPTED as this partial parcel, subject to retaining area's delegate
+move and direct compile/execution evidence. Leaf reports pinned formatting and
+source generation checks only; no leaf or reviewer native execution was
+performed for this repair. Parent owns integration and counted execution.
+Full R1/runtime-END/off-checkout acceptance remains expressly withheld.
