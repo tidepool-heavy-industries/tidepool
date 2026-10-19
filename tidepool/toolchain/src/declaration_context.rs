@@ -19582,7 +19582,16 @@ mod tests {
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products([2; 32], &[support_product("Hidden")])
+                .extend_issued_compiler_support(
+                    &match support_offer(&[support_product("Hidden")]) {
+                        CompilerSupportFixture::Complete(inputs) => {
+                            inputs.compiler_source_support().clone()
+                        }
+                        CompilerSupportFixture::RecordedRoles { .. } => {
+                            unreachable!("closed output fixture")
+                        }
+                    },
+                )
                 .unwrap(),
         );
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(7));
@@ -20610,13 +20619,31 @@ mod tests {
         let unowned = certificate("ValUnowned", vec![]);
         let dormant = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products([2; 32], &[support_product("DormantSource")])
+            .extend_issued_compiler_support(&match support_offer(&[support_product(
+                "DormantSource",
+            )]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed output fixture")
+                }
+            })
             .unwrap()
             .extend_program_value_interface(unowned.clone())
             .unwrap();
         let context = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products([2; 32], &[support_product("SelectedSource")])
+            .extend_issued_compiler_support(&match support_offer(&[support_product(
+                "SelectedSource",
+            )]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed output fixture")
+                }
+            })
             .unwrap()
             .extend_with_value_interfaces(
                 &[value.clone()],
@@ -20723,7 +20750,16 @@ mod tests {
         let baseline = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products([2; 32], &[support_product("Hidden")])
+                .extend_issued_compiler_support(
+                    &match support_offer(&[support_product("Hidden")]) {
+                        CompilerSupportFixture::Complete(inputs) => {
+                            inputs.compiler_source_support().clone()
+                        }
+                        CompilerSupportFixture::RecordedRoles { .. } => {
+                            unreachable!("closed output fixture")
+                        }
+                    },
+                )
                 .unwrap(),
         );
         let mut request = program_request(directory.path(), baseline.clone());
@@ -20831,7 +20867,16 @@ mod tests {
 
         let later = (*context)
             .clone()
-            .extend_checked_original_products([2; 32], &[support_product("LaterSupport")])
+            .extend_issued_compiler_support(
+                &match support_offer(&[support_product("LaterSupport")]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed output fixture")
+                    }
+                },
+            )
             .unwrap();
         let mut later_support = request.program_source_lexical().to_vec();
         later_support.push(ExactLexicalNode {
@@ -21424,7 +21469,16 @@ mod tests {
         let baseline = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products([2; 32], &[support_product("Public")])
+                .extend_issued_compiler_support(
+                    &match support_offer(&[support_product("Public")]) {
+                        CompilerSupportFixture::Complete(inputs) => {
+                            inputs.compiler_source_support().clone()
+                        }
+                        CompilerSupportFixture::RecordedRoles { .. } => {
+                            unreachable!("closed output fixture")
+                        }
+                    },
+                )
                 .unwrap(),
         );
         let mut baseline = (*baseline).clone();
@@ -21951,7 +22005,16 @@ mod tests {
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_checked_original_products([2; 32], &[support_product("Unchanged")])
+                .extend_issued_compiler_support(&match support_offer(&[support_product(
+                    "Unchanged",
+                )]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed output fixture")
+                    }
+                })
                 .unwrap(),
         );
         let physical = program_request(directory.path(), context.clone());
