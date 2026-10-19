@@ -13006,6 +13006,141 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn completed_type_output_preserves_baseline_original_permissions() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
+            NativeArtifactDemand, NativeGroupKey,
+        };
+        use crate::declaration_context::{
+            ExactCompileContext, ExactDeclarationContext, NativeTransportMode,
+            OriginalCompilerInputs,
+        };
+        let producer_bytes = b"baseline-permission-type-output";
+        let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
+        let dependency = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "BaselineTypePermission",
+                vec![(7, vec![]), (9001, vec![])],
+                93,
+                &BTreeMap::new(),
+                b"baseline type permission".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let fresh = fixture_finalized_product_with_requirements(
+            original_groups_fixture_with_interface(
+                "FreshTypePermission",
+                vec![(3, vec![])],
+                94,
+                &BTreeMap::new(),
+                b"fresh type permission".to_vec(),
+            ),
+            producer.sha256(),
+            Some(BTreeMap::from([(
+                (
+                    dependency.owner().unit.clone(),
+                    dependency.owner().module.clone(),
+                ),
+                dependency.module_interface().unwrap().interface_sha256(),
+            )])),
+        );
+        let products = recovered_witness_fixtures(&[dependency, fresh]);
+        let dependency = &products[0].product;
+        let fresh = &products[1].product;
+        let input =
+            Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
+        let output = Arc::new(ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap());
+        for ordinals in [vec![7, 9001], vec![7], vec![]] {
+            let inventory = ArtifactInventory::default();
+            let selected = ordinals
+                .iter()
+                .map(|ordinal| NativeGroupKey {
+                    artifact: input.descriptor.id,
+                    original_ordinal: *ordinal,
+                })
+                .collect();
+            let view = inventory
+                .admit_recovery_selection(&inventory.empty_view(), vec![input.clone()], &selected)
+                .unwrap();
+            let baseline = Arc::new(
+                ExactDeclarationContext::from_authenticated_execution(
+                    producer.sha256(),
+                    &view,
+                    CompilerInputProjection::from_issued_entries(&[input.clone()]).unwrap(),
+                    vec![],
+                    input.descriptor.owner.clone(),
+                    &[],
+                )
+                .unwrap(),
+            );
+            let root = tempfile::tempdir().unwrap();
+            let request = ExactCompileContext::new(baseline.clone())
+                .prepare_compilation(&root.path().join("inputs"), producer_bytes)
+                .unwrap();
+            let operation = InventoryOperation::new(Default::default());
+            let mut selection = CertifiedSourceSelection::from_compiler_inputs(
+                request.compiler_inputs(),
+                &operation,
+            )
+            .unwrap();
+            selection
+                .admit_current(
+                    fresh.owner(),
+                    ProductOrigin::RetainedCore,
+                    fresh.module_interface().unwrap(),
+                    &operation,
+                )
+                .unwrap();
+            let physical = inventory
+                .admit_shared_with_demand(
+                    request.compiler_inputs().artifacts(),
+                    vec![output.clone()],
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let completed = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+            assert_eq!(
+                completed
+                    .native_availability()
+                    .rows()
+                    .map(|row| row.original.descriptor.id)
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([input.descriptor.id, output.descriptor.id])
+            );
+            assert!(completed
+                .issued_artifacts()
+                .selected_native_groups()
+                .iter()
+                .all(|group| group.artifact != output.descriptor.id));
+            let next = ExactCompileContext::new(baseline)
+                .prepare_compilation_with_private_input(
+                    &root.path().join("output"),
+                    producer_bytes,
+                    None,
+                    Some(completed),
+                )
+                .unwrap();
+            let inherited = next
+                .compiler_inputs()
+                .native_availability(input.descriptor.id)
+                .unwrap();
+            assert_eq!(
+                inherited.mode == NativeTransportMode::Full,
+                ordinals.len() == 2
+            );
+            assert_eq!(inherited.permits(7), ordinals.contains(&7));
+            assert_eq!(inherited.permits(9001), ordinals.contains(&9001));
+            assert_eq!(
+                next.compiler_inputs().artifacts().selected_native_groups(),
+                request
+                    .compiler_inputs()
+                    .artifacts()
+                    .selected_native_groups()
+            );
+        }
+    }
+
     // Replay actual Request continuation and new-output admission with independent
     // input permission and selected execution demand. Unrelated prior roots cannot
     // widen permissions or become fresh-output obligations.

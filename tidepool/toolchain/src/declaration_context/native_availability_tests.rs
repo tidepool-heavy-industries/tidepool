@@ -987,27 +987,18 @@ fn selected_output_carries_baseline_type_dependency_without_granting_body() {
             .contains(&required_interface),
         "the refusal control retains the exact dependency bytes privately"
     );
-    let empty = ExactDeclarationContext::new(&[], &[], vec![])
-        .unwrap()
-        .admit_producer(producer.sha256())
-        .unwrap();
-    let refused = ExactCompileContext::new(Arc::new(empty)).prepare_compilation_with_private_input(
-        &root.path().join("missing-baseline"),
-        PRODUCER,
-        None,
-        Some(private),
-    );
-    let error = match refused {
-        Err(error) => error,
-        Ok(_) => panic!("private dependency custody cannot replace a receiving baseline role"),
-    };
-    assert!(
-        matches!(error, CompileError::ArtifactInventory(error)
-        if matches!(&error.failure, ArtifactInventoryFailure::MissingDependency {
-            artifact, dependent, required, dependency: ArtifactDependency::Interface,
-        } if *artifact == original && dependent == &offered && required == &dependency)),
-        "final request must report the unclosed fragment dependency, not an owner conflict"
-    );
+    let output = Arc::new(ArtifactEntry::original(producer.sha256(), consumer.clone()).unwrap());
+    let incomplete = CompilerInputProjection::from_issued_entries(&[output]).unwrap();
+    let error = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+        &incomplete,
+        &private.artifacts.metadata_snapshot(),
+        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    )
+    .expect_err("retained type bytes cannot replace the selected required type role");
+    assert!(matches!(
+        error,
+        crate::certified_products::CertificationError::Mismatch("compiler original projection")
+    ));
 }
 
 #[test]
@@ -5207,16 +5198,31 @@ fn selected_authored_availability_refuses_source_original_spelling_with_full_gro
         .iter()
         .all(|role| role.original().is_none()));
     assert!(context.artifact_view().selected_native_groups().is_empty());
+    let original = ArtifactEntry::original(producer.sha256(), native.clone())
+        .unwrap()
+        .descriptor
+        .id;
+    let full = context
+        .compiler_source_support()
+        .native_offers()
+        .iter()
+        .find(|offer| offer.original() == original && offer.is_full())
+        .expect("the type-only source owner retains an actual complete issued offer");
+    let issued = full
+        .issued_group_carriers()
+        .unwrap()
+        .into_keys()
+        .filter(|group| group.binding.artifact() == original)
+        .map(|group| group.original_ordinal)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(issued, BTreeSet::from([7, 9001]));
     assert_eq!(
-        context
-            .artifact_view()
-            .capture_graph_selection()
-            .native_groups
-            .iter()
-            .map(|group| group.original_ordinal)
+        crate::certified_products::original_available_groups(&native)
+            .unwrap()
+            .map(|group| group.original_ordinal())
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([7, 9001]),
-        "the complete issued body remains custody without executable demand",
+        issued,
+        "opaque Full permission and the independent immutable body have the same census"
     );
     assert!(OriginalCompilerInputs::reuse_selected_authored(&context)
         .unwrap()
@@ -11092,113 +11098,6 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
                 matches!(recovered.context_for_expected_snapshot(committed.root(), &substituted), Err(CompileError::CompilerEvidence(error)) if matches!(*error, crate::certified_products::CertificationError::Mismatch("acquired compiler snapshot root differs from expected context")))
             );
         }
-    }
-}
-
-#[test]
-fn fresh_fragment_does_not_issue_empty_permissions_for_baseline_originals() {
-    let baseline_product = product("BaselineNativePermission", 93);
-    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
-    let entry =
-        Arc::new(ArtifactEntry::original(producer.sha256(), baseline_product.clone()).unwrap());
-    let owner = entry.descriptor.owner.clone();
-    let fresh = crate::certified_products::fixture_finalized_product_with_requirements(
-        original_groups_fixture_with_interface(
-            "FreshOnlyPermission",
-            vec![(3, vec![])],
-            94,
-            &BTreeMap::new(),
-            b"fresh-only canonical".to_vec(),
-        ),
-        producer.sha256(),
-        Some(BTreeMap::from([(
-            (owner.unit.clone(), owner.module.clone()),
-            baseline_product
-                .module_interface()
-                .unwrap()
-                .interface_sha256(),
-        )])),
-    );
-    let fresh = recovered_witness_fixtures(&[fresh]).remove(0).product;
-    let fresh_id = ArtifactEntry::original(producer.sha256(), fresh.clone())
-        .unwrap()
-        .descriptor
-        .id;
-    for ordinals in [vec![7, 9001], vec![7], vec![]] {
-        let inventory = ArtifactInventory::default();
-        let selected = ordinals
-            .iter()
-            .map(|ordinal| NativeGroupKey {
-                artifact: entry.descriptor.id,
-                original_ordinal: *ordinal,
-            })
-            .collect();
-        let view = inventory
-            .admit_recovery_selection(&inventory.empty_view(), vec![entry.clone()], &selected)
-            .unwrap();
-        let baseline = Arc::new(
-            ExactDeclarationContext::from_authenticated_execution(
-                producer.sha256(),
-                &view,
-                CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
-                vec![ExactLexicalNode {
-                    owner: owner.clone(),
-                    imports: vec![],
-                }],
-                owner.clone(),
-                std::slice::from_ref(&owner),
-            )
-            .unwrap(),
-        );
-        let fragment = {
-            let output =
-                Arc::new(ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap());
-            let dependency = Arc::new(ArtifactEntry::canonical(
-                baseline_product.module_interface().unwrap().clone(),
-            ));
-            let artifacts = baseline
-                .artifact_view()
-                .inventory()
-                .admit_shared_with_demand(
-                    baseline.artifact_view(),
-                    vec![output.clone()],
-                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                )
-                .unwrap();
-            let projection =
-                CompilerInputProjection::from_issued_entries(&[output, dependency]).unwrap();
-            let selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &projection,
-                    &artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-                )
-                .unwrap();
-            OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap()
-        };
-        assert_eq!(fragment.role_projection().snapshot_roles().len(), 2);
-        assert_eq!(
-            fragment
-                .native_availability
-                .rows()
-                .map(|row| row.original.descriptor.id)
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([fresh_id])
-        );
-        let scratch = tempfile::tempdir().unwrap();
-        let request = ExactCompileContext::new(baseline)
-            .prepare_compilation_with_private_input(scratch.path(), PRODUCER, None, Some(fragment))
-            .unwrap();
-        let inherited = request
-            .compiler_inputs()
-            .native_availability(entry.descriptor.id)
-            .expect("baseline explicit Empty remains issued by its input owner");
-        assert_eq!(
-            inherited.mode == NativeTransportMode::Full,
-            ordinals.len() == 2
-        );
-        assert_eq!(inherited.permits(7), ordinals.contains(&7));
-        assert_eq!(inherited.permits(9001), ordinals.contains(&9001));
     }
 }
 
