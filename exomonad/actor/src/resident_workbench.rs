@@ -22797,6 +22797,325 @@ pub(crate) mod request_tests {
     }
 
     #[test]
+    fn durable_sleep_binding_observes_real_retraction_request_and_clean_end() {
+        use super::generation_admission::{BootstrapWorld, GenerationDependency, SourceDependency};
+        use crate::termination::{CompilerWorkClose, CompilerWorkTicket};
+        use tidepool_runtime::session::{
+            DurablePublicOwnerPublication, ModuleEnv, RecoveryPublicOwner, SessionLib,
+        };
+        use tidepool_runtime::CompilerTransactionClose as Close;
+        use tracing_subscriber::prelude::*;
+
+        // Observe the existing endpoint request span, not the outer transaction
+        // wrapper: even a request-free continuation creates that wrapper span.
+        #[derive(Clone, Default)]
+        struct Requests(Arc<parking_lot::Mutex<Vec<std::collections::BTreeMap<String, String>>>>);
+        #[derive(Default)]
+        struct Fields(std::collections::BTreeMap<String, String>);
+        impl tracing::field::Visit for Fields {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.insert(field.name().into(), value.into());
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.insert(field.name().into(), format!("{value:?}"));
+            }
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Requests {
+            fn on_new_span(
+                &self,
+                attributes: &tracing::span::Attributes<'_>,
+                _: &tracing::span::Id,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if attributes.metadata().target() != "tidepool_extract_cmd::endpoint"
+                    || attributes.metadata().name() != "compile_request"
+                {
+                    return;
+                }
+                let mut fields = Fields::default();
+                attributes.record(&mut fields);
+                if matches!(
+                    fields.0.get("execution_layer").map(String::as_str),
+                    Some("physical" | "endpoint_submission")
+                ) {
+                    self.0.lock().push(fields.0);
+                }
+            }
+        }
+
+        assert!(
+            std::env::var_os("TIDEPOOL_EXTRACT_DAEMON_SOCKET").is_some(),
+            "the declared owned-resident compiler is required"
+        );
+        for kind in 0..3 {
+            let root = tempfile::tempdir().unwrap();
+            let id = tidepool_repr::SessionId(8870 + kind);
+            let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
+                tidepool_mcp::sleep_decl(),
+            ])
+            .unwrap();
+            let mut lib = SessionLib::open(id, root.path(), ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(effects.include_paths().to_vec());
+            let recovery =
+                crate::recovery::recovery_test_fixture::RecoveryFixture::create(lib.include_dir());
+            tidepool_testing::with_settlement(|settlement| {
+                recovery.attach_root(&mut lib, settlement)
+            });
+            let mut session = ResidentSession::unbootstrapped(
+                frunk::HNil,
+                tidepool_mcp::CapturedOutput::new(),
+                tidepool_runtime::DEFAULT_NURSERY_SIZE,
+                Some(lib),
+            );
+            // Keep both real issuers alive throughout the history. Typed bootstrap
+            // has A as a prerequisite and its own canonical C, just like a child.
+            let parent_scope = session.mint_notebook_scope_with_lease(None).unwrap();
+            let parent = GenerationDependency::new(
+                crate::ActorRef::first(crate::ActorId(8870)),
+                tidepool_runtime::session::NotebookGenerationId::INITIAL,
+                crate::CheckpointSourceLayer::default(),
+                &parent_scope,
+                None,
+            );
+            let public_scope = session
+                .mint_notebook_scope_with_lease(
+                    (kind == 2).then(|| parent.runtime_admission().clone()),
+                )
+                .unwrap();
+            let generation = GenerationDependency::new(
+                crate::ActorRef::first(crate::ActorId(8871 + kind)),
+                tidepool_runtime::session::NotebookGenerationId::INITIAL,
+                crate::CheckpointSourceLayer::default(),
+                &public_scope,
+                (kind == 2).then(|| parent.clone()),
+            );
+            let dependency = match kind {
+                0 => SourceDependency::Generation(generation.clone()),
+                1 => SourceDependency::World(BootstrapWorld::new(None)),
+                _ => SourceDependency::World(BootstrapWorld::new(Some(parent.clone()))),
+            };
+            dependency
+                .adopt_final_scope(&mut session, public_scope.scope())
+                .unwrap();
+            let durable_owner = RecoveryPublicOwner::new(
+                &tidepool_repr::ActorPath::parse("root/durable-hidden-binding").unwrap(),
+                1,
+            )
+            .unwrap();
+            let readiness = match session
+                .initialize_durable_public_scope_with_readiness(
+                    durable_owner.clone(),
+                    public_scope.scope(),
+                )
+                .unwrap()
+            {
+                DurablePublicOwnerPublication::Committed(readiness) => readiness,
+                _ => panic!("fixture needs an actually committed, ready durable public owner"),
+            };
+            assert!(readiness.is_current() && readiness.is_ready());
+            let retained = crate::RetainedActorExit::new();
+            let services = crate::capabilities::WorkbenchServices::new();
+            let owner =
+                services.with_compiler_owner(CompilerCloseOwner::ActorLifecycle(retained.clone()));
+            let private = CompilerWorkTicket::run_source_transaction(
+                &mut session,
+                owner.admit_continuation().unwrap(),
+                &dependency,
+                |session, _| {
+                    session.begin_durable_private_execution(&durable_owner, public_scope.scope())
+                },
+            )
+            .unwrap()
+            .unwrap();
+            let target = private.retained_lexical_scope();
+            assert_eq!(target.scope(), private.private_scope());
+            let context = tidepool_runtime::session::SessionRunContext {
+                lexical_scope: target.scope(),
+                ..tidepool_runtime::session::SessionRunContext::ROOT
+            };
+            session
+                .set_actor_execution(
+                    context,
+                    tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+                    tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                )
+                .unwrap();
+            CompilerWorkTicket::run_source_transaction(
+                &mut session,
+                owner.admit_continuation().unwrap(),
+                &dependency,
+                |session, settlement| {
+                    session.define_scoped_in(
+                        target.scope(),
+                        &["lazySourceBinding :: ()\nlazySourceBinding = ()"],
+                        settlement,
+                    )
+                },
+            )
+            .unwrap()
+            .unwrap();
+            assert!(matches!(
+                retained.compiler_close_observations().last(),
+                Some(CompilerWorkClose::Settled(Close::Clean))
+            ));
+            assert!(session
+                .current_decl_heads_in(target.scope())
+                .iter()
+                .any(|(name, _)| name == "lazySourceBinding"));
+            let view = session.compile_view_in(target.scope()).unwrap();
+            let imports =
+                view.turn_imports(&SourceImports::from_specs(["Tidepool.Duration (minutes)"]));
+            let templates =
+                resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+            let paths = view.include_paths(effects.include_paths());
+            let include = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+            let injected = view.injected_module_names();
+            let turn = CompilerWorkTicket::run_source_transaction(
+                &mut session,
+                owner.admit_continuation().unwrap(),
+                &dependency,
+                |session, settlement| {
+                    session.admit_source_mutation(target.scope()).unwrap();
+                    run_turn(
+                        TurnRequest {
+                            exact_context: view.exact_compile_context(),
+                            session_id: Some(id),
+                            turn_text: "lazySourceBinding <- (sleep (minutes 0) >> pure ())",
+                            templates: &templates,
+                            include: &include,
+                            session_root: view.session_root(),
+                            inject_modules: &injected,
+                            gen: 8872,
+                            verdict: None,
+                            target: None,
+                            retained_imports: &[],
+                        },
+                        settlement,
+                    )
+                },
+            )
+            .unwrap()
+            .unwrap();
+            let TurnResult::Bind {
+                bound, compiled, ..
+            } = turn
+            else {
+                panic!("fixture must produce an actual legacy binding");
+            };
+            let suspended = CompilerWorkTicket::run_source_transaction(
+                &mut session,
+                owner.admit_continuation().unwrap(),
+                &dependency,
+                |session, settlement| {
+                    session.run_bind_with_sites(
+                        "durable_sleep_binding",
+                        compiled.code(),
+                        &bound[0],
+                        tidepool_repr::Generation(8872),
+                        settlement,
+                    )
+                },
+            )
+            .unwrap()
+            .unwrap();
+            let ResidentOutcome::Suspended { hole, .. } = suspended else {
+                panic!("binding must suspend before its declaration is retracted");
+            };
+            assert!(session
+                .current_decl_heads_in(target.scope())
+                .iter()
+                .any(|(name, _)| name == "lazySourceBinding"));
+            assert!(!session
+                .binding_names_in(target.scope())
+                .iter()
+                .any(|name| name == "lazySourceBinding"));
+
+            let requests = Requests::default();
+            tracing::subscriber::with_default(
+                tracing_subscriber::registry().with(requests.clone()),
+                || {
+                    CompilerWorkTicket::run_source_transaction(
+                        &mut session,
+                        owner.admit_continuation().unwrap(),
+                        &dependency,
+                        |_, _| (),
+                    )
+                    .unwrap()
+                },
+            );
+            assert!(
+                requests.0.lock().is_empty(),
+                "pure continuation must issue no GHC request"
+            );
+            assert!(matches!(
+                retained.compiler_close_observations().last(),
+                Some(CompilerWorkClose::Settled(Close::NotStarted))
+            ));
+            let fence = generation.fence().unwrap();
+            assert_eq!(fence.pending_claims(), 0);
+            fence.reopen().unwrap();
+            if let SourceDependency::World(world) = &dependency {
+                world.begin_publication(&generation).unwrap().refused();
+            }
+            let close_count = retained.compiler_close_observations().len();
+            tracing::subscriber::with_default(
+                tracing_subscriber::registry().with(requests.clone()),
+                || {
+                    CompilerWorkTicket::run_source_transaction(
+                    &mut session, owner.admit_continuation().unwrap(), &dependency,
+                    |session, settlement| {
+                        let outcome = session.resume(hole, (), settlement).unwrap();
+                        assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+                        // This observation is before the actual outer END. Setup
+                        // spans were never observed by this scoped subscriber.
+                        let observed = requests.0.lock();
+                        assert!(!observed.is_empty(), "kind {kind}: durable retraction must issue real GHC work during resume");
+                        for request in observed.iter() {
+                            assert!(!request.get("compile_request").unwrap().is_empty());
+                            assert!(!request.get("request_mode").unwrap().is_empty());
+                        }
+                        eprintln!("durable Sleep kind {kind} resumed requests: {observed:?}");
+                    },
+                ).unwrap()
+                },
+            );
+            let closes = retained.compiler_close_observations();
+            assert_eq!(closes.len(), close_count + 1);
+            assert_eq!(
+                closes.last(),
+                Some(&CompilerWorkClose::Settled(Close::Clean)),
+                "kind {kind}: only the actual request-bearing outer END qualifies this positive"
+            );
+            assert!(session
+                .binding_names_in(target.scope())
+                .iter()
+                .any(|name| name == "lazySourceBinding"));
+            assert!(!session
+                .current_decl_heads_in(target.scope())
+                .iter()
+                .any(|(name, _)| name == "lazySourceBinding"));
+            let fence = generation.fence().unwrap();
+            assert_eq!(fence.pending_claims(), 0);
+            fence.reopen().unwrap();
+            let parent_fence = parent.fence().unwrap();
+            assert_eq!(parent_fence.pending_claims(), 0);
+            parent_fence.reopen().unwrap();
+            if let SourceDependency::World(world) = &dependency {
+                world.begin_publication(&generation).unwrap().refused();
+            }
+            drop((
+                private,
+                target,
+                public_scope,
+                parent_scope,
+                readiness,
+                recovery,
+            ));
+        }
+    }
+
+    #[test]
     fn joined_source_hook_refusal_precedes_binding_and_native_exports() {
         let (mut session, _root) = bare_session_at(tidepool_repr::SessionId(878));
         let scope = session.mint_notebook_scope_with_lease(None).unwrap();
