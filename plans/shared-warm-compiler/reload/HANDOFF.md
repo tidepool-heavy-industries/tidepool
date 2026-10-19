@@ -3,7 +3,7 @@
 Contract/base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
 Area: `/srv/swarm/checkouts/tidepool-shared-warm-reload-20261019`,
 branch `feature/shared-warm/reload`, source checkpoint
-`3b91e6f73949f5b23f6d6bc00afef2664faa518f`.
+`8dca6d6a89ec430b9841b7f3f44a9c202121019c`.
 Campaign owner: `/root/warm_compiler_campaign`; area owner:
 `/root/warm_compiler_campaign/reload`.
 
@@ -28,8 +28,10 @@ The area source contains:
   no startup can issue NotStarted. Worker loss/uncertain lifecycle startup keeps
   the identity claim and pending cleanup, including whole-run accounting.
 - A narrow force-input foundation, independent of surface cache consent, in the
-  owning schema/authored helper and existing codec controls. Generator refresh,
-  compilation and actual force semantics remain pending. The matched options
+  owning schema/authored helper and existing codec controls. The exact native
+  std-only generator compiled and refreshed its two mirrors; the owning snapshot
+  check passed. Generated Rust/Haskell consumer execution and actual force
+  semantics remain pending. The matched options
   constructor deliberately changes from two fields to three.
 
 `dc2c85879579f5fa3543f4bde3d2c3fa2dce3b2b` was independently reviewed and
@@ -40,7 +42,8 @@ its exact independent source review found no new blocking defect. The narrow
 scope; its independent source review also found no new blocking defect. The joined
 R1 review remains pending. `6978429d8f` is the
 narrow force-input source parcel.
-Neither source parcel has passing compilation or test evidence. See
+The directory/R1 consumers have no passing compilation or test evidence; the
+std-only generator and snapshot check do not establish those claims. See
 [the independent review](REVIEW-BASE.md) for findings and untested boundaries.
 
 ## Owners and exact continuation
@@ -118,7 +121,17 @@ reopen an unbound world. Unknown publication remains unavailable even when the
 visibility callback never ran. Candidate preparation must not fill the binding.
 B retains external parent prerequisites only, excluding its retired bootstrap A.
 The R1 leaf implements this closure; the independent high reviewer checks actual
-atomicity and initial failure/uncertainty plus typed-child histories.
+atomicity and initial failure/uncertainty plus typed-child histories. An unbound
+world must retain real admission custody across the first-publication cutoff;
+returning None after a state precheck creates a race.
+
+Initial publication uncertainty must retain private candidate facts distinctly
+from a selected ActorGeneration: binding an owner with no runtime readiness
+would falsely grant current authority. The existing durable store remains fenced
+after unknown publication and has no live reconciliation API. Campaign is
+arbitrating explicit existing host/run reopen recovery versus a new lower-owner
+mechanism; safe source work retains unavailable truth and forbids new work.
+No fresh candidate/gate may be reconstructed from the old generation integer.
 
 ## Verification admission and pending commands
 
@@ -136,17 +149,28 @@ Required workspace submodule `ce60f76888c94e9d7229615f27762d02933549b1` is
 initialized from the verified local campaign repository. Receipts are under
 `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/reload/` in
 `formatting.json`, `source-generation.log` and `source-generation-check.log`.
-This is syntax/metadata evidence, with zero native compilations/tests. The
-joined R1 modules need the same owning source generation after integration.
-Once storage admission permits, build the exact
-protocol generator, refresh its tracked mirrors through
-`scripts/protocol-snapshots.py --generator EXACT_BUILT_GENERATOR --refresh`,
-then check the mirrors. Generated files must not be hand edited.
+The campaign admitted a separate 128 MiB std-only protocol-generator lane.
+Default pinned configuration, `just build -j1 //bridge/protocol:tidepool_protocol_gen`,
+exact generator refresh and `just build -j1 //bridge/protocol:snapshots_check`
+all exited 0. The native artifact SHA-256 is
+`143f28f99a457a86aad2bbb52269a8f432bd95670bbe1d84b07e7f6911a047f4`,
+6,598,656 bytes. The generator build ran four local cold actions; the snapshot
+check ran three local actions. Zero tests executed. Receipt and logs:
+`protocol-generator-receipt.json` in the evidence directory above. The generated
+mirrors are committed, with no hand edits. The joined R1 modules still need
+owning source generation after integration.
+
+Own buck-out final allocated bytes were 56,938,496 (initially zero); lowest
+observed global available bytes were 107,887,243,264, above the 100 GiB floor.
+Scratch peak and shared-cache attribution were not instrumented. Buck daemon
+PID 3835600 is retained idle in `/build.slice/inanna-build-1792398682-3835490.scope`;
+its enclosing observed MemoryPeak was 836,239,360 bytes. No commands are running.
+The serial native lane was released. Root owns new storage cleanup; no further
+admission is inferred until its settled receipts and refreshed df arrive.
 
 ```sh
 swarm-build bash scripts/buck2-configure.sh --tests --browser
-swarm-build just build //bridge/protocol:tidepool_protocol_gen
-swarm-build just build //bridge/protocol:snapshots_check //tidepool/bridge-effects:tidepool_bridge_effects_unit_tests //bridge/mcp:tidepool_mcp_unit_tests //bridge/mcp:mcp
+swarm-build just build //tidepool/bridge-effects:tidepool_bridge_effects_unit_tests //bridge/mcp:tidepool_mcp_unit_tests //bridge/mcp:mcp
 swarm-build just build //exomonad/actor:exomonad_actor_unit_tests //exomonad/host:exomonad_host //exomonad/host:exomonad_host_unit_tests //tidepool/runtime:tidepool_runtime_unit_tests
 swarm-build just test-lib tidepool-bridge-effects --exact tests::reload_options_and_typed_receipts_roundtrip_and_reject_wrong_arity --expected-count 1
 swarm-build just test-native //exomonad/actor:actor_notebook_contract_tests
@@ -164,5 +188,6 @@ joined gate and refusal controls. Preserve immutable source/prompt observation,
 old compiled pure continuation, independent IO and exact historical dependencies.
 Retain source/artifact/profile identity, nonzero selected/executed counts,
 exit/logs, compiler END and lifecycle cleanup reports. Current verification is
-source review, pinned formatting, source metadata and `git diff --check`; no
-compilation/test acceptance exists.
+source review, pinned formatting, source metadata, the std-only protocol
+generator build, snapshot check and `git diff --check`. No R1/actor/runtime/
+Haskell consumer compilation or behavioral acceptance exists.
