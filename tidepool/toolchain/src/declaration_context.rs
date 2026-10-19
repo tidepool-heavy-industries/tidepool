@@ -1420,6 +1420,10 @@ impl RequestNativeAvailability {
         self.0.get(&key.artifact)?.dependency_support(key, owner)
     }
 
+    pub(crate) fn same_acquisition(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     pub(crate) fn from_issued_rows(
         rows: impl IntoIterator<Item = Arc<NativeTransportAvailability>>,
     ) -> Result<Self, CompileError> {

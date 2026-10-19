@@ -20,6 +20,7 @@ struct PublicationNativeInputs {
     decisions: IssuedInputNativeDecisions,
     artifacts: ArtifactView,
     projection: CompilerInputProjection,
+    selected: Arc<AdmittedCompilerRoles>,
 }
 impl PublicationNativeAuthority {
     pub(crate) fn facts(&self) -> &Arc<crate::exact_context::PublicationNativeFacts> {
@@ -40,6 +41,7 @@ impl PublicationNativeAuthority {
                 decisions: source.input_decisions.clone(),
                 artifacts: source.artifacts.clone(),
                 projection: source.projection.clone(),
+                selected: Arc::clone(&source.selected),
             },
         ))))
     }
@@ -96,6 +98,7 @@ impl PublicationNativeAuthority {
                 decisions: restored.input_decisions,
                 artifacts: restored.artifacts,
                 projection: prior,
+                selected: restored.selected,
             },
         ))))
     }
@@ -1836,6 +1839,40 @@ impl CompilerSourceSupport {
         selected.support_for_owners(vec![owner])
     }
 
+    /// Reopen only an already acquired publication's exact pre-endorsement
+    /// owner. This consumes its retained admission rows, never equal inventory.
+    pub(crate) fn publication_birth_support(
+        &self,
+        root: &ExactModuleIdentity,
+    ) -> Result<Self, CompileError> {
+        let Some(CompilerInputRole::PublishedSourceOriginal {
+            native_authority,
+            selection,
+            ..
+        }) = self.projection.snapshot_roles().get(root)
+        else {
+            return Err(failure(
+                "publication birth lacks its acquired published role",
+            ));
+        };
+        let saved = native_authority.acquired()?;
+        if saved.artifacts.selection_snapshot().as_ref() != selection.snapshot().as_ref() {
+            return Err(failure(
+                "publication native owner differs from its issued selection",
+            ));
+        }
+        Ok(Self {
+            projection: saved.projection.clone(),
+            artifacts: saved.artifacts.clone(),
+            native_fact_owner: Some(Arc::clone(&saved.facts)),
+            native_offers: Arc::clone(&saved.offers),
+            native_offer_facts: saved.facts.offers.clone(),
+            native_availability: saved.availability.clone(),
+            selected: Arc::clone(&saved.selected),
+            input_decisions: saved.decisions.clone(),
+        })
+    }
+
     pub(crate) fn select_publication_graph(
         &self,
         root: &ExactModuleIdentity,
@@ -1870,16 +1907,7 @@ impl CompilerSourceSupport {
                     "publication root is outside its native owner's namespace",
                 ));
             }
-            let projection = saved.projection.clone();
-            let mut prior = Self::new_with_native_facts(
-                projection,
-                saved.artifacts.clone(),
-                saved.offers.iter().cloned(),
-                saved.availability.clone(),
-                saved.decisions.clone(),
-                Some(&saved.facts),
-            )?;
-            prior.input_decisions = saved.decisions.clone();
+            let prior = self.publication_birth_support(root)?;
             return prior.publish_original(
                 &crate::declaration_context::PublishedOriginalEndorsement::new(
                     root.clone(),
@@ -1926,9 +1954,40 @@ impl CompilerSourceSupport {
             .snapshot_roles()
             .get(endorsement.owner())
             .ok_or_else(|| failure("publication lacks its issued compiler role"))?;
-        let CompilerInputRole::PublishedSourceOriginal { selection, .. } = role else {
+        let CompilerInputRole::PublishedSourceOriginal {
+            selection,
+            native_authority,
+            ..
+        } = role
+        else {
             return Err(failure("publication endorsement lacks published policy"));
         };
+        let birth = match &native_authority.0 {
+            PublicationNativeState::Acquired(birth) => birth,
+            PublicationNativeState::Recorded(_) => {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::PublicationNativeDomainMismatch {
+                        owner: endorsement.owner().clone(),
+                    },
+                ));
+            }
+        };
+        // The exact fact domain and the acquired admission owners are separate
+        // obligations. Equal IDs/graphs cannot substitute another birth's mode.
+        if self.native_fact_owner().commitment() != birth.facts.commitment()
+            || !Arc::ptr_eq(&self.selected, &birth.selected)
+            || !Arc::ptr_eq(&self.artifacts.lease, &birth.artifacts.lease)
+            || !Arc::ptr_eq(&self.native_offers, &birth.offers)
+            || !self
+                .native_availability
+                .same_acquisition(&birth.availability)
+        {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::PublicationNativeDomainMismatch {
+                    owner: endorsement.owner().clone(),
+                },
+            ));
+        }
         if previous.interface() != role.interface()
             || previous.original() != role.original()
             || selection.graph_selection() != &self.artifacts.capture_graph_selection()
