@@ -1,6 +1,6 @@
 # Compiler work and authority map
 
-Source checked at `8245fa800aec17fd7fd37fbe64cd4a35aa3efcde` (reviewed release checkpoint).
+Source checked at `5b74c2f1fe010c5c343e0c6f331d54328fbd5090` (shared warm compiler campaign base).
 This is the current production workflow, not a list of proposed optimizations.
 Stage names identify ownership boundaries; their timings are not additive.
 Use [compiler profiling](compiler-profiling.md) for measurement and
@@ -135,6 +135,25 @@ needed to establish how many
 chosen inputs, unique groups, immutable facts or permission environments exist.
 
 ## Evidence and qualification boundary
+
+The shared warm compiler campaign starts from the imported peer repair at
+`70a92c65a02a591f76590daf4e5bfa3e6fcbf723`, followed by the planning commit
+above. This is a source prerequisite, not a newly qualified compiler rewrite.
+The stronger shared-workspace Persona regression executed once at exact `70a`:
+one selected/executed case passed, exit 0, direct compiler, minimal trace.
+Process and hosted cleanup were confirmed; compiler cleanup was `not_observed`
+with its observation complete, and diagnostic evidence was incomplete. The
+[retained case report](/srv/swarm/evidence/inanna/admission-analysis-review-20261018/overnight-70a-strong-persona/host-cases/e27eec134184eea75959071896799d075b55b040628a49a0e25165b9be2fab4e.json)
+therefore establishes focused behavior, not frozen timing or compiler cleanup.
+Its shared workspace Gitlink is `ce60f76888c94e9d7229615f27762d02933549b1`;
+the live failure's `457d7d` workspace is a distinct source identity.
+
+The [campaign acceptance matrix](../plans/shared-warm-compiler/qualification/ACCEPTANCE.md)
+tracks exact joined folds separately from semantic, work-counter, performance,
+frozen-release and deployment claims. A reference hit alone cannot establish
+eliminated physical input work: `ExactCompilationRequest::input_transport_files`
+and its export consumers must also avoid baseline part/FD enumeration. Work
+moved into root publication or commit remains part of the same workflow.
 
 Historical **b108** scripted Persona13 measurements include 389 retained input
 references across 13 offers (not 389 distinct graphs), 64 native-item
