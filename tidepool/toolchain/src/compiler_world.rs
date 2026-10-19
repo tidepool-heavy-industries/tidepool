@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use sha2::{Digest, Sha256};
 use tidepool_extract_cmd::{InspectionNamespace, InspectionScope, StructuredInspection};
 
-use crate::artifact_inventory::CanonicalProducerIdentity;
+use crate::artifact_inventory::{ArtifactBinding, CanonicalProducerIdentity};
 use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
 use crate::declaration_context::ExactDeclarationContext;
@@ -67,7 +67,14 @@ impl CapturedCompilerSources {
             .and_then(|n| n.checked_add(origin.len()))
             .and_then(|n| n.checked_add(4))
             .ok_or_else(source_size_failure)?;
+        let mut ordering_scratch = 0usize;
         for root in &roots {
+            ordering_scratch = ordering_scratch.max(
+                root.bodies
+                    .len()
+                    .checked_mul(std::mem::size_of::<(&PathBuf, &Arc<[u8]>)>())
+                    .ok_or_else(source_size_failure)?,
+            );
             u32::try_from(root.bodies.len()).map_err(|_| source_size_failure())?;
             crate::host_work::checkpoint()?;
             encoded_size = encoded_size
@@ -96,9 +103,12 @@ impl CapturedCompilerSources {
             }
         }
         let allowance = capture_allowance()?;
-        if encoded_size as u64 > allowance {
+        let required = encoded_size
+            .checked_add(ordering_scratch)
+            .ok_or_else(source_size_failure)?;
+        if required as u64 > allowance {
             return Err(source_failure(format!(
-                "captured compiler sources require {encoded_size} bytes; request capture allowance is {allowance} bytes")));
+                "captured compiler sources require {required} bytes including canonical ordering scratch; request capture allowance is {allowance} bytes")));
         }
         for root in &roots {
             let actual = SourceRootManifest::from_file_digests(
@@ -117,7 +127,16 @@ impl CapturedCompilerSources {
         source_count(&mut encoded, roots.len())?;
         for root in &roots {
             source_count(&mut encoded, root.bodies.len())?;
-            for (path, body) in &root.bodies {
+            // PathBuf compares components, while the wire compares the complete
+            // UTF-8 relative path. Preserve root precedence and sort only the
+            // borrowed, already validated cold namespace for canonical transfer.
+            let mut ordered = root.bodies.iter().collect::<Vec<_>>();
+            ordered.sort_unstable_by(|(left, _), (right, _)| {
+                left.as_os_str()
+                    .as_encoded_bytes()
+                    .cmp(right.as_os_str().as_encoded_bytes())
+            });
+            for (path, body) in ordered {
                 crate::host_work::checkpoint()?;
                 source_frame(&mut encoded, relative_source_path(path)?.as_bytes())?;
                 source_frame(&mut encoded, body)?;
@@ -355,8 +374,11 @@ pub struct CompilerWorldBindings {
 
 // The occurrence is the existing SnapshotKey<String>. The row link names the
 // independently materialized exact semantic row plus its original issuer.
+// Compiler generation comes from that retained row owner; SessionVarId remains
+// an independent runtime identity and never supplies a compiler generation.
 type WorldBindingSnapshotFact = (
     (String, String, String, String, Option<String>),
+    u64,
     u64,
     u64,
     cid::Cid,
@@ -470,6 +492,7 @@ impl CompilerWorldBindings {
                     ),
                     entry.session_var.raw(),
                     entry.defining_scope,
+                    entry.row.owner().gen.0,
                     *row,
                 ),
             );
@@ -510,6 +533,7 @@ pub struct CompilerWorldRestoration {
     product: Arc<[u8]>,
     primary_root: ContextRoot,
     primary_blocks: ReachableBlocks,
+    primary_associations: MaterializedMap<ArtifactBinding, cid::Cid>,
     bindings: MaterializedMap<String, WorldBindingSnapshotFact>,
     producer: [u8; 32],
     profile: [u8; 32],
@@ -523,6 +547,7 @@ impl fmt::Debug for CompilerWorldRestoration {
             .field("logical_id", &self.logical_id)
             .field("primary_root", &self.primary_root)
             .field("primary_frontier_work", &self.primary_blocks.work())
+            .field("primary_association_root", self.primary_associations.root())
             .field("binding_root", self.bindings.root())
             .finish_non_exhaustive()
     }
@@ -665,6 +690,79 @@ mod tests {
     }
 
     #[test]
+    fn captured_source_wire_uses_complete_utf8_path_order() {
+        let bodies: BTreeMap<PathBuf, Arc<[u8]>> = [
+            (
+                "Tidepool/Effects/Core.hs",
+                &b"module Tidepool.Effects.Core where"[..],
+            ),
+            ("Tidepool/Effects.hs", &b"module Tidepool.Effects where"[..]),
+            (
+                "Tidepool/Actor/Source.hs",
+                &b"module Tidepool.Actor.Source where"[..],
+            ),
+            ("Tidepool/Actor.hs", &b"module Tidepool.Actor where"[..]),
+            ("Tidepool/É.hs", &b"module Tidepool.Unicode where"[..]),
+        ]
+        .into_iter()
+        .map(|(path, body)| (PathBuf::from(path), Arc::from(body)))
+        .collect();
+        let root = CapturedCompilerSourceRoot {
+            manifest: SourceRootManifest::from_file_digests(
+                bodies
+                    .iter()
+                    .map(|(path, body)| (path.clone(), blake3::hash(body).to_hex().to_string())),
+            )
+            .unwrap(),
+            bodies,
+        };
+        // This fixture distinguishes component order from the receiving codec's
+        // full-string order, rather than relying on the production sort twice.
+        let captured = CapturedCompilerSources::from_captured_roots(
+            vec![root.clone(), root],
+            Arc::from(&b"owner"[..]),
+            Arc::new(()),
+        )
+        .unwrap();
+        fn count(input: &mut &[u8]) -> usize {
+            let (word, rest) = input.split_at(4);
+            *input = rest;
+            u32::from_le_bytes(word.try_into().unwrap()) as usize
+        }
+        fn frame<'a>(input: &mut &'a [u8]) -> &'a [u8] {
+            let length = count(input);
+            let (value, rest) = input.split_at(length);
+            *input = rest;
+            value
+        }
+        let mut input = &captured.encoded()[8..];
+        assert_eq!(frame(&mut input), b"owner");
+        assert_eq!(count(&mut input), 2);
+        for _ in 0..2 {
+            assert_eq!(count(&mut input), 5);
+            let mut paths = Vec::new();
+            for _ in 0..5 {
+                paths.push(std::str::from_utf8(frame(&mut input)).unwrap());
+                frame(&mut input);
+            }
+            assert_eq!(
+                paths,
+                [
+                    "Tidepool/Actor.hs",
+                    "Tidepool/Actor/Source.hs",
+                    "Tidepool/Effects.hs",
+                    "Tidepool/Effects/Core.hs",
+                    "Tidepool/É.hs"
+                ]
+            );
+            assert!(paths
+                .windows(2)
+                .all(|pair| pair[0].as_bytes() < pair[1].as_bytes()));
+        }
+        assert!(input.is_empty());
+    }
+
+    #[test]
     fn ordered_roots_and_unimported_bodies_bind_source_capture() {
         let a = captured("Module.hs", b"module Module where\nx = 1\n");
         let b = captured("Module.hs", b"module Module where\nx = 2\n");
@@ -780,7 +878,7 @@ fn binding_metadata_bound(fields: [usize; 5], parent_bytes: usize) -> Result<u64
     let hamt_node = 9 + (9 + 4) + 9;
     let routing = 52 * (hamt_node + cid_link);
     let key_bucket_heads = 5 * 9;
-    let binding_heads = 2 * 9 + 5 * 9 + 2 * 9 + cid_link;
+    let binding_heads = 2 * 9 + 5 * 9 + 3 * 9 + cid_link;
     fields.into_iter().chain([parent_bytes]).try_fold(
         routing + key_bucket_heads + binding_heads,
         |size, field| {
@@ -806,6 +904,21 @@ fn binding_row_metadata_bound(
                 .ok_or_else(source_size_failure)
         },
     )
+}
+
+// ArtifactBinding's derived codec is a two-field map of fixed 32-byte
+// arrays. Reserve its key, both acquired bindings and the complete private
+// HAMT path before staging any association or copying semantic row fields.
+fn primary_association_metadata_bound(
+    unit: &str,
+    module: &str,
+    requires: &[crate::declaration_join::ExactModuleIdentity],
+) -> Result<u64, CompileError> {
+    let binding = 9 + 2 * (9 + 9 + 32 * 9);
+    let routing = 52 * ((9 + 9 + 4 + 9) + (9 + 9 + 39));
+    binding_row_metadata_bound(unit, module, requires)?
+        .checked_add(routing + 5 * 9 + 3 * binding + 9 + 20 + 1)
+        .ok_or_else(source_size_failure)
 }
 
 struct WorldColdRows {
@@ -1031,6 +1144,208 @@ fn world_semantic_row(
     ]))
 }
 
+fn materialize_primary_association<BS: fvm_ipld_blockstore::Blockstore>(
+    materializer: &mut Materializer<'_, BS>,
+    interface: &ArtifactBinding,
+    original: Option<&ArtifactBinding>,
+    semantic: &ciborium::value::Value,
+) -> Result<cid::Cid, CompileError> {
+    materializer
+        .materialize_value(&("TPCWPRIMARY1", interface, original, semantic))
+        .map_err(|error| source_failure(error.to_string()))
+}
+
+fn materialize_primary_associations<BS: fvm_ipld_blockstore::Blockstore>(
+    context: &ExactDeclarationContext,
+    producer: &[u8; 32],
+    directory: &Path,
+    rows: &mut WorldColdRows,
+    materializer: &mut Materializer<'_, BS>,
+    remaining_raw: &mut u64,
+) -> Result<
+    (
+        Vec<ciborium::value::Value>,
+        MaterializedMap<ArtifactBinding, cid::Cid>,
+    ),
+    CompileError,
+> {
+    use crate::declaration_context::original_inputs::{OriginalInputKind as K, OriginalInputPart};
+    let mut primary_facts = imbl::OrdMap::new();
+    let mut base = Vec::new();
+    for (ordinal, selected) in context
+        .compiler_source_support()
+        .world_primary_type_rows()
+        .enumerate()
+    {
+        let entry = selected.entry;
+        if selected.owner != &entry.descriptor.owner {
+            return Err(source_failure("primary acquired row has another owner"));
+        }
+        crate::host_work::checkpoint()?;
+        let estimate = primary_association_metadata_bound(
+            &entry.descriptor.owner.unit,
+            &entry.descriptor.owner.module,
+            &entry.requirements,
+        )?;
+        *remaining_raw = remaining_raw
+            .checked_sub(estimate)
+            .ok_or_else(|| binding_capture_refusal(estimate, *remaining_raw))?;
+        let root = directory.join(format!("primary-{ordinal}"));
+        let mut builder =
+            crate::owned_input_arena::OwnedInputArenaBuilder::new(capture_allowance()?)
+                .map_err(|e| source_failure(e.to_string()))?;
+        let mut pending = Vec::new();
+        for (kind, bytes) in crate::declaration_context::original_inputs::entry_payloads(entry) {
+            if matches!(kind, K::Native | K::Census | K::Graph) {
+                continue;
+            }
+            if bytes.is_empty() || bytes.len() as u64 > kind.byte_limit() {
+                return Err(source_failure("world type input exceeds its format bound"));
+            }
+            *remaining_raw = remaining_raw
+                .checked_sub(bytes.len() as u64)
+                .ok_or_else(source_size_failure)?;
+            pending.push((
+                kind,
+                builder
+                    .append(bytes)
+                    .map_err(|e| source_failure(e.to_string()))?,
+            ));
+        }
+        let arena = builder
+            .finish()
+            .map_err(|e| source_failure(e.to_string()))?;
+        let parts = pending
+            .into_iter()
+            .map(|(kind, pending)| {
+                let transport = arena
+                    .issue_slice(pending)
+                    .map_err(|e| source_failure(e.to_string()))?;
+                Ok(OriginalInputPart {
+                    kind,
+                    path: root.join(kind.wire_tag()),
+                    sha256: world_hex(transport.sha256()),
+                    bytes: transport.len(),
+                    transport,
+                })
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        let row = rows.row(entry, parts)?.0;
+        let semantic = world_semantic_row(&row, producer)?;
+        let fact = materialize_primary_association(
+            materializer,
+            selected.interface_binding,
+            selected.original_binding,
+            &semantic,
+        )?;
+        if primary_facts
+            .insert(*selected.transport_binding, fact)
+            .is_some()
+        {
+            return Err(source_failure("duplicate primary transport binding"));
+        }
+        base.push(row);
+    }
+    let primary_associations = materializer
+        .materialize_map(None, &primary_facts)
+        .map_err(|error| source_failure(error.to_string()))?;
+    Ok((base, primary_associations))
+}
+
+/// DATA from an already-issued context, through the production association
+/// writer. The fixture packet owns copied arena bytes until its actual reader
+/// completes. Its tagged file ranges are DATA, not a production acquisition:
+/// the existing Haskell fixture owner must reseal them before the real reader.
+/// These bytes issue no new compiler or runtime permission.
+#[cfg(test)]
+pub(crate) fn world_context_fixture(
+    context: &ExactDeclarationContext,
+    directory: &Path,
+) -> Result<Vec<u8>, CompileError> {
+    use ciborium::value::Value;
+    use std::os::unix::fs::FileExt;
+    let snapshot = context.snapshot();
+    let producer = snapshot.producer_sha256();
+    let store = fvm_ipld_blockstore::MemoryBlockstore::new();
+    let mut materializer = Materializer::new(&store);
+    let primary = materializer
+        .materialize_context(None, &snapshot)
+        .map_err(|error| source_failure(error.to_string()))?;
+    let mut rows = WorldColdRows {
+        producer,
+        files: BTreeMap::new(),
+        images: BTreeMap::new(),
+        rows: BTreeMap::new(),
+        arenas: Default::default(),
+    };
+    let mut remaining = capture_allowance()?;
+    let (base, associations) = materialize_primary_associations(
+        context,
+        &producer,
+        directory,
+        &mut rows,
+        &mut materializer,
+        &mut remaining,
+    )?;
+    let mut acquisition = rows
+        .arenas
+        .acquisition(rows.images.into_values().collect())?;
+    let Value::Array(fields) = &mut acquisition else {
+        unreachable!()
+    };
+    fields[0] = world_text("TPCWORLDFIXTUREBYTES1");
+    let Value::Array(arenas) = &mut fields[1] else {
+        unreachable!()
+    };
+    for (index, descriptor) in arenas.iter_mut().enumerate() {
+        let Value::Array(fields) = descriptor else {
+            unreachable!()
+        };
+        let Value::Text(endpoint) = &fields[0] else {
+            unreachable!()
+        };
+        let extent: u64 = fields[1]
+            .as_integer()
+            .and_then(|n| n.try_into().ok())
+            .ok_or_else(|| source_failure("fixture arena extent"))?;
+        let file = rows
+            .files
+            .get(Path::new(endpoint))
+            .ok_or_else(|| source_failure("fixture arena owner"))?;
+        let destination = directory.join(format!("world-arena-{index}"));
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)?;
+        let mut offset = 0;
+        let mut buffer = [0u8; 65536];
+        while offset < extent {
+            crate::host_work::checkpoint()?;
+            let count = (extent - offset).min(buffer.len() as u64) as usize;
+            file.read_exact_at(&mut buffer[..count], offset)?;
+            std::io::Write::write_all(&mut output, &buffer[..count])?;
+            offset += count as u64;
+        }
+        fields[0] = world_path(&destination)?;
+    }
+    let staged = materializer
+        .finish()
+        .map_err(|error| source_failure(error.to_string()))?;
+    world_bytes(&world_array(vec![
+        world_blob(primary.root().cid().to_bytes()),
+        world_blob(associations.root().cid().to_bytes()),
+        world_array(base),
+        acquisition,
+        world_array(
+            staged
+                .blocks()
+                .iter()
+                .map(|(cid, body)| world_array(vec![world_blob(cid.to_bytes()), world_blob(body)]))
+                .collect(),
+        ),
+    ]))
+}
+
 impl CompilerWorldOpenInputs {
     fn materialize_primary(
         &self,
@@ -1067,9 +1382,6 @@ impl CompilerWorldOpenInputs {
         mut self,
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
     ) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
-        use crate::declaration_context::original_inputs::{
-            OriginalInputKind as K, OriginalInputPart,
-        };
         let identity = endpoint.identity();
         let producer = CanonicalProducerIdentity::from_compiler(identity).sha256();
         let profile = *identity
@@ -1107,60 +1419,17 @@ impl CompilerWorldOpenInputs {
         let mut remaining_raw = capture_allowance()?
             .checked_sub(envelope_bytes)
             .ok_or_else(source_size_failure)?;
-        let metadata = self.primary_context.compiler_metadata_snapshot()?;
-        let mut base = Vec::with_capacity(metadata.entries.len());
-        let mut base_references = Vec::with_capacity(metadata.entries.len());
-        for (ordinal, entry) in metadata.entries.values().enumerate() {
-            crate::host_work::checkpoint()?;
-            let root = self.directory.path().join(format!("primary-{ordinal}"));
-            let mut builder =
-                crate::owned_input_arena::OwnedInputArenaBuilder::new(capture_allowance()?)
-                    .map_err(|e| source_failure(e.to_string()))?;
-            let mut pending = Vec::new();
-            for (kind, bytes) in crate::declaration_context::original_inputs::entry_payloads(entry)
-            {
-                if matches!(kind, K::Native | K::Census | K::Graph) {
-                    continue;
-                }
-                if bytes.is_empty() || bytes.len() as u64 > kind.byte_limit() {
-                    return Err(source_failure("world type input exceeds its format bound"));
-                }
-                remaining_raw = remaining_raw
-                    .checked_sub(bytes.len() as u64)
-                    .ok_or_else(source_size_failure)?;
-                pending.push((
-                    kind,
-                    builder
-                        .append(bytes)
-                        .map_err(|e| source_failure(e.to_string()))?,
-                ));
-            }
-            let arena = builder
-                .finish()
-                .map_err(|e| source_failure(e.to_string()))?;
-            let parts = pending
-                .into_iter()
-                .map(|(kind, pending)| {
-                    let transport = arena
-                        .issue_slice(pending)
-                        .map_err(|e| source_failure(e.to_string()))?;
-                    Ok(OriginalInputPart {
-                        kind,
-                        path: root.join(kind.wire_tag()),
-                        sha256: world_hex(transport.sha256()),
-                        bytes: transport.len(),
-                        transport,
-                    })
-                })
-                .collect::<Result<Vec<_>, CompileError>>()?;
-            let row = rows.row(entry, parts)?.0;
-            base_references.push(world_semantic_row(&row, &producer)?);
-            base.push(row);
-        }
         let mut binding_materializer = Materializer::new(&primary_blocks);
+        let (base, primary_associations) = materialize_primary_associations(
+            &self.primary_context,
+            &producer,
+            self.directory.path(),
+            &mut rows,
+            &mut binding_materializer,
+            &mut remaining_raw,
+        )?;
         let mut binding_rows = BTreeMap::new();
         let mut visible = Vec::with_capacity(self.visible_rows.len());
-        let mut references = Vec::with_capacity(self.visible_rows.len());
         for artifact in &self.visible_rows {
             crate::host_work::checkpoint()?;
             let (entry, parts) = artifact.world_type_parts()?;
@@ -1188,7 +1457,6 @@ impl CompilerWorldOpenInputs {
                 .materialize_value(&row_fact)
                 .map_err(|error| source_failure(error.to_string()))?;
             binding_rows.insert(artifact.owner().module_name(), row_root);
-            references.push(semantic);
             visible.push(row);
         }
         let binding_facts = self.bindings.cold_snapshot(&binding_rows)?;
@@ -1199,7 +1467,14 @@ impl CompilerWorldOpenInputs {
             .finish()
             .map_err(|error| source_failure(error.to_string()))?;
         primary_blocks = primary_blocks
-            .replace_roots(&staged, vec![*primary_root.cid(), *bindings.root().cid()])
+            .replace_roots(
+                &staged,
+                vec![
+                    *primary_root.cid(),
+                    *primary_associations.root().cid(),
+                    *bindings.root().cid(),
+                ],
+            )
             .map_err(|error| source_failure(error.to_string()))?;
         let work = primary_blocks.work();
         crate::host_work::record_host_work(
@@ -1211,7 +1486,7 @@ impl CompilerWorldOpenInputs {
             work.link_visits.saturating_add(work.unlink_visits),
         );
         let visibility = world_bytes(&world_array(vec![
-            world_text("TPCWBIND3"),
+            world_text("TPCWBIND4"),
             self.bindings.query_scope.into(),
             world_blob(bindings.root().cid().to_bytes()),
         ]))?;
@@ -1219,28 +1494,18 @@ impl CompilerWorldOpenInputs {
             .blocks()
             .map(|(cid, body)| world_array(vec![world_blob(cid.to_bytes()), world_blob(body)]))
             .collect();
-        let seals = primary_blocks
-            .blocks()
-            .map(|(cid, body)| {
-                world_array(vec![
-                    world_blob(cid.to_bytes()),
-                    world_blob(world_digest(body)),
-                ])
-            })
-            .collect();
-        // The closed Materializer issued the CID basis. This SHA envelope binds
-        // transfer and restoration; it does not independently verify CID content.
+        // CID-validated roots bind logical facts. Cold transfer order and raw
+        // image inventory are not part of a live successor's fixed identity.
         let product = world_bytes(&world_array(vec![
             world_text("TPCWREST"),
-            2u64.into(),
+            3u64.into(),
             world_blob(primary_root.cid().to_bytes()),
             world_blob(self.sources.seal()),
             world_blob(producer),
             world_blob(profile),
-            world_blob(&visibility),
-            world_blob(world_digest(&world_bytes(&world_array(base_references))?)),
-            world_blob(world_digest(&world_bytes(&world_array(references))?)),
-            world_blob(world_digest(&world_bytes(&world_array(seals))?)),
+            self.bindings.query_scope.into(),
+            world_blob(primary_associations.root().cid().to_bytes()),
+            world_blob(bindings.root().cid().to_bytes()),
         ]))?;
         let logical_id = world_digest(&product);
         let source_path = self.directory.path().join("sources.bin");
@@ -1252,7 +1517,7 @@ impl CompilerWorldOpenInputs {
         let descriptor = self.directory.path().join("world.cbor");
         let encoded = world_bytes(&world_array(vec![
             world_text("TPCWORLD"),
-            2u64.into(),
+            3u64.into(),
             world_blob(&product),
             world_path(&source_path)?,
             world_blob(producer),
@@ -1270,6 +1535,7 @@ impl CompilerWorldOpenInputs {
             product: product.into(),
             primary_root,
             primary_blocks,
+            primary_associations,
             bindings,
             producer,
             profile,
@@ -1419,20 +1685,20 @@ fn ensure_world(
     Ok(realized)
 }
 
-/// Open exact published primary/source facts, then ask the actual service. The
-/// public handle is returned only after the service has accepted those facts.
+/// Acquire the exact published logical world independently of its next demand.
+/// Runtime source admission owns the current physical transaction and its END.
 pub fn open_world(
     cold: CompilerWorldOpenInputs,
     endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
-    question: PublicModuleQuestion,
-) -> Result<WorldQueryResult, CompileError> {
+) -> Result<Arc<CompilerWorld>, CompileError> {
     scoped_world_action(|| {
         let restoration = cold.prepare(endpoint)?;
         let world = Arc::new(CompilerWorld {
             restoration,
             realization: Arc::new(Mutex::new(None)),
         });
-        query_world_inner(endpoint.identity(), world, question)
+        ensure_world(&world, endpoint.identity())?;
+        Ok(world)
     })
 }
 
@@ -1446,6 +1712,536 @@ pub fn query_public_module(
     scoped_world_action(|| {
         query_world_inner(endpoint.identity(), Arc::new(world.clone()), question)
     })
+}
+
+/// Parse current authored input in the logical world. Source authority and
+/// physical END remain with the caller's runtime source compiler transaction.
+pub fn plan_cell(
+    endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+    world: &CompilerWorld,
+    recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+) -> Result<Arc<crate::cell_plan::CompilerWorldCellPlan>, CompileError> {
+    scoped_world_action(|| {
+        let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
+        let output = directory.path().join("cell-plan.cbor");
+        if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(&directory)) {
+            return Err(source_failure(
+                "world cell planning requires its compiler scope",
+            ));
+        }
+        let mut request = tidepool_extract_cmd::WorldCellPlanRequest {
+            world: world_hex(world.logical_id()),
+            realization: "not-resident".into(),
+            recipe: Arc::clone(&recipe),
+            output: output.clone(),
+        };
+        request
+            .validate_transport()
+            .map_err(|error| source_failure(error.to_string()))?;
+        request.realization = ensure_world(world, endpoint.identity())?;
+        let (mut command, bound) = world_command(endpoint.identity())?;
+        command
+            .world_cell_plan(request)
+            .map_err(|error| source_failure(error.to_string()))?;
+        let diagnostics =
+            crate::artifacts::CompilerDiagnosticCapture::start(directory.path(), &command);
+        let result = world_execute(&command, bound, Vec::new())?;
+        diagnostics.completed(
+            directory.path(),
+            &command,
+            result.success(),
+            &result.output.stderr,
+        );
+        crate::diag::decode_extract_result(
+            result.success(),
+            &result.output.stdout,
+            &result.output.stderr,
+        )?;
+        let receipt = crate::checked_cell::read(output, 8 << 20)?;
+        crate::cell_plan::admit_world_plan(
+            Arc::new(world.clone()),
+            recipe,
+            CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256(),
+            receipt,
+        )
+    })
+}
+
+/// Physical completion of one world-bound preparation. Only the existing
+/// artifacts certifier can turn these observations into checked item products.
+pub(crate) struct WorldCellOutputAdmission {
+    pub(crate) origin: tidepool_extract_cmd::CompilerTransactionOrigin,
+    pub(crate) reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
+    pub(crate) directory: Arc<tempfile::TempDir>,
+    pub(crate) observations: Arc<[u8]>,
+    pub(crate) items: Vec<ciborium::value::Value>,
+    pub(crate) common_files: BTreeMap<PathBuf, [u8; 32]>,
+    pub(crate) demanded_rows: Vec<Arc<CheckedValueArtifact>>,
+    pub(crate) captured_files: BTreeMap<PathBuf, WorldOutputFile>,
+    pub(crate) validation: crate::recovery_artifacts::PackageInterfaceValidation,
+}
+
+/// Bytes and their observed seal from the one named output acquisition. This
+/// carries physical custody, independently of semantic or native admission.
+pub(crate) struct WorldOutputFile {
+    bytes: Arc<[u8]>,
+    sha256: [u8; 32],
+}
+
+impl WorldOutputFile {
+    pub(crate) fn bytes(&self) -> &Arc<[u8]> {
+        &self.bytes
+    }
+    pub(crate) fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
+}
+
+/// Obtain the actual held-world completion. This is kept private to the
+/// artifact front door: parsing a completion cannot issue checked execution.
+pub(crate) fn prepare_world_cell_outputs(
+    endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+    reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
+) -> Result<Result<WorldCellOutputAdmission, WorldQueryRejection>, CompileError> {
+    scoped_world_action(|| {
+        let origin = tidepool_extract_cmd::CompilerTransactionOrigin::current()
+            .ok_or_else(|| source_failure("world cell preparation requires its compiler scope"))?;
+        let plan = reservation.plan();
+        if *plan.producer_sha256()
+            != CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256()
+        {
+            return Err(source_failure(
+                "world cell plan belongs to another compiler producer",
+            ));
+        }
+        let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
+        let output = directory.path().join("cell-prepared.cbor");
+        let world_id = world_hex(plan.world().logical_id());
+        tidepool_extract_cmd::WorldCellPrepareRequest::validate_borrowed(
+            &world_id,
+            "not-resident",
+            plan.recipe(),
+            plan.receipt(),
+            reservation
+                .slots()
+                .iter()
+                .enumerate()
+                .map(|(ordinal, slot)| {
+                    use crate::checked_cell::CheckedPlannedCellSlot as S;
+                    use tidepool_extract_cmd::PlannedCellSlotRef as P;
+                    (
+                        ordinal as u64,
+                        match slot {
+                            S::Prologue { declaration } => P::Prologue(*declaration),
+                            S::Declaration { declaration } => P::Declaration(*declaration),
+                            S::Bind { value } => P::Bind(*value),
+                            S::Expression {
+                                capture,
+                                observation_name,
+                            } => P::Expression {
+                                generation: *capture,
+                                observation: observation_name,
+                            },
+                        },
+                    )
+                }),
+            directory.path(),
+            &output,
+        )
+        .map_err(|error| source_failure(error.to_string()))?;
+        let mut request = tidepool_extract_cmd::WorldCellPrepareRequest {
+            world: world_id,
+            realization: "not-resident".into(),
+            recipe: plan.recipe_owned(),
+            plan: plan.receipt_owned(),
+            admission: *reservation.admission_digest(),
+            slots: world_cell_slots(&reservation),
+            directory: directory.path().to_path_buf(),
+            output: output.clone(),
+        };
+        // Source and parser receipt remain shared. Bound the actual frame
+        // before Ensure or transport encoding performs bulk allocation.
+        request
+            .validate_transport()
+            .map_err(|error| source_failure(error.to_string()))?;
+        if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(&directory)) {
+            return Err(source_failure(
+                "world cell preparation requires its compiler scope",
+            ));
+        }
+        request.realization = ensure_world(plan.world(), endpoint.identity())?;
+        let (mut command, bound) = world_command(endpoint.identity())?;
+        command
+            .world_cell_prepare(request)
+            .map_err(|error| source_failure(error.to_string()))?;
+        let diagnostics =
+            crate::artifacts::CompilerDiagnosticCapture::start(directory.path(), &command);
+        let run = world_execute(&command, bound, Vec::new())?;
+        diagnostics.completed(
+            directory.path(),
+            &command,
+            run.success(),
+            &run.output.stderr,
+        );
+        crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
+        let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let bytes = crate::certified_products::read_bounded_with_operation(
+            &output,
+            8 << 20,
+            &validation.inventory,
+        )
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        admit_world_preparation_response(origin, reservation, directory, &bytes, validation)
+    })
+}
+
+fn world_cell_slots(
+    reservation: &crate::cell_plan::CompilerWorldCellReservation,
+) -> Vec<(u64, tidepool_extract_cmd::PlannedCellSlot)> {
+    use crate::checked_cell::CheckedPlannedCellSlot as S;
+    use tidepool_extract_cmd::PlannedCellSlot as P;
+    reservation
+        .slots()
+        .iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            (
+                index as u64,
+                match slot {
+                    S::Prologue { declaration } => P::Prologue(*declaration),
+                    S::Declaration { declaration } => P::Declaration(*declaration),
+                    S::Bind { value } => P::Bind(*value),
+                    S::Expression {
+                        capture,
+                        observation_name,
+                    } => P::Expression {
+                        generation: *capture,
+                        observation: observation_name.clone(),
+                    },
+                },
+            )
+        })
+        .collect()
+}
+
+fn world_cell_generation(slot: &crate::checked_cell::CheckedPlannedCellSlot) -> u64 {
+    use crate::checked_cell::CheckedPlannedCellSlot as S;
+    match slot {
+        S::Prologue { declaration } | S::Declaration { declaration } => *declaration,
+        S::Bind { value } => *value,
+        S::Expression { capture, .. } => *capture,
+    }
+}
+
+fn world_output_manifest(
+    value: &ciborium::value::Value,
+    inventory: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<BTreeMap<PathBuf, [u8; 32]>, CompileError> {
+    let ciborium::value::Value::Array(entries) = value else {
+        return Err(world_response_error(false));
+    };
+    inventory
+        .charge_value_copies(value, 1)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let mut files = BTreeMap::new();
+    for entry in entries {
+        crate::host_work::checkpoint()?;
+        let entry = answer_array(entry, 2)?;
+        let path = PathBuf::from(answer_text(&entry[0])?);
+        relative_source_path(&path).map_err(|_| world_response_error(false))?;
+        if files.insert(path, answer_hash(&entry[1])?).is_some() {
+            return Err(world_response_error(false));
+        }
+    }
+    Ok(files)
+}
+
+fn world_output_symbol(
+    value: &ciborium::value::Value,
+) -> Result<tidepool_repr::execution_schema::SymbolIdentity, CompileError> {
+    let fields = answer_array(value, 5)?;
+    // ExecutionEncode's option codec is deliberately distinct from the
+    // nullable record-parent field in the persistent binding HAMT.
+    let parent = match &fields[4] {
+        ciborium::value::Value::Array(v) if v.len() == 1 && answer_u64(&v[0])? == 0 => None,
+        ciborium::value::Value::Array(v) if v.len() == 2 && answer_u64(&v[0])? == 1 => {
+            Some(answer_text(&v[1])?.to_owned())
+        }
+        _ => return Err(world_response_error(false)),
+    };
+    Ok(tidepool_repr::execution_schema::SymbolIdentity {
+        unit: answer_text(&fields[0])?.to_owned(),
+        module: answer_text(&fields[1])?.to_owned(),
+        namespace: answer_text(&fields[2])?.to_owned(),
+        occurrence: answer_text(&fields[3])?.to_owned(),
+        record_parent: parent,
+    })
+}
+
+fn admit_world_preparation_response(
+    origin: tidepool_extract_cmd::CompilerTransactionOrigin,
+    reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
+    directory: Arc<tempfile::TempDir>,
+    bytes: &[u8],
+    mut validation: crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Result<Result<WorldCellOutputAdmission, WorldQueryRejection>, CompileError> {
+    let packet = validation
+        .inventory
+        .decode_value(bytes, 8 << 20)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let fields = answer_array(&packet, 8)?;
+    let plan = reservation.plan();
+    let base = plan.world().logical_id();
+    let plan_digest = world_digest(plan.receipt());
+    if answer_text(&fields[0])? != "TPCWPREP2"
+        || answer_hash(&fields[1])? != *base
+        || answer_hash(&fields[2])? != plan_digest
+        || answer_hash(&fields[3])? != *reservation.admission_digest()
+    {
+        return Err(world_response_error(true));
+    }
+    let outcome = answer_array(&fields[4], 2)?;
+    if answer_text(&outcome[0])? == "rejected" {
+        if !answer_blob(&fields[5])?.is_empty()
+            || !answer_array(&fields[6], 0)?.is_empty()
+            || !answer_array(&fields[7], 0)?.is_empty()
+        {
+            return Err(world_response_error(false));
+        }
+        return Ok(Err(match answer_u64(&outcome[1])? {
+            0 => WorldQueryRejection::Unsupported,
+            1 => WorldQueryRejection::Unavailable,
+            2 => WorldQueryRejection::Corrupt,
+            _ => return Err(world_response_error(false)),
+        }));
+    }
+    if answer_text(&outcome[0])? != "prepared" {
+        return Err(world_response_error(false));
+    }
+    let completed = answer_array(&outcome[1], reservation.slots().len())?;
+    validation
+        .inventory
+        .reserve::<ciborium::value::Value>(completed.len())
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let mut items = Vec::with_capacity(completed.len());
+    let mut captured_files = BTreeMap::new();
+    for (index, (completed, slot)) in completed.iter().zip(reservation.slots()).enumerate() {
+        crate::host_work::checkpoint()?;
+        let completed = answer_array(completed, 3)?;
+        if answer_u64(&completed[0])? != index as u64
+            || answer_u64(&completed[1])? != world_cell_generation(slot)
+        {
+            return Err(world_response_error(true));
+        }
+        let item_path = PathBuf::from(format!("item-{index}/world-item.cbor"));
+        let item_bytes = crate::certified_products::read_bounded_with_operation(
+            &directory.path().join(&item_path),
+            4 << 20,
+            &validation.inventory,
+        )
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        validation
+            .inventory
+            .charge(item_bytes.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        if world_digest(&item_bytes) != answer_hash(&completed[2])? {
+            return Err(world_response_error(true));
+        }
+        let item = validation
+            .inventory
+            .decode_value(&item_bytes, 4 << 20)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let observed = answer_array(&item, 13)?;
+        if answer_text(&observed[0])? != "TPCWITEM1"
+            || answer_hash(&observed[1])? != *base
+            || answer_hash(&observed[2])? != plan_digest
+            || answer_hash(&observed[3])? != *reservation.admission_digest()
+            || answer_u64(&observed[4])? != index as u64
+            || answer_u64(&observed[5])? != world_cell_generation(slot)
+            || answer_hash(&observed[7])? != world_digest(plan.items()[index].source().as_bytes())
+        {
+            return Err(world_response_error(true));
+        }
+        validation
+            .inventory
+            .charge_value_copies(&observed[9], 1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        world_output_symbol(&observed[9])?;
+        let manifest = world_output_manifest(&observed[12], &validation.inventory)?;
+        for (path, digest) in manifest {
+            validation
+                .inventory
+                .charge(path.as_os_str().len() + 32)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            capture_world_output(
+                &directory,
+                PathBuf::from(format!("item-{index}")).join(path),
+                digest,
+                &mut captured_files,
+                &mut validation,
+            )?;
+        }
+        validation
+            .inventory
+            .reserve::<(PathBuf, WorldOutputFile)>(1)
+            .and_then(|_| validation.inventory.charge(item_bytes.len()))
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        captured_files.insert(
+            item_path,
+            WorldOutputFile {
+                bytes: item_bytes.into(),
+                sha256: answer_hash(&completed[2])?,
+            },
+        );
+        items.push(item);
+    }
+    let ciborium::value::Value::Array(input_refs) = &fields[6] else {
+        return Err(world_response_error(false));
+    };
+    let world = plan.world();
+    validation
+        .inventory
+        .charge_value_copies(&fields[6], 1)
+        .and_then(|_| {
+            validation
+                .inventory
+                .reserve::<(String, Arc<CheckedValueArtifact>)>(input_refs.len())
+        })
+        .and_then(|_| validation.inventory.reserve::<&str>(input_refs.len()))
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let mut demanded = BTreeMap::<String, Arc<CheckedValueArtifact>>::new();
+    let mut occurrences = std::collections::BTreeSet::new();
+    for input in input_refs {
+        crate::host_work::checkpoint()?;
+        let input = answer_array(input, 6)?;
+        let occurrence = answer_text(&input[0])?;
+        if !occurrences.insert(occurrence) {
+            return Err(world_response_error(true));
+        }
+        let actual = world
+            .restoration
+            .inputs
+            .bindings
+            .entries
+            .get(occurrence)
+            .ok_or_else(|| world_response_error(true))?;
+        if world_output_symbol(&input[1])? != actual.symbol
+            || answer_u64(&input[2])? != actual.session_var.raw()
+            || answer_u64(&input[3])? != actual.defining_scope
+            || answer_u64(&input[4])? != actual.row.owner().gen.0
+        {
+            return Err(world_response_error(true));
+        }
+        // The service returns the exact root-bound row fact, not a caller's
+        // module/image guess or a fresh certificate.
+        let row =
+            cid::Cid::try_from(answer_blob(&input[5])?).map_err(|_| world_response_error(false))?;
+        let expected = world
+            .restoration
+            .bindings
+            .facts()
+            .get(occurrence)
+            .ok_or_else(|| world_response_error(true))?;
+        if row != expected.4 {
+            return Err(world_response_error(true));
+        }
+        // The canonical session module renderer uses a fixed prefix and at
+        // most twenty decimal generation digits.
+        validation
+            .inventory
+            .charge(64)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        match demanded.entry(actual.row.owner().module_name()) {
+            std::collections::btree_map::Entry::Occupied(old)
+                if !old.get().same_world_type_row(&actual.row) =>
+            {
+                return Err(world_response_error(true))
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {}
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Arc::clone(&actual.row));
+            }
+        }
+    }
+    let common_files = world_output_manifest(&fields[7], &validation.inventory)?;
+    for (path, digest) in &common_files {
+        validation
+            .inventory
+            .charge(path.as_os_str().len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        capture_world_output(
+            &directory,
+            path.clone(),
+            *digest,
+            &mut captured_files,
+            &mut validation,
+        )?;
+    }
+    validation
+        .inventory
+        .charge_value_copies(&fields[5], 1)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    validation
+        .inventory
+        .reserve::<Arc<CheckedValueArtifact>>(demanded.len())
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    Ok(Ok(WorldCellOutputAdmission {
+        origin,
+        reservation,
+        directory,
+        observations: Arc::from(answer_blob(&fields[5])?),
+        items,
+        common_files,
+        captured_files,
+        validation,
+        demanded_rows: demanded.into_values().collect(),
+    }))
+}
+
+fn capture_world_output(
+    root: &tempfile::TempDir,
+    relative: PathBuf,
+    digest: [u8; 32],
+    files: &mut BTreeMap<PathBuf, WorldOutputFile>,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Result<(), CompileError> {
+    relative_source_path(&relative).map_err(|_| world_response_error(false))?;
+    if files.contains_key(&relative) {
+        return Err(world_response_error(false));
+    }
+    validation
+        .inventory
+        .reserve::<(PathBuf, WorldOutputFile)>(1)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    validation
+        .inventory
+        .charge(root.path().as_os_str().len() + relative.as_os_str().len() + 1)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let path = root.path().join(&relative);
+    let bytes = crate::certified_products::read_bounded_with_operation(
+        &path,
+        validation.inventory.limits().max_bytes as u64,
+        &validation.inventory,
+    )
+    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+    validation
+        .inventory
+        .charge(bytes.len().checked_mul(2).ok_or_else(source_size_failure)?)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    if world_digest(&bytes) != digest {
+        return Err(world_response_error(true));
+    }
+    validation
+        .record_captured_bytes(&path, &bytes)
+        .map_err(|error| source_failure(error.to_string()))?;
+    files.insert(
+        relative,
+        WorldOutputFile {
+            bytes: bytes.into(),
+            sha256: digest,
+        },
+    );
+    Ok(())
 }
 
 fn query_world_inner(
@@ -2123,12 +2919,106 @@ mod answer_tests {
                 symbol.4.as_ref().unwrap().len(),
             )
             .unwrap();
-            facts.insert(occurrence, (symbol, index, index, row));
+            facts.insert(occurrence, (symbol, index, index, index, row));
         }
         materializer.materialize_map(None, &facts).unwrap();
         let staged = materializer.finish().unwrap();
         assert!(staged.metrics().staged_bytes <= bound);
     }
+    #[test]
+    fn primary_associations_preserve_scoped_bindings_and_bound_actual_staging() {
+        use crate::artifact_inventory::{ArtifactId, ArtifactSelectionId};
+        use fvm_ipld_blockstore::Blockstore;
+        let requires = vec![crate::declaration_join::ExactModuleIdentity {
+            unit: "dependency-unit".repeat(8),
+            module: "Dependency.Module".repeat(8),
+        }];
+        let semantic = world_array(vec![
+            world_text("main"),
+            world_text("Owner"),
+            world_blob([1; 32]),
+            world_blob([2; 32]),
+            world_text("module"),
+            world_array(vec![world_array(vec![
+                world_text(&requires[0].unit),
+                world_text(&requires[0].module),
+            ])]),
+        ]);
+        let store = fvm_ipld_blockstore::MemoryBlockstore::new();
+        let mut materializer = Materializer::new(&store);
+        let mut facts = imbl::OrdMap::new();
+        let mut scoped_roots = Vec::new();
+        let estimate = primary_association_metadata_bound("main", "Owner", &requires).unwrap();
+        for index in 0..128u8 {
+            let interface = ArtifactBinding {
+                artifact: ArtifactId([3; 32]),
+                selection: ArtifactSelectionId([index; 32]),
+            };
+            let original = ArtifactBinding {
+                artifact: ArtifactId([4; 32]),
+                ..interface
+            };
+            let fact = materialize_primary_association(
+                &mut materializer,
+                &interface,
+                Some(&original),
+                &semantic,
+            )
+            .unwrap();
+            facts.insert(original, fact);
+            if index < 2 {
+                let mut one = imbl::OrdMap::new();
+                one.insert(original, fact);
+                scoped_roots.push(
+                    *materializer
+                        .materialize_map(None, &one)
+                        .unwrap()
+                        .root()
+                        .cid(),
+                );
+            }
+        }
+        assert_ne!(
+            scoped_roots[0], scoped_roots[1],
+            "equal images cannot erase acquisition scopes"
+        );
+        let root = materializer.materialize_map(None, &facts).unwrap();
+        let staged = materializer.finish().unwrap();
+        assert!(staged.metrics().staged_bytes <= 128 * estimate + 128);
+        for (cid, body) in staged.blocks() {
+            store.put_keyed(cid, body).unwrap();
+        }
+        let bytes = store.get(root.root().cid()).unwrap().unwrap();
+        assert!(!bytes.is_empty());
+        let first = *facts.iter().next().unwrap().1;
+        let value: ciborium::value::Value =
+            ciborium::de::from_reader(store.get(&first).unwrap().unwrap().as_slice()).unwrap();
+        let fields = value.as_array().unwrap();
+        assert_eq!(fields[0].as_text(), Some("TPCWPRIMARY1"));
+        assert_eq!(&fields[3], &semantic);
+        assert!(primary_association_metadata_bound("main", "Owner", &[]).unwrap() < estimate);
+    }
+
+    #[test]
+    fn empty_context_parcel_uses_production_primary_association_writer() {
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .admit_producer([7; 32])
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let encoded = world_context_fixture(&context, directory.path()).unwrap();
+        let parcel: ciborium::value::Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let fields = parcel.as_array().unwrap();
+        assert_eq!(fields.len(), 5);
+        assert!(fields[2].as_array().unwrap().is_empty());
+        let blocks = fields[4].as_array().unwrap();
+        for root in &fields[..2] {
+            assert!(blocks
+                .iter()
+                .any(|block| &block.as_array().unwrap()[0] == root));
+        }
+    }
+
     #[test]
     fn world_identifier_namespace_is_checked_beyond_question_echo() {
         use InspectionNamespace as N;
@@ -2151,5 +3041,53 @@ mod answer_tests {
         })
         .is_err());
         assert!(!reached.get());
+    }
+
+    #[test]
+    fn world_output_capture_retains_authenticated_bytes_and_refuses_changed_products() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("product.cbor");
+        let original = b"actual compiler product";
+        std::fs::write(&path, original).unwrap();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut files = BTreeMap::new();
+        capture_world_output(
+            &directory,
+            "product.cbor".into(),
+            world_digest(original),
+            &mut files,
+            &mut validation,
+        )
+        .unwrap();
+        std::fs::write(&path, b"changed after capture").unwrap();
+        assert_eq!(&**files[Path::new("product.cbor")].bytes(), original);
+        assert_eq!(
+            *files[Path::new("product.cbor")].sha256(),
+            world_digest(original)
+        );
+        assert!(capture_world_output(
+            &directory,
+            "product.cbor".into(),
+            world_digest(original),
+            &mut files,
+            &mut validation
+        )
+        .is_err());
+        assert!(capture_world_output(
+            &directory,
+            "product.cbor".into(),
+            world_digest(original),
+            &mut BTreeMap::new(),
+            &mut validation
+        )
+        .is_err());
+        assert!(capture_world_output(
+            &directory,
+            "../product.cbor".into(),
+            world_digest(original),
+            &mut BTreeMap::new(),
+            &mut validation
+        )
+        .is_err());
     }
 }

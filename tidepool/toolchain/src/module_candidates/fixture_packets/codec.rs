@@ -372,7 +372,7 @@ fn source_boot_codec_packet_producer() {
                 .try_into()
                 .expect("context fixture producer length");
             let context = super::empty_fixture_scope(producer);
-            let encoded = super::materialize_fixture_context(&context);
+            let encoded = super::materialize_fixture_context(&context, &root);
             let output = root.join("world-context-blocks.cbor");
             tidepool_atomic_write::write_best_effort(&output, &encoded).unwrap();
             output

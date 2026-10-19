@@ -65,7 +65,7 @@ module Tidepool.Session
   , mkThinSessionIfaceWithFixities
   , writeSessionIface
   , injectSessionIface
-  , injectSessionIfaceWithBindings
+  , injectSessionIfaceWithBindings, injectCapturedSessionIfaceWithBindings
   , injectSessionScope, registerSessionInterfaceLocation
   , CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence, capturedSessionInterfaceBody, capturedSessionInterfaceEvidenceBodies
   , injectSessionScopeWithCaptures
@@ -137,6 +137,9 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Char (isDigit)
 import Data.List (isPrefixOf, stripPrefix, nub, sort)
 import Data.Word (Word64)
+import qualified Data.Text as Text
+import Codec.CBOR.Encoding (encodeListLen, encodeString)
+import Codec.CBOR.Write (toStrictByteString)
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeFile, doesFileExist)
 import System.IO (openBinaryTempFile, hClose, hIsClosed)
 import System.FilePath (takeDirectory, (</>), (<.>))
@@ -377,15 +380,61 @@ injectSessionIfaceWithCapture root sm hsc0 = do
 injectSessionIfaceWithBindings :: FilePath -> SessionModule -> HscEnv
   -> IO (HscEnv, [Id], CapturedSessionInterface)
 injectSessionIfaceWithBindings root sm hsc0 = do
-  let homeU = hsc_home_unit hsc0
-      modNm = renderSessionModule sm
-      theMod = mkModule (homeUnitAsUnit homeU) modNm
-      path = sessionHiPath root sm
+  let path = sessionHiPath root sm
+  bytes <- readSelected (32 * 1024 * 1024) path
+  (hydrated,identifiers,owner) <- injectSessionBody sm hsc0 (captureArtifactBytes bytes)
+  packageExists <- doesFileExist (path ++ ".packages")
+  requirementsExist <- doesFileExist (path ++ ".requirements")
+  evidence <- if not packageExists && not requirementsExist then pure Nothing else do
+    unless (packageExists && requirementsExist)
+      (fail "selected session interface has incomplete value evidence")
+    packages <- readSelected (4 * 1024 * 1024) (path ++ ".packages")
+    requirements <- readSelected (4 * 1024 * 1024) (path ++ ".requirements")
+    pure (Just (captureArtifactBytes packages,captureArtifactBytes requirements,sessionNominalOwners hydrated identifiers))
+  pure (hydrated,identifiers,CapturedSessionInterface owner (captureArtifactBytes bytes) evidence)
+  where
+    readSelected limit path = do
+      bytes <- readFileAtMost path (limit + 1)
+      unless (not (BS.null bytes) && BS.length bytes <= limit)
+        (fail "selected session value payload exceeds bounds or is empty")
+      pure bytes
+
+-- The closed world reader supplies authenticated interface/package tokens and
+-- its exact nominal requirements. This issues type-input custody only; runtime
+-- value permission and original/native certification retain their own owners.
+injectCapturedSessionIfaceWithBindings :: SessionModule -> ArtifactBytes -> ArtifactBytes
+  -> [(String,String)] -> HscEnv -> IO (HscEnv,[Id],CapturedSessionInterface)
+injectCapturedSessionIfaceWithBindings sm body packages required hsc0 = do
+  unless (smKind sm == ValMod && not (BS.null (artifactBytes packages))
+      && BS.length (artifactBytes packages) <= 4 * 1024 * 1024)
+    (fail "captured session value has another owner or invalid package evidence")
+  (hydrated,identifiers,owner) <- injectSessionBody sm hsc0 body
+  let actual = sessionNominalOwners hydrated identifiers
+  unless (required == actual)
+    (fail "captured session value nominal requirements differ from its hydrated types")
+  let requirements = captureArtifactBytes (toStrictByteString
+        (encodeListLen (fromIntegral (length actual))
+          <> foldMap (\(unit,name) -> encodeListLen 2 <> encodeString (Text.pack unit) <> encodeString (Text.pack name)) actual))
+  pure (hydrated,identifiers,CapturedSessionInterface owner body (Just (packages,requirements,actual)))
+
+sessionNominalOwners :: HscEnv -> [Id] -> [(String,String)]
+sessionNominalOwners env identifiers = sort . nub $
+  [(unitString (moduleUnit owner),moduleNameString (moduleName owner))
+  | binder <- identifiers,constructor <- nonDetEltsUniqSet (tyConsOfType (idType binder))
+  , Just owner <- [nameModule_maybe (tyConName constructor)]
+  , moduleUnit owner == homeUnitAsUnit (hsc_home_unit env)]
+
+-- Both path and captured input consumers decode through this one owner. The
+-- installed interface and returned capture consume the same immutable bytes.
+injectSessionBody :: SessionModule -> HscEnv -> ArtifactBytes -> IO (HscEnv,[Id],Module)
+injectSessionBody sm hsc0 body = do
+  let modNm = renderSessionModule sm
+      theMod = mkModule (homeUnitAsUnit (hsc_home_unit hsc0)) modNm
+      bytes = artifactBytes body
+  unless (not (BS.null bytes) && BS.length bytes <= 32 * 1024 * 1024)
+    (fail "selected session value payload exceeds bounds or is empty")
   timing <- readTimingEnabled
   emitCount timing ("session_iface_decode_reads." ++ sessionModuleString sm) 1
-  bytes <- readSelected (32 * 1024 * 1024) path
-  -- Decode a private copy so the snapshot and the installed interface cannot
-  -- disagree if the mutable session file changes during or after injection.
   temporary <- getTemporaryDirectory
   readRes <- bracket (openBinaryTempFile temporary "tidepool-session-iface.hi")
     (\(capturedPath, handle) -> do
@@ -397,43 +446,13 @@ injectSessionIfaceWithBindings root sm hsc0 = do
       hClose handle
       readIface (hsc_dflags hsc0) (hsc_NC hsc0) theMod capturedPath)
   case readRes of
-    MErr.Failed err ->
-      ioError (userError ("injectSessionIface: readIface failed for "
-                          ++ sessionModuleString sm ++ " at " ++ path
-                          ++ ": " ++ showSDocUnsafe
-                               (readInterfaceErrorDiagnostic err)))
+    MErr.Failed err -> ioError (userError ("injectSessionIface: readIface failed for "
+      ++ sessionModuleString sm ++ ": " ++ showSDocUnsafe (readInterfaceErrorDiagnostic err)))
     MErr.Succeeded iface -> do
-      unless (mi_module iface == theMod) $
-        ioError (userError "injectSessionIface: captured interface has another owner")
-      details <- injectDetails hsc0 modNm iface
+      unless (mi_module iface == theMod) (fail "injectSessionIface: captured interface has another owner")
+      details <- initIfaceCheck (text "tidepool session inject") hsc0 (typecheckIface iface)
       let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
-          hsc1 = hscUpdateHPT (addHomeModInfoToHpt hmi) hsc0
-      packageExists <- doesFileExist (path ++ ".packages")
-      requirementsExist <- doesFileExist (path ++ ".requirements")
-      evidence <- if not packageExists && not requirementsExist then pure Nothing else do
-        unless (packageExists && requirementsExist)
-          (fail "selected session interface has incomplete value evidence")
-        packages <- readSelected (4 * 1024 * 1024) (path ++ ".packages")
-        requirements <- readSelected (4 * 1024 * 1024) (path ++ ".requirements")
-        let home = homeUnitAsUnit homeU
-            nominalOwners = sort . nub $
-              [(unitString (moduleUnit owner),moduleNameString (moduleName owner))
-              | binder <- typeEnvIds (md_types details)
-              , constructor <- nonDetEltsUniqSet (tyConsOfType (idType binder))
-              , Just owner <- [nameModule_maybe (tyConName constructor)]
-              , moduleUnit owner == home]
-        pure (Just (packages,requirements,nominalOwners))
-      pure (hsc1, typeEnvIds (md_types details), CapturedSessionInterface theMod (captureArtifactBytes bytes)
-        (fmap (\(packages,requirements,owners) -> (captureArtifactBytes packages,captureArtifactBytes requirements,owners)) evidence))
-  where
-    readSelected limit path = do
-      bytes <- readFileAtMost path (limit + 1)
-      unless (not (BS.null bytes) && BS.length bytes <= limit)
-        (fail "selected session value payload exceeds bounds or is empty")
-      pure bytes
-    injectDetails :: HscEnv -> ModuleName -> ModIface -> IO ModDetails
-    injectDetails hsc _ iface =
-      initIfaceCheck (text "tidepool session inject") hsc (typecheckIface iface)
+      pure (hscUpdateHPT (addHomeModInfoToHpt hmi) hsc0,typeEnvIds (md_types details),theMod)
 
 -- Register a source-less owner after its exact interface has been installed.
 -- This changes only the finder location; it never reads or grants interface

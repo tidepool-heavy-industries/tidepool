@@ -57,9 +57,9 @@ pub use request::{
     CompileWorkload, EnsureExactInputsOutcome, ExactInputsAcquisition, ExactInputsRejection,
     ExactInputsRequest, ExactNameInspection, ExtractRequest, HostedLookupBatch,
     HostedLookupDiscovery, HostedLookupOperation, HostedLookupQuery, InspectionNamespace,
-    InspectionScope, LookupNameInspection, LookupNameMode, PlannedCellSlot, ProtocolError,
-    StructuredInspection, SymbolIdentity, WorldCellPlanRequest, WorldCellPrepareRequest,
-    WorldCellRecipe, WorldPublicModuleRequest, WorldQueryMode,
+    InspectionScope, LookupNameInspection, LookupNameMode, PlannedCellSlot, PlannedCellSlotRef,
+    ProtocolError, StructuredInspection, SymbolIdentity, WorldCellPlanRequest,
+    WorldCellPrepareRequest, WorldCellRecipe, WorldPublicModuleRequest, WorldQueryMode,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.
@@ -965,11 +965,11 @@ mod tests {
         let refused = command.world_cell_plan(WorldCellPlanRequest {
             world: "a".repeat(64),
             realization: "held".into(),
-            recipe: WorldCellRecipe {
+            recipe: std::sync::Arc::new(WorldCellRecipe {
                 source: "pure ()".into(),
                 template: "template".into(),
                 turn_templates: vec![],
-            },
+            }),
             output: "plan.cbor".into(),
         });
         assert!(matches!(refused, Err(ProtocolError::InvalidWorldCell)));

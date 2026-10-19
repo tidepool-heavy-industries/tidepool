@@ -3,15 +3,15 @@
 module Main where
 
 import System.Environment (getArgs)
-import System.FilePath (takeBaseName, takeDirectory, (</>))
-import System.Directory (createDirectoryIfMissing, setCurrentDirectory)
+import System.FilePath (takeBaseName, takeDirectory, (</>), isAbsolute, makeRelative, splitDirectories)
+import System.Directory (createDirectoryIfMissing, setCurrentDirectory, canonicalizePath)
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Char (digitToInt, intToDigit)
 import qualified Data.ByteString.Lazy as BL
 import qualified Codec.CBOR.Decoding as CD
 import Codec.CBOR.Read (deserialiseFromBytes)
-import Codec.CBOR.Encoding (Encoding, encodeBytes, encodeListLen, encodeString, encodeWord64, encodeWord32, encodeNull)
+import Codec.CBOR.Encoding (Encoding, encodeBytes, encodeListLen, encodeString, encodeWord64, encodeWord32, encodeNull, encodeBool)
 import Codec.CBOR.Write (toStrictByteString)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -69,6 +69,7 @@ import Tidepool.GhcPipeline
   , withResidentCompilerScopes, checkCellInstances
   , captureSupportedPackageProfile
   , scopedEnsureWorld, WorldCellRefusal(..), WorldModulePolicyFailure(..)
+  , worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
 import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes, encodeSymbol)
@@ -77,7 +78,7 @@ import Tidepool.CompilerProducts
   , PreparedProductContext
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
-  , stagedOriginalEntryOrdinal, stagedFinalizedArtifacts
+  , stagedOriginalEntryOrdinal, stagedFinalizedArtifacts, stagedOriginalOutputFiles
   , retainStagedProgramProducts, publishStagedOriginalProducts
   , exactProgramProductVersionFromDigest, retainProgramProducts, programLexicalRequirements, programSourceRequirements )
 import Tidepool.ExecutionProjection (preparedRootIdentity)
@@ -164,7 +165,7 @@ import Tidepool.TurnSource
   , generatedScaffoldModuleName, renameScaffoldModuleHeader
   , captureCompilerDefaultRecipe, qualifyCompilerDefaultWithLineOffset, preambleImportMarker )
 import Tidepool.DependencyEvidence
-  ( validateDependencyEvidence, writeDependencyEvidence )
+  ( validateDependencyEvidence, writeDependencyEvidence, renderDependencyQualifier )
 import Tidepool.PackageWitness (requireObservationPackageEnvironment)
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
@@ -947,24 +948,25 @@ runCellPlanMode parserFlags args cellPath = do
   either throwIO (const (pure [])) result
 
 -- This initial slice performs actual whole-segment inference/output emission
--- for an empty primary/binding base. Other bases receive an explicit typed
--- refusal until their exact Context/alias resolver is available. It never
+-- for an empty primary base and exact checked-value aliases whose types need
+-- only fixed packages. Other type closures receive an explicit typed refusal.
+-- It never
 -- constructs an ExactScope or publishes a runtime world during compilation.
 runWorldCellPrepareMode :: BoundCompilerRequest -> WorldCellPrepareRequest -> IO [Diag]
 runWorldCellPrepareMode bound question = do
   admitted <- validateBoundWorldCell bound
   case admitted of
-    Left refusal -> writeResult (Left refusal) BS.empty
+    Left refusal -> writeResult (Left refusal) BS.empty [] []
     Right initial
-      | null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "")
+      | null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "") [] []
       | otherwise -> do
           attempted <- trySynchronous (prepareSegment initial)
           case attempted of
-            Right (items,observations) -> writeResult (Right items) observations
+            Right (items,observations,inputs,common) -> writeResult (Right items) observations inputs common
             Left failure -> case fromException failure of
-              Just refusal -> writeResult (Left refusal) BS.empty
+              Just refusal -> writeResult (Left refusal) BS.empty [] []
               Nothing -> case fromException failure of
-                Just (WorldModulePolicyFailure _ _) -> writeResult (Left WorldCellUnsupported) BS.empty
+                Just (WorldModulePolicyFailure _ _) -> writeResult (Left WorldCellUnsupported) BS.empty [] []
                 Nothing -> throwIO failure
   pure []
   where
@@ -981,15 +983,21 @@ runWorldCellPrepareMode bound question = do
     refusalTag WorldCellUnsupported = 0
     refusalTag WorldCellUnavailable = 1
     refusalTag WorldCellCorrupt = 2
-    writeResult outcome observations = BS.writeFile (worldCellPrepareOutput question) $
-      toStrictByteString (encodeListLen 6 <> text "TPCWPREP1" <> encodeBytes base
+    writeResult outcome observations inputs common = BS.writeFile (worldCellPrepareOutput question) $
+      toStrictByteString (encodeListLen 8 <> text "TPCWPREP2" <> encodeBytes base
         <> encodeBytes planDigest <> encodeBytes admission
         <> (case outcome of
           Left refusal -> encodeListLen 2 <> text "rejected" <> encodeWord64 (refusalTag refusal)
           Right items -> encodeListLen 2 <> text "prepared" <> encodeListLen (fromIntegral (length items))
             <> foldMap (\(ordinal,generation,sha) -> encodeListLen 3 <> encodeWord64 ordinal
               <> encodeWord64 generation <> encodeBytes sha) items)
-        <> encodeBytes observations)
+        <> encodeBytes observations
+        <> encodeListLen (fromIntegral (length inputs))
+        <> foldMap (\(occurrence,symbol,variable,scope,generation,row) -> encodeListLen 6
+            <> text occurrence <> encodeSymbol symbol <> encodeWord64 variable <> encodeWord64 scope
+            <> encodeWord64 generation <> encodeBytes row) inputs
+        <> encodeListLen (fromIntegral (length common))
+        <> foldMap (\(path,sha) -> encodeListLen 2 <> text path <> encodeBytes sha) common)
     prepareSegment initial = do
       createDirectoryIfMissing True directory
       preparedBatch <- newIORef Nothing
@@ -1054,8 +1062,12 @@ runWorldCellPrepareMode bound question = do
               ++ occNameString (nameOccName (idName (typedCaptureIdentifier capture)))) (typedCaptureType capture)
         pure (plannedItemOrdinal (typedItemPlan item),signatures)
       originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared directory
-      let generations = Map.fromList [(preparedRootIdentity global,generation)
+      let producedGenerations = Map.fromList [(preparedRootIdentity global,generation)
             | (global,generation) <- typedSegmentSessionRetainedGlobals batch]
+          retainedGenerations = maybe Map.empty worldCellRetainedGenerations (preparedCompilationWorldInputs completion)
+      unless (Map.null (Map.intersection producedGenerations retainedGenerations))
+        (throwIO WorldCellCorrupt)
+      let generations = Map.union producedGenerations retainedGenerations
       (artifacts,context) <- prepareArtifacts originalInterfaces directory completion targets (standardAuxiliaryRoots binds)
         generations (typedSegmentSessionBindingRepresentations batch)
       unless (length artifacts == length items && length items == length (cellPlanItems finalized))
@@ -1111,6 +1123,39 @@ runWorldCellPrepareMode bound question = do
       -- Nothing here adopts a runtime value or updates an actor-current world.
       _ <- publishStagedOriginalProducts prepared staged
       validateDependencyEvidence (preparedFreshDependencies prepared)
+      inputFacts <- maybe (fail "world cell completion lost its actual input basis") pure
+        (preparedCompilationWorldInputs completion)
+      let (sourcePath,sourceSha) = worldCellSourceSnapshot inputFacts
+          commonWrites = (sourcePath,sourceSha)
+            : [(path,rawWorldID sha) | (path,sha) <- stagedOriginalOutputFiles staged]
+      owner <- canonicalizePath directory
+      common <- forM commonWrites $ \(path,sha) -> do
+        actual <- canonicalizePath path
+        let relative = makeRelative owner actual
+        unless (not (isAbsolute relative) && not (null relative)
+            && all (`notElem` [".",".."]) (splitDirectories relative) && BS.length sha == 32)
+          (throwIO WorldCellCorrupt)
+        pure (relative,sha)
+      let sourceName = makeRelative owner sourcePath
+          fileRef name = case lookup name common of
+            Just sha -> encodeListLen 2 <> text name <> encodeBytes sha
+            Nothing -> error "world source receipt lacks its actual common output"
+          importRow (qualifier,name,boot,unit) = encodeListLen 4
+            <> text (renderDependencyQualifier qualifier) <> text name <> encodeBool boot <> text unit
+          moduleRow ((unit,name,boot),edges) = encodeListLen 4
+            <> text unit <> text name <> encodeBool boot
+            <> encodeListLen (fromIntegral (length edges)) <> foldMap importRow edges
+          sourceEnvelope = toStrictByteString (encodeListLen 10 <> text "TPCWSOURCE1"
+            <> encodeBytes base <> encodeBytes planDigest <> encodeBytes admission
+            <> text (typedSegmentPlanDigest typedPlan)
+            <> fileRef sourceName <> fileRef "dependencies.json" <> fileRef "module-package-imports.cbor"
+            <> encodeListLen (fromIntegral (length (worldCellExactImports inputFacts)))
+            <> foldMap moduleRow (worldCellExactImports inputFacts)
+            -- The compiler entry has checked the exact primary-empty basis.
+            -- This is no source-original selection receipt for another world.
+            <> encodeListLen 2 <> encodeListLen 0 <> encodeNull)
+          sourceReceiptName = "world-source.cbor"
+      BS.writeFile (directory </> sourceReceiptName) sourceEnvelope
       let observations = [CellExpressionPlan (plannedItemEntry (typedItemPlan item))
             (case typedObservationLift observation of PureObservation -> ExpressionPure; EffectfulObservation -> ExpressionEffectful)
             (showSDoc (hsc_dflags (prHscEnv result)) (ppr (typedObservationValueType observation)))
@@ -1118,7 +1163,8 @@ runWorldCellPrepareMode bound question = do
             | item <- items,Just observation <- [typedItemObservation item]]
           prefix = recordTypedSegment finalized typedPlan observations (concatMap snd signaturesByItem) rendered
             (initialProgramCellState (cellPlanPrologue initial) (worldCellPrepareIdentity question,planDigest) Map.empty)
-      pure (descriptions,encodeCellOut finalized [] (programObservations prefix) (concat (programSources prefix)))
+      pure (descriptions,encodeCellOut finalized [] (programObservations prefix) (concat (programSources prefix))
+        ,worldCellInputReferences inputFacts,(sourceReceiptName,SHA256.hash sourceEnvelope):common)
     rawWorldID [] = BS.empty
     rawWorldID (a:b:rest) = BS.cons (fromIntegral (16 * digitToInt a + digitToInt b)) (rawWorldID rest)
     rawWorldID _ = error "world identity left its admitted shape"
