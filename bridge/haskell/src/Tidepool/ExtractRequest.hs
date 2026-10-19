@@ -4,6 +4,7 @@
 module Tidepool.ExtractRequest
   ( CompileWorkload(..)
   , ExactInputsRequest(..), ExactInputsAcquisition(..)
+  , WorldPublicModuleRequest(..), WorldQueryMode(..)
   , EnsureExactInputsOutcome(..), ExactInputsRejection(..), encodeEnsureExactInputsOutcomeWithin
   , RequestField(..)
   , HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), HostedLookupDiscovery(..)
@@ -48,12 +49,35 @@ data ExactInputsAcquisition = ResidentExactInputs String | CompleteExactInputs F
 
 validExactInputsRequest :: ExactInputsRequest -> Bool
 validExactInputsRequest (ExactInputsRequest root acquisition) = valid root && case acquisition of
-  ResidentExactInputs reference -> valid reference
-  CompleteExactInputs manifest -> valid manifest
-  where valid value = not (null value) && '\0' `notElem` value
+  ResidentExactInputs reference -> validReference reference
+  CompleteExactInputs manifest -> validReference manifest
+  where valid = validWorldIdentity
+
+validWorldIdentity :: String -> Bool
+validWorldIdentity value = length value == 64 && all (\c -> c >= '0' && c <= '9' || c >= 'a' && c <= 'f') value
+
+validReference :: String -> Bool
+validReference value = not (null value) && '\0' `notElem` value
+
+data WorldQueryMode = WorldStructuredInfo | WorldStructuredType deriving (Eq, Show)
+
+data WorldPublicModuleRequest = WorldPublicModuleRequest
+  { worldQueryIdentity :: String
+  , worldQueryRealization :: String
+  , worldQueryMode :: WorldQueryMode
+  , worldQueryInspection :: StructuredInspection
+  , worldQueryOutput :: FilePath
+  } deriving (Eq, Show)
+
+validWorldPublicModuleRequest :: WorldPublicModuleRequest -> Bool
+validWorldPublicModuleRequest request = validWorldIdentity (worldQueryIdentity request)
+  && validReference (worldQueryRealization request) && validReference (worldQueryOutput request)
+  && case structuredScope (worldQueryInspection request) of
+    StructuredPublicModule name -> validReference name
+    StructuredCurrentScope -> False
 
 data EnsureExactInputsOutcome
-  = ExactInputsReady String
+  = ExactInputsReady String String
   | ExactInputsNeedsAcquisition String
   | ExactInputsRejected ExactInputsRejection
   deriving (Eq, Show)
@@ -66,21 +90,27 @@ data ExactInputsRejection
 -- frame length are charged to the existing aggregate response payload budget.
 encodeEnsureExactInputsOutcomeWithin :: Integer -> EnsureExactInputsOutcome -> Maybe BS.ByteString
 encodeEnsureExactInputsOutcomeWithin budget outcome = case outcome of
-  ExactInputsReady reference -> referenceFrame 0 reference
-  ExactInputsNeedsAcquisition root -> referenceFrame 1 root
+  ExactInputsReady root reference | validWorldIdentity root -> do
+    encodedRoot <- referenceFrame (budget - 13) root
+    encodedReference <- referenceFrame (budget - 9 - toInteger (BS.length encodedRoot)) reference
+    pure ("TPEXO002" <> BS.singleton 0 <> encodedRoot <> encodedReference)
+  ExactInputsReady _ _ -> Nothing
+  ExactInputsNeedsAcquisition root | validWorldIdentity root ->
+    ("TPEXO002" <>) . (BS.singleton 1 <>) <$> referenceFrame (budget - 9) root
+  ExactInputsNeedsAcquisition _ -> Nothing
   ExactInputsRejected cause
     | budget < 10 -> Nothing
-    | otherwise -> Just ("TPEXO001" <> BS.pack [2, rejectionTag cause])
+    | otherwise -> Just ("TPEXO002" <> BS.pack [2, rejectionTag cause])
   where
-    referenceFrame tag reference
-      | budget < 13 = Nothing
+    referenceFrame remaining reference
+      | remaining < 4 = Nothing
       | otherwise =
-          let limit = min (budget - 13) (toInteger (maxBound :: Word32))
+          let limit = min (remaining - 4) (toInteger (maxBound :: Word32))
               prefix = LBS.take (fromInteger (limit + 1)) (LTE.encodeUtf8 (LT.pack reference))
           in if toInteger (LBS.length prefix) > limit then Nothing else
             let bytes = LBS.toStrict prefix
             in if BS.null bytes || BS.elem 0 bytes then Nothing else
-              Just ("TPEXO001" <> BS.singleton tag <> putU32 (BS.length bytes) <> bytes)
+              Just (putU32 (BS.length bytes) <> bytes)
     rejectionTag UnsupportedOperation = 0
     rejectionTag InvalidRealization = 1
     rejectionTag InvalidRoot = 2
@@ -133,6 +163,7 @@ data RequestField
   | InspectionStrict
   | PortableOutput
   | EnsureExactInputs ExactInputsRequest
+  | WorldPublicModule WorldPublicModuleRequest
   deriving (Eq, Show)
 
 -- | A decoded compiler-worker invocation. This is the Haskell boundary's
@@ -189,6 +220,7 @@ data WorkerRequest = WorkerRequest
   , requestActivationPreview :: Bool
   , requestPortableOutput :: Bool
   , requestEnsureExactInputs :: Maybe ExactInputsRequest
+  , requestWorldPublicModule :: Maybe WorldPublicModuleRequest
   , requestInspectionStrict :: Bool
   }
   deriving (Eq, Show)
@@ -197,6 +229,7 @@ data WorkerRequest = WorkerRequest
 -- refines a turn; declaration operations own both their manifest and output.
 data RequestOperation
   = EnsureExactInputsOperation ExactInputsRequest
+  | WorldPublicModuleOperation WorldPublicModuleRequest
   | SourceOperation
   | TurnOperation
   | ActivationPreviewOperation
@@ -210,6 +243,7 @@ data RequestOperation
 
 data RequestShapeError
   = InvalidExactInputsShape
+  | InvalidWorldPublicModuleShape
   | InvalidSourceCheckShape
   | InvalidPortableOutputShape
   | InvalidCellPlanShape
@@ -234,6 +268,14 @@ admitRequestOperation args
         , requestEnsureExactInputs = Just request }
       then Right (EnsureExactInputsOperation request)
       else Left InvalidExactInputsShape
+  | Just request <- requestWorldPublicModule args =
+      if validWorldPublicModuleRequest request && args == emptyWorkerRequest
+        { requestWorkload = requestWorkload args
+        , requestCompilerJobs = requestCompilerJobs args
+        , requestCompilerCapabilities = requestCompilerCapabilities args
+        , requestWorldPublicModule = Just request }
+      then Right (WorldPublicModuleOperation request)
+      else Left InvalidWorldPublicModuleShape
   | Just batch <- requestHostedLookup args,
       not (validHostedLookup batch) || not (null (requestInspections args))
         || present (requestInspectTypeBatch args)
@@ -341,6 +383,7 @@ emptyWorkerRequest = WorkerRequest
   , requestActivationPreview = False
   , requestPortableOutput = False
   , requestEnsureExactInputs = Nothing
+  , requestWorldPublicModule = Nothing
   , requestInspectionStrict = False
   }
 
@@ -517,9 +560,10 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       InspectionStrict -> request { requestInspectionStrict = True }
       PortableOutput -> request { requestPortableOutput = True }
       EnsureExactInputs inputs -> request { requestEnsureExactInputs = Just inputs }
+      WorldPublicModule query -> request { requestWorldPublicModule = Just query }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v22"
+workerRequestFlag = "--worker-request-v23"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -544,8 +588,9 @@ workerRequestFromArgv _ = Left "worker requires exactly one versioned request"
 -- duplicate operations or source/output authority beside a source-free exchange.
 validateExactInputsFields :: [RequestField] -> Either String ()
 validateExactInputsFields fields
-  | null [() | EnsureExactInputs _ <- fields] = Right ()
+  | null [() | EnsureExactInputs _ <- fields] && null [() | WorldPublicModule _ <- fields] = Right ()
   | [EnsureExactInputs request] <- fields, validExactInputsRequest request = Right ()
+  | [WorldPublicModule request] <- fields, validWorldPublicModuleRequest request = Right ()
   | otherwise = Left "worker request: exact input acquisition must be source-free and exclusive"
 
 -- Certification produces originals for every fresh home module. Authenticated
@@ -600,7 +645,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String (CompileWorkload, Int, Int, [RequestField])
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ022"
+  if magic /= "TPREQ023"
     then Left "worker request: unsupported magic or version"
     else do
       (workloadTag, afterWorkload) <- pWord8 body
@@ -620,7 +665,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ022" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ023" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -675,6 +720,10 @@ encodeField field = case field of
     BS.singleton 57 <> textFrame root <> case acquisition of
       ResidentExactInputs reference -> BS.singleton 0 <> textFrame reference
       CompleteExactInputs manifest -> BS.singleton 1 <> textFrame manifest
+  WorldPublicModule request -> BS.singleton 58
+    <> textFrame (worldQueryIdentity request) <> textFrame (worldQueryRealization request)
+    <> BS.singleton (case worldQueryMode request of WorldStructuredInfo -> 0; WorldStructuredType -> 1)
+    <> encodeStructuredInspection (worldQueryInspection request) <> textFrame (worldQueryOutput request)
   InspectScopeBrowse -> BS.singleton 43
 
 encodeSymbolIdentity :: SymbolIdentity -> BS.ByteString
@@ -829,6 +878,19 @@ pField bytes = do
       if validExactInputsRequest request then Right (EnsureExactInputs request, afterValue)
         else Left "worker request: invalid exact input reference"
     43 -> Right (InspectScopeBrowse, rest)
+    58 -> do
+      (root, afterRoot) <- pText rest
+      (reference, afterReference) <- pText afterRoot
+      (modeTag, afterMode) <- pWord8 afterReference
+      mode <- case modeTag of
+        0 -> Right WorldStructuredInfo
+        1 -> Right WorldStructuredType
+        _ -> Left "worker request: invalid world query mode"
+      (query, afterQuery) <- pStructuredInspection afterMode
+      (output, afterOutput) <- pText afterQuery
+      let request = WorldPublicModuleRequest root reference mode query output
+      if validWorldPublicModuleRequest request then Right (WorldPublicModule request, afterOutput)
+        else Left "worker request: invalid world public module query"
     45 -> retired tag
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where

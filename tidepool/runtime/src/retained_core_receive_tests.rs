@@ -5,8 +5,7 @@ use std::sync::Arc;
 use tidepool_repr::execution_schema::Group;
 use tidepool_toolchain::artifact_inventory::ArtifactKind;
 use tidepool_toolchain::artifacts::{
-    compile_invocation_in_context, prepare_frozen_production_entry, CompileInvocation,
-    FrozenEntrySources,
+    prepare_frozen_production_entry, CompileInvocation, FrozenEntrySources,
 };
 use tidepool_toolchain::certified_products::ProductOrigin;
 use tidepool_toolchain::declaration_join::{ExactDeclarationContext, ExactModuleIdentity};
@@ -231,20 +230,38 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     std::fs::remove_file(&owner_source).unwrap();
     std::fs::remove_file(&support_source).unwrap();
     assert!(!owner_source.exists() && !support_source.exists());
-    let compiled = tidepool_testing::with_settlement(|settlement| {
-        compile_invocation_in_context(
-            &CompileInvocation {
-                source: include_str!("../tests/fixtures/RetainedReceiveConsumer.hs"),
-                targets: &["__prepared", "__payload"],
-                include: &include,
-                fallback_module_name: "RetainedReceiveConsumer",
-            },
-            Arc::new(context),
-            |_, _, _| {},
-            settlement,
+    let mut source_session = crate::session::PersistentSession::new(None, 4096);
+    let source_lease = source_session.mint_isolated_scope_with_lease().unwrap();
+    let prepared = tidepool_testing::with_settlement(|settlement| {
+        crate::finish_runtime_targets(
+            source_lease
+                .with_source_compiler_transaction(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    settlement,
+                    |owner, report| {
+                        crate::prepare_runtime_targets_in_context(
+                            owner,
+                            &CompileInvocation {
+                                source: include_str!(
+                                    "../tests/fixtures/RetainedReceiveConsumer.hs"
+                                ),
+                                targets: &["__prepared", "__payload"],
+                                include: &include,
+                                fallback_module_name: "RetainedReceiveConsumer",
+                            },
+                            Arc::new(context),
+                            |_, _, _| {},
+                            report,
+                        )
+                    },
+                )
+                .unwrap(),
         )
     })
     .expect("exact consumer prepares original Core without authored source");
+    let compiled = prepared.artifacts();
     for expected in [&owner, &support] {
         let groups = compiled
             .certified_groups
@@ -324,7 +341,8 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         .expect("the certified retained owner carries its original receive site");
     assert_eq!(receive.origin(), ProductOrigin::RetainedCore);
     let mut state = crate::session::PersistentSession::new(None, 4096);
-    let program = crate::install_compiled_target(&mut state, &compiled, "__prepared")
+    let (program, _scope) = prepared
+        .install_in(&mut state, "__prepared")
         .expect("install the target and its complete certified native closure");
     let table = state.session_table().clone();
     let payload_group = reached_payload_construction(&compiled);
@@ -337,7 +355,8 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         ),
     );
     let mut producer = crate::session::PersistentSession::new(None, 4096);
-    let payload_program = crate::install_compiled_target(&mut producer, &compiled, "__payload")
+    let (payload_program, _payload_scope) = prepared
+        .install_in(&mut producer, "__payload")
         .expect("install the payload target and its complete certified native closure");
     crate::typed_receive_test_support::assert_typed_receive_json(
         state.prepared_mut().unwrap(),

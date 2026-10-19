@@ -523,6 +523,60 @@ impl KernelContext {
         Ok(reservation)
     }
 
+    pub(crate) async fn reserve_source_worker_creation(
+        &self,
+        lifetime: crate::WorkerLifetime,
+        dependency: &crate::resident_workbench::generation_admission::SourceDependency,
+    ) -> Result<run_control::ActorReservation, ractor::SpawnErr> {
+        let (dependency, _bootstrap_claim) = dependency
+            .registration_dependency()
+            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        let Some(dependency) = dependency else {
+            return self.reserve_worker_creation(lifetime).await;
+        };
+        let admission = self
+            .lifecycle
+            .resource_admission()
+            .await
+            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        let mut reservation = if lifetime == crate::WorkerLifetime::RunOwned {
+            self.directory
+                .reserve_generation_actor(&dependency, self.identity.incarnation)
+                .await
+        } else {
+            self.directory
+                .reserve_generation_worker(&dependency, self.identity, self.identity.incarnation)
+                .await
+        }
+        .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        reservation.retain_parent_admission(admission);
+        Ok(reservation)
+    }
+
+    pub(crate) async fn reserve_source_successor_creation(
+        &self,
+        dependency: &crate::resident_workbench::generation_admission::SourceDependency,
+    ) -> Result<run_control::ActorReservation, ractor::SpawnErr> {
+        let (dependency, _bootstrap_claim) = dependency
+            .registration_dependency()
+            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        let Some(dependency) = dependency else {
+            return self.reserve_successor_creation().await;
+        };
+        let admission = self
+            .lifecycle
+            .resource_admission()
+            .await
+            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        let mut reservation = self
+            .directory
+            .reserve_generation_successor(&dependency, self.identity, self.identity.incarnation)
+            .await
+            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        reservation.retain_parent_admission(admission);
+        Ok(reservation)
+    }
+
     pub(crate) async fn spawn_successor<B: KernelBehavior>(
         &self,
         behavior: B,
@@ -718,7 +772,7 @@ impl KernelContext {
             )
         })?;
         let context = self.clone();
-        let result = self.directory.prepare_root(Box::new(move |_ticket| Box::pin(async move {
+        let result = self.directory.prepare_worker_root(reservation.identity(), Box::new(move |_ticket| Box::pin(async move {
             let produced: run_control::RootOperationResult = async {
                 let mut custody = StartupCustody { directory: context.directory.clone(), parent: context.identity, accounted: false };
                 let identity = reservation.identity();
@@ -7277,6 +7331,7 @@ mod tests {
                     context.retained_exit(),
                 ),
             )
+            .for_preparation()
             .scope(PendingOperation {
                 payload: [42; 128 * 1024],
                 drops: drops.clone(),
@@ -7321,11 +7376,13 @@ mod tests {
             .unwrap();
         let sender_context = observations.lock()[0].0.clone();
         let recipient_context = observations.lock()[1].0.clone();
-        let original = services.with_compiler_owner(
-            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
-                sender_context.retained_exit(),
-            ),
-        );
+        let original = services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                    sender_context.retained_exit(),
+                ),
+            )
+            .for_preparation();
         original
             .scope(
                 services
@@ -7334,6 +7391,7 @@ mod tests {
                             recipient_context.retained_exit(),
                         ),
                     )
+                    .for_preparation()
                     .scope(async {
                         crate::ActorCompilerCloseOwner::current()
                             .unwrap()
@@ -7367,6 +7425,7 @@ mod tests {
                     recipient_context.retained_exit(),
                 ),
             )
+            .for_preparation()
             .scope(async {
                 crate::ActorCompilerCloseOwner::current()
                     .unwrap()
@@ -7406,6 +7465,7 @@ mod tests {
                     recipient_context.retained_exit(),
                 ),
             )
+            .for_preparation()
             .scope(async {
                 crate::ActorCompilerCloseOwner::current()
                     .unwrap()
@@ -7436,6 +7496,7 @@ mod tests {
                     context.retained_exit(),
                 ),
             )
+            .for_preparation()
             .scope(async { crate::ActorCompilerCloseOwner::current().unwrap() })
             .await;
         let (entered, observed) = oneshot::channel();
@@ -7477,6 +7538,7 @@ mod tests {
                     context.retained_exit(),
                 ),
             )
+            .for_preparation()
             .scope(async {
                 crate::ActorCompilerCloseOwner::current()
                     .unwrap()

@@ -17,6 +17,11 @@
 //! declaration REPL on its own.
 
 mod admission;
+mod source_admission;
+pub use source_admission::{
+    RuntimeSourceAdmission, RuntimeSourceClaim, RuntimeSourceCompilerTransaction,
+    RuntimeSourceFence, SourceAdmissionError, SourceAdmissionHook, SourceAdmissionPhase,
+};
 mod binding_table;
 mod dialect;
 mod generation_lease;
@@ -73,11 +78,13 @@ pub use dialect::{
 };
 
 pub use inspection::{
-    run_admitted_inspections, run_inspections, AdmittedInspectionInputs, ClassMethodInfo,
-    ConstructorInfo, DeclarationInfo, ExactNameQuery, FieldInfo, IdentifierInfo,
-    IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery,
-    InspectionRequest, InspectionResult, LookupAnswer, LookupNameMode, NameNamespace, NameQuery,
-    NameScope, QueryError, ScopeProvenance, TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
+    finish_admitted_world_inspection, run_admitted_inspections, run_admitted_world_inspection,
+    run_inspections, AdmittedInspectionInputs, AdmittedInspectionWorld, ClassMethodInfo,
+    CompletedInspectionWorld, ConstructorInfo, DeclarationInfo, ExactNameQuery, FieldInfo,
+    IdentifierInfo, IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability,
+    InspectionQuery, InspectionRequest, InspectionResult, LookupAnswer, LookupNameMode,
+    NameNamespace, NameQuery, NameScope, QueryError, ScopeProvenance, TypeExpression, TypeInfo,
+    TypeMatch, TypeMatchQuality, WorldInspectionError,
 };
 
 pub use persistent::{
@@ -380,6 +387,8 @@ pub enum DurablePublicAdmissionFailure {
 
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
+    #[error(transparent)]
+    SourceAdmission(#[from] SourceAdmissionError),
     #[error(transparent)]
     NotebookGeneration(#[from] NotebookGenerationError),
     #[error(transparent)]
@@ -971,6 +980,7 @@ pub(crate) struct ScopeDeclarationState {
     pub(crate) exact_context: Option<recovery::ScopedCompilerContext>,
     pub(crate) published_sources:
         Vec<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
+    pub(crate) inspection_world: Option<Arc<inspection::InspectionWorldAssociation>>,
 }
 
 struct DurableDeclarationGraph {
@@ -1835,6 +1845,7 @@ impl SessionLib {
                 tip: inherited,
                 exact_context: context.map(recovery::ScopedCompilerContext::new),
                 published_sources: Vec::new(),
+                inspection_world: None,
             });
     }
 

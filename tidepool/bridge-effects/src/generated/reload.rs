@@ -14,6 +14,7 @@ pub enum RlPolicy {
 pub struct RlOptions {
     pub also_check: Vec<String>,
     pub policy: RlPolicy,
+    pub force: bool,
 }
 
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]

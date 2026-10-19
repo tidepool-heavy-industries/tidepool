@@ -34,16 +34,17 @@ pub mod diagnostics;
 mod endpoint;
 pub mod exec_check;
 pub mod frontend;
+mod package_source;
 mod process;
 mod request;
 mod resources;
 pub use endpoint::{
-    compiler_host_checkpoint, retain_compiler_input_directory, retain_compiler_input_file,
-    settle_compiler_transaction_cancellable, settle_compiler_transaction_cancellable_for_workload,
-    with_compiler_transaction, with_compiler_transaction_cancellable,
-    with_compiler_transaction_cancellable_for_workload, with_compiler_transaction_for_workload,
-    CompilerEndpoint, CompilerFrontendCloseReport, CompilerIdentity, CompilerIoCause,
-    CompilerPackageSourceAssociation,
+    compiler_host_checkpoint, reject_compiler_response, retain_compiler_input_directory,
+    retain_compiler_input_file, settle_compiler_transaction_cancellable,
+    settle_compiler_transaction_cancellable_for_workload, with_compiler_transaction,
+    with_compiler_transaction_cancellable, with_compiler_transaction_cancellable_for_workload,
+    with_compiler_transaction_for_workload, CompilerEndpoint, CompilerFrontendCloseReport,
+    CompilerIdentity, CompilerIoCause, CompilerPackageSourceAssociation, CompilerResponseRejection,
     CompilerScratchFailure, CompilerScratchRetirement, CompilerTermination, CompilerTransaction,
     CompilerTransactionCancellation, CompilerTransactionClose, CompilerTransactionCloseEvidence,
     CompilerTransactionCloseFailure, CompilerTransactionClosePhase, CompilerTransactionCloseReason,
@@ -53,9 +54,11 @@ pub use endpoint::{
 };
 use exec_check::is_readable_executable_file;
 pub use request::{
-    CompileWorkload, ExactNameInspection, ExtractRequest, HostedLookupBatch, HostedLookupDiscovery,
-    HostedLookupOperation, HostedLookupQuery, InspectionNamespace, InspectionScope,
-    LookupNameInspection, LookupNameMode, ProtocolError, StructuredInspection, SymbolIdentity,
+    CompileWorkload, EnsureExactInputsOutcome, ExactInputsAcquisition, ExactInputsRejection,
+    ExactInputsRequest, ExactNameInspection, ExtractRequest, HostedLookupBatch,
+    HostedLookupDiscovery, HostedLookupOperation, HostedLookupQuery, InspectionNamespace,
+    InspectionScope, LookupNameInspection, LookupNameMode, ProtocolError, StructuredInspection,
+    SymbolIdentity, WorldPublicModuleRequest, WorldQueryMode,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.
@@ -67,9 +70,7 @@ pub use request::{
 /// directly bound extractor's (see [`ExtractCmd::bind_direct`]).
 pub fn preflight_compiler_daemon(socket: &Path) -> std::io::Result<CompilerIdentity> {
     daemon::preflight(socket)
-        .map(|binding| {
-            CompilerIdentity::daemon(binding.producer, binding.consumed_worker, binding.epoch)
-        })
+        .map(|binding| binding.identity())
         .map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::ConnectionRefused,
@@ -865,6 +866,18 @@ impl ExtractCmd {
         self
     }
 
+    /// Acquire the exact logical world on the current pinned worker transaction.
+    pub fn ensure_exact_inputs(&mut self, request: ExactInputsRequest) -> &mut Self {
+        self.request.ensure_exact_inputs(request);
+        self
+    }
+
+    /// Query public metadata in the exact world held by the current transaction.
+    pub fn world_public_module(&mut self, request: WorldPublicModuleRequest) -> &mut Self {
+        self.request.world_public_module(request);
+        self
+    }
+
     /// Ask for a structured declaration of one resolved identifier.
     pub fn inspect_structured_info(&mut self, query: StructuredInspection) -> &mut Self {
         self.request.inspect_structured_info(query);
@@ -926,6 +939,42 @@ impl ExtractCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_transport_builders_preserve_exclusive_domain_requests() {
+        let mut ensure = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
+        ensure.ensure_exact_inputs(ExactInputsRequest {
+            root: "a".repeat(64),
+            acquisition: ExactInputsAcquisition::Resident("realized".into()),
+        });
+        assert!(ExtractRequest::decode(&ensure.request_bytes()).is_ok());
+        ensure.input("source.hs");
+        assert_eq!(
+            ExtractRequest::decode(&ensure.request_bytes()).unwrap_err(),
+            ProtocolError::InvalidExactInputs
+        );
+
+        let mut query = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
+        query.world_public_module(WorldPublicModuleRequest {
+            world: "a".repeat(64),
+            realization: "realized".into(),
+            mode: WorldQueryMode::Type,
+            query: StructuredInspection {
+                scope: InspectionScope::PublicModule("Data.List".into()),
+                namespace: InspectionNamespace::Value,
+                name: "map".into(),
+                generation: 1,
+                fingerprint: "display-only".into(),
+            },
+            output: "answer.bin".into(),
+        });
+        assert!(ExtractRequest::decode(&query.request_bytes()).is_ok());
+        query.inspect_out("other.bin");
+        assert_eq!(
+            ExtractRequest::decode(&query.request_bytes()).unwrap_err(),
+            ProtocolError::InvalidWorldPublicModule
+        );
+    }
     use std::sync::Mutex;
 
     #[test]

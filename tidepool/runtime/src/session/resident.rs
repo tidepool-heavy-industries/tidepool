@@ -1330,6 +1330,10 @@ pub struct RuntimeActivationPreviewAdmission {
 }
 
 impl RuntimeActivationPreviewAdmission {
+    pub fn source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
+        self.scope_lease.clone()
+    }
+
     pub fn view(&self) -> &super::SessionCompileView {
         &self.view
     }
@@ -2508,11 +2512,13 @@ impl PendingPreparedMode {
 /// [`Self::compile_off_checkout`] then
 /// [`ResidentSession::revalidate_and_run_prepared`].
 pub struct PendingPreparedInstall {
+    source: Arc<super::RuntimeLexicalScopeLease>,
     snapshot: PendingPreparedSource,
     metadata: PreparedInstallMetadata,
 }
 
 struct PreparedInstallMetadata {
+    target: Arc<super::RuntimeLexicalScopeLease>,
     constructor_table: DataConTable,
     mode: PendingPreparedMode,
     argument: Option<PreparedHandle>,
@@ -2715,6 +2721,7 @@ enum ReadyPreparedSource {
 /// One compiled install with its original source snapshot and completion
 /// metadata. Only consuming a pending install can construct this capsule.
 pub struct ReadyPreparedInstall {
+    original: Arc<super::RuntimeLexicalScopeLease>,
     source: ReadyPreparedSource,
     metadata: PreparedInstallMetadata,
 }
@@ -2723,11 +2730,25 @@ impl PendingPreparedInstall {
     /// Compile this install off checkout, consuming its source and completion
     /// metadata into one capsule for final revalidation and execution.
     pub fn compile_off_checkout(self) -> Result<ReadyPreparedInstall, PreparedRuntimeError> {
-        let source = self.snapshot.compile_off_checkout()?;
-        Ok(ReadyPreparedInstall {
-            source,
-            metadata: self.metadata,
-        })
+        let original = self.source.clone();
+        super::source_admission::run_source_compiler_transaction(
+            self.source,
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, _| {
+                owner.admit(Some(self.metadata.target.clone()))?;
+                let source = self.snapshot.compile_off_checkout()?;
+                Ok(ReadyPreparedInstall {
+                    original,
+                    source,
+                    metadata: self.metadata,
+                })
+            },
+        )?
+        .into_outcome()
+        .action
     }
 }
 
@@ -3496,6 +3517,69 @@ where
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
         }
+    }
+
+    pub fn materialize_facade(
+        &self,
+        surface: &super::ExactExportSurface,
+        view: &super::SessionCompileView,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<super::MaterializedFacade, super::ExactFacadeError> {
+        self.state.materialize_facade(surface, view, settlement)
+    }
+    pub fn select_facade_exact_exports(
+        &self,
+        facade: &super::MaterializedFacade,
+        selected: &[tidepool_toolchain::declaration_join::ExportIdentity],
+        includes: &[PathBuf],
+        root: &Path,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Option<super::MaterializedFacade>, super::ExactFacadeError> {
+        self.state.select_facade_exact_exports(
+            self.run_context().lexical_scope,
+            facade,
+            selected,
+            includes,
+            root,
+            settlement,
+        )
+    }
+
+    /// Claim an actual source mutation before its first affine reservation.
+    pub fn admit_source_mutation(&mut self, scope: ScopeId) -> Result<(), ResidentError> {
+        self.state
+            .admit_source_work_in(scope)
+            .map_err(SessionError::from)?;
+        Ok(())
+    }
+
+    /// Own the exact source lease and all lower claims through physical END.
+    pub fn with_source_compiler_transaction<T>(
+        &mut self,
+        source: Arc<super::RuntimeLexicalScopeLease>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        cancellation: crate::CompilerTransactionCancellation,
+        supplemental_hook: Option<super::SourceAdmissionHook>,
+        close_sink: impl FnOnce(crate::CompilerTransactionClose),
+        action: impl FnOnce(&mut Self, &mut dyn FnMut(crate::CompilerTransactionClose)) -> T,
+    ) -> Result<crate::CompilerTransactionSettled<T>, super::SourceAdmissionError> {
+        super::source_admission::run_source_compiler_transaction(
+            source,
+            workload,
+            cancellation,
+            supplemental_hook,
+            close_sink,
+            |context, report| {
+                let previous = self.state.source_transaction.replace(context);
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self, report)));
+                self.state.source_transaction = previous;
+                match result {
+                    Ok(value) => value,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            },
+        )
     }
 
     /// Observe the interpreters installed on this exact machine. The caller
@@ -4497,6 +4581,30 @@ where
         self.state
             .compile_view_in(scope)
             .map(|view| view.hide_value_names(&hidden))
+    }
+
+    /// Capture a logical-world observation before constructing a compile view.
+    pub fn capture_inspection_world_in(
+        &self,
+        scope: ScopeId,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> Result<super::AdmittedInspectionWorld, SessionError> {
+        self.state
+            .capture_inspection_world_in(scope, source, original_source, |id| {
+                self.hidden_host_bindings.contains_key(&id)
+            })
+    }
+
+    /// Attach only the world returned by the runner for this unchanged base.
+    pub fn install_inspection_world_if_current(
+        &mut self,
+        completed: &super::CompletedInspectionWorld,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> bool {
+        self.state
+            .install_inspection_world_if_current(completed, source, original_source)
     }
 
     /// Capture checked value inputs while the matching resident view is owned.
@@ -5894,6 +6002,10 @@ where
         };
         self.validate_host_mount_geometry(scope, &binder, gen)?;
 
+        let _source_claim = self
+            .state
+            .admit_source_work_in(scope)
+            .map_err(SessionError::from)?;
         let stub_source = carrier.stub_source(&module, name);
         let stub_path = session_root.join(SessionModule::val(gen).relative_hs_path());
         if let Some(parent) = stub_path.parent() {
@@ -6135,6 +6247,10 @@ where
         ) -> Result<PreparedHandle, PreparedRuntimeError>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
+        let _source_claim = self
+            .state
+            .admit_source_work_in(scope)
+            .map_err(SessionError::from)?;
         self.state
             .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])?;
         let table = code
@@ -6475,12 +6591,28 @@ where
         self.settle_dropped_custody();
         self.state.mint_isolated_scope_with_lease()
     }
+    pub fn mint_notebook_scope_with_lease(
+        &mut self,
+        prerequisite: Option<super::RuntimeSourceAdmission>,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.mint_notebook_scope_with_lease(prerequisite)
+    }
     pub fn adopt_initial_notebook_scope(
         &mut self,
         scope: ScopeId,
     ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
         self.settle_dropped_custody();
         self.state.adopt_initial_notebook_scope(scope)
+    }
+    pub fn adopt_initial_notebook_scope_with_source(
+        &mut self,
+        scope: ScopeId,
+        prerequisite: Option<super::RuntimeSourceAdmission>,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
+        self.settle_dropped_custody();
+        self.state
+            .adopt_initial_notebook_scope_with_source(scope, prerequisite)
     }
 
     /// The persistent binding names visible at `scope`: its own mutable frame over
@@ -7067,6 +7199,10 @@ where
             scope,
             resolved,
         } = admission;
+        let _source_claim = self
+            .state
+            .admit_source_work_in(scope)
+            .map_err(SessionError::from)?;
         let (metadata, sites, prepared, certification) = code.into_parts();
         let (program, source_keys) = if let Some(resolved) = resolved {
             let (target, demanded) = match images {
@@ -7331,9 +7467,23 @@ where
             effect_policy: self.state.effect_policy(),
             live_payload: self.state.live_payload_policy(),
         };
+        let source = match &self.state.source_transaction {
+            Some(owner) => owner.source.clone(),
+            None => {
+                return Err(SessionError::SourceAdmission(
+                    super::SourceAdmissionError::MissingTransaction,
+                )
+                .into())
+            }
+        };
         Ok(PendingPreparedInstall {
+            source,
             snapshot,
             metadata: PreparedInstallMetadata {
+                target: self
+                    .state
+                    .source_lease_in(lexical_scope)
+                    .map_err(PreparedRuntimeError::from)?,
                 constructor_table: constructor_table.into_owned(),
                 mode,
                 argument,
@@ -7358,8 +7508,13 @@ where
         ready: ReadyPreparedInstall,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Option<ResidentOutcome>, ResidentError> {
-        let ReadyPreparedInstall { source, metadata } = ready;
+        let ReadyPreparedInstall {
+            original,
+            source,
+            metadata,
+        } = ready;
         let PreparedInstallMetadata {
+            target,
             constructor_table,
             mode,
             argument,
@@ -7371,12 +7526,21 @@ where
         } = metadata;
         self.state
             .validate_new_binding_ids(binding_ids_of(&mode.as_mode()))?;
+        self.state
+            .validate_lexical_scope_lease(lexical_scope, &target)?;
+        self.state
+            .admit_source_lease(original)
+            .map_err(PreparedRuntimeError::from)?;
+        self.state
+            .admit_source_lease(target)
+            .map_err(PreparedRuntimeError::from)?;
         let install_started = std::time::Instant::now();
         let mut checked_completion = None;
         let install_span = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.install", inclusive = true).entered();
         let (program, source_keys) = match source {
             ReadyPreparedSource::Legacy { snapshot, image } => {
                 match self.state.revalidate_and_install_prepared(
+                    lexical_scope,
                     snapshot,
                     image,
                     Some(&constructor_table),
@@ -9747,6 +9911,774 @@ mod authored_publication_tests {
         })
         .unwrap();
         (root, session)
+    }
+
+    #[test]
+    fn runtime_source_owner_keeps_binding_claim_through_close_and_unwind() {
+        for unwind in [false, true] {
+            let (_root, mut session) = startup_session();
+            let scope = session.mint_isolated_scope_with_lease().unwrap();
+            let mut value = source_action(&mut session, &scope, |session, _| {
+                super::super::prepared::tests::rooted_publication_fixture(
+                    &mut session.state,
+                    "lazy",
+                    870,
+                )
+            });
+            value.scope = scope.scope();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _settled = session.with_source_compiler_transaction(scope.clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground, crate::CompilerTransactionCancellation::new(), None, |_| {}, |session, report| {
+                    session.state.bind_replacing_decls_in(scope.scope(), vec![value], report).unwrap();
+                    let fence = scope.source_admission().fence().unwrap();
+                    assert_eq!(fence.pending_claims(), 1, "actual binding claim remains held inside its owner");
+                    fence.reopen().unwrap();
+                    if unwind { panic!("compiler action unwind"); }
+                    // Synthetic aggregate uncertainty checks joined custody, not a GHC END fault.
+                    report(crate::CompilerTransactionClose::Unconfirmed(tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled, tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None })));
+                }).unwrap();
+            }));
+            assert_eq!(result.is_err(), unwind);
+            let fence = scope.source_admission().fence().unwrap();
+            assert_eq!(fence.pending_claims(), 1);
+            assert_eq!(fence.unconfirmed_claims(), 1);
+            assert!(matches!(
+                fence.reopen(),
+                Err(super::super::SourceAdmissionError::Unconfirmed { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn runtime_source_owner_retains_each_exact_scope_until_its_session_retires_it() {
+        for shared_gate in [false, true] {
+            let (_original_root, mut original) = startup_session();
+            let (_recipient_root, mut recipient) = startup_session();
+            let source = if shared_gate {
+                recipient.mint_isolated_scope_with_lease().unwrap()
+            } else {
+                original.mint_isolated_scope_with_lease().unwrap()
+            };
+            let original_binding = (!shared_gate).then(|| {
+                source_action(&mut original, &source, |session, report| {
+                    let mut value = super::super::prepared::tests::rooted_publication_fixture(
+                        &mut session.state,
+                        "originalRetained",
+                        872,
+                    );
+                    value.scope = source.scope();
+                    let id = value.id;
+                    session
+                        .state
+                        .bind_replacing_decls_in(source.scope(), vec![value], report)
+                        .unwrap();
+                    id
+                })
+            });
+            let target = if shared_gate {
+                let scope = recipient.state.mint_scope_from_lease(&source).unwrap();
+                recipient.state.adopt_initial_notebook_scope(scope).unwrap()
+            } else {
+                recipient.mint_isolated_scope_with_lease().unwrap()
+            };
+            assert_eq!(
+                source
+                    .source_admission()
+                    .same_owner(target.source_admission()),
+                shared_gate
+            );
+            assert!(!Arc::ptr_eq(&source, &target));
+            let target_scope = target.scope();
+            let target_weak = Arc::downgrade(&target);
+            let owner_weak = Arc::downgrade(recipient.state.admission_owner());
+            let mut value = source_action(&mut recipient, &source, |session, _| {
+                super::super::prepared::tests::rooted_publication_fixture(
+                    &mut session.state,
+                    "retained",
+                    871,
+                )
+            });
+            value.scope = target_scope;
+            let binding_id = value.id;
+            recipient.with_source_compiler_transaction(
+                source.clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(), None, |_| {},
+                |session, report| {
+                    session.state.bind_replacing_decls_in(target_scope, vec![value], report).unwrap();
+                    // Injected aggregate uncertainty; not a physical GHC END fault.
+                    report(crate::CompilerTransactionClose::Unconfirmed(tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                        tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
+                        tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None },
+                    )));
+                },
+            ).unwrap();
+            drop(target);
+            let _next = recipient.mint_isolated_scope_with_lease().unwrap();
+            assert!(
+                target_weak.upgrade().is_some(),
+                "unknown target custody survives public lease drop and actual reap"
+            );
+            assert!(recipient.state.scope_tree().is_live(target_scope));
+            assert!(recipient.state.bindings().get(binding_id).is_some());
+            let source_fence = source.source_admission().fence().unwrap();
+            assert_eq!(source_fence.unconfirmed_claims(), 1);
+            if let Some(original_binding) = original_binding {
+                let original_scope = source.scope();
+                let original_gate = source.source_admission().clone();
+                let original_weak = Arc::downgrade(&source);
+                drop(source);
+                let _original_next = original.mint_isolated_scope_with_lease().unwrap();
+                assert!(
+                    original_weak.upgrade().is_some(),
+                    "original A's own session retains its last public lease through its own reap"
+                );
+                assert!(original.state.scope_tree().is_live(original_scope));
+                assert!(original.state.bindings().get(original_binding).is_some());
+                original.state.retire_scope(original_scope);
+                assert!(original_weak.upgrade().is_none());
+                assert!(original.state.bindings().get(original_binding).is_none());
+                assert!(
+                    target_weak.upgrade().is_some(),
+                    "retiring A does not release B's distinct uncertain custody"
+                );
+                assert!(recipient.state.bindings().get(binding_id).is_some());
+                assert_eq!(
+                    source_fence.unconfirmed_claims(),
+                    1,
+                    "explicit scope retirement does not certify the original END"
+                );
+                assert_eq!(
+                    original_gate.fence().err(),
+                    Some(super::super::SourceAdmissionError::Closed {
+                        scope: original_scope,
+                        phase: super::super::SourceAdmissionPhase::ScopeRetired
+                    })
+                );
+                let target_gate = target_weak.upgrade().unwrap().source_admission().clone();
+                let target_fence = target_gate.fence().unwrap();
+                assert_eq!(
+                    target_fence.unconfirmed_claims(),
+                    1,
+                    "explicit A retirement is not evidence of B END"
+                );
+                assert!(matches!(
+                    target_fence.reopen(),
+                    Err(super::super::SourceAdmissionError::Unconfirmed { .. })
+                ));
+                recipient.state.retire_scope(target_scope);
+                assert!(target_weak.upgrade().is_none());
+                assert!(recipient.state.bindings().get(binding_id).is_none());
+                drop(_next);
+                drop(recipient);
+                assert!(owner_weak.upgrade().is_none());
+                continue;
+            }
+            recipient.state.retire_scope(target_scope);
+            assert!(
+                target_weak.upgrade().is_none(),
+                "explicit retirement releases only that exact target hold"
+            );
+            assert!(recipient.state.bindings().get(binding_id).is_none());
+            assert!(source.validate_source_issuer().is_ok());
+            assert!(matches!(
+                source.source_admission().admit(),
+                Err(super::super::SourceAdmissionError::Unconfirmed { count: 1, .. })
+            ));
+            assert!(matches!(
+                source.source_admission().fence(),
+                Err(super::super::SourceAdmissionError::Closed {
+                    phase: super::super::SourceAdmissionPhase::Fenced { .. },
+                    ..
+                })
+            ));
+            drop(_next);
+            drop(recipient);
+            assert_eq!(source.validate_source_issuer().is_err(), shared_gate);
+            drop(original);
+            assert!(matches!(
+                source.validate_source_issuer(),
+                Err(super::super::SourceAdmissionError::StaleSourceLease)
+            ));
+            drop(source);
+            assert!(
+                owner_weak.upgrade().is_none(),
+                "session teardown leaves no metadata self-cycle"
+            );
+        }
+    }
+
+    #[test]
+    fn retiring_foreign_captured_scope_with_same_numeric_id_keeps_original_live() {
+        let (_original_root, mut original) = startup_session();
+        let (_recipient_root, mut recipient) = startup_session();
+        let source = original.mint_isolated_scope_with_lease().unwrap();
+        let original_binding = source_action(&mut original, &source, |session, report| {
+            let mut value = super::super::prepared::tests::rooted_publication_fixture(
+                &mut session.state,
+                "foreignOriginal",
+                873,
+            );
+            value.scope = source.scope();
+            let id = value.id;
+            session
+                .state
+                .bind_replacing_decls_in(source.scope(), vec![value], report)
+                .unwrap();
+            id
+        });
+        // Real capture uses the original source owner while minting recipient
+        // placement; the numeric scope coincidence conveys no authority.
+        let captured = source_action(&mut recipient, &source, |session, _| {
+            let scope = session.state.mint_scope(ScopeId::ROOT).unwrap();
+            session.state.adopt_initial_notebook_scope(scope).unwrap()
+        });
+        assert_eq!(captured.scope(), source.scope());
+        assert!(captured
+            .source_admission()
+            .same_owner(source.source_admission()));
+        let native_roots = original.state.persistent_roots_count();
+        let recipient_binding = source_action(&mut recipient, &source, |session, report| {
+            let mut value = super::super::prepared::tests::rooted_publication_fixture(
+                &mut session.state,
+                "foreignRecipient",
+                874,
+            );
+            value.scope = captured.scope();
+            let id = value.id;
+            session
+                .state
+                .bind_replacing_decls_in(captured.scope(), vec![value], report)
+                .unwrap();
+            let fence = source.source_admission().fence().unwrap();
+            assert_eq!(
+                fence.pending_claims(),
+                1,
+                "distinct lexical owners sharing a gate earn only one gate claim"
+            );
+            fence.reopen().unwrap();
+            id
+        });
+        recipient.state.retire_scope(captured.scope());
+        assert!(recipient.state.bindings().get(recipient_binding).is_none());
+        assert!(original.state.bindings().get(original_binding).is_some());
+        assert_eq!(original.state.persistent_roots_count(), native_roots);
+        assert!(source.validate_source_issuer().is_ok());
+        drop(
+            source
+                .source_admission()
+                .admit()
+                .expect("foreign retirement leaves original gate open"),
+        );
+        drop(recipient);
+        assert!(captured.validate_source_issuer().is_err());
+        assert!(source.validate_source_issuer().is_ok());
+        assert!(original.state.scope_tree().is_live(source.scope()));
+        assert!(original.state.bindings().get(original_binding).is_some());
+        assert_eq!(original.state.persistent_roots_count(), native_roots);
+        drop(
+            source
+                .source_admission()
+                .admit()
+                .expect("foreign session teardown leaves original gate open"),
+        );
+    }
+
+    #[test]
+    fn real_owner_transfer_refuses_stale_cell_source_under_unrelated_open_owner() {
+        use crate::session::{
+            resident_cell_check_template, resident_workbench_templates, PersistentSession,
+            PublicManifestCommit, RecoveryPublicOwner, RecoveryRunAuthority,
+            RecoverySuccessorAuthority, SourceImports, TemplateSelector,
+        };
+        use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+        use tracing_subscriber::prelude::*;
+
+        struct Successor {
+            run: Arc<crate::session::recovery_test_fixture::TestRunOwner>,
+            predecessor: RecoveryPublicOwner,
+            successor: RecoveryPublicOwner,
+            session: SessionId,
+            scope: ScopeId,
+        }
+        impl RecoverySuccessorAuthority for Successor {
+            fn validate_successor(
+                &self,
+                root: &Path,
+                predecessor: &RecoveryPublicOwner,
+                successor: &RecoveryPublicOwner,
+                session: SessionId,
+                scope: ScopeId,
+            ) -> std::io::Result<bool> {
+                Ok(self.run.owns_run(root)?
+                    && predecessor == &self.predecessor
+                    && successor == &self.successor
+                    && session == self.session
+                    && scope == self.scope)
+            }
+        }
+        #[derive(Clone, Default)]
+        struct ProducerObservation {
+            preparation: Arc<AtomicUsize>,
+            requests: Arc<AtomicUsize>,
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ProducerObservation {
+            fn on_new_span(
+                &self,
+                attrs: &tracing::span::Attributes<'_>,
+                _: &tracing::span::Id,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if attrs.metadata().name() == "cell_program.prepare" {
+                    self.preparation.fetch_add(1, Ordering::SeqCst);
+                }
+                if attrs.metadata().target() == "tidepool_extract_cmd::endpoint"
+                    && attrs.metadata().name() == "compile_request"
+                {
+                    self.requests.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        tidepool_testing::eval_harness::require_extract();
+        let durable = tempfile::tempdir().unwrap();
+        let recovery =
+            crate::session::recovery_test_fixture::RecoveryFixture::create(durable.path());
+        let compiler = durable.path().join("compiler");
+        let owner = |incarnation| {
+            RecoveryPublicOwner::new(
+                &tidepool_repr::ActorPath::parse("root/source-epoch").unwrap(),
+                incarnation,
+            )
+            .unwrap()
+        };
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let library = |id| {
+            let mut lib = SessionLib::open(id, &compiler, ModuleEnv::standalone_default())
+                .unwrap()
+                .with_validation_include(effects.include_paths().to_vec());
+            tidepool_testing::with_settlement(|report| recovery.attach_root(&mut lib, report))
+                .unwrap();
+            lib
+        };
+        {
+            let mut producer = PersistentSession::new(Some(library(SessionId(4503))), 1024 * 1024);
+            let public = producer.mint_isolated_scope();
+            assert!(matches!(
+                producer
+                    .initialize_durable_public_scope(owner(1), public)
+                    .unwrap(),
+                PublicManifestCommit::Durable
+            ));
+        }
+        let mut original = TestSession::unbootstrapped(
+            frunk::HNil,
+            EmptyOutput,
+            1024 * 1024,
+            Some(library(SessionId(4504))),
+        );
+        let source = original.mint_isolated_scope_with_lease().unwrap();
+        let view = original.compile_view_in(source.scope()).unwrap();
+        let imports = view.turn_imports(&SourceImports::new());
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: "_ <- pure ()".into(),
+            template_source: resident_cell_check_template(
+                effects.preamble(),
+                effects.row(),
+                &imports,
+            ),
+            turn_templates: templates
+                .iter()
+                .map(|template| {
+                    let kind = match template.kind {
+                        TemplateSelector::Decl => "decl",
+                        TemplateSelector::Bind => "bind",
+                        TemplateSelector::BindDiscard => "binddiscard",
+                        TemplateSelector::Expr => "expr",
+                    };
+                    (kind.into(), template.source.clone())
+                })
+                .collect(),
+            injected_modules: view.injected_module_names(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let includes = view.include_paths(effects.include_paths());
+        let admitted = original
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, report| {
+                    let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(specification.clone()),
+                        &includes,
+                        report,
+                    )
+                    .unwrap();
+                    session
+                        .admit_native_setup_cell_in(
+                            source.scope(),
+                            plan,
+                            Arc::new(specification.clone()),
+                            specification.specification_digest(),
+                            [1; 32],
+                            includes,
+                            None,
+                        )
+                        .unwrap()
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(admitted.close(), crate::CompilerTransactionClose::Clean),
+            "actual parsed setup must settle cleanly: {:?}",
+            admitted.close()
+        );
+        let admission = admitted.into_outcome().action;
+        let (_recipient_root, mut recipient) = startup_session();
+        let unrelated = recipient.mint_isolated_scope_with_lease().unwrap();
+        let observation = ProducerObservation::default();
+        let subscriber = tracing_subscriber::registry().with(observation.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            let positive = unrelated
+                .with_source_compiler_transaction(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |transaction, report| {
+                        super::super::turn::prepare_cell_program_admitted(
+                            transaction,
+                            admission.clone(),
+                            report,
+                        )
+                    },
+                )
+                .unwrap();
+            assert!(
+                positive.action().is_ok(),
+                "actual open A cell producer: {:?}",
+                positive.action().as_ref().err()
+            );
+            assert!(
+                matches!(positive.close(), crate::CompilerTransactionClose::Clean),
+                "positive actual GHC producer must settle cleanly: {:?}",
+                positive.close()
+            );
+            assert_eq!(
+                observation.preparation.load(Ordering::SeqCst),
+                1,
+                "positive control enters actual scratch/worker preparation"
+            );
+            assert!(observation.requests.load(Ordering::SeqCst) > 0);
+            drop(positive);
+            let before_preparation = observation.preparation.load(Ordering::SeqCst);
+            let before_requests = observation.requests.load(Ordering::SeqCst);
+            let original_before = original
+                .public_visibility_snapshot_in(source.scope())
+                .unwrap();
+            original
+                .seal_recovery_initialization_scope(source.scope())
+                .unwrap();
+            assert!(matches!(
+                original
+                    .transfer_recovered_public_owner(
+                        &owner(1),
+                        owner(2),
+                        source.scope(),
+                        Arc::new(Successor {
+                            run: recovery.owner.clone(),
+                            predecessor: owner(1),
+                            successor: owner(2),
+                            session: SessionId(4504),
+                            scope: source.scope(),
+                        }),
+                    )
+                    .unwrap(),
+                PublicManifestCommit::Durable
+            ));
+            let transferred = original
+                .public_visibility_snapshot_in(source.scope())
+                .unwrap();
+            assert_eq!(transferred.epoch, original_before.epoch + 1);
+            assert!(original.state.scope_tree().is_live(source.scope()));
+            assert!(matches!(
+                source.validate_source_issuer(),
+                Err(super::super::SourceAdmissionError::StaleSourceLease)
+            ));
+            assert!(matches!(
+                admission.source_lease().validate_source_issuer(),
+                Err(super::super::SourceAdmissionError::StaleSourceLease)
+            ));
+            drop(admission.source_lease().source_admission().admit().expect(
+                "real transfer invalidates the exact issuer even while its raw gate stays open",
+            ));
+            let before_exports = recipient.code_export_count();
+            let before_table = recipient.state.session_table().clone();
+            let before_public = recipient.public_visibility_snapshot_in(unrelated.scope());
+            let refused = unrelated
+                .with_source_compiler_transaction(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |transaction, report| {
+                        super::super::turn::prepare_cell_program_admitted(
+                            transaction,
+                            admission,
+                            report,
+                        )
+                    },
+                )
+                .unwrap();
+            let failure = refused
+                .action()
+                .as_ref()
+                .err()
+                .expect("real transferred A must refuse under unrelated valid B");
+            assert_eq!(
+                failure.source_admission,
+                Some(super::super::SourceAdmissionError::StaleSourceLease)
+            );
+            assert!(matches!(
+                refused.close(),
+                crate::CompilerTransactionClose::NotStarted
+            ));
+            assert_eq!(
+                observation.preparation.load(Ordering::SeqCst),
+                before_preparation,
+                "stale issuer refuses before scratch producer"
+            );
+            assert_eq!(
+                observation.requests.load(Ordering::SeqCst),
+                before_requests,
+                "stale issuer starts no worker request"
+            );
+            assert_eq!(recipient.code_export_count(), before_exports);
+            assert_eq!(recipient.state.session_table(), &before_table);
+            assert_eq!(
+                recipient.public_visibility_snapshot_in(unrelated.scope()),
+                before_public
+            );
+            assert!(unrelated.validate_source_issuer().is_ok());
+            drop(unrelated.source_admission().admit().unwrap());
+            let entered = std::cell::Cell::new(false);
+            let stale_entry = source.with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |_, _| entered.set(true),
+            );
+            assert!(matches!(
+                stale_entry,
+                Err(super::super::SourceAdmissionError::StaleSourceLease)
+            ));
+            assert!(!entered.get());
+        });
+    }
+
+    fn source_action<T>(
+        session: &mut TestSession,
+        source: &Arc<super::super::RuntimeLexicalScopeLease>,
+        action: impl FnOnce(&mut TestSession, &mut dyn FnMut(crate::CompilerTransactionClose)) -> T,
+    ) -> T {
+        session
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                action,
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+    }
+
+    #[test]
+    fn source_fence_keeps_precompiled_plain_execution_and_refuses_ready_install() {
+        let (_root, mut session) = startup_session();
+        let scope = session.mint_isolated_scope_with_lease().unwrap();
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: scope.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let entry = source_action(&mut session, &scope, |session, _| {
+            session.prepare_startup_entry_installed(
+                startup_code_with_value(false, Some(11)),
+                StartupCompileIdentity::Fixture,
+            )
+        })
+        .unwrap();
+        let open_ready = source_action(&mut session, &scope, |session, _| {
+            session.snapshot_run_prepared(
+                startup_code_with_value(false, Some(22)),
+                PendingPreparedMode::Value,
+                None,
+            )
+        })
+        .unwrap()
+        .compile_off_checkout()
+        .unwrap();
+        let open_outcome = source_action(&mut session, &scope, |session, settlement| {
+            session.revalidate_and_run_prepared(open_ready, settlement)
+        })
+        .unwrap();
+        let Some(ResidentOutcome::Completed { result, .. }) = open_outcome else {
+            panic!("fresh legacy Ready capsule must install while open")
+        };
+        assert_eq!(result.to_json(), serde_json::json!(22));
+
+        // Snapshot after the successful install so stale imports cannot account
+        // for refusal. No machine work intervenes between this snapshot and use.
+        let ready = source_action(&mut session, &scope, |session, _| {
+            session.snapshot_run_prepared(
+                startup_code_with_value(false, Some(33)),
+                PendingPreparedMode::Value,
+                None,
+            )
+        })
+        .unwrap()
+        .compile_off_checkout()
+        .unwrap();
+        let before_exports = session.code_export_count();
+        let before_table = session.state.session_table().clone();
+        let before_bindings = session.binding_names();
+        let before_parked = session.parked_count();
+        session.set_run_context(SessionRunContext::ROOT).unwrap();
+        let fence = scope.source_admission().fence().unwrap();
+        // The transaction retains original source S independently of ROOT placement.
+        let refused = source_action(&mut session, &scope, |session, settlement| {
+            session.revalidate_and_run_prepared(ready, settlement)
+        });
+        assert!(
+            matches!(
+                &refused,
+                Err(ResidentError::Prepared(
+                    PreparedRuntimeError::SourceAdmission(
+                        super::super::SourceAdmissionError::Closed { .. }
+                    )
+                ))
+            ),
+            "actual legacy Ready result: {refused:?}"
+        );
+        assert_eq!(session.code_export_count(), before_exports);
+        assert_eq!(session.state.session_table(), &before_table);
+        assert_eq!(session.binding_names(), before_bindings);
+        assert_eq!(session.parked_count(), before_parked);
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: scope.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let outcome = session
+            .with_source_compiler_transaction(
+                scope.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.run_startup_entry(entry, settlement),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        let ResidentOutcome::Completed { result, .. } = outcome else {
+            panic!("precompiled plain result must settle")
+        };
+        assert_eq!(result.to_json(), serde_json::json!(11));
+        assert_eq!(
+            fence.pending_claims(),
+            0,
+            "plain execution needs no fresh source authority"
+        );
+        assert!(session.state.scope_tree().is_live(scope.scope()));
+    }
+
+    #[test]
+    fn ready_install_keeps_original_source_when_recipient_owner_changes() {
+        let (_source_root, mut original) = startup_session();
+        let source = original.mint_isolated_scope_with_lease().unwrap();
+        let target_root = tempfile::tempdir().unwrap();
+        let library = SessionLib::open(
+            SessionId(403),
+            target_root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        let mut recipient =
+            TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(library));
+        let target = recipient.mint_isolated_scope_with_lease().unwrap();
+        recipient
+            .set_run_context(SessionRunContext {
+                lexical_scope: target.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        source_action(&mut recipient, &source, |session, report| {
+            session.run_with_sites(
+                "original_source_bootstrap",
+                startup_code_with_value(false, Some(11)),
+                report,
+            )
+        })
+        .unwrap();
+        let make_ready = |session: &mut TestSession, value| {
+            source_action(session, &source, |session, _| {
+                session.snapshot_run_prepared(
+                    startup_code_with_value(false, Some(value)),
+                    PendingPreparedMode::Value,
+                    None,
+                )
+            })
+            .unwrap()
+            .compile_off_checkout()
+            .unwrap()
+        };
+        let open = make_ready(&mut recipient, 22);
+        let outcome = source_action(&mut recipient, &target, |session, report| {
+            session.revalidate_and_run_prepared(open, report)
+        })
+        .unwrap();
+        let Some(ResidentOutcome::Completed { result, .. }) = outcome else {
+            panic!("an open original can install under recipient authority");
+        };
+        assert_eq!(result.to_json(), serde_json::json!(22));
+        let ready = make_ready(&mut recipient, 33);
+        let before_exports = recipient.code_export_count();
+        let before_table = recipient.state.session_table().clone();
+        let fence = source.source_admission().fence().unwrap();
+        let refused = source_action(&mut recipient, &target, |session, report| {
+            session.revalidate_and_run_prepared(ready, report)
+        });
+        assert!(
+            matches!(
+                &refused,
+                Err(ResidentError::Prepared(
+                    PreparedRuntimeError::SourceAdmission(
+                        super::super::SourceAdmissionError::Closed { .. }
+                    )
+                ))
+            ),
+            "actual A→B Ready result: {refused:?}"
+        );
+        assert_eq!(recipient.code_export_count(), before_exports);
+        assert_eq!(recipient.state.session_table(), &before_table);
+        assert!(recipient.state.scope_tree().is_live(target.scope()));
+        drop(
+            target
+                .source_admission()
+                .admit()
+                .expect("recipient B remains open"),
+        );
+        assert_eq!(fence.pending_claims(), 0);
     }
 
     #[test]

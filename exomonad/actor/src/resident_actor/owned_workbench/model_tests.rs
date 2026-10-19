@@ -172,6 +172,7 @@ async fn blocking_source_check_keeps_exact_execution_owner_on_error_and_unwind_w
         let expected_control = original_control.clone();
         let running = services
             .with_compiler_owner(CompilerCloseOwner::Hosted(unrelated.clone()))
+            .for_preparation()
             .scope(async {
                 owned.spawn_blocking(move || {
                     crate::ActorCompilerCloseOwner::current()

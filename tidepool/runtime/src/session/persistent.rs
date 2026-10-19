@@ -5,7 +5,7 @@
 //! Suspension is threadless: a continuation is rooted as data and a later
 //! entry may resume it from a fresh evaluation thread.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -218,8 +218,12 @@ fn stage_interface_file(
 /// wrapping, decl/pure-bind routing, output draining, continuation-id minting)
 /// and delegate the machine and persistent-store operations here.
 pub struct PersistentSession {
+    pub(super) source_transaction:
+        Option<Arc<super::source_admission::RuntimeSourceCompilerTransaction>>,
     catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
     admission_owner: Arc<super::admission::RuntimeAdmissionOwner>,
+    pub(super) uncertain_source_scopes:
+        Arc<parking_lot::Mutex<Vec<Arc<super::RuntimeLexicalScopeLease>>>>,
     /// The resident machine — `None` before the first turn bootstraps it,
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
     /// turn's duration (stowed-XOR-running).
@@ -313,6 +317,12 @@ pub(super) struct CompileViewKey {
     public_epoch: u64,
 }
 
+impl CompileViewKey {
+    pub(super) fn generation(&self) -> Generation {
+        self.tip
+    }
+}
+
 struct CachedCompileView {
     key: Option<CompileViewKey>,
     view: SessionCompileView,
@@ -354,7 +364,46 @@ pub struct DeclarationPlaneCommit {
     pub evicted_values: Vec<String>,
 }
 
+impl Drop for PersistentSession {
+    fn drop(&mut self) {
+        // Seal the actual issuer before releasing uncertain lexical custody or
+        // the native machine. External aliases remain stale after teardown.
+        self.admission_owner.seal_session();
+        let held = std::mem::take(&mut *self.uncertain_source_scopes.lock());
+        drop(held);
+    }
+}
+
 impl PersistentSession {
+    /// Own source preparation for callers that hold the session substrate.
+    pub fn with_source_compiler_transaction<T>(
+        &mut self,
+        source: Arc<super::RuntimeLexicalScopeLease>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        cancellation: crate::CompilerTransactionCancellation,
+        supplemental_hook: Option<super::SourceAdmissionHook>,
+        close_sink: impl FnOnce(crate::CompilerTransactionClose),
+        action: impl FnOnce(&mut Self, &mut dyn FnMut(crate::CompilerTransactionClose)) -> T,
+    ) -> Result<crate::CompilerTransactionSettled<T>, super::SourceAdmissionError> {
+        super::source_admission::run_source_compiler_transaction(
+            source,
+            workload,
+            cancellation,
+            supplemental_hook,
+            close_sink,
+            |context, report| {
+                let previous = self.source_transaction.replace(context);
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self, report)));
+                self.source_transaction = previous;
+                match result {
+                    Ok(value) => value,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            },
+        )
+    }
+
     /// Build an idle session core. `lib` is the persistent declaration environment (`Some` for the repl
     /// and the accumulating harness; `None` for a session with no persistent declarations). The
     /// machine is not bootstrapped until the first turn.
@@ -366,8 +415,13 @@ impl PersistentSession {
                 .value_generation
                 .max(lib.log.retained_value_generation_high_water());
         }
+        let uncertain_source_scopes = Arc::new(parking_lot::Mutex::new(Vec::new()));
         PersistentSession {
-            admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new()),
+            source_transaction: None,
+            admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new(
+                &uncertain_source_scopes,
+            )),
+            uncertain_source_scopes,
             catalog_selection: Default::default(),
             machine: None,
             invocation_cancel: None,
@@ -892,6 +946,8 @@ impl PersistentSession {
         ),
         PreparedRuntimeError,
     > {
+        let _source_claim = self.admit_source_work_in(scope)?;
+
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
@@ -1421,6 +1477,8 @@ impl PersistentSession {
         prepared: PreparedProgram,
         metadata: Option<&DataConTable>,
     ) -> Result<tidepool_codegen::prepared_program::ProgramId, PreparedRuntimeError> {
+        let _source_claim = self.admit_source_work_in(ScopeId::ROOT)?;
+
         let admitted_metadata = self.stage_install_metadata(
             metadata,
             prepared.constructors().iter(),
@@ -1490,10 +1548,12 @@ impl PersistentSession {
     /// import (caller recompiles from a fresh snapshot, or falls back).
     pub(crate) fn revalidate_and_install_prepared(
         &mut self,
+        scope: ScopeId,
         snapshot: InstallSnapshot,
         compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
         metadata: Option<&DataConTable>,
     ) -> Result<Option<tidepool_codegen::prepared_program::ProgramId>, PreparedRuntimeError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
         let admitted_metadata = self.stage_install_metadata(
             metadata,
             compiled.constructor_declarations(),
@@ -1647,6 +1707,143 @@ impl PersistentSession {
 
     pub(super) fn compile_view_digest_in(&self, scope: ScopeId) -> Option<[u8; 32]> {
         self.scoped_compile_view_in(scope).map(|view| view.digest)
+    }
+
+    pub(super) fn capture_inspection_world_in(
+        &self,
+        scope: ScopeId,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        hidden: impl Fn(tidepool_repr::SessionVarId) -> bool,
+    ) -> Result<super::inspection::AdmittedInspectionWorld, SessionError> {
+        use super::inspection::{
+            AdmittedInspectionWorld, InspectionWorldBase, InspectionWorldInputs,
+        };
+        let key = self
+            .compile_view_key_in(scope)
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        if let Some(association) = self
+            .lib()
+            .tips
+            .get(&scope)
+            .and_then(|state| state.inspection_world.as_ref())
+            .filter(|association| {
+                self.inspection_world_base_is_current(&association.base, source, original_source)
+            })
+        {
+            tidepool_toolchain::timing::record_host_work(
+                tidepool_toolchain::timing::HostWorkCounter::WorldBorrowHit,
+                1,
+            );
+            return Ok(AdmittedInspectionWorld {
+                base: association.base.clone(),
+                inputs: InspectionWorldInputs::Published(association.world.clone()),
+            });
+        }
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::ColdBootstrap,
+            1,
+        );
+        let mut visible = self
+            .bindings
+            .iter_current_in(&self.scopes, scope)
+            .into_iter()
+            .filter(|(_, entry)| !hidden(entry.id))
+            .collect::<Vec<_>>();
+        visible.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0));
+        let visibility = visible
+            .iter()
+            .map(|(name, entry)| {
+                (
+                    name.0.clone(),
+                    entry.module.module_name(),
+                    entry.module.gen.0,
+                    entry.scope.0,
+                    entry.id.raw(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&("TPCWV001", scope.0, visibility), &mut encoded)
+            .map_err(|error| SessionError::Io(std::io::Error::other(error.to_string())))?;
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::ScopeEncodedByte,
+            encoded.len() as u64,
+        );
+        let mut modules = HashSet::new();
+        let mut rows = Vec::new();
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::ValueInterfaceCapture,
+            1,
+        );
+        for (_, entry) in visible {
+            if self.is_stub_module(entry.module) || !modules.insert(entry.module) {
+                continue;
+            }
+            tidepool_toolchain::timing::record_host_work(
+                tidepool_toolchain::timing::HostWorkCounter::ReachableValueVisit,
+                1,
+            );
+            rows.push(
+                self.retained_checked_value_artifact(entry.module)
+                    .ok_or(SessionError::MissingRetainedValueInterface(entry.module))?
+                    .clone(),
+            );
+        }
+        Ok(AdmittedInspectionWorld {
+            base: InspectionWorldBase {
+                scope,
+                key,
+                owner: self.admission_owner().clone(),
+                epoch: self.admission_owner().epoch(),
+                source: Arc::new(source.clone()),
+                original_source: original_source.clone(),
+                target: self.source_lease_in(scope)?,
+            },
+            inputs: InspectionWorldInputs::Cold {
+                primary: self.lib().current_exact_context_in(scope),
+                rows,
+                visibility: encoded.into(),
+            },
+        })
+    }
+
+    fn inspection_world_base_is_current(
+        &self,
+        base: &super::inspection::InspectionWorldBase,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> bool {
+        Arc::ptr_eq(&base.owner, self.admission_owner())
+            && base.epoch == self.admission_owner().epoch()
+            && base.source.sha256() == source.sha256()
+            && Arc::ptr_eq(&base.original_source, original_source)
+            && self
+                .source_lease_in(base.scope)
+                .is_ok_and(|lease| Arc::ptr_eq(&lease, &base.target))
+            && self.compile_view_key_in(base.scope).as_ref() == Some(&base.key)
+    }
+
+    pub(super) fn install_inspection_world_if_current(
+        &mut self,
+        completed: &super::inspection::CompletedInspectionWorld,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> bool {
+        if completed.cancellation.checkpoint().is_err() {
+            return false;
+        }
+        let association = &completed.prepared.association;
+        if !self.inspection_world_base_is_current(&association.base, source, original_source) {
+            return false;
+        }
+        let state = self
+            .lib_mut()
+            .tips
+            .entry(association.base.scope)
+            .or_default();
+        state.inspection_world = Some(association.clone());
+        true
     }
 
     /// Read mutation-owner facts without constructing a view or its digest.
@@ -1926,6 +2123,7 @@ impl PersistentSession {
         source_layer: &[PathBuf],
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<super::StagedDeclaration, SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
         let (persistent_imports, import_modules, visible_values) =
             self.declaration_staging_context_in(scope, receipt, external)?;
         #[allow(clippy::expect_used, reason = "decl plane present")]
@@ -1959,6 +2157,11 @@ impl PersistentSession {
         receipt: &super::DeclarationReceipt,
         external: &SourceImports,
     ) -> Result<(DeclarationCandidateRender, Vec<(SessionVarId, String)>), SessionError> {
+        let _source_claim = if self.lib().durable_graph.is_some() {
+            self.admit_source_work_in(scope)?
+        } else {
+            None
+        };
         let (persistent_imports, import_modules, visible_values) =
             self.declaration_staging_context_in(scope, receipt, external)?;
         #[allow(clippy::expect_used, reason = "decl plane present")]
@@ -2031,6 +2234,7 @@ impl PersistentSession {
         ) -> Result<A, SessionError>,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
         let scope = staged.scope();
+        let _source_claim = self.admit_source_work_in(scope)?;
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -2288,6 +2492,8 @@ impl PersistentSession {
         namespace: Option<tidepool_toolchain::declaration_join::ExportNamespace>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
+
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -2319,6 +2525,7 @@ impl PersistentSession {
     /// mint and first use from leaking into the child.
     pub fn mint_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
         let child = self.scopes.mint_child(parent)?;
+        self.inherit_source_admission(parent, child);
         if let Some(lib) = self.lib.as_mut() {
             let inherited = lib.scope_tip(parent);
             lib.seed_scope(child, inherited);
@@ -2337,6 +2544,7 @@ impl PersistentSession {
             return None;
         }
         let root = self.scopes.mint_isolated();
+        self.inherit_source_admission(parent, root);
         if let Some(lib) = self.lib.as_mut() {
             let inherited = lib.scope_tip(parent);
             lib.seed_scope(root, inherited);
@@ -2377,6 +2585,17 @@ impl PersistentSession {
         let scope = self.mint_isolated_scope();
         self.prepared_lexical_scope_lease(scope)
     }
+
+    /// Replacement notebook issuance keeps external prerequisites while giving
+    /// the new notebook its own gate. The old notebook is not a prerequisite.
+    pub fn mint_notebook_scope_with_lease(
+        &mut self,
+        prerequisite: Option<super::RuntimeSourceAdmission>,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
+        self.reap_admission_leases();
+        let scope = self.mint_isolated_scope();
+        self.prepared_lexical_scope_lease_with_source(scope, prerequisite)
+    }
     /// Preserve the exact initialized notebook, including captured ancestry.
     /// Canonical lease issuance prevents independent retirement owners.
     pub fn adopt_initial_notebook_scope(
@@ -2388,6 +2607,18 @@ impl PersistentSession {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         self.prepared_lexical_scope_lease(scope)
+    }
+
+    pub fn adopt_initial_notebook_scope_with_source(
+        &mut self,
+        scope: ScopeId,
+        prerequisite: Option<super::RuntimeSourceAdmission>,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
+        self.reap_admission_leases();
+        if scope == ScopeId::ROOT {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        self.prepared_notebook_scope_lease(scope, prerequisite)
     }
 
     /// The session's one scope forest — read by both stores for their lookup
@@ -2574,6 +2805,7 @@ impl PersistentSession {
                 tip: generation,
                 exact_context: recovered_context,
                 published_sources,
+                inspection_world: None,
             },
         );
         if let Err(error) = lib.bind_durable_public_scope(owner.clone(), scope) {
@@ -2876,6 +3108,7 @@ impl PersistentSession {
                 tip: snapshot.declaration_tip,
                 exact_context: installing_context,
                 published_sources: lib.published_source_selections_in(target).to_vec(),
+                inspection_world: None,
             },
         );
         self.public_visibility_epochs.try_reserve(1).map_err(|e| {
@@ -3014,6 +3247,7 @@ impl PersistentSession {
                 tip: generation,
                 exact_context: context,
                 published_sources,
+                inspection_world: None,
             },
         );
         let mut public_scopes = lib.durable_public_scopes.clone();
@@ -3585,6 +3819,8 @@ impl PersistentSession {
     /// check is the backstop, not the first line, since `bind_in` failing here
     /// is too late to return an adopted root to the machine's registry.
     pub fn bind_in(&mut self, scope: ScopeId, entry: BindingEntry) -> Result<(), SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
+
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -3679,6 +3915,14 @@ impl PersistentSession {
         entries: Vec<BindingEntry>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<MaterializationSetCommit, SessionError> {
+        let _source_claim = match self.admit_source_work_in(scope) {
+            Ok(claim) => claim,
+            Err(error) => {
+                self.discard_unbound_entries(entries);
+                return Err(error.into());
+            }
+        };
+
         if let Err(error) = self.validate_binding_set_in(scope, &entries) {
             self.discard_unbound_entries(entries);
             return Err(error);
@@ -3720,6 +3964,14 @@ impl PersistentSession {
         entries: Vec<BindingEntry>,
         binders: &[&super::BoundBinder],
     ) -> Result<MaterializationSetCommit, SessionError> {
+        let _source_claim = match self.admit_source_work_in(scope) {
+            Ok(claim) => claim,
+            Err(error) => {
+                self.discard_unbound_entries(entries);
+                return Err(error.into());
+            }
+        };
+
         match completion.validates_private_overlay(self, scope, binders) {
             Ok(true) => {}
             Ok(false) => {
@@ -3858,6 +4110,8 @@ impl PersistentSession {
         external: &SourceImports,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<DeclarationPlaneCommit, SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
+
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -3884,6 +4138,7 @@ impl PersistentSession {
         external: &SourceImports,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<DeclarationPlaneCommit, SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -4074,6 +4329,7 @@ impl PersistentSession {
         let mut retired = Vec::new();
         let mut source_instances = Vec::new();
         for dead in &doomed {
+            self.retire_source_admission(*dead);
             if let Some(lib) = self.lib.as_mut() {
                 lib.tips.remove(dead);
             }
@@ -4331,6 +4587,66 @@ mod checkpoint_scope_tests {
                 .prepared_handle_of(own.value.handle.raw()),
             Some(own.value.handle),
         );
+    }
+
+    #[test]
+    fn world_observation_refuses_changed_or_foreign_base() {
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 420);
+        let scope = session.mint_isolated_scope();
+        let original_source = session.adopt_initial_notebook_scope(scope).unwrap();
+        let source = super::super::GenerationArtifactReference::capture(b"source A".to_vec());
+        let admitted = session
+            .capture_inspection_world_in(scope, &source, &original_source, |_| false)
+            .unwrap();
+        assert!(admitted.needs_source_capture());
+        assert!(session.inspection_world_base_is_current(
+            &admitted.base,
+            &source,
+            &original_source
+        ));
+        let other_source = super::super::GenerationArtifactReference::capture(b"source B".to_vec());
+        assert!(!session.inspection_world_base_is_current(
+            &admitted.base,
+            &other_source,
+            &original_source
+        ));
+        let other = publication_session(&recovery, root.path(), 421);
+        assert!(!other.inspection_world_base_is_current(&admitted.base, &source, &original_source));
+        let tip = session.lib().scope_tip(scope);
+        let settled = session
+            .with_source_compiler_transaction(
+                original_source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let entry = super::super::prepared::tests::rooted_publication_fixture(
+                        session, "changed", 999,
+                    );
+                    session.bind_in(scope, entry)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &crate::CompilerTransactionClose::NotStarted
+        );
+        settled.into_outcome().action.unwrap();
+        assert_eq!(session.lib().scope_tip(scope), tip);
+        assert!(!session.inspection_world_base_is_current(
+            &admitted.base,
+            &source,
+            &original_source
+        ));
+        let fresh = session
+            .capture_inspection_world_in(scope, &source, &original_source, |_| true)
+            .unwrap();
+        assert!(session.inspection_world_base_is_current(&fresh.base, &source, &original_source));
+        session.retire_scope(scope);
+        assert!(!session.inspection_world_base_is_current(&fresh.base, &source, &original_source));
     }
 
     #[test]
@@ -7837,6 +8153,30 @@ mod maintained_binding_lifetime_properties {
 }
 
 impl PersistentSession {
+    pub(crate) fn admit_source_lease(
+        &self,
+        lease: Arc<super::RuntimeLexicalScopeLease>,
+    ) -> Result<(), super::SourceAdmissionError> {
+        self.source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?
+            .admit(Some(lease))
+    }
+
+    pub(super) fn admit_source_work_in(
+        &mut self,
+        scope: ScopeId,
+    ) -> Result<Option<super::RuntimeSourceClaim>, super::SourceAdmissionError> {
+        if let Some(owner) = &self.source_transaction {
+            let target = (scope != ScopeId::ROOT)
+                .then(|| self.source_lease_in(scope))
+                .transpose()?;
+            owner.admit(target)?;
+            return Ok(None);
+        }
+        Err(super::SourceAdmissionError::MissingTransaction)
+    }
+
     pub fn active_notebook_generation(
         &self,
         actor: &super::RecoveryPublicOwner,
@@ -8097,6 +8437,7 @@ impl PersistentSession {
                 tip: snapshot.declaration_tip,
                 exact_context: None,
                 published_sources: Vec::new(),
+                inspection_world: None,
             });
         if let Some(source) = &source {
             tip.exact_context = Some(source.context.clone());

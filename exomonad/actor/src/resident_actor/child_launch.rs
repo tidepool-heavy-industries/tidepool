@@ -420,7 +420,7 @@ where
             .as_ref()
             .map(|(lease, _)| lease.clone());
         let actor_reservation = kernel
-            .reserve_worker_creation(lifetime)
+            .reserve_source_worker_creation(lifetime, descriptor.source_dependency())
             .await
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         if !launch_worktrees.is_empty() {
@@ -517,6 +517,7 @@ where
                     descriptor.placement().resource_scope,
                     seed.as_ref(),
                     descriptor.source_layer(),
+                    descriptor.source_dependency(),
                 )
                 .await
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
@@ -526,6 +527,10 @@ where
                 .placement_custody
                 .provisioned(descriptor.placement());
         }
+        environment
+            .runner
+            .adopt_final_source_scope(descriptor.session_context(context.actor))
+            .await?;
         let entry = environment
             .runner
             .transfer_mailbox_value(
@@ -1289,6 +1294,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn child_factory_requires_clean_uncancelled_preparation_before_runtime_adoption() {
+        use tidepool_runtime::CompilerTransactionClose as Close;
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum History {
+            Idle,
+            Clean,
+            Unknown,
+            PrimaryAndUnknown,
+            Cancelled,
+            CancelledIdle,
+            PriorRetired,
+        }
+        assert!(
+            std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_some(),
+            "this case requires its declared private owned-resident compiler"
+        );
+        crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+            let prior_retired = Arc::new(Mutex::new(None::<Close>));
+            for history in [History::Idle, History::Clean, History::Unknown,
+                History::PrimaryAndUnknown, History::Cancelled, History::CancelledIdle, History::PriorRetired] {
+                let source = ActorWorkbenchSource::new("", Vec::new()).bind_preparation(preparation.clone());
+                let retained = crate::RetainedActorExit::new();
+                let owner = crate::capabilities::WorkbenchServices::new().with_compiler_owner(
+                    crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(retained.clone()),
+                );
+                let root = tempfile::tempdir().unwrap();
+                let root_path = root.path().to_path_buf();
+                let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let machines = Arc::new(Machines::new());
+                let factory_owner = retained.clone();
+                let factory_calls = calls.clone();
+                let factory_retired = prior_retired.clone();
+                let id = SessionId(4510 + history as u64);
+                let dependency = crate::ActorDescriptor::new("child phase control", crate::ActorPlacement {
+                    session: id, resource_scope: RealmId::ROOT, lexical_scope: ScopeId::ROOT,
+                }).admit_independent_world().source_dependency().clone();
+                assert!(dependency.source_lease().is_err());
+                let runner = Runner::new(machines.clone(), source)
+                    .with_child_session_factory(Arc::new(move |id, _, settlement| {
+                        assert_eq!(factory_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 0,
+                            "the actual factory must never replay");
+                        if !matches!(history, History::Idle | History::CancelledIdle) {
+                            // A real pinned worker request keeps the actual outer
+                            // preparation scope active until its physical END.
+                            let scratch = Arc::new(tidepool_toolchain::artifacts::compiler_scratch_directory().map_err(|e| e.to_string())?);
+                            let input = scratch.path().join("ChildPreparation.hs");
+                            std::fs::write(&input, "module ChildPreparation where\nentry :: Int\nentry = 42\n").map_err(|e| e.to_string())?;
+                            let before = tidepool_extract_cmd::extract_spawn_count();
+                            let mut command = tidepool_extract_cmd::ExtractCmd::new().map_err(|e| e.to_string())?;
+                            command.input(&input).output_dir(scratch.path()).target("entry");
+                            let output = command.bind().map_err(|e| e.to_string())?
+                                .execute_with_input_directories(&command, vec![scratch], |close| settlement(close))
+                                .action.map_err(|e| e.to_string())?;
+                            if !output.success() {
+                                return Err(format!("actual preparation worker failed: {:?}", output.output));
+                            }
+                            assert!(tidepool_extract_cmd::extract_spawn_count() > before);
+                        }
+                        if matches!(history, History::Unknown | History::PrimaryAndUnknown) {
+                            // Injected aggregate uncertainty after a real worker
+                            // response; this is not a physical END-loss fixture.
+                            settlement(Close::Unconfirmed(tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                                tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
+                                tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None },
+                            )));
+                        }
+                        if history == History::PriorRetired {
+                            // Carry an actual previously issued independent close;
+                            // never fabricate a retirement or reuse its authority.
+                            settlement(factory_retired.lock().clone().expect("earlier real daemon cancellation must have issued Retired"));
+                        }
+                        if matches!(history, History::Cancelled | History::CancelledIdle) {
+                            // Cancel this actual lifecycle's admitted operation,
+                            // including host-only advancement after NotStarted.
+                            drop(factory_owner.begin_compiler_finalization().map_err(|e| e.to_string())?);
+                        }
+                        if history == History::PrimaryAndUnknown { return Err("factory primary refusal".into()); }
+                        Ok(Box::new(session(id, &root_path)))
+                    }))
+                    .with_child_bootstrap_program(bootstrap_program());
+                let result = owner.scope(runner.provision_child_session(id, RealmId::fresh(), None, &[], &dependency)).await;
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+                let observations = retained.compiler_close_observations();
+                let crate::termination::CompilerWorkClose::Settled(close) = &observations[0] else {
+                    panic!("actual preparation must settle: {observations:?}");
+                };
+                match history {
+                    History::Idle | History::Clean => {
+                        assert!(matches!(close, Close::NotStarted) == (history == History::Idle));
+                        assert!(matches!(close, Close::Clean) == (history == History::Clean));
+                        let provisioned = result.unwrap_or_else(|error| panic!("clean {history:?}: {error}"));
+                        assert_eq!(observations.len(), 2, "runtime phase is admitted exactly once after actual clean preparation");
+                        assert_eq!(dependency.source_lease().unwrap().scope(), provisioned.lexical_scope);
+                        assert_eq!(machines.kind(id), Some(SlotKind::Idle));
+                        drop(provisioned);
+                        assert!(machines.kind(id).is_none());
+                        assert!(dependency.source_lease().unwrap().validate_source_issuer().is_err());
+                    }
+                    _ => {
+                        let error = result.err().expect("uncertain/cancelled preparation cannot advance");
+                        assert_eq!(observations.len(), 1, "no runtime compiler phase may start after refused preparation");
+                        assert!(dependency.source_lease().is_err(), "final canonical lease must not be adopted");
+                        assert!(machines.kind(id).is_none(), "no registry publication after refused preparation");
+                        match history {
+                            History::Unknown | History::PrimaryAndUnknown => assert!(matches!(close, Close::Unconfirmed(_))),
+                            History::CancelledIdle => assert!(matches!(close, Close::NotStarted)),
+                            History::PriorRetired => {
+                                assert!(matches!(close, Close::Retired(_)));
+                                assert!(close.resources_retired(), "actual independent cleanup cannot authorize phase advancement");
+                            }
+                            History::Cancelled => {
+                                assert!(matches!(close, Close::Retired(_)), "owned daemon must report the actual acknowledged/reaped cancellation: {close:?}");
+                                assert!(close.resources_retired(), "physical retirement is distinct from clean preparation");
+                                *prior_retired.lock() = Some(close.clone());
+                            }
+                            _ => unreachable!(),
+                        }
+                        if history == History::PrimaryAndUnknown {
+                            assert!(error.contains("factory primary refusal"), "primary error and independent close are both retained: {error}");
+                        }
+                        if matches!(history, History::Unknown | History::PrimaryAndUnknown) {
+                            let retry = owner.scope(runner.provision_child_session(id, RealmId::fresh(), None, &[], &dependency)).await;
+                            assert!(retry.is_err());
+                            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "unknown preparation cannot replay its factory");
+                            assert_eq!(retained.compiler_close_observations().len(), 1);
+                        }
+                    }
+                }
+            }
+        }).await;
+    }
+
+    #[tokio::test]
     async fn admitted_machine_and_capture_survive_unconfirmed_launch_cleanup_until_actor_retirement(
     ) {
         crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
@@ -1311,7 +1449,22 @@ mod tests {
                         }))
                         .with_child_bootstrap_program(bootstrap_program());
                     let startup = runner
-                        .provision_child_session(id, RealmId::fresh(), None, &[])
+                        .provision_child_session(
+                            id,
+                            RealmId::fresh(),
+                            None,
+                            &[],
+                            crate::ActorDescriptor::new(
+                                "independent child fixture",
+                                crate::ActorPlacement {
+                                    session: id,
+                                    resource_scope: RealmId::ROOT,
+                                    lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+                                },
+                            )
+                            .admit_independent_world()
+                            .source_dependency(),
+                        )
                         .await
                         .unwrap()
                         .startup_lease;

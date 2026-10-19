@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease) where
+module CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries) where
 
 import Tidepool.RequestCompletion (finishCompletion)
 
@@ -8,14 +8,15 @@ import Control.Monad ((>=>), forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import qualified Data.ByteString as BS
 import GHC (findModule, getModuleInfo, modInfoExports, mkModuleName)
 import GHC.Types.Name (getOccString)
 import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import SourceBootFixtureSupport (hasIntResultLiteral, withScratch)
-import System.Directory (copyFile)
-import System.FilePath ((</>))
+import System.Directory (copyFile, doesFileExist, getPermissions, setPermissions, Permissions(..))
+import System.FilePath ((</>), takeFileName)
 import Test.QuickCheck
 import Tidepool.CompilerProducts
   ( prepareCompilerProjectionContext, newPreparedOriginalInterfaceArtifacts, preparedProductInventory )
@@ -23,6 +24,118 @@ import Tidepool.CompilerRequest
 import Tidepool.ExecutionProjection (preparedModuleProductOutcomes, projectOriginalHomeModuleProducts)
 import Tidepool.ExtractRequest
 import Tidepool.GhcPipeline
+import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..))
+import Tidepool.PackageWitness (requireObservationPackageEnvironment)
+import Tidepool.DiagJson (InputRejection(..))
+
+worldRequestBoundaries :: IO ()
+worldRequestBoundaries = do
+  requireObservationPackageEnvironment
+  let root = replicate 64 'a'
+      resident = ExactInputsRequest root (ResidentExactInputs "foreign-worker-realization")
+      complete = ExactInputsRequest root (CompleteExactInputs "/unavailable/world-inputs.cbor")
+      question = WorldPublicModuleRequest root "foreign-worker-realization" WorldStructuredInfo
+        (StructuredInspection (StructuredPublicModule "Data.List") StructuredValueName "map"
+          (InspectionProvenance 1 "display-only")) "/unavailable/world-answer.bin"
+      body = BS.pack [136,1,88,32] <> BS.replicate 32 170 <> BS.pack [0,105] <> "Data.List"
+        <> BS.pack [132,1,99] <> "map" <> BS.pack [1,108] <> "display-only"
+        <> BS.pack [130,104] <> "rejected" <> BS.pack [1,246,64]
+      expected = "TPWQ0002" <> BS.pack [80,0,0,0] <> body
+  args <- case workerRequestFromArgv (workerArgv [WorldPublicModule question]) of
+    Right (Just request) -> pure request
+    other -> fail ("invalid world query fixture: " ++ show other)
+  (lateEnsure,lateQuery) <- withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \scope -> do
+    forM_ [resident,complete] $ \request -> do
+      outcome <- scopedEnsureWorld scope request
+      unless (outcome == ExactInputsRejected UnsupportedOperation)
+        (fail "observation boot acquired a world or read complete inputs")
+    (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \request -> do
+      actual <- runBoundWorldQuery request
+      unless (actual == expected) (fail "missing scope hold lost its typed unavailable response")
+      generic <- try (runBoundGhc request (pure ())) :: IO (Either SomeException ())
+      case generic of
+        Left failure | Just CheckedPurposeMismatch <- fromException failure -> pure ()
+        Left failure -> throwIO failure
+        Right _ -> fail "held-world request entered the generic GHC operation path"
+      pure (void (scopedEnsureWorld scope resident),void (runBoundWorldQuery request))
+  requirePhase CompilerTransactionReleased lateEnsure
+  try lateQuery >>= requireCancellation
+
+-- Actual module checking enters the same bound executor and pipeline as the
+-- service query. Refusals must identify the transitive dependency, before
+-- preprocessing/typechecking has an opportunity to execute its options.
+checkedPublicModuleHistories :: IO ()
+checkedPublicModuleHistories = do
+  withRequestFixture $ \_ request work -> do
+    writeTarget work
+    checked <- compileBoundRequest request CheckedPublicModule Set.empty GeneralCompile Nothing
+      (work </> "BoundPreparedA.hs")
+    unless (moduleNameString (moduleName (checkedPublicModuleIdentity checked)) == "BoundPreparedA"
+        && Set.fromList (map dependencyModuleName (dependencyModules (checkedPublicModuleEvidence checked)))
+          == Set.fromList ["BoundPreparedA","BoundPreparedB"])
+      (fail "public module completion lost the actual target or dependency graph")
+    -- Ordinary consumers still receive their target's checked environment.
+    ordinary <- compileBoundRequest request CheckedEnvironment Set.empty GeneralCompile Nothing
+      (work </> "BoundPreparedA.hs")
+    unless (moduleNameString (moduleName (tcg_mod (crTargetTcGblEnv ordinary))) == "BoundPreparedA")
+      (fail "ordinary checked consumer changed after public module completion")
+  forM_ ["{-# LANGUAGE CPP #-}","{-# LANGUAGE TemplateHaskell #-}"] $ \pragma ->
+    withRequestFixture $ \_ request work -> do
+      writeTarget work
+      prependDependency work pragma
+      refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldUntrackedOptions
+  forM_ ["-fbyte-code","-fobject-code"] $ \backendFlag ->
+    withRequestFixture $ \_ request work -> do
+      writeTarget work
+      let compiler = work </> "foreign-compiler.sh"
+          marker = work </> "foreign-compiler-ran"
+      writeFile compiler ("#!/bin/sh\necho ran > " ++ show marker ++ "\nexit 1\n")
+      permissions <- getPermissions compiler
+      setPermissions compiler (permissions {executable=True})
+      writeFile (work </> "BoundPreparedB.hs") (unlines
+        [ "{-# LANGUAGE CApiFFI #-}"
+        , "{-# OPTIONS_GHC " ++ backendFlag ++ " -pgmc " ++ show compiler ++ " #-}"
+        , "module BoundPreparedB where"
+        , "import Foreign.C.Types (CInt(..))"
+        , "foreign import capi unsafe \"uncaptured_world_header.h world_probe\" probe :: IO CInt"
+        , "__result :: Int"
+        , "__result = 97"
+        ])
+      refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldCodeGeneration
+      ran <- doesFileExist marker
+      unless (not ran) (fail "world module admission executed a transitive foreign compiler")
+  withRequestFixture $ \_ request work -> do
+    writeTarget work
+    let preprocessor = work </> "preprocessor.sh"
+        marker = work </> "preprocessor-ran"
+    writeFile preprocessor ("#!/bin/sh\necho ran > " ++ show marker ++ "\nexit 1\n")
+    permissions <- getPermissions preprocessor
+    setPermissions preprocessor (permissions {executable=True})
+    prependDependency work ("{-# OPTIONS_GHC -F -pgmF " ++ show preprocessor ++ " #-}")
+    refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldUntrackedOptions
+    ran <- doesFileExist marker
+    unless (not ran) (fail "world module admission executed a transitive custom preprocessor")
+  withRequestFixture $ \_ request work -> do
+    let literate = work </> "BoundPreparedA.lhs"
+    writeFile literate "> module BoundPreparedA where\n> answer :: Int\n> answer = 41\n"
+    refused request literate "BoundPreparedA.lhs" WorldLiterateSource
+  where
+    writeTarget work = writeFile (work </> "BoundPreparedA.hs")
+      "module BoundPreparedA where\nimport qualified BoundPreparedB\nanswer :: Int\nanswer = BoundPreparedB.__result\n"
+    prependDependency work pragma = do
+      let path = work </> "BoundPreparedB.hs"
+      original <- readFile path
+      -- Force the old text before reopening the same path for writing.
+      length original `seq` writeFile path (pragma ++ "\n" ++ original)
+    refused request path dependency reason = do
+      outcome <- try (compileBoundRequest request CheckedPublicModule Set.empty GeneralCompile Nothing path)
+        :: IO (Either SomeException CheckedPublicModuleResult)
+      case outcome of
+        Left failure
+          | Just (WorldModulePolicyFailure actual actualReason) <- fromException failure
+          , takeFileName actual == dependency, actualReason == reason -> pure ()
+          | otherwise -> throwIO failure
+        Right _ -> fail "unsupported world module source was checked"
 
 requestFor :: FilePath -> IO WorkerRequest
 requestFor work = case workerRequestFromArgv (workerArgv [Input (work </> "BoundPreparedA.hs"), Include work]) of

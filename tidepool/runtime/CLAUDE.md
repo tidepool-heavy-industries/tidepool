@@ -119,7 +119,15 @@ Notebook generations qualify public recovery ownership independently of actor
 incarnation and declaration allocation. Reload inserts a fresh public owner and
 atomically selects its complete source, installation and prompt references through
 the existing RunRecoveryStore transaction. It never transfers the prior owner or
-advances the machine admission epoch: issued requests may still publish into that
-prior generation. Startup incarnation transfer selects the actual active generation
+advances the machine admission epoch. Source admission has a separate lexical-scope
+owner: fencing it refuses fresh compilation, installation and binding publication
+while retained code, pure continuation and receipt observation keep their custody.
+Actual source work carries its original prerequisites through compiler END;
+unconfirmed cleanup retains that obligation. A frontend's scoped admission hook
+may carry its exact bootstrap owner into the same compiler transaction, but does
+not replace the concrete runtime gate or authorize work merely by being absent.
+Unknown durable publication requires the existing explicit owner-reopen recovery;
+it never reopens a captured alias or manufactures prospective runtime readiness.
+Startup incarnation transfer selects the actual active generation
 and carries those exact references through its existing transaction and epoch fence.
 Source links are derived projections, not another publication decision.

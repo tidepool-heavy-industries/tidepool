@@ -612,10 +612,12 @@ fn compiler_owner(
     services: &crate::capabilities::WorkbenchServices,
     work: &Arc<InvocationWork>,
 ) -> crate::capabilities::CompilerOwnerScope {
-    services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
-        work: work.clone(),
-        control: Some(crate::WorkbenchExecutionControl::untracked()),
-    })
+    services
+        .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
+            work: work.clone(),
+            control: Some(crate::WorkbenchExecutionControl::untracked()),
+        })
+        .for_preparation()
 }
 
 #[test]
@@ -679,11 +681,12 @@ fn hosted_refusal_settles_the_invocations_partial_compiler_registration() {
         &response,
         true,
     );
-    let owner =
-        services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
+    let owner = services
+        .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
             work: work.clone(),
             control: Some(control.clone()),
-        });
+        })
+        .for_preparation();
     assert!(matches!(
         owner.admit_work(),
         Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
@@ -705,11 +708,12 @@ async fn publication_cleanup_retains_admitted_ticket_until_late_close_after_canc
     let fixture = Fixture::start().await;
     let work = InvocationWork::new(fixture.actor.identity(), reservation());
     let control = crate::WorkbenchExecutionControl::untracked();
-    let owner =
-        services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
+    let owner = services
+        .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
             work: work.clone(),
             control: Some(control.clone()),
-        });
+        })
+        .for_preparation();
     assert!(work.begin_publication());
     let ticket = owner.admit_publication().unwrap();
     control.request_cancellation();

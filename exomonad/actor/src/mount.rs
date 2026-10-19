@@ -942,6 +942,10 @@ impl ActorCompileView {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ActorCompileViewError {
+    #[error(transparent)]
+    SourceAdmission(
+        #[from] crate::resident_workbench::generation_admission::GenerationAdmissionError,
+    ),
     #[error("actor inherited declaration capture has been released")]
     ReleasedInheritedScope,
     #[error("actor selected declaration capture has been released")]
@@ -964,6 +968,7 @@ pub enum ActorCompileViewError {
 /// from drifting apart at the actor boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorSessionContext {
+    pub(crate) source_dependency: crate::resident_workbench::generation_admission::SourceDependency,
     pub actor: ActorRef,
     pub placement: ActorPlacement,
     pub effect_policy: EffectRunPolicy,
@@ -980,6 +985,11 @@ pub struct ActorSessionContext {
 }
 
 impl ActorSessionContext {
+    pub(crate) fn source_dependency(
+        &self,
+    ) -> &crate::resident_workbench::generation_admission::SourceDependency {
+        &self.source_dependency
+    }
     /// Select the immutable revision paths captured for an issued workbench
     /// request. Actor authority and lexical placement remain unchanged.
     pub(crate) fn with_issued_source(
@@ -1157,9 +1167,10 @@ mod source_authority_tests {
             .exact_exports_in(ScopeId::ROOT, &["Selected"])
             .unwrap();
         let view = session.compile_view_in(ScopeId::ROOT).unwrap();
-        let facade =
-            tidepool_testing::with_settlement(|settlement| surface.materialize(&view, settlement))
-                .unwrap();
+        let facade = tidepool_testing::with_settlement(|settlement| {
+            session.materialize_facade(&surface, &view, settlement)
+        })
+        .unwrap();
         let projection = Arc::downgrade(facade.projection().unwrap());
         let imports = ActorSourceImports::from_exact_facades([&facade]);
         let retained = imports.clone();
@@ -1210,19 +1221,26 @@ mod source_authority_tests {
     }
 
     fn context(paths: Vec<PathBuf>) -> ActorSessionContext {
-        ActorSessionContext {
-            actor: crate::ActorRef::first(crate::ActorId(1)),
-            placement: ActorPlacement {
+        {
+            let context_actor = crate::ActorRef::first(crate::ActorId(1));
+            let context_placement = ActorPlacement {
                 session: SessionId(1),
                 resource_scope: RealmId::ROOT,
                 lexical_scope: ScopeId::ROOT,
-            },
-            effect_policy: EffectRunPolicy::HandleOrSuspend,
-            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-            source_imports: ActorSourceImports::default(),
-            haskell_effects_alias: "[]".into(),
-            current_model: None,
-            source_layer: paths.into(),
+            };
+            ActorSessionContext {
+                actor: context_actor,
+                placement: context_placement,
+                effect_policy: EffectRunPolicy::HandleOrSuspend,
+                live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                source_imports: ActorSourceImports::default(),
+                haskell_effects_alias: "[]".into(),
+                current_model: None,
+                source_layer: paths.into(),
+                ..crate::ActorDescriptor::new("fixture", context_placement)
+                    .admit_independent_world()
+                    .session_context(context_actor)
+            }
         }
     }
 

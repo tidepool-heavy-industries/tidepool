@@ -184,9 +184,9 @@ fn select_checks<'a>(checks: &'a [String], recipe: Option<&str>) -> Result<Vec<&
 }
 
 /// Issued only after recipe compilation and confirmed transaction close.
-/// Its owned artifacts can be executed without retaining compiler authority.
+/// It retains the original source owner for each fresh installation.
 struct PreparedRecipe {
-    artifacts: tidepool_runtime::CompiledArtifacts,
+    artifacts: tidepool_runtime::RuntimePreparedTargets,
     source: String,
     entry: String,
 }
@@ -225,12 +225,24 @@ fn prepare_recipe(entry: &str, selected: &FrozenWorkspace) -> Result<PreparedRec
         tidepool_runtime::session::ExpressionLift::Effectful,
     );
     let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
-    let artifacts = super::run_compiler_preparation(|settlement| {
-        tidepool_runtime::compile_targets(&source, &[target], &includes, |_, _, _| {}, settlement)
-            .map_err(|error| -> Box<dyn std::error::Error> {
-                Box::new(render_recipe_compile_error(error.into(), &source, entry))
-            })
-    })?;
+    let mut preparation = exomonad_actor::CompilerPreparationOwner::new();
+    let outcome = preparation.compile_runtime_targets(
+        &tidepool_toolchain::artifacts::CompileInvocation {
+            source: &source,
+            targets: &[target],
+            include: &includes,
+            fallback_module_name: "Input",
+        },
+        |_, _, _| {},
+    );
+    if !outcome.cleanup.observation().is_confirmed() {
+        return Err(Box::new(super::PreparationCleanupUnconfirmed { outcome }));
+    }
+    let artifacts = outcome
+        .action?
+        .map_err(|error| -> Box<dyn std::error::Error> {
+            Box::new(render_recipe_compile_error(error, &source, entry))
+        })?;
     Ok(PreparedRecipe {
         artifacts,
         source,
@@ -407,8 +419,7 @@ impl Driver {
         prepared: &PreparedRecipe,
     ) -> std::result::Result<(), RecipeCompilationFailure> {
         tokio::task::block_in_place(|| {
-            tidepool_runtime::run_compiled_target(
-                &prepared.artifacts,
+            prepared.artifacts.run(
                 tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET,
                 tidepool_runtime::DEFAULT_NURSERY_SIZE,
                 self,
@@ -1096,6 +1107,43 @@ mod tests {
                 tidepool_runtime::CompilerTransactionClose::Clean
             ),]
         );
+    }
+
+    #[test]
+    fn recipe_preparation_uses_one_runtime_source_transaction() {
+        use super::*;
+        let workspace = tempfile::tempdir().unwrap();
+        crate::exomonad::workspace::copy_authored(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../exomonad/examples/workspace"),
+            workspace.path(),
+        )
+        .unwrap();
+        let authored = workspace.path().join(".exomonad");
+        std::fs::write(
+            authored.join("Project/EpochStartupChecks.hs"),
+            include_str!("fixtures/recipe_fresh_original_epoch.hs"),
+        )
+        .unwrap();
+        crate::exomonad::edit_fixture_project_config(&authored, |project| {
+            project.haskell.modules.clear();
+            project.haskell.checks =
+                vec!["Project.EpochStartupChecks.installedOriginalEpoch".into()];
+        });
+        let selection = tempfile::tempdir().unwrap();
+        let selected = FrozenWorkspace::load(workspace.path(), selection.path()).unwrap();
+        // This is the production recipe issuer, including its lifecycle ticket.
+        // An enclosing raw compiler transaction would refuse ForeignTransaction.
+        let prepared = prepare_recipe(
+            "Project.EpochStartupChecks.installedOriginalEpoch",
+            &selected,
+        )
+        .unwrap();
+        assert!(prepared
+            .artifacts
+            .artifacts()
+            .targets
+            .contains_key(tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET));
+        assert!(!prepared.artifacts.artifacts().warnings.has_io);
     }
 
     #[tokio::test(flavor = "multi_thread")]

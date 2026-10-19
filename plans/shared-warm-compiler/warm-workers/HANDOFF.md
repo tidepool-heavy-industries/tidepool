@@ -1,138 +1,92 @@
 # Warm worker implementation handoff
 
-Area: `/root/warm_compiler_campaign/warm_workers`, Sol high.
-Checkout: `/srv/swarm/checkouts/tidepool-shared-warm-warm-workers-20261019`.
-Branch: `feature/shared-warm/warm-workers`. Base:
-`5b74c2f1fe010c5c343e0c6f331d54328fbd5090`. Current compiled and executed
-source: `cbef468ed5750ba6320cfff94c43440fac74c645`.
-The C2 amendment `e2bd2611102566085d0c573568d820a50ed62fb3` was imported as
-`6beec6fd58c5ae27ee47ff86fa5f2797895adb9c`, including its unchanged STATUS.
-The campaign owner alone edits shared CONTRACTS/STATUS.
+Owner: `/root/warm_compiler_campaign/warm_workers`; reserved implementation leaf
+`/root/warm_compiler_campaign/warm_workers/protocol` (Sol high). One descendant;
+no extra grant. Source checkout is `tidepool-shared-warm-warm-workers-20261019`,
+branch `feature/shared-warm/warm-workers`. Campaign controls shared contracts and
+integration. No deployment or live Persona changes are authorized here.
 
-## Delivered slice
+## Current source and actual evidence
 
-Matched TPREQ022 / TPEXO001 framing adds an exclusive source-free
-EnsureExactInputs request and typed Ready/NeedsAcquisition/Rejected completion.
-Complete carries the existing exact-scope manifest; Resident carries a worker-local
-reference. These labels issue no root authority. The production source-free dispatch
-currently returns typed UnsupportedOperation before source acquisition: no Ready
-registration, resident hit, delta, pool migration or shared-warm performance gain is
-claimed. Rust preserves the existing BEGIN/request/END transaction and poisons an
-uncertain accepted response without replay. Haskell preserves diagnostic/cleanup
-precedence and the separate human stdout channel.
+Committed `20c063b86faaaa653c18780b42efc4c6efe0a676` contains the matched v23
+request/world protocol, actual Haskell public-module checking, rooted package
+boot/lifetime owner, and native provider-guard finalizer. Source review accepted
+the bounded transport/package/finalizer seams; aggregate world retention remains
+an open repair before joined acceptance.
 
-The unused explicit completed HscEnv and redundant module-environment fallback
-were removed after confirming the identical final-HPT owner lookup, including the
-missing-HMI path. Lazy HMI, recovery and package owners remain.
+* Production worker and four affected test binaries compiled at `20c063b86f`:
+  `tidepool_extract_bin`, `worker_response_test_bin`, `worker_response_child`,
+  `cell_splitter_test_bin`, `source_boot_product_reuse_test_bin`. Exit 0, 13 local
+  actions. This includes the raw-v2 SourceBoot control's compilation, not execution.
+* Extract production and cfg(test) compiled at `6404d7c8cf`; four maintained Rust
+  controls executed and passed: interrupted native finalization through the actual
+  cleanup CLI, wrong guard/evidence refusal, copied-owner/missing-pending refusal,
+  and accepted malformed control preserving one BEGIN/request/END owner.
+* Evidence directory: `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/`.
+  Logs: `world-worker-build-retry1.log`, `finalizer-rust-build-6404.log`,
+  `native-finalizer-controls.log`; individual counted JSON files are in
+  `native-finalizer-controls/`. Original missing-CBOR-helper failure is retained
+  in `world-worker-build-6404.log`.
+* Actual worker service/query/retirement acceptance is NOT established by those
+  component checks. Real owned-area Rooted startup at joined `e695` failed before
+  readiness because the wrapper allowlist incorrectly included its own profile
+  object. The real provider's 73 pins remain retained; no complete-retirement
+  record was fabricated. Protocol leaf owns the minimal self-profile repair.
 
-The existing RequestIfaceDecoder now remembers inactive retained seals. A live
-scope still decodes valid uncached data when its image is evicted; it cannot refill
-the optional shared cache afterward. Standalone readExactScope owns an unrestricted
-local decoder. Raw-input custody and decoder policy publish together: expensive
-acquisition, validation and all staged timing writes run with cancellation restored,
-then masked nested owner locks prune and publish without a fallible observer between
-them. The decoded-interface count observer follows committed publication. A failure
-there can leave a coherently committed state without a returned scope.
+Committed `f079ff637e` and `f16015f73a` add actual toolchain open/query/restore
+consumers, cold raw type-row transfer, cached restoration backing and strict
+TPWQ0002 answer correlation. `6b8e435cdf` repairs the maintained finite Haskell
+fixture wrapper to read current mandatory schema2 provenance metadata, with old
+format refusal controls. These are source-only until the active native gate
+settles. Campaign critical review requires three further client repairs after
+that frozen action: require the existing runtime physical/source scope instead
+of creating a raw fallback scope; validate the conventional ordered source
+winner rather than membership alone; correlate inner identifier namespace.
 
-The owning genuine history proves the initial Dependency-only cache policy, injects
-an IOException and external ThreadKilled during the old split point, checks two
-actual old-live-scope decodes, then separately probes retained raw Dependency facts.
-Two stale native-row test adapters were repaired to the current ten-field format;
-classification remains unchanged and production admission still validates it. The
-neighboring binder refusal checks the observed quoted `expected word` cause rather
-than a generic parser failure.
+## Active observer and exact continuation
 
-## Review and execution
+Native toolchain production + cfg(test) build is active at exact `6b8e435cdf`:
 
-The single descendant grant was reused throughout; no second descendant was spawned.
-Actual native task ID: `/root/warm_compiler_campaign/warm_workers/protocol`, configured
-`gpt-6.1-sol`, high, fresh context. Initial implementation started at base5b74 in
-`tidepool-shared-warm-worker-protocol-20261019`; successive concrete review/audit
-reactivations used this same task. Its final source receipt settled at exact2aa1; the later cbef success-message correction changes no predicate.
-It independently reviewed area-authored publication/history repairs. Its authored
-protocol/encoder pieces received separate campaign-supervisor review. Native event
-history retains starts/settlements; no additional timestamp is inferred here.
+```
+swarm-build just build -j1 //tidepool/toolchain:tidepool_toolchain //tidepool/toolchain:tidepool_toolchain_unit_tests_binary
+```
 
-Campaign source review accepted the initial full protocol and later production
-atomicity. The only final source-review finding, an overly broad refusal predicate,
-is repaired at exact2aa1, whose predicate is unchanged in cbef. Child exact receipts are retained in
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/protocol/WAVE2-OWNERS.md`.
-The campaign owns final cumulative review/fold disposition.
+Session `54132`, sole observer this supervisor. Log `world-client-build-6b8.log`;
+admission `CLIENT-NATIVE-ADMISSION-6b8.json`: 8 GiB prospective memory, 2 GiB
+output growth; actual startup projection 63,009,525,760 B below 80 GiB build-slice
+pressure threshold, free output storage 441,213,722,624 B. Do not edit its Rust
+inputs until terminal. The earlier GHC6 and Rust4 gates are settled and released;
+this is not an additional lingering reservation. Existing area daemon PID4101866
+is in `/build.slice/inanna-build-1792404990-4101779.scope`.
 
-Production worker, four affected Haskell binaries and Rust production/cfg(test)
-consumers compiled through pinned fast-dev, local-only Buck actions. The maintained
-wrappers, including their declared generator/runtime/fixture inputs, were built.
-Final exactcbef counted execution passed **9 selected / 9 executed / 9 passed**:
+On terminal: collect exit/first complete stderr/artifact and scope evidence;
+report the terminal event to campaign, then repair actual compile findings and
+critical source review findings, compile changed production/test consumers, and
+execute the smallest genuine controls. No raw test-bin execution bypasses the
+maintained wrapper's declared runtime inputs.
 
-- Worker response cleanup suppresses Ready: 1.
-- Matched source-free request wire: 1.
-- Owned scope reuse and failed-publication history, standalone finalized Core,
-  and native ordinal refusal: 3.
-- Rust exclusivity, response framing/correlation, and poisoned transaction custody: 4.
+## Remaining implementation frontier
 
-The authorized negative branch
-`review/shared-warm/decoder-publication-negative-20261019` retains exact
-`5ac20115af4eadccc4fc0aad0d5fe766921f15ef`: production ExactScope/ExactHydration
-bytes from07c8 and unchanged repaired test265. It compiled, then selected/executed
-one genuine owned-scope case and **failed at the intended decoder-policy assertion**:
-Source read once/reused once, Dependency read twice. The feature branch was restored
-before final compilation and all nine final controls. This proves IOException-mutant
-sensitivity; the negative run stops there and does not establish async-mutant
-sensitivity. Positive execution covers both failures.
+1. Protocol leaf: profile self-custody repair; unissued materialization cleanup
+   through existing Completion; source-local output/dump/HIE guard; combined
+   optional retention accounting under the existing ExactInputOwner budget.
+   Late request closures must carry only a tiny world/ref binding and reborrow
+   the held payload after phase/executor checks. Map deletion alone is not proof
+   of release. Global EPS/NameCache remain under service pin and worker RSS policy.
+2. Supervisor: finish client review repairs, counters from the actual host owner,
+   actual runtime query integration and exact source/provenance/absence/refusal
+   controls. Host runtime leaf is reactivated with the real APIs, not placeholders.
+   Owned area owns actual provider/rooted boot/retirement execution; avoid duplicate
+   expensive boot lanes.
+3. Mandatory ordinary cell/each-item successor/publication/fork/reload/restore
+   migration follows the accepted `RUST-CLIENT-MIGRATION` and paired
+   `CELL-SUCCESSOR-CONTRACT-8d69.md`. It remains authorized required work. Do not
+   rebuild full ExactCompilationRequest or all retained supports behind the new API.
+   Successors borrow shared frontier and actual issued delta, never predecessor
+   worlds or completed-module-cache inference. Existing runtime prefix and atomic
+   publication owner stays authoritative.
 
-Full exact commands, source/artifact hashes, selected/executed counts, actual exit
-statuses, negative-control identity and hashed logs:
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/NATIVE-VALIDATION-cbef.json`.
-Prior failures and reports are preserved, including the native-row adapter's
-pre-regression failure and the binder fixture's pre-ordinal failure. Compilation
-and execution are distinct in this receipt.
-
-## Resource and hold policy
-
-The per-checkout buck-out bind and pinned --tests generation `generation.dVqJhqs0`
-remain provisioned. The exact ce60 workspace submodule is initialized. The area
-Buck daemon3810824 remains owned/idle under
-`/build.slice/inanna-build-1792397236-3810751.scope`; direct production GHC3842958
-was observed in the same scope. No command observer remains outstanding.
-
-The admitted native lane allowed3GiB prospective total additional output. Own
-allocated output changed931872768→2665410560 bytes (growth1733537792);
-sampled high2712383488. The daemon scope's cumulative memory peak was5718179840
-bytes, below the granted16GiB allowance. Scratch/shared-cache-upload peak was not
-independently instrumented, and concurrent root cleanup prevents attributing global
-free-space changes to this lane. The installed launcher lacks the staged storage
-switches; no bypass, arbitrary output deletion or shared daemon restart was used.
-
-Actual strong owners and release/hold policy are recorded in private
-`WAVE2-POLICY.md` and `protocol/WAVE2-OWNERS.md` beside the native evidence.
-Dropping a future realization index cannot release monotone source/original maps,
-last HPT/module graph, recovery contexts, lazy cohydrated HMI, EPS/NameCache or the
-interpreter's separate loaded state. Keep required live borrows and existing
-RSS/request rotation. No cohort decoder snapshots, parallel registry, new cache
-budget or transitive compatibility equivalence were introduced. The planned
-41/disjoint/42 native interpreter control remains unexecuted.
-
-## Event-driven continuation
-
-No periodic wake or polling loop is scheduled. The ready implementation/review/
-repair/test frontier above is drained; final campaign source review/fold is the
-next receipt. Awaited producers and exact continuation:
-
-- **host-inputs:** actual complete authenticated owner/root and portable cold
-  manifest/base relation. Its process-local selected Arc or root text is not an
-  issuer. Once supplied, bind worker-local realization identity through the existing
-  owner and make a genuine hit precede all whole-baseline encoding/FD enumeration.
-- **owned-inputs:** admitted immutable row/byte reference and END/absence/release
-  transport seam. Extend the existing physical owner; preserve all custody.
-- **campaign/package-source owner:** actual retained consumed package/native-source
-  proof at new worker boot, or an accepted scoped fallback/control decision. Existing
-  deployment hashes frontend/worker and libdir text; fresh hashes cannot bless old
-  EPS/native state. Per-operation/default reset remains held, not silently enabled.
-- **qualification/campaign:** joined exact bundle/Persona/cell/lookup acceptance,
-  then measured semantic/performance controls. The nine local controls do not qualify
-  a release or a production Ready/hit implementation.
-
-A producer sends exact candidate/evidence/next action to this area with send_message
-if running, or followup_task if idle/completed. The same terminal-event rule applies
-to this area and its child. Reactivate the existing reserved child for concrete
-ready implementation or independent review; no duplicate slot or orphan command.
+No Ready/hit performance or full warm-compiler completion claim is made. Before
+an event yield, retain the exact awaited dependency/producer/recipient/next action.
+Reactivate dormant recipients with `followup_task`; a message alone does not
+restart their turn. Never leave a running command without a terminal observer.

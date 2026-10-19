@@ -31,6 +31,18 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
     if args.is_empty() {
         return Err(FrontendError::Usage(USAGE.to_owned()));
     }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--finish-compiler-service-source-retirement")
+    {
+        let [_, owner] = args.as_slice() else {
+            return Err(FrontendError::Usage(
+                "--finish-compiler-service-source-retirement requires one owner directory".into(),
+            ));
+        };
+        crate::package_source::finish_retirement(Path::new(owner)).map_err(FrontendError::Io)?;
+        return Ok(0);
+    }
     if args.first().is_some_and(|arg| arg == "--owned-daemon-run") {
         return owned_daemon_run(&args[1..]);
     }
@@ -80,6 +92,13 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         return stop_daemon(&args[1..]);
     }
 
+    for key in crate::package_source::BOOT_ENV {
+        if std::env::var_os(key).is_some() {
+            return Err(FrontendError::Usage(format!(
+                "owned daemon refuses inherited {key}"
+            )));
+        }
+    }
     let profile = crate::CompilerTraceProfile::select(
         std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok().as_deref(),
         std::env::var("TIDEPOOL_TIMING").ok().as_deref(),
@@ -103,6 +122,104 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
     let status = command.status().map_err(FrontendError::Io)?;
     build_products.cleanup();
     Ok(exit_code(status))
+}
+
+/// A private inherited process-owner carrier, created only for the owned
+/// runner's daemon child. Ordinary workload children do not inherit either end.
+pub(crate) struct OwnedServiceStartup {
+    directory: PathBuf,
+    _control: std::os::unix::net::UnixStream,
+}
+
+impl OwnedServiceStartup {
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
+    }
+}
+
+pub(crate) fn read_owned_service_startup() -> io::Result<OwnedServiceStartup> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::MetadataExt;
+    let fd = unsafe { libc::fcntl(0, libc::F_DUPFD_CLOEXEC, 3) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut control = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+    if unsafe { libc::fcntl(0, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    if unsafe {
+        libc::getsockopt(
+            control.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut peer as *mut libc::ucred).cast(),
+            &mut size,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if size as usize != std::mem::size_of::<libc::ucred>()
+        || peer.pid != unsafe { libc::getppid() }
+        || peer.uid != unsafe { libc::getuid() }
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "compiler source startup carrier is not issued by its actual parent",
+        ));
+    }
+    let parent = std::fs::metadata(format!("/proc/{}/exe", peer.pid))?;
+    let current = std::fs::metadata("/proc/self/exe")?;
+    if parent.dev() != current.dev() || parent.ino() != current.ino() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "compiler source startup parent is not its owning frontend",
+        ));
+    }
+    control.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    let mut magic = [0; 8];
+    control.read_exact(&mut magic)?;
+    if &magic != b"TPSOWN01" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid compiler source startup carrier",
+        ));
+    }
+    let mut start = [0; 8];
+    control.read_exact(&mut start)?;
+    if crate::process::process_start_ticks(peer.pid as u32)? != Some(u64::from_le_bytes(start)) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "compiler source startup parent incarnation differs",
+        ));
+    }
+    let mut length = [0; 4];
+    control.read_exact(&mut length)?;
+    let length = u32::from_le_bytes(length) as usize;
+    if length > 16 * 1024 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "compiler source startup path exceeds control budget",
+        ));
+    }
+    let mut bytes = vec![0; length];
+    control.read_exact(&mut bytes)?;
+    let path = String::from_utf8(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let directory = PathBuf::from(&path);
+    if path.contains('\0') || !directory.is_absolute() || !directory.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid owned compiler source directory",
+        ));
+    }
+    Ok(OwnedServiceStartup {
+        directory,
+        _control: control,
+    })
 }
 
 struct OwnedSocketDirectory(PathBuf);
@@ -288,6 +405,15 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         program,
         child_args,
     } = parse_owned_invocation(args)?;
+    for key in crate::package_source::BOOT_ENV {
+        if std::env::var_os(key).is_some() {
+            return Err(FrontendError::Usage(format!(
+                "owned daemon refuses inherited {key}"
+            )));
+        }
+    }
+    let service_configuration =
+        crate::package_source::ConfiguredSource::from_environment().map_err(FrontendError::Io)?;
     let profile = crate::CompilerTraceProfile::select(
         std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok().as_deref(),
         std::env::var("TIDEPOOL_TIMING").ok().as_deref(),
@@ -348,16 +474,43 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         allowances,
     );
     let mut command = owned_timing_command(&frontend, profile);
+    let (mut owner_control, daemon_control) = if service_configuration.is_some() {
+        let (owner, daemon) = std::os::unix::net::UnixStream::pair().map_err(FrontendError::Io)?;
+        (Some(owner), Some(daemon))
+    } else {
+        (None, None)
+    };
     command
         .args(&arguments)
         .env("XDG_CACHE_HOME", &cache)
         .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
         .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
         .env("TIDEPOOL_BUILD_PRODUCTS_DIR", cache.join("products"))
-        .stdin(Stdio::null())
+        .stdin(daemon_control.map_or_else(Stdio::null, |control| {
+            Stdio::from(std::os::fd::OwnedFd::from(control))
+        }))
         .stdout(Stdio::null())
         .stderr(Stdio::from(daemon_log));
     let mut daemon = OwnedDaemonChild(command.spawn().map_err(FrontendError::Io)?);
+    drop(command);
+    if let Some(control) = &mut owner_control {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = root.as_os_str().as_bytes();
+        let count = u32::try_from(bytes.len())
+            .map_err(|_| FrontendError::Usage("owned source path exceeds framing".into()))?;
+        let parent_start = crate::process::process_start_ticks(std::process::id())
+            .map_err(FrontendError::Io)?
+            .ok_or_else(|| {
+                FrontendError::Daemon("owned frontend incarnation unavailable".into())
+            })?;
+        control
+            .write_all(b"TPSOWN01")
+            .and_then(|()| control.write_all(&parent_start.to_le_bytes()))
+            .and_then(|()| control.write_all(&count.to_le_bytes()))
+            .and_then(|()| control.write_all(bytes))
+            .and_then(|()| control.flush())
+            .map_err(FrontendError::Io)?;
+    }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let binding = loop {
         if let Some(status) = daemon.0.try_wait().map_err(FrontendError::Io)? {
@@ -375,8 +528,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     };
-    let identity =
-        crate::CompilerIdentity::daemon(binding.producer, binding.consumed_worker, binding.epoch);
+    let identity = binding.identity();
     if identity.producer_bytes() != expected.producer_bytes()
         || identity.consumed_worker_bytes() != expected.consumed_worker_bytes()
     {
@@ -436,6 +588,11 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
                 "owned compiler descendant {pid} remains live or unreaped"
             )));
         }
+    }
+    if let Some(configuration) = &service_configuration {
+        configuration
+            .release_after_complete(root, binding.epoch)
+            .map_err(FrontendError::Io)?;
     }
     socket_directory.cleanup().map_err(FrontendError::Io)?;
     let code = exit_code(child?);
@@ -539,6 +696,7 @@ pub(crate) struct PreparedWorker {
     selection: PathBuf,
     bytes: Vec<u8>,
     ghc_libdir: OsString,
+    pub(crate) service_source: Option<std::sync::Arc<crate::package_source::ServicePackageSource>>,
 }
 
 impl PreparedWorker {
@@ -554,6 +712,7 @@ impl PreparedWorker {
             selection,
             bytes,
             ghc_libdir,
+            service_source: None,
         };
         prepared.check_request_protocol()?;
         Ok(prepared)
@@ -652,6 +811,7 @@ impl PreparedWorker {
             selection,
             bytes,
             ghc_libdir: "unused".into(),
+            service_source: None,
         })
     }
 }
@@ -824,13 +984,21 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
         }
         Ok((code, stdout, stderr))
     })();
-    if result.is_ok() {
-        worker.shutdown();
-    } else {
-        // A rejected frame can leave the worker blocked writing its unread
-        // body. Waiting for stdin EOF would not make that worker exit.
-        worker.abort();
-    }
+    let result = match result {
+        Ok(report) => match worker.shutdown_confirmed() {
+            Ok(()) => Ok(report),
+            Err(error) => {
+                received_before_failed_end = Some(report);
+                Err(error)
+            }
+        },
+        Err(error) => {
+            // A rejected frame can leave the worker blocked writing its unread
+            // body. Waiting for stdin EOF would not make that worker exit.
+            worker.abort();
+            Err(error)
+        }
+    };
     // A successful response releases the caller's direct endpoint, which can
     // immediately terminate this frontend. Reap and retire scratch ownership
     // before publishing that final response.
@@ -1120,6 +1288,7 @@ mod tests {
             bytes: std::fs::read(&selection).unwrap(),
             selection,
             ghc_libdir: "unused".into(),
+            service_source: None,
         };
         let config = DaemonConfig {
             socket: socket.clone(),
@@ -1189,6 +1358,7 @@ mod tests {
             bytes: std::fs::read(&selection).unwrap(),
             selection,
             ghc_libdir: "unused".into(),
+            service_source: None,
         };
         let config = DaemonConfig {
             socket: socket.clone(),

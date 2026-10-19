@@ -436,7 +436,8 @@ PYPROBE
 
     def test_genuine_issuer_uses_declared_deployment_identity(self):
         deployment = self.root / "compiler deployment.json"
-        deployment.write_text(json.dumps(dict(schema=1, producer_identity=list(range(32)))))
+        deployment.write_text(json.dumps(dict(schema=2, producer_identity=list(range(32)),
+            consumed_worker_identity=list(reversed(range(32))), package_source={"kind": "observation-only"})))
         env = self.env | {
             "TIDEPOOL_COMPILER_DEPLOYMENT": deployment.name,
             "TIDEPOOL_COMPILER_PRODUCER": "ambient producer",
@@ -446,6 +447,22 @@ PYPROBE
         result = self.run_wrapper(env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(json.loads(self.record.read_text())["producer"], bytes(range(32)).hex())
+
+    def test_genuine_issuer_refuses_legacy_or_missing_deployment_scope(self):
+        deployment = self.root / "compiler deployment.json"
+        env = self.env | {
+            "TIDEPOOL_COMPILER_DEPLOYMENT": deployment.name,
+            "TIDEPOOL_TEST_INPUT_PATHS": self.env["TIDEPOOL_TEST_INPUT_PATHS"]
+                + " TIDEPOOL_COMPILER_DEPLOYMENT:file",
+        }
+        for fields in [dict(schema=1, package_source={"kind": "observation-only"}),
+                       dict(schema=2), dict(schema=2, package_source={"kind": "legacy"})]:
+            with self.subTest(fields=fields):
+                deployment.write_text(json.dumps(fields | dict(producer_identity=list(range(32)),
+                    consumed_worker_identity=list(reversed(range(32))))))
+                result = self.run_wrapper(env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.record.exists())
 
     def test_declared_genuine_deployment_missing_or_wrong_role_refuses(self):
         for changed in [

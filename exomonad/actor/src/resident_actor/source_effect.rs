@@ -246,6 +246,10 @@ where
             Err(SourceError::SourceUnavailable(
                 "reload requires an exact synchronous Reload invocation".into(),
             ))
+        } else if options.force {
+            Err(SourceError::SourceUnavailable(
+                "forced generation retirement is not supported".into(),
+            ))
         } else {
             issued
                 .as_ref()

@@ -12,7 +12,7 @@ module Tidepool.PackageWitness
   , captureSupportedPackageProfileWith, supportedPackageProfileIdentity
   , requireObservationPackageEnvironment
   , CompilerPackageBoot, ServicePackageAssociation, readCompilerPackageBoot
-  , compilerPackageBootLibdir
+  , compilerPackageBootLibdir, servicePackageWorkerInstance, servicePackageProfile
   , validateCompilerPackageBootConfiguration
   , validateCompilerPackageBoot, emitCompilerPackageBootAcknowledgement ) where
 
@@ -599,6 +599,12 @@ data ServicePackageAssociation = ServicePackageAssociation
   BS.ByteString BS.ByteString BS.ByteString BS.ByteString BS.ByteString
   -- worker instance, service epoch, source identity, profile identity, facts SHA
 
+servicePackageWorkerInstance :: ServicePackageAssociation -> BS.ByteString
+servicePackageWorkerInstance (ServicePackageAssociation worker _ _ _ _) = worker
+
+servicePackageProfile :: ServicePackageAssociation -> BS.ByteString
+servicePackageProfile (ServicePackageAssociation _ _ _ profile _) = profile
+
 data SupportedPackageFacts = SupportedPackageFacts FilePath FilePath [FilePath]
 
 readCompilerPackageBoot :: IO CompilerPackageBoot
@@ -645,9 +651,12 @@ readCompilerPackageBoot = do
         (fail "declared compiler settings or interpreter source is not retained")
       settings <- canonicalAbsolute (libdir </> "settings")
       interpreter <- canonicalAbsolute (libdir </> ".." </> "bin" </> "ghc-iserv")
+      -- The launcher retains/authenticates the profile object independently
+      -- above. Its own store hash cannot appear inside its wrapper contents.
+      -- This allowlist covers only the GHC inputs described by that wrapper.
       -- Before runGhc reads settings or opens package databases, every declared
       -- immutable input must be inside the actual preheld service closure.
-      forM_ (path:libdir:settings:interpreter:globalDB:paths) $ \input -> do
+      forM_ (libdir:settings:interpreter:globalDB:paths) $ \input -> do
         canonical <- canonicalAbsolute input
         unless (coveredBy objects input && coveredBy objects canonical)
           (fail "compiler service profile input is outside its retained closure")

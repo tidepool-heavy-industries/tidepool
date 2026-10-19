@@ -75,11 +75,11 @@ workerChild oneFreeFd scratch = do
         ["next-request"] -> BSC.hPutStr stdout "complete-next-request"
         _ -> fail "unexpected capture fixture request"
       pure $ case args of
-        ["source-free"] -> ExactInputsResponse (ExactInputsNeedsAcquisition "selected-root")
+        ["source-free"] -> ExactInputsResponse (ExactInputsNeedsAcquisition (replicate 64 'a'))
         ["source-free-rejected"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
-        ["source-free-capture-overflow"] -> ExactInputsResponse (ExactInputsReady "realization")
-        ["source-free-response-overflow"] -> ExactInputsResponse (ExactInputsReady (repeat 'x'))
-        ["source-free-capture-failure"] -> ExactInputsResponse (ExactInputsReady "realization")
+        ["source-free-capture-overflow"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') "realization")
+        ["source-free-response-overflow"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (repeat 'x'))
+        ["source-free-capture-failure"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') "realization")
         ["source-free-rejected-capture-failure"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
         _ -> DiagnosticResponse []
 
@@ -99,7 +99,7 @@ check scratch = do
       unless (ack == BS.singleton 1) (fail "missing transaction acknowledgement")
       forRequest input output "source-free" $ \code out err ->
         unless (code == 0
-            && Just out == encodeEnsureExactInputsOutcomeWithin (toInteger limit) (ExactInputsNeedsAcquisition "selected-root")
+            && Just out == encodeEnsureExactInputsOutcomeWithin (toInteger limit) (ExactInputsNeedsAcquisition (replicate 64 'a'))
             && err == "captured-control-debug")
           (fail "typed source-free result did not use the machine channel")
       forRequest input output "source-free-capture-overflow" $ \code out _ ->

@@ -289,6 +289,8 @@ impl Default for PackageOwnerDiagnosticLimits {
 #[derive(Debug, thiserror::Error)]
 pub enum PreparedRuntimeError {
     #[error(transparent)]
+    SourceAdmission(#[from] super::SourceAdmissionError),
+    #[error(transparent)]
     ConstructorMetadata(#[from] tidepool_repr::datacon_table::ConstructorMetadataMismatch),
     #[error(transparent)]
     ConstructorMetadataCollision(#[from] tidepool_repr::datacon_table::DataConCollision),
@@ -531,7 +533,8 @@ impl PreparedRuntimeError {
     #[must_use]
     pub fn stage(&self) -> PreparedFailureStage {
         match self {
-            Self::Parse(_)
+            Self::SourceAdmission(_)
+            | Self::Parse(_)
             | Self::ConstructorMetadata(_)
             | Self::ConstructorMetadataCollision(_)
             | Self::Link(_)
@@ -642,7 +645,7 @@ impl PreparedRuntimeError {
             },
             Self::MissingPreparedNativeImage => PreparedFailureKind::Integrity,
             Self::Cancelled => PreparedFailureKind::Cancelled,
-            Self::Compile(_) => PreparedFailureKind::Rejected,
+            Self::Compile(_) | Self::SourceAdmission(_) => PreparedFailureKind::Rejected,
             // A handler fault is this turn's own failure, so the machine stays reusable.
             Self::Handler { .. } => PreparedFailureKind::Language,
             Self::Install(error) | Self::Run(error) => match error {
@@ -6936,7 +6939,7 @@ pub(super) mod tests {
     #[test]
     fn scientific_plain_and_quasiquoted_programs_share_one_representation() {
         use tidepool_repr::freer_names::find_declared;
-        use tidepool_toolchain::artifacts::{compile_invocation, CompileInvocation};
+        use tidepool_toolchain::artifacts::CompileInvocation;
 
         fn observed_int(value: &HaskellValue) -> i64 {
             match value {
@@ -6956,7 +6959,7 @@ pub(super) mod tests {
         ]
         .map(|source| {
             tidepool_testing::with_settlement(|settlement| {
-                compile_invocation(
+                crate::compile_runtime_targets(
                     &CompileInvocation {
                         source,
                         targets: &["result"],
@@ -6971,7 +6974,7 @@ pub(super) mod tests {
         });
         let programs = artifacts
             .each_ref()
-            .map(|artifact| artifact.targets["result"].prepared.prepared());
+            .map(|artifact| artifact.artifacts().targets["result"].prepared.prepared());
         let declarations = programs.map(|program| {
             find_declared(
                 program.constructors(),
@@ -6988,9 +6991,11 @@ pub(super) mod tests {
         let scientific_id = declarations[0].host_id;
         for order in [[0, 1], [1, 0]] {
             let mut state = super::super::PersistentSession::new(None, 4096);
-            let first = crate::install_compiled_target(&mut state, &artifacts[order[0]], "result")
+            let (first, _first_scope) = artifacts[order[0]]
+                .install_in(&mut state, "result")
                 .expect("install first Scientific certified closure");
-            let second = crate::install_compiled_target(&mut state, &artifacts[order[1]], "result")
+            let (second, _second_scope) = artifacts[order[1]]
+                .install_in(&mut state, "result")
                 .expect("second certified closure shares constructor interning");
             let engine = state.require_prepared().expect("shared prepared machine");
             for (index, program) in [(order[0], first), (order[1], second), (order[0], first)] {

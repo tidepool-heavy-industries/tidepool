@@ -68,19 +68,26 @@ async fn prepare_callback_fixture(
         tidepool_runtime::DEFAULT_NURSERY_SIZE,
         Some(lib),
     );
-    let mut context = crate::ActorSessionContext {
-        actor: crate::ActorRef::first(crate::ActorId(1)),
-        placement: crate::ActorPlacement {
+    let mut context = {
+        let context_actor = crate::ActorRef::first(crate::ActorId(1));
+        let context_placement = crate::ActorPlacement {
             session: session_id,
             lexical_scope: session.mint_isolated_scope(),
             resource_scope: RealmId::fresh(),
-        },
-        effect_policy: EffectRunPolicy::HandleOrSuspend,
-        live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-        source_imports: crate::ActorSourceImports::default(),
-        haskell_effects_alias: surface.row().into(),
-        current_model: None,
-        source_layer: Vec::new().into(),
+        };
+        crate::ActorSessionContext {
+            actor: context_actor,
+            placement: context_placement,
+            effect_policy: EffectRunPolicy::HandleOrSuspend,
+            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            source_imports: crate::ActorSourceImports::default(),
+            haskell_effects_alias: surface.row().into(),
+            current_model: None,
+            source_layer: Vec::new().into(),
+            ..crate::ActorDescriptor::new("fixture", context_placement)
+                .admit_independent_world()
+                .session_context(context_actor)
+        }
     };
     let public_context = context.clone();
     let admission = private.then(|| {

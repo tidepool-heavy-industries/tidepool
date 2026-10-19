@@ -142,7 +142,7 @@ impl<H, O> ResidentActorRoot<H, O> {
         outcome: ResidentOutcome,
     ) -> Self {
         Self {
-            descriptor,
+            descriptor: descriptor.admit_independent_world(),
             machine,
             outcome: ResidentRootEntry::Prepared(outcome),
         }
@@ -155,7 +155,7 @@ impl<H, O> ResidentActorRoot<H, O> {
         entry: tidepool_runtime::session::PreparedStartupEntry,
     ) -> Self {
         Self {
-            descriptor,
+            descriptor: descriptor.admit_independent_world(),
             machine,
             outcome: ResidentRootEntry::Startup(entry),
         }
@@ -6110,6 +6110,11 @@ where
         source: crate::request::sources::SourceBinding,
     ) -> Result<(), String> {
         use crate::request::sources::SourceTarget;
+        let _source_claim = source
+            .execution
+            .source_dependency()
+            .claim()
+            .map_err(|error| error.to_string())?;
         if owner != context.actor {
             return Err("event sink belongs to another actor incarnation".into());
         }
@@ -8471,7 +8476,8 @@ where
                     context.actor,
                     activation_source.clone(),
                     Some(Arc::new(tools)),
-                );
+                )
+                .with_source_dependency(context.source_dependency());
                 Some(Arc::new(crate::RequestReplyActivation::new(
                     context.actor,
                     request.request,
@@ -8974,6 +8980,10 @@ where
         context: &ActorSessionContext,
         initial_user_message: Option<String>,
     ) -> Result<LocalResidentInstallation, ResidentActorWorkbenchError> {
+        self.environment
+            .runner
+            .adopt_final_source_scope(context.clone())
+            .await?;
         self.select_initial_configuration(context).await?;
         let source = self.freeze_installed_source(context.actor)?;
         self.prepare_interactive_policy_from_source(kernel, context, initial_user_message, source)
@@ -9097,7 +9107,8 @@ where
         }
         let declarations = compiled_tools.surface();
         let prepared_tools =
-            crate::InstalledToolLease::new(context.actor, source, Some(compiled_tools));
+            crate::InstalledToolLease::new(context.actor, source, Some(compiled_tools))
+                .with_source_dependency(context.source_dependency());
         let policy: Arc<dyn ResidentToolEndpoint> =
             Arc::new(crate::ResidentInteractivePolicy::local_with_installation(
                 actor.clone(),
@@ -9168,9 +9179,19 @@ where
         boot: ResidentBoot,
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
         self.select_initial_configuration(context).await?;
+        let selected_context = self
+            .actor_program_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.generation())
+            .map_or_else(
+                || context.clone(),
+                |generation| generation.context().clone(),
+            );
+        let context = &selected_context;
         if self.actor_program_snapshot.is_none() {
             let source = self.freeze_installed_source(context.actor)?;
-            let bootstrap = crate::InstalledToolLease::new(context.actor, source, None);
+            let bootstrap = crate::InstalledToolLease::new(context.actor, source, None)
+                .with_source_dependency(context.source_dependency());
             self.installed_tools
                 .install_bootstrap(
                     crate::resident_workbench::BootstrapExpectation::Empty,
@@ -9184,7 +9205,11 @@ where
         let workbench = self.environment.runner.application_workbench();
         let guard = workbench
             .actor_initialization_cleanup(context.clone())
-            .with_compiler_owner(self.environment.compiler_lifecycle_scope(kernel));
+            .with_compiler_owner(
+                self.environment
+                    .compiler_lifecycle_scope(kernel)
+                    .with_source_dependency(context.source_dependency()),
+            );
         let registration = guard.registration();
         // Keep initialization state out of the enclosing task-local scope future.
         let result = registration
@@ -9296,7 +9321,8 @@ where
             self.installed_tools
                 .install_bootstrap(
                     expected,
-                    crate::InstalledToolLease::new(context.actor, source, None),
+                    crate::InstalledToolLease::new(context.actor, source, None)
+                        .with_source_dependency(context.source_dependency()),
                 )
                 .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
             self.set_standing(context.actor, ResidentStanding::Workbench);
@@ -9350,7 +9376,8 @@ where
                             mut source,
                         } => {
                             source.execution.snapshot = self.actor_program_snapshot.clone();
-                            self.sources.push(source);
+                            let dependency = source.execution.source_dependency().clone();
+                            dependency.with_open_admission(|| self.sources.push(source))?;
                             outcome = self
                                 .environment
                                 .runner
@@ -12091,7 +12118,12 @@ where
                             detail: "source delivery does not match an installed connection".into(),
                             diagnostic: None,
                         })?;
-                    let context = source.execution.context.clone();
+                    source
+                        .execution
+                        .admit_activation()
+                        .map_err(ResidentActorWorkbenchError::from)
+                        .map_err(Self::workbench_failure)?;
+                    let context = source.execution.activation_context();
                     self.actor_callback_execution = Some(source.execution.clone());
                     let delivery = self.environment.requests.accept_source_delivery(delivery);
                     if let Some(committed) = &mut self.committed {
@@ -14802,12 +14834,14 @@ where
                     })
                 }));
                 let result = async {
-                    let (publication, outcome) = environment
+                    let (publication, outcome, source_dependency) = environment
                         .runner
                         .prepare_root_program_tracked(session, compiled, publisher.into_mint())
                         .await?;
                     let placement = publication.placement();
-                    let descriptor = ActorDescriptor::new(label, placement).with_capabilities(role);
+                    let descriptor = ActorDescriptor::new(label, placement)
+                        .with_capabilities(role)
+                        .with_source_dependency(source_dependency);
                     let mut behavior =
                         ResidentKernelBehavior::prepared(descriptor, environment.clone(), outcome);
                     if let Some(replay) = replay {
@@ -14965,7 +14999,9 @@ where
                         .provision_root_scope_tracked(session, publisher.into_mint())
                         .await?;
                     let placement = publication.placement();
-                    let descriptor = ActorDescriptor::new(label, placement).with_capabilities(role);
+                    let descriptor = ActorDescriptor::new(label, placement)
+                        .with_capabilities(role)
+                        .admit_independent_world();
                     let mut behavior = ResidentKernelBehavior::with_boot(
                         descriptor,
                         environment.clone(),
@@ -15143,6 +15179,7 @@ where
         .map_err(|error| refuse(&error.to_string()))?;
         // The borrowed intent callback ends before owned work enters supervision.
         let intent = intent(reservation.identity());
+        let descriptor = descriptor.admit_independent_world();
         let placement = descriptor.placement();
         let environment = self.environment.clone();
         let directory = self.directory.clone();
@@ -15330,6 +15367,7 @@ where
                 "forest root must be independent and belong to the forest machine",
             ));
         }
+        let descriptor = descriptor.admit_independent_world();
         let reservation = self
             .directory
             .reserve(self.incarnation)
@@ -17315,7 +17353,7 @@ mod tests {
                 }]),
             };
             let response = super::cell_check_rejection(tidepool_runtime::session::CellCheckFailure {
-                error: tidepool_runtime::CompileError::Diagnostics(diagnostics), items,
+                error: tidepool_runtime::CompileError::Diagnostics(diagnostics), items, source_admission: None,
             }, "-- λ\n:}");
             prop_assert_eq!(response.status, WorkbenchRunStatus::Rejected);
             prop_assert_eq!(response.items.len(), 1);
