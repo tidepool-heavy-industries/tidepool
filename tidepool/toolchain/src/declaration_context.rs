@@ -16162,6 +16162,8 @@ mod tests {
         let birth_basis = base
             .compiler_source_support()
             .select_support_roots(source_roots)
+            .unwrap()
+            .for_source_owners(&BTreeSet::from([root.clone()]))
             .unwrap();
         let birth_graph = birth_basis.artifacts().capture_graph_selection();
         assert!(
