@@ -55,10 +55,10 @@ reload R1 remain active. Completed contexts are not duplicate-task capacity.
 | Area/task under campaign | Reserved leaves | Current concrete state / next event owner |
 | --- | ---: | --- |
 | host_inputs | 2 | Source frontier settled at b449632676 (code ff2c4577), cumulative independent review accepted, native0/0. Supervisor owns active -j1 issuer production/test gate plus eight exact counted controls; broad02/03 remains held until results. |
-| owned_inputs | 2 | Original value-row factory candidate efdde89307 is under exact review/repair. Early toolchain/runtime check exit3 caught three stale private cfg(test) callers; scope peak7.18GB. No accepted product fold or passing native gate. Rows owns repaired candidate and reviewer/supervisor reactivation; next compile waits lane accounting. |
+| owned_inputs | 2 | Original value-row factory successor49b65c8f82 independently source-accepted; prior efd compile exit3 caught three stale cfg(test) callers. Same target set retry active under actual12GiB memory allowance (prior scope peak7.18GB), rows owns terminal. No accepted product fold or passing native gate yet. |
 | warm_workers | 1 | Exact07c8 production and all five Haskell consumers compiled; Rust4/4 passed, Haskell execution0. Staged atomic repair38a749fb02 independently reviewed; exact production/all five Haskell consumers and Rust cfg(test) compile0. Supervisor owns active serialized declared-wrapper graph and counted execution; Haskell execution still0. |
 | reload | 2 | Directory/schema source8dca6d6a and report a0d293d2, std-only generator/snapshot checks passed (execution0). Coherent leaf fe3ef791 remains unaccepted: reviewer caught uncertain compiler-close claim loss and test lease-custody defect, repair active. Area02e888309c awaits exact repair/review; producers own supervisor reactivation. Initial-publication uncertainty stays unavailable and existing explicit reopen recovery obtains actual head; no new live reconciliation API. BroadR2/R3 held at native gate. |
-| qualification | 1 | Current reconciliation settled; all five Haskell hashes and four Rust passes independently verified at07c8. Supervisor/capture grant reserved for exact new checkpoint or campaign frontier-settled final scratch analysis. |
+| qualification | 1 | All five Haskell hashes and four Rust passes independently verified at07c8. Supervisor reactivated approved current-baseline frontier after storage recovery: exact reusable frozen bundle/representative history or smallest build/resource gate, no historical-speedup substitute. Final scratch analysis waits frontier settlement. |
 
 Every leaf has an isolated real checkout/index and per-area HANDOFF. Campaign alone
 edits shared STATUS/CONTRACTS. Only owning parent integrates its branch. Full
@@ -103,8 +103,15 @@ batch completion presumed. Actual build.slice20.35GB/host available96.95GB befor
 lane transition supports two independent bounded native lanes, with room to80GiB
 pressure threshold. Warm owns3GiB additional output/16GiB conservative memory;
 host owns32GiB prospective output/24GiB memory, both -j1 and separate outputs.
-Owned check settled (exit3); no third active expensive lane is admitted before
-new concrete accounting. Reload is source repair/review pending next lane.
+Owned first check settled (exit3); repaired49b65 same-target retry was admitted
+on fresh build.slice19.81GB/free277802762240B with12GiB own memory allowance
+(prior measured7.18GB peak). Host24+warm16+owned12+current stays below80GiB.
+The owning check recipe lacks a jobs switch; actual retry used the same recipe
+before cross-message direct -j1 guidance arrived. No duplicate/cancel was issued;
+future retry uses exact same check-plan labels via the existing pinned -j1 runner.
+Latest available330640728064B; cleanup still owner-coordinated, not presumed done.
+Reload is source repair/review pending next lane; qualification prepares current
+baseline evidence and a concrete resource gate without launching a fourth lane.
 Warm maintained wrappers include declared Rust/runtime fixture producers; no
 direct test-bin bypass. Every owner observes terminal source/count/resource evidence.
 Recheck actual disk/memory at transitions; broad migration still waits native gates.
@@ -150,7 +157,7 @@ throughout work. Final bundle/performance qualification and deployment remain se
 ## Campaign continuation handoff
 
 Campaign has no running commands. Public github campaign/shared-warm-compiler
-contains2ac2656408 (tested code6d3b ancestor);
+contains718e7864ad (tested code6d3b ancestor);
 this snapshot supersedes that documentation state. Next actionable event owners:
 
 - warm_workers owns staged decoder/raw retention atomic commit, exact independent
@@ -160,11 +167,14 @@ this snapshot supersedes that documentation state. Next actionable event owners:
   source-adoption implementation stay held until production/tests compile and
   focused controls execute. Source-adoption bridge design only is retained.
 - owned rows owns repaired original value-row factory, source association and
-  stale cfg(test) caller repairs plus full retention controls. Reviewer/supervisor
-  own exact review/fold; campaign coordinates next compile from terminal event.
+  stale cfg(test) caller repairs plus full retention controls. Exact49b65 source
+  review accepted; rows observes active same-target retry and reports terminal
+  to campaign/area, then area reviews/folds passing exact evidence.
 - reload owns coherentR1 and exact independent review, then actual actor/runtime
   native gate. Unknown bootstrap publication uses unavailable truth and explicit
   existing run reopen recovery; no same-actor recovery is claimed.
+- qualification owns current matched baseline bundle/history gate preparation and
+  eventual exact semantic/performance execution, with heavy build admission separate.
 - coordinator owns further settled storage receipts; campaign must recheck real
   headroom before admitting succeeding lanes. Qualification owns final analysis
   only after every approved campaign frontier has settled.
