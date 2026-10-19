@@ -5,7 +5,7 @@
 module Tidepool.CompilerExecution
   ( CompilerExecutionGrant, compilerExecutionGrant, serialCompilerExecutionGrant
   , compilerModuleJobs
-  , CompilerExecutor, requireCompilerExecutorOpen, withCompilerExecutor, runCompilerTasks, runCompilerWorklist, runCompilerWorklistWithStarted
+  , CompilerExecutor, sameCompilerExecutor, requireCompilerExecutorOpen, withCompilerExecutor, runCompilerTasks, runCompilerWorklist, runCompilerWorklistWithStarted
   , runCompilerWorklistWithAttempt, runCompilerTasksWithAttempt, dependencyClosedReuse
   ) where
 
@@ -46,6 +46,11 @@ compilerModuleJobs (CompilerExecutionGrant jobs) = jobs
 -- leave a waiter behind. The closed flag fences later submissions.
 data ExecutorState = ExecutorState Bool Int (Map.Map Int (SomeException -> IO ()))
 data CompilerExecutor = CompilerExecutor Word64 (Chan (IO ())) (MVar ExecutorState)
+
+-- Compare the issuing allowance's actual mutable owner, not a caller-supplied
+-- request number. This grants neither submissions nor a replacement allowance.
+sameCompilerExecutor :: CompilerExecutor -> CompilerExecutor -> Bool
+sameCompilerExecutor (CompilerExecutor _ _ left) (CompilerExecutor _ _ right) = left == right
 
 -- Check effectful operation entry even when a completed worklist needs no new
 -- submissions. Concurrent closure is still fenced by each task submission.

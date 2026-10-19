@@ -119,9 +119,15 @@ request fields; field 58 queries public module metadata through the same
 cell plan and preparation recipes. Runtime owns reservation/adoption authority;
 parser receipts, admission digests and prepared item descriptions are correlated
 data. Preparation uses operation-local compiler/recovery state and actual typed
-outputs. The initial cell slice explicitly refuses nonempty unprepared primary
-contexts, value types with unprepared home dependencies, declarations and multiple inference segments; it does not
-select Originals from passive rows or adapt them into an ExactScope. A completed
+outputs. Captured source imports demand only actual Context-selected canonical
+rows and their exact type closure. The shared current-source validator checks
+source bytes, adjacency, packages and interface compatibility. Their qualification
+receipt remains distinct from genuinely fresh generated-source evidence; an
+admitted owner cannot masquerade as a fresh replacement. The initial slice still
+refuses unsupported primary roles, value types with unprepared home dependencies,
+authored declaration/prologue items and multiple inference segments. General
+inherited lexical import activation remains a separate migration obligation;
+this route does not select Originals from passive rows or construct an ExactScope. A completed
 item description is not a published runtime successor. Source request builders
 preflight binary framing plus hex expansion against the same daemon receive
 budget before appending bulk fields; the transport still charges actual cwd.
@@ -130,7 +136,7 @@ the complete occurrence inventory. `TPCWBIND4` keeps runtime variable IDs,
 defining scope and the checked row's explicit compiler generation separate.
 Exact exported GHC Names/types supply native alias identity; ordinary renaming
 preserves authored local shadowing. Captured thin interfaces and package facts
-remain explicit operation inputs. `TPCWPREP2` reports correlated input refs and
+remain explicit operation inputs. `TPCWPREP3` reports actual normalized typed-segment plans, correlated input refs and
 the existing emitters' output manifest; it grants no runtime value permission.
 The matched `TPCWORLD` version 3 carrier retains exactly the frontier of three
 roots in Context, primary-association, occurrence order. Its fixed `TPCWREST`

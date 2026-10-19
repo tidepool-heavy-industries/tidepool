@@ -69,7 +69,7 @@ import Tidepool.GhcPipeline
   , withResidentCompilerScopes, checkCellInstances
   , captureSupportedPackageProfile
   , scopedEnsureWorld, WorldCellRefusal(..), WorldModulePolicyFailure(..)
-  , worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports
+  , worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports, worldCellSourceSelection
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
 import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes, encodeSymbol)
@@ -130,7 +130,7 @@ import Tidepool.ExactScope
   , scopeCheckedCell, scopeCheckedItem
   , originalGroupFromProjected
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), PlannedCellAdmission(..), PlannedCellSlot(..)
-  , ExactInterfaceEvidence(..)
+  , ExactInterfaceEvidence(..), encodeSourceSelectedOriginals, revalidateSourceSelectedOriginals
   , revalidateExactScope, ExactScopeOriginal(..), extendExactScopeGeneration, extendCheckedValueScope
   )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
@@ -948,25 +948,27 @@ runCellPlanMode parserFlags args cellPath = do
   either throwIO (const (pure [])) result
 
 -- This initial slice performs actual whole-segment inference/output emission
--- for an empty primary base and exact checked-value aliases whose types need
--- only fixed packages. Other type closures receive an explicit typed refusal.
+-- from captured current canonical source imports and exact checked-value
+-- aliases whose types need only fixed packages. Other closures are refused.
 -- It never
 -- constructs an ExactScope or publishes a runtime world during compilation.
 runWorldCellPrepareMode :: BoundCompilerRequest -> WorldCellPrepareRequest -> IO [Diag]
 runWorldCellPrepareMode bound question = do
   admitted <- validateBoundWorldCell bound
   case admitted of
-    Left refusal -> writeResult (Left refusal) BS.empty [] []
+    Left refusal -> writeResult (Left refusal) BS.empty [] [] []
     Right initial
-      | null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "") [] []
+      | null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "") [] [] []
       | otherwise -> do
           attempted <- trySynchronous (prepareSegment initial)
           case attempted of
-            Right (items,observations,inputs,common) -> writeResult (Right items) observations inputs common
+            Right (items,observations,inputs,common,plans,completion) -> do
+              writeResult (Right items) observations inputs common plans
+              commitPreparedWorldDependencies bound completion
             Left failure -> case fromException failure of
-              Just refusal -> writeResult (Left refusal) BS.empty [] []
+              Just refusal -> writeResult (Left refusal) BS.empty [] [] []
               Nothing -> case fromException failure of
-                Just (WorldModulePolicyFailure _ _) -> writeResult (Left WorldCellUnsupported) BS.empty [] []
+                Just (WorldModulePolicyFailure _ _) -> writeResult (Left WorldCellUnsupported) BS.empty [] [] []
                 Nothing -> throwIO failure
   pure []
   where
@@ -983,8 +985,8 @@ runWorldCellPrepareMode bound question = do
     refusalTag WorldCellUnsupported = 0
     refusalTag WorldCellUnavailable = 1
     refusalTag WorldCellCorrupt = 2
-    writeResult outcome observations inputs common = BS.writeFile (worldCellPrepareOutput question) $
-      toStrictByteString (encodeListLen 8 <> text "TPCWPREP2" <> encodeBytes base
+    writeResult outcome observations inputs common plans = BS.writeFile (worldCellPrepareOutput question) $
+      toStrictByteString (encodeListLen 9 <> text "TPCWPREP3" <> encodeBytes base
         <> encodeBytes planDigest <> encodeBytes admission
         <> (case outcome of
           Left refusal -> encodeListLen 2 <> text "rejected" <> encodeWord64 (refusalTag refusal)
@@ -997,7 +999,8 @@ runWorldCellPrepareMode bound question = do
             <> text occurrence <> encodeSymbol symbol <> encodeWord64 variable <> encodeWord64 scope
             <> encodeWord64 generation <> encodeBytes row) inputs
         <> encodeListLen (fromIntegral (length common))
-        <> foldMap (\(path,sha) -> encodeListLen 2 <> text path <> encodeBytes sha) common)
+        <> foldMap (\(path,sha) -> encodeListLen 2 <> text path <> encodeBytes sha) common
+        <> encodeListLen (fromIntegral (length plans)) <> foldMap encodeTypedSegmentPlan plans)
     prepareSegment initial = do
       createDirectoryIfMissing True directory
       preparedBatch <- newIORef Nothing
@@ -1125,6 +1128,9 @@ runWorldCellPrepareMode bound question = do
       validateDependencyEvidence (preparedFreshDependencies prepared)
       inputFacts <- maybe (fail "world cell completion lost its actual input basis") pure
         (preparedCompilationWorldInputs completion)
+      forM_ (worldCellSourceSelection inputFacts) $ \selected -> do
+        unchanged <- revalidateSourceSelectedOriginals selected
+        unless unchanged (throwIO WorldCellUnavailable)
       let (sourcePath,sourceSha) = worldCellSourceSnapshot inputFacts
           commonWrites = (sourcePath,sourceSha)
             : [(path,rawWorldID sha) | (path,sha) <- stagedOriginalOutputFiles staged]
@@ -1151,9 +1157,7 @@ runWorldCellPrepareMode bound question = do
             <> fileRef sourceName <> fileRef "dependencies.json" <> fileRef "module-package-imports.cbor"
             <> encodeListLen (fromIntegral (length (worldCellExactImports inputFacts)))
             <> foldMap moduleRow (worldCellExactImports inputFacts)
-            -- The compiler entry has checked the exact primary-empty basis.
-            -- This is no source-original selection receipt for another world.
-            <> encodeListLen 2 <> encodeListLen 0 <> encodeNull)
+            <> encodeSourceSelectedOriginals (worldCellSourceSelection inputFacts))
           sourceReceiptName = "world-source.cbor"
       BS.writeFile (directory </> sourceReceiptName) sourceEnvelope
       let observations = [CellExpressionPlan (plannedItemEntry (typedItemPlan item))
@@ -1164,7 +1168,7 @@ runWorldCellPrepareMode bound question = do
           prefix = recordTypedSegment finalized typedPlan observations (concatMap snd signaturesByItem) rendered
             (initialProgramCellState (cellPlanPrologue initial) (worldCellPrepareIdentity question,planDigest) Map.empty)
       pure (descriptions,encodeCellOut finalized [] (programObservations prefix) (concat (programSources prefix))
-        ,worldCellInputReferences inputFacts,(sourceReceiptName,SHA256.hash sourceEnvelope):common)
+        ,worldCellInputReferences inputFacts,(sourceReceiptName,SHA256.hash sourceEnvelope):common,[typedPlan],completion)
     rawWorldID [] = BS.empty
     rawWorldID (a:b:rest) = BS.cons (fromIntegral (16 * digitToInt a + digitToInt b)) (rawWorldID rest)
     rawWorldID _ = error "world identity left its admitted shape"
