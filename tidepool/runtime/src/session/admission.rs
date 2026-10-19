@@ -3623,8 +3623,6 @@ impl PersistentSession {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        self.admit_source_work_in(scope)?;
-        let store = self.held_admission_store()?;
         // Naming an expression capture must not enumerate historical names.
         // A service-owned collision witness is required before this path grows.
         if let Some(item) = plan
@@ -3636,6 +3634,8 @@ impl PersistentSession {
                 ordinal: item.index(),
             });
         }
+        self.admit_source_work_in(scope)?;
+        let store = self.held_admission_store()?;
         let private_key = private_key.clone();
         let declaration_count = plan
             .items()
