@@ -15519,11 +15519,52 @@ mod tests {
         assert!(groups
             .iter()
             .all(|group| group.binding.artifact() != published_original));
+        let reconstructed = context
+            .published_source_original_selections_for_target(&groups, &imports)
+            .unwrap();
+        for actual in &reconstructed {
+            let actual_context = actual.context();
+            let expected_context = publication.context();
+            let actual_support = actual_context.compiler_source_support();
+            let expected_support = expected_context.compiler_source_support();
+            eprintln!(
+                "publication reconstruction: context_equal={} semantic_equal={} support_equal={} roles_equal={} artifacts_equal={} graph_equal={} offers_equal={} availability_equal={} decisions_equal={} lexical_equal={} templates_equal={} instance_environment_equal={}",
+                actual_context == expected_context,
+                actual_context.semantic_sha256() == expected_context.semantic_sha256(),
+                actual_support == expected_support,
+                actual_support.projection() == expected_support.projection(),
+                actual_support.artifacts() == expected_support.artifacts(),
+                actual_support.artifacts().capture_graph_selection() == expected_support.artifacts().capture_graph_selection(),
+                actual_support.native_offers() == expected_support.native_offers(),
+                actual_support.native_availability() == expected_support.native_availability(),
+                actual_support.input_decisions() == expected_support.input_decisions(),
+                actual_context.owner.facts.lexical == expected_context.owner.facts.lexical,
+                actual_context.owner.facts.template_imports == expected_context.owner.facts.template_imports,
+                actual_context.owner.facts.original_instance_environment == expected_context.owner.facts.original_instance_environment,
+            );
+            if actual_support.native_availability() != expected_support.native_availability() {
+                eprintln!(
+                    "publication native rows actual={:?} expected={:?}",
+                    actual_support
+                        .native_availability()
+                        .snapshot_facts()
+                        .unwrap(),
+                    expected_support
+                        .native_availability()
+                        .snapshot_facts()
+                        .unwrap()
+                );
+            }
+            if actual_support.input_decisions() != expected_support.input_decisions() {
+                eprintln!(
+                    "publication input decisions actual={:?} expected={:?}",
+                    actual_support.input_decisions(),
+                    expected_support.input_decisions()
+                );
+            }
+        }
         assert_eq!(
-            context
-                .published_source_original_selections_for_target(&groups, &imports)
-                .unwrap()
-                .as_slice(),
+            reconstructed.as_slice(),
             std::slice::from_ref(&publication),
             "source policy follows the selected consumer's lexical proof even when the published body has no remaining native call"
         );
