@@ -1153,7 +1153,7 @@ impl CompilerSourceSupport {
         let (facts, _) = self
             .native_fact_owner()
             .project(keys, operation)
-            .map_err(|error| failure(format!("demanded native fact projection: {error}")))?;
+            .map_err(|error| failure(&format!("demanded native fact projection: {error}")))?;
         let artifacts = self.artifacts.select_acquired_compiler_bindings(
             &namespace,
             groups.bindings(),

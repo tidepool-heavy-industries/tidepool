@@ -2858,7 +2858,7 @@ mod projection_tests {
                 .unwrap();
             let next = [(0u64, facts[&0].clone())]
                 .into_iter()
-                .collect::<OrdMap<_, _>>();
+                .collect::<OrdMap<u64, _>>();
             let keys = std::collections::BTreeSet::from([0u64]);
             let operation = InventoryOperation::new(Default::default());
             let mut writer = Materializer::new(&frontier);

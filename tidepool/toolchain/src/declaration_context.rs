@@ -2179,7 +2179,7 @@ impl DemandNativeInputs {
                 original_ordinal: *original_ordinal,
             };
             let mut candidates = BTreeSet::new();
-            for contribution in &row.contributions {
+            for contribution in row.contributions.iter() {
                 budget.checkpoint()?;
                 for binding in contribution.groups(key) {
                     budget.checkpoint()?;
