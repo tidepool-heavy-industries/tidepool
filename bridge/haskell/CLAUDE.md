@@ -150,10 +150,10 @@ decoded primary facts and their known backing/record charges stay with the same
 world/input owner. The receiver preserves private Rust artifact/scope receipts as
 provenance, and grants no native execution or completed value from them.
 Context descriptors use version 6. Each published source role requires its
-birth-native-authority descriptor and all three offer, availability and decision
-HAMTs. Those immutable facts remain passive Rust provenance under the same world
+birth-native-authority descriptor2 and all four typed-role, offer, availability
+and decision HAMTs. Those immutable facts remain passive Rust provenance under the same world
 owner and retention charge; current-context offers cannot replace birth facts.
-Old Context5 descriptors and published roles without that link refuse.
+Old Context5, authority descriptor1 and published roles without that link refuse.
 `TPCWORLD` custody keeps base and unmerged
 value rows separate and names each owned image explicitly. Custody does not
 select compiler Originals or native groups. Cold block admission verifies the

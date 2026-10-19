@@ -560,6 +560,7 @@ semanticWorldBindingControls handles work scopePath contextParcel = do
         [("version",replaceField "version" (TInt 5),"unsupported compiler world descriptor version")
         ,("producer",replaceField "producer" (TList (map (TInt . fromIntegral) wrongProducer)),"compiler world context producer differs")
         ,("missing-field",TMap (filter ((/= TString "roles") . fst) fields),"invalid compiler world descriptor fields")
+        ,("missing-decisions",TMap (filter ((/= TString "input_decisions") . fst) fields),"invalid compiler world descriptor fields")
         ,("unknown-field",TMap [(if key == TString "roles" then TString "wrong" else key,value) | (key,value) <- fields],"unsupported compiler world descriptor field")]
   forM_ contextMutations $ \(label,term,reason) -> do
     let body = encode term
@@ -709,25 +710,27 @@ worldPrimaryChargeOracle contextRoot associationRoot pairs = do
             closure seen (node:rest) = closure (Set.insert node seen) (Map.findWithDefault [] node edges ++ rest)
             selected = closure Set.empty roots
         pure (foldl plus (descriptorBytes,1+toInteger (Set.size selected)) (map snd maps ++ map snd proofs))
+      roleFact reference = do
+        cid <- link reference
+        role <- value cid
+        bytes <- size cid
+        kind <- field "kind" role
+        extra <- case kind of
+          TString "published_source_original" -> do
+            selected <- linked "selection" role >>= selection
+            authorityCID <- linked "native_authority" role
+            authority <- value authorityCID
+            authorityBytes <- size authorityCID
+            authorityMaps <- forM ["roles","offers","native_availability","input_decisions"] $ \name -> linked name authority >>= hamt
+            bornRoles <- mapM (roleFact . snd) (fst (head authorityMaps))
+            pure (plus selected (foldl plus (authorityBytes,1) (map snd authorityMaps ++ bornRoles)))
+          _ -> pure (0,0)
+        pure (plus (bytes,1) extra)
   context <- value contextRoot
   contextBytes <- size contextRoot
   maps <- forM ["roles","lexical","offers","native_availability","input_decisions"] $ \name -> linked name context >>= hamt
   selected <- linked "selection" context >>= selection
-  roleFacts <- forM (fst (head maps)) $ \(_,reference) -> do
-    cid <- link reference
-    role <- value cid
-    bytes <- size cid
-    kind <- field "kind" role
-    extra <- case kind of
-      TString "published_source_original" -> do
-        selected <- linked "selection" role >>= selection
-        authorityCID <- linked "native_authority" role
-        authority <- value authorityCID
-        authorityBytes <- size authorityCID
-        authorityMaps <- forM ["offers","native_availability","input_decisions"] $ \name -> linked name authority >>= hamt
-        pure (plus selected (foldl plus (authorityBytes,1) (map snd authorityMaps)))
-      _ -> pure (0,0)
-    pure (plus (bytes,1) extra)
+  roleFacts <- mapM (roleFact . snd) (fst (head maps))
   lexicalFacts <- forM (fst (maps !! 1)) $ \(_,reference) -> do
     cid <- link reference
     fact <- value cid
