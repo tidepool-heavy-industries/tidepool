@@ -332,3 +332,15 @@ be measured and reported.
   targets refuse before source submission. Actual A/B worker receipt and cold
   recovery controls remain required; source-only frozen eligibility is no proof
   of execution or compiler authority.
+
+- 2026-10-19, ordinary-cell concrete implementation: accepted private packet
+  `warm-workers/CELL-WORLD-CONTRACT-a3.md` in campaign evidence
+  (SHA1c90df26a3fa564894e558c16099a438d33c0704f255a72e7c95605b38db4fa8).
+  Exact typed runtime bindings reference immutable issued rows; only actual
+  checked item settlement publishes matching private successful outputs and
+  bindings. Existing Materializer roots/diffs drive a current reachable CID
+  frontier, with multiplicity, forks and obsolete path release. Count actual
+  verification/decoding/link/unlink work; no whole-map snapshot or flat hash at
+  successor publication. Cold CID parsing uses the maintained declared hash
+  dependency, with serial realization and fresh profile/provider/boot evidence.
+  Prior profile/EPS cannot be upgraded by a parser-only source review.

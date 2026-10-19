@@ -150,3 +150,17 @@ control, extract-cmd retains typed reject_compiler_response exports, host_work
 preserves the campaign's CompileViewBuild/Digest counters. Critical staged
 consumer diff read directly. Existing joined de23 evidence remains separate;
 new joined compilation/controls pending.
+
+## Joined Warm component gate159ee
+
+The reviewed5ac receiving merge now compiles joined production and test consumers:
+15 targets80local0remote;25 projection,9 Rust,5 Haskell and recovered-base corpus
+1program passed. Campaign reconciled59 hashes and all nine terminal commands.
+Actual frontend resumption and Rooted lifecycle remain with host; this component
+fold cannot qualify ordinary cells, service residency or performance.
+
+Qualification3a8 test-only repairs are source accepted for a narrow rerun: genuine
+closed compiler-support fixtures and existing native observers replace obsolete
+factory/private-field assumptions. Actual ambiguity-only custody positive and
+explicit selected-A/B conflict negative remain distinct. The prior a286 compile
+failure and baseline-discriminated fixture failures remain evidence.

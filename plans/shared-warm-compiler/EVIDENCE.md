@@ -140,3 +140,14 @@ terminal0;79 report/stream/resource/executable hashes reconciled before rebuildi
 Peak12,806,127,616B under14GiB lane. Per-report cleanup/diagnostic limitations
 retained; directory resource hashes UNKNOWN. No actual world query, ordinary-cell
 successor, frozen candidate or speedup acceptance.
+
+## Joined world component checkpoint159ee05fc4
+
+Exact source159ee05fc4c04055868c2097677acae245f6345e:15 production/cfg(test)/Haskell
+targets80local0remote,620.9s;25 projection tests,9 Rust cases,5 Haskell leaves and
+one recovered-base corpus program all passed. Nine command phases terminal0;
+59 report/stream/resource/executable hashes reconciled before further rebuilds.
+Private receipt `campaign/world-component-join/TERMINAL.json`; cumulative scope
+peak13,501,480,960B under14GiB. Directory resource hashes remain UNKNOWN; individual
+cleanup/diagnostic limits are preserved. No actual world query, retention history,
+ordinary-cell successor, frozen qualification or speedup acceptance.
