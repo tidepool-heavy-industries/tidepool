@@ -13640,27 +13640,37 @@ pub(crate) mod tests {
                 issue_fixture_compiler_support(projection.clone(), right.clone()).unwrap();
             let original_graph = support.artifacts().capture_graph_selection();
             let assert_retained_offer =
-                |support: &crate::artifact_inventory::CompilerSourceSupport,
+                |stage: &str,
+                 case: usize,
+                 support: &crate::artifact_inventory::CompilerSourceSupport,
                  expected: &IssuedNativeOffer| {
                     let retained = support
                         .native_offers()
                         .iter()
                         .find(|retained| retained.same_issuance(expected))
-                        .expect("the same opaque issuance retains its exact historical custody");
+                        .unwrap_or_else(|| {
+                            let actual = support.native_offers().iter()
+                                .map(|offer| (offer.original(), offer.is_full()))
+                                .collect::<Vec<_>>();
+                            panic!("same opaque issuance missing: stage={stage} case={case} shared_carrier={shared_carrier} expected_original={:?} expected_full={} actual={actual:?}", expected.original(), expected.is_full());
+                        });
                     assert_eq!(
                         retained.custody_snapshot().binding_dependencies().unwrap(),
                         expected.custody_snapshot().binding_dependencies().unwrap()
                     );
                 };
             let fresh = product("FreshAlongsideSelectedIssuer", 135);
-            for (extra, mixed_fresh) in [
+            for (case, (extra, mixed_fresh)) in [
                 (vec![b.clone()], false),
                 (vec![a.clone(), b.clone()], false),
                 (vec![b.clone(), a.clone()], false),
                 (vec![a.clone(), b.clone(), parent_offer.clone()], false),
                 (vec![a.clone(), b.clone(), parent_offer.clone()], true),
                 (vec![b.clone(), a.clone()], true),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let includes_a = extra.iter().any(|offer| offer == &a);
                 let includes_parent = extra.iter().any(|offer| offer == &parent_offer);
                 let carried = support.retain_offers(extra).unwrap();
@@ -13675,7 +13685,7 @@ pub(crate) mod tests {
                 );
                 assert_eq!(exact_groups(carried.artifacts()), b_groups);
                 if includes_parent {
-                    assert_retained_offer(&carried, &parent_offer);
+                    assert_retained_offer("carried-parent", case, &carried, &parent_offer);
                     assert!(parent_offer
                         .custody_snapshot()
                         .binding_dependencies()
@@ -13683,7 +13693,7 @@ pub(crate) mod tests {
                         .contains(&historical_edge));
                 }
                 if includes_a {
-                    assert_retained_offer(&carried, &a);
+                    assert_retained_offer("carried-historical", case, &carried, &a);
                 }
                 assert_eq!(
                     NativeOriginalRequirement::from_selected_view(
@@ -13755,7 +13765,12 @@ pub(crate) mod tests {
                     "fresh availability cannot add executable demand beside selected B"
                 );
                 if includes_a {
-                    assert_retained_offer(request.compiler_inputs().compiler_source_support(), &a);
+                    assert_retained_offer(
+                        "request-historical",
+                        case,
+                        request.compiler_inputs().compiler_source_support(),
+                        &a,
+                    );
                 }
                 if includes_parent {
                     assert!(
@@ -13775,6 +13790,8 @@ pub(crate) mod tests {
                         "historical parent availability cannot become a current root"
                     );
                     assert_retained_offer(
+                        "request-parent",
+                        case,
                         request.compiler_inputs().compiler_source_support(),
                         &parent_offer,
                     );
@@ -13804,7 +13821,7 @@ pub(crate) mod tests {
                     joined.artifacts().capture_graph_selection().namespace,
                     left_support.artifacts().capture_graph_selection().namespace
                 );
-                assert_retained_offer(&joined, &b);
+                assert_retained_offer("joined-current", 6, &joined, &b);
             }
             assert_eq!(
                 right
