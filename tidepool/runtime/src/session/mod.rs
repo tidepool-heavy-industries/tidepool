@@ -430,6 +430,14 @@ pub enum SessionError {
     WorldCellRequiresServicePreparation,
     #[error("world cell item {ordinal} requires an observation-name reservation")]
     WorldCellExpressionReservationUnsupported { ordinal: usize },
+    #[error("world execution requires a SAME-certified checked World CellProgram capability")]
+    WorldCellCheckedProgramCapabilityMissing,
+    #[error("world cell item {ordinal} requires a SAME-certified per-item successor capability")]
+    WorldCellSuccessorCapabilityMissing { ordinal: usize },
+    #[error("world execution final publication requires the SAME post-removal promotion product")]
+    WorldCellFinalPromotionCapabilityMissing,
+    #[error("world execution public semantic base changed before atomic installation")]
+    WorldCellPublicationBaseStale,
     #[error("live value module {0:?} has no retained compiler-certified interface")]
     MissingRetainedValueInterface(SessionModule),
     #[error("compiler world cannot capture generic source binding {id:?} in {module:?} (scope={scope:?})")]

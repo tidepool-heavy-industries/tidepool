@@ -189,7 +189,26 @@ enum PrivateExecutionCompilerBasis {
     World {
         published: Arc<super::inspection::InspectionWorldAssociation>,
         private_key: super::persistent::CompileViewKey,
+        source: Arc<super::GenerationArtifactReference>,
+        original_source: Arc<RuntimeLexicalScopeLease>,
+        admitted: PublicVisibilitySnapshot,
+        admitted_context:
+            Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+        admitted_public_view: [u8; 32],
     },
+}
+
+/// Exact facts captured when a private execution borrows a published World.
+/// Cloning them preserves the SAME admitted association and source Arcs; none
+/// of these facts reconstruct a compiler view or issue execution authority.
+pub(super) struct WorldExecutionAdmissionFacts {
+    pub(super) published: Arc<super::inspection::InspectionWorldAssociation>,
+    pub(super) source: Arc<super::GenerationArtifactReference>,
+    pub(super) original_source: Arc<RuntimeLexicalScopeLease>,
+    pub(super) admitted: PublicVisibilitySnapshot,
+    pub(super) admitted_context:
+        Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+    pub(super) admitted_public_view: [u8; 32],
 }
 
 pub(super) struct CertifiedPrivateValueWrite {
@@ -556,10 +575,35 @@ impl PrivateExecutionAdmission {
             PrivateExecutionCompilerBasis::World {
                 published,
                 private_key,
+                ..
             } => Ok((&published.world, private_key)),
             PrivateExecutionCompilerBasis::Finite { .. } => Err(
                 SessionError::MissingPublishedCompilerWorld(self.public_scope),
             ),
+        }
+    }
+
+    /// The exact published association, source selection and admitted public
+    /// base for a World private execution. Finite execution has no World facts.
+    pub(super) fn world_execution_facts(&self) -> Option<WorldExecutionAdmissionFacts> {
+        match &self.compiler_basis {
+            PrivateExecutionCompilerBasis::World {
+                published,
+                source,
+                original_source,
+                admitted,
+                admitted_context,
+                admitted_public_view,
+                ..
+            } => Some(WorldExecutionAdmissionFacts {
+                published: published.clone(),
+                source: source.clone(),
+                original_source: original_source.clone(),
+                admitted: admitted.clone(),
+                admitted_context: admitted_context.clone(),
+                admitted_public_view: *admitted_public_view,
+            }),
+            PrivateExecutionCompilerBasis::Finite { .. } => None,
         }
     }
     pub fn binding_tip(&self) -> BindingTipId {
@@ -593,6 +637,16 @@ enum RuntimeCellCompilerBasis {
     World {
         reservation: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation>,
         private_key: super::persistent::CompileViewKey,
+        /// The exact active source transaction lease admitted with the
+        /// published World. It is original A; the cell's retained scope is a
+        /// separately captured target B. Warm's pending checked-program
+        /// capability must consume this lease, so it is retained here rather
+        /// than reconstructed from the private execution.
+        #[allow(
+            dead_code,
+            reason = "retained for Warm's pending SAME-certified checked World CellProgram capability"
+        )]
+        original_source: Arc<RuntimeLexicalScopeLease>,
     },
 }
 
@@ -1484,6 +1538,19 @@ impl CheckedTurnCompletion {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        let world = self.prefix.admission.world_reservation().is_some();
+        if world {
+            let private = self
+                .prefix
+                .admission
+                .private_execution()
+                .ok_or(SessionError::StaleStagedDeclaration)?;
+            if private.private_scope() != self.scope
+                || self.execution.item().index() != state.snapshot.compiler_prefix.next_item()
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+        }
         let compiler_prefix = state
             .snapshot
             .compiler_prefix
@@ -1521,6 +1588,16 @@ impl CheckedTurnCompletion {
         } else {
             None
         };
+        if world {
+            // The item's checked prefix, accepted binder identities and native
+            // delta are validated above, but installing the private successor
+            // requires Warm's item-inseparable World capability. Refuse before
+            // advancing the snapshot or clearing the in-flight reservation so
+            // later items cannot build on an unsealed predecessor.
+            return Err(SessionError::WorldCellSuccessorCapabilityMissing {
+                ordinal: self.execution.item().index(),
+            });
+        }
         settle_checked_snapshot(
             session,
             &mut state,
@@ -1746,6 +1823,7 @@ impl std::fmt::Debug for RuntimeCellAdmission {
             RuntimeCellCompilerBasis::World {
                 reservation,
                 private_key,
+                ..
             } => {
                 debug
                     .field("world_reservation", reservation)
@@ -2535,6 +2613,12 @@ impl PersistentSession {
         if !admission.has_execution_purpose() {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        // A World execution cannot borrow the finite checked-program route.
+        // The SAME certifier must issue a checked World CellProgram capability
+        // tied to the reservation, logical world and item generation.
+        if admission.world_reservation().is_some() {
+            return Err(SessionError::WorldCellCheckedProgramCapabilityMissing);
+        }
         let finite = admission.finite_inputs()?;
         let planned = admission
             .plan_reservation()?
@@ -2583,6 +2667,9 @@ impl PersistentSession {
         first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
         program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
     ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
+        if admission.world_reservation().is_some() {
+            return Err(SessionError::WorldCellCheckedProgramCapabilityMissing);
+        }
         let finite = admission.finite_inputs()?;
         if !admission.belongs_to(self)
             || first_item.admission_digest() != admission.digest()
@@ -2799,13 +2886,31 @@ impl PersistentSession {
             })
             .cloned()
             .ok_or(SessionError::MissingPublishedCompilerWorld(public_scope))?;
-        self.begin_private_execution_with_world(public_scope, Some(published))
+        let admitted = self
+            .public_visibility_snapshot_in(public_scope)
+            .ok_or(SessionError::DeadScope(public_scope))?;
+        let admitted_context = self.lib().current_exact_context_in(public_scope);
+        let admitted_public_view = self
+            .compile_view_digest_in(public_scope)
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let source = published.base.source.clone();
+        self.begin_private_execution_with_world(
+            public_scope,
+            Some(WorldExecutionAdmissionFacts {
+                published,
+                source,
+                original_source: original_source.clone(),
+                admitted,
+                admitted_context,
+                admitted_public_view,
+            }),
+        )
     }
 
     fn begin_private_execution_with_world(
         &mut self,
         public_scope: ScopeId,
-        published: Option<Arc<super::inspection::InspectionWorldAssociation>>,
+        world: Option<WorldExecutionAdmissionFacts>,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
         self.admit_source_work_in(public_scope)?;
 
@@ -2817,7 +2922,7 @@ impl PersistentSession {
             .durable_public_scopes
             .iter()
             .find_map(|(owner, scope)| (*scope == public_scope).then(|| owner.clone()));
-        let admitted = if published.is_none() {
+        let admitted = if world.is_none() {
             Some(
                 self.public_visibility_snapshot_in(public_scope)
                     .ok_or(SessionError::DeadScope(public_scope))?,
@@ -2840,12 +2945,17 @@ impl PersistentSession {
             private_scope
         };
         let scope_lease = self.prepared_lexical_scope_lease(private_scope)?;
-        let compiler_basis = match published {
-            Some(published) => PrivateExecutionCompilerBasis::World {
-                published,
+        let compiler_basis = match world {
+            Some(world) => PrivateExecutionCompilerBasis::World {
+                published: world.published,
                 private_key: self
                     .compile_view_key_in(private_scope)
                     .ok_or(SessionError::StaleStagedDeclaration)?,
+                source: world.source,
+                original_source: world.original_source,
+                admitted: world.admitted,
+                admitted_context: world.admitted_context,
+                admitted_public_view: world.admitted_public_view,
             },
             None => PrivateExecutionCompilerBasis::Finite {
                 view: self
@@ -3635,6 +3745,26 @@ impl PersistentSession {
             });
         }
         self.admit_source_work_in(scope)?;
+        // Keep the SAME admitted original-A lease Arc that the published base
+        // validated against. target B is retained separately on the cell
+        // admission's `_retained_scope`; neither substitutes for the other.
+        let original_source = self
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?
+            .source
+            .clone();
+        let admitted_original_source = match &execution.compiler_basis {
+            PrivateExecutionCompilerBasis::World { published, .. } => {
+                &published.base.original_source
+            }
+            PrivateExecutionCompilerBasis::Finite { .. } => {
+                return Err(SessionError::WorldCellRequiresServicePreparation)
+            }
+        };
+        if !Arc::ptr_eq(&original_source, admitted_original_source) {
+            return Err(super::SourceAdmissionError::ForeignTransaction.into());
+        }
         let store = self.held_admission_store()?;
         let private_key = private_key.clone();
         let declaration_count = plan
@@ -3774,6 +3904,7 @@ impl PersistentSession {
             compiler_basis: RuntimeCellCompilerBasis::World {
                 reservation,
                 private_key,
+                original_source,
             },
             digest,
         }))

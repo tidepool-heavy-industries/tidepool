@@ -3633,12 +3633,78 @@ impl PersistentSession {
             || current.semantic.public_view != old.semantic.public_view
         {
             if let super::PublicationIntent::Final(intent) = &old.intent {
+                if intent.world().is_some() {
+                    return Ok(super::PublicationAttempt::Settled(
+                        PublicManifestCommit::Refused {
+                            error: Box::new(SessionError::WorldCellPublicationBaseStale),
+                        },
+                    ));
+                }
                 return Ok(super::PublicationAttempt::Rebase(intent.clone()));
+            }
+        }
+        if let super::PublicationIntent::Final(intent) = &old.intent {
+            if intent.world().is_some() && !self.world_execution_base_is_current(intent) {
+                return Ok(super::PublicationAttempt::Settled(
+                    PublicManifestCommit::Refused {
+                        error: Box::new(SessionError::WorldCellPublicationBaseStale),
+                    },
+                ));
             }
         }
         current.intent = old.intent.clone();
         *certified.base_mut() = current;
         Ok(super::PublicationAttempt::RestageMetadata(certified))
+    }
+
+    /// Exact World premises for installing a final binding/world pair. This is
+    /// an observation of the SAME published association and admitted Arcs, not
+    /// an issuer: it never reconstructs a compiler world or a public view.
+    fn world_execution_base_is_current(
+        &self,
+        intent: &super::FinalExecutionIntent,
+    ) -> bool {
+        let Some(world) = intent.world() else {
+            return true;
+        };
+        if !intent.owner_matches(self.admission_owner())
+            || !self.scopes.is_live(intent.admitted_scope())
+            || !self.scopes.is_live(intent.private_scope())
+        {
+            return false;
+        }
+        let Some(lib) = self.lib.as_ref() else {
+            return false;
+        };
+        if lib.compile_view_identity != intent.library()
+            || self
+                .public_visibility_snapshot_in(intent.private_scope())
+                .as_ref()
+                != Some(intent.private_snapshot())
+            || self.compile_view_digest_in(intent.private_scope())
+                != Some(intent.private_view_digest())
+            || self
+                .public_visibility_snapshot_in(intent.admitted_scope())
+                .as_ref()
+                != Some(intent.admitted_public())
+            || lib.current_exact_context_in(intent.admitted_scope()).as_ref()
+                != intent.admitted_context()
+            || self.compile_view_digest_in(intent.admitted_scope()) != Some(world.public_view)
+        {
+            return false;
+        }
+        let live = lib
+            .tips
+            .get(&intent.admitted_scope())
+            .and_then(|state| state.inspection_world.as_ref());
+        if !live.is_some_and(|association| Arc::ptr_eq(association, &world.association)) {
+            return false;
+        }
+        self.inspection_world_base_is_current(
+            &world.association.base,
+            &world.source,
+            &world.original_source,
+        )
     }
 
     /// Admit the frontend's short control claim only after exact native preflight.
@@ -3666,6 +3732,22 @@ impl PersistentSession {
             .lib
             .as_ref()
             .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let world_execution = match &ticket.intent {
+            super::PublicationIntent::Final(intent) if intent.world().is_some() => {
+                Some(intent.clone())
+            }
+            _ => None,
+        };
+        if world_execution
+            .as_ref()
+            .is_some_and(|intent| !self.world_execution_base_is_current(intent))
+        {
+            return Ok(super::PublicationAttempt::Settled(
+                PublicManifestCommit::Refused {
+                    error: Box::new(SessionError::WorldCellPublicationBaseStale),
+                },
+            ));
+        }
         if matches!(
             ticket.intent,
             super::PublicationIntent::HostBindings(
@@ -3703,7 +3785,13 @@ impl PersistentSession {
         {
             return Ok(match &ticket.intent {
                 super::PublicationIntent::Final(intent) => {
-                    super::PublicationAttempt::Rebase(intent.clone())
+                    if intent.world().is_some() {
+                        super::PublicationAttempt::Settled(PublicManifestCommit::Refused {
+                            error: Box::new(SessionError::WorldCellPublicationBaseStale),
+                        })
+                    } else {
+                        super::PublicationAttempt::Rebase(intent.clone())
+                    }
                 }
                 super::PublicationIntent::HostBindings(_) => {
                     super::PublicationAttempt::RestageMetadata(ticket.certified)
@@ -3754,6 +3842,16 @@ impl PersistentSession {
             .bindings
             .prepare_binding_publication_removals(prepared, &declared_names)
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        // The final promotion witness must be taken from the SAME prepared
+        // promotion that would commit. It is only meaningful after removals.
+        let world_promotion_witness = world_execution
+            .as_ref()
+            .map(|_| {
+                self.bindings
+                    .prepared_promotion_scope_witness(self.scope_tree(), &prepared)
+                    .map_err(SessionError::InvalidPublicBindingPromotion)
+            })
+            .transpose()?;
         self.public_visibility_epochs
             .try_reserve(1)
             .map_err(|error| SessionError::RecoveryManifest {
@@ -3769,6 +3867,28 @@ impl PersistentSession {
                     .prepare_resident_declaration(public_scope, declaration)
             })
             .transpose()?;
+        if let (Some(intent), Some(_witness)) = (&world_execution, world_promotion_witness) {
+            // Final compare after every fallible preparation and effect, before
+            // any claim or install. A stale base refuses without replay and
+            // preserves the executed effects and private prefix.
+            if !self.world_execution_base_is_current(intent) {
+                return Ok(super::PublicationAttempt::Settled(
+                    PublicManifestCommit::Refused {
+                        error: Box::new(SessionError::WorldCellPublicationBaseStale),
+                    },
+                ));
+            }
+            // The binding promotion and its exact post-removal scope witness
+            // are prepared, but installing the matching World association
+            // requires Warm's SAME final promotion product. The Host must not
+            // synthesize that product from raw receipts. Drop the prepared
+            // promotion without claiming or committing.
+            return Ok(super::PublicationAttempt::Settled(
+                PublicManifestCommit::Refused {
+                    error: Box::new(SessionError::WorldCellFinalPromotionCapabilityMissing),
+                },
+            ));
+        }
         let Some(claim) = claim() else {
             return Ok(super::PublicationAttempt::Settled(
                 PublicManifestCommit::Cancelled,
@@ -3784,6 +3904,10 @@ impl PersistentSession {
             .as_mut()
             .expect("preflight library")
             .publish_staged_public_manifest_unchecked(ticket, declaration, |_| {
+                // A World publication must commit its final association in
+                // this SAME callback, next to the binding promotion, using the
+                // SAME prepared promotion and scope witness. The finite path
+                // below cannot install a World pair and never runs for one.
                 bindings.commit_exact_binding_promotion(prepared);
                 public_visibility_epochs.insert(public_scope, next_epoch);
             });
