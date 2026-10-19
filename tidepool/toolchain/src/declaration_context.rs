@@ -1287,6 +1287,20 @@ pub(crate) struct NativeAvailabilitySnapshotFacts {
     pub(crate) contributions: imbl::OrdMap<[u8; 32], NativeContributionSnapshotFacts>,
 }
 
+impl NativeAvailabilitySnapshotFacts {
+    /// Canonical identity of one row's permission facts. Rows with equal
+    /// facts share this identity regardless of `Arc` identity.
+    pub(crate) fn identity(&self) -> Result<[u8; 32], CompileError> {
+        use sha2::{Digest, Sha256};
+        let bytes = fvm_ipld_encoding::to_vec(self)
+            .map_err(|error| failure(format!("native availability identity: {error}")))?;
+        let mut digest = Sha256::new();
+        digest.update(b"Tidepool native availability row v1\0");
+        digest.update(bytes);
+        Ok(digest.finalize().into())
+    }
+}
+
 /// Issuer-bound input availability, independent of output visibility and roles.
 /// Only native selection issuance constructs a nonempty component; clones retain its
 /// exact payload owners and opaque availability handles. The second persistent root
@@ -1409,7 +1423,7 @@ impl NativeDemandBudget<'_> {
 impl RequestNativeAvailability {
     /// Derive immutable facts only at a real row construction or mutation. The
     /// acquisition/permission owner remains the row, never these durable facts.
-    fn row_snapshot_facts(
+    pub(crate) fn row_snapshot_facts(
         row: &NativeTransportAvailability,
     ) -> Result<NativeAvailabilitySnapshotFacts, CompileError> {
         Ok(NativeAvailabilitySnapshotFacts {
@@ -2308,6 +2322,39 @@ impl DemandNativeInputs {
             validation,
         )
         .map_err(compiler_evidence_failure)?;
+        // Certified rows are the authority for executable bindings. The
+        // closure map above only carries the exact issuing scope for each
+        // selected key, so it may neither add an unbacked binding nor lose a
+        // certified group.
+        let mut artifacts_by_owner = BTreeMap::new();
+        for (id, product) in &available {
+            artifacts_by_owner.insert(product.owner(), **id);
+        }
+        let mut certified_keys = BTreeSet::new();
+        for group in &groups {
+            budget.checkpoint()?;
+            let artifact = artifacts_by_owner
+                .get(group.owner())
+                .copied()
+                .ok_or_else(|| failure("certified receipt group lost its issued original"))?;
+            let key = NativeGroupKey {
+                artifact,
+                original_ordinal: group.group().original_ordinal(),
+            };
+            if !certified_keys.insert(key) {
+                return Err(failure("certified receipt group was issued twice"));
+            }
+        }
+        if certified_keys.len() != bindings.len()
+            || bindings
+                .keys()
+                .any(|key| !certified_keys.contains(key))
+        {
+            return Err(failure(
+                "certified receipt groups and executable bindings disagree",
+            ));
+        }
+        bindings.retain(|key, _| certified_keys.contains(key));
         Ok(DemandCertifiedGroups {
             basis: Arc::clone(&self.cold),
             groups,

@@ -1258,6 +1258,16 @@ pub enum CertificationError {
         owner: crate::declaration_join::ExactModuleIdentity,
         reason: InputDecisionRefusal,
     },
+    /// A demanded native permission row differs from the row this cold owner
+    /// issued. Pointer-distinct equal rows are the same permission; a real
+    /// narrowing or change needs its own bounded fact issuance. `old` and
+    /// `new` are the canonical identities of each row's permission facts.
+    #[error("changed native permission for {id:?} requires bounded issuance (issued {old:?}, demanded {new:?})")]
+    ChangedNativePermissionRequiresIssuance {
+        id: crate::artifact_inventory::ArtifactId,
+        old: [u8; 32],
+        new: [u8; 32],
+    },
     #[error("compiler host work interrupted: {0}")]
     Interrupted(#[source] std::io::Error),
     #[error("unsupported {format:?} version {found}; expected {expected}")]

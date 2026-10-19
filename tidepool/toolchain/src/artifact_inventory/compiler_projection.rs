@@ -1062,6 +1062,10 @@ impl CompilerSourceSupport {
         let mut selected = imbl::OrdMap::new();
         for (owner, role) in demand.projection().snapshot_roles() {
             crate::host_work::checkpoint()?;
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::DemandSemanticRoleVisit,
+                1,
+            );
             charge(operation.charge(1))?;
             let row = self
                 .selected
@@ -1110,18 +1114,34 @@ impl CompilerSourceSupport {
         let mut offers = BTreeMap::new();
         for row in availability.rows() {
             crate::host_work::checkpoint()?;
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::DemandNativeAvailabilityVisit,
+                1,
+            );
             charge(operation.charge(1))?;
             let id = row.original_artifact_id();
-            if !self
+            let old = self
                 .native_availability
                 .issued_row(id)
-                .is_some_and(|old| Arc::ptr_eq(old, row))
-            {
-                // A genuinely narrowed permission row needs its own bounded
-                // encoding. Reusing the broader cold leaf would change authority.
-                return Err(failure(
-                    "changed native permission requires bounded fact issuance",
-                ));
+                .ok_or_else(|| failure("demanded native row has no issued permission"))?;
+            if !Arc::ptr_eq(old, row) && **old != **row {
+                // A pointer-distinct but semantically equal row is the same
+                // permission. A genuinely narrowed or changed row needs its
+                // own bounded issuance; reusing the broader cold leaf would
+                // change authority.
+                let facts_id = |row: &Arc<
+                    crate::declaration_context::NativeTransportAvailability,
+                >| -> Result<[u8; 32], CompileError> {
+                    crate::declaration_context::RequestNativeAvailability::row_snapshot_facts(row)?
+                        .identity()
+                };
+                return Err(CompileError::CompilerEvidence(Box::new(
+                    crate::certified_products::CertificationError::ChangedNativePermissionRequiresIssuance {
+                        id,
+                        old: facts_id(old)?,
+                        new: facts_id(row)?,
+                    },
+                )));
             }
             charge(operation.reserve::<(ArtifactId, [usize; 4])>(1))?;
             keys.native_availability.insert(id);
@@ -1135,8 +1155,19 @@ impl CompilerSourceSupport {
                 }
             }
         }
+        // Executable bindings are derived from certified rows during
+        // certification, so this loop and `groups()` describe one authority.
+        if groups.groups().len() != groups.bindings().len() {
+            return Err(failure(
+                "demanded certified groups lost their executable bindings",
+            ));
+        }
         for (key, binding) in groups.bindings() {
             crate::host_work::checkpoint()?;
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::DemandNativeGroupVisit,
+                1,
+            );
             charge(operation.charge(1))?;
             let row = availability
                 .issued_row(key.artifact)
@@ -1170,10 +1201,11 @@ impl CompilerSourceSupport {
             },
             native_offer_facts: facts.offers.clone(),
             native_fact_owner: Some(facts),
-            selected: Arc::new(AdmittedCompilerRoles {
-                rows: selected,
-                home_units: Arc::clone(&self.selected.home_units),
-            }),
+            // The home census belongs to the demanded rows, not to cold
+            // custody or units merely mentioned by another retained row.
+            selected: Arc::new(AdmittedCompilerRoles::from_admitted(
+                selected.into_iter().collect(),
+            )),
         }))
     }
 
