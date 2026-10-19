@@ -14431,7 +14431,6 @@ mod tests {
         interfaces: Vec<Arc<ArtifactEntry>>,
         helper_import: crate::certified_products::PendingImportOwner,
         producer_bytes: &[u8],
-        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     ) {
         use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
         let crate::certified_products::PendingImportOwner::Source {
@@ -15051,7 +15050,6 @@ mod tests {
             vec![],
             issued_source(&helper, 7),
             b"native recapture fixture",
-            &[product],
         );
     }
 
@@ -15138,7 +15136,6 @@ mod tests {
             interfaces,
             helper_import,
             endpoint.identity().producer_bytes(),
-            &private.contextual_native_availability,
         );
     }
     #[test]
