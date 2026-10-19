@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tidepool_bridge::FromHaskell;
-use tidepool_bridge_derive::DeriveFromHaskell;
+use tidepool_bridge_derive::FromHaskell as DeriveFromHaskell;
 use tidepool_runtime::session::{
     IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionResult,
     NameNamespace, NameQuery, NameScope, QueryError, ScopeProvenance,
@@ -38,12 +38,21 @@ use super::structured_introspection::{
 use super::to_haskell::{actor_haskell_int, visit_core, visit_named};
 use super::*;
 
-/// One effect result crosses into the guest heap as a single value. Keep the
-/// returned rows bounded and report the observed count beside the applied
-/// limit, so truncation is visible instead of being mistaken for the whole
-/// scope. Calibrate from retained query evidence if the boundary budget moves.
-/// The decoder collects the complete list first; counting happens before this
-/// limit is applied, never from the retained prefix.
+/// One effect result crosses into the guest heap as a single value, so an
+/// enumeration answer carries a fixed budget instead of growing with the
+/// installed API. The same budget is handed to the extraction request
+/// (`ScopeBrowseBounded`/`BrowseBounded`/`TypeSearchBounded`), so the worker
+/// stops rendering at the cap rather than shipping an unbounded list that the
+/// handler trims after transit.
+///
+/// Basis: 256 is a presentation/transport budget for one notebook answer, not
+/// a measured scope statistic. It is the boundary the provisional limit already
+/// used; what was missing is enforcement, which now happens in the worker. The
+/// handler tests assert that a 16x-budget scope still projects exactly `limit`
+/// entries, so the encoded value cannot grow with the installed API. Calibrate
+/// from retained query evidence if the boundary budget moves. The handler still
+/// trims defensively so a decoder that ignores the request budget cannot hand
+/// an unbounded list to the guest encoder.
 pub(super) const QUERY_RESULT_LIMIT: usize = 256;
 
 /// A decoded compiler question. The wire enum lives in
@@ -136,16 +145,22 @@ impl CompilerQuery {
     pub(super) fn inspection_queries(&self) -> Vec<InspectionQuery> {
         match self {
             Self::CurrentScopeView => Vec::new(),
-            Self::ScopeBindings { .. } => vec![InspectionQuery::ScopeBrowse],
-            Self::ModuleExports { module, .. } => vec![InspectionQuery::Browse {
+            Self::ScopeBindings { .. } => {
+                vec![InspectionQuery::ScopeBrowseBounded(QUERY_RESULT_LIMIT)]
+            }
+            Self::ModuleExports { module, .. } => vec![InspectionQuery::BrowseBounded {
                 module: module.clone(),
                 expanded: false,
+                budget: QUERY_RESULT_LIMIT,
             }],
             Self::RowFit { identifier, .. } => vec![row_fit_query(identifier)],
             Self::TypeOfExpression { expression, .. } => {
                 vec![InspectionQuery::TypeOf(expression.clone())]
             }
-            Self::TypeSearch { pattern, .. } => vec![InspectionQuery::TypeSearch(pattern.clone())],
+            Self::TypeSearch { pattern, .. } => vec![InspectionQuery::TypeSearchBounded {
+                pattern: pattern.clone(),
+                budget: QUERY_RESULT_LIMIT,
+            }],
         }
     }
 }
@@ -160,6 +175,14 @@ impl CompilerQuery {
 /// Every other reference names its defining public module explicitly. The
 /// Lookup excision removes `InspectionQuery::ExactName`; until a keyed,
 /// non-enumerating availability query lands, this reads the browsed entries.
+///
+/// This is the one deliberately unbounded enumeration in the verb set. A cap
+/// can drop the requested identifier from the retained prefix and turn a real
+/// answer into `FitUnknown`, so `rowFit` keeps the complete module read even
+/// though its answer crosses the wire as a single `Fit` record. The world-side
+/// enumeration spike ruled a non-compiling `rowFit` out; replacing this with a
+/// keyed availability query is the follow-up that removes the last unbounded
+/// compiler read.
 fn row_fit_query(identifier: &IdentifierRef) -> InspectionQuery {
     if tidepool_repr::SessionModule::is_reserved_name(&identifier.module) {
         InspectionQuery::ScopeBrowse
@@ -253,8 +276,11 @@ pub(super) struct NameList {
 
 impl NameList {
     fn from_entries(entries: Vec<InfoEntry>, provenance: ScopeProvenance) -> Self {
-        // `entries` is the decoder's complete list. Measure the observed count
-        // before truncation and never recompute it from the retained prefix.
+        // The worker is asked for at most `QUERY_RESULT_LIMIT` entries, so the
+        // decoder's list is already bounded. Count what arrived before the
+        // defensive trim; never recompute the count from the retained prefix.
+        // `observed == limit` means "at least limit": the worker stopped at the
+        // cap, so the true scope size is not observable.
         let observed = entries.len();
         let entries = entries
             .into_iter()
@@ -320,8 +346,9 @@ pub(super) struct TypeMatches {
 
 impl TypeMatches {
     fn from_matches(matches: Vec<RuntimeTypeMatch>, provenance: ScopeProvenance) -> Self {
-        // The decoder returns every match; count before applying the limit so
-        // the answer reports the complete observation, not the retained prefix.
+        // The worker bounds the encoded match list at the requested budget, so
+        // the decoder's list is already capped. Count what arrived before the
+        // defensive trim; `observed == limit` means "at least limit".
         let observed = matches.len();
         let matches = matches
             .into_iter()
@@ -1266,7 +1293,7 @@ mod tests {
                 expected_scope: None
             }
             .inspection_queries(),
-            vec![InspectionQuery::ScopeBrowse]
+            vec![InspectionQuery::ScopeBrowseBounded(QUERY_RESULT_LIMIT)]
         );
         assert_eq!(
             CompilerQuery::ModuleExports {
@@ -1274,9 +1301,10 @@ mod tests {
                 module: "Data.Thing".into()
             }
             .inspection_queries(),
-            vec![InspectionQuery::Browse {
+            vec![InspectionQuery::BrowseBounded {
                 module: "Data.Thing".into(),
-                expanded: false
+                expanded: false,
+                budget: QUERY_RESULT_LIMIT,
             }]
         );
         assert_eq!(
@@ -1312,8 +1340,140 @@ mod tests {
                 pattern: "a -> a".into()
             }
             .inspection_queries(),
-            vec![InspectionQuery::TypeSearch("a -> a".into())]
+            vec![InspectionQuery::TypeSearchBounded {
+                pattern: "a -> a".into(),
+                budget: QUERY_RESULT_LIMIT,
+            }]
         );
+    }
+
+    #[test]
+    fn enumeration_verbs_request_the_extraction_budget() {
+        // The cap has to reach the worker: the handler asks for the bounded
+        // question instead of trimming an unbounded answer after transit.
+        assert_eq!(
+            CompilerQuery::ScopeBindings {
+                expected_scope: None
+            }
+            .inspection_queries(),
+            vec![InspectionQuery::ScopeBrowseBounded(QUERY_RESULT_LIMIT)]
+        );
+        assert_eq!(
+            CompilerQuery::ModuleExports {
+                expected_scope: None,
+                module: "Data.Thing".into()
+            }
+            .inspection_queries(),
+            vec![InspectionQuery::BrowseBounded {
+                module: "Data.Thing".into(),
+                expanded: false,
+                budget: QUERY_RESULT_LIMIT,
+            }]
+        );
+        assert_eq!(
+            CompilerQuery::TypeSearch {
+                expected_scope: None,
+                pattern: "a -> a".into()
+            }
+            .inspection_queries(),
+            vec![InspectionQuery::TypeSearchBounded {
+                pattern: "a -> a".into(),
+                budget: QUERY_RESULT_LIMIT,
+            }]
+        );
+    }
+
+    #[test]
+    fn row_fit_keeps_the_complete_module_read() {
+        // A budget can drop the asked-for identifier from the retained prefix,
+        // turning a real availability answer into `FitUnknown`. `rowFit` is the
+        // documented exception: its wire answer is one `Fit`, so it keeps the
+        // unbounded enumeration until a keyed availability query lands.
+        assert_eq!(
+            CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier: identifier("Data.Thing", "thing")
+            }
+            .inspection_queries(),
+            vec![InspectionQuery::Browse {
+                module: "Data.Thing".into(),
+                expanded: true,
+            }]
+        );
+        assert_eq!(
+            CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier: identifier("Tidepool.Session.Val.G3", "x")
+            }
+            .inspection_queries(),
+            vec![InspectionQuery::ScopeBrowse]
+        );
+    }
+
+    #[test]
+    fn a_large_scope_cannot_encode_more_than_the_budget() {
+        // `visit_name_list` iterates exactly `NameList::entries`, so bounding
+        // the retained entries is what bounds the encoded effect result. A
+        // decoder that ignores the worker budget must still not hand the guest
+        // an unbounded list.
+        let view = provenance(1, "world");
+        let entries = (0..QUERY_RESULT_LIMIT * 16)
+            .map(|index| {
+                entry(
+                    &format!("thing{index}"),
+                    "Data.Thing",
+                    InspectionAvailability::Available,
+                )
+            })
+            .collect::<Vec<_>>();
+        let answer = compiler_query_answer(
+            &CompilerQuery::ScopeBindings {
+                expected_scope: None,
+            },
+            view.clone(),
+            view.clone(),
+            BatchOutcome::Answer(Ok(browse(entries))),
+        );
+        match answer {
+            CompilerQueryAnswer::Names(names) => {
+                assert_eq!(names.entries.len(), QUERY_RESULT_LIMIT);
+                assert_eq!(names.limit, QUERY_RESULT_LIMIT);
+                assert!(names.observed > names.limit);
+            }
+            other => panic!("expected a name list, got {}", answer_name(&other)),
+        }
+
+        let matches = (0..QUERY_RESULT_LIMIT * 16)
+            .map(|index| RuntimeTypeMatch {
+                name: format!("match{index}"),
+                module: Some("Prelude".into()),
+                signature: "Int -> Int".into(),
+                quality: RuntimeTypeMatchQuality::Usable,
+                availability: InspectionAvailability::Available,
+                references: vec![identifier("Prelude", "succ")],
+                identity: identifier("Prelude", "succ"),
+            })
+            .collect::<Vec<_>>();
+        let answer = compiler_query_answer(
+            &CompilerQuery::TypeSearch {
+                expected_scope: None,
+                pattern: "Int -> Int".into(),
+            },
+            view.clone(),
+            view.clone(),
+            BatchOutcome::Answer(Ok(InspectionResult::TypeMatches {
+                query: "Int -> Int".into(),
+                matches,
+            })),
+        );
+        match answer {
+            CompilerQueryAnswer::Matches(found) => {
+                assert_eq!(found.matches.len(), QUERY_RESULT_LIMIT);
+                assert_eq!(found.limit, QUERY_RESULT_LIMIT);
+                assert!(found.observed > found.limit);
+            }
+            other => panic!("expected type matches, got {}", answer_name(&other)),
+        }
     }
 
     #[test]
@@ -1333,7 +1493,9 @@ mod tests {
                     planned.iter().all(|planned| matches!(
                         planned,
                         InspectionQuery::ScopeBrowse
+                            | InspectionQuery::ScopeBrowseBounded(_)
                             | InspectionQuery::Browse { .. }
+                            | InspectionQuery::BrowseBounded { .. }
                     )),
                     "enumeration planned a probe or walk: {query:?} -> {planned:?}"
                 );
@@ -1344,7 +1506,9 @@ mod tests {
                         .iter()
                         .any(|planned| matches!(
                             planned,
-                            InspectionQuery::TypeOf(_) | InspectionQuery::TypeSearch(_)
+                            InspectionQuery::TypeOf(_)
+                                | InspectionQuery::TypeSearch(_)
+                                | InspectionQuery::TypeSearchBounded { .. }
                         )),
                     "probe verb planned no probe query: {query:?}"
                 );
@@ -1372,7 +1536,10 @@ mod tests {
                     expected_scope: None,
                     pattern: "a -> a".into(),
                 },
-                InspectionQuery::TypeSearch("a -> a".into()),
+                InspectionQuery::TypeSearchBounded {
+                    pattern: "a -> a".into(),
+                    budget: QUERY_RESULT_LIMIT,
+                },
             ),
         ] {
             assert!(query.compiles_probe(), "{query:?}");
