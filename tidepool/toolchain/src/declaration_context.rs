@@ -5837,14 +5837,18 @@ pub(crate) struct WorldSourceCompilationBinding {
 }
 
 impl WorldSourceCompilationBinding {
-    pub(crate) fn new(
-        reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
-        segment: Arc<crate::checked_cell::CheckedTypedSegmentPlan>,
-    ) -> Self {
-        Self {
-            reservation,
-            segment,
-        }
+    pub(crate) fn from_output(
+        output: &crate::compiler_world::WorldCellOutputAdmission,
+        segment_index: usize,
+    ) -> Result<Self, CompileError> {
+        let segment = output
+            .segments()
+            .get(segment_index)
+            .ok_or_else(|| failure("world source binding has no actual prepared segment"))?;
+        Ok(Self {
+            reservation: Arc::clone(output.reservation()),
+            segment: Arc::clone(segment),
+        })
     }
 }
 
