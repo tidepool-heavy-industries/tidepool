@@ -407,38 +407,6 @@ impl super::PersistentSession {
     }
 }
 
-impl<H, O> super::ResidentSession<H, O>
-where
-    H: tidepool_effect::dispatch::DispatchEffect<O> + Send,
-    O: super::OutputSink + Sync,
-{
-    pub fn materialize_facade(
-        &self,
-        surface: &ExactExportSurface,
-        view: &SessionCompileView,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<MaterializedFacade, ExactFacadeError> {
-        self.state.materialize_facade(surface, view, settlement)
-    }
-    pub fn select_facade_exact_exports(
-        &self,
-        facade: &MaterializedFacade,
-        selected: &[ExportIdentity],
-        includes: &[PathBuf],
-        root: &Path,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<Option<MaterializedFacade>, ExactFacadeError> {
-        self.state.select_facade_exact_exports(
-            self.run_context().lexical_scope,
-            facade,
-            selected,
-            includes,
-            root,
-            settlement,
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

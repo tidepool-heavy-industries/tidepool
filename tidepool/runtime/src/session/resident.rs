@@ -3498,6 +3498,32 @@ where
         }
     }
 
+    pub fn materialize_facade(
+        &self,
+        surface: &super::ExactExportSurface,
+        view: &super::SessionCompileView,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<super::MaterializedFacade, super::ExactFacadeError> {
+        self.state.materialize_facade(surface, view, settlement)
+    }
+    pub fn select_facade_exact_exports(
+        &self,
+        facade: &super::MaterializedFacade,
+        selected: &[tidepool_toolchain::declaration_join::ExportIdentity],
+        includes: &[PathBuf],
+        root: &Path,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Option<super::MaterializedFacade>, super::ExactFacadeError> {
+        self.state.select_facade_exact_exports(
+            self.run_context().lexical_scope,
+            facade,
+            selected,
+            includes,
+            root,
+            settlement,
+        )
+    }
+
     /// Select source authority separately from recipient placement. Read-only
     /// observation and pure continuation evaluation do not claim source work.
     /// The first actual source action earns one claim for this synchronous
