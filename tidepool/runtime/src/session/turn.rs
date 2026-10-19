@@ -386,6 +386,9 @@ fn encode_checked_expression(plan: &CheckedExpressionPlan) -> CborValue {
 #[derive(Debug, thiserror::Error)]
 #[error("{error}")]
 pub struct CellCheckFailure {
+    /// Actual outer close, after the settled finisher has paired this failure.
+    /// Absence is not evidence of a clean or unstarted compiler transaction.
+    pub compiler_close: Option<crate::CompilerTransactionClose>,
     pub source_admission: Option<super::SourceAdmissionError>,
     pub error: CompileError,
     pub items: Option<Vec<CellAnalysisItem>>,
@@ -397,6 +400,7 @@ impl From<CompileError> for CellCheckFailure {
             error,
             items: None,
             source_admission: None,
+            compiler_close: None,
         }
     }
 }
@@ -407,6 +411,7 @@ impl From<super::SourceAdmissionError> for CellCheckFailure {
             error: CompileError::ExtractFailed(error.to_string()),
             items: None,
             source_admission: Some(error),
+            compiler_close: None,
         }
     }
 }
@@ -3082,41 +3087,50 @@ pub fn finish_cell_program_admitted(
     ),
     CellCheckFailure,
 > {
-    let cancellation = outcome.host_admission_cancellation().cloned();
-    let belongs_to_owner = outcome
-        .action()
-        .as_ref()
-        .is_ok_and(|prepared| outcome.belongs_to(&prepared.origin));
-    let outcome = outcome.into_outcome();
-    let prepared = outcome.action?;
-    match &outcome.close {
-        crate::CompilerTransactionClose::Unconfirmed(_)
-        | crate::CompilerTransactionClose::Retired(_) => {
-            tracing::warn!(target: "exomonad_harness::timing", preparation_completed = true, compiler_close = ?outcome.close, "cell program publication refused");
+    let close = outcome.close().clone();
+    let result: Result<_, CellCheckFailure> = (|| {
+        let cancellation = outcome.host_admission_cancellation().cloned();
+        let belongs_to_owner = outcome
+            .action()
+            .as_ref()
+            .is_ok_and(|prepared| outcome.belongs_to(&prepared.origin));
+        let outcome = outcome.into_outcome();
+        let prepared = outcome.action?;
+        match &outcome.close {
+            crate::CompilerTransactionClose::Unconfirmed(_)
+            | crate::CompilerTransactionClose::Retired(_) => {
+                tracing::warn!(target: "exomonad_harness::timing", preparation_completed = true, compiler_close = ?outcome.close, "cell program publication refused");
+            }
+            crate::CompilerTransactionClose::Clean
+            | crate::CompilerTransactionClose::NotStarted => {}
         }
-        crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted => {}
-    }
-    match outcome.close {
-        crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted => {}
-        crate::CompilerTransactionClose::Unconfirmed(evidence) => {
-            return Err(
-                CompileError::CompilerPreparationCloseUnconfirmed(Box::new(evidence)).into(),
-            );
+        match outcome.close {
+            crate::CompilerTransactionClose::Clean
+            | crate::CompilerTransactionClose::NotStarted => {}
+            crate::CompilerTransactionClose::Unconfirmed(evidence) => {
+                return Err(
+                    CompileError::CompilerPreparationCloseUnconfirmed(Box::new(evidence)).into(),
+                );
+            }
+            crate::CompilerTransactionClose::Retired(evidence) => {
+                return Err(CompileError::CompilerPreparationRetired(Box::new(evidence)).into());
+            }
         }
-        crate::CompilerTransactionClose::Retired(evidence) => {
-            return Err(CompileError::CompilerPreparationRetired(Box::new(evidence)).into());
+        if !belongs_to_owner {
+            return Err(CompileError::CompilerPublication(
+                crate::CompilerTransactionPublicationError::DifferentOwner,
+            )
+            .into());
         }
-    }
-    if !belongs_to_owner {
-        return Err(CompileError::CompilerPublication(
-            crate::CompilerTransactionPublicationError::DifferentOwner,
-        )
-        .into());
-    }
-    let cancellation = cancellation.ok_or(CompileError::CompilerPublication(
-        crate::CompilerTransactionPublicationError::MissingOwner,
-    ))?;
-    prepared.seal(&cancellation)
+        let cancellation = cancellation.ok_or(CompileError::CompilerPublication(
+            crate::CompilerTransactionPublicationError::MissingOwner,
+        ))?;
+        prepared.seal(&cancellation)
+    })();
+    result.map_err(|mut failure| {
+        failure.compiler_close = Some(close);
+        failure
+    })
 }
 
 impl PreparedRuntimeCell {
@@ -3474,6 +3488,7 @@ fn check_cell_impl(
                 };
                 return Err(CellCheckFailure {
                     source_admission: None,
+                    compiler_close: None,
                     error: offer.retain_failure(temp.path(), &cmd, &output.stderr, error),
                     items,
                 });
@@ -7509,6 +7524,111 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn cell_program_primary_failure_keeps_its_outer_close_observation() {
+        #[derive(Clone, Copy, Debug)]
+        enum Closure {
+            Clean,
+            SyntheticUnknown,
+            ActualRetired,
+        }
+        for closure in [
+            Closure::Clean,
+            Closure::SyntheticUnknown,
+            Closure::ActualRetired,
+        ] {
+            let mut fixture = CheckedHomeFixture::new();
+            let admission = CheckedHomeFixture::admit_in(
+                &mut fixture.resident,
+                &fixture.execution,
+                &fixture.effects,
+                fixture.root.path(),
+                "let capturedNumber = missingPreparedCellName",
+                &[],
+                None,
+            )
+            .unwrap();
+            let source = admission.source_lease();
+            let cancellation = crate::CompilerTransactionCancellation::new();
+            let observed = std::cell::RefCell::new(None);
+            let before = tidepool_extract_cmd::extract_spawn_count();
+            let outcome = source.with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation.clone(),
+                None,
+                |close| *observed.borrow_mut() = Some(close),
+                |owner, report| {
+                    let result = prepare_cell_program_admitted(owner, admission, report);
+                    assert!(matches!(result.as_ref().err().expect("real invalid source must fail").error, CompileError::Diagnostics(_)));
+                    match closure {
+                        Closure::Clean => {},
+                        Closure::SyntheticUnknown => {
+                            // This tests aggregation and custody, not physical END loss.
+                            report(crate::CompilerTransactionClose::Unconfirmed(
+                                tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                                    tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
+                                    tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None },
+                                ),
+                            ));
+                        },
+                        Closure::ActualRetired => cancellation.cancel(),
+                    }
+                    result
+                },
+            ).unwrap();
+            let actual = outcome.close().clone();
+            assert_eq!(Some(&actual), observed.borrow().as_ref());
+            match closure {
+                Closure::Clean => assert!(matches!(actual, crate::CompilerTransactionClose::Clean)),
+                Closure::SyntheticUnknown => assert!(matches!(
+                    actual,
+                    crate::CompilerTransactionClose::Unconfirmed(_)
+                )),
+                Closure::ActualRetired => assert!(matches!(
+                    actual,
+                    crate::CompilerTransactionClose::Retired(_)
+                )),
+            }
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count() - before, 1);
+            let before_finish = outcome
+                .action()
+                .as_ref()
+                .err()
+                .expect("actual primary failure");
+            assert!(before_finish.compiler_close.is_none());
+            let item_count = before_finish.items.as_ref().map(Vec::len);
+            let expected_diagnostics = match &before_finish.error {
+                CompileError::Diagnostics(diagnostics) => diagnostics.clone(),
+                _ => unreachable!(),
+            };
+            let failure = finish_cell_program_admitted(outcome).unwrap_err();
+            assert_eq!(failure.compiler_close.as_ref(), Some(&actual));
+            assert_eq!(failure.source_admission, None);
+            assert_eq!(failure.items.as_ref().map(Vec::len), item_count);
+            assert!(
+                matches!(&failure.error, CompileError::Diagnostics(diagnostics) if diagnostics == &expected_diagnostics)
+            );
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count() - before,
+                1,
+                "finishing must not replay failed compilation"
+            );
+            match closure {
+                Closure::SyntheticUnknown => assert!(matches!(
+                    source.source_admission().admit(),
+                    Err(super::super::SourceAdmissionError::Unconfirmed { count: 1, .. })
+                )),
+                Closure::Clean | Closure::ActualRetired => {
+                    drop(source.source_admission().admit().unwrap())
+                }
+            }
+        }
+        let early: CellCheckFailure =
+            CompileError::ExtractFailed("pre-settlement refusal".into()).into();
+        assert!(early.compiler_close.is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn cell_program_host_cancellation_after_end_refuses_sealing_without_new_request() {
         let mut fixture = CheckedHomeFixture::new();
         let admission = CheckedHomeFixture::admit_in(
@@ -7555,6 +7675,10 @@ mod tests {
             std::io::ErrorKind::Interrupted
         );
         let failure = finish_cell_program_admitted(outcome).unwrap_err();
+        assert!(matches!(
+            failure.compiler_close,
+            Some(crate::CompilerTransactionClose::Clean)
+        ));
         assert!(
             matches!(failure.error, CompileError::Io(ref error) if error.kind() == std::io::ErrorKind::Interrupted)
         );
