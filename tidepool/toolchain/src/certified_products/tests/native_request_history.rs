@@ -599,12 +599,16 @@ fn replay_native_transport_history(
     });
     let base_context = context(&base);
     let first = usize::from(reverse);
-    let mut joined = private[first].merge(&private[1 - first]).unwrap();
+    let closed = private.each_ref().map(|input| {
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(input).unwrap()
+    });
+    let mut joined_support = closed[first].merge(&closed[1 - first]).unwrap();
     coverage.reversed_joins += usize::from(reverse);
     if duplicate {
-        joined = joined.merge(&private[first]).unwrap();
+        joined_support = joined_support.merge(&closed[first]).unwrap();
         coverage.duplicate_joins += 1;
     }
+    let mut joined = OriginalCompilerInputs::from_issued_support(&joined_support);
     // Join order must not change demand when the caller pins the same namespace.
     let pinned = private[0]
         .issued_artifacts()
