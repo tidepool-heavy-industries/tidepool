@@ -821,7 +821,15 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
                 .unwrap();
             assert_eq!(retained.state, InitialContextState::Published);
             let seed = retained.result.as_ref().unwrap();
-            assert_eq!(seed.sections.len(), 2);
+            assert_eq!(seed.sections.len(), 3);
+            assert_eq!(seed.sections[2].label, "effects at arrival");
+            let docs_at_arrival = &seed.sections[2].body;
+            assert!(docs_at_arrival.contains("EffectCommands"), "{docs_at_arrival}");
+            assert!(docs_at_arrival.contains("EffectRuntimeInfo"), "{docs_at_arrival}");
+            assert!(docs_at_arrival.contains("currentEffectDocs ::"), "{docs_at_arrival}");
+            assert!(!docs_at_arrival.contains("EffectModelCall"), "{docs_at_arrival}");
+            assert!(!docs_at_arrival.contains("EffectSpawnAgent"), "{docs_at_arrival}");
+            assert!(docs_at_arrival.contains("Catalogue documentation unavailable."), "{docs_at_arrival}");
             assert_eq!(seed.sections[1].label, "runtime at arrival");
             let at_arrival = &seed.sections[1].body;
             assert!(
@@ -892,7 +900,7 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
             std::fs::write(&orientation, format!("-- runtime-info reload observation\n{original_source}")).unwrap();
             let operation = after.operation("runtime-during-reload");
             after.sync_call_named("runtime-during-reload", "haskell",
-                "Right runtimeReload <- reloadSource []\nRight duringReload <- getRuntimeInfo\ndisplay (runtimeExecutingSpec duringReload == runtimeExecutingSpec runtimeFacts && runtimeExecutingGeneration duringReload == runtimeExecutingGeneration runtimeFacts)\n");
+                "Right runtimeReload <- reloadSource []\nRight duringReload <- getRuntimeInfo\nRight docsDuringReload <- currentEffectDocs\ndisplay (runtimeExecutingSpec duringReload == runtimeExecutingSpec runtimeFacts && runtimeExecutingGeneration duringReload == runtimeExecutingGeneration runtimeFacts && docsDuringReload == runtimeDocs)\n");
             let reloaded = host.while_operation_succeeds(&operation,
                 next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
             let origin = harness::store::actor_output::ActorOutputOrigin {

@@ -30,11 +30,39 @@ pub fn runtime_info() -> Effect {
         prompt_card: None,
         type_params: &[], default_row_args: &[], extra_imports: &[],
         external_types: &[
+            ExternalType { haskell_name: "ActorEffectKey", rust_wire: "ActorEffectKeyWire", core_module: None },
             ExternalType { haskell_name: "Model", rust_wire: "Model", core_module: None },
             ExternalType { haskell_name: "Reasoning", rust_wire: "Reasoning", core_module: None },
             ExternalType { haskell_name: "InitialContextObservation", rust_wire: "InitialContextObservation", core_module: None },
         ],
         type_defs: vec![
+            record("EffectDocsSnapshot", vec![
+                field("effectDocsInstall", "install", HsType::Int),
+                field("effectDocsSource", "source", HsType::Text),
+                field("effectDocsGeneration", "generation", HsType::maybe(HsType::Int)),
+                field("effectDocsEffects", "effects", HsType::list(HsType::Named("EffectDocumentation"))),
+            ], &["The exact executing interpreter row. Documentation observes membership, not resource grants, provider credentials or successful execution."]),
+            record("EffectDocumentation", vec![
+                field("effectDocumentationIdentity", "identity", HsType::Named("ActorEffectKey")),
+                field("effectDocumentationBody", "body", HsType::Named("EffectDocumentationBody")),
+            ], &[]),
+            sum("EffectDocumentationBody", vec![
+                ("EffectDocumentationMissing", vec![]),
+                ("EffectDocumentationAvailable", vec![HsType::Named("EffectDocumentationFacts")]),
+            ], &["Missing catalogue documentation differs from an effect absent from the executing row."]),
+            record("EffectDocumentationFacts", vec![
+                field("effectDocumentationDescription", "description", HsType::Text),
+                field("effectDocumentationCard", "card", HsType::maybe(HsType::Text)),
+                field("effectDocumentationImports", "imports", HsType::list(HsType::Text)),
+                field("effectDocumentationOperations", "operations", HsType::list(HsType::Named("EffectOperationDocumentation"))),
+            ], &[]),
+            record("EffectOperationDocumentation", vec![
+                field("effectOperationName", "name", HsType::Text),
+                field("effectOperationSignature", "signature", HsType::Text),
+                field("effectOperationContract", "contract", HsType::list(HsType::Text)),
+                field("effectOperationExamples", "examples", HsType::list(HsType::Text)),
+                field("effectOperationSource", "source", HsType::maybe(HsType::Text)),
+            ], &["Only owner-issued catalogue facts are present; absent examples or source references are not reconstructed from rendered source."]),
             record("RuntimeInfoSnapshot", vec![
                 field("runtimeExecutingSpec", "executing_spec", HsType::maybe(HsType::Named("RuntimeSpec"))),
                 field("runtimeExecutingGeneration", "executing_generation", HsType::maybe(HsType::Int)),
@@ -68,9 +96,13 @@ pub fn runtime_info() -> Effect {
             doc: "the executing request or its lifecycle owner cannot be observed",
         }] }),
         verbs: vec![Verb { ctor: "GetRuntimeInfoWith", method: "get_runtime_info", args: vec![],
-            ret: HsType::Named("RuntimeInfoSnapshot"), errors: Some("RuntimeInfoError"), handling: HandlingClass::Actor }],
+            ret: HsType::Named("RuntimeInfoSnapshot"), errors: Some("RuntimeInfoError"), handling: HandlingClass::Actor },
+            Verb { ctor: "CurrentEffectDocsWith", method: "current_effect_docs", args: vec![],
+                ret: HsType::Named("EffectDocsSnapshot"), errors: Some("RuntimeInfoError"), handling: HandlingClass::Actor }],
         helpers: vec![Helper { name: "getRuntimeInfo", ctor: Some("GetRuntimeInfoWith"), substrate: false,
-            doc: &["Observe this execution's installed spec and configured inference, plus startup evidence as of the query. Safe during initialContext; no filesystem or memory-policy inference."], body: HelperBody::Nullary }],
+            doc: &["Observe this execution's installed spec and configured inference, plus startup evidence as of the query. Safe during initialContext; no filesystem or memory-policy inference."], body: HelperBody::Nullary },
+            Helper { name: "currentEffectDocs", ctor: Some("CurrentEffectDocsWith"), substrate: false,
+                doc: &["Observe structured documentation for this execution's exact installed interpreter row. Safe during initialContext; uses the shipped catalogue without GHC lookup. Membership does not establish runtime grants or credential availability."], body: HelperBody::Nullary }],
         polymorphism: Polymorphism::None, generated_handler: false,
         handler_execution: crate::schema::HandlerExecution::Immediate, caller_principal: false,
     }

@@ -6193,23 +6193,32 @@ where
                 });
                 return Box::pin(std::future::ready(Ok(operation)));
             }
-            ResidentActorBoundary::RuntimeInfo { continuation } => {
-                let answer = self.runtime_info(effect_owner.issued_snapshot());
-                let runner = self.environment.runner.clone();
-                let operation: futures_util::future::BoxFuture<
-                    'static,
-                    commands::CommandResolution,
-                > = Box::pin(async move {
-                    let disposition = if answer.is_ok() {
-                        WorkbenchOperationDisposition::Read
-                    } else {
-                        WorkbenchOperationDisposition::Rejected
-                    };
-                    commands::CommandResolution::settled(
-                        disposition,
-                        runner.resume_value(context, continuation, answer).await,
-                    )
-                });
+            ResidentActorBoundary::RuntimeInfo { continuation, request } => {
+                macro_rules! resume_observation {
+                    ($answer:expr) => {{
+                        let answer = $answer;
+                        let runner = self.environment.runner.clone();
+                        let disposition = if answer.is_ok() {
+                            WorkbenchOperationDisposition::Read
+                        } else {
+                            WorkbenchOperationDisposition::Rejected
+                        };
+                        Box::pin(async move {
+                            commands::CommandResolution::settled(
+                                disposition,
+                                runner.resume_value(context, continuation, answer).await,
+                            )
+                        }) as futures_util::future::BoxFuture<'static, commands::CommandResolution>
+                    }};
+                }
+                let operation = match request {
+                    crate::generated::runtime_info::RuntimeInfoReq::GetRuntimeInfoWith => {
+                        resume_observation!(self.runtime_info(effect_owner.issued_snapshot()))
+                    }
+                    crate::generated::runtime_info::RuntimeInfoReq::CurrentEffectDocsWith => {
+                        resume_observation!(self.current_effect_docs(effect_owner.issued_snapshot()))
+                    }
+                };
                 return Box::pin(std::future::ready(Ok(operation)));
             }
             ResidentActorBoundary::Source {

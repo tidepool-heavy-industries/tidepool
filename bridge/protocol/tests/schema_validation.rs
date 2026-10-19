@@ -367,11 +367,12 @@ fn runtime_info_is_read_only_actor_routed_and_reuses_startup_observation() {
     let effect = tidepool_protocol::effects::runtime_info::runtime_info();
     effect.validate().unwrap();
     assert!(!effect.generated_handler);
-    assert_eq!(effect.verbs.len(), 1);
-    assert_eq!(effect.verbs[0].handling, HandlingClass::Actor);
+    assert_eq!(effect.verbs.len(), 2);
+    assert!(effect.verbs.iter().all(|verb| verb.handling == HandlingClass::Actor));
     assert_eq!(
         effect.constructor_signatures(),
-        ["GetRuntimeInfoWith :: RuntimeInfo (Either RuntimeInfoError RuntimeInfoSnapshot)",]
+        ["GetRuntimeInfoWith :: RuntimeInfo (Either RuntimeInfoError RuntimeInfoSnapshot)",
+         "CurrentEffectDocsWith :: RuntimeInfo (Either RuntimeInfoError EffectDocsSnapshot)"]
     );
     let startup = effect
         .type_defs

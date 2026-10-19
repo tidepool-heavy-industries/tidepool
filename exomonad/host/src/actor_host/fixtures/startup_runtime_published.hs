@@ -1,8 +1,14 @@
 import qualified Tidepool.Agent.Context as C
 Right runtimeFacts <- getRuntimeInfo
+Right runtimeDocs <- currentEffectDocs
 display (case (runtimeExecutingSpec runtimeFacts, runtimeStartup runtimeFacts) of
   (Just selected, RuntimeStartupObserved (C.InitialContextPublished initial _ _ _)) ->
-    runtimeSpecEntry selected == Just "Persona.Spec.runtimeSpec"
+    effectDocsInstall runtimeDocs == runtimeSpecInstall selected
+      && effectDocsSource runtimeDocs == runtimeSpecSource selected
+      && effectDocsGeneration runtimeDocs == runtimeExecutingGeneration runtimeFacts
+      && EffectCommands `elem` map effectDocumentationIdentity (effectDocsEffects runtimeDocs)
+      && not (EffectModelCallOpenAI `elem` map effectDocumentationIdentity (effectDocsEffects runtimeDocs))
+      && runtimeSpecEntry selected == Just "Persona.Spec.runtimeSpec"
       && runtimeSpecInstall selected == EXPECTED_INSTALL
       && runtimeSpecSource selected == EXPECTED_SOURCE
       && runtimeExecutingGeneration runtimeFacts == Just EXPECTED_GENERATION
