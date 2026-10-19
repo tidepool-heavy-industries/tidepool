@@ -57,7 +57,9 @@ joined InterfaceOnly original; preserve its InterfaceOnly role and EVERY later
 actual target/native-group, hidden-type, inspection, bind/capture, replay and
 edited-input refusal control. Opaque offers can retain exact native proof
 outside selected and public graph group lists; neither list is a full-offer
-oracle. Rows owns repair plus prod/cfgtest, full corrected case and two existing
+oracle. Rows committed exact test-only successor `5113d9c962bdc06179628a0758cb0c768f3e5491`;
+supervisor read its critical diff. Independent review and native gates remain pending.
+Rows owns prod/cfgtest, full corrected case and two existing
 owner controls (disconnected opaque custody and competing private issuances).
 Any later failure is a new observation requiring investigation. Exact independent
 review follows the package proposal below; no fold before the terminal gates.

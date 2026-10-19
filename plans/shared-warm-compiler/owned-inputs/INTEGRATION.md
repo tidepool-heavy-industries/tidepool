@@ -6,7 +6,8 @@ until the approved second test-only correction is reviewed and its full case exe
 product source is merged into the area yet.
 
 Base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
-Full candidate: `a178a9d331ac560786925e3c443a5789e03c9358`, including accepted
+Full candidate: `5113d9c962bdc06179628a0758cb0c768f3e5491` (second test-only
+oracle correction; exact independent review/native gates pending), including accepted
 row implementation `29d6467c309e53dbd0c1e9c89961c2eff24259c4`.
 Branch: `feature/shared-warm/owned-rows`.
 Checkout: `/srv/swarm/checkouts/tidepool-shared-warm-owned-rows-20261019`.
