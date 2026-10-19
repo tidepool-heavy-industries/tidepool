@@ -7617,6 +7617,99 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn publication_restage_refuses_fenced_original_before_join_reservation() {
+        let mut fixture = CheckedHomeFixture::new();
+        let declaration = fixture
+            .check("freshPublication n = (n :: Int)", &[], None)
+            .unwrap();
+        fixture.execute(declaration);
+        let intent = fixture
+            .resident
+            .freeze_private_execution(&fixture.execution)
+            .unwrap();
+        let source = fixture.execution.retained_lexical_scope();
+        let open = fixture
+            .resident
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |resident, _| resident.restage_ephemeral_execution_publication(intent.clone()),
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                open.action(),
+                Ok(crate::session::ExecutionPublication::Declarations(_))
+            ),
+            "actual authored declaration must reserve a fresh join while open"
+        );
+        assert_eq!(*open.close(), crate::CompilerTransactionClose::NotStarted);
+        drop(open);
+        let public = fixture.execution.admitted_public().scope;
+        let private = fixture.execution.private_scope();
+        let before_public = fixture
+            .resident
+            .public_visibility_snapshot_in(public)
+            .unwrap();
+        let before_private = fixture
+            .resident
+            .public_visibility_snapshot_in(private)
+            .unwrap();
+        let before_allocation = fixture
+            .resident
+            .declaration_generation_high_water()
+            .unwrap();
+        let before_requests = tidepool_extract_cmd::extract_spawn_count();
+        let fence = source.source_admission().fence().unwrap();
+        let closed = fixture
+            .resident
+            .with_source_compiler_transaction(
+                source,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |resident, _| resident.restage_ephemeral_execution_publication(intent),
+            )
+            .unwrap();
+        assert!(matches!(
+            closed.action(),
+            Err(crate::session::SessionError::SourceAdmission(
+                crate::session::SourceAdmissionError::Closed { .. }
+            ))
+        ));
+        assert_eq!(*closed.close(), crate::CompilerTransactionClose::NotStarted);
+        assert_eq!(fence.pending_claims(), 0);
+        assert_eq!(
+            fixture
+                .resident
+                .declaration_generation_high_water()
+                .unwrap(),
+            before_allocation,
+            "fenced source must refuse before burning a join identity"
+        );
+        assert_eq!(
+            fixture
+                .resident
+                .public_visibility_snapshot_in(public)
+                .unwrap(),
+            before_public
+        );
+        assert_eq!(
+            fixture
+                .resident
+                .public_visibility_snapshot_in(private)
+                .unwrap(),
+            before_private
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_requests);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn cell_program_primary_failure_keeps_its_outer_close_observation() {
         #[derive(Clone, Copy, Debug)]
         enum Closure {
