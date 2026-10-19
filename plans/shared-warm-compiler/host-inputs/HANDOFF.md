@@ -31,13 +31,30 @@ reviewed concrete issuance contract.
 - Initial bounded implementation changes `AdmittedCompilerRoles.rows` from a
   `BTreeMap` copied on fresh value append to a persistent map. This alone does
   not establish incremental admission or publication.
+- Accepted C2 amendment: campaign `e2bd2611102566085d0c573568d820a50ed62fb3`,
+  inspected directly. The selected row's exact binding and admitted payload is
+  its home witness: canonical finalization, checked Val certificate or accepted
+  lexical join. Preserve the separate type-name `home_units` query. Base-bound
+  transitions retain exact old/new selected owners, not payload equality.
 - `OriginalValidationInventory::new` currently builds its module census from
   every supplied available original before selected-group traversal. It includes
   zero-group originals and has no interface-only input. It is not yet a proven
   selected-world census. The proposed successor census consists of exactly
   selected declared home owners, including authenticated interface-only owners;
-  dormant custody and executable demand do not issue membership. Campaign
-  arbitration and independent issuer tracing remain pending.
+  dormant custody and executable demand do not issue membership. Production
+  callers pass retained maps including custody roots, while fresh native-offer
+  validation has a deliberately scoped producer census. Do not narrow exact
+  carrier authentication or `native_ids` wholesale when migrating this query.
+  Independent issuer/caller tracing and minimized insertion/removal/fork recipes:
+  `/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/oracle/selected-world-census.txt`.
+- The campaign approved independent lazy P6 support preparation. Declaration
+  preparation already admits each source and continuation through the exact
+  context's `extend` / `finish` and `in_program_context_with_private_input`.
+  `PreparedCellProgram::seal` now builds contextual value support only before
+  the first native value item consumes it. Declaration prefixes are local
+  immutable assembly; cancellation checks remain per item and before candidate
+  publication. The contextual constructor can still refuse before native target
+  capture; no declaration-only value support is built.
 - Keep optional equal-interface body replacement and strict conflict refusal
   for genuinely required historical edges. Exact scoped child edges and private
   root permissions remain immutable facts, separate from direct seeds.
