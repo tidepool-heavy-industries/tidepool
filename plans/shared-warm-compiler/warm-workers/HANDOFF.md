@@ -42,36 +42,47 @@ repair; never mix descriptor layouts or infer native permission from passive CID
 ## Native evidence and next commands
 
 Frozen native checkout `/srv/swarm/checkouts/tidepool-shared-warm-cell-native-20261019`,
-branch `feature/shared-warm/cell-native`, OID
-`4dea8ba2d6170563307f89dd39684157977e6872` (tree identical accepted ac739).
-Production toolchain, cfg(test), candidate fixture issuer compiled successfully:
-1008 local actions, exit0, executed tests0. This does NOT qualify later PREP3,
-source-adapter/cold-basis changes at main147b or actual ordinary cells.
-Evidence root:
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/prepare-transport-ac739/`
-contains `RUST-TERMINAL.json`, `rust.log`, process samples and admission.
-Session83042 is terminal; all Warm clients settled. Warm LIVE grant is0/0.
+branch `feature/shared-warm/cell-native`, current OID
+`c9400fec56b343f7a0a2d59407b47fa60ef9c3d2` is the exact minimal layout-repair
+merge of qualified physical transport tree4dea and source0be344. Rust production,
+cfg(test), candidate fixture issuer compiled at4dea:1008local/exit0. Actual
+production Haskell worker compiled atc940:5local/exit0; declared runner resources
+3local/exit0 and extract-cmd cfg(test)2local/exit0. Four exact canonical controls
+executed4/PASS4/FAIL0, each report has1 executed/1pass/exit0:
+
+- compiler_world::answer_tests::world_output_capture_retains_authenticated_bytes_and_refuses_changed_products
+- cell_plan::tests::world_reservations_keep_declaration_and_value_generations_separate
+- request::tests::world_prepare_bounds_borrowed_names_before_owned_slot_copies
+- request::tests::world_cell_wire_is_exclusive_bounded_and_matches_haskell
+
+Aggregate private evidence:
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/prepare-transport-ac739/counted-c940/COMPONENT-EXECUTION.json`,
+SHA256 `4c808bf8896640c561b19f716db3f670f0f71371fe8147491d0fb2ff224bcb02`.
+It authenticates27 referenced reports/streams/logs/binary snapshots (28 files
+including aggregate). No actual compiler transactions were invoked by these
+Rust controls. Directory resource hashes remain UNKNOWN; process cleanup is
+confirmed, hosted/compiler cleanup not_observed, fast cgroup observation partial.
+No ordinary-cell/performance/certifier claim is made.
+
+Earlier failures remain:4dea declared runner first exposed Source.hs layout
+GHC58481, exit3/tests0. Minimal owner repair0be344b75371d376306cc4c9d909421b38559097
+independently source accepted and now producer compiled. My first c940 exact
+selector used ::tests instead of ::answer_tests; canonical runner refused it,
+exit1/0execution. That procedure failure is not a product test failure. HOST
+independently owns its full0be+classifier retry.
+
+All Warm clients are terminal, including83042/30702/71362/81697; Warm LIVE0/0.
 Idle Buck641810 remains globally charged in
-`/build.slice/inanna-build-1792428206-641740.scope`.
-Observed scope current maximum5596319744 bytes is a sampled value, not a full
-process peak. Outside Nix sampled600453120 bytes; tmux is not a build peak.
-No Nix job is owned here. Source configured independently with crypton and pinned
-GHC9.12.2/Rust1.93.0; buck-out bind mount is provisioned in cell-native.
+`/build.slice/inanna-build-1792428206-641740.scope`. No orphan client or Nix work.
+The4dea build sampled scope current maximum5596319744 bytes is not a full peak;
+outside Nix600453120 bytes and tmux are separate. Cell-native's pinned configured
+GHC9.12.2/Rust1.93.0/crypton closure and buck-out bind mount remain preserved.
 
-Next, after fresh LIVE/global/scope/disk admission, run each exact case with the
-canonical native counted runner (not the linked executable alone):
-
-- toolchain: compiler_world::tests::world_output_capture_retains_authenticated_bytes_and_refuses_changed_products
-- toolchain: cell_plan::tests::world_reservations_keep_declaration_and_value_generations_separate
-- extract-cmd: request::tests::world_prepare_bounds_borrowed_names_before_owned_slot_copies
-- extract-cmd: request::tests::world_cell_wire_is_exclusive_bounded_and_matches_haskell
-
-Command shape in frozen native checkout:
+Reproduction uses canonical isolated declared runners, for example:
 `swarm-build bash scripts/buck2-run.sh run --local-only -c remote.enabled=false -j1 //tidepool/toolchain:tidepool_toolchain_unit_tests -- --exact CASE --expected-count 1 --jobs 1 --timeout 600 --output-dir PRIVATE_CASE_DIR --retain-artifacts`.
-Use extract-cmd's corresponding native runner label for its cases. Confirm actual
-runner syntax against its help/source; no zero-match passes. Compile changed
-extract-cmd cfg(test) and preserve actual reports/binary hashes. Installed
-swarm-build has COMMAND-only interface; do not use unsupported disk flags.
+The corresponding extract-cmd label owns its two tests. Installed swarm-build is
+COMMAND-only; unsupported disk flags must not be used. Repeat only for a changed
+source or unresolved concern, after fresh LIVE/global/scope/disk admission.
 
 Then join current main source into the isolated native checkout with source-owner
 review, regenerate owning metadata only if changed, and compile actual affected
@@ -81,8 +92,8 @@ production/cfg(test)/Haskell consumers early. Do not inherit frozen4dea success.
 
 Warm owns Prepare transport, SAME output certifier and successful-target private
 successor. HOST owns actual runtime Finite/World admission, same per-item capability
-settlement and atomic binding/world adoption. Runtime source306d has an active
-separate HOST14TOTAL lane; consult LIVE rather than assuming it is terminal.
+settlement and atomic binding/world adoption. Runtime source306d first compile failed (own classifier plus incoming Source layout);
+HOST full a25b+0be+classifier retry54780 is separate. Consult fresh LIVE.
 HOST requires SAME reservation Arc, actual ordinal/IDs/generations/native delta,
 and inseparable ExactCompiledItem/cap. Public scope/postkey comes from SAME final
 PreparedBindingPromotion after removals. Changed semantic base refuses; storage
@@ -102,13 +113,13 @@ Independent prefix receipt WORLD-SOURCE-PREFIX-REVIEW-e91d.md SHA256
 Protocol child core checkout
 `/srv/swarm/checkouts/tidepool-shared-warm-worker-cell-20261019`, branch
 `feature/shared-warm/worker-cell-bindings`, d3c176 above. Full core merged.
-Separate running branch `feature/shared-warm/worker-cell-publication` contains
-8ae65c32ca +2bc57629fe descriptor2 receiver; native0. It pairs Qual's explicit
+Separate branch `feature/shared-warm/worker-cell-publication` is clean
+`d848367d1832673c60613e67717391a4b93d0469`, independently source accepted; native0. It pairs Qual's explicit
 TPSOURCEBOOTPUBLISHED1 tuple12 fixture and Context6/Published8 with required four
 born roots (roles/offers/availability/decisions), explicit old-layout refusal.
 Do not merge an unmatched wire break into core. Child durable private handoff:
 `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/protocol/cell/HANDOFF.md`,
-SHA256 `efd073344d2b0af6fe6e870ad016fedc34e40d6410dedac9319dd87ce84c5ae4`.
+SHA256 `0ee946699ead1be2c43d3df50faa86721193e218b002ea1d30ba0ca2cd6af278`.
 
 World dependency helper checkout `/srv/swarm/checkouts/tidepool-world-dependencies-20261019`,
 branch warm-world-dependencies, clean61eccf36887564284c703bc1c5ab2e42aa1077a0.
@@ -116,6 +127,11 @@ Helpers already joined into protocol; source accepted, actual reuse/cache/END
 histories unqualified. No jobs/grant. Direct lexical get helper in separate
 `tidepool-world-demanded-basis-20261019` at b9b63535ba73dc51ceed662e59ec8bad5aa6be62
 is NOT yet merged. It avoids lexical snapshot Deref full materialization.
+This SAME leaf is now reactivated on warm-world-demanded-support at147b for
+closed demanded role/interface projection+metadata; scope excludes native/instance
+permission issuance. It retains SAME cold support/metadata, uses keyed roots and
+canonical/Original requirement edges, charges actual request allocations. Source
+WIP helper is not yet reviewed/compiled or consumed; native0.
 Durable child handoff `/srv/swarm/evidence/inanna/world-dependencies-20261019/handoff.json`,
 SHA256 `75aad5b86e0dc808d6fadec18bbf091dc2db14fe1e0da721bc4bee7040d57347`.
 Required actual shared-backing eviction/oversize/quarantine/END controls remain;
