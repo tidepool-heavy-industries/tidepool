@@ -35,7 +35,6 @@ pub use published_source::PublishedSourceOriginalSelection;
 // Full-profile diagnostics have an independent output budget. An omitted row
 // or binding makes this observation incomplete, never proof of absence.
 const NATIVE_TRACE_ROWS: usize = 256;
-const NATIVE_TRACE_ROOTS: usize = 512;
 
 pub(crate) fn trace_native_input_roles(
     stage: &'static str,
@@ -1313,6 +1312,82 @@ enum NativeAvailabilityRowMerge {
     Changed,
 }
 
+/// Operation-local observations of the exact issued native subset.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DemandNativeInputsWork {
+    pub(crate) owner_lookups: usize,
+    pub(crate) row_lookups: usize,
+    pub(crate) group_visits: usize,
+    pub(crate) group_lookups: usize,
+    pub(crate) closure_nodes: usize,
+    pub(crate) closure_edges: usize,
+    pub(crate) closure_queued: usize,
+    pub(crate) reused_rows: usize,
+    pub(crate) changed_rows: usize,
+    pub(crate) reused_facts: usize,
+    pub(crate) advertised: usize,
+}
+
+#[derive(Clone, Copy)]
+struct NativeDemandBudget<'a>(Option<&'a tidepool_repr::execution_schema::InventoryOperation>);
+
+impl NativeDemandBudget<'_> {
+    fn checkpoint(self) -> Result<(), CompileError> {
+        if let Some(operation) = self.0 {
+            crate::host_work::checkpoint()?;
+            operation
+                .charge(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        }
+        Ok(())
+    }
+
+    fn reserve<T>(self, count: usize) -> Result<(), CompileError> {
+        if let Some(operation) = self.0 {
+            operation
+                .reserve::<T>(count)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        }
+        Ok(())
+    }
+
+    fn strings(self, bytes: usize) -> Result<(), CompileError> {
+        if let Some(operation) = self.0 {
+            operation
+                .charge(bytes)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        }
+        Ok(())
+    }
+
+    fn restrict(
+        self,
+        contribution: &Arc<crate::artifact_inventory::NativeOfferContribution>,
+        roots: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+        work: &mut DemandNativeInputsWork,
+    ) -> Result<Arc<crate::artifact_inventory::NativeOfferContribution>, CompileError> {
+        if let Some(operation) = self.0 {
+            let (restricted, observed) =
+                contribution.for_groups_with_operation(roots, operation)?;
+            work.closure_nodes += observed.nodes;
+            work.closure_edges += observed.edges;
+            work.closure_queued += observed.queued;
+            Ok(restricted)
+        } else {
+            contribution.for_groups(roots)
+        }
+    }
+
+    fn row_facts(self, row: &NativeTransportAvailability) -> Result<(), CompileError> {
+        // Changed contribution identities were budgeted by their graph owner.
+        // Here the row owner copies only immutable persistent roots and keys.
+        self.reserve::<([u8; 32], NativeContributionSnapshotFacts, [usize; 8])>(
+            row.contributions.len(),
+        )?;
+        Ok(())
+    }
+}
+
 impl RequestNativeAvailability {
     /// Derive immutable facts only at a real row construction or mutation. The
     /// acquisition/permission owner remains the row, never these durable facts.
@@ -1534,8 +1609,8 @@ impl RequestNativeAvailability {
     }
 
     /// Select direct availability roots from effective compiler roles, then keep
-    /// their exact dependencies. Replacing a direct Original cannot erase a
-    /// historical child still required by a surviving issued body.
+    /// their exact dependencies. The demanded path supplies its already issued
+    /// direct choices to the same closure/intersection policy below.
     pub(crate) fn for_compiler_roles(
         &self,
         roles: &CompilerInputProjection,
@@ -1544,206 +1619,198 @@ impl RequestNativeAvailability {
         if self.0.is_empty() {
             return Ok(self.clone());
         }
-        let trace = tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG);
+        let direct = self
+            .0
+            .iter()
+            .filter_map(|(id, row)| {
+                let role = roles.snapshot_roles().get(&row.original.descriptor.owner)?;
+                (role.interface() == row.canonical
+                    && role.original().is_none_or(|selected| selected == *id))
+                .then_some(*id)
+            })
+            .collect::<BTreeSet<_>>();
         let payloads = artifacts.retained_payloads();
-        let mut retained = BTreeSet::new();
+        self.for_compiler_roots(
+            roles,
+            artifacts,
+            &direct,
+            |id| payloads.get(id).is_some(),
+            NativeDemandBudget(None),
+            &mut DemandNativeInputsWork::default(),
+        )
+    }
+
+    fn for_compiler_roots(
+        &self,
+        roles: &CompilerInputProjection,
+        artifacts: &ArtifactView,
+        direct: &BTreeSet<ArtifactId>,
+        has_payload: impl Fn(&ArtifactId) -> bool,
+        budget: NativeDemandBudget<'_>,
+        work: &mut DemandNativeInputsWork,
+    ) -> Result<Self, CompileError> {
         let mut roots_by_contribution = BTreeMap::new();
-        for (index, (id, row)) in self.0.iter().enumerate() {
-            let owner = identity(&row.original_owner().unit, &row.original_owner().module);
-            let role = roles.snapshot_roles().get(&owner);
-            let observe = |direct: bool| {
-                if trace && index < NATIVE_TRACE_ROWS {
-                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                        ?owner, available_original = ?id, available_mode = ?row.mode, canonical = ?row.canonical,
-                        selected_interface = ?role.map(CompilerInputRole::interface),
-                        selected_original = ?role.and_then(CompilerInputRole::original), direct,
-                        "native availability direct root decision");
-                }
-            };
-            let Some(role) = role else {
-                observe(false);
-                continue;
-            };
-            if role.interface() != row.canonical
-                || role.original().is_some_and(|selected| selected != *id)
-            {
-                observe(false);
-                continue;
-            }
-            observe(true);
-            retained.insert(*id);
+        for id in direct {
+            budget.checkpoint()?;
+            work.row_lookups += 1;
+            let row = self.0.get(id).ok_or_else(|| {
+                admission_failure(ArtifactInventoryFailure::NativeRootOutsideView { artifact: *id })
+            })?;
             for contribution in row.contributions.iter() {
-                let entry = roots_by_contribution
-                    .entry(contribution.identity()?)
-                    .or_insert_with(|| (Arc::clone(contribution), BTreeSet::new()));
-                for ordinal in contribution
-                    .ordinals(*id)
-                    .filter(|ordinal| row.permits(*ordinal))
-                {
-                    entry.1.extend(contribution.groups(NativeGroupKey {
-                        artifact: *id,
-                        original_ordinal: ordinal,
-                    }));
+                budget.checkpoint()?;
+                let identity = contribution.identity()?;
+                for group in contribution.original_groups(*id) {
+                    budget.checkpoint()?;
+                    work.group_visits += 1;
+                    if !roots_by_contribution.contains_key(&identity) {
+                        budget.reserve::<(
+                            [u8; 32],
+                            Arc<crate::artifact_inventory::NativeOfferContribution>,
+                            BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+                            [usize; 8],
+                        )>(1)?;
+                        roots_by_contribution
+                            .insert(identity, (Arc::clone(contribution), BTreeSet::new()));
+                    }
+                    let roots = &mut roots_by_contribution
+                        .get_mut(&identity)
+                        .expect("inserted contribution")
+                        .1;
+                    // Every contribution is already in this exact row. Its
+                    // groups therefore satisfy the row's issued permission.
+                    if !roots.contains(&group) {
+                        budget
+                            .reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(
+                                1,
+                            )?;
+                        roots.insert(group);
+                    }
                 }
             }
         }
-        // Traverse each distinct authenticated contribution once, retaining only
-        // descendants of direct compiler-role bodies, never unrelated sibling roots.
         let mut dependencies: BTreeMap<
             ArtifactId,
             Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
         > = BTreeMap::new();
-        let contribution_count = roots_by_contribution.len();
-        if trace {
-            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                rows = self.0.len(), row_omissions = self.0.len().saturating_sub(NATIVE_TRACE_ROWS),
-                contributions = roots_by_contribution.len(),
-                contribution_omissions = roots_by_contribution.len().saturating_sub(NATIVE_TRACE_ROWS),
-                complete = self.0.len() <= NATIVE_TRACE_ROWS && roots_by_contribution.len() <= NATIVE_TRACE_ROWS,
-                "native availability root observation coverage");
-        }
-        for (index, (identity, (contribution, roots))) in
-            roots_by_contribution.into_iter().enumerate()
-        {
-            let restricted = contribution.for_groups(&roots)?;
-            if trace && index < NATIVE_TRACE_ROWS {
-                let observed_roots = roots.iter().take(NATIVE_TRACE_ROOTS).collect::<Vec<_>>();
-                let members = restricted.originals();
-                let observed_members = members.iter().take(NATIVE_TRACE_ROWS).collect::<Vec<_>>();
-                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                    contribution = ?identity, issuer_original = ?contribution.offer().original(),
-                    roots = ?observed_roots, root_count = roots.len(),
-                    root_omissions = roots.len().saturating_sub(NATIVE_TRACE_ROOTS),
-                    closure_members = ?observed_members, member_count = members.len(),
-                    member_omissions = members.len().saturating_sub(NATIVE_TRACE_ROWS),
-                    complete = roots.len() <= NATIVE_TRACE_ROOTS && members.len() <= NATIVE_TRACE_ROWS,
-                    "native availability closure from direct roots");
-            }
+        for (_, (contribution, roots)) in roots_by_contribution {
+            let restricted = budget.restrict(&contribution, &roots, work)?;
             for id in restricted.originals() {
+                budget.checkpoint()?;
+                if !dependencies.contains_key(id) {
+                    budget.reserve::<(
+                        ArtifactId,
+                        Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
+                        [usize; 8],
+                    )>(1)?;
+                    dependencies.insert(*id, Vec::new());
+                }
+                budget
+                    .reserve::<[Arc<crate::artifact_inventory::NativeOfferContribution>; 2]>(1)?;
                 dependencies
-                    .entry(*id)
-                    .or_default()
+                    .get_mut(id)
+                    .expect("inserted dependency")
                     .push(Arc::clone(&restricted));
             }
         }
-        if trace {
-            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                contribution_count, emitted = contribution_count.min(NATIVE_TRACE_ROWS),
-                omitted = contribution_count.saturating_sub(NATIVE_TRACE_ROWS),
-                complete = contribution_count <= NATIVE_TRACE_ROWS,
-                "native availability closure observation coverage");
+        let mut selected_ids = BTreeSet::new();
+        for id in direct.iter().chain(dependencies.keys()) {
+            if !selected_ids.contains(id) {
+                budget.reserve::<(ArtifactId, [usize; 4])>(1)?;
+                selected_ids.insert(*id);
+            }
         }
         let mut rows = BTreeMap::new();
-        let mut facts = self.1.clone();
-        let mut changed_rows = false;
-        let mut historical_observations = 0usize;
-        for (id, row) in self.0.iter() {
-            let direct = retained.contains(id);
-            if !direct && !dependencies.contains_key(id) {
-                #[cfg(test)]
-                NATIVE_AVAILABILITY_FACT_WORK.with(|work| {
-                    let (cold, changed) = work.get();
-                    work.set((cold, changed + 1));
-                });
-                facts.remove(id);
-                changed_rows = true;
-                continue;
-            }
-            if payloads.get(id).is_none() {
-                return Err(failure("normalized native payload is outside custody"));
+        let mut facts = imbl::OrdMap::new();
+        let mut changed_rows = selected_ids.len() != self.0.len();
+        // Only demanded direct/dependency keys are observed. In particular, an
+        // equal-canonical historical dependency does not become a direct root.
+        for id in selected_ids {
+            budget.checkpoint()?;
+            work.row_lookups += 1;
+            let row = self.0.get(&id).ok_or_else(|| {
+                admission_failure(ArtifactInventoryFailure::NativeRootOutsideView { artifact: id })
+            })?;
+            if !has_payload(&id) {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootOutsideView { artifact: id },
+                ));
             }
             let mut selected = (**row).clone();
             if selected.mode == NativeTransportMode::Full
                 && !selected.contributions.iter().any(|contribution| {
-                    contribution.offer().original() == *id
+                    contribution.offer().original() == id
                         && contribution
                             .offer()
                             .qualified_private_availability(roles, artifacts)
                             .is_some()
                 })
             {
-                // Exact membership survives a namespace change, but the earlier
-                // complete qualification does not become a new Full grant.
                 selected.mode = NativeTransportMode::IssuedGroups;
             }
-            if !direct {
-                // Intersect with the existing row's permission. A backing Full
-                // offer cannot upgrade a dependency's narrower issued row.
+            if !direct.contains(&id) {
                 let mut contributions = Vec::new();
                 for contribution in row.contributions.iter() {
                     let mut roots = BTreeSet::new();
-                    for dependency in &dependencies[id] {
-                        for ordinal in dependency
-                            .ordinals(*id)
-                            .filter(|ordinal| row.permits(*ordinal))
-                        {
-                            roots.extend(
-                                dependency
-                                    .groups(NativeGroupKey {
-                                        artifact: *id,
-                                        original_ordinal: ordinal,
-                                    })
-                                    .filter(|group| {
-                                        contribution
-                                            .groups(NativeGroupKey {
-                                                artifact: *id,
-                                                original_ordinal: ordinal,
-                                            })
-                                            .any(|actual| actual == *group)
-                                    }),
-                            );
+                    for dependency in &dependencies[&id] {
+                        for group in dependency.original_groups(id) {
+                            budget.checkpoint()?;
+                            work.group_visits += 1;
+                            work.group_lookups += 1;
+                            if contribution.contains_group(group) && !roots.contains(&group) {
+                                budget.reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(1)?;
+                                roots.insert(group);
+                            }
                         }
-                    }
-                    if trace {
-                        if historical_observations < NATIVE_TRACE_ROWS {
-                            let observed =
-                                roots.iter().take(NATIVE_TRACE_ROOTS).collect::<Vec<_>>();
-                            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                                required_original = ?id, issuer_original = ?contribution.offer().original(),
-                                required_groups = ?observed, group_count = roots.len(),
-                                group_omissions = roots.len().saturating_sub(NATIVE_TRACE_ROOTS),
-                                complete = roots.len() <= NATIVE_TRACE_ROOTS,
-                                "native availability historical dependency permissions");
-                        }
-                        historical_observations += 1;
                     }
                     if !roots.is_empty() {
-                        contributions.push(contribution.for_groups(&roots)?);
+                        budget.reserve::<[Arc<crate::artifact_inventory::NativeOfferContribution>; 2]>(1)?;
+                        contributions.push(budget.restrict(contribution, &roots, work)?);
                     }
                 }
                 selected.mode = NativeTransportMode::IssuedGroups;
+                budget.reserve::<Arc<crate::artifact_inventory::NativeOfferContribution>>(
+                    contributions.len(),
+                )?;
                 selected.contributions = contributions.into();
             }
-            let owner = identity(&row.original_owner().unit, &row.original_owner().module);
             selected.classification = if roles
                 .snapshot_roles()
-                .get(&owner)
-                .is_some_and(|role| role.original() == Some(*id))
+                .get(&row.original.descriptor.owner)
+                .is_some_and(|role| role.original() == Some(id))
             {
                 NativeInputClassification::CompilerRole
             } else {
                 NativeInputClassification::PrivateInput
             };
-            if selected.mode != row.mode || selected.contributions != row.contributions {
-                let changed = Self::changed_row_facts(&selected)?;
-                if facts.get(id) != Some(&changed) {
-                    facts.insert(*id, changed);
-                }
-            }
+            budget.reserve::<(ArtifactId, NativeAvailabilitySnapshotFacts, [usize; 8])>(1)?;
+            budget.strings(
+                row.original_owner()
+                    .unit
+                    .len()
+                    .saturating_add(row.original_owner().module.len()),
+            )?;
+            let row_facts =
+                if selected.mode != row.mode || selected.contributions != row.contributions {
+                    budget.row_facts(&selected)?;
+                    work.changed_rows += 1;
+                    Self::changed_row_facts(&selected)?
+                } else {
+                    work.reused_facts += 1;
+                    self.1
+                        .get(&id)
+                        .ok_or_else(|| failure("normalized native row lacks its maintained facts"))?
+                        .clone()
+                };
+            facts.insert(id, row_facts);
+            budget.reserve::<(ArtifactId, Arc<NativeTransportAvailability>, [usize; 4])>(1)?;
             if selected == **row {
-                rows.insert(*id, Arc::clone(row));
+                work.reused_rows += 1;
+                rows.insert(id, Arc::clone(row));
             } else {
+                budget.reserve::<NativeTransportAvailability>(1)?;
                 changed_rows = true;
-                rows.insert(*id, Arc::new(selected));
+                rows.insert(id, Arc::new(selected));
             }
-        }
-        if trace {
-            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                observations = historical_observations,
-                emitted = historical_observations.min(NATIVE_TRACE_ROWS),
-                omitted = historical_observations.saturating_sub(NATIVE_TRACE_ROWS),
-                complete = historical_observations <= NATIVE_TRACE_ROWS,
-                "native availability historical dependency observation coverage");
         }
         Ok(if changed_rows {
             Self(Arc::new(rows), facts)
@@ -1900,6 +1967,188 @@ impl AdvertisedNativeOriginals {
                 && &row.original_owner().module_version == version)
                 .then_some(row.as_ref()),
         )
+    }
+}
+
+/// Exact request-owned narrowing; it cannot be paired with another cold
+/// issuer or used to manufacture missing private native availability.
+pub(crate) struct DemandNativeInputs {
+    cold: Arc<RequestCompilerInputs>,
+    demand: crate::artifact_inventory::DemandCompilerProjection,
+    native_selection: NativeInputSelection,
+    work: DemandNativeInputsWork,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DemandNativeInputsError {
+    #[error("demanded native inputs belong to another cold compiler owner")]
+    ForeignBasis,
+    #[error("demanded native owner {owner:?} lacks its closed compiler role")]
+    MissingRole { owner: ExactModuleIdentity },
+    #[error("demanded native owner {owner:?} lacks an issued body choice")]
+    UnadvertisedOwner { owner: ExactModuleIdentity },
+    #[error(transparent)]
+    Compiler(#[from] CompileError),
+}
+
+impl DemandNativeInputs {
+    pub(crate) fn cold(&self) -> &Arc<RequestCompilerInputs> {
+        &self.cold
+    }
+
+    pub(crate) fn demand(&self) -> &crate::artifact_inventory::DemandCompilerProjection {
+        &self.demand
+    }
+
+    pub(crate) fn native_availability(&self) -> &RequestNativeAvailability {
+        &self.native_selection.availability
+    }
+
+    pub(crate) fn advertised_native_originals(&self) -> &AdvertisedNativeOriginals {
+        &self.native_selection.advertised
+    }
+
+    pub(crate) fn work(&self) -> DemandNativeInputsWork {
+        self.work
+    }
+}
+
+impl RequestCompilerInputs {
+    /// Consume a closed role/interface demand from this exact cold owner. The
+    /// caller supplies additional native roots from its source/instance proof;
+    /// custody alone cannot supply a new direct body choice.
+    pub(crate) fn demanded_native_inputs(
+        self: &Arc<Self>,
+        demand: crate::artifact_inventory::DemandCompilerProjection,
+        native_roots: &BTreeSet<ExactModuleIdentity>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<DemandNativeInputs, DemandNativeInputsError> {
+        crate::host_work::checkpoint()?;
+        if !Arc::ptr_eq(&self.source_support, demand.source_support())
+            || !Arc::ptr_eq(&self.metadata.retained, &demand.metadata().retained)
+        {
+            return Err(DemandNativeInputsError::ForeignBasis);
+        }
+        let budget = NativeDemandBudget(Some(operation));
+        let mut work = DemandNativeInputsWork::default();
+        for owner in native_roots {
+            budget.checkpoint()?;
+            work.owner_lookups += 1;
+            if !demand.owners().contains(owner) {
+                budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
+                return Err(DemandNativeInputsError::MissingRole {
+                    owner: owner.clone(),
+                });
+            }
+        }
+        let mut direct = BTreeSet::new();
+        let mut advertised = BTreeMap::new();
+        for owner in demand.owners() {
+            budget.checkpoint()?;
+            work.owner_lookups += 2;
+            let Some(role) = demand.projection().snapshot_roles().get(owner) else {
+                budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
+                return Err(DemandNativeInputsError::MissingRole {
+                    owner: owner.clone(),
+                });
+            };
+            let chosen = self.native_selection.advertised.0.get(owner).copied();
+            if role.original().is_some() && chosen.is_some_and(|id| Some(id) != role.original()) {
+                budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
+                return Err(
+                    admission_failure(ArtifactInventoryFailure::NativeOwnerAmbiguity {
+                        owner: owner.clone(),
+                    })
+                    .into(),
+                );
+            }
+            let direct_choice = role
+                .original()
+                .or_else(|| native_roots.contains(owner).then_some(chosen).flatten());
+            let Some(id) = direct_choice else {
+                if native_roots.contains(owner) {
+                    budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
+                    return Err(DemandNativeInputsError::UnadvertisedOwner {
+                        owner: owner.clone(),
+                    });
+                }
+                continue;
+            };
+            work.row_lookups += 1;
+            let row = self
+                .native_selection
+                .availability
+                .0
+                .get(&id)
+                .ok_or_else(|| {
+                    admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
+                        artifact: id,
+                    })
+                })?;
+            let payload = self.metadata.retained.artifacts.get(&id).ok_or_else(|| {
+                admission_failure(ArtifactInventoryFailure::NativeRootOutsideView { artifact: id })
+            })?;
+            let classification = if role.original().is_some() {
+                NativeInputClassification::CompilerRole
+            } else {
+                NativeInputClassification::PrivateInput
+            };
+            if !Arc::ptr_eq(payload, &row.original)
+                || &row.original.descriptor.owner != owner
+                || row.canonical != role.interface()
+                || row.classification != classification
+            {
+                return Err(
+                    admission_failure(ArtifactInventoryFailure::MetadataConflict { artifact: id })
+                        .into(),
+                );
+            }
+            budget.reserve::<(ArtifactId, [usize; 4])>(1)?;
+            direct.insert(id);
+            if chosen == Some(id) {
+                budget.reserve::<(ExactModuleIdentity, ArtifactId, [usize; 4])>(1)?;
+                budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
+                advertised.insert(owner.clone(), id);
+                work.advertised += 1;
+            }
+        }
+        let availability = self.native_selection.availability.for_compiler_roots(
+            demand.projection(),
+            self.artifacts(),
+            &direct,
+            |id| {
+                self.metadata
+                    .retained
+                    .artifacts
+                    .get(id)
+                    .is_some_and(|payload| {
+                        self.native_selection
+                            .availability
+                            .0
+                            .get(id)
+                            .is_some_and(|row| Arc::ptr_eq(payload, &row.original))
+                    })
+            },
+            budget,
+            &mut work,
+        )?;
+        for row in availability.rows() {
+            budget.checkpoint()?;
+            crate::artifact_inventory::validate_consumed_native_namespace(
+                &row.original,
+                &demand.metadata().entries,
+            )?;
+        }
+        availability.validate_role_coverage(demand.projection())?;
+        Ok(DemandNativeInputs {
+            cold: Arc::clone(self),
+            demand,
+            native_selection: NativeInputSelection {
+                availability,
+                advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
+            },
+            work,
+        })
     }
 }
 
@@ -17542,6 +17791,511 @@ mod tests {
             std::fs::write(&path, saved).unwrap();
             context.validate_artifacts(&artifacts).unwrap();
         }
+    }
+
+    // This fixture enters the same authenticated view/source/request issuers as
+    // ordinary inherited inputs. No test manufactures normalized permission rows.
+    fn demanded_native_fixture(
+        unrelated: usize,
+        demand: crate::artifact_inventory::NativeArtifactDemand,
+        partial: bool,
+    ) -> Arc<RequestCompilerInputs> {
+        use crate::certified_products::tests::{
+            original_groups_fixture_with_interface, recovered_witness_fixtures,
+        };
+        let producer = [2; 32];
+        let product = |module: &str, groups| {
+            crate::certified_products::fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    module,
+                    groups,
+                    1,
+                    &BTreeMap::new(),
+                    module.as_bytes().to_vec(),
+                ),
+                producer,
+            )
+        };
+        let child = product("DemandChild", vec![(9, vec![]), (9001, vec![])]);
+        let finalized = crate::certified_products::finalize_original_for_inventory(
+            child.clone(),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let definitions =
+            crate::certified_products::original_native_group_definitions(&finalized, 9).unwrap();
+        let binder = match &definitions.bindings()[0] {
+            tidepool_repr::execution_schema::Group::NonRecursive(binding) => {
+                binding.identity.clone()
+            }
+            tidepool_repr::execution_schema::Group::Recursive(bindings) => {
+                bindings[0].identity.clone()
+            }
+        };
+        let parent = product(
+            "DemandParent",
+            vec![(
+                7,
+                vec![crate::certified_products::PendingImportOwner::Source {
+                    owner: finalized.owner().clone(),
+                    original_ordinal: 9,
+                    binder,
+                }],
+            )],
+        );
+        let mut products = vec![child, parent];
+        products.extend(
+            (0..unrelated)
+                .map(|index| product(&format!("UnrelatedNative{index}"), vec![(1, vec![])])),
+        );
+        let entries = recovered_witness_fixtures(&products)
+            .into_iter()
+            .map(|row| Arc::new(ArtifactEntry::original(producer, row.product).unwrap()))
+            .collect::<Vec<_>>();
+        let inventory = ArtifactInventory::default();
+        let artifacts = inventory
+            .admit_shared_with_demand(&inventory.empty_view(), entries.clone(), demand)
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let support = crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
+            projection.clone(),
+            artifacts,
+        )
+        .unwrap();
+        let support = if partial {
+            let offers = support
+                .native_offers()
+                .iter()
+                .map(|offer| {
+                    offer
+                        .within_projection(&projection, &inventory.empty_view())
+                        .unwrap()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            recover_fixture_compiler_support(projection, support.artifacts().clone(), offers)
+                .unwrap()
+        } else {
+            support
+        };
+        let context = ExactDeclarationContext::from_authenticated_execution_support(
+            producer,
+            support,
+            vec![
+                ExactLexicalNode {
+                    owner: identity("fixture", "DemandParent"),
+                    imports: vec![identity("fixture", "DemandChild")],
+                },
+                ExactLexicalNode {
+                    owner: identity("fixture", "DemandChild"),
+                    imports: vec![],
+                },
+            ],
+            identity("fixture", "DemandParent"),
+            &[],
+        )
+        .unwrap();
+        Arc::new(
+            ProtectedScaffoldRequirements::default()
+                .compiler_inputs(&context, None)
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn demanded_native_inputs_preserve_issuer_with_constant_unrelated_work() {
+        use crate::artifact_inventory::{NativeArtifactDemand, NativeOfferContribution};
+        use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+        let roots = BTreeSet::from([identity("fixture", "DemandParent")]);
+        for (mode, partial) in [
+            (NativeArtifactDemand::AllGroups, false),
+            (NativeArtifactDemand::ScopeInterfaces, false),
+            (NativeArtifactDemand::AllGroups, true),
+        ] {
+            let mut baseline = None;
+            for unrelated in [0, 32, 128] {
+                let cold = demanded_native_fixture(unrelated, mode, partial);
+                let operation = InventoryOperation::new(Default::default());
+                let demand = cold
+                    .source_support
+                    .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+                    .unwrap();
+                NativeOfferContribution::take_group_binding_scope_visits();
+                let selected = cold
+                    .demanded_native_inputs(demand, &roots, &operation)
+                    .unwrap();
+                assert_eq!(
+                    NativeOfferContribution::take_group_binding_scope_visits(),
+                    0,
+                    "hot keyed groups must not enumerate retained scopes"
+                );
+                assert!(Arc::ptr_eq(selected.cold(), &cold));
+                assert!(Arc::ptr_eq(
+                    selected.demand().source_support(),
+                    &cold.source_support
+                ));
+                assert!(Arc::ptr_eq(
+                    &selected.demand().metadata().retained,
+                    &cold.metadata.retained
+                ));
+                assert!(selected.native_availability().rows().all(|row| !row
+                    .original
+                    .descriptor
+                    .owner
+                    .module
+                    .starts_with("Unrelated")));
+                assert_eq!(
+                    selected.native_availability().persistent_facts().len(),
+                    selected.native_availability().0.len()
+                );
+                let parent = cold.projection().snapshot_roles()
+                    [&identity("fixture", "DemandParent")]
+                    .original()
+                    .unwrap();
+                assert!(
+                    Arc::ptr_eq(
+                        &selected.native_availability().0[&parent],
+                        &cold.native_selection.availability.0[&parent]
+                    ),
+                    "unchanged direct row keeps its acquired owner/mode"
+                );
+                assert_eq!(
+                    selected.advertised_native_originals().0[&identity("fixture", "DemandParent")],
+                    parent
+                );
+                let observed = (selected.work(), operation.work_usage().unwrap());
+                if let Some(expected) = baseline {
+                    assert_eq!(observed, expected);
+                } else {
+                    baseline = Some(observed);
+                }
+
+                let empty_operation = InventoryOperation::new(InventoryDecodeLimits {
+                    max_work: 0,
+                    ..Default::default()
+                });
+                let demand = cold
+                    .source_support
+                    .demanded_compiler_projection(
+                        &cold.metadata.retained,
+                        &BTreeSet::new(),
+                        &empty_operation,
+                    )
+                    .unwrap();
+                let empty = cold
+                    .demanded_native_inputs(demand, &BTreeSet::new(), &empty_operation)
+                    .unwrap();
+                assert_eq!(empty.work(), DemandNativeInputsWork::default());
+                assert!(empty.native_availability().0.is_empty());
+                assert!(empty.native_availability().persistent_facts().is_empty());
+                assert_eq!(empty_operation.work_usage().unwrap(), (0, 0));
+
+                let demand = cold
+                    .source_support
+                    .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+                    .unwrap();
+                let exhausted = InventoryOperation::new(InventoryDecodeLimits {
+                    max_work: 0,
+                    ..Default::default()
+                });
+                assert!(matches!(
+                    cold.demanded_native_inputs(demand, &roots, &exhausted),
+                    Err(DemandNativeInputsError::Compiler(
+                        CompileError::CompilerEvidence(_)
+                    ))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn demanded_native_inputs_keep_historical_dependencies_intersected() {
+        use crate::artifact_inventory::{NativeArtifactDemand, NativeOfferContribution};
+        use tidepool_repr::execution_schema::InventoryOperation;
+        let cold = demanded_native_fixture(0, NativeArtifactDemand::AllGroups, false);
+        let parent_owner = identity("fixture", "DemandParent");
+        let child_owner = identity("fixture", "DemandChild");
+        let parent = cold.projection().snapshot_roles()[&parent_owner]
+            .original()
+            .unwrap();
+        let child = cold.projection().snapshot_roles()[&child_owner]
+            .original()
+            .unwrap();
+        let roles = cold
+            .projection()
+            .for_source_owners(&BTreeSet::from([parent_owner.clone()]));
+        let previous = cold
+            .native_selection
+            .availability
+            .for_compiler_roles(&roles, cold.artifacts())
+            .unwrap();
+        assert!(
+            previous.0[&child].permits(9001),
+            "positive control: interface-only child becomes a direct root under legacy predicate"
+        );
+        let operation = InventoryOperation::new(Default::default());
+        let mut work = DemandNativeInputsWork::default();
+        NativeOfferContribution::take_group_binding_scope_visits();
+        let selected = cold
+            .native_selection
+            .availability
+            .for_compiler_roots(
+                &roles,
+                cold.artifacts(),
+                &BTreeSet::from([parent]),
+                |id| cold.metadata.retained.artifacts.contains_key(id),
+                NativeDemandBudget(Some(&operation)),
+                &mut work,
+            )
+            .unwrap();
+        assert_eq!(
+            NativeOfferContribution::take_group_binding_scope_visits(),
+            0
+        );
+        assert!(selected.0[&child].permits(9));
+        assert!(!selected.0[&child].permits(9001));
+        assert_eq!(selected.0[&child].mode, NativeTransportMode::IssuedGroups);
+        assert_eq!(
+            selected.0[&child].classification,
+            NativeInputClassification::PrivateInput
+        );
+        assert!(Arc::ptr_eq(
+            &selected.0[&parent],
+            &cold.native_selection.availability.0[&parent]
+        ));
+        assert_eq!(selected.persistent_facts().len(), 2);
+        assert!(work.closure_edges > 0);
+        assert!(work.changed_rows > 0);
+
+        // The old exact-key group lookup really enumerates its proof scopes;
+        // this positive control connects zero above to the costly old issuer.
+        NativeOfferContribution::take_group_binding_scope_visits();
+        let contribution = &cold.native_selection.availability.0[&child].contributions[0];
+        let old = contribution
+            .offer()
+            .group_bindings(NativeGroupKey {
+                artifact: child,
+                original_ordinal: 9,
+            })
+            .filter(|group| {
+                contribution
+                    .original_groups(child)
+                    .any(|actual| actual == *group)
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(NativeOfferContribution::take_group_binding_scope_visits() > 0);
+        let keyed = contribution
+            .original_groups(child)
+            .filter(|group| group.original_ordinal == 9)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(old, keyed);
+        assert_eq!(
+            NativeOfferContribution::take_group_binding_scope_visits(),
+            0
+        );
+
+        let roots = BTreeSet::from([parent_owner]);
+        let demand = cold
+            .source_support
+            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .unwrap();
+        let other = demanded_native_fixture(0, NativeArtifactDemand::AllGroups, false);
+        assert!(matches!(
+            other.demanded_native_inputs(demand, &roots, &operation),
+            Err(DemandNativeInputsError::ForeignBasis)
+        ));
+        let demand = cold
+            .source_support
+            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .unwrap();
+        assert!(matches!(
+            cold.demanded_native_inputs(
+                demand,
+                &BTreeSet::from([identity("fixture", "Missing")]),
+                &operation
+            ),
+            Err(DemandNativeInputsError::MissingRole { .. })
+        ));
+    }
+
+    #[test]
+    fn demanded_native_inputs_require_explicit_interface_only_body_roots() {
+        use crate::artifact_inventory::NativeArtifactDemand;
+        use tidepool_repr::execution_schema::InventoryOperation;
+        let parent_owner = identity("fixture", "DemandParent");
+        let child_owner = identity("fixture", "DemandChild");
+        let role_roots = BTreeSet::from([parent_owner.clone(), child_owner.clone()]);
+        for partial in [false, true] {
+            let original = demanded_native_fixture(0, NativeArtifactDemand::AllGroups, partial);
+            let support = original
+                .source_support
+                .for_source_owners(&BTreeSet::from([parent_owner.clone()]))
+                .unwrap();
+            let context = ExactDeclarationContext::from_authenticated_execution_support(
+                [2; 32],
+                support,
+                vec![
+                    ExactLexicalNode {
+                        owner: parent_owner.clone(),
+                        imports: vec![child_owner.clone()],
+                    },
+                    ExactLexicalNode {
+                        owner: child_owner.clone(),
+                        imports: vec![],
+                    },
+                ],
+                parent_owner.clone(),
+                &[],
+            )
+            .unwrap();
+            let cold = Arc::new(
+                ProtectedScaffoldRequirements::default()
+                    .compiler_inputs(&context, None)
+                    .unwrap(),
+            );
+            assert!(cold.projection().snapshot_roles()[&child_owner]
+                .original()
+                .is_none());
+            let child = cold.native_selection.advertised.0[&child_owner];
+            let row = &cold.native_selection.availability.0[&child];
+            assert_eq!(row.classification, NativeInputClassification::PrivateInput);
+            assert_eq!(
+                row.mode,
+                if partial {
+                    NativeTransportMode::IssuedGroups
+                } else {
+                    NativeTransportMode::Full
+                }
+            );
+            assert!(
+                row.permits(9) && row.permits(9001),
+                "cold issuer really advertises both groups"
+            );
+            let operation = InventoryOperation::new(Default::default());
+            let demand = cold
+                .source_support
+                .demanded_compiler_projection(&cold.metadata.retained, &role_roots, &operation)
+                .unwrap();
+            let dependency_only = cold
+                .demanded_native_inputs(demand, &BTreeSet::from([parent_owner.clone()]), &operation)
+                .unwrap();
+            assert!(dependency_only.native_availability().0[&child].permits(9));
+            assert!(!dependency_only.native_availability().0[&child].permits(9001), "interface-only dependency cannot become a direct body from cold advertisement alone");
+            assert!(!dependency_only
+                .advertised_native_originals()
+                .0
+                .contains_key(&child_owner));
+            let demand = cold
+                .source_support
+                .demanded_compiler_projection(&cold.metadata.retained, &role_roots, &operation)
+                .unwrap();
+            let explicit = cold
+                .demanded_native_inputs(demand, &role_roots, &operation)
+                .unwrap();
+            assert!(explicit.native_availability().0[&child].permits(9001));
+            assert_eq!(
+                explicit.advertised_native_originals().0[&child_owner],
+                child
+            );
+            assert!(
+                Arc::ptr_eq(&explicit.native_availability().0[&child], row),
+                "explicit body root retains its exact Full/partial cold row"
+            );
+        }
+    }
+
+    #[test]
+    fn demanded_native_graph_accounts_duplicate_edges_before_enqueue() {
+        use crate::artifact_inventory::NativeArtifactDemand;
+        use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+        let cold = demanded_native_fixture(0, NativeArtifactDemand::AllGroups, false);
+        let child = cold.projection().snapshot_roles()[&identity("fixture", "DemandChild")]
+            .original()
+            .unwrap();
+        let contribution = cold.native_selection.availability.0[&child]
+            .contributions
+            .iter()
+            .find(|contribution| {
+                contribution.offer().original() == child && contribution.offer().is_full()
+            })
+            .unwrap();
+        let roots = contribution.original_groups(child).collect::<BTreeSet<_>>();
+        assert_eq!(roots.len(), 2);
+        let operation = InventoryOperation::new(Default::default());
+        let (same, work) = contribution
+            .for_groups_with_operation(&roots, &operation)
+            .unwrap();
+        assert!(Arc::ptr_eq(&same, contribution));
+        assert_eq!(work.queued, roots.len() + work.edges);
+        assert!(
+            work.queued > work.nodes,
+            "two groups queue their shared carrier through distinct edges"
+        );
+        let charged = operation.work_usage().unwrap().0;
+        let insufficient = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: charged - 1,
+            ..Default::default()
+        });
+        assert!(matches!(
+            contribution.for_groups_with_operation(&roots, &insufficient),
+            Err(CompileError::CompilerEvidence(_))
+        ));
+        assert_eq!(
+            contribution.original_groups(child).collect::<BTreeSet<_>>(),
+            roots,
+            "failed local traversal cannot mutate the issued owner"
+        );
+    }
+
+    #[test]
+    fn demanded_native_inputs_refuse_missing_or_conflicting_issued_witness() {
+        use crate::artifact_inventory::NativeArtifactDemand;
+        use tidepool_repr::execution_schema::InventoryOperation;
+        let roots = BTreeSet::from([identity("fixture", "DemandParent")]);
+        for remove in [false, true] {
+            let mut cold = demanded_native_fixture(0, NativeArtifactDemand::AllGroups, false);
+            let operation = InventoryOperation::new(Default::default());
+            let demand = cold
+                .source_support
+                .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+                .unwrap();
+            let id = cold.projection().snapshot_roles()[roots.first().unwrap()]
+                .original()
+                .unwrap();
+            // Corrupt a genuinely issued request for refusal testing only.
+            // This does not create successful native permission in a fixture.
+            let inputs = Arc::get_mut(&mut cold).unwrap();
+            let rows = Arc::make_mut(&mut inputs.native_selection.availability.0);
+            if remove {
+                rows.remove(&id);
+            } else {
+                Arc::make_mut(rows.get_mut(&id).unwrap()).canonical = id;
+            }
+            let error = cold
+                .demanded_native_inputs(demand, &roots, &operation)
+                .err()
+                .expect("missing/conflicting issued row must refuse");
+            assert!(matches!(
+                error,
+                DemandNativeInputsError::Compiler(CompileError::ArtifactInventory(_))
+            ));
+        }
+        let (context, _) = metadata_fixture();
+        let cold = Arc::new(
+            ProtectedScaffoldRequirements::default()
+                .compiler_inputs(&context, None)
+                .unwrap(),
+        );
+        let roots = BTreeSet::from([identity("fixture", "Joined")]);
+        let operation = InventoryOperation::new(Default::default());
+        let demand = cold
+            .source_support
+            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .unwrap();
+        assert!(matches!(
+            cold.demanded_native_inputs(demand, &roots, &operation),
+            Err(DemandNativeInputsError::UnadvertisedOwner { .. })
+        ));
     }
 
     struct ReferenceNativeCompilerTransport {
