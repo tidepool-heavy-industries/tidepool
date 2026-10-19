@@ -4,6 +4,7 @@ import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredIn
 import Test.Tasty (withResource)
 import SourceBootCases
 import CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease)
+import CompilerRequestTest (checkedPublicModuleHistories)
 import BoundedReadTest (boundedReadChecks)
 import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws)
 import RequestInputsTest (compilerServiceBootBoundaries)
@@ -21,6 +22,7 @@ tests :: TestTree
 tests = testGroup "source-boot"
   [ testCase "completed compiler request histories" completedRequestHistories
   , testCase "compiler service boot admission boundaries" compilerServiceBootBoundaries
+  , testCase "public module checking guards transitive source execution" checkedPublicModuleHistories
   , testCase "completed compiler cancellation preserves facts and fences effects" completedRequestCancellation
   , testCase "closed executor refuses completed cached preparation" completedRequestRelease
   , testCase "owned arena range reads" ownedArenaRangeReads

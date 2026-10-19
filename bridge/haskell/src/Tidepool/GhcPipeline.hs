@@ -5,6 +5,8 @@
 module Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedModuleCompletion, PreparedModuleCompletionInputs(..), PreparedModuleObserver(..)
   , PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules
+  , CheckedPublicModuleResult, checkedPublicModuleIdentity, checkedPublicModuleEvidence
+  , WorldModulePolicyFailure(..), WorldModulePolicy(..)
   , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprReuseContext
   , AdmittedSourceCandidate, pprAcceptedCandidates, preparedCandidateOriginal, preparedCandidateProof, revalidatePreparedCandidateInputs, PreparedSegmentProductsResult(..), TypedSegmentPreparation, CheckedEnvironmentResult(..)
   , PreparedDependencies, preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
@@ -58,7 +60,7 @@ import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, run
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks, hsc_interp, hsc_type_env_vars))
 import GHC.Driver.Env.KnotVars (emptyKnotVars)
 import GHC.Driver.Monad (reflectGhc, reifyGhc, Session(..))
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, emptyHomePackageTable, justBytecode, addToHpt, lookupHpt, eltsHpt, filterHpt)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomePackageTable, HomeModLinkable(..), emptyHomeModInfoLinkable, emptyHomePackageTable, justBytecode, addToHpt, lookupHpt, eltsHpt, filterHpt)
 import GHC.Unit.Module.ModDetails (ModDetails, md_types)
 import GHC.Unit.Module.Status (HscBackendAction(..))
 import GHC.Types.ForeignStubs (ForeignStubs(NoStubs))
@@ -113,6 +115,7 @@ import GHC.Driver.Session
       , Opt_WarnIncompleteUniPatterns
       )
   , wopt_set
+  , packageFlagsChanged
   , PackageFlag(..), PackageArg(..), ModRenaming(..)
   , PackageDBFlag(..), PkgDbRef(..), ParMakeCount(..) )
 import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
@@ -307,6 +310,7 @@ data PipelineSelection result where
   PreparedSegmentProducts :: TypedSegmentPlan -> Maybe FilePath -> PipelineSelection PreparedSegmentProductsResult
   WithTypedSegmentPreparation :: TypedSegmentPreparation -> PipelineSelection result -> PipelineSelection result
   CheckedEnvironment :: PipelineSelection CheckedEnvironmentResult
+  CheckedPublicModule :: PipelineSelection CheckedPublicModuleResult
   CheckedEnvironmentProducts :: FilePath -> PipelineSelection CheckedEnvironmentResult
   WithCompilerExecution :: CompilerExecutionGrant -> CompilerExecutor -> PipelineSelection result -> PipelineSelection result
   WithPreparedModuleCompletion :: PreparedModuleCompletion -> PipelineSelection result -> PipelineSelection result
@@ -648,12 +652,33 @@ data CheckedEnvironmentResult = CheckedEnvironmentResult
   , crWarnings :: [Diag]
   }
 
+-- Issued only by successful checking of the actual demanded module. No mutable
+-- target typechecker environment or executable target survives this projection.
+data CheckedPublicModuleResult = CheckedPublicModuleResult
+  HomeModInfo HomePackageTable DependencyEvidence [Diag]
+
+checkedPublicModuleIdentity :: CheckedPublicModuleResult -> Module
+checkedPublicModuleIdentity (CheckedPublicModuleResult home _ _ _) = mi_module (hm_iface home)
+
+checkedPublicModuleEvidence :: CheckedPublicModuleResult -> DependencyEvidence
+checkedPublicModuleEvidence (CheckedPublicModuleResult _ _ evidence _) = evidence
+
+data WorldModulePolicy = WorldLiterateSource | WorldPreprocessing
+  | WorldUntrackedOptions | WorldSearchInputsChanged | WorldUncapturedDependency
+  deriving (Eq, Show)
+
+data WorldModulePolicyFailure = WorldModulePolicyFailure FilePath WorldModulePolicy
+  deriving (Show)
+
+instance Exception WorldModulePolicyFailure
+
 selectionKind :: PipelineSelection result -> PreparationKind
 selectionKind PreparedStg = PrepareStg
 selectionKind (PreparedProducts _) = PrepareStg
 selectionKind (PreparedSegmentProducts _ _) = PrepareStg
 selectionKind (WithTypedSegmentPreparation _ inner) = selectionKind inner
 selectionKind CheckedEnvironment = CheckOnly
+selectionKind CheckedPublicModule = CheckOnly
 selectionKind (CheckedEnvironmentProducts _) = CheckOnly
 selectionKind (WithCompilerExecution _ _ selection) = selectionKind selection
 selectionKind (WithPreparedModuleCompletion _ selection) = selectionKind selection
@@ -665,6 +690,13 @@ capturesProductInterfaces (WithTypedSegmentPreparation _ inner) = capturesProduc
 capturesProductInterfaces (WithCompilerExecution _ _ selection) = capturesProductInterfaces selection
 capturesProductInterfaces (WithPreparedModuleCompletion _ selection) = capturesProductInterfaces selection
 capturesProductInterfaces _ = False
+
+checksPublicModule :: PipelineSelection result -> Bool
+checksPublicModule CheckedPublicModule = True
+checksPublicModule (WithCompilerExecution _ _ inner) = checksPublicModule inner
+checksPublicModule (WithPreparedModuleCompletion _ inner) = checksPublicModule inner
+checksPublicModule (WithTypedSegmentPreparation _ inner) = checksPublicModule inner
+checksPublicModule _ = False
 
 data PipelineResult = PipelineResult
   { ownedPrBinds  :: [CoreBind]
@@ -2233,7 +2265,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- before any shared package interface is demanded. Package unfoldings and
     -- home type identities remain available without an EPS flush.
     previous <- getSession
-    modGraphDownsweep <- depanalSourceModules (pvDownsweepExcludes variant)
+    modGraphDownsweep <- withWorldModulePreprocessing selection path $
+      depanalSourceModules (pvDownsweepExcludes variant)
+    when (checksPublicModule selection) $
+      forM_ [summary | ModuleNode _ summary <- mgModSummaries' modGraphDownsweep] $ \summary ->
+        liftIO (requireWorldModuleFlags (ms_hspp_file summary) (ms_hspp_opts summary))
     forM_ (pvExactScope variant) $ \scope -> do
       let exactNames = Set.fromList [mkModuleName (exactModule iface)
             | (iface, _, _) <- scopeInterfaces scope]
@@ -3947,8 +3983,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           forM_ (Set.toAscList (Map.keysSet finalizedModules `Set.difference` Map.keysSet packageRoots)) $
             liftIO . throwIO . MissingFinalizedFacts
           pure (pipelineResult, preparedModules, dependencies, productInterfaces, finalizedModules, packageRoots)
-    let compileChecked :: Ghc CheckedEnvironmentResult
-        compileChecked = do
+    let compileChecked :: Bool -> Ghc (CheckedEnvironmentResult, [(ModuleName, ModuleFacts)])
+        compileChecked retainPublicTarget = do
           -- Restore the full graph after any target deferral so checking sees
           -- every source instance, including dependencies loaded for TH.
           environment <- getSession
@@ -4024,8 +4060,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                           (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
                             mkIfaceTc env Sf_None details canonical Nothing tcg
                         liftIO (reuseEvent Interface ReuseWork Absent summary)
-                        let linkable = maybe emptyHomeModInfoLinkable hm_linkable
-                              (lookupHpt (hsc_HPT env) (ms_mod_name summary))
+                        let linkable
+                              | retainPublicTarget && isTarget = emptyHomeModInfoLinkable
+                              | otherwise = maybe emptyHomeModInfoLinkable hm_linkable
+                                  (lookupHpt (hsc_HPT env) (ms_mod_name summary))
                             hmi = HomeModInfo (set_mi_extra_decls Nothing iface) details linkable
                         setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) ambient)
                         when timing $ liftIO $ hPutStrLn stderr $
@@ -4037,15 +4075,17 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     , moduleFactPackageImports = emptyPackageImports
                     , moduleFactHasDependentFiles = not (null dependentFiles)
                     , moduleFactQuasiQuoteUse = quotes }) :))
-                  case homeInterfaceUse summary laterConsumers of
-                    HomeInterfaceLeaf -> when timing $ liftIO $ hPutStrLn stderr $
-                      "tidepool-checked-interface-elided module="
-                        ++ moduleNameString (ms_mod_name summary)
-                        ++ " reason=no-later-home-importer"
-                    HomeInterfaceNeededBy consumer ->
-                      retainInterface (" consumer=" ++ moduleNameString consumer)
-                    HomeInterfaceNeededForSessionInjection ->
-                      retainInterface " reason=session-value-interface"
+                  if retainPublicTarget && isTarget
+                    then retainInterface " reason=public-module-query"
+                    else case homeInterfaceUse summary laterConsumers of
+                      HomeInterfaceLeaf -> when timing $ liftIO $ hPutStrLn stderr $
+                        "tidepool-checked-interface-elided module="
+                          ++ moduleNameString (ms_mod_name summary)
+                          ++ " reason=no-later-home-importer"
+                      HomeInterfaceNeededBy consumer ->
+                        retainInterface (" consumer=" ++ moduleNameString consumer)
+                      HomeInterfaceNeededForSessionInjection ->
+                        retainInterface " reason=session-value-interface"
                   pure (if isTarget then Just (tcg, inspectionProbes) else Nothing)
           warnings <- liftIO (nub . reverse <$> readIORef warnRef)
           cpBeforeMerge plan CheckedReceiptBoundary
@@ -4060,15 +4100,17 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 facts <- liftIO (readIORef checkedFactsRef)
                 evidence <- liftIO (dependencyEvidenceFor env captured freshGraph facts)
                 liftIO (writeCheckedExactCompilation env compilation evidence)
-              pure CheckedEnvironmentResult
-                { crHscEnv = cpFinalEnv plan env
-                , crTargetTcGblEnv = tcg
-                , crTargetRdrEnv = tcg_rdr_env tcg
-                , crInspectionProbes = probes
-                , crResultType = foldr (<|>) Nothing [capturedBindingType name tcg | name <- cpResultBinders plan]
-                , crCheckedBinderPins = capturedCellBinderPins (cpFinalEnv plan env) tcg
-                , crWarnings = map snd warnings
-                }
+              let result = CheckedEnvironmentResult
+                    { crHscEnv = cpFinalEnv plan env
+                    , crTargetTcGblEnv = tcg
+                    , crTargetRdrEnv = tcg_rdr_env tcg
+                    , crInspectionProbes = probes
+                    , crResultType = foldr (<|>) Nothing [capturedBindingType name tcg | name <- cpResultBinders plan]
+                    , crCheckedBinderPins = capturedCellBinderPins (cpFinalEnv plan env) tcg
+                    , crWarnings = map snd warnings
+                    }
+              facts <- liftIO (readIORef checkedFactsRef)
+              pure (result,facts)
             _ -> liftIO $ ioError $ userError "metadata target missing from checked module graph"
     let finish :: PipelineSelection output -> Ghc output
         finish selected = case selected of
@@ -4111,8 +4153,20 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             segment <- liftIO (readIORef targetTypedSegmentRef) >>= maybe
               (liftIO (throwIO MissingCaptureRoot)) pure
             pure (PreparedSegmentProductsResult products segment)
-          CheckedEnvironment -> compileChecked
-          CheckedEnvironmentProducts _ -> compileChecked
+          CheckedEnvironment -> fst <$> compileChecked False
+          CheckedEnvironmentProducts _ -> fst <$> compileChecked False
+          CheckedPublicModule -> do
+            (checked,facts) <- compileChecked True
+            let environment = crHscEnv checked
+                actualTarget = tcg_mod (crTargetTcGblEnv checked)
+            home <- case lookupHpt (hsc_HPT environment) targetName of
+              Just selected | mi_module (hm_iface selected) == actualTarget -> pure selected
+              _ -> liftIO (fail "checked public module target interface is absent")
+            captured <- liftIO (captureDependencySources modGraphRaw)
+            evidence <- liftIO (dependencyEvidenceFor environment captured freshGraph facts)
+            unless (dependencyCacheSafe evidence && dependencySelectionComplete evidence)
+              (liftIO (throwIO (WorldModulePolicyFailure path WorldUncapturedDependency)))
+            pure (CheckedPublicModuleResult home (hsc_HPT environment) evidence (crWarnings checked))
           WithCompilerExecution _ _ inner -> finish inner
           WithPreparedModuleCompletion _ inner -> finish inner
           WithTypedSegmentPreparation _ inner -> finish inner
@@ -5612,6 +5666,55 @@ withCycleHooks action = reifyGhc $ \session -> bracket
   (\(hooks, logger) -> reflectGhc
     (getSession >>= \env -> setSession env {hsc_hooks=hooks, hsc_logger=logger}) session)
   (const (reflectGhc action session))
+
+-- GHC's summary walk reaches this phase hook for every actually demanded
+-- source. FileArgs parses the module's real LANGUAGE/OPTIONS before either
+-- preprocessing phase can run; a frontend-only check would be too late.
+withWorldModulePreprocessing :: PipelineSelection result -> FilePath -> Ghc a -> Ghc a
+withWorldModulePreprocessing selection path action
+  | not (checksPublicModule selection) = action
+  | otherwise = reifyGhc $ \session -> bracket
+      (reflectGhc install session)
+      (\original -> reflectGhc (do
+        current <- getSession
+        setSession current {hsc_hooks=(hsc_hooks current) {runPhaseHook=original}}) session)
+      (const (reflectGhc action session))
+  where
+    install = do
+      env <- getSession
+      liftIO (requireWorldModuleFlags path (hsc_dflags env))
+      let original = runPhaseHook (hsc_hooks env)
+          delegate :: forall value. TPhase value -> IO value
+          delegate phase = case original of
+            Nothing -> runPhase phase
+            Just (PhaseHook operation) -> operation phase
+          guarded :: forall value. TPhase value -> IO value
+          guarded phase = case phase of
+            T_Unlit _ _ source -> throwIO (WorldModulePolicyFailure source WorldLiterateSource)
+            T_Cpp _ _ source -> throwIO (WorldModulePolicyFailure source WorldPreprocessing)
+            T_HsPp _ _ source _ -> throwIO (WorldModulePolicyFailure source WorldPreprocessing)
+            T_FileArgs sourceEnv source -> do
+              requireWorldModuleFlags source (hsc_dflags sourceEnv)
+              result@(effective,_,_) <- delegate phase
+              requireWorldModuleFlags source effective
+              let initial = hsc_dflags sourceEnv
+              unless (importPaths effective == importPaths initial
+                  && workingDirectory effective == workingDirectory initial
+                  && not (packageFlagsChanged initial effective))
+                (throwIO (WorldModulePolicyFailure source WorldSearchInputsChanged))
+              pure result
+            _ -> delegate phase
+      -- Existing load admission already refuses arbitrary custom phase hooks.
+      -- Refuse them before preprocessing too, rather than execute an opaque
+      -- callback and only later discover that its effects were unsupported.
+      when (isJust original) (liftIO (throwIO CustomLoadPhaseHook))
+      setSession env {hsc_hooks=(hsc_hooks env) {runPhaseHook=Just (PhaseHook guarded)}}
+      pure original
+
+requireWorldModuleFlags :: FilePath -> DynFlags -> IO ()
+requireWorldModuleFlags path flags =
+  when (hasUntrackedCompileTimeExecution flags)
+    (throwIO (WorldModulePolicyFailure path WorldUntrackedOptions))
 
 -- Make owns temporary interface cleanup. Every candidate view is staged in
 -- this private request directory, retained through deferred target checking,
