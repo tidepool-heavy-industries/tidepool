@@ -591,11 +591,13 @@ pub(super) struct RuntimeAdmissionOwner {
     epoch: std::sync::atomic::AtomicU64,
     retired: parking_lot::Mutex<Vec<ScopeId>>,
     lexical_leases: parking_lot::Mutex<BTreeMap<ScopeId, RuntimeLexicalScopeRecord>>,
+    session_live: std::sync::atomic::AtomicBool,
+    uncertain_scopes: std::sync::Weak<parking_lot::Mutex<Vec<Arc<RuntimeLexicalScopeLease>>>>,
 }
 
 struct RuntimeLexicalScopeRecord {
     lease: Option<std::sync::Weak<RuntimeLexicalScopeLease>>,
-    unconfirmed_source_custody: Option<Arc<RuntimeLexicalScopeLease>>,
+    owns_source_admission: bool,
     source_admission: super::RuntimeSourceAdmission,
 }
 
@@ -606,13 +608,22 @@ impl RuntimeAdmissionOwner {
     pub(super) fn epoch(&self) -> u64 {
         self.epoch.load(std::sync::atomic::Ordering::Acquire)
     }
-    pub(super) fn new() -> Self {
+    pub(super) fn new(
+        uncertain_scopes: &Arc<parking_lot::Mutex<Vec<Arc<RuntimeLexicalScopeLease>>>>,
+    ) -> Self {
         Self {
             identity: uuid::Uuid::new_v4(),
             epoch: std::sync::atomic::AtomicU64::new(0),
             retired: parking_lot::Mutex::new(Vec::new()),
             lexical_leases: parking_lot::Mutex::new(BTreeMap::new()),
+            session_live: std::sync::atomic::AtomicBool::new(true),
+            uncertain_scopes: Arc::downgrade(uncertain_scopes),
         }
+    }
+    pub(super) fn seal_session(&self) {
+        self.session_live
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.lexical_leases.lock().clear();
     }
 }
 
@@ -626,7 +637,12 @@ pub struct RuntimeLexicalScopeLease {
 }
 impl RuntimeLexicalScopeLease {
     pub fn validate_source_issuer(&self) -> Result<(), super::SourceAdmissionError> {
-        if self.owner_epoch != self.owner.epoch() {
+        if !self
+            .owner
+            .session_live
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.owner_epoch != self.owner.epoch()
+        {
             return Err(super::SourceAdmissionError::StaleSourceLease);
         }
         let scopes = self.owner.lexical_leases.lock();
@@ -642,17 +658,18 @@ impl RuntimeLexicalScopeLease {
         }
         Ok(())
     }
-    /// Unknown source completion retains the exact physical scope in its
-    /// existing owner record. This intentionally prevents lease-drop retirement;
-    /// old-world custody is not released by admitting a recovered context.
+    /// Retain this exact scope in its own live session until explicit scope
+    /// retirement or session teardown. The metadata owner holds only a weak
+    /// link; this does not keep a caller-owned session or compiler process alive.
     pub fn retain_unconfirmed_source_custody(self: &Arc<Self>) {
-        let mut scopes = self.owner.lexical_leases.lock();
-        if let Some(record) = scopes.get_mut(&self.scope) {
-            if record.source_admission.same_owner(&self.source_admission) {
-                record
-                    .unconfirmed_source_custody
-                    .get_or_insert_with(|| self.clone());
-            }
+        let Some(custody) = self.owner.uncertain_scopes.upgrade() else {
+            return;
+        };
+        let mut held = custody.lock();
+        if self.validate_source_issuer().is_ok()
+            && !held.iter().any(|lease| Arc::ptr_eq(lease, self))
+        {
+            held.push(self.clone());
         }
     }
 
@@ -2032,6 +2049,9 @@ impl PersistentSession {
             }
             return Ok(lease);
         }
+        let owns_source_admission = leases
+            .get(&scope)
+            .is_none_or(|record| record.owns_source_admission);
         let source_admission = leases
             .get(&scope)
             .map(|record| record.source_admission.clone())
@@ -2046,11 +2066,27 @@ impl PersistentSession {
             scope,
             RuntimeLexicalScopeRecord {
                 lease: Some(Arc::downgrade(&lease)),
-                unconfirmed_source_custody: None,
+                owns_source_admission,
                 source_admission,
             },
         );
         Ok(lease)
+    }
+
+    pub(super) fn source_lease_in(
+        &self,
+        scope: ScopeId,
+    ) -> Result<Arc<RuntimeLexicalScopeLease>, super::SourceAdmissionError> {
+        if !self.scope_tree().is_live(scope) {
+            return Err(super::SourceAdmissionError::MissingTargetLease { scope });
+        }
+        self.admission_owner()
+            .lexical_leases
+            .lock()
+            .get(&scope)
+            .and_then(|record| record.lease.as_ref())
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or(super::SourceAdmissionError::MissingTargetLease { scope })
     }
 
     pub(super) fn source_admission_in(
@@ -2095,7 +2131,7 @@ impl PersistentSession {
                 target,
                 RuntimeLexicalScopeRecord {
                     lease: None,
-                    unconfirmed_source_custody: None,
+                    owns_source_admission: false,
                     source_admission,
                 },
             );
@@ -2103,9 +2139,27 @@ impl PersistentSession {
     }
 
     pub(super) fn retire_source_admission(&self, scope: ScopeId) {
-        if let Some(record) = self.admission_owner().lexical_leases.lock().remove(&scope) {
-            record.source_admission.retire_scope(scope);
+        let record = self.admission_owner().lexical_leases.lock().remove(&scope);
+        if let Some(record) = record {
+            if record.owns_source_admission {
+                record.source_admission.retire_scope(scope);
+            }
         }
+        // Drop leases outside the custody lock: lease Drop queues retirement.
+        let released = {
+            let mut held = self.uncertain_source_scopes.lock();
+            let mut released = Vec::new();
+            let mut index = 0;
+            while index < held.len() {
+                if held[index].scope == scope {
+                    released.push(held.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            released
+        };
+        drop(released);
     }
     /// Validate a retained placement without minting another scope or changing
     /// its custody. Owner transfer invalidates an unconsumed placement grant.

@@ -222,6 +222,8 @@ pub struct PersistentSession {
         Option<Arc<super::source_admission::RuntimeSourceCompilerTransaction>>,
     catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
     admission_owner: Arc<super::admission::RuntimeAdmissionOwner>,
+    pub(super) uncertain_source_scopes:
+        Arc<parking_lot::Mutex<Vec<Arc<super::RuntimeLexicalScopeLease>>>>,
     /// The resident machine — `None` before the first turn bootstraps it,
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
     /// turn's duration (stowed-XOR-running).
@@ -354,6 +356,16 @@ pub struct DeclarationPlaneCommit {
     pub evicted_values: Vec<String>,
 }
 
+impl Drop for PersistentSession {
+    fn drop(&mut self) {
+        // Seal the actual issuer before releasing uncertain lexical custody or
+        // the native machine. External aliases remain stale after teardown.
+        self.admission_owner.seal_session();
+        let held = std::mem::take(&mut *self.uncertain_source_scopes.lock());
+        drop(held);
+    }
+}
+
 impl PersistentSession {
     /// Own source preparation for callers that hold the session substrate.
     pub fn with_source_compiler_transaction<T>(
@@ -395,9 +407,13 @@ impl PersistentSession {
                 .value_generation
                 .max(lib.log.retained_value_generation_high_water());
         }
+        let uncertain_source_scopes = Arc::new(parking_lot::Mutex::new(Vec::new()));
         PersistentSession {
             source_transaction: None,
-            admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new()),
+            admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new(
+                &uncertain_source_scopes,
+            )),
+            uncertain_source_scopes,
             catalog_selection: Default::default(),
             machine: None,
             invocation_cancel: None,
@@ -7744,12 +7760,25 @@ mod maintained_binding_lifetime_properties {
 }
 
 impl PersistentSession {
+    pub(super) fn admit_source_lease(
+        &self,
+        lease: Arc<super::RuntimeLexicalScopeLease>,
+    ) -> Result<(), super::SourceAdmissionError> {
+        self.source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?
+            .admit(Some(lease))
+    }
+
     pub(super) fn admit_source_work_in(
         &mut self,
         scope: ScopeId,
     ) -> Result<Option<super::RuntimeSourceClaim>, super::SourceAdmissionError> {
         if let Some(owner) = &self.source_transaction {
-            owner.admit(self.source_admission_in(scope))?;
+            let target = (scope != ScopeId::ROOT)
+                .then(|| self.source_lease_in(scope))
+                .transpose()?;
+            owner.admit(target)?;
             return Ok(None);
         }
         Err(super::SourceAdmissionError::MissingTransaction)
