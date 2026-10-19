@@ -17057,8 +17057,10 @@ pub(crate) mod request_tests {
 
             let history_context = workbench.access.with_machine(context.clone(), |session, context, _| {
                 let placement = crate::ActorPlacement { lexical_scope: session.mint_isolated_scope(), ..context.placement };
-                Ok(crate::ActorDescriptor::new("unrelated history", placement)
-                    .admit_independent_world().session_context(crate::ActorRef::first(crate::ActorId(2))))
+                let mut history = crate::ActorDescriptor::new("unrelated history", placement)
+                    .admit_independent_world().session_context(crate::ActorRef::first(crate::ActorId(2)));
+                history.haskell_effects_alias = context.haskell_effects_alias.clone();
+                Ok(history)
             }).await.unwrap();
             workbench_runner_for_test(&workbench).adopt_final_source_scope(history_context.clone()).await.unwrap();
             for retained in 0..=3 {
