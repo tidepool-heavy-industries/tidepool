@@ -513,7 +513,7 @@ pub struct CompilerWorldRestoration {
     inputs: CompilerWorldOpenInputs,
     product: Arc<[u8]>,
     primary_root: ContextRoot,
-    primary_blocks: StagedBlocks,
+    primary_blocks: ReachableBlocks,
     producer: [u8; 32],
     profile: [u8; 32],
     descriptor: PathBuf,
@@ -525,7 +525,7 @@ impl fmt::Debug for CompilerWorldRestoration {
         f.debug_struct("CompilerWorldRestoration")
             .field("logical_id", &self.logical_id)
             .field("primary_root", &self.primary_root)
-            .field("primary_block_count", &self.primary_blocks.blocks().len())
+            .field("primary_block_count", &self.primary_blocks.blocks().count())
             .finish_non_exhaustive()
     }
 }
@@ -995,10 +995,7 @@ impl CompilerWorldOpenInputs {
     fn materialize_primary(
         &self,
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
-    ) -> Result<(Arc<ExactDeclarationContext>, ContextRoot, StagedBlocks), CompileError> {
-        // Published empty contexts have no producer yet. Bind that identity at
-        // the actual admitted endpoint before issuing any portable root; a
-        // context already issued by another producer must refuse here.
+    ) -> Result<(Arc<ExactDeclarationContext>, ContextRoot, ReachableBlocks), CompileError> {
         let producer = CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256();
         let primary_context = Arc::new((*self.primary_context).clone().admit_producer(producer)?);
         let snapshot = primary_context.snapshot();
@@ -1007,11 +1004,23 @@ impl CompilerWorldOpenInputs {
         let context = materializer
             .materialize_context(None, &snapshot)
             .map_err(|error| source_failure(error.to_string()))?;
-        let root = context.root().clone();
-        let blocks = materializer
+        let primary_root = context.root().clone();
+        let staged = materializer
             .finish()
             .map_err(|error| source_failure(error.to_string()))?;
-        Ok((primary_context, root, blocks))
+        let primary_blocks = ReachableBlocks::default()
+            .replace_roots(&staged, vec![*primary_root.cid()])
+            .map_err(|error| source_failure(error.to_string()))?;
+        let work = primary_blocks.work();
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::SemanticDigestInputByte,
+            work.verified_bytes,
+        );
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::MaterializationGraphVisit,
+            work.link_visits.saturating_add(work.unlink_visits),
+        );
+        Ok((primary_context, primary_root, primary_blocks))
     }
 
     fn prepare(
@@ -1047,7 +1056,6 @@ impl CompilerWorldOpenInputs {
         };
         let block_bytes = primary_blocks
             .blocks()
-            .iter()
             .try_fold(0u64, |total, (cid, body)| {
                 total
                     .checked_add(body.len() as u64)
@@ -1918,8 +1926,7 @@ mod answer_tests {
         let sources = Arc::new(sources(b"module Module where\n", b"module Module where\n"));
         let cold = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
             None,
-            Vec::new(),
-            Arc::from(&b"published empty namespace"[..]),
+            CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             Arc::clone(&sources),
         )
         .unwrap();
@@ -1937,8 +1944,7 @@ mod answer_tests {
         assert_eq!(restored.snapshot().producer_sha256(), canonical);
         let issued = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
             Some(bound),
-            Vec::new(),
-            Arc::from(&b"published empty namespace"[..]),
+            CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             Arc::clone(&sources),
         )
         .unwrap();
@@ -1947,8 +1953,7 @@ mod answer_tests {
             Some(Arc::new(
                 (*cold.primary_context).clone().admit_producer(raw).unwrap(),
             )),
-            Vec::new(),
-            Arc::from(&b"published empty namespace"[..]),
+            CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             sources,
         )
         .unwrap();
