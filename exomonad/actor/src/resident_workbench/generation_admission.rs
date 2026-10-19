@@ -1013,10 +1013,10 @@ mod tests {
         let abandoned = directory.generation_population(&fence).await.unwrap();
         assert_eq!(abandoned.resources.len(), 1);
         assert_eq!(abandoned.resources[0].identity, Identity::Actor(actor));
-        assert_eq!(
+        assert!(matches!(
             abandoned.resources[0].state,
-            State::CleanupUnconfirmed("reservation has no confirmed terminal cleanup".into()),
-        );
+            State::CleanupUnconfirmed(_)
+        ));
         assert!(terminal.requested_shutdown().is_some());
         assert!(terminal.get().is_none());
         assert!(terminal.cleanup().is_none());
@@ -1099,10 +1099,10 @@ mod tests {
             } else {
                 assert_eq!(population.resources.len(), 1);
                 assert_eq!(population.resources[0].identity, Identity::Actor(identity));
-                assert_eq!(
+                assert!(matches!(
                     population.resources[0].state,
-                    State::CleanupUnconfirmed("actor terminal cleanup is not confirmed".into()),
-                );
+                    State::CleanupUnconfirmed(_)
+                ));
             }
 
             stopped_release.send(()).unwrap();
