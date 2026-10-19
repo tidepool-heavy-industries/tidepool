@@ -652,11 +652,6 @@ pub(super) enum RunControlMessage {
         actor: ActorRef,
         reply: oneshot::Sender<Vec<LocalActorRef>>,
     },
-    ForgetChild {
-        parent: ActorRef,
-        child: ActorRef,
-        reply: oneshot::Sender<Result<(), DirectoryError>>,
-    },
     TransferChildren {
         predecessor: ActorRef,
         successor: ActorRef,
@@ -1300,23 +1295,6 @@ impl Actor for RunControl {
                         .map(|entry| entry.actor.clone())
                         .collect(),
                 );
-            }
-            RunControlMessage::ForgetChild {
-                parent,
-                child,
-                reply,
-            } => {
-                let result = if let Some(entry) = state.entries.get_mut(&child) {
-                    if entry.spawn_ownership == SpawnOwnership::Supervised(parent) {
-                        entry.spawn_ownership = SpawnOwnership::Independent;
-                        Ok(())
-                    } else {
-                        Err(DirectoryError::Unauthorized { actor: child })
-                    }
-                } else {
-                    Err(DirectoryError::Unauthorized { actor: child })
-                };
-                let _ = reply.send(result);
             }
             RunControlMessage::TransferChildren {
                 predecessor,
@@ -2470,18 +2448,6 @@ impl RunControlClient {
     ) -> Result<Vec<LocalActorRef>, DirectoryError> {
         self.ask(|reply| RunControlMessage::Children { actor, reply })
             .await
-    }
-    pub(crate) async fn forget_child(
-        &self,
-        parent: ActorRef,
-        child: ActorRef,
-    ) -> Result<(), DirectoryError> {
-        self.ask(|reply| RunControlMessage::ForgetChild {
-            parent,
-            child,
-            reply,
-        })
-        .await?
     }
     pub(crate) async fn transfer_children(
         &self,
