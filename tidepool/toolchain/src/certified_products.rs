@@ -21775,13 +21775,20 @@ None,
                             && selected_canonical.is_some()))),
             "raw rebound must refuse the exact prior input group despite raw body custody; expected={expected_missing:?}; outcome={rebound_outcome}"
         );
-        let view = crate::declaration_context::certified_product_artifact_view(
-            canonical_producer,
-            &custody,
-            &[],
-            Some(planned.request.context().as_ref()),
-        )
-        .unwrap();
+        let issued = planned.completed_output().artifacts();
+        let issued_graph = issued.capture_graph_selection();
+        let view = issued.retain_custody(&rebound).unwrap();
+        let retained_graph = view.capture_graph_selection();
+        assert_eq!(retained_graph.namespace, issued_graph.namespace);
+        assert_eq!(retained_graph.roots, issued_graph.roots);
+        assert_eq!(
+            view.artifact_ids().into_iter().collect::<BTreeSet<_>>(),
+            issued
+                .artifact_ids()
+                .into_iter()
+                .chain(rebound.artifact_ids())
+                .collect::<BTreeSet<_>>()
+        );
         let incompatible_source =
             planned_original_history_tests::issue_planned_original_with_source_value(
                 root.path(),
