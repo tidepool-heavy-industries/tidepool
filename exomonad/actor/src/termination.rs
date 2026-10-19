@@ -1953,6 +1953,54 @@ mod tests {
     }
 
     #[test]
+    fn terminal_preserves_native_carrier_refusal_scope() {
+        use tidepool_toolchain::artifact_inventory::{
+            ArtifactBinding, ArtifactId, ArtifactInventoryFailure, ArtifactSelectionId,
+            NativeAdmissionRefusal, NativeAdmissionSource,
+        };
+        use tidepool_toolchain::failclass::{
+            CompileFailureCause, FailureClass, FailureEnvelope, Phase,
+        };
+        let selected = ArtifactBinding {
+            artifact: ArtifactId([3; 32]),
+            selection: ArtifactSelectionId([4; 32]),
+        };
+        let cause = CompileFailureCause::ArtifactInventory {
+            failure: ArtifactInventoryFailure::NativeGroupUnavailable {
+                artifact: selected.artifact,
+                original_ordinal: 296,
+            },
+            native_refusal: Some(NativeAdmissionRefusal::InputNoCompatibleCandidate {
+                source: NativeAdmissionSource::CertifiedSelection,
+                selected_original: Some(selected),
+                canonical: ArtifactId([5; 32]),
+                selected_canonical: None,
+                candidate_count: 2,
+            }),
+        };
+        let terminal = ActorTerminal::failed(
+            "admission refused",
+            Some(FailureEnvelope {
+                class: FailureClass::VersionSkew,
+                phase: Phase::Compile,
+                cause: Some(cause.clone()),
+                message: "native group admission refused".into(),
+            }),
+        );
+        let encoded = serde_json::to_value(&terminal).unwrap();
+        assert_eq!(
+            encoded["diagnostic"]["cause"]["native_refusal"]["selected_original"],
+            serde_json::to_value(selected).unwrap()
+        );
+        assert_eq!(
+            encoded["diagnostic"]["cause"]["native_refusal"]["reason"],
+            "input_no_compatible_candidate"
+        );
+        let restored: ActorTerminal = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.diagnostic.unwrap().cause, Some(cause));
+    }
+
+    #[test]
     fn terminal_retains_bounded_diagnostic_and_serializes_original_category() {
         use tidepool_toolchain::failclass::{
             CompileFailureCause, FailureClass, FailureEnvelope, Phase,

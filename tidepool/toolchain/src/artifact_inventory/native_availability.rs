@@ -231,10 +231,13 @@ fn bind_input_demand(
                         permitted = false, body_present = entry.native_group_ordinals.contains(&key.original_ordinal),
                         selected_carrier = ?namespace.get(&key.artifact),
                         "native input demand exceeds issued permission");
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::NativeGroupUnavailable {
-                            artifact: key.artifact,
-                            original_ordinal: key.original_ordinal,
+                    return Err(native_admission_failure(
+                        *key,
+                        NativeAdmissionRefusal::InputPermissionDenied {
+                            body_present: entry
+                                .native_group_ordinals
+                                .contains(&key.original_ordinal),
+                            selected_original: namespace.get(&key.artifact).copied(),
                         },
                     ));
                 }
@@ -258,12 +261,7 @@ fn bind_input_demand(
                                     stage = "input_demand_support", ?key, owner = ?product.owner(),
                                     ?group, permitted = true,
                                     "native input candidate lost its issued support");
-                                admission_failure(
-                                    ArtifactInventoryFailure::NativeGroupUnavailable {
-                                        artifact: key.artifact,
-                                        original_ordinal: key.original_ordinal,
-                                    },
-                                )
+                                native_admission_failure(*key, NativeAdmissionRefusal::InputIssuedSupportMissing { candidate: group })
                             })
                     })
                     .collect::<Result<Vec<_>, _>>()?
@@ -435,10 +433,21 @@ fn bind_input_demand(
                     NativeDemandSource::Catalog { .. } => "native_dependency_catalog",
                 },
                 "native input candidates do not match selected carrier or canonical binding");
-            return Err(admission_failure(
-                ArtifactInventoryFailure::NativeGroupUnavailable {
-                    artifact: key.artifact,
-                    original_ordinal: key.original_ordinal,
+            return Err(native_admission_failure(
+                *key,
+                NativeAdmissionRefusal::InputNoCompatibleCandidate {
+                    source: match source {
+                        NativeDemandSource::Certified(_) => {
+                            NativeAdmissionSource::CertifiedSelection
+                        }
+                        NativeDemandSource::Catalog(_) => {
+                            NativeAdmissionSource::NativeDependencyCatalog
+                        }
+                    },
+                    selected_original: namespace.get(&key.artifact).copied(),
+                    canonical,
+                    selected_canonical: namespace.get(&canonical).copied(),
+                    candidate_count,
                 },
             ));
         };
@@ -2719,6 +2728,17 @@ mod normalized_dependency_tests {
             .expect("unissued native demand must refuse");
             assert!(matches!(error, CompileError::ArtifactInventory(ref error)
                 if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { .. })));
+            let diagnostic = crate::failclass::classify_compile(&error);
+            let encoded = serde_json::to_value(diagnostic.cause).unwrap();
+            assert_eq!(
+                encoded["native_refusal"]["reason"],
+                "input_no_compatible_candidate"
+            );
+            assert_eq!(
+                encoded["native_refusal"]["source"],
+                "native_dependency_catalog"
+            );
+            assert_eq!(encoded["native_refusal"]["candidate_count"], 0);
         }
     }
 }

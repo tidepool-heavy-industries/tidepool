@@ -1315,10 +1315,42 @@ pub enum ArtifactInventoryFailure {
     },
 }
 
+/// Failure-path observations, never native availability or byte ownership authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeAdmissionRefusal {
+    InputPermissionDenied {
+        body_present: bool,
+        selected_original: Option<ArtifactBinding>,
+    },
+    BoundPermissionDenied {
+        body_present: bool,
+        selected_original: Option<ArtifactBinding>,
+    },
+    InputIssuedSupportMissing {
+        candidate: NativeGroupBinding,
+    },
+    InputNoCompatibleCandidate {
+        source: NativeAdmissionSource,
+        selected_original: Option<ArtifactBinding>,
+        canonical: ArtifactId,
+        selected_canonical: Option<ArtifactBinding>,
+        candidate_count: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeAdmissionSource {
+    CertifiedSelection,
+    NativeDependencyCatalog,
+}
+
 pub struct ArtifactInventoryError {
     pub failure: ArtifactInventoryFailure,
     pub diagnostic_artifacts: Option<std::path::PathBuf>,
     pub(crate) owner_conflict: Option<ArtifactOwnerConflictEvidence>,
+    pub(crate) native_refusal: Option<NativeAdmissionRefusal>,
 }
 
 pub(crate) enum ArtifactOwnerConflictEvidence {
@@ -1419,6 +1451,7 @@ impl std::fmt::Debug for ArtifactInventoryError {
             .debug_struct("ArtifactInventoryError")
             .field("failure", &self.failure)
             .field("diagnostic_artifacts", &self.diagnostic_artifacts)
+            .field("native_refusal", &self.native_refusal)
             .field(
                 "owner_conflict",
                 &self
@@ -1467,7 +1500,15 @@ impl ArtifactInventoryError {
 
 impl std::fmt::Display for ArtifactInventoryError {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.failure.fmt(output)?;
+        if let Some(reason) = &self.native_refusal {
+            write!(
+                output,
+                "native group admission refused ({:?}): {}",
+                reason, self.failure
+            )?;
+        } else {
+            self.failure.fmt(output)?;
+        }
         if let Some(evidence) = &self.owner_conflict {
             write!(output, "; conflict evidence {}", evidence.summary())?;
         }
@@ -1503,9 +1544,27 @@ pub(crate) fn admission_failure(failure: ArtifactInventoryFailure) -> CompileErr
     ArtifactInventoryError {
         failure,
         diagnostic_artifacts: None,
+        native_refusal: None,
         owner_conflict: None,
     }
     .into()
+}
+
+#[track_caller]
+pub(crate) fn native_admission_failure(
+    key: NativeGroupKey,
+    reason: NativeAdmissionRefusal,
+) -> CompileError {
+    let CompileError::ArtifactInventory(mut error) =
+        admission_failure(ArtifactInventoryFailure::NativeGroupUnavailable {
+            artifact: key.artifact,
+            original_ordinal: key.original_ordinal,
+        })
+    else {
+        unreachable!("admission_failure preserves inventory classification")
+    };
+    error.native_refusal = Some(reason);
+    CompileError::ArtifactInventory(error)
 }
 
 /// An exact live value required by original native code. Execution selection
@@ -2607,6 +2666,7 @@ impl SelectedOwners {
                         owner: entry.descriptor.owner.clone(),
                     },
                     diagnostic_artifacts: None,
+                    native_refusal: None,
                     owner_conflict: Some(ArtifactOwnerConflictEvidence::ArtifactSelection {
                         existing: Arc::clone(existing),
                         incoming: Arc::clone(incoming),
@@ -2807,6 +2867,7 @@ impl SelectedOwners {
                         owner: entry.descriptor.owner.clone(),
                     },
                     diagnostic_artifacts: None,
+                    native_refusal: None,
                     owner_conflict: Some(ArtifactOwnerConflictEvidence::NativeCanonicalCarrier {
                         selected: Arc::clone(&entries[&id]),
                         incoming: Arc::new(carrier),
@@ -3304,10 +3365,19 @@ impl ArtifactInventory {
                     permitted = false, body_present = entry.native_group_ordinals.contains(&group.original_ordinal),
                     selected_carrier = ?fixed.view.lease.selection.namespace.get(&group.artifact),
                     "native demand exceeds issued permission");
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::NativeGroupUnavailable {
-                        artifact: group.artifact,
-                        original_ordinal: group.original_ordinal,
+                return Err(native_admission_failure(
+                    group,
+                    NativeAdmissionRefusal::BoundPermissionDenied {
+                        body_present: entry
+                            .native_group_ordinals
+                            .contains(&group.original_ordinal),
+                        selected_original: fixed
+                            .view
+                            .lease
+                            .selection
+                            .namespace
+                            .get(&group.artifact)
+                            .copied(),
                     },
                 ));
             }

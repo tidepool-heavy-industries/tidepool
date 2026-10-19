@@ -140,6 +140,8 @@ pub enum CompileFailureCause {
     },
     ArtifactInventory {
         failure: crate::artifact_inventory::ArtifactInventoryFailure,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_refusal: Option<crate::artifact_inventory::NativeAdmissionRefusal>,
     },
     CompileInput {
         failure: crate::CompileInputError,
@@ -545,6 +547,7 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         },
         CompileError::ArtifactInventory(error) => CompileFailureCause::ArtifactInventory {
             failure: error.failure.clone(),
+            native_refusal: error.native_refusal.clone(),
         },
         CompileError::CompileInput(error) => CompileFailureCause::CompileInput {
             failure: error.clone(),
@@ -843,6 +846,57 @@ mod tests {
     }
 
     #[test]
+    fn native_carrier_refusal_retains_exact_identity_in_failure_cause() {
+        use crate::artifact_inventory::{
+            ArtifactBinding, ArtifactId, ArtifactSelectionId, NativeAdmissionRefusal,
+            NativeAdmissionSource, NativeGroupKey,
+        };
+        let selected = ArtifactBinding {
+            artifact: ArtifactId([3; 32]),
+            selection: ArtifactSelectionId([4; 32]),
+        };
+        let canonical = ArtifactId([5; 32]);
+        let reason = NativeAdmissionRefusal::InputNoCompatibleCandidate {
+            source: NativeAdmissionSource::CertifiedSelection,
+            selected_original: Some(selected),
+            canonical,
+            selected_canonical: None,
+            candidate_count: 2,
+        };
+        let error = crate::artifact_inventory::native_admission_failure(
+            NativeGroupKey {
+                artifact: selected.artifact,
+                original_ordinal: 296,
+            },
+            reason.clone(),
+        );
+        let diagnostic = classify_compile(&error);
+        assert_eq!(
+            diagnostic.cause,
+            Some(CompileFailureCause::ArtifactInventory {
+                failure:
+                    crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact: selected.artifact,
+                        original_ordinal: 296
+                    },
+                native_refusal: Some(reason),
+            })
+        );
+        let encoded = serde_json::to_value(&diagnostic).unwrap();
+        assert_eq!(
+            encoded["cause"]["native_refusal"]["reason"],
+            "input_no_compatible_candidate"
+        );
+        assert_eq!(
+            encoded["cause"]["native_refusal"]["selected_original"],
+            serde_json::to_value(selected).unwrap()
+        );
+        let decoded: CompileFailureCause =
+            serde_json::from_value(encoded["cause"].clone()).unwrap();
+        assert_eq!(Some(decoded), diagnostic.cause);
+    }
+
+    #[test]
     fn artifact_inventory_diagnostic_retains_typed_owner_edge() {
         use crate::artifact_inventory::{
             ArtifactDependency, ArtifactId, ArtifactInventoryError, ArtifactInventoryFailure,
@@ -869,6 +923,7 @@ mod tests {
         let error = CompileError::ArtifactInventory(ArtifactInventoryError {
             failure: failure.clone(),
             diagnostic_artifacts: Some(PathBuf::from("retained-evidence")),
+            native_refusal: None,
             owner_conflict: None,
         });
         let diagnostic = classify_compile(&error);
@@ -876,7 +931,10 @@ mod tests {
         assert_eq!(diagnostic.phase, Phase::Compile);
         assert_eq!(
             diagnostic.cause,
-            Some(CompileFailureCause::ArtifactInventory { failure })
+            Some(CompileFailureCause::ArtifactInventory {
+                failure,
+                native_refusal: None
+            })
         );
         assert!(diagnostic.message.contains("retained-evidence"));
         let metadata = serde_json::to_value(&diagnostic).unwrap();

@@ -2074,6 +2074,7 @@ impl CompilerInputProjection {
                 return Err(ArtifactInventoryError {
                     failure: ArtifactInventoryFailure::OwnerConflict { owner },
                     diagnostic_artifacts: None,
+                    native_refusal: None,
                     owner_conflict: Some(ArtifactOwnerConflictEvidence::CompilerRole {
                         existing: previous.clone(),
                         incoming,

@@ -1853,13 +1853,46 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let fixed_before = failed_then_retried.observed_binding_state();
     let cursor_before = admitted.capture_graph_selection();
     let mixed = [demand.clone(), denied_demand.clone()];
-    assert!(matches!(admitted.inventory().admit_bound_target(
-        &mut failed_then_retried, &admitted,
-        NativeArtifactDemand::CertifiedTargetImports(&mixed), vec![], &selected,
-    ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+    let denied = admitted
+        .inventory()
+        .admit_bound_target(
+            &mut failed_then_retried,
+            &admitted,
+            NativeArtifactDemand::CertifiedTargetImports(&mixed),
+            vec![],
+            &selected,
+        )
+        .err()
+        .expect("actual denied group must refuse");
+    assert!(
+        matches!(&denied, CompileError::ArtifactInventory(error) if matches!(error.failure,
         crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
             artifact, original_ordinal: 9001,
-        } if artifact == b_id)));
+        } if artifact == b_id))
+    );
+    let CompileError::ArtifactInventory(ref denied_error) = denied else {
+        unreachable!()
+    };
+    assert!(matches!(
+        &denied_error.native_refusal,
+        Some(
+            crate::artifact_inventory::NativeAdmissionRefusal::InputPermissionDenied {
+                body_present: true,
+                ..
+            } | crate::artifact_inventory::NativeAdmissionRefusal::BoundPermissionDenied {
+                body_present: true,
+                ..
+            }
+        )
+    ));
+    let classified = crate::failclass::classify_compile(&denied);
+    assert!(classified.message.contains("PermissionDenied"));
+    let cause = serde_json::to_value(classified.cause).unwrap();
+    assert!(matches!(
+        cause["native_refusal"]["reason"].as_str(),
+        Some("input_permission_denied" | "bound_permission_denied")
+    ));
+    assert_eq!(cause["native_refusal"]["body_present"], true);
     assert_eq!(
         failed_then_retried.observed_binding_state(),
         fixed_before,
@@ -7149,6 +7182,7 @@ fn matching_native_offer_role_preserves_issuance_without_rewalking_proof() {
         diagnostic.cause,
         Some(crate::failclass::CompileFailureCause::ArtifactInventory {
             failure: error.failure,
+            native_refusal: None,
         })
     );
 }
