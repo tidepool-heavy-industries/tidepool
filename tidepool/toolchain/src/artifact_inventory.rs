@@ -15103,7 +15103,7 @@ mod tests {
         let producer =
             CanonicalProducerIdentity::from_producer_bytes(endpoint.identity().producer_bytes());
         let product = private
-            .native_availability
+            .contextual_native_availability
             .iter()
             .find(|product| product.owner().module == "Tidepool.View.Types")
             .expect("borrowed View.Types original")
@@ -15145,7 +15145,7 @@ mod tests {
             interfaces,
             helper_import,
             endpoint.identity().producer_bytes(),
-            &private.native_availability,
+            &private.contextual_native_availability,
         );
     }
     #[test]

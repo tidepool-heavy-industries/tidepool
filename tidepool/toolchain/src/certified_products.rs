@@ -18462,11 +18462,11 @@ pub(crate) mod tests {
         std::fs::remove_file(&graph_path).unwrap();
         let missing = select(&producer, &include, &root.path().join("missing-offer")).unwrap();
         assert!(missing.by_owner.is_empty());
-        assert!(missing.native_availability.is_empty());
+        assert!(missing.contextual_native_availability.is_empty());
         std::fs::write(&graph_path, b"tampered").unwrap();
         let tampered = select(&producer, &include, &root.path().join("tampered-offer")).unwrap();
         assert!(tampered.by_owner.is_empty());
-        assert!(tampered.native_availability.is_empty());
+        assert!(tampered.contextual_native_availability.is_empty());
         std::fs::write(&graph_path, graph_bytes).unwrap();
         let restored = select(&producer, &include, &root.path().join("restored-offer")).unwrap();
         assert_eq!(restored.by_owner.len(), 1);
