@@ -5,6 +5,14 @@
 //! captured before the compiler runs and compared again before resumption, and
 //! a moved view is refused with `ScopeChanged` rather than reinterpreted.
 //!
+//! Provenance is that compile view's own triple: scope, publication generation
+//! and content fingerprint. It is the only view identity this layer can
+//! observe, because `ActorCompileView` exposes no compiler-world handle, so a
+//! handler must never synthesize one. Comparing the full triple is what makes
+//! `ScopeChanged` meaningful; correlating it with world-publication identity is
+//! a runtime-owner follow-up. Until a request pins an expected provenance, only
+//! movement observed during a query is refused.
+//!
 //! Enumeration maps to the existing browse queries. `currentScopeView` never
 //! enters the compiler path; the remaining verbs reuse the admitted inspection
 //! batch already owned by the structured-introspection path instead of
