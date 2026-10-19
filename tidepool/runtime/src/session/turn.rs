@@ -2679,9 +2679,10 @@ pub fn bind_activation_renderer(
     if !renderer.proof.matches_input(admission.input_interface())
         || renderer.proof.original_context_digest() != admission.original_context_digest()
         || !admission.matches_original_display(&renderer.proof)
+        || admission.is_consumed()
     {
         return Err(CompileError::ExtractFailed(
-            "renderer differs from the mounted original input".into(),
+            "renderer differs from the mounted original input or its admission is spent".into(),
         )
         .into());
     }

@@ -2172,7 +2172,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         .iter()
         .map(|output| {
             source
-                .admit_turn_code_in(source.run_context.lexical_scope, output.code())
+                .admit_turn_code_in(
+                    source.run_context.lexical_scope,
+                    output.code(),
+                    TurnInstallationAdmission::Compilation,
+                )
                 .and_then(|admission| source.provenance_for(&admission))
                 .unwrap()
         })
@@ -2311,7 +2315,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         );
         assert_eq!(
             source
-                .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
+                .admit_turn_code_in(
+                    source.run_context.lexical_scope,
+                    compiled.code(),
+                    TurnInstallationAdmission::Compilation,
+                )
                 .and_then(|admission| source.provenance_for(&admission))
                 .unwrap()
                 .authenticated_inputs,
@@ -2331,7 +2339,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             assert!(
                 matches!(
                     source
-                        .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
+                        .admit_turn_code_in(
+                            source.run_context.lexical_scope,
+                            compiled.code(),
+                            TurnInstallationAdmission::Compilation,
+                        )
                         .and_then(|admission| source.provenance_for(&admission)),
                     Err(ResidentError::Prepared(
                         PreparedRuntimeError::MissingRetainedCertifiedOwner { .. }
@@ -2343,7 +2355,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             assert!(
                 matches!(
                     source
-                        .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
+                        .admit_turn_code_in(
+                            source.run_context.lexical_scope,
+                            compiled.code(),
+                            TurnInstallationAdmission::Compilation,
+                        )
                         .and_then(|admission| source.provenance_for(&admission)),
                     Err(ResidentError::Prepared(
                         PreparedRuntimeError::SourceScopeAdmission
@@ -2355,7 +2371,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             source.set_run_context(previous).unwrap();
             assert_eq!(
                 source
-                    .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
+                    .admit_turn_code_in(
+                        source.run_context.lexical_scope,
+                        compiled.code(),
+                        TurnInstallationAdmission::Compilation,
+                    )
                     .and_then(|admission| source.provenance_for(&admission))
                     .unwrap()
                     .authenticated_inputs,
@@ -3684,6 +3704,27 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         assert!(Arc::ptr_eq(first, next));
     }
     drop(repeated);
+    // The same sealed renderer code still cannot enter through the generic
+    // source installer: only its opaque original-A/target-B admission may
+    // install a preview.
+    let unsealed = resident.admit_turn_code_in(
+        compiled.admission.scope_lease.scope(),
+        compiled.renderer.compiled.code(),
+        TurnInstallationAdmission::Compilation,
+    );
+    assert!(
+        matches!(
+            unsealed,
+            Err(ResidentError::Session(SessionError::SourceAdmission(
+                super::super::SourceAdmissionError::Unqualified
+            )))
+        ),
+        "preview code cannot enter the generic source installer"
+    );
+    assert!(
+        !compiled.admission.is_consumed(),
+        "generic-installer refusal must not spend the affine preview admission"
+    );
     let before_fault = resident.residency();
     {
         let incomplete = bundle.omitting_target_image();
@@ -3691,6 +3732,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
             .admit_turn_code_in(
                 compiled.admission.scope_lease.scope(),
                 compiled.renderer.compiled.code(),
+                TurnInstallationAdmission::ActivationPreview(&compiled.admission),
             )
             .unwrap();
         let refused = resident.install_admitted_turn(
@@ -3889,6 +3931,7 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
     };
     assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before + 1);
     let renderer = Arc::downgrade(&first.renderer);
+    let cached = first.renderer.clone();
     let failed = tidepool_testing::with_settlement(|settlement| {
         parent.resume(last_submission.unwrap(), Ok::<(), ()>(()), settlement)
     });
@@ -3927,6 +3970,23 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
             serde_json::json!([format!("{}", index + 41), false])
         );
     }
+    // Reuse of immutable renderer code still requires its own unconsumed
+    // admission; the spent first-child permission cannot be resealed.
+    let refused = turn::bind_activation_renderer(
+        children[0].1.clone(),
+        &SharedActivationRenderer::Renderable(cached.clone()),
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(turn::TurnFailure {
+                error: crate::CompileError::ExtractFailed(detail),
+                ..
+            }) if detail.contains("admission is spent")
+        ),
+        "a spent admission cannot bind cached renderer code"
+    );
+    drop(cached);
     assert!(
         renderer.upgrade().is_some(),
         "child provenance retains native code"

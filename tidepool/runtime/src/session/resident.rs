@@ -1333,6 +1333,9 @@ impl RuntimeActivationPreviewAdmission {
     pub fn source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
         self.scope_lease.clone()
     }
+    pub(super) fn is_consumed(&self) -> bool {
+        self.consumed.load(Ordering::Acquire)
+    }
 
     pub fn view(&self) -> &super::SessionCompileView {
         &self.view
@@ -2540,6 +2543,11 @@ enum PreparedExecutionPurpose<'a> {
         lease: Arc<super::RuntimeLexicalScopeLease>,
         images: &'a super::prepared::NativeImageBundle,
     },
+}
+
+enum TurnInstallationAdmission<'a> {
+    Compilation,
+    ActivationPreview(&'a RuntimeActivationPreviewAdmission),
 }
 
 enum TurnImageAcquisition<'a> {
@@ -6789,7 +6797,39 @@ where
         &self,
         scope: ScopeId,
         code: TurnCode<'a>,
+        authority: TurnInstallationAdmission<'_>,
     ) -> Result<AdmittedTurnCode<'a>, ResidentError> {
+        match authority {
+            TurnInstallationAdmission::Compilation => {
+                // Preview code installs only through its opaque
+                // original-A/target-B admission. The generic source installer
+                // refuses that purpose before any source lease is admitted.
+                if code.certification().is_some_and(|certification| {
+                    matches!(certification.purpose(), TurnPurpose::ActivationPreview(_))
+                }) {
+                    return Err(SessionError::SourceAdmission(
+                        super::SourceAdmissionError::Unqualified,
+                    )
+                    .into());
+                }
+            }
+            TurnInstallationAdmission::ActivationPreview(admission) => {
+                let proof = code
+                    .certification()
+                    .and_then(|certification| certification.checked_activation_preview())
+                    .ok_or(ResidentError::ActivationPreviewRefused {
+                        binding: admission.mounted.binding,
+                    })?;
+                if !proof.matches_input(admission.input_interface())
+                    || proof.original_context_digest() != admission.original_context_digest()
+                    || !admission.matches_original_display(proof)
+                {
+                    return Err(ResidentError::ActivationPreviewRefused {
+                        binding: admission.mounted.binding,
+                    });
+                }
+            }
+        }
         let resolved = code
             .certification()
             .map(|certification| {
@@ -6963,7 +7003,7 @@ where
             || admission.owner_epoch != self.state.admission_owner().epoch()
             || self.state.compile_view_digest_in(admission.mounted.scope)
                 != Some(admission.view_digest)
-            || admission.consumed.load(Ordering::Acquire)
+            || admission.is_consumed()
         {
             return Err(ResidentError::ActivationPreviewRefused {
                 binding: admission.mounted.binding,
@@ -7038,6 +7078,7 @@ where
         let provenance_admission = self.admit_turn_code_in(
             self.run_context.lexical_scope,
             compiled.renderer.compiled.code(),
+            TurnInstallationAdmission::ActivationPreview(admission),
         )?;
         let provenance = self.provenance_for(&provenance_admission)?;
         drop(provenance_admission);
@@ -7046,6 +7087,7 @@ where
         let execution_admission = self.admit_turn_code_in(
             admission.scope_lease.scope(),
             compiled.renderer.compiled.code(),
+            TurnInstallationAdmission::ActivationPreview(admission),
         )?;
         self.run_prepared_for_purpose(
             execution_admission,
@@ -7089,7 +7131,11 @@ where
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         self.state.validate_new_binding_ids(binding_ids_of(&mode))?;
-        let admission = self.admit_turn_code_in(self.run_context.lexical_scope, code)?;
+        let admission = self.admit_turn_code_in(
+            self.run_context.lexical_scope,
+            code,
+            TurnInstallationAdmission::Compilation,
+        )?;
         let provenance = self.provenance_for(&admission)?;
         let checked = checked_turn_plan(
             admission.code.certification.as_ref(),
@@ -7305,7 +7351,8 @@ where
         if self.state.public_visibility_snapshot_in(scope).is_none() {
             return Err(PreparedRuntimeError::SourceScopeAdmission.into());
         }
-        let admission = self.admit_turn_code_in(scope, code)?;
+        let admission =
+            self.admit_turn_code_in(scope, code, TurnInstallationAdmission::Compilation)?;
         let provenance = self.provenance_for(&admission)?;
         let InstalledAdmittedTurn {
             program,
@@ -7450,7 +7497,13 @@ where
         let lexical_scope = self.run_context.lexical_scope;
         let admission =
             tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.resolve")
-                .in_scope(|| self.admit_turn_code_in(lexical_scope, code))?;
+                .in_scope(|| {
+                    self.admit_turn_code_in(
+                        lexical_scope,
+                        code,
+                        TurnInstallationAdmission::Compilation,
+                    )
+                })?;
         let provenance = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.provenance")
             .in_scope(|| self.provenance_for(&admission))?;
         let AdmittedTurnCode {
