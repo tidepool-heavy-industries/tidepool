@@ -250,7 +250,9 @@ pub struct PersistentSession {
     /// Immutable scoped semantics, keyed by witnesses from the mutation owners.
     /// Request counters and the ambient injection inventory are refreshed separately.
     compile_views: parking_lot::Mutex<HashMap<ScopeId, Arc<CachedCompileView>>>,
-    stub_revision: u64,
+    // Shared invalidation revision for stub and catalog input selection.
+    // Zero permanently disables cached witnesses after counter exhaustion.
+    compiler_input_revision: u64,
     #[cfg(test)]
     compile_view_bytes_hashed: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -303,11 +305,11 @@ pub struct PersistentSession {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct CompileViewKey {
+pub(super) struct CompileViewKey {
     library: uuid::Uuid,
     tip: Generation,
     bindings: BindingScopeWitness,
-    stubs: u64,
+    compiler_inputs: u64,
     public_epoch: u64,
 }
 
@@ -376,7 +378,7 @@ impl PersistentSession {
             lib,
             bindings: BindingTable::new(),
             compile_views: parking_lot::Mutex::new(HashMap::new()),
-            stub_revision: 1,
+            compiler_input_revision: 1,
             #[cfg(test)]
             compile_view_bytes_hashed: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -398,6 +400,7 @@ impl PersistentSession {
         catalog: tidepool_toolchain::toolchain::CatalogSelection,
     ) {
         self.catalog_selection = catalog;
+        self.advance_compiler_input_revision();
     }
 
     pub fn catalog_selection(&self) -> &tidepool_toolchain::toolchain::CatalogSelection {
@@ -413,15 +416,15 @@ impl PersistentSession {
     /// `.hi`. Idempotent.
     pub(super) fn mark_stub_generation(&mut self, generation: Generation) {
         if self.stub_generations.insert(generation.0) {
-            self.advance_stub_revision();
+            self.advance_compiler_input_revision();
         }
     }
 
-    fn advance_stub_revision(&mut self) {
-        self.stub_revision = if self.stub_revision == 0 {
+    fn advance_compiler_input_revision(&mut self) {
+        self.compiler_input_revision = if self.compiler_input_revision == 0 {
             0
         } else {
-            self.stub_revision.checked_add(1).unwrap_or(0)
+            self.compiler_input_revision.checked_add(1).unwrap_or(0)
         };
     }
 
@@ -1096,7 +1099,7 @@ impl PersistentSession {
                 && !self.binding_index.is_module_live(&module.module_name())
             {
                 self.stub_generations.remove(&module.gen().0);
-                self.advance_stub_revision();
+                self.advance_compiler_input_revision();
                 self.retired_stub_sources.push(module.gen());
             }
             if !safe_to_release {
@@ -1636,27 +1639,29 @@ impl PersistentSession {
         self.scoped_compile_view_in(scope).map(|view| view.digest)
     }
 
+    /// Read mutation-owner facts without constructing a view or its digest.
+    /// A missing stable witness requires a checked cold observation.
+    pub(super) fn compile_view_key_in(&self, scope: ScopeId) -> Option<CompileViewKey> {
+        if !self.scopes.is_live(scope) || self.compiler_input_revision == 0 {
+            return None;
+        }
+        let lib = self.lib.as_ref()?;
+        Some(CompileViewKey {
+            library: lib.compile_view_identity,
+            tip: lib.scope_tip(scope),
+            bindings: self.bindings.scope_witness(&self.scopes, scope)?,
+            compiler_inputs: self.compiler_input_revision,
+            public_epoch: self.public_visibility_epochs.get(&scope).copied().unwrap_or(0),
+        })
+    }
+
     fn scoped_compile_view_in(&self, scope: ScopeId) -> Option<Arc<CachedCompileView>> {
         if !self.scopes.is_live(scope) {
             return None;
         }
         let lib = self.lib.as_ref()?;
         super::generation_lease::requested_end(self.val_gen(), 1).ok()?;
-        let key = self
-            .bindings
-            .scope_witness(&self.scopes, scope)
-            .filter(|_| self.stub_revision != 0)
-            .map(|bindings| CompileViewKey {
-                library: lib.compile_view_identity,
-                tip: lib.scope_tip(scope),
-                bindings,
-                stubs: self.stub_revision,
-                public_epoch: self
-                    .public_visibility_epochs
-                    .get(&scope)
-                    .copied()
-                    .unwrap_or(0),
-            });
+        let key = self.compile_view_key_in(scope);
         if let Some(key) = &key {
             if let Some(cached) = self
                 .compile_views
@@ -4304,6 +4309,87 @@ mod checkpoint_scope_tests {
                 .prepared_handle_of(own.value.handle.raw()),
             Some(own.value.handle),
         );
+    }
+
+    #[test]
+    fn inspection_key_reads_only_publication_facts_before_view_capture() {
+        for count in [1, 10, 100] {
+            let root = tempfile::tempdir().unwrap();
+            let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+            let mut session = publication_session(&recovery, root.path(), 417);
+            let scope = session.mint_isolated_scope();
+            for index in 0..count {
+                let entry = super::super::prepared::tests::rooted_publication_fixture(
+                    &mut session, &format!("value{index}"), 900 + index,
+                );
+                session.bind_in(scope, entry).unwrap();
+            }
+            assert!(session.compile_views.lock().is_empty());
+            let key = session.compile_view_key_in(scope).unwrap();
+            for _ in 0..100 {
+                assert!(session.compile_view_key_in(scope).as_ref() == Some(&key));
+            }
+            assert!(session.compile_views.lock().is_empty(), "key reads must not prepare a view");
+            assert_eq!(session.compile_view_bytes_hashed.load(Ordering::Relaxed), 0);
+            let prepared = session.scoped_compile_view_in(scope).unwrap();
+            assert!(prepared.key.as_ref() == Some(&key));
+            assert!(session.compile_view_bytes_hashed.load(Ordering::Relaxed) > 0,
+                "the ordinary view path must calibrate the work observation");
+            eprintln!("inspection fact key retained_values={count} repeated_reads=100 prepared_views=0 hashed_bytes=0");
+        }
+    }
+
+    #[test]
+    fn inspection_key_invalidates_same_tip_inputs_and_disables_on_exhaustion() {
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 418);
+        let scope = session.mint_isolated_scope();
+        let initial = session.compile_view_key_in(scope).unwrap();
+        let tip = session.lib().scope_tip(scope);
+        let entry = super::super::prepared::tests::rooted_publication_fixture(
+            &mut session, "value", 1010,
+        );
+        session.bind_in(scope, entry).unwrap();
+        let bound = session.compile_view_key_in(scope).unwrap();
+        assert!(bound != initial);
+        assert_eq!(session.lib().scope_tip(scope), tip);
+        let child = session.mint_scope(scope).unwrap();
+        let inherited = session.compile_view_key_in(child).unwrap();
+        let entry = super::super::prepared::tests::rooted_publication_fixture(
+            &mut session, "value", 1011,
+        );
+        session.bind_in(scope, entry).unwrap();
+        let shadowed = session.compile_view_key_in(scope).unwrap();
+        assert!(shadowed != bound);
+        assert!(session.compile_view_key_in(child).as_ref() == Some(&inherited),
+            "a captured child retains its original binding world");
+        let sibling = session.mint_isolated_scope();
+        let entry = super::super::prepared::tests::rooted_publication_fixture(
+            &mut session, "unrelated", 1012,
+        );
+        session.bind_in(sibling, entry).unwrap();
+        assert!(session.compile_view_key_in(scope).as_ref() == Some(&shadowed));
+        session.set_catalog_selection(Default::default());
+        let catalog = session.compile_view_key_in(scope).unwrap();
+        assert!(catalog != shadowed, "catalog replacement invalidates even a same-tip world");
+        session.mark_stub_generation(Generation(1013));
+        let stub = session.compile_view_key_in(scope).unwrap();
+        assert!(stub != catalog);
+        let epoch = session.prepare_public_visibility_advance(scope).unwrap();
+        session.commit_public_visibility_advance(scope, epoch);
+        assert!(session.compile_view_key_in(scope).as_ref() != Some(&stub));
+        session.retire_scope(child);
+        assert!(session.compile_view_key_in(child).is_none());
+        session.compiler_input_revision = u64::MAX;
+        assert!(session.compile_view_key_in(scope).is_some());
+        session.set_catalog_selection(Default::default());
+        assert_eq!(session.compiler_input_revision, 0);
+        assert!(session.compile_view_key_in(scope).is_none());
+        session.set_catalog_selection(Default::default());
+        assert_eq!(session.compiler_input_revision, 0);
+        assert!(session.compile_view_key_in(scope).is_none());
+        assert_eq!(session.lib().scope_tip(scope), tip);
     }
 
     #[test]
