@@ -91,10 +91,13 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
         let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
         let compile_start = std::time::Instant::now();
         let compiled = tidepool_testing::with_settlement(|settlement| {
-            tidepool_runtime::compile_targets(
-                &source,
-                &[target],
-                &source_roots,
+            tidepool_runtime::compile_runtime_targets(
+                &tidepool_toolchain::artifacts::CompileInvocation {
+                    source: &source,
+                    targets: &[target],
+                    include: &source_roots,
+                    fallback_module_name: "Input",
+                },
                 |stage, elapsed, bytes| {
                     eprintln!(
                     "deployment compile {row}: stage={stage} elapsed_ns={} payload_bytes={bytes}",
@@ -110,6 +113,7 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
             compile_start.elapsed().as_nanos(),
         );
         let accepted: BTreeSet<_> = compiled
+            .artifacts()
             .certified_groups
             .iter()
             .filter(|group| group.origin() == ProductOrigin::Cached)
@@ -122,6 +126,7 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
             serde_json::to_string(&accepted).unwrap(),
         );
         let cached: BTreeSet<_> = compiled
+            .artifacts()
             .certified_groups
             .iter()
             .filter(|group| group.origin() == ProductOrigin::Cached)
@@ -136,6 +141,7 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
         // T_Hsc with CandidateFrontendReplayRefused. The assertion below also
         // rejects catalog owners reported as freshly extracted in the groups.
         let replayed = compiled
+            .artifacts()
             .certified_groups
             .iter()
             .filter(|group| {
@@ -145,15 +151,15 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
             .count();
         assert_eq!(replayed, 0, "catalog owners must not be re-extracted");
         let execution_start = std::time::Instant::now();
-        let value = tidepool_runtime::run_compiled_target(
-            &compiled,
-            target,
-            tidepool_runtime::DEFAULT_NURSERY_SIZE,
-            &mut frunk::HNil,
-            &(),
-            |_| {},
-        )
-        .expect("actual native execution of the package-backed target");
+        let value = compiled
+            .run(
+                target,
+                tidepool_runtime::DEFAULT_NURSERY_SIZE,
+                &mut frunk::HNil,
+                &(),
+                |_| {},
+            )
+            .expect("actual native execution of the package-backed target");
         eprintln!(
             "deployment execution {row}: elapsed_ns={}",
             execution_start.elapsed().as_nanos(),

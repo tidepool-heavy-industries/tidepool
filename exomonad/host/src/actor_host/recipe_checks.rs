@@ -184,9 +184,9 @@ fn select_checks<'a>(checks: &'a [String], recipe: Option<&str>) -> Result<Vec<&
 }
 
 /// Issued only after recipe compilation and confirmed transaction close.
-/// Its owned artifacts can be executed without retaining compiler authority.
+/// It retains the original source owner for each fresh installation.
 struct PreparedRecipe {
-    artifacts: tidepool_runtime::CompiledArtifacts,
+    artifacts: tidepool_runtime::RuntimePreparedTargets,
     source: String,
     entry: String,
 }
@@ -226,10 +226,19 @@ fn prepare_recipe(entry: &str, selected: &FrozenWorkspace) -> Result<PreparedRec
     );
     let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
     let artifacts = super::run_compiler_preparation(|settlement| {
-        tidepool_runtime::compile_targets(&source, &[target], &includes, |_, _, _| {}, settlement)
-            .map_err(|error| -> Box<dyn std::error::Error> {
-                Box::new(render_recipe_compile_error(error.into(), &source, entry))
-            })
+        tidepool_runtime::compile_runtime_targets(
+            &tidepool_toolchain::artifacts::CompileInvocation {
+                source: &source,
+                targets: &[target],
+                include: &includes,
+                fallback_module_name: "Input",
+            },
+            |_, _, _| {},
+            settlement,
+        )
+        .map_err(|error| -> Box<dyn std::error::Error> {
+            Box::new(render_recipe_compile_error(error.into(), &source, entry))
+        })
     })?;
     Ok(PreparedRecipe {
         artifacts,
@@ -407,8 +416,7 @@ impl Driver {
         prepared: &PreparedRecipe,
     ) -> std::result::Result<(), RecipeCompilationFailure> {
         tokio::task::block_in_place(|| {
-            tidepool_runtime::run_compiled_target(
-                &prepared.artifacts,
+            prepared.artifacts.run(
                 tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET,
                 tidepool_runtime::DEFAULT_NURSERY_SIZE,
                 self,

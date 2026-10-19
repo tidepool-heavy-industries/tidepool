@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 pub use tidepool_runtime::CompileError;
 use tidepool_runtime::{
-    compile_and_run, compile_and_run_with_nursery_size, compile_haskell, compile_targets,
-    run_compiled_target, CompileResult, CompiledArtifacts, DispatchEffect, EvalResult,
-    HaskellValue, RuntimeError, DEFAULT_NURSERY_SIZE, EVAL_STACK_SIZE,
+    compile_and_run, compile_and_run_with_nursery_size, compile_haskell, compile_runtime_targets,
+    CompileResult, DispatchEffect, EvalResult, HaskellValue, RuntimeError, RuntimePreparedTargets,
+    DEFAULT_NURSERY_SIZE, EVAL_STACK_SIZE,
 };
 
 /// Repo root, derived from this crate's manifest dir (`<root>/bridge/testing`).
@@ -282,7 +282,7 @@ impl EvalHarness {
     }
 
     /// Compile MULTIPLE named top-level bindings sharing ONE module against
-    /// ONE `tidepool-extract` spawn ([`compile_targets`]'s N-in-one-spawn
+    /// ONE `tidepool-extract` spawn ([`compile_runtime_targets`]'s N-in-one-spawn
     /// mode). Run each target independently afterward via
     /// [`run_target`](Self::run_target)/
     /// [`run_target_owned`](Self::run_target_owned) — own handler instance,
@@ -292,10 +292,19 @@ impl EvalHarness {
         &self,
         source: &str,
         targets: &[&str],
-    ) -> Result<CompiledArtifacts, CompileError> {
+    ) -> Result<RuntimePreparedTargets, RuntimeError> {
         let includes = self.owned_includes();
         crate::with_settlement(|settlement| {
-            compile_targets(source, targets, &includes, |_, _, _| {}, settlement)
+            compile_runtime_targets(
+                &tidepool_toolchain::artifacts::CompileInvocation {
+                    source,
+                    targets,
+                    include: &includes,
+                    fallback_module_name: "Input",
+                },
+                |_, _, _| {},
+                settlement,
+            )
         })
     }
 
@@ -384,10 +393,15 @@ impl EvalHarness {
     /// against `handlers` (user context `()`) — own [`EVAL_STACK_SIZE`]
     /// thread, own dispatch, no additional `tidepool-extract` spawn (the
     /// target's Core was already produced by `compile_many`). Mirrors
-    /// [`run`](Self::run) but takes the pre-compiled [`CompiledArtifacts`]
+    /// [`run`](Self::run) but takes the pre-compiled [`RuntimePreparedTargets`]
     /// and a target name instead of source. The outcome retains the admitted
     /// constructor table and compile warnings with the evaluated value.
-    pub fn run_target<H>(&self, artifacts: &CompiledArtifacts, target: &str, handlers: H) -> Outcome
+    pub fn run_target<H>(
+        &self,
+        artifacts: &RuntimePreparedTargets,
+        target: &str,
+        handlers: H,
+    ) -> Outcome
     where
         H: DispatchEffect<()> + Send + 'static,
     {
@@ -397,7 +411,7 @@ impl EvalHarness {
     /// As [`run_target`](Self::run_target) but with an explicit user context `U`.
     pub fn run_target_with<U, H>(
         &self,
-        artifacts: &CompiledArtifacts,
+        artifacts: &RuntimePreparedTargets,
         target: &str,
         handlers: H,
         user: U,
@@ -415,7 +429,7 @@ impl EvalHarness {
     /// state (write counts, stored files, recorded calls) IS the assertion.
     pub fn run_target_owned<H>(
         &self,
-        artifacts: &CompiledArtifacts,
+        artifacts: &RuntimePreparedTargets,
         target: &str,
         handlers: H,
     ) -> (Outcome, H)
@@ -429,7 +443,7 @@ impl EvalHarness {
     /// back alongside the [`Outcome`].
     pub fn run_target_with_owned<U, H>(
         &self,
-        artifacts: &CompiledArtifacts,
+        artifacts: &RuntimePreparedTargets,
         target: &str,
         mut handlers: H,
         user: U,
@@ -440,8 +454,7 @@ impl EvalHarness {
     {
         let nursery = self.nursery.unwrap_or(DEFAULT_NURSERY_SIZE);
         let (result, handlers) = with_eval_stack(move || {
-            let result =
-                run_compiled_target(artifacts, target, nursery, &mut handlers, &user, |_| {});
+            let result = artifacts.run(target, nursery, &mut handlers, &user, |_| {});
             (result, handlers)
         });
         (Outcome(result), handlers)

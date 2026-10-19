@@ -7760,7 +7760,7 @@ mod maintained_binding_lifetime_properties {
 }
 
 impl PersistentSession {
-    pub(super) fn admit_source_lease(
+    pub(crate) fn admit_source_lease(
         &self,
         lease: Arc<super::RuntimeLexicalScopeLease>,
     ) -> Result<(), super::SourceAdmissionError> {

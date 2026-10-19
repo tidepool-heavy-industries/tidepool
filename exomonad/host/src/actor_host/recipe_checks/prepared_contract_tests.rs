@@ -109,7 +109,16 @@ fn run() {
     std::fs::write(scratch.join("contract.hs"), &source).unwrap();
     let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
     let compiled = tidepool_testing::with_settlement(|settlement| {
-        tidepool_runtime::compile_targets(&source, &[target], &includes, |_, _, _| {}, settlement)
+        tidepool_runtime::compile_runtime_targets(
+            &tidepool_toolchain::artifacts::CompileInvocation {
+                source: &source,
+                targets: &[target],
+                include: &includes,
+                fallback_module_name: "Input",
+            },
+            |_, _, _| {},
+            settlement,
+        )
     })
     .unwrap();
     let cases = [
@@ -150,8 +159,7 @@ fn run() {
             cells: vec![],
             attempts: vec![],
         };
-        let result = tidepool_runtime::run_compiled_target(
-            &compiled,
+        let result = compiled.run(
             target,
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             &mut host,

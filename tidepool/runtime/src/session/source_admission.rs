@@ -542,6 +542,13 @@ impl RuntimeSourceCompilerTransaction {
         self.source.validate_source_issuer()?;
         Ok(())
     }
+    pub(crate) fn admitted_original_source(
+        &self,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SourceAdmissionError> {
+        self.admit(None)?;
+        Ok(self.source.clone())
+    }
+
     fn settle(&self, confirmed: bool) {
         self.closed
             .store(true, std::sync::atomic::Ordering::Release);
