@@ -12,6 +12,7 @@ module Tidepool.GhcPipeline
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
   , CompilerProducerIdentity, captureCompilerProducerIdentity
+  , captureSupportedPackageProfile
   , runPipelineSessionSelectedWithProducer
   , CompilePurpose(..), withSourceImportIntents
   , PipelineResult, prBinds, prHscEnv, prInjectedSessionInterfaces, prProducedSessionInterfaces
@@ -285,6 +286,7 @@ import Tidepool.PackageWitness
   ( PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports, decodeCapturedPackageImports
   , validatePackageImportRoot
   , withPackageRootObservations, packageImportRootWithin, validatePackageImportRootWithin )
+import Tidepool.PackageWitness (captureSupportedPackageProfileWith, requireObservationPackageEnvironment)
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..), CandidateGroup(..)
   , CapturedCandidateManifest, captureCandidateManifest
@@ -4845,6 +4847,19 @@ type RequestRunner = forall requestResult.
 
 type CompilerScopeRunner = forall requestResult.
   IO () -> (CompilerScope -> IO requestResult) -> IO requestResult
+
+-- Metadata-only observation uses precisely the package setup of the resident
+-- compiler. It has no source target and cannot run compile-time user code.
+captureSupportedPackageProfile :: IO BS.ByteString
+captureSupportedPackageProfile = do
+  requireObservationPackageEnvironment
+  libdir <- lookupEnv "TIDEPOOL_GHC_LIBDIR" >>= maybe
+    (fail "package profile capture requires TIDEPOOL_GHC_LIBDIR") pure
+  runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags (gopt_set (extractionDynFlags flags []) Opt_ExternalInterpreter)
+    env <- getSession
+    liftIO (captureSupportedPackageProfileWith libdir env)
 
 withResidentCompilerScopes :: [FilePath] -> (CompilerScopeRunner -> IO a) -> IO a
 withResidentCompilerScopes baseIncludes useRequests = do

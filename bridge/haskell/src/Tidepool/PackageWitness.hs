@@ -8,24 +8,39 @@ module Tidepool.PackageWitness
   , extendAdmittedPackageImportsWithFacts
   , PackageRootObservations, withPackageRootObservations
   , packageImportRootWithin, validatePackageImportRootWithin
-  , packageInputClosure ) where
+  , packageInputClosure
+  , captureSupportedPackageProfileWith, supportedPackageProfileIdentity
+  , requireObservationPackageEnvironment ) where
 
 import Codec.CBOR.Decoding
 import Codec.CBOR.Encoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, try, bracket, evaluate)
-import Control.Monad (replicateM, unless, when, foldM)
+import Control.Monad (replicateM, unless, when, foldM, forM)
+import Control.Monad.State.Strict (StateT, evalStateT, get, put)
+import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA
+import Data.ByteString.Builder (Builder, byteString, toLazyByteString, word32LE)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Text qualified as T
+import Data.Text.Lazy qualified as LT
+import Data.Text.Lazy.Encoding qualified as LTE
+import Data.Word (Word32)
+import Data.List (groupBy, sortOn)
+import GHC.Data.ShortText qualified as ST
+import GHC.Driver.Session (globalPackageDatabasePath, platformMisc, projectVersion)
+import GHC.Settings (platformMisc_targetPlatformString)
+import GHC.Unit.Info (UnitInfo, unitId, unitAbiHash, unitImportDirs, unitLibraryDirs, unitLibraryDynDirs, unitIncludeDirs)
+import GHC.Unit.State (listUnitInfo)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Unit.Module.ModIface (mi_module, mi_usages, mi_deps)
 import GHC.Unit.Module.Deps (Usage(..), Dependencies(..))
 import Tidepool.FatIface (readExactInterface)
+import Tidepool.ExtractUtil (shaHex)
 import GHC.Driver.Config.Finder (initFinderOpts)
 import GHC.Driver.Env (HscEnv(..), hsc_HUG, hsc_units, hsc_home_unit_maybe, hsc_home_unit)
 import GHC.Unit.Env (HomeUnitEnv(..))
@@ -35,8 +50,9 @@ import GHC.Unit.Module (Module, moduleUnit, moduleName, moduleNameString, mkModu
 import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenWithIsBoot(..))
 import Numeric (showHex)
-import System.Directory (removeFile)
+import System.Directory (removeFile, canonicalizePath)
 import System.FilePath (isAbsolute, takeDirectory)
+import System.Environment (lookupEnv)
 import System.IO (openBinaryTempFile, hClose)
 import System.Posix.Files (createLink)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
@@ -458,3 +474,102 @@ packageInputClosure env roots = do
     -- Installed package inputs consume the resulting .hi, not the source
     -- files used to build that package. Their fingerprints remain in its bytes.
     usage UsageFile{} = []
+
+-- The enclosing immutable profile/provider owns these facts on reusable boot.
+-- These bytes alone cannot establish roots, service lifetime or query authority.
+requireObservationPackageEnvironment :: IO ()
+requireObservationPackageEnvironment = do
+  fields <- traverse lookupEnv compilerPackageBootFields
+  unless (all (== Nothing) fields)
+    (fail "package profile observation cannot inherit compiler service boot fields")
+
+compilerPackageBootFields :: [String]
+compilerPackageBootFields =
+  [ "TIDEPOOL_COMPILER_PACKAGE_PROFILE"
+  , "TIDEPOOL_COMPILER_PACKAGE_PROFILE_SHA256"
+  , "TIDEPOOL_COMPILER_SERVICE_EPOCH"
+  , "TIDEPOOL_COMPILER_PACKAGE_SOURCE_ID"
+  , "TIDEPOOL_COMPILER_PACKAGE_PROFILE_ID"
+  , "TIDEPOOL_COMPILER_WORKER_INSTANCE"
+  ]
+
+supportedPackageProfileIdentity :: BS.ByteString -> String
+supportedPackageProfileIdentity bytes =
+  shaHex ("Tidepool GHC supported package profile v1\0" <> bytes)
+
+captureSupportedPackageProfileWith :: FilePath -> HscEnv -> IO BS.ByteString
+captureSupportedPackageProfileWith libdir env = do
+  canonicalLibdir <- canonicalAbsolute libdir
+  globalDB <- canonicalAbsolute (globalPackageDatabasePath flags)
+  -- UnitState can index an instantiated unit under more than one key. Emit
+  -- each actual UnitId once, refusing inconsistent aliases rather than picking.
+  units <- forM (groupBy sameUnit (sortOn unitKey (listUnitInfo (hsc_units env)))) $ \aliases ->
+    case aliases of
+      [] -> fail "empty package profile unit alias group"
+      first:rest -> do
+        unless (all (== first) rest) (fail "inconsistent package profile unit aliases")
+        pure first
+  builder <- flip evalStateT maxSupportedPackageProfileBytes $ do
+    chargeProfile 8
+    header <- traverse framedText
+      [projectVersion flags, platformMisc_targetPlatformString (platformMisc flags),
+       canonicalLibdir, globalDB]
+    count <- counted (length units)
+    rows <- traverse unitRow units
+    pure (byteString "TPGHC001" <> mconcat header <> count <> mconcat rows)
+  pure (BL.toStrict (toLazyByteString builder))
+  where
+    flags = hsc_dflags env
+    unitKey = unitIdString . unitId
+    sameUnit left right = unitKey left == unitKey right
+
+-- Shared with the service profile wrapper: this is the existing machine
+-- control-input budget, not a limit on source modules or compiler residency.
+maxSupportedPackageProfileBytes :: Int
+maxSupportedPackageProfileBytes = 16 * 1024 * 1024
+
+type ProfileEncoding = StateT Int IO
+
+unitRow :: UnitInfo -> ProfileEncoding Builder
+unitRow info = do
+  identity <- framedText (unitIdString (unitId info))
+  abi <- framedText (ST.unpack (unitAbiHash info))
+  directories <- forM
+    [unitImportDirs info, unitLibraryDirs info, unitLibraryDynDirs info, unitIncludeDirs info] $ \paths -> do
+      canonical <- liftIO (traverse (canonicalAbsolute . ST.unpack) paths)
+      count <- counted (length canonical)
+      values <- traverse framedText canonical
+      pure (count <> mconcat values)
+  pure (identity <> abi <> mconcat directories)
+
+canonicalAbsolute :: FilePath -> IO FilePath
+canonicalAbsolute path = do
+  unless (isAbsolute path && '\0' `notElem` path)
+    (fail "supported package profile requires absolute paths")
+  canonicalizePath path
+
+framedText :: String -> ProfileEncoding Builder
+framedText value = do
+  remaining <- get
+  unless (remaining >= 4) (fail "package profile exceeds 16 MiB control-input budget")
+  let prefix = BL.take (fromIntegral (remaining - 4) + 1)
+        (LTE.encodeUtf8 (LT.pack value))
+  unless (BL.length prefix <= fromIntegral (remaining - 4))
+    (fail "package profile exceeds 16 MiB control-input budget")
+  let bytes = BL.toStrict prefix
+  unless (not (BS.elem 0 bytes)) (fail "package profile text contains NUL")
+  chargeProfile (4 + BS.length bytes)
+  pure (word32LE (fromIntegral (BS.length bytes)) <> byteString bytes)
+
+counted :: Int -> ProfileEncoding Builder
+counted count = do
+  unless (toInteger count <= toInteger (maxBound :: Word32))
+    (fail "package profile count exceeds its wire field")
+  chargeProfile 4
+  pure (word32LE (fromIntegral count))
+
+chargeProfile :: Int -> ProfileEncoding ()
+chargeProfile count = do
+  remaining <- get
+  unless (count <= remaining) (fail "package profile exceeds 16 MiB control-input budget")
+  put (remaining - count)
