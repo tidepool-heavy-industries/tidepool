@@ -14072,11 +14072,9 @@ mod tests {
                 .check(&retained)
                 .expect("retention preserves issuing groups");
             assert_eq!(retained.roots(), joined.roots());
-            assert!(helper_groups.iter().all(|group| {
-                retained
-                    .custody_roots()
-                    .contains(&InventoryNodeKey::Group(*group))
-            }));
+            assert!(helper_groups
+                .iter()
+                .all(|group| retained.contains_issued_native_group(*group)));
             let generated = Arc::new(entry("RecaptureScaffold", &[]));
             let scaffold = inventory
                 .admit_shared(&inventory.empty_view(), vec![generated.clone()])
