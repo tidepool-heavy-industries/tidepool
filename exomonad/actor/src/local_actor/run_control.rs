@@ -15,6 +15,8 @@ pub(crate) use startup::{
 };
 mod generation;
 pub(crate) use generation::GenerationPopulation;
+#[cfg(test)]
+pub(crate) use generation::{GenerationResourceIdentity, GenerationResourceState};
 mod transfers;
 #[cfg(test)]
 pub(crate) use preparation::RootPlacementPublicationError;
