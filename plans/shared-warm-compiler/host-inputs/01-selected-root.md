@@ -1,5 +1,12 @@
 # 01 — Issue persistent exact selected inputs
 
+Ownership amendment: read [DEMAND-SERVICE.md](../DEMAND-SERVICE.md) first.
+Rust retains primary notebook selections, execution provenance and atomic
+publication; Haskell owns compiler-derived worlds and invalidation. The
+paired owner review must classify mixed structures before moving or deleting
+them. The previous field/path inventory below remains investigative evidence,
+not a requirement to preserve its host-side decomposition.
+
 Assigned to a Sol implementation child of the [host-inputs supervisor](README.md) when this plan is executed. Base source: `70a92c65a02a591f76590daf4e5bfa3e6fcbf723`; start from the supervisor's later exact reviewed base, recording both. This document authorizes no implementation during the current plan-writing task.
 
 **Goal.** Make the issuer of compiler selection retain the persistent exact selected input root, its immutable role/body choices and exact required edges. Extend/narrow that owner directly instead of resolving the whole retained inventory on every request. Selection reads should reuse issued facts without re-deriving them. Dormant custody must remain available without becoming optional roots. Deliver the minimal typed internal contract needed by delta admission and publication; conceptual names here are not instructions to introduce another registry.

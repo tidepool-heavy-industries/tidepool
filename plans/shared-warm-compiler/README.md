@@ -1,12 +1,23 @@
 # Shared warm compiler: delivery plan
 
-Status: cross-reviewed implementation plan; no implementation started by this research fork.
+Status: active implementation campaign. Reviewed host, input-custody and worker
+protocol tranches are integrated and joined verified; see [current status](STATUS.md)
+for exact source and evidence. The demand-service architecture amendment is
+accepted after bounded owner and independent review. Concrete paired contracts
+and the first production slice are the active successor wave.
+
 
 This directory is the handoff for a Sol supervision tree. Read this file, the
 [shared contracts](CONTRACTS.md), and the [supervisor assignment](supervisor/README.md)
 first. The directory structure mirrors the area owners and their successive
 worker assignments. It is a delivery plan, not a proposal to build an agent
 orchestration framework.
+
+Read [compiler-owned worlds](DEMAND-SERVICE.md) before further host/worker API
+work. It changes the organizing boundary: Haskell owns derived compiler worlds;
+Rust supplies primary notebook changes and publishes exact returned products.
+Earlier references to host-issued roots describe authoritative selection facts,
+not a requirement to maintain GHC's derived dependency world in Rust.
 
 The [overnight root instructions](OVERNIGHT.md) specify Sol-low coordination,
 Sol medium/high implementation and review, optional Luna helpers, and the
@@ -22,9 +33,9 @@ resident process for every actor.
 
 The campaign has two deliverables:
 
-1. A reviewed, integrated production candidate with persistent selected input
-   roots, incremental admission, shared owned input rows, bounded worker
-   realizations, and explicit changed-reload retirement semantics.
+1. A reviewed, integrated production compiler service: immutable selected worlds,
+   demand-specific queries, shared owned input rows, incremental notebook
+   publication, bounded worker residency, and changed-reload retirement.
 2. A measured frontend experiment that determines whether ordinary-module import
    processing can also reuse a checked environment safely. Promote that change
    only if its semantic and performance gates pass. Otherwise preserve its
@@ -96,15 +107,14 @@ commits and the recorded contract revision define what was actually integrated.
 
 ```mermaid
 flowchart LR
-  Owner[Runtime publication owner] --> Root[Exact selected input root]
-  Root --> Capture[Borrow immutable inputs]
-  Capture --> Ensure[Realize on an admitted worker]
-  Ensure --> Attempt[Fresh guarded compilation]
-  Attempt --> Seal[Matching END and output certification]
+  Owner[Runtime notebook and publication owner] --> Request[World reference + actual changes + demand]
+  Request --> Compiler[Haskell compiler service owns derived world]
+  Compiler --> Result[Exact result + private successor + restoration facts]
+  Result --> Seal[Matching END and output certification]
   Seal --> Run[Install and execute once]
-  Run --> Commit[Publish bindings and successor root together]
+  Run --> Commit[Publish bindings and successor world together]
   Commit --> Owner
-  Root -. shared facts .-> Fork[Independent fork root]
+  Compiler -. immutable shared facts .-> Fork[Independent fork world]
 ```
 
 Custody can contain more than the selected root. A compiler namespace can select
@@ -118,9 +128,9 @@ authority.
 | Checkpoint | Required outputs | Parallel work enabled | Fold requirement |
 | --- | --- | --- | --- |
 | G0: agree and observe | Current source baseline; shared contracts; selection regression oracle; current phase/counter coverage | All area first waves, with coordinated shared-file edits | Compile any shared scaffolding and exercise a small production history immediately |
-| G1: complete owner-issued inputs | Host selected-root owner; owned immutable rows; mutation-route inventory; cold enumeration control | Delta admission, checked realization protocol, reload owner implementation | Independent selection/custody and byte-lifetime review |
-| G2: stop repeating host history | Delta indexes and output support; paired publication; generation retirement controls | Joined scaled histories, worker transport and retention work | No missed value-only/shadow/fork/recovery path; no full scan merely moved to commit |
-| G3: reuse exact worker facts | Source-free realization acquisition; private attempts; bounded retention; cold fallback | Frontend experiment and qualified affinity comparison | Transaction/END/cancellation and incompatible-world controls |
+| G1: establish service ownership | Runtime facts versus compiler-derived state inventory; exact world/restoration contract; owned rows and package-source decision | First actual inspection/check service path; independent reload work | Independent selection, source lifetime and production consumer review |
+| G2: prove demand-based operation | Held compiler world; actual lookup/check caller; no host export before hit; cold restore | Cell and publication migration; bounded retention | Exact module/visibility semantics, no hidden full preparation or worker rebuilding |
+| G3: migrate cells and publication | Whole-cell checking/executable demand; paired successor publication; fork/reload/recovery; old route deletion | Frontend experiment and qualified affinity comparison | No missed mutation route; END/cancellation, stale writer and divergent-world controls |
 | G4: decide and qualify | Import-context decision; joined source; updated engine map; matched baseline/candidate evidence | Release owner integration and subsequent exploratory runs | Frozen bundle and all claimed workloads qualify at the exact delivered commit |
 
 These are dependency gates, not global barriers. For example, input-row work and

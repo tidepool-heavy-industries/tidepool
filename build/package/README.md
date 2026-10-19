@@ -512,7 +512,7 @@ assertion. That attempt did not execute the frozen bundle's owned-resident
 qualification contract, so it is retained as an unqualified diagnostic rather
 than evidence for the four-case cohort.
 
-The `persona-startup` cohort runs six ordinary production controls from the
+The `persona-startup` cohort runs seven ordinary production controls from the
 same frozen descriptor: full memory arrival and explicit refresh without startup
 judgment, Web selection with native judgment and empty-input control, and genuine
 process-loss recovery of the edited Persona context. Arrival also checks authored
@@ -522,11 +522,16 @@ The crash history kills and waits for the actual subprocess, reopens the same
 source and run, and checks native binding transfer and retained context without
 initializer replay. It requires the bundle's browser assets, fixtures, catalog
 and root entry, retains artifacts, and runs serially with an owned compiler.
+The shared-workspace history uses scaffolded shared Jev sources, required derived
+JSON startup support and a wrapper preserving the Persona runtime spec. It checks
+memory/files effects, native lookup, notebook lookup and a later pure display.
+Its focused direct-compiler result is separate from this frozen resident gate;
+changing the roster requires rebuilding and freezing the bundle.
 The coherent reload history checks new source and type behavior, fresh notebook
 bindings, immutable issued requests, prompt selection, no-op and refusal outcomes.
 Independent coherent cold histories restore published B despite edited draft C and refuse
 missing or corrupt selected installers while retaining the configuration through
-legitimate incarnation transfers. All six exact cases must execute and pass.
+legitimate incarnation transfers. All seven exact cases must execute and pass.
 The crash case has no graceful
 hosted cleanup report; its retained `not_observed` status remains distinct from
 the test's actual process wait, physical lock and successor assertions.

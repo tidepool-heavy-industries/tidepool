@@ -1,18 +1,19 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws) where
 
 import Tidepool.RequestCompletion (finishCompletion)
 
-import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try)
-import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try, finally, mask)
+import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, readMVar, threadDelay)
 import Control.Monad ((>=>), foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Internal as BSI
-import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
+import Data.IORef (IORef, newIORef, modifyIORef', readIORef, writeIORef)
 import Data.List (sortOn, isInfixOf, isPrefixOf, nub, permutations, stripPrefix, tails)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -20,7 +21,7 @@ import qualified Data.Text as T
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
 import System.FilePath ((</>), takeDirectory)
-import System.IO (hClose, hFlush, hGetLine, hPutStrLn, Handle)
+import System.IO (hClose, hFlush, hGetLine, hPutStrLn, Handle, stderr, utf8, BufferMode(NoBuffering), hGetEncoding, hGetBuffering, hSetEncoding, hSetBuffering, hSetBinaryMode)
 import Foreign.C.String (CString, withCString)
 import Foreign.C.Types (CInt(..), CUInt(..))
 import System.Posix.Types (Fd(..))
@@ -29,6 +30,8 @@ import System.Posix.Process (getProcessID)
 import System.Process (CreateProcess(..), StdStream(CreatePipe), callProcess, proc, waitForProcess, withCreateProcess)
 import System.Exit (ExitCode(ExitSuccess))
 import GHC.Conc (ThreadStatus(..), threadStatus)
+import GHC.IO.Buffer (Buffer(..), CharBuffer, readCharBuf)
+import GHC.IO.Encoding.Types (BufferCodec(BufferCodec), TextEncoding(TextEncoding))
 import System.Timeout (timeout)
 import Test.QuickCheck
 import Test.QuickCheck.Random (mkQCGen)
@@ -54,7 +57,7 @@ import Tidepool.ExactScope
   , writeCheckedExactCompilation, writeRetainedExactCompilation
   , ExactCompilationPublication(..), writeRetainedExactCompilationWithOutputsAndPublication
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
-  , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes )
+  , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
@@ -216,7 +219,7 @@ ownedFixtureScope handles path = do
             | core <- maybe [] pure (canonicalCoreArtifact proof)]) (scopeModuleInterfaceProofs scope)
   nativeParts <- case scopeCodecField ScopeCodecNativeProducts fixture of
     TList rows -> Map.fromListWith (++) <$> forM rows (\row -> case row of
-      TList [TString unit,TString name,_,_,_,_,_,TList [TString censusPath,TString censusSha],_] -> do
+      TList [TString unit,TString name,_,_,_,_,_,TList [TString censusPath,TString censusSha],_,_] -> do
         let key = (T.unpack unit,T.unpack name)
         product' <- maybe (fail "issued native census lacks its admitted product") pure
           (Map.lookup key (Map.fromList [((originalUnit value,originalModule value),value)
@@ -396,7 +399,17 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
       (fail "fresh physical owner inherited a prior worker's decoder")
     withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" "0" $ do
       bounded <- newExactInputOwner
-      _ <- readExactScopeWithOwner bounded thirdPath >>= either fail pure
+      live <- readExactScopeWithOwner bounded thirdPath >>= either fail pure
+      let interfaces = [iface | (iface,_,_) <- scopeInterfaces live]
+          decode = readScopedInterfaces (prHscEnv (pprPipelineResult original)) live interfaces >>= either fail pure
+      unless (length interfaces == 2 && Set.size (Set.fromList (map exactSha256 interfaces)) == 2)
+        (fail "zero-budget decoder control needs two genuine distinct interface owners")
+      _ <- decode
+      (_,decodedAgain) <- captureDiagnostics decode
+      unless (sum [total ("exact_iface_read_calls." ++ exactModule iface) decodedAgain | iface <- interfaces]
+              == toInteger (length interfaces)
+          && sum [total ("exact_iface_decode_reuse." ++ exactModule iface) decodedAgain | iface <- interfaces] == 0)
+        (fail "late live-scope decoding repopulated zero-budget inactive interface retention")
       (_,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
       unless (counterValues "original_inputs.retained_encoded_bytes" evicted == [0]
           && total "original_inputs.certificate.misses" evicted == 2)
@@ -427,6 +440,15 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
     withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" (show positiveLimit) $ do
       bounded <- newExactInputOwner
       (live,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
+      let interfaces = [iface | (iface,_,_) <- scopeInterfaces live]
+          decode = readScopedInterfaces (prHscEnv (pprPipelineResult original)) live interfaces >>= either fail pure
+      unless (length interfaces == 2 && Set.size (Set.fromList (map exactSha256 interfaces)) == 2)
+        (fail "positive-budget decoder control needs two genuine distinct interface owners")
+      _ <- decode
+      (_,decodedAgain) <- captureDiagnostics decode
+      unless (sum [total ("exact_iface_decode_reuse." ++ exactModule iface) decodedAgain | iface <- interfaces] > 0
+          && sum [total ("exact_iface_read_calls." ++ exactModule iface) decodedAgain | iface <- interfaces] > 0)
+        (fail "positive inactive allowance did not separate retained and live-only interface decoding")
       unless (total "original_inputs.retained_encoded_bytes" evicted > 0
           && total "original_inputs.evicted_encoded_bytes" evicted > 0)
         (fail "positive allowance did not retain and evict genuine images")
@@ -435,6 +457,50 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
         ++ " evicted=" ++ show (total "original_inputs.evicted_encoded_bytes" evicted))
       receiving <- writeGenuineMetadataScope work ["CanonicalDependency"] fixture >>= ownedFixtureScope handles
       _ <- readExactScopeWithOwner bounded receiving >>= either fail pure
+      -- Change only image order: the same issued complete scope now retains
+      -- Source first. Restoring the same full images Dependency first must
+      -- evict Source's optional decode while the old complete scope stays usable.
+      (_,codec) <- readScopeCodecFixture thirdPath
+      (arenas,images) <- case scopeCodecAcquisition codec of
+        Just (ContinueCodecOriginals arenas (TList images)) -> pure (arenas,images)
+        _ -> fail "publication control needs genuine owned images"
+      let sourceFirst image = case image of
+            TList [_,_,TString name,_,_] -> name /= "CanonicalSource"
+            _ -> True
+          failedPath = work </> "failed-scope-publication.cbor"
+      BS.writeFile failedPath (toStrictByteString (encodeTerm (scopeCodecTerm
+        (replaceScopeCodecAcquisition (ContinueCodecOriginals arenas
+          (TList (sortOn sourceFirst images))) codec))))
+      forM_ [False,True] $ \asynchronous -> do
+        let kind = if asynchronous then "async" else "io"
+        atomicOwner <- newExactInputOwner
+        oldLive <- readExactScopeWithOwner atomicOwner failedPath >>= either fail pure
+        _ <- readExactScopeWithOwner atomicOwner thirdPath >>= either fail pure
+        let oldInterfaces = [iface | (iface,_,_) <- scopeInterfaces oldLive]
+            decodeOld = readScopedInterfaces (prHscEnv (pprPipelineResult original)) oldLive oldInterfaces >>= either fail pure
+        _ <- decodeOld
+        (_,beforeFailed) <- captureDiagnostics decodeOld
+        unless (total "exact_iface_read_calls.CanonicalSource" beforeFailed == 1
+            && total "exact_iface_decode_reuse.CanonicalSource" beforeFailed == 0
+            && total "exact_iface_decode_reuse.CanonicalDependency" beforeFailed == 1)
+          (fail "publication control did not establish Dependency-only inactive decoder retention")
+        attempted <- failRetainedCountWrite asynchronous (readExactScopeWithOwner atomicOwner failedPath)
+        unless (case (kind,attempted) of
+            ("io",Right (Left reason)) -> "injected retained-count write failure" `isInfixOf` reason
+            ("async",Left problem) -> fromException problem == Just ThreadKilled
+            _ -> False)
+          (fail ("scope publication did not reach its injected " ++ kind ++ " failure"))
+        (_,afterFailed) <- captureDiagnostics (decodeOld >> decodeOld)
+        unless (total "exact_iface_read_calls.CanonicalSource" afterFailed == 2
+            && total "exact_iface_decode_reuse.CanonicalSource" afterFailed == 0
+            && total "exact_iface_decode_reuse.CanonicalDependency" afterFailed == 2)
+          (fail ("failed " ++ kind ++ " acquisition split raw custody from decoder retention: " ++ afterFailed))
+        -- Probe only Dependency after the decoder observations: aggregate
+        -- full-scope hit counts cannot distinguish retained Dependency/Source.
+        (_,stillPrevious) <- captureDiagnostics (readExactScopeWithOwner atomicOwner receiving >>= either fail pure)
+        unless (total "original_inputs.certificate.hits" stillPrevious == 1
+            && total "original_inputs.certificate.misses" stillPrevious == 0)
+          (fail "failed acquisition discarded previous raw input facts")
       forM_ (scopeInterfaces live) $ \(iface,_,_) -> do
         bytes <- scopeInterfaceBytes live iface
         bracket (BS.readFile (exactPath iface)) (BS.writeFile (exactPath iface)) $ \_ -> do
@@ -487,6 +553,90 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
     unless (total "original_inputs.certificate.misses" afterReplacement == 2)
       (fail "replacement owner inherited cancelled physical-worker facts")
     putStrLn ("owned exact inputs: A/B/A reuse, deleted manifests, rotation, positive/live and zero-budget eviction, cancelled admission and replacement passed\n" ++ warm)
+
+-- Fail a real timing write at the old decoder/raw publication split. A one-shot
+-- encoder delegates UTF-8 unchanged and recognizes only consumed characters;
+-- chunk boundaries and retries cannot silently miss or duplicate the injection.
+failRetainedCountWrite :: Bool -> IO a -> IO (Either SomeException a)
+failRetainedCountWrite asynchronous action = do
+  fired <- newIORef False
+  (result,_) <- captureDiagnostics $
+    if asynchronous then do
+      reached <- newEmptyMVar
+      blocked <- newEmptyMVar
+      done <- newEmptyMVar
+      let retire reader = do
+            settled <- timeout 5000000 (killThread reader >> readMVar done)
+            case settled of
+              Nothing -> fail "publication fault observer did not join its acquisition thread"
+              Just _ -> pure ()
+      bracket (forkIO (try (withRetainedCountFault fired
+          (putMVar reached () >> takeMVar blocked) action) >>= putMVar done)) retire $ \reader -> do
+        observed <- timeout 5000000 (takeMVar reached)
+        unless (observed == Just ()) (fail "publication cancellation did not reach its timing write")
+        killThread reader
+        timeout 5000000 (readMVar done) >>= maybe
+          (fail "publication cancellation did not settle") pure
+    else try (withRetainedCountFault fired
+      (throwIO (userError "injected retained-count write failure")) action)
+  didFire <- readIORef fired
+  unless didFire (fail "publication failure control did not reach its timing write")
+  pure result
+
+withRetainedCountFault :: IORef Bool -> IO () -> IO a -> IO a
+withRetainedCountFault fired fault action = mask $ \restore -> do
+  oldEncoding <- hGetEncoding stderr
+  oldBuffering <- hGetBuffering stderr
+  armed <- newIORef True
+  suffix <- newIORef ""
+  let marker = "tidepool-count name=original_inputs.retained_encoded_bytes "
+      wrapped (TextEncoding name makeDecoder makeEncoder) =
+        TextEncoding name makeDecoder $ do
+          BufferCodec encode recover close getState setState <- makeEncoder
+          let inspect input output = do
+                result@(_, consumed, _) <- encode input output
+                active <- readIORef armed
+                when active $ do
+                  -- UTF-8 resets a fully consumed character buffer to 0/0.
+                  let end = if bufL consumed == 0 && bufR consumed == 0
+                        then bufR input else bufL consumed
+                  chars <- consumedChars input end
+                  previous <- readIORef suffix
+                  let observed = previous ++ chars
+                  if marker `isInfixOf` observed
+                    then do
+                      writeIORef armed False
+                      writeIORef fired True
+                      fault
+                    else writeIORef suffix (drop (max 0 (length observed - length marker + 1)) observed)
+                pure result
+          pure (BufferCodec inspect recover close getState setState)
+      restoreSettings = do
+        writeIORef armed False
+        hFlush stderr `finally` (do
+          case oldEncoding of
+            Just encoding -> hSetEncoding stderr encoding
+            Nothing -> hSetBinaryMode stderr True
+          hSetBuffering stderr oldBuffering)
+      install = do
+        hFlush stderr
+        hSetBuffering stderr NoBuffering
+        hSetEncoding stderr (wrapped utf8)
+  install `onException` restoreSettings
+  restore action `finally` restoreSettings
+
+consumedChars :: CharBuffer -> Int -> IO String
+consumedChars buffer end
+  | end < bufL buffer || end > bufR buffer =
+      fail "UTF-8 adapter observed an invalid consumed input range"
+  | otherwise = go (bufL buffer)
+  where
+    go index
+      | index == end = pure []
+      | index > end = fail "UTF-8 adapter stepped beyond consumed characters"
+      | otherwise = do
+          (character,next) <- readCharBuf (bufRaw buffer) index
+          (character :) <$> go next
 
 validationTimingControl :: IO ()
 validationTimingControl = do

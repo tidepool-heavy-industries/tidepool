@@ -8691,10 +8691,14 @@ mod tests {
             view.library(),
             Some(SessionModule::lib(original_generation))
         );
+        let library_import = view
+            .library_import_module()
+            .expect("certified joined projection has a lexical import module");
+        assert_ne!(view.library().unwrap().module_name(), library_import);
         assert!(context
             .lexical_graph()
             .iter()
-            .any(|node| node.owner.module == view.library().unwrap().module_name()));
+            .any(|node| node.owner.module == library_import));
         assert!(context
             .lexical_graph()
             .iter()
@@ -8711,15 +8715,13 @@ mod tests {
             .filter(|key| key.artifact == original_artifact)
             .collect::<BTreeSet<_>>();
         assert!(!issued_original_groups.is_empty());
-        assert_eq!(
+        assert!(
             context
                 .artifact_view()
                 .selected_native_groups()
-                .into_iter()
-                .filter(|key| key.artifact == original_artifact)
-                .collect::<BTreeSet<_>>(),
-            issued_original_groups,
-            "the join must retain the original issuer's executable selection"
+                .iter()
+                .all(|key| key.artifact != original_artifact),
+            "an interface-only compiler view must not demand original native groups before target admission"
         );
         let canonical_interface = context
             .artifact_view()
