@@ -1881,7 +1881,7 @@ mod answer_tests {
                 symbol[1..]
                     .iter()
                     .map(|s| world_text(*s))
-                    .chain([Value::Null])
+                    .chain([ciborium::value::Value::Null])
                     .collect(),
             ),
             u64::MAX.into(),
