@@ -11,6 +11,7 @@ module Tidepool.CheckedPrefixImports
   , refineProgramDeclarationImports
   , refineParsedDeclarationImports
   , selectedImportNames
+  , CompletedValueAliases, hydrateCompletedValueAliases, transformCompletedValueAliases
   ) where
 
 import Control.Exception (evaluate)
@@ -18,24 +19,31 @@ import Control.Monad (forM, forM_, unless)
 import Data.List (nub, sort)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Word (Word64)
 import GHC (ParsedModule(..), ModSummary(ms_hspp_opts))
 import GHC.Data.Maybe (MaybeErr(..))
-import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_unit_env)
+import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_unit_env, hsc_home_unit, lookupType)
 import GHC.Driver.Session (xopt)
 import GHC.Hs
-import GHC.Iface.Load (loadInterface, WhereFrom(..))
+import GHC.Iface.Load (loadInterface, importDecl, WhereFrom(..))
 import GHC.LanguageExtensions.Type (Extension(ImplicitPrelude))
 import GHC.Rename.Names (renameRawPkgQual)
-import GHC.Tc.Utils.Monad (initIfaceCheck)
+import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLoad)
 import GHC.Types.Avail (AvailInfo, availName, availNames)
-import GHC.Types.Name (Name, nameOccName)
-import GHC.Types.Name.Occurrence (OccName, isTcOcc, isDataOcc, occNameString, occNameFS, varToRecFieldOcc)
-import GHC.Types.Name.Reader (mkRdrUnqual, rdrNameOcc)
+import GHC.Types.Name (Name, nameOccName, nameModule_maybe)
+import GHC.Types.Name.Occurrence (OccName, isTcOcc, isDataOcc, mkVarOcc, occNameString, occNameFS, varToRecFieldOcc)
+import GHC.Types.Name.Reader (RdrName(Exact), mkRdrUnqual, rdrNameOcc)
+import GHC.Types.Name.Set (extendNameSet, unionNameSets)
+import GHC.Types.Id (Id, idName, idType)
+import GHC.Types.TyThing (TyThing(AnId))
+import GHC.Iface.Syntax (IfaceDecl(..), IfaceIdDetails(..), freeNamesIfDecl)
+import GHC.CoreToIface (toIfaceType)
 import GHC.Types.PkgQual (RawPkgQual(..))
-import GHC.Types.SrcLoc (GenLocated(..), unLoc)
+import GHC.Types.SrcLoc (GenLocated(..), unLoc, noSrcSpan)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
-import GHC.Unit.Module (Module, moduleName)
+import GHC.Unit.Module (Module, moduleName, moduleUnit)
+import GHC.Unit.Home (isHomeUnit)
 import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_iface_hash, mi_final_exts, mi_exports)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Utils.Fingerprint (Fingerprint)
@@ -44,8 +52,10 @@ import System.Mem.StableName (StableName, makeStableName)
 import Tidepool.DeclarationJoin (ExportIdentity(..), ExportNamespace(..), exportIdentity)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), VerifiedExactIfaceClosure, readExactIfaceArtifacts
-  , selectVerifiedValueInterfaces, hydrateExactScope )
-import Tidepool.Identity (stableVarId)
+  , selectVerifiedValueInterfaces, hydrateExactScope, checkedValueOwner )
+import Tidepool.Identity (stableVarId, nameSymbolIdentity)
+import Tidepool.ExecutionSchema (SymbolIdentity)
+import Tidepool.CheckedCell (NativeParsedModule(..))
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule,
   sessionModuleString, scaffoldTargetName, registerSessionInterfaceLocation)
 
@@ -60,6 +70,93 @@ data CompletedValueImport = CompletedValueImport
   } deriving (Eq, Show)
 
 newtype CompletedValueImports = CompletedValueImports [RefinementOwner]
+
+-- This capability comes from exact installed interface allocations and their
+-- actual exported Names. Runtime variable IDs never supply GHC binder identity.
+data CompletedValueAliases = CompletedValueAliases [RefinementOwner] (Map.Map String Id)
+
+hydrateCompletedValueAliases
+  :: [(String,SymbolIdentity,ExactIfaceArtifact)] -> [(ExactIfaceArtifact,ModIface)] -> HscEnv
+  -> IO (Either String (HscEnv,CompletedValueAliases))
+hydrateCompletedValueAliases requested captured env
+  | length requested /= Map.size (Map.fromList [(alias,()) | (alias,_,_) <- requested]) =
+      pure (Left "completed value aliases have duplicate lexical winners")
+  | any (not . checkedValueOwner . fst) captured = pure (Left "completed value alias has another owner")
+  | length captured /= Map.size (Map.fromList
+      [((exactUnit artifact,exactModule artifact),()) | (artifact,_) <- captured]) =
+      pure (Left "completed value aliases contain duplicate interface owners")
+  | otherwise = do
+      let interfaces = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,iface,names iface)) | (artifact,iface) <- captured]
+          names iface = Map.fromListWith (++)
+            [(symbol,[name]) | name <- Set.toList (Set.fromList (concatMap availNames (mi_exports iface)))
+              , Just symbol <- [nameSymbolIdentity "value" name]]
+          select (alias,symbol,artifact) = do
+            (actual,iface,exports) <- maybe (Left "completed value alias lacks its captured interface") Right
+              (Map.lookup (exactUnit artifact,exactModule artifact) interfaces)
+            unless (actual == artifact) (Left "completed value alias has another captured interface")
+            name <- case Map.findWithDefault [] symbol exports of
+              [name] -> Right name
+              _ -> Left "completed value alias lacks its exact exported SymbolIdentity"
+            pure (alias,iface,name)
+      case mapM select requested of
+        Left reason -> pure (Left reason)
+        Right selected -> do
+          installed <- forM captured $ \(_,iface) -> case lookupHpt (hsc_HPT env) (moduleName (mi_module iface)) of
+            Just home | mi_module (hm_iface home) == mi_module iface -> do
+              expected <- evaluate iface >>= makeStableName
+              actual <- evaluate (hm_iface home) >>= makeStableName
+              pure (actual == expected)
+            _ -> pure False
+          hydrated <- if and installed then pure env else hydrateExactScope env captured
+          aliases <- forM selected $ \(alias,iface,name) -> do
+            _ <- currentOwner hydrated (mi_module iface) (mi_iface_hash (mi_final_exts iface))
+            known <- lookupType hydrated name
+            resolved <- case known of
+              Just thing -> pure (Just thing)
+              Nothing | Just owner <- nameModule_maybe name
+                  , not (isHomeUnit (hsc_home_unit hydrated) (moduleUnit owner)) -> do
+                    loaded <- initIfaceLoad hydrated (importDecl name)
+                    pure $ case loaded of Succeeded thing -> Just thing; Failed _ -> Nothing
+              _ -> pure Nothing
+            case resolved of
+              Just (AnId identifier) | idName identifier == name -> pure (Right (alias,identifier))
+              _ -> pure (Left "completed value alias has no hydrated value identifier")
+          owners <- forM captured $ \(_,iface) -> do
+            forced <- evaluate iface
+            stable <- makeStableName forced
+            pure (RefinementOwner (mi_module forced) (mi_iface_hash (mi_final_exts forced))
+              [] (CompletedValues []) (Just (forced,stable)))
+          pure ((\values -> (hydrated,CompletedValueAliases owners (Map.fromList values))) <$> sequence aliases)
+
+-- The generated root's segment chain stays untouched. Explicit native-typed
+-- top-level aliases let ordinary GHC renaming preserve authored local shadows
+-- and the imported value's sigma type without textual source stand-ins.
+transformCompletedValueAliases :: CompletedValueAliases -> HscEnv -> ParsedModule -> IO NativeParsedModule
+transformCompletedValueAliases (CompletedValueAliases owners aliases) env parsed = do
+  forM_ owners $ \owner -> do
+    original <- currentOwner env (refinementOwner owner) (refinementFingerprint owner)
+    case refinementReadback owner of
+      Just (retained,expected) -> do
+        _ <- evaluate retained
+        actual <- evaluate (hm_iface original) >>= makeStableName
+        unless (actual == expected) (fail "completed value alias lost its exact installed interface allocation")
+      Nothing -> fail "completed value alias lacks its installed interface allocation"
+  let syntax = unLoc (pm_parsed_source parsed)
+      authored = concatMap parsedDeclarationOccurrences (hsmodDecls syntax)
+      additions = concatMap aliasDeclarations (Map.toAscList aliases)
+      uses = unionNameSets [extendNameSet
+          (freeNamesIfDecl (IfaceId (idName identifier) (toIfaceType (idType identifier)) IfVanillaId []))
+          (idName identifier) | identifier <- Map.elems aliases]
+  unless (all ((`notElem` authored) . mkVarOcc) (Map.keys aliases))
+    (fail "completed value alias conflicts with a generated top-level binder")
+  pure (NativeParsedModule (parsed {pm_parsed_source=case pm_parsed_source parsed of
+    L location _ -> L location syntax {hsmodDecls=additions ++ hsmodDecls syntax}}) uses)
+  where
+    aliasDeclarations (alias,identifier) =
+      let name = mkRdrUnqual (mkVarOcc alias)
+          binding = mkHsVarBind noSrcSpan name (nlHsVar (Exact (idName identifier)))
+          signature = TypeSig noAnn [noLocA name] (hsTypeToHsSigWcType (noLocA (XHsType (idType identifier))))
+      in [noLocA (SigD noExtField signature),noLocA (ValD noExtField (unLoc binding))]
 
 data DirectSelection = OriginalDeclarations | CompletedValues [Name]
 data RefinementOwner = RefinementOwner

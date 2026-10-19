@@ -28,7 +28,7 @@ module Tidepool.ExactScope
   , writeRetainedExactCompilation
   , writeRetainedExactCompilationWithOutputsAndPublication, extendSourceSelectedOriginals
   , writeCheckedExactCompilationWithOutputsAndPublication
-  , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
+  , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals, freshOutputSealFacts
   , revalidateExactScopesAtWithOutputs
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
@@ -36,8 +36,9 @@ module Tidepool.ExactScope
   , originalGroupFromProjected, originalGroupFromCandidate
   , WorldInputFacts, CapturedWorldSources, WorldSourceRoot
   , WorldBinding, WorldBindingRow, worldInputsBindingScope, worldInputsBindings
-  , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingRow
-  , worldBindingRowInterface, worldBindingCertifiedArtifact, worldBindingCompilerReceipt
+  , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow
+  , worldBindingRowInterface, worldBindingCertifiedArtifact, worldBindingCompilerReceipt, worldBindingRowFactCID
+  , worldBindingInterfaceArtifact, readWorldBindingInputs
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
   , worldInputsSourceModuleHints, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
@@ -314,6 +315,9 @@ maxFreshOutputBytes = 4 * 1024 * 1024 * 1024
 
 emptyFreshOutputSeals :: FreshOutputSeals
 emptyFreshOutputSeals = FreshOutputSeals []
+
+freshOutputSealFacts :: FreshOutputSeals -> [(FilePath,String)]
+freshOutputSealFacts (FreshOutputSeals outputs) = [(path,sha) | (path,sha,_) <- outputs]
 
 freshOutputSealsFromWrites :: [(FilePath,BS.ByteString)] -> Either String FreshOutputSeals
 freshOutputSealsFromWrites writes
@@ -2234,6 +2238,7 @@ data WorldBinding = WorldBinding
   { worldBindingSymbol :: SymbolIdentity
   , worldBindingSessionVar :: Word64
   , worldBindingScope :: Word64
+  , worldBindingGeneration :: Word64
   , worldBindingRow :: WorldBindingRow
   }
 
@@ -2245,7 +2250,48 @@ data WorldBindingRow = WorldBindingRow
   { worldBindingRowInterface :: ScopeInterfaceInput
   , worldBindingCertifiedArtifact :: BS.ByteString
   , worldBindingCompilerReceipt :: BS.ByteString
+  , worldBindingRowFactCID :: BS.ByteString
   }
+
+worldBindingInterfaceArtifact :: WorldBinding -> ExactIfaceArtifact
+worldBindingInterfaceArtifact binding = case worldBindingRowInterface (worldBindingRow binding) of
+  ScopeInterfaceInput (artifact,_,_) CheckedValueEvidence -> artifact
+  _ -> error "admitted world binding lost its checked value evidence"
+
+-- Select by submitted occurrences in the already admitted namespace. Only
+-- their exact captured rows enter this operation-local decoder; no pathname
+-- reacquisition or enumeration of the world's passive rows is involved.
+readWorldBindingInputs :: HscEnv -> WorldInputFacts -> [String]
+  -> IO (Either String ([(String,WorldBinding)],[(ExactIfaceArtifact,ArtifactBytes,ArtifactBytes)]))
+readWorldBindingInputs env facts occurrences = do
+  let selected = [(name,value) | name <- occurrences,Just value <- [Map.lookup name (worldInputsBindings facts)]]
+      rows = [worldBindingRowInterface (worldBindingRow value) | (_,value) <- selected]
+      key (ScopeInterfaceInput (artifact,_,_) _) = (exactUnit artifact,exactModule artifact)
+      distinct = Map.fromList [(key row,row) | row <- rows]
+      sidecars = Map.fromList [(path,sha) | ScopeInterfaceInput (_,path,sha) CheckedValueEvidence <- Map.elems distinct]
+      tokens = worldInputsCustody facts
+      readInput path cap = do
+        sha <- maybe (fail "world value package proof is outside its selected rows") pure (Map.lookup path sidecars)
+        bytes <- artifactBytes <$> capturedRequestInputToken tokens path sha
+        unless (BS.length bytes <= cap) (fail "world value package proof exceeds its input bound")
+        pure bytes
+  if any (\row -> Map.lookup (key row) distinct /= Just row) rows
+    then pure (Left "world value aliases select conflicting captured interface versions")
+    else do
+      packages <- extendAdmittedPackageImportsWith readInput emptyAdmittedPackageImports
+        [row | ScopeInterfaceInput row CheckedValueEvidence <- Map.elems distinct]
+      case packages of
+        Left reason -> pure (Left reason)
+        Right admitted -> do
+          valid <- validateAdmittedPackageSelection env admitted
+          case valid of
+            Left reason -> pure (Left reason)
+            Right () -> do
+              captured <- forM (Map.elems distinct) $ \(ScopeInterfaceInput (artifact,path,sha) _) -> do
+                body <- capturedRequestInputToken tokens (exactPath artifact) (exactSha256 artifact)
+                packages <- capturedRequestInputToken tokens path sha
+                pure (artifact,body,packages)
+              pure (Right (selected,captured))
 
 -- Conservative backing charge: receiving allowances count every retained
 -- encoded body/path, even when a separate world happens to have equal bytes.
@@ -2797,13 +2843,13 @@ encodeWorldBindingNode node = E.encodeMapLen 1 <> case node of
     <> E.encodeString "binding" <> encodeWorldBinding binding
     <> E.encodeString "original_ordinal" <> E.encodeWord32 ordinal
 
--- TPCWBIND3 names the occurrence root; raw CID bytes in visibility do not
+-- TPCWBIND4 names the occurrence root; raw CID bytes in visibility do not
 -- become a Context DAG link by themselves. No legacy visibility is inferred.
 decodeWorldBindingRoot :: Decoder s (Word64,BS.ByteString)
 decodeWorldBindingRoot = do
   worldArray 3
   magic <- decodeStringCanonical
-  unless (magic == "TPCWBIND3") (fail "unsupported compiler world bindings")
+  unless (magic == "TPCWBIND4") (fail "unsupported compiler world bindings")
   scope <- decodeWord64Canonical
   root <- decodeBytesCanonical
   unless (supportedWorldCID root) (fail "unsupported compiler world binding root CID")
@@ -2816,12 +2862,12 @@ worldBindingText = do
     (fail "invalid compiler world binding identity")
   pure value
 
-decodeWorldBindingValue :: Decoder s (SymbolIdentity,Word64,Word64,BS.ByteString)
+decodeWorldBindingValue :: Decoder s (SymbolIdentity,Word64,Word64,Word64,BS.ByteString)
 decodeWorldBindingValue = do
   token <- peekTokenType
   unless (token == TypeListLen) (fail "invalid compiler world binding value tuple")
   count <- decodeListLenCanonical
-  unless (count == 4) (fail "invalid compiler world binding value tuple")
+  unless (count == 5) (fail "invalid compiler world binding value tuple")
   worldArray 5
   unit <- worldBindingText
   name <- worldBindingText
@@ -2834,8 +2880,9 @@ decodeWorldBindingValue = do
     pure (Just value)
   variable <- decodeWord64Canonical
   scope <- decodeWord64Canonical
+  generation <- decodeWord64Canonical
   row <- worldCID
-  pure (SymbolIdentity unit name namespace occurrence parent,variable,scope,row)
+  pure (SymbolIdentity unit name namespace occurrence parent,variable,scope,generation,row)
 
 -- Compare one exact canonical semantic row, including role/requirements, with
 -- the existing receiving projection. A byte-image key alone omits those facts.
@@ -2856,14 +2903,14 @@ readWorldBindings frontier root producer visible = do
     semantic <- toStrictByteString <$> worldSemanticRowEncoding producer offered
     pure (semantic,input)
   let rows = Map.fromList eligible
-      referenced = Set.fromList [cid | (_,_,_,cid) <- Map.elems selected]
+      referenced = Set.fromList [cid | (_,_,_,_,cid) <- Map.elems selected]
   -- Decode each shared row once; aliases retain that same immutable row value.
   decoded <- forM (Set.toAscList referenced) $ \cid -> do
     body <- maybe (worldCorrupt "compiler world binding row is absent") pure (Map.lookup cid frontier)
     (semantic,certified,receipt) <- decodeWorldBytes (decodeWorldBindingRow (BS.length body)) body
     input <- maybe (worldCorrupt "compiler world binding row differs from admitted visible value inputs") pure
       (Map.lookup semantic rows)
-    pure (cid,(WorldBindingRow input certified receipt,semantic,toInteger (BS.length body)))
+    pure (cid,(WorldBindingRow input certified receipt cid,semantic,toInteger (BS.length body)))
   unless (length eligible == length visible && Map.keysSet rows == Set.fromList [semantic | (_,(_,semantic,_)) <- decoded])
     (worldCorrupt "compiler world visible input census differs from occurrence facts")
   let actual = Map.fromDistinctAscList decoded
@@ -2875,9 +2922,13 @@ readWorldBindings frontier root producer visible = do
       entries = toInteger (Map.size selected) + toInteger nodeCount + toInteger (Set.size referenced)
   when (entries > toInteger (maxBound :: Int))
     (worldCorrupt "compiler world binding retention count exceeds host range")
-  bindings <- forM selected $ \(symbol,variable,scope,cid) -> case Map.lookup cid actual of
-    Just (row,_,_) -> pure (WorldBinding symbol variable scope row)
-    Nothing -> worldCorrupt "compiler world binding has no decoded row"
+  bindings <- forM selected $ \(symbol,variable,scope,generation,cid) -> case Map.lookup cid actual of
+    Just (row@(WorldBindingRow (ScopeInterfaceInput (artifact,_,_) CheckedValueEvidence) _ _ _),_,_) -> do
+      unless (parseSessionModule (exactModule artifact) == Just (SessionModule ValMod (Generation generation))
+          && sessionModuleString (SessionModule ValMod (Generation generation)) == exactModule artifact)
+        (worldCorrupt "compiler world binding generation differs from its checked value owner")
+      pure (WorldBinding symbol variable scope generation row)
+    _ -> worldCorrupt "compiler world binding has no decoded checked value row"
   -- Settle all charge work during acquisition, never at a hit or END.
   _ <- evaluate (bytes + entries + toInteger (Map.size bindings))
   pure (bindings,(bytes,fromInteger entries))

@@ -448,7 +448,7 @@ semanticWorldBindingControls handles work scopePath contextParcel = do
       profile = BS.replicate 32 97
       text = TString . T.pack
       blocks pairs = TList [TList [TBytes cid,TBytes body] | (cid,body) <- pairs]
-      visibility root = encode (TList [TString "TPCWBIND3",TInt 0,TBytes root])
+      visibility root = encode (TList [TString "TPCWBIND4",TInt 0,TBytes root])
       restoration version root associations occurrences = encode (TList
         [TString "TPCWREST",TInt version,TBytes root,TBytes (SHA.hash sources),TBytes producer
         ,TBytes profile,TInt 0,TBytes associations,TBytes occurrences])
@@ -516,6 +516,11 @@ semanticWorldBindingControls handles work scopePath contextParcel = do
     (packet 3 emptyProduct emptyPrimary emptyPairs base [] acquisition emptyBinding)
   requireCorrupt Nothing "old-descriptor-v2" (packet 2 product primary blockPairs base [] acquisition emptyBinding)
   requireCorrupt Nothing "old-restoration-v2" (packet 3 (restoration 2 primary association emptyBinding) primary blockPairs base [] acquisition emptyBinding)
+  let oldBindings = encode (TList [TString "TPCWBIND3",TInt 0,TBytes emptyBinding])
+      oldBindingPacket = case originalPacket of
+        TList fields -> TList (take 8 fields ++ [TBytes oldBindings] ++ drop 9 fields)
+        _ -> error "world binding control lost its actual carrier"
+  requireCorrupt (Just "unsupported compiler world bindings") "old-occurrence-tag3" oldBindingPacket
   -- Mutate actual root blocks, then rebind the portable product. CID validation
   -- must reject body/digest/codec changes even under a self-consistent SHA ID.
   rootBody <- maybe (fail "Context root is absent") pure (lookup primary blockPairs)
