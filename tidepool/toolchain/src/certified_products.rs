@@ -9743,6 +9743,7 @@ pub(crate) mod tests {
     #[path = "../planned_original_history_tests.rs"]
     mod planned_original_history_tests;
     mod promotion_import_history;
+    mod publication_request_history;
     mod sparse_interface_selection_properties;
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
@@ -14002,9 +14003,11 @@ pub(crate) mod tests {
             )
             .unwrap();
         let completed = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
-        assert_eq!(
-            completed.role_projection().snapshot_roles()[&original.descriptor.owner].original(),
-            Some(original.descriptor.id)
+        assert!(
+            matches!(completed.role_projection().snapshot_roles()[&original.descriptor.owner],
+            crate::artifact_inventory::CompilerInputRole::InterfaceOnly { interface }
+                if interface == ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id),
+            "RetainedCore availability does not select a compiler Original"
         );
         assert_eq!(
             completed.native_availability().snapshot_facts().unwrap()[&original.descriptor.id].mode,
@@ -14157,6 +14160,276 @@ pub(crate) mod tests {
                 }
             }
             assert_eq!(context.artifact_view().capture_graph_selection(), before);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn compiled_new_output_refuses_absent_input_native_permission() {
+        use crate::artifact_inventory::{
+            ArtifactDependency, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure,
+            CanonicalProducerIdentity, CompilerInputProjection, CompilerInputRole,
+            NativeArtifactDemand,
+        };
+        use crate::declaration_context::{
+            issue_fixture_compiler_support, ExactCompileContext, ExactDeclarationContext,
+            NativeTransportMode, OriginalCompilerInputs,
+        };
+        use crate::declaration_join::ExactModuleIdentity;
+        use crate::CompileError;
+        let directory = tempfile::tempdir().unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let root = directory.path();
+            let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1));
+            let source = include_str!("../tests/fixtures/checked-prefix-publication/G1.hs");
+            let support_source = include_str!(
+                "../tests/fixtures/checked-prefix-publication/PrefixSelectedSupport.hs"
+            );
+            let source_path = root.join(module.relative_hs_path());
+            std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+            std::fs::write(&source_path, source).unwrap();
+            std::fs::write(root.join("PrefixSelectedSupport.hs"), support_source).unwrap();
+            let includes = vec![root.to_path_buf()];
+            let certificate = crate::artifacts::test_support::certify_authored_declaration(
+                module,
+                &source_path,
+                source,
+                &includes,
+                root,
+            )
+            .expect("actual compiler issues C with its exact Support A dependency");
+            let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
+            let producer = CanonicalProducerIdentity::from_compiler(endpoint.identity());
+            assert_eq!(certificate.toolchain_identity_sha256(), producer.sha256());
+            let support_owner = ExactModuleIdentity {
+                unit: "main".into(),
+                module: "PrefixSelectedSupport".into(),
+            };
+            let products = certificate.recovery_products();
+            let supports = products
+                .iter()
+                .filter(|product| {
+                    product.owner().unit == support_owner.unit
+                        && product.owner().module == support_owner.module
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(supports.len(), 1);
+            let support_product = supports[0];
+            let output_product = certificate.product();
+            assert_ne!(output_product.owner(), support_product.owner());
+            let support_entry = Arc::new(
+                ArtifactEntry::original(producer.sha256(), support_product.clone()).unwrap(),
+            );
+            let output_entry = Arc::new(
+                ArtifactEntry::original(producer.sha256(), output_product.clone()).unwrap(),
+            );
+            let canonical_support = Arc::new(ArtifactEntry::canonical(
+                support_product.module_interface().unwrap().clone(),
+            ));
+            assert!(output_entry.requirements.contains(&support_owner));
+            let mut required = BTreeSet::new();
+            let mut required_edges = Vec::new();
+            for group in original_available_groups(output_product).unwrap() {
+                for import in
+                    original_native_group_imports(output_product, group.original_ordinal()).unwrap()
+                {
+                    if let PendingImportOwner::Source {
+                        owner,
+                        original_ordinal,
+                        binder,
+                    } = import
+                    {
+                        if owner == support_product.owner() {
+                            assert!(authenticates_original_native_entry(
+                                support_product,
+                                *original_ordinal,
+                                binder
+                            ));
+                            required.insert(*original_ordinal);
+                            required_edges.push((
+                                group.original_ordinal(),
+                                *original_ordinal,
+                                binder.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                required.len(),
+                1,
+                "actual compiled C has one exact required A ordinal"
+            );
+            assert!(!required_edges.is_empty());
+            let required_ordinal = *required.first().unwrap();
+            assert!(required_edges
+                .iter()
+                .any(|(_, _, binder)| binder.occurrence == "selected"));
+            let inventory = ArtifactInventory::default();
+            let interface_view = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    vec![canonical_support.clone()],
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let type_only = issue_fixture_compiler_support(
+                CompilerInputProjection::from_issued_entries(&[canonical_support.clone()]).unwrap(),
+                interface_view,
+            )
+            .unwrap();
+            assert!(type_only.native_offers().is_empty());
+            assert!(type_only.native_availability().rows().next().is_none());
+            // A is an independently compiled closed support module. Self-group
+            // edges are its own body, while foreign home/live dependencies would
+            // require another actual input issuer and must fail this premise.
+            assert!(support_entry.requirements.is_empty());
+            let requirements = original_native_requirements(support_product).unwrap();
+            assert!(requirements.retained_packages.is_empty());
+            assert!(requirements
+                .artifact_edges
+                .iter()
+                .all(|(owner, edge)| owner == &support_owner
+                    && matches!(edge, ArtifactDependency::NativeGroup { .. })));
+            let support_view = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    vec![support_entry.clone()],
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let support_projection =
+                CompilerInputProjection::from_issued_entries(&[support_entry.clone()]).unwrap();
+            let support_selection = CertifiedSourceSelection::from_compiler_projection(
+                &support_projection,
+                &support_view.metadata_snapshot(),
+                &InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+            let support_output =
+                OriginalCompilerInputs::from_selection(&support_selection, &support_view).unwrap();
+            let issued_support =
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                    &support_output,
+                )
+                .unwrap()
+                .for_source_owners(&BTreeSet::new())
+                .unwrap();
+            assert_eq!(issued_support.projection().roles().len(), 1);
+            for (label, support, expected) in [
+                ("absent", type_only, false),
+                ("issued", issued_support, true),
+            ] {
+                let context = Arc::new(
+                    ExactDeclarationContext::new(&[], &[], vec![])
+                        .unwrap()
+                        .extend_issued_compiler_support(&support)
+                        .unwrap(),
+                );
+                let roles = context.compiler_input_projection().snapshot_roles();
+                assert!(
+                    matches!(roles[&support_owner], CompilerInputRole::InterfaceOnly { interface }
+                    if interface == canonical_support.descriptor.id)
+                );
+                assert!(!roles.contains_key(&output_entry.descriptor.owner));
+                assert!(context.artifact_view().selected_native_groups().is_empty());
+                let before = context.artifact_view().capture_graph_selection();
+                let request = ExactCompileContext::new(context.clone())
+                    .prepare_compilation(
+                        &root.join(format!("request-{label}")),
+                        endpoint.identity().producer_bytes(),
+                    )
+                    .unwrap();
+                let input = request.compiler_inputs();
+                assert!(input
+                    .native_availability(output_entry.descriptor.id)
+                    .is_none());
+                assert_eq!(
+                    input
+                        .native_availability(support_entry.descriptor.id)
+                        .is_some_and(|row| row.permits(required_ordinal)),
+                    expected
+                );
+                if !expected {
+                    assert!(input.compiler_source_support().native_offers().is_empty());
+                }
+                let operation = InventoryOperation::new(Default::default());
+                let mut selection =
+                    CertifiedSourceSelection::from_compiler_inputs(input, &operation).unwrap();
+                selection
+                    .admit_current(
+                        output_product.owner(),
+                        ProductOrigin::RetainedCore,
+                        output_product.module_interface().unwrap(),
+                        &operation,
+                    )
+                    .unwrap();
+                let physical = input
+                    .artifacts()
+                    .inventory()
+                    .admit_shared_with_demand(
+                        input.artifacts(),
+                        vec![output_entry.clone()],
+                        NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let completed = OriginalCompilerInputs::from_selection(&selection, &physical);
+                if !expected {
+                    assert!(
+                        matches!(completed, Err(CompileError::ArtifactInventory(error))
+                        if error.failure == ArtifactInventoryFailure::NativeGroupUnavailable {
+                            artifact: support_entry.descriptor.id, original_ordinal: required_ordinal,
+                        }),
+                        "actual NEW C must consult the receiving Request's absent A permission"
+                    );
+                } else {
+                    let completed = completed.unwrap();
+                    assert!(
+                        matches!(completed.role_projection().snapshot_roles()[&output_entry.descriptor.owner],
+                        CompilerInputRole::InterfaceOnly { interface }
+                            if interface == ArtifactEntry::canonical(output_product.module_interface().unwrap().clone()).descriptor.id),
+                        "RetainedCore output availability does not grant Original selection"
+                    );
+                    assert_eq!(
+                        completed.native_availability().snapshot_facts().unwrap()
+                            [&output_entry.descriptor.id]
+                            .mode,
+                        NativeTransportMode::Full
+                    );
+                    assert!(completed
+                        .issued_artifacts()
+                        .selected_native_groups()
+                        .is_empty());
+                    let next = ExactCompileContext::new(context.clone())
+                        .prepare_compilation_with_private_input(
+                            &root.join("completed"),
+                            endpoint.identity().producer_bytes(),
+                            None,
+                            Some(completed),
+                        )
+                        .unwrap();
+                    assert!(next
+                        .compiler_inputs()
+                        .native_availability(support_entry.descriptor.id)
+                        .unwrap()
+                        .permits(required_ordinal));
+                    assert!(next
+                        .compiler_inputs()
+                        .artifacts()
+                        .selected_native_groups()
+                        .is_empty());
+                }
+                assert_eq!(context.artifact_view().capture_graph_selection(), before);
+            }
+            eprintln!("compiled_new_output_permission_controls=2 accepted=1 typed_refusals=1 required_ordinal={required_ordinal} compiled_edges={required_edges:?}");
+        }));
+        if let Err(panic) = result {
+            let retained = directory.keep();
+            eprintln!(
+                "compiled Request permission inputs retained at {}",
+                retained.display()
+            );
+            std::panic::resume_unwind(panic);
         }
     }
 
