@@ -255,7 +255,10 @@ pub struct RuntimePreparedTargets {
 impl std::fmt::Debug for RuntimePreparedTargets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimePreparedTargets")
-            .field("artifacts", &self.artifacts)
+            .field(
+                "targets",
+                &self.artifacts.targets.keys().collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -265,7 +268,7 @@ impl std::fmt::Debug for RuntimePreparedTargets {
 pub fn prepare_runtime_targets_in_context(
     owner: &session::RuntimeSourceCompilerTransaction,
     invocation: &artifacts::CompileInvocation<'_>,
-    context: Arc<tidepool_toolchain::declaration_context::ExactDeclarationContext>,
+    context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
     on_stage: impl FnMut(&str, std::time::Duration, u64),
     report: &mut dyn FnMut(CompilerTransactionClose),
 ) -> Result<RuntimePreparedTargetsDraft, RuntimeError> {
@@ -275,7 +278,7 @@ pub fn prepare_runtime_targets_in_context(
 fn prepare_runtime_targets(
     owner: &session::RuntimeSourceCompilerTransaction,
     invocation: &artifacts::CompileInvocation<'_>,
-    context: Option<Arc<tidepool_toolchain::declaration_context::ExactDeclarationContext>>,
+    context: Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
     on_stage: impl FnMut(&str, std::time::Duration, u64),
     report: &mut dyn FnMut(CompilerTransactionClose),
 ) -> Result<RuntimePreparedTargetsDraft, RuntimeError> {
