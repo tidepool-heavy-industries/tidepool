@@ -120,6 +120,10 @@ pub(crate) struct ChildSessionSeed {
 #[derive(Debug, thiserror::Error)]
 pub enum ActorStartCaptureError {
     #[error(transparent)]
+    SourceAdmission(
+        #[from] crate::resident_workbench::generation_admission::GenerationAdmissionError,
+    ),
+    #[error(transparent)]
     Session(#[from] tidepool_runtime::session::SessionError),
     #[error(transparent)]
     Resident(#[from] tidepool_runtime::session::ResidentError),
@@ -233,6 +237,7 @@ impl ResidentActorStart {
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
+        let _source_claim = actor_context.source_dependency().claim()?;
         let session_id = actor_context.placement.session;
         let parent_actor = actor_context.actor;
         let captured = matches!(&context, SpawnContextWire::CapturedSpawn(_));
@@ -289,6 +294,7 @@ impl ResidentActorStart {
             },
         )
         .with_capabilities(crate::ActorCapabilities::default().with_effect_keys(keys.clone()))
+        .admit_independent_world()
         .with_creator(parent_actor)
         .with_checkpoint_token(checkpoint)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades(&facades))
@@ -331,6 +337,7 @@ impl ResidentActorStart {
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
+        let _source_claim = actor_context.source_dependency().claim()?;
         let ActorStartRequest {
             model_permissions,
             label,
@@ -381,6 +388,7 @@ impl ResidentActorStart {
             },
         )
         .with_capabilities(capabilities)
+        .admit_dependent_world(actor_context.source_dependency().selected_dependency()?)
         .with_creator(parent_actor)
         .with_supervisor_parent(parent_actor)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades(&facades));
@@ -513,10 +521,11 @@ where
     if !local.is_empty() {
         let names = local.iter().map(String::as_str).collect::<Vec<_>>();
         let surface = session.exact_exports_in_namespace(scope, ExportNamespace::Type, &names)?;
-        facades.push(surface.materialize(&view, settlement)?);
+        facades.push(session.materialize_facade(&surface, &view, settlement)?);
     }
     for (index, selected) in selections {
-        if let Some(facade) = inherited[index].select_exact_exports(
+        if let Some(facade) = session.select_facade_exact_exports(
+            &inherited[index],
             &selected,
             &include,
             actor_view.session_root(),
@@ -789,6 +798,69 @@ mod tests {
         }
     }
 
+    fn capture_facade_unknown_end_control(
+        session: &mut tidepool_runtime::session::ResidentSession<
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput,
+        >,
+        context: &crate::ActorSessionContext,
+        provenance: &tidepool_runtime::session::ProgramProvenance,
+        include: &[std::path::PathBuf],
+        compiler_work: bool,
+    ) {
+        use crate::resident_workbench::generation_admission::{
+            BootstrapWorld, GenerationAdmissionError, SourceDependency,
+        };
+        let dependency = SourceDependency::World(BootstrapWorld::new(None));
+        let mut context = context.clone();
+        context.source_dependency = dependency.clone();
+        dependency
+            .adopt_final_scope(session, context.placement.lexical_scope)
+            .unwrap();
+        let services = crate::capabilities::WorkbenchServices::new();
+        let owner = services.with_compiler_owner(
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                crate::RetainedActorExit::new(),
+            ),
+        );
+        let facades = {
+            crate::termination::CompilerWorkTicket::run_source_transaction(
+                session,
+                owner.admit_continuation().unwrap(),
+                &dependency,
+                |session, settlement| {
+                    let facades = super::materialize_entry_facades(
+                        session, provenance, &context, include, settlement,
+                    )
+                    .unwrap();
+                    settlement(tidepool_runtime::CompilerTransactionClose::Unconfirmed(
+                        tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                            tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
+                            tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                                disconnect: None,
+                            },
+                        ),
+                    ));
+                    facades
+                },
+            )
+            .unwrap()
+        };
+        if compiler_work {
+            assert!(!facades.is_empty());
+            assert!(matches!(
+                dependency.claim(),
+                Err(GenerationAdmissionError::BootstrapBusy { unconfirmed: 1, .. })
+            ));
+        } else {
+            drop(
+                dependency
+                    .claim()
+                    .expect("empty or unchanged facade selection does not issue compiler work"),
+            );
+        }
+    }
+
     #[test]
     fn inherited_and_local_capture_preserves_originals_refuses_shadow_and_released_owner() {
         use tidepool_codegen::scope::ScopeId;
@@ -834,13 +906,36 @@ mod tests {
             .head
             .clone();
         let facade = tidepool_testing::with_settlement(|settlement| {
-            surface.materialize(&session.compile_view_in(ScopeId::ROOT).unwrap(), settlement)
+            session.materialize_facade(
+                &surface,
+                &session.compile_view_in(ScopeId::ROOT).unwrap(),
+                settlement,
+            )
         })
         .unwrap();
         let ceiling = session
             .declaration_generation_high_water()
             .unwrap()
             .unwrap();
+        let local_provenance = nominal_provenance(vec![tidepool_runtime::NominalHead {
+            unit: original.unit.clone(),
+            module: original.module.clone(),
+            name: original.occurrence.clone(),
+        }]);
+        capture_facade_unknown_end_control(
+            &mut session,
+            &selection_context(),
+            &local_provenance,
+            effects.include_paths(),
+            true,
+        );
+        capture_facade_unknown_end_control(
+            &mut session,
+            &selection_context(),
+            &tidepool_runtime::session::ProgramProvenance::default(),
+            effects.include_paths(),
+            false,
+        );
         drop(session);
         let child_id = tidepool_repr::SessionId(18);
         let mut child_lib = SessionLib::open(
@@ -892,6 +987,38 @@ mod tests {
             name: original.occurrence.clone(),
         };
         let inherited = nominal_provenance(vec![inherited_head.clone(), inherited_head.clone()]);
+        capture_facade_unknown_end_control(
+            &mut session,
+            &context,
+            &inherited,
+            effects.include_paths(),
+            true,
+        );
+        let all_inherited = nominal_provenance(
+            facade
+                .projection()
+                .unwrap()
+                .receipt()
+                .exports()
+                .iter()
+                .filter(|export| {
+                    export.head.namespace
+                        == tidepool_toolchain::declaration_join::ExportNamespace::Type
+                })
+                .map(|export| tidepool_runtime::NominalHead {
+                    unit: export.head.unit.clone(),
+                    module: export.head.module.clone(),
+                    name: export.head.occurrence.clone(),
+                })
+                .collect(),
+        );
+        capture_facade_unknown_end_control(
+            &mut session,
+            &context,
+            &all_inherited,
+            effects.include_paths(),
+            false,
+        );
         let selected = tidepool_testing::with_settlement(|settlement| {
             super::materialize_entry_facades(
                 &session,
@@ -1102,10 +1229,11 @@ mod tests {
             Err(super::ActorStartCaptureError::ShadowDrift { .. })
         ));
         let shadow = tidepool_testing::with_settlement(|settlement| {
-            session
-                .exact_exports_in(scope, &["Inherited"])
-                .unwrap()
-                .materialize(&session.compile_view_in(scope).unwrap(), settlement)
+            session.materialize_facade(
+                &session.exact_exports_in(scope, &["Inherited"]).unwrap(),
+                &session.compile_view_in(scope).unwrap(),
+                settlement,
+            )
         })
         .unwrap();
         let mut ambiguous = descendant.clone();

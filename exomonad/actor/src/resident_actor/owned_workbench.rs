@@ -1020,12 +1020,14 @@ where
                 "hosted execution abandoned before exact continuation settlement".into(),
                 resources.clone(),
             )
-            .with_compiler_owner(workbench.compiler_scope(
-                crate::resident_workbench::CompilerCloseOwner::Invocation {
-                    work: invocation_work.clone(),
-                    control: control.clone(),
-                },
-            ));
+            .with_compiler_owner(
+                workbench
+                    .compiler_scope(crate::resident_workbench::CompilerCloseOwner::Invocation {
+                        work: invocation_work.clone(),
+                        control: control.clone(),
+                    })
+                    .with_source_dependency(context.source_dependency()),
+            );
         let owned = OwnedExecution {
             observation: self.runtime_observation.clone(),
             retirement: kernel.retained_exit(),
@@ -3059,19 +3061,26 @@ mod authority_tests {
     }
 
     fn context() -> crate::ActorSessionContext {
-        crate::ActorSessionContext {
-            actor: crate::ActorRef::first(crate::ActorId(8)),
-            placement: crate::ActorPlacement {
+        {
+            let context_actor = crate::ActorRef::first(crate::ActorId(8));
+            let context_placement = crate::ActorPlacement {
                 session: tidepool_repr::SessionId(1),
                 resource_scope: tidepool_codegen::suspension::RealmId(0),
                 lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
-            },
-            effect_policy: Default::default(),
-            live_payload: Default::default(),
-            source_imports: Default::default(),
-            haskell_effects_alias: String::new().into(),
-            current_model: None,
-            source_layer: vec![PathBuf::from("original-root")].into(),
+            };
+            crate::ActorSessionContext {
+                actor: context_actor,
+                placement: context_placement,
+                effect_policy: Default::default(),
+                live_payload: Default::default(),
+                source_imports: Default::default(),
+                haskell_effects_alias: String::new().into(),
+                current_model: None,
+                source_layer: vec![PathBuf::from("original-root")].into(),
+                ..crate::ActorDescriptor::new("fixture", context_placement)
+                    .admit_independent_world()
+                    .session_context(context_actor)
+            }
         }
     }
 

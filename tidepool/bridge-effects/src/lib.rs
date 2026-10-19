@@ -404,7 +404,7 @@ mod context_constructor_tests {
         let mut table = DataConTable::new();
         table
             .extend_checked([
-                row(1, "Tidepool.Effects.Core", "ReloadOptions", 2),
+                row(1, "Tidepool.Effects.Core", "ReloadOptions", 3),
                 row(2, "Tidepool.Effects.Core", "CompatibleOnly", 0),
                 row(3, "Tidepool.Effects.Core", "AcceptCacheInvalidation", 0),
                 row(4, "Tidepool.Effects.Core", "ReloadSurfaceDiff", 3),
@@ -417,15 +417,31 @@ mod context_constructor_tests {
                 row(11, "GHC.Types", ":", 2),
                 row(12, "Data.Text", "Text", 3),
                 row(13, "GHC.Types", "I#", 1),
+                row(14, "GHC.Types", "False", 0),
+                row(15, "GHC.Types", "True", 0),
             ])
             .unwrap();
-        for policy in [RlPolicy::CompatibleOnly, RlPolicy::AcceptCacheInvalidation] {
+        for (policy, force) in [
+            (RlPolicy::CompatibleOnly, false),
+            (RlPolicy::CompatibleOnly, true),
+            (RlPolicy::AcceptCacheInvalidation, false),
+            (RlPolicy::AcceptCacheInvalidation, true),
+        ] {
             let options = RlOptions {
                 also_check: vec!["Additional".into()],
                 policy,
+                force,
             };
             let encoded = options.to_value(&table).unwrap();
             assert_eq!(RlOptions::from_value(&encoded, &table).unwrap(), options);
+            let HaskellValue::Con(id, mut fields) = encoded else {
+                panic!("reload options must encode as their declared constructor");
+            };
+            fields.pop();
+            assert!(
+                RlOptions::from_value(&HaskellValue::Con(id, fields), &table).is_err(),
+                "the prior options arity cannot silently authorize a new force decision"
+            );
         }
         let revision = SrRevision {
             identity: "exact-content".into(),

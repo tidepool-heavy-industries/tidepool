@@ -56,6 +56,7 @@ impl WorkbenchServices {
         CompilerOwnerScope {
             owner,
             services: self.clone(),
+            source_authority: CompilerSourceAuthority::Unqualified,
         }
     }
 }
@@ -80,6 +81,15 @@ impl HasCompilerAdmission for WorkbenchServices {
 pub(crate) struct CompilerOwnerScope {
     owner: CompilerCloseOwner,
     services: WorkbenchServices,
+    source_authority: CompilerSourceAuthority,
+}
+
+#[derive(Clone)]
+enum CompilerSourceAuthority {
+    Unqualified,
+    Preparation,
+    Cleanup,
+    Source(crate::resident_workbench::generation_admission::SourceDependency),
 }
 
 impl CompilerOwnerScope {
@@ -87,32 +97,83 @@ impl CompilerOwnerScope {
         Self {
             owner: self.owner.shared_preparation(producer),
             services: self.services.clone(),
+            source_authority: self.source_authority.clone(),
         }
     }
 
     pub(crate) fn admit_work(&self) -> Result<CompilerWorkTicket, ResidentActorWorkbenchError> {
+        let source_claim = self.source_claim()?;
+        Ok(self
+            .services
+            .compiler_admission()
+            .admit_work(&self.owner)?
+            .with_source_claim(source_claim))
+    }
+
+    pub(crate) fn with_source_dependency(
+        mut self,
+        dependency: &crate::resident_workbench::generation_admission::SourceDependency,
+    ) -> Self {
+        self.source_authority = CompilerSourceAuthority::Source(dependency.clone());
+        self
+    }
+
+    /// Native preparation before an authored actor world is admitted. The
+    /// production preparation/root owner selects this purpose explicitly.
+    pub(crate) fn for_preparation(mut self) -> Self {
+        self.source_authority = CompilerSourceAuthority::Preparation;
+        self
+    }
+
+    pub(crate) fn for_cleanup(mut self) -> Self {
+        self.source_authority = CompilerSourceAuthority::Cleanup;
+        self
+    }
+
+    fn source_claim(
+        &self,
+    ) -> Result<
+        Option<crate::resident_workbench::generation_admission::SourceClaim>,
+        ResidentActorWorkbenchError,
+    > {
+        match &self.source_authority {
+            CompilerSourceAuthority::Unqualified => Err(crate::resident_workbench::generation_admission::GenerationAdmissionError::Unqualified.into()),
+            CompilerSourceAuthority::Preparation | CompilerSourceAuthority::Cleanup => Ok(None),
+            CompilerSourceAuthority::Source(dependency) => Ok(Some(dependency.claim()?)),
+        }
+    }
+
+    /// Cleanup custody for resuming an already admitted continuation. This does
+    /// not authorize a compiler request, installation or callback registration.
+    pub(crate) fn admit_continuation(
+        &self,
+    ) -> Result<CompilerWorkTicket, ResidentActorWorkbenchError> {
         self.services.compiler_admission().admit_work(&self.owner)
     }
 
     pub(crate) fn admit_publication(
         &self,
     ) -> Result<CompilerWorkTicket, ResidentActorWorkbenchError> {
-        self.services
+        let source_claim = self.source_claim()?;
+        Ok(self
+            .services
             .compiler_admission()
-            .admit_publication(&self.owner)
+            .admit_publication(&self.owner)?
+            .with_source_claim(source_claim))
     }
 
     pub(crate) fn run<T>(
         &self,
         action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
     ) -> Result<T, ResidentActorWorkbenchError> {
-        run_compiler_action(&self.services, &self.owner, action)
+        Ok(self.admit_work()?.run(action))
     }
 }
 
 /// Run an action after checkout/source admission, using the captured exact owner.
 /// Action success and compiler close are separate; this caller retains the
 /// owner's live close observation while the action returns its original value.
+#[cfg(test)]
 pub(crate) fn run_compiler_action<C: HasCompilerAdmission + ?Sized, T>(
     capabilities: &C,
     owner: &CompilerCloseOwner,
@@ -150,8 +211,9 @@ mod tests {
         let services = WorkbenchServices::new();
         let retained = crate::RetainedActorExit::new();
         let unrelated = crate::WorkbenchExecutionControl::untracked();
-        let scope =
-            services.with_compiler_owner(CompilerCloseOwner::ActorLifecycle(retained.clone()));
+        let scope = services
+            .with_compiler_owner(CompilerCloseOwner::ActorLifecycle(retained.clone()))
+            .for_preparation();
         let captured = scope
             .scope(crate::resident_workbench::with_execution_control(
                 unrelated.clone(),

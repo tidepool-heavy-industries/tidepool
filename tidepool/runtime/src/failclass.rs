@@ -22,6 +22,10 @@ pub use tidepool_toolchain::failclass::{classify_compile, FailureClass, FailureE
 pub fn classify(err: &RuntimeError) -> FailureEnvelope {
     match err {
         RuntimeError::Compile(c) => classify_compile(c),
+        RuntimeError::Session(error) => classify_session(error),
+        RuntimeError::SourceAdmission(_) | RuntimeError::CompilerClose { .. } => {
+            FailureEnvelope::new(FailureClass::Runtime, Phase::Compile, err.to_string())
+        }
         RuntimeError::Jit(_) => {
             FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
         }
@@ -73,6 +77,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         // candidate at this admission point is a caller/session-state error,
         // not a user declaration or an environment failure.
         SessionError::NotebookGeneration(crate::session::NotebookGenerationError::Exhausted)
+        | SessionError::SourceAdmission(_)
         | SessionError::GenerationExhausted(_)
         | SessionError::DeadScope(_)
         | SessionError::MissingDeclarationLibrary

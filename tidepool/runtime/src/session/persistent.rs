@@ -218,8 +218,12 @@ fn stage_interface_file(
 /// wrapping, decl/pure-bind routing, output draining, continuation-id minting)
 /// and delegate the machine and persistent-store operations here.
 pub struct PersistentSession {
+    pub(super) source_transaction:
+        Option<Arc<super::source_admission::RuntimeSourceCompilerTransaction>>,
     catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
     admission_owner: Arc<super::admission::RuntimeAdmissionOwner>,
+    pub(super) uncertain_source_scopes:
+        Arc<parking_lot::Mutex<Vec<Arc<super::RuntimeLexicalScopeLease>>>>,
     /// The resident machine — `None` before the first turn bootstraps it,
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
     /// turn's duration (stowed-XOR-running).
@@ -354,7 +358,46 @@ pub struct DeclarationPlaneCommit {
     pub evicted_values: Vec<String>,
 }
 
+impl Drop for PersistentSession {
+    fn drop(&mut self) {
+        // Seal the actual issuer before releasing uncertain lexical custody or
+        // the native machine. External aliases remain stale after teardown.
+        self.admission_owner.seal_session();
+        let held = std::mem::take(&mut *self.uncertain_source_scopes.lock());
+        drop(held);
+    }
+}
+
 impl PersistentSession {
+    /// Own source preparation for callers that hold the session substrate.
+    pub fn with_source_compiler_transaction<T>(
+        &mut self,
+        source: Arc<super::RuntimeLexicalScopeLease>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        cancellation: crate::CompilerTransactionCancellation,
+        supplemental_hook: Option<super::SourceAdmissionHook>,
+        close_sink: impl FnOnce(crate::CompilerTransactionClose),
+        action: impl FnOnce(&mut Self, &mut dyn FnMut(crate::CompilerTransactionClose)) -> T,
+    ) -> Result<crate::CompilerTransactionSettled<T>, super::SourceAdmissionError> {
+        super::source_admission::run_source_compiler_transaction(
+            source,
+            workload,
+            cancellation,
+            supplemental_hook,
+            close_sink,
+            |context, report| {
+                let previous = self.source_transaction.replace(context);
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self, report)));
+                self.source_transaction = previous;
+                match result {
+                    Ok(value) => value,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            },
+        )
+    }
+
     /// Build an idle session core. `lib` is the persistent declaration environment (`Some` for the repl
     /// and the accumulating harness; `None` for a session with no persistent declarations). The
     /// machine is not bootstrapped until the first turn.
@@ -366,8 +409,13 @@ impl PersistentSession {
                 .value_generation
                 .max(lib.log.retained_value_generation_high_water());
         }
+        let uncertain_source_scopes = Arc::new(parking_lot::Mutex::new(Vec::new()));
         PersistentSession {
-            admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new()),
+            source_transaction: None,
+            admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new(
+                &uncertain_source_scopes,
+            )),
+            uncertain_source_scopes,
             catalog_selection: Default::default(),
             machine: None,
             invocation_cancel: None,
@@ -892,6 +940,8 @@ impl PersistentSession {
         ),
         PreparedRuntimeError,
     > {
+        let _source_claim = self.admit_source_work_in(scope)?;
+
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
@@ -1421,6 +1471,8 @@ impl PersistentSession {
         prepared: PreparedProgram,
         metadata: Option<&DataConTable>,
     ) -> Result<tidepool_codegen::prepared_program::ProgramId, PreparedRuntimeError> {
+        let _source_claim = self.admit_source_work_in(ScopeId::ROOT)?;
+
         let admitted_metadata = self.stage_install_metadata(
             metadata,
             prepared.constructors().iter(),
@@ -1490,10 +1542,12 @@ impl PersistentSession {
     /// import (caller recompiles from a fresh snapshot, or falls back).
     pub(crate) fn revalidate_and_install_prepared(
         &mut self,
+        scope: ScopeId,
         snapshot: InstallSnapshot,
         compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
         metadata: Option<&DataConTable>,
     ) -> Result<Option<tidepool_codegen::prepared_program::ProgramId>, PreparedRuntimeError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
         let admitted_metadata = self.stage_install_metadata(
             metadata,
             compiled.constructor_declarations(),
@@ -1926,6 +1980,7 @@ impl PersistentSession {
         source_layer: &[PathBuf],
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<super::StagedDeclaration, SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
         let (persistent_imports, import_modules, visible_values) =
             self.declaration_staging_context_in(scope, receipt, external)?;
         #[allow(clippy::expect_used, reason = "decl plane present")]
@@ -1959,6 +2014,11 @@ impl PersistentSession {
         receipt: &super::DeclarationReceipt,
         external: &SourceImports,
     ) -> Result<(DeclarationCandidateRender, Vec<(SessionVarId, String)>), SessionError> {
+        let _source_claim = if self.lib().durable_graph.is_some() {
+            self.admit_source_work_in(scope)?
+        } else {
+            None
+        };
         let (persistent_imports, import_modules, visible_values) =
             self.declaration_staging_context_in(scope, receipt, external)?;
         #[allow(clippy::expect_used, reason = "decl plane present")]
@@ -2031,6 +2091,7 @@ impl PersistentSession {
         ) -> Result<A, SessionError>,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
         let scope = staged.scope();
+        let _source_claim = self.admit_source_work_in(scope)?;
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -2288,6 +2349,8 @@ impl PersistentSession {
         namespace: Option<tidepool_toolchain::declaration_join::ExportNamespace>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
+
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -2319,6 +2382,7 @@ impl PersistentSession {
     /// mint and first use from leaking into the child.
     pub fn mint_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
         let child = self.scopes.mint_child(parent)?;
+        self.inherit_source_admission(parent, child);
         if let Some(lib) = self.lib.as_mut() {
             let inherited = lib.scope_tip(parent);
             lib.seed_scope(child, inherited);
@@ -2337,6 +2401,7 @@ impl PersistentSession {
             return None;
         }
         let root = self.scopes.mint_isolated();
+        self.inherit_source_admission(parent, root);
         if let Some(lib) = self.lib.as_mut() {
             let inherited = lib.scope_tip(parent);
             lib.seed_scope(root, inherited);
@@ -2377,6 +2442,17 @@ impl PersistentSession {
         let scope = self.mint_isolated_scope();
         self.prepared_lexical_scope_lease(scope)
     }
+
+    /// Replacement notebook issuance keeps external prerequisites while giving
+    /// the new notebook its own gate. The old notebook is not a prerequisite.
+    pub fn mint_notebook_scope_with_lease(
+        &mut self,
+        prerequisite: Option<super::RuntimeSourceAdmission>,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
+        self.reap_admission_leases();
+        let scope = self.mint_isolated_scope();
+        self.prepared_lexical_scope_lease_with_source(scope, prerequisite)
+    }
     /// Preserve the exact initialized notebook, including captured ancestry.
     /// Canonical lease issuance prevents independent retirement owners.
     pub fn adopt_initial_notebook_scope(
@@ -2388,6 +2464,18 @@ impl PersistentSession {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         self.prepared_lexical_scope_lease(scope)
+    }
+
+    pub fn adopt_initial_notebook_scope_with_source(
+        &mut self,
+        scope: ScopeId,
+        prerequisite: Option<super::RuntimeSourceAdmission>,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
+        self.reap_admission_leases();
+        if scope == ScopeId::ROOT {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        self.prepared_notebook_scope_lease(scope, prerequisite)
     }
 
     /// The session's one scope forest — read by both stores for their lookup
@@ -3585,6 +3673,8 @@ impl PersistentSession {
     /// check is the backstop, not the first line, since `bind_in` failing here
     /// is too late to return an adopted root to the machine's registry.
     pub fn bind_in(&mut self, scope: ScopeId, entry: BindingEntry) -> Result<(), SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
+
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -3679,6 +3769,14 @@ impl PersistentSession {
         entries: Vec<BindingEntry>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<MaterializationSetCommit, SessionError> {
+        let _source_claim = match self.admit_source_work_in(scope) {
+            Ok(claim) => claim,
+            Err(error) => {
+                self.discard_unbound_entries(entries);
+                return Err(error.into());
+            }
+        };
+
         if let Err(error) = self.validate_binding_set_in(scope, &entries) {
             self.discard_unbound_entries(entries);
             return Err(error);
@@ -3720,6 +3818,14 @@ impl PersistentSession {
         entries: Vec<BindingEntry>,
         binders: &[&super::BoundBinder],
     ) -> Result<MaterializationSetCommit, SessionError> {
+        let _source_claim = match self.admit_source_work_in(scope) {
+            Ok(claim) => claim,
+            Err(error) => {
+                self.discard_unbound_entries(entries);
+                return Err(error.into());
+            }
+        };
+
         match completion.validates_private_overlay(self, scope, binders) {
             Ok(true) => {}
             Ok(false) => {
@@ -3858,6 +3964,8 @@ impl PersistentSession {
         external: &SourceImports,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<DeclarationPlaneCommit, SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
+
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -3884,6 +3992,7 @@ impl PersistentSession {
         external: &SourceImports,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<DeclarationPlaneCommit, SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -4074,6 +4183,7 @@ impl PersistentSession {
         let mut retired = Vec::new();
         let mut source_instances = Vec::new();
         for dead in &doomed {
+            self.retire_source_admission(*dead);
             if let Some(lib) = self.lib.as_mut() {
                 lib.tips.remove(dead);
             }
@@ -7837,6 +7947,30 @@ mod maintained_binding_lifetime_properties {
 }
 
 impl PersistentSession {
+    pub(crate) fn admit_source_lease(
+        &self,
+        lease: Arc<super::RuntimeLexicalScopeLease>,
+    ) -> Result<(), super::SourceAdmissionError> {
+        self.source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?
+            .admit(Some(lease))
+    }
+
+    pub(super) fn admit_source_work_in(
+        &mut self,
+        scope: ScopeId,
+    ) -> Result<Option<super::RuntimeSourceClaim>, super::SourceAdmissionError> {
+        if let Some(owner) = &self.source_transaction {
+            let target = (scope != ScopeId::ROOT)
+                .then(|| self.source_lease_in(scope))
+                .transpose()?;
+            owner.admit(target)?;
+            return Ok(None);
+        }
+        Err(super::SourceAdmissionError::MissingTransaction)
+    }
+
     pub fn active_notebook_generation(
         &self,
         actor: &super::RecoveryPublicOwner,

@@ -11,19 +11,26 @@ type Registry = ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>;
 type Workbench = ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>;
 
 fn context(session: SessionId, scope: ScopeId) -> ActorSessionContext {
-    ActorSessionContext {
-        actor: ActorRef::first(ActorId(41)),
-        placement: ActorPlacement {
+    {
+        let context_actor = ActorRef::first(ActorId(41));
+        let context_placement = ActorPlacement {
             session,
             resource_scope: RealmId::ROOT,
             lexical_scope: scope,
-        },
-        effect_policy: EffectRunPolicy::HandleOrSuspend,
-        live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-        source_imports: ActorSourceImports::default(),
-        haskell_effects_alias: "[]".into(),
-        current_model: None,
-        source_layer: Vec::new().into(),
+        };
+        ActorSessionContext {
+            actor: context_actor,
+            placement: context_placement,
+            effect_policy: EffectRunPolicy::HandleOrSuspend,
+            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            source_imports: ActorSourceImports::default(),
+            haskell_effects_alias: "[]".into(),
+            current_model: None,
+            source_layer: Vec::new().into(),
+            ..crate::ActorDescriptor::new("fixture", context_placement)
+                .admit_independent_world()
+                .session_context(context_actor)
+        }
     }
 }
 

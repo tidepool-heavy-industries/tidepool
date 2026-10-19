@@ -17,6 +17,11 @@
 //! declaration REPL on its own.
 
 mod admission;
+mod source_admission;
+pub use source_admission::{
+    RuntimeSourceAdmission, RuntimeSourceClaim, RuntimeSourceCompilerTransaction,
+    RuntimeSourceFence, SourceAdmissionError, SourceAdmissionHook, SourceAdmissionPhase,
+};
 mod binding_table;
 mod dialect;
 mod generation_lease;
@@ -380,6 +385,8 @@ pub enum DurablePublicAdmissionFailure {
 
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
+    #[error(transparent)]
+    SourceAdmission(#[from] SourceAdmissionError),
     #[error(transparent)]
     NotebookGeneration(#[from] NotebookGenerationError),
     #[error(transparent)]
