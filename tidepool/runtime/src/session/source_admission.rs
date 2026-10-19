@@ -93,45 +93,67 @@ impl RuntimeSourceAdmission {
         self.0.prerequisite.as_ref()
     }
 
-    /// Only synchronous registration/enqueue belongs in this callback. Locks
-    /// remain held in ancestor order through the owner's actual reservation.
-    pub fn with_open_admission<T>(
+    /// Gate state alone is not source authority; canonical lease consumers also
+    /// hold the issuing epochs through their synchronous reservation.
+    #[cfg(test)]
+    pub(crate) fn with_open_admission<T>(
         &self,
         admit: impl FnOnce() -> T,
     ) -> Result<T, SourceAdmissionError> {
-        let mut guards = Vec::new();
-        self.lock_open_chain(&mut guards)?;
-        Ok(admit())
+        Self::with_open_admissions([self], admit)
     }
 
-    fn lock_open_chain<'a>(
-        &'a self,
-        guards: &mut Vec<parking_lot::MutexGuard<'a, AdmissionState>>,
-    ) -> Result<(), SourceAdmissionError> {
-        if let Some(parent) = &self.0.prerequisite {
-            parent.lock_open_chain(guards)?;
+    pub(super) fn with_open_admissions<'a, T>(
+        admissions: impl IntoIterator<Item = &'a Self>,
+        admit: impl FnOnce() -> T,
+    ) -> Result<T, SourceAdmissionError> {
+        fn collect(admission: &RuntimeSourceAdmission, gates: &mut Vec<RuntimeSourceAdmission>) {
+            if gates.iter().any(|gate| gate.same_owner(admission)) {
+                return;
+            }
+            if let Some(parent) = admission.prerequisite() {
+                collect(parent, gates);
+            }
+            gates.push(admission.clone());
         }
-        let state = self.0.state.lock();
-        if state.unconfirmed != 0 {
-            return Err(SourceAdmissionError::Unconfirmed {
-                scope: self.0.scope,
-                count: state.unconfirmed,
-            });
+        let mut gates = Vec::new();
+        for admission in admissions {
+            collect(admission, &mut gates);
         }
-        if state.phase != SourceAdmissionPhase::Open {
-            return Err(SourceAdmissionError::Closed {
-                scope: self.0.scope,
-                phase: state.phase,
-            });
+        // A total order also covers two unrelated source/target chains. A
+        // recursive ancestor-only lock order would invert on overlapping DAGs.
+        gates.sort_unstable_by_key(|gate| Arc::as_ptr(&gate.0) as usize);
+        let mut guards = Vec::new();
+        for gate in &gates {
+            let state = gate.0.state.lock();
+            if state.unconfirmed != 0 {
+                return Err(SourceAdmissionError::Unconfirmed {
+                    scope: gate.0.scope,
+                    count: state.unconfirmed,
+                });
+            }
+            if state.phase != SourceAdmissionPhase::Open {
+                return Err(SourceAdmissionError::Closed {
+                    scope: gate.0.scope,
+                    phase: state.phase,
+                });
+            }
+            guards.push(state);
         }
-        guards.push(state);
-        Ok(())
+        Ok(admit())
     }
 
     /// Records one actual source action before allocation. A retained claim
     /// permits its admitted action to finish; every new action earns a claim.
-    pub fn admit(&self) -> Result<RuntimeSourceClaim, SourceAdmissionError> {
+    #[cfg(test)]
+    pub(crate) fn admit(&self) -> Result<RuntimeSourceClaim, SourceAdmissionError> {
         let prerequisite = self.0.prerequisite.as_ref().map(Self::admit).transpose()?;
+        let mut claim = self.admit_local()?;
+        claim.prerequisite = prerequisite.map(Box::new);
+        Ok(claim)
+    }
+
+    fn admit_local(&self) -> Result<RuntimeSourceClaim, SourceAdmissionError> {
         let mut state = self.0.state.lock();
         if state.unconfirmed != 0 {
             return Err(SourceAdmissionError::Unconfirmed {
@@ -144,7 +166,7 @@ impl RuntimeSourceAdmission {
                 state.claims += 1;
                 Ok(RuntimeSourceClaim {
                     owner: self.clone(),
-                    prerequisite: prerequisite.map(Box::new),
+                    prerequisite: None,
                     release_on_drop: true,
                 })
             }
@@ -195,7 +217,7 @@ impl PartialEq for RuntimeSourceAdmission {
 impl Eq for RuntimeSourceAdmission {}
 
 #[must_use]
-pub struct RuntimeSourceClaim {
+pub(crate) struct RuntimeSourceClaim {
     owner: RuntimeSourceAdmission,
     prerequisite: Option<Box<RuntimeSourceClaim>>,
     release_on_drop: bool,
@@ -221,6 +243,41 @@ impl Drop for RuntimeSourceClaim {
         if self.release_on_drop {
             self.owner.0.state.lock().claims -= 1;
             self.owner.0.settled.notify_waiters();
+        }
+    }
+}
+
+/// One actual source action retains every exact ancestor even when scopes
+/// share a gate. Issued only by a validated canonical lexical lease.
+pub struct RuntimeSourceLeaseClaim {
+    claims: Vec<RuntimeSourceClaim>,
+    leases: Vec<Arc<super::RuntimeLexicalScopeLease>>,
+}
+impl RuntimeSourceLeaseClaim {
+    pub(super) fn admit(
+        leases: &[Arc<super::RuntimeLexicalScopeLease>],
+    ) -> Result<Self, SourceAdmissionError> {
+        let mut gates: Vec<RuntimeSourceAdmission> = Vec::new();
+        let mut claims = Vec::new();
+        for lease in leases {
+            let gate = lease.source_admission();
+            if !gates.iter().any(|held| held.same_owner(gate)) {
+                claims.push(gate.admit_local()?);
+                gates.push(gate.clone());
+            }
+        }
+        Ok(Self {
+            claims,
+            leases: leases.to_vec(),
+        })
+    }
+
+    pub fn retain_unconfirmed(self) {
+        for lease in &self.leases {
+            lease.retain_unconfirmed_source_custody();
+        }
+        for claim in self.claims {
+            claim.retain_unconfirmed();
         }
     }
 }
@@ -406,10 +463,7 @@ mod tests {
         let retained = session.retain_lexical_scope(parent.scope()).unwrap();
         let inherited = session.mint_scope_from_lease(&retained).unwrap();
         let child = session
-            .adopt_initial_notebook_scope_with_source(
-                inherited,
-                Some(parent.source_admission().clone()),
-            )
+            .adopt_initial_notebook_scope_with_source(inherited, Some(parent.clone()))
             .unwrap();
         let independent = session.mint_notebook_scope_with_lease(None).unwrap();
         assert!(child
@@ -431,7 +485,7 @@ mod tests {
         fn generated_admission_histories_match_owner_model(history in prop::collection::vec((0_u8..7, 0_usize..2, 0_usize..8), 1..96)) {
             let mut session = PersistentSession::new(None, 1024);
             let parent = session.mint_isolated_scope_with_lease().unwrap();
-            let child = session.mint_notebook_scope_with_lease(Some(parent.source_admission().clone())).unwrap();
+            let child = session.mint_notebook_scope_with_lease(Some(parent.clone())).unwrap();
             let gates = [parent.source_admission(), child.source_admission()];
             let mut phases = [0_u8; 2]; // independent model: open/fenced/retired
             let mut fences: [Option<RuntimeSourceFence>; 2] = [None, None];
@@ -522,25 +576,27 @@ impl RuntimeSourceCompilerTransaction {
             }
             holds.hook_admitted = true;
         }
-        for lease in std::iter::once(self.source.clone()).chain(target) {
-            lease.validate_source_issuer()?;
-            let admission = lease.source_admission();
-            if !holds
-                .claims
-                .iter()
-                .any(|(held, _)| held.same_owner(admission))
-            {
-                let claim = admission.admit()?;
-                holds.claims.push((admission.clone(), claim));
-            }
-            lease.validate_source_issuer()?;
-            // Captured scopes can share admission but own distinct native roots.
-            if !holds.leases.iter().any(|held| Arc::ptr_eq(held, &lease)) {
-                holds.leases.push(lease);
-            }
-        }
-        self.source.validate_source_issuer()?;
-        Ok(())
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            std::iter::once(self.source.clone()).chain(target),
+            |leases| {
+                for lease in leases {
+                    let admission = lease.source_admission();
+                    if !holds
+                        .claims
+                        .iter()
+                        .any(|(held, _)| held.same_owner(admission))
+                    {
+                        holds
+                            .claims
+                            .push((admission.clone(), admission.admit_local()?));
+                    }
+                    if !holds.leases.iter().any(|held| Arc::ptr_eq(held, lease)) {
+                        holds.leases.push(lease.clone());
+                    }
+                }
+                Ok(())
+            },
+        )
     }
     pub(crate) fn admitted_original_source(
         &self,

@@ -18,6 +18,7 @@
     "exomonad/actor/src/fixtures/captured-replacement-installers-bind.hs",
     "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
     "exomonad/actor/src/fixtures/captured-spec-installer.hs",
+    "exomonad/actor/src/fixtures/compiler-world-info.hs",
     "exomonad/actor/src/fixtures/host-job-first.hs",
     "exomonad/actor/src/fixtures/host-job-retained.hs",
     "exomonad/actor/src/fixtures/host-json-first.hs",

@@ -1300,7 +1300,7 @@ mod tests {
         let ticket = scope.admit_work().unwrap();
         ticket.run(|close| close(uncertain_close()));
         assert!(scope.admit_work().is_err());
-        assert!(dependency.registration_dependency().is_err());
+        assert!(dependency.with_open_admission(|| ()).is_err());
     }
 
     #[test]

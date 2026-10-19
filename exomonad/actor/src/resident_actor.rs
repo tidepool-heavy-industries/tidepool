@@ -17353,7 +17353,7 @@ mod tests {
                 }]),
             };
             let response = super::cell_check_rejection(tidepool_runtime::session::CellCheckFailure {
-                error: tidepool_runtime::CompileError::Diagnostics(diagnostics), items, source_admission: None,
+                error: tidepool_runtime::CompileError::Diagnostics(diagnostics), items, source_admission: None, compiler_close: None,
             }, "-- λ\n:}");
             prop_assert_eq!(response.status, WorkbenchRunStatus::Rejected);
             prop_assert_eq!(response.items.len(), 1);

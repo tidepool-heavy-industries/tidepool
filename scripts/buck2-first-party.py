@@ -1705,6 +1705,7 @@ tidepool_buildscript_run(
                         "resident_workbench::request_tests::lookup_batches_qualified_export_facts_in_one_compiler_request",
                         "resident_workbench::request_tests::lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc",
                         "resident_actor::child_launch::tests::child_factory_requires_clean_uncancelled_preparation_before_runtime_adoption",
+                        "resident_workbench::request_tests::durable_sleep_binding_observes_real_retraction_request_and_clean_end",
                     ]) + "},"] if package_name == "exomonad-actor" else []),
                 '    visibility = ["PUBLIC"],', ")", ""]))
             if package_name == "exomonad-actor":
