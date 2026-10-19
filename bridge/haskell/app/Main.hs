@@ -65,6 +65,7 @@ import Tidepool.GhcPipeline
   , CompilePurpose(..), withSourceImportIntents, prBinds, prHscEnv
   , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope
   , withResidentCompilerScopes, checkCellInstances
+  , captureSupportedPackageProfile
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
 import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes)
@@ -175,6 +176,10 @@ main = do
     then putStrLn "tidepool-extractor-role-v1 worker" >> exitWith ExitSuccess
   else if rawWorkerRequest == ["--print-worker-request-flag"]
     then putStrLn workerRequestFlag >> exitWith ExitSuccess
+  else if rawWorkerRequest == ["--capture-supported-package-profile-v1"]
+    then do
+      hSetBinaryMode stdout True
+      captureSupportedPackageProfile >>= BS.hPut stdout
   else if rawWorkerRequest == ["--worker-loop-v2"]
     then do
       hSetBinaryMode stdin True
