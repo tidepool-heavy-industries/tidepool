@@ -2,7 +2,8 @@
 
 The campaign is incomplete. Reviewed input sharing, custody, transport, source
 capture and observation repairs are integrated. Joined production/test compilation
-passed; the latest execution passed 592 script cases and 14 selected Rust cases.
+passed; the latest execution passed637 script cases,16 selected Rust cases and
+three Haskell leaves. Real package lifetime controls also passed in the area.
 The actual service-backed public-module query, ordinary-cell migration, exact
 successor publication/recovery, forced reload and measured improvement remain
 required. No Ready or speedup acceptance is claimed.
@@ -28,11 +29,11 @@ Read [RUST-CLIENT-MIGRATION.md](RUST-CLIENT-MIGRATION.md),
 
 Latest integrated code:3bacb5687e includes qualified hostfc1bae via ced803f,
 standalone fixture-wrapper6b8 via eb915, and scoped package-ownera7c125 via3bac.
-The package fold includes Warm20c+0b prerequisites; it does not accept the pending
-world retention/query implementation. Published checkpoint74ce5c1eef precedes these
-folds. A joined production/cfg(test)/declared-script gate starts from the next exact
-prebuild commit; campaign owns its terminal observation and tracked source stays
-frozen during native execution.
+Exact prebuild de23ab76bd joined15 targets successfully (2420local0remote), then
+637 script cases,16 Rust cases and3 Haskell leaves passed. All commands settled;
+79 report/stream/resource/executable hashes were reconciled. The package fold
+includes Warm20c+0b prerequisites, without accepting later world retention/query.
+Reviewed Warm5ac4dd38 (tested a3c033) is ready for the next integration gate.
 
 | Exact source | Joined evidence | Acceptance limits |
 | --- | --- | --- |
@@ -40,6 +41,7 @@ frozen during native execution.
 | e1cfc49e68 | Production/cfg(test)1243local0remote; four fact-key/counter controls4/4. `campaign/fact-key-counter-join/TERMINAL.json` | No service query; later digest-only observer gap repaired in cb888. |
 | 732d345691 | Host production/cfg(test)1157local0remote; scaffold/recovery controls2/2. `campaign/joined-host-fixture/TERMINAL.json` | Real worker execution, no Rooted service; recovery diagnostics incomplete. |
 | 80db8e5c6b compile;40471e8441 execution | Eight toolchain/runtime/actor/host production+test targets52local0remote in476.6s; scripts438+154=592 PASS; Rust14/14 (7toolchain,4runtime,1actor,2host). `campaign/source-owner-join/TERMINAL.json` | Prior script fixture NameError retained and repaired; all selected reports/streams/executable hashes reconciled. Process cleanup confirmed; host/compiler not_observed. No actual service query. |
+| de23ab76bd | Fifteen production/cfg(test)/Haskell targets2420local0remote in1366.2s; scripts637/637 (458+154+25), Rust16/16, Haskell3/3. `campaign/package-host-join/TERMINAL.json` | All79 hashes reconciled; peak12,806,127,616B within14GiB grant. Process cleanup confirmed; host/compiler cleanup and diagnostic limits preserved per report. No actual service-world query. |
 
 All evidence paths above are under
 `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`.
@@ -54,11 +56,11 @@ No new actors are needed. Reserved grants persist across event-bound yields.
 
 | Area | Current candidate/evidence | Next owned action |
 | --- | --- | --- |
-| host_inputs (2leaves) | Fullfc1bae folded. Toolchain production/cfg(test)+2controls and host production/cfg(test)+ordered A/B control all passed; source ownership and finite provenance reader repaired. | Actual query caller0cd280+d32 resource group under independent review, then four-target early compile and two real Rooted controls. Ordinary-cell/publication/recovery successor waves remain required. |
-| owned_inputs (2leaves) | Fulla7c125 folded with productdd0297. Five-label build passed; two real lifecycle controls/4 actual GHC inspections passed. Normal new epoch pins0/confirmed; native early recovery pins0 while broader old outcome remains unconfirmed. | Reserved source_lifetime independently reviews Warm world retention/client. Failed e695 original73pins remain retained unknown; no fabricated release. Package acceptance excludes PublicModule/world/ordinary-cell/rotation/performance. |
-| warm_workers (1leaf) | Matched20c+0b package prerequisite folded; actual client42b/4f64 production/cfg(test)+3controls passed in area. Maintained SourceBoot039c executed4:3PASS/1FAIL (effective byte-code flag guard), retained for repair. | FORMAT2 binds both semantic rowvectors; independent review and aggregate retention/backing release controls remain. Tiny request binding, output guards, preallocation and defining-unit reexport correction active. No actual query acceptance. |
-| reload (2leaves) | Exact80ad wave1 executed9:5PASS/4FAIL; invalid empty-context fixtures repaired029 independently reviewed. Wave2 runtime5/5 and integration1/1 passed; host recipe and Haskell controls running. | Parent observes session35163, then reviewed repair/fold. Canonical prerequisite DAG, conservative epoch invalidation on uncertain commit and close evidence on primary error have explicit owners. R2 force drain and actual END-loss discriminator remain required. |
-| qualification (1leaf) | Frozen428b stronger Persona1FAIL, all3cleanup confirmed, exact constructor trace locates AvailabilityOnly promotion. Typed repair916 early compile passed; five controls3PASS/2FAIL (new positive observer and unrelated custody fixture require discrimination). | Commands terminal/grant0; repair exact fixtures/producer as evidence requires, migrate remaining obsolete test issuer callers, independent review then narrow gate before frozen retry. |
+| host_inputs (2leaves) | Fullfc1bae folded/joined; actual query source16ed four production/cfg(test) targets nowPASS. Earlier e5a missing HashSet and bd2 six wrong fixture receivers retained/repaired. | Finite runtime/actor refusal controls active14TOTAL/8growth. Then coherent a3+reload composition, actual Info/Type effect resumption and same existing Rooted group for first query, eviction/restore, budget0 actual END and cleanup-failure worker retirement. No query execution acceptance. |
+| owned_inputs (2leaves) | Fulla7c125 folded/joined. Actual lifetime controls2/2 and4 GHC inspections passed; normal own pins0, recovery own pins0 with broader old outcome unconfirmed. Failed e695 original73pins remain unknown. | Reserved reviewer independently accepted a3 full source and10 component checks/22 hashes. Reawaken for exact new consumer/history evidence or changed compiler profile; no owned native jobs. |
+| warm_workers (1leaf) | Upward5ac4dd38, tested a3c033: matched FORMAT2, aggregate retention, tiny request binding, transitive/output guards, defining-unit receipt and preallocation fixes. Production/cfg(test) passed;5Rust+5Tasty passed, independently reconciled. | Campaign fold next. Host owns real Rooted lifecycle histories; Warm owns actual branch counters/worker observations. Concrete CELL-WORLD-CONTRACT-a3 is accepted for implementation using typed exact bindings, existing Materializer/current block frontier and local compiler attempts; cold CID parser changes declared profile and requires fresh provider/boot qualification. |
+| reload (2leaves) | Canonical scope/target foundation, prerequisite DAG, uncertain-commit epoch fence and close evidence repaired/reviewed. Actual wave2 runtime5+session1+host1 passed; notebook4 all failed MissingTransaction at actual mutation entry. Source69bf includes reviewed scope-composition fix and one runtime fixture import repair. | Owning9-target retry31325 active14TOTAL/32growth; then exact notebook4 plus owner/ancestry/target/physical-positive controls. R2 force drain and actual END-loss discriminator remain required. No full reload acceptance. |
+| qualification (1leaf) | Frozen428b Persona1FAIL with exact AvailabilityOnly first-promotion trace. Core667 compile passed;18controls14PASS4FAIL: primary historicalA/native-only child, true producer, strict conflict, repeated optional custody and Request48 internal states passed. Baseline c3 reproduces two unchanged fixture premises. | Own8ADDITIONAL/8growth real GHC quotation/pairing and declared catalog positive active. Exact test-oracle repairs preserve later permissions/substitution refusals; obsolete Candidate test-only API removal and maintained shrinking coverage continue. No final fold/frozen retry yet. |
 
 Campaign directly reviews critical source/consumers, shared contracts and exact
 joined evidence, folds reviewed area histories, publishes checkpoints and owns
@@ -125,10 +127,11 @@ local-only Buck workflow and verified bind mounts; no substitute wrapper. Preser
 100GiB unreserved including expected growth. Sample actual global memory plus
 remaining expected increments of EXACT active scopes below80GiB pressure threshold.
 Idle daemons stay in global current. Latest campaign gate peak14,228,971,520B;
-previous own jobs terminal. New campaign joined lane is14GiB TOTAL/32GiB growth
-including existing daemon; reload14TOTAL/32 remains active. Qualification, host,
-owned and Warm previous lanes are terminal/released; each new launch needs fresh
-actual-scope arithmetic, and updates only its own existing LIVE entry. Operational
+all campaign joined jobs terminal; peak12.806GB, current daemon remains in global
+accounting. Active area lanes at this snapshot: reload14TOTAL/32growth,
+host14TOTAL/8growth and qualification8ADDITIONAL/8growth. Warm and owned grants0.
+Each new launch needs fresh actual-scope arithmetic and updates only its own
+existing LIVE entry. Operational
 current receipts are `campaign/LIVE.json` plus each owner's exact admission record;
 refresh before every launch. No shared-daemon restart or output deletion by campaign.
 

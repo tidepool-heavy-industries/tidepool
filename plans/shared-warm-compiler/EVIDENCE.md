@@ -129,3 +129,14 @@ and the inspected production consumers.
 ## Integrated core checkpoint f088e3e783
 
 Reviewed host b5, owned f330 and worker0bd histories join at f088e3e7837c72cf0e82aab8e71a2687d767da34. Pinned production/cfgtest and declared runner resources compiled,52 local/0remote actions,303.4s, exit0. Thirty-six selected controls passed:25 toolchain,2 real-worker runtime histories,4 Rust protocol and5 Haskell. Exact source/commands/report and binary hashes/counts/status: private `campaign/CORE-JOINED-TERMINAL.json`, `core-joined-native-build.json`, `core-joined-tests.json` beneath `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`. All clients terminal. Runtime compiler/host cleanup not_observed and diagnostic completeness limits retained. No production Ready or performance/release claim.
+
+## Joined package/host checkpoint de23ab76bd
+
+Private receipt `campaign/package-host-join/TERMINAL.json`: exactsource
+`de23ab76bd1a0860c42efb09ac9f27faf064d88b`, fifteen production/cfg(test)/Haskell
+targets2420local0remote, compile1366.2s. Scripts637 executed/passed (458+154+25);
+Rust16 selected/executed/passed; three selected Haskell leaves passed. All commands
+terminal0;79 report/stream/resource/executable hashes reconciled before rebuilding.
+Peak12,806,127,616B under14GiB lane. Per-report cleanup/diagnostic limitations
+retained; directory resource hashes UNKNOWN. No actual world query, ordinary-cell
+successor, frozen candidate or speedup acceptance.

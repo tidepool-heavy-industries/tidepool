@@ -113,3 +113,33 @@ passed, including native early finalization. Original e695 failed epoch73pins re
 unknown. Campaign accepts package lifetime foundation only: inherited Warm20c world
 cache/late binding and restoration row seals have concrete pending repairs. No world,
 query, ordinary-cell, forced reload or performance acceptance follows from this fold.
+
+## Joined package/host gate de23 and paired cell implementation review
+
+Exactde23 joined15 production/cfg(test)/Haskell targets passed2420local0remote;
+637 scripts,16 Rust and3 Haskell leaves passed. Campaign reconciled79 actual
+report/stream/resource/executable hashes before further rebuilds. Receipt
+`campaign/package-host-join/TERMINAL.json`; no world-query/performance acceptance.
+
+Campaign read current runtime capture→source A/target B admission→physical END
+finish→CAS and actual frontend branch directly; helper+manual CAS tests do not
+complete frontend resumption. Warm a3 full-base source and10 component checks
+have independent receipts8db51fc/30eec2e; actual Rooted eviction/oversize/END
+histories remain assigned. Questioned cleanup charge cone is closed by preserved
+RequestReleaseFailure and WorkerServer failure before request recursion.
+
+CELL-WORLD-CONTRACT-a3 (private campaign warm-workers evidence, SHA1c90df26a3fa564894e558c16099a438d33c0704f255a72e7c95605b38db4fa8)
+is approved for implementation: exact typed binding/row links, actual compiled
+private item outputs, existing runtime END/item/atomic publication owners, existing
+Materializer changed nodes/current reachable frontier, closed cold CID decoder
+with maintained declared hash dependency and fresh profile/provider qualification.
+No baseline snapshot/offer fold, predecessor chain or global compiler memo owner
+is permitted behind ordinary publication. Shared-CID multiplicity, forks, obsolete
+path release and changed-node-only work require independent executable oracles.
+
+Qualification667 core probe source accepted. Campaign rejected expanding product
+custody solely to satisfy an overstrong optional-B request assertion: the context
+already retains B independently. Test-only69c151 preserves exact requiredA7 edges
+while allowing unused request custody to narrow. Baseline c3 proved two earlier
+fixture premises fail unchanged; focused repairs preserve actual downstream body
+permission and conflicting selected implementation refusals.
