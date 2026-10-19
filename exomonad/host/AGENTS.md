@@ -68,7 +68,10 @@ through the existing conversation seam so the root admits `Reflect`.
 
 Notebook inspection feedback may be a binding handle. Behavioral assertions
 must follow the existing output or inspection owner to the evaluated value;
-immediate feedback text is not itself proof of the result. When assertion
+immediate feedback text is not itself proof of the result. Installed binding names
+can identify typed accessors rather than their retained values. Follow the issued
+binding type and apply its projection before asserting presentation; bare-expression
+observations are unit accessors consumed as `observationN ()`. When assertion
 branches display different types, discard each typed display handle before
 joining the branches. Render Show-only outcomes explicitly with `show` so
 failure pages retain their constructors and details. `display` publishes

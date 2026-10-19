@@ -3713,7 +3713,7 @@ async fn either_text_display_preserves_raw_text_through_retained_expansion() {
         );
         let result = displayed(
                 campaign, policy.as_ref(),
-                &format!("Inspect.display {binding}"),
+                &format!("Inspect.display ({binding} ())"),
             )
             .await;
         assert_eq!(explicit_display_output(&result)["text"], expected, "{result:?}");
