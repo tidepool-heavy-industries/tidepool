@@ -17179,40 +17179,61 @@ pub(crate) mod request_tests {
                 assert!(matches!(crate::resident_actor::WorkbenchCompilationAuthority::admit(
                     context.clone(), wrong_reference, None, Some(&layers),
                 ), Err(crate::KernelInvocationFailure::Rejected { .. })));
-                let descriptor = crate::ActorDescriptor::new("private-cell-test", context.placement);
-                let public_owner = crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None).unwrap();
-                let private = Arc::new(workbench_runner_for_test(&workbench).begin_private_execution(
-                    context.clone(), public_owner, tidepool_runtime::session::PublicationDecision::new(),
-                ).await.unwrap());
-                let mut private_context = context.clone();
-                private_context.placement.lexical_scope = private.private_scope;
-                let (frontend_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
-                    private_context, captured.clone(), None, Some(&layers),
-                ).unwrap_or_else(|error| panic!("actual source owner must admit its retained selection: {error:?}"));
-                let frontend = workbench.shared_view().with_compilation_authority(authority).with_private_execution(private);
-                let cell = include_str!("fixtures/compiler-world-info.hs").to_owned();
-                let (checked, prepared) = frontend.prepare_cell(frontend_context.clone(), cell.clone()).await.unwrap();
-                let PreparedCell { mut items, dependencies } = prepared;
-                assert_eq!(checked.items.len(), 1);
-                assert_eq!(items.len(), 1);
-                let step = frontend.begin_prepared_cell_item(frontend_context.clone(), ParsedBlock {
-                    ordinal: 1, total: 1, source: cell,
-                }, items.remove(0)).await.unwrap();
-                let ResidentWorkbenchStep::Running { fragment, outcome } = step else { panic!("actual Introspection effect must suspend"); };
-                let boundary = workbench_runner_for_test(&frontend).capture_boundary(
-                    frontend_context.clone(), (*outcome).into(), frontend_context.placement.resource_scope,
-                ).await.unwrap();
-                let ResidentActorBoundary::Introspection { continuation, query, kind } = boundary else { panic!("real structured inspection boundary"); };
-                assert_eq!(query.scope, tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()));
-                assert!(matches!(kind, StructuredInspectionKind::Info));
-                let outcome = frontend.resume_structured_introspection(frontend_context.clone(), continuation, query, kind).await.unwrap();
-                let step = frontend.settle_item(frontend_context, *fragment, outcome).await.unwrap();
-                let ResidentWorkbenchStep::Committed { output, installed_bindings, .. } = step else { panic!("real world answer must resume and complete the authored item"); };
-                assert_eq!(installed_bindings, ["frontendAnswer"]);
-                assert!(output.contains("known") && output.contains("compiler-world:"), "{output}");
-                assert_eq!(owner.captures.load(std::sync::atomic::Ordering::Relaxed), 1,
-                    "the real frontend must borrow the retained captured source domain");
-                drop(dependencies);
+                for valid_answer in [true, false] {
+                    let descriptor = crate::ActorDescriptor::new("private-cell-test", context.placement);
+                    let public_owner = crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None).unwrap();
+                    let private = Arc::new(workbench_runner_for_test(&workbench).begin_private_execution(
+                        context.clone(), public_owner, tidepool_runtime::session::PublicationDecision::new(),
+                    ).await.unwrap());
+                    let mut private_context = context.clone();
+                    private_context.placement.lexical_scope = private.private_scope;
+                    let (frontend_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                        private_context, captured.clone(), None, Some(&layers),
+                    ).unwrap_or_else(|error| panic!("actual source owner must admit its retained selection: {error:?}"));
+                    let frontend = workbench.shared_view().with_compilation_authority(authority).with_private_execution(private);
+                    let fixture = include_str!("fixtures/compiler-world-info.hs");
+                    // Change only the expected answer, preserving the real queried name.
+                    let guard = "== \"known\"";
+                    assert_eq!(fixture.matches(guard).count(), 1);
+                    let cell = if valid_answer {
+                        fixture.to_owned()
+                    } else {
+                        fixture.replacen(guard, "== \"not-known\"", 1)
+                    };
+                    let (checked, prepared) = frontend.prepare_cell(frontend_context.clone(), cell.clone()).await.unwrap();
+                    let PreparedCell { mut items, dependencies } = prepared;
+                    assert_eq!(checked.items.len(), 1);
+                    assert_eq!(items.len(), 1);
+                    let step = frontend.begin_prepared_cell_item(frontend_context.clone(), ParsedBlock {
+                        ordinal: 1, total: 1, source: cell,
+                    }, items.remove(0)).await.unwrap();
+                    let ResidentWorkbenchStep::Running { fragment, outcome } = step else { panic!("actual Introspection effect must suspend"); };
+                    let boundary = workbench_runner_for_test(&frontend).capture_boundary(
+                        frontend_context.clone(), (*outcome).into(), frontend_context.placement.resource_scope,
+                    ).await.unwrap();
+                    let ResidentActorBoundary::Introspection { continuation, query, kind } = boundary else { panic!("real structured inspection boundary"); };
+                    assert_eq!(query.scope, tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()));
+                    assert!(matches!(kind, StructuredInspectionKind::Info));
+                    let resumed = frontend.resume_structured_introspection(frontend_context.clone(), continuation, query, kind).await;
+                    if valid_answer {
+                        let outcome = resumed.expect("the strict answer guard must accept the actual world answer");
+                        let step = frontend.settle_item(frontend_context, *fragment, outcome).await.unwrap();
+                        let ResidentWorkbenchStep::Committed { output, installed_bindings, .. } = step else { panic!("real world answer must resume and complete the authored item"); };
+                        assert_eq!(installed_bindings, ["frontendAnswer"]);
+                        assert_eq!(output, "[bound frontendAnswer]");
+                    } else {
+                        let failure = resumed.expect_err("a wrong expected name must fail before commit");
+                        assert!(matches!(&failure, ResidentActorWorkbenchError::Delivered(error) if error.is_language_failure()), "{failure:?}");
+                        frontend.access.with_machine(frontend_context, |session, context, _| {
+                            assert!(session.workbench_bindings_in(context.placement.lexical_scope)
+                                .iter().all(|binding| binding.name != "frontendAnswer"));
+                            Ok(())
+                        }).await.unwrap();
+                    }
+                    assert_eq!(owner.captures.load(std::sync::atomic::Ordering::Relaxed), 1,
+                        "the real frontend must borrow the retained captured source domain");
+                    drop(dependencies);
+                }
             }
 
             let history_context = workbench.access.with_machine(context.clone(), |session, context, _| {
