@@ -30,8 +30,8 @@ path = "empty.rs"
 "fvm_ipld_hamt" = { package = "fvm_ipld_hamt", version = "=0.10.6", default-features = true, features = [] }
 "genai" = { package = "genai", version = "=0.6.5", default-features = true, features = [] }
 "glob" = { package = "glob", version = "=0.3.4", default-features = true, features = [] }
-"harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "554a0fa24c5c42f4b187933ee6013cef6b4016d7" }
-"harness-schema" = { package = "harness-schema", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "554a0fa24c5c42f4b187933ee6013cef6b4016d7" }
+"harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "ab31248957c3dc052da699796e67b351784f5c9d" }
+"harness-schema" = { package = "harness-schema", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "ab31248957c3dc052da699796e67b351784f5c9d" }
 "ignore" = { package = "ignore", version = "=0.4.33", default-features = true, features = [] }
 "imbl" = { package = "imbl", version = "=7.0.2", default-features = false, features = [] }
 "inventory" = { package = "inventory", version = "=0.3.24", default-features = true, features = [] }
