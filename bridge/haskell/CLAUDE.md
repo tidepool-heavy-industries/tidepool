@@ -137,6 +137,9 @@ Effective source flags preserve the operation's fixed output policy, including
 directories, explicit filenames and suffixes. World queries refuse dump files,
 IDE outputs and coverage files before load; these are not captured world inputs
 or implicitly owned products.
+An admitted query stores only its scope-issued world binding. It borrows the
+actual payload from the still-held scope after executor and phase checks, so a
+retained closed request does not become another raw-source/HPT retention owner.
 
 Exact-scope manifests use strict `TPEXACTSCOPE` version 16 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization

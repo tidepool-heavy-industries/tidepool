@@ -36,7 +36,7 @@ module Tidepool.GhcPipeline
   , withResidentPipelineSelected
   , withResidentPipelineSelectedRequests
   , CompilerScope, scopedCompile, scopedCompileCompleted, scopedReadExactScope, scopedRunGhc, scopedParserFlags
-  , scopedEnsureWorld, scopedReadHeldWorld, scopedQueryWorld, HeldCompilerWorld
+  , scopedEnsureWorld, scopedReadHeldWorld, scopedQueryWorld, HeldWorldQueryBinding
   , materializeWorldSources
   , CompletedCompilerResult, completedCompilerResult, completedCompilerRecovery, completedCompilerGuard
   , CompilerScopeRunner, withResidentCompilerScopes
@@ -1307,6 +1307,11 @@ data CompilerUniverse = CompilerUniverse
 -- This realization is indexed by its universe and strongly borrowed by one
 -- active compiler scope through confirmed END.
 data HeldCompilerWorld = HeldCompilerWorld WorldInputFacts String WorldMaterialization (IORef WorldPreparedModules)
+
+-- A retained closed request carries correlation, never a second payload hold.
+-- The scope revalidates this binding and borrows its actual held payload only
+-- after the fresh executor and phase checks have succeeded.
+data HeldWorldQueryBinding = HeldWorldQueryBinding !String !String
 
 data WorldHomeSource = WorldHomeSource Int FilePath FilePath BS.ByteString
 data WorldMaterialization = WorldMaterialization FilePath [FilePath]
@@ -5126,8 +5131,8 @@ data CompilerScope = CompilerScope
   , ownedScopedCompileCompleted :: CompletedResidentCompiler
   , ownedScopedReadExactScope :: FilePath -> IO (Either String ExactScope)
   , ownedScopedEnsureWorld :: ExactInputsRequest -> IO EnsureExactInputsOutcome
-  , ownedScopedReadHeldWorld :: String -> String -> IO (Maybe HeldCompilerWorld)
-  , ownedScopedQueryWorld :: Maybe HeldCompilerWorld -> CompilerExecutionGrant -> CompilerExecutor -> WorldPublicModuleRequest -> IO BS.ByteString
+  , ownedScopedReadHeldWorld :: String -> String -> IO (Maybe HeldWorldQueryBinding)
+  , ownedScopedQueryWorld :: Maybe HeldWorldQueryBinding -> CompilerExecutionGrant -> CompilerExecutor -> WorldPublicModuleRequest -> IO BS.ByteString
   , ownedScopedRunGhc :: forall result. Ghc result -> IO result
   , ownedScopedParserFlags :: DynFlags
   }
@@ -5145,10 +5150,10 @@ scopedReadExactScope = ownedScopedReadExactScope
 scopedEnsureWorld :: CompilerScope -> ExactInputsRequest -> IO EnsureExactInputsOutcome
 scopedEnsureWorld = ownedScopedEnsureWorld
 
-scopedReadHeldWorld :: CompilerScope -> String -> String -> IO (Maybe HeldCompilerWorld)
+scopedReadHeldWorld :: CompilerScope -> String -> String -> IO (Maybe HeldWorldQueryBinding)
 scopedReadHeldWorld = ownedScopedReadHeldWorld
 
-scopedQueryWorld :: CompilerScope -> Maybe HeldCompilerWorld -> CompilerExecutionGrant -> CompilerExecutor -> WorldPublicModuleRequest -> IO BS.ByteString
+scopedQueryWorld :: CompilerScope -> Maybe HeldWorldQueryBinding -> CompilerExecutionGrant -> CompilerExecutor -> WorldPublicModuleRequest -> IO BS.ByteString
 scopedQueryWorld = ownedScopedQueryWorld
 
 scopedRunGhc :: CompilerScope -> Ghc result -> IO result
@@ -5325,8 +5330,11 @@ withResidentCompilerScopes baseIncludes useRequests = do
                 readHeldWorld root reference = runGuarded $ do
                   held <- readIORef heldWorld
                   case held of
-                    Just world@(HeldCompilerWorld facts issued _ _)
-                      | root == worldInputsIdentity facts && reference == issued -> pure (Just world)
+                    Just (HeldCompilerWorld facts issued _ _)
+                      | root == worldInputsIdentity facts && reference == issued -> do
+                          let identity = worldInputsIdentity facts
+                          _ <- evaluate (length identity + length issued)
+                          pure (Just (HeldWorldQueryBinding identity issued))
                     _ -> pure Nothing
                 ensureWorld (ExactInputsRequest root acquisition) = runGuarded $ do
                   selected <- readIORef universe
@@ -5377,9 +5385,9 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   requireCompilerExecutorOpen executor
                   held <- readIORef heldWorld
                   case (expected,held) of
-                    (Just world@(HeldCompilerWorld facts reference _ _),Just (HeldCompilerWorld current issued _ _))
-                      | worldInputsIdentity current == worldInputsIdentity facts && issued == reference
-                        && worldQueryIdentity question == worldInputsIdentity facts
+                    (Just (HeldWorldQueryBinding identity reference),Just world@(HeldCompilerWorld current issued _ _))
+                      | worldInputsIdentity current == identity && issued == reference
+                        && worldQueryIdentity question == identity
                         && worldQueryRealization question == reference -> do
                           selected <- readIORef universe
                           bracket (reflectGhc getSession session) (\original -> reflectGhc (setSession original) session) $ \_ ->
