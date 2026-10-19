@@ -8714,15 +8714,13 @@ mod tests {
             .filter(|key| key.artifact == original_artifact)
             .collect::<BTreeSet<_>>();
         assert!(!issued_original_groups.is_empty());
-        assert_eq!(
+        assert!(
             context
                 .artifact_view()
                 .selected_native_groups()
-                .into_iter()
-                .filter(|key| key.artifact == original_artifact)
-                .collect::<BTreeSet<_>>(),
-            issued_original_groups,
-            "the join must retain the original issuer's executable selection"
+                .iter()
+                .all(|key| key.artifact != original_artifact),
+            "an interface-only compiler view must not demand original native groups before target admission"
         );
         let canonical_interface = context
             .artifact_view()
