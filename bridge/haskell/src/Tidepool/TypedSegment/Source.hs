@@ -71,7 +71,8 @@ typedSegmentInputOccurrences environment plan source = case rootExpression of
             (nlHsVar (mkRdrUnqual (mkVarOcc (typedSegmentPlanRoot plan))))))
           _ -> Left UnprovedRootAbstraction
     supportedDeclaration :: HsDecl GhcPs -> Bool
-    supportedDeclaration ValD{} = True
+    supportedDeclaration (ValD _ FunBind{}) = True
+    supportedDeclaration (ValD _ PatBind{}) = True
     supportedDeclaration SigD{} = True
     supportedDeclaration DefD{} = True
     supportedDeclaration (TyClD _ SynDecl{}) = True
