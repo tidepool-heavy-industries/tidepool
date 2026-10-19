@@ -289,6 +289,7 @@ import Tidepool.PackageWitness
 import Tidepool.PackageWitness
   ( captureSupportedPackageProfileWith, requireObservationPackageEnvironment
   , ServicePackageAssociation, readCompilerPackageBoot, validateCompilerPackageBoot
+  , compilerPackageBootLibdir
   , validateCompilerPackageBootConfiguration
   , emitCompilerPackageBootAcknowledgement )
 import Tidepool.ModuleCandidates
@@ -4871,7 +4872,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
   packageBoot <- readCompilerPackageBoot
   producer <- captureCompilerProducerIdentity
   timing <- readTimingEnabled
-  (libdir,startupMs) <- timeSection getLibdir
+  (libdir,startupMs) <- timeSection (compilerPackageBootLibdir packageBoot)
   emitPhase timing "startup" startupMs
   -- Internal interpreters cannot retire a dynamic object epoch. The selected
   -- pinned GHC closure owns this executable alongside its libraries.
