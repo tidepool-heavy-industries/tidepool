@@ -66,9 +66,11 @@ COMPILER_SERVICE_SOURCE_CONFIG, and COMPILER_SERVICE_SOURCE_CONFIG_SHA256, each
 prefixed TIDEPOOL_. The frontend and admission consumer must independently check
 the producer's configured digest; that joined authority is not accepted yet.
 
-Two CLI preflight caller migrations remain uncommitted in exomonad.rs, depending
-on owned's actual admit_service_preflight API successor. They are preserved,
-outside the tested runtime/actor graph, and must not be hidden for a host build.
+Campaign-approved owned API/provider history through a56ad6f71e is merged in
+90d9a65; its earlier API compile and producer controls remain owner receipts,
+not a Rooted service claim. The two CLI preflight callers are now committed in
+e4f7b31c3a, consuming actual issued CompilerIdentity through the shared admission
+checker. These host callers still require their owning production/cfg-test gate.
 
 ## Required service boundary and successors
 
@@ -87,8 +89,14 @@ First source policy supports captured non-CPP/nonexternal-preprocessor demanded
 closures and a fixed package profile. Graph-v2 cannot authenticate a header-only
 new revision. Accepted/uncertain submissions never replay the old route. Lookup
 hydration does not advance logical selection or bindings. Catalog module/source
-aliases not represented by conventional captured finder paths must be refused;
-the actual target/source metadata lives in the catalog owner's private records.
+aliases not represented by conventional captured finder paths must be refused.
+Source-only cbdda49142 checks actual acquired catalog records against the first
+conventional source in the same ordered captured manifest namespace. Duplicate
+roots, reordered catalog roles, ambiguous suffixes, nonconventional targets and
+partial owners refuse before query acceptance; cached capture skips this cold
+check. Independent review and owning toolchain/host gates remain pending. Exact
+planned command is retained in catalog-lookup-9487/commands.json under the host
+evidence root; no test execution is claimed.
 
 Accepted CELL-SUCCESSOR contract is retained at
 `/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/CELL-SUCCESSOR-CONTRACT-8d69.md`,
