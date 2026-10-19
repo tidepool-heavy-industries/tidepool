@@ -4,7 +4,7 @@ Status: READY_FOR_BACKEND_HANDOFF. All five area supervisors and all nine leaves
 
 ## First read and ownership
 
-Use account `inanna`. Do not switch/edit `/srv/swarm/checkouts/tidepool` or another live checkout. The campaign owns `/srv/swarm/checkouts/tidepool-shared-warm-campaign-20261019`; active branch `integration/shared-warm-cell`, exact HEAD `eea0c47da119224c151b07634d2868ae75c35c86`. The full Warm/owned/Host source consolidation is product70c1. Compiler-only Actor/Host trait-depth fixes a55d/eea0 are committed and published. The final handoff commit changes only plan Markdown; exact final publication is recorded in `campaign/CONTINUATION.json`. Qualified branch `campaign/shared-warm-compiler` remains944b, tested productbedfe.
+Use account `inanna`. Do not switch/edit `/srv/swarm/checkouts/tidepool` or another live checkout. The campaign owns `/srv/swarm/checkouts/tidepool-shared-warm-campaign-20261019`; branch `integration/shared-warm-cell`, tested product `eea0c47da119224c151b07634d2868ae75c35c86`. The current documentation HEAD is recorded in CONTINUATION.json. The full Warm/owned/Host source consolidation is product70c1. Compiler-only Actor/Host trait-depth fixes a55d/eea0 are committed and published. The final handoff commit changes only plan Markdown; exact final publication is recorded in `campaign/CONTINUATION.json`. Qualified branch `campaign/shared-warm-compiler` remains944b, tested productbedfe.
 
 Read campaign `plans/shared-warm-compiler/{README,CONTRACTS,DEMAND-SERVICE,RUST-CLIENT-MIGRATION,SERVICE-API,STATUS}.md`, repository AGENTS/glossary/nearest subsystem guides, and `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/root-review-joined-20261019/REVIEW.md`. The review is source-level, not joined approval.
 
