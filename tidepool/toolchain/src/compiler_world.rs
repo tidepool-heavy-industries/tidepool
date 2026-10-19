@@ -1932,6 +1932,7 @@ pub(crate) struct WorldCellOutputAdmission {
     pub(crate) captured_files: BTreeMap<PathBuf, WorldOutputFile>,
     pub(crate) validation: crate::recovery_artifacts::PackageInterfaceValidation,
     segments: Vec<Arc<crate::checked_cell::CheckedTypedSegmentPlan>>,
+    item_proofs: Vec<WorldItemProof>,
 }
 
 impl WorldCellOutputAdmission {
@@ -1950,6 +1951,12 @@ impl WorldCellOutputAdmission {
     }
     pub(crate) fn segments(&self) -> &[Arc<crate::checked_cell::CheckedTypedSegmentPlan>] {
         &self.segments
+    }
+
+    /// One decoded item proof per reservation slot, correlated with the same
+    /// physical output that produced `items` and `captured_files`.
+    pub(crate) fn item_proofs(&self) -> &[WorldItemProof] {
+        &self.item_proofs
     }
 
     pub(crate) fn source_path_domain<'a>(
@@ -1977,6 +1984,58 @@ impl WorldOutputFile {
     }
     pub(crate) fn sha256(&self) -> &[u8; 32] {
         &self.sha256
+    }
+}
+
+/// Compiler-issued identity decoded from one item's own `TPCWITEM1` output.
+/// Admission retains this proof so a later constructor does not re-decode
+/// transport bytes, and so the item's binder, signature, provenance and
+/// native group ordinal stay correlated with the physical output that carried
+/// them. It grants no runtime value or execution permission by itself.
+pub(crate) struct WorldItemProof {
+    index: usize,
+    ordinal: u64,
+    generation: u64,
+    entry: String,
+    native_ordinal: u32,
+    segment_digest: String,
+    symbol: tidepool_repr::execution_schema::SymbolIdentity,
+    binders: Vec<crate::checked_cell::WorldItemBinder>,
+    signatures: Vec<crate::checked_cell::ExactCheckedSignature>,
+    manifest: BTreeMap<PathBuf, [u8; 32]>,
+}
+
+impl WorldItemProof {
+    pub(crate) fn index(&self) -> usize {
+        self.index
+    }
+    pub(crate) fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub(crate) fn entry(&self) -> &str {
+        &self.entry
+    }
+    /// Native original-group ordinal the compiler issued for this item entry.
+    pub(crate) fn native_ordinal(&self) -> u32 {
+        self.native_ordinal
+    }
+    pub(crate) fn segment_digest(&self) -> &str {
+        &self.segment_digest
+    }
+    pub(crate) fn symbol(&self) -> &tidepool_repr::execution_schema::SymbolIdentity {
+        &self.symbol
+    }
+    pub(crate) fn binders(&self) -> &[crate::checked_cell::WorldItemBinder] {
+        &self.binders
+    }
+    pub(crate) fn signatures(&self) -> &[crate::checked_cell::ExactCheckedSignature] {
+        &self.signatures
+    }
+    pub(crate) fn manifest(&self) -> &BTreeMap<PathBuf, [u8; 32]> {
+        &self.manifest
     }
 }
 
@@ -2161,6 +2220,38 @@ fn world_output_symbol(
     })
 }
 
+/// A world item's root identity is a compiler-issued session value binder.
+/// Every component is checked: the occurrence names the typed entry, the
+/// module is the exact generated session module for the slot generation, the
+/// namespace is the `value` namespace the writer passes, and a record parent
+/// is never valid for a top-level session binder.
+fn validate_world_output_symbol(
+    symbol: &tidepool_repr::execution_schema::SymbolIdentity,
+    typed_item: &crate::checked_cell::CheckedTypedSegmentItem,
+    slot: &crate::checked_cell::CheckedPlannedCellSlot,
+) -> Result<(), CompileError> {
+    use crate::checked_cell::CheckedPlannedCellSlot as Slot;
+    use tidepool_repr::{Generation, SessionModule};
+    let generation = Generation(typed_item.generation());
+    let module = match slot {
+        Slot::Prologue { .. } | Slot::Declaration { .. } => SessionModule::lib(generation),
+        Slot::Bind { .. } | Slot::Expression { .. } => SessionModule::val(generation),
+    };
+    let bounded = |value: &str| !value.is_empty() && value.len() <= 65536;
+    if symbol.namespace != "value"
+        || symbol.record_parent.is_some()
+        || !bounded(&symbol.unit)
+        || !bounded(&symbol.module)
+        || !bounded(&symbol.namespace)
+        || !bounded(&symbol.occurrence)
+        || symbol.occurrence != typed_item.entry()
+        || symbol.module != module.module_name()
+    {
+        return Err(world_response_error(true));
+    }
+    Ok(())
+}
+
 fn admit_world_preparation_response(
     origin: tidepool_extract_cmd::CompilerTransactionOrigin,
     reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
@@ -2233,6 +2324,8 @@ fn admit_world_preparation_response(
         .reserve::<ciborium::value::Value>(completed.len())
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     let mut items = Vec::with_capacity(completed.len());
+    let mut item_proofs = Vec::with_capacity(completed.len());
+    let mut issued_native_ordinals = BTreeMap::<String, u32>::new();
     let mut captured_files = BTreeMap::new();
     for (index, (completed, slot)) in completed.iter().zip(reservation.slots()).enumerate() {
         crate::host_work::checkpoint()?;
@@ -2282,11 +2375,61 @@ fn admit_world_preparation_response(
             .inventory
             .charge_value_copies(&observed[9], 1)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        if world_output_symbol(&observed[9])?.occurrence != typed_item.entry() {
-            return Err(world_response_error(true));
+        let symbol = world_output_symbol(&observed[9])?;
+        validate_world_output_symbol(&symbol, typed_item, slot)?;
+        // Field 10 is the native original-group ordinal the compiler issued for
+        // this item entry. Retain it, and refuse a preparation whose two items
+        // claim different ordinals for one entry.
+        validation
+            .inventory
+            .charge_value_copies(&observed[10], 1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let native_ordinal = u32::try_from(answer_u64(&observed[10])?)
+            .map_err(|_| world_response_error(false))?;
+        match issued_native_ordinals.get(typed_item.entry()) {
+            Some(issued) if *issued != native_ordinal => {
+                return Err(world_response_error(true));
+            }
+            Some(_) => {}
+            None => {
+                issued_native_ordinals.insert(typed_item.entry().to_owned(), native_ordinal);
+            }
         }
+        // Field 11 is the two-list `[binders, signatures]`. Binder order and
+        // identity must match the reservation, and each signature must name
+        // this typed item's entry and ordered capture.
+        validation
+            .inventory
+            .charge_value_copies(&observed[11], 1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let evidence = answer_array(&observed[11], 2)?;
+        let expected_bindings = reservation
+            .expected_bindings()
+            .get(index)
+            .ok_or_else(|| world_response_error(true))?;
+        let binders =
+            crate::checked_cell::decode_world_item_binders(&evidence[0], expected_bindings)?;
+        let captures = typed_item.body().captures();
+        let signatures = crate::checked_cell::decode_world_item_signatures(
+            &evidence[1],
+            typed_item.entry(),
+            &captures,
+        )?;
         let manifest = world_output_manifest(&observed[12], &validation.inventory)?;
-        for (path, digest) in manifest {
+        // One item owns exactly one prepared physical program output. The
+        // writer emits `writePreparedArtifacts child [output]` per item.
+        if manifest
+            .keys()
+            .filter(|path| {
+                path.to_str()
+                    .is_some_and(|path| path.ends_with(".prepared.cbor"))
+            })
+            .count()
+            != 1
+        {
+            return Err(world_response_error(false));
+        }
+        for (path, digest) in &manifest {
             validation
                 .inventory
                 .charge(path.as_os_str().len() + 32)
@@ -2294,7 +2437,7 @@ fn admit_world_preparation_response(
             capture_world_output(
                 &directory,
                 PathBuf::from(format!("item-{index}")).join(path),
-                digest,
+                *digest,
                 &mut captured_files,
                 &mut validation,
             )?;
@@ -2311,6 +2454,18 @@ fn admit_world_preparation_response(
                 sha256: answer_hash(&completed[2])?,
             },
         );
+        item_proofs.push(WorldItemProof {
+            index,
+            ordinal: index as u64,
+            generation: world_cell_generation(slot),
+            entry: typed_item.entry().to_owned(),
+            native_ordinal,
+            segment_digest: segment.digest().to_owned(),
+            symbol,
+            binders,
+            signatures,
+            manifest,
+        });
         items.push(item);
     }
     let ciborium::value::Value::Array(input_refs) = &fields[6] else {
@@ -2413,6 +2568,7 @@ fn admit_world_preparation_response(
         captured_files,
         validation,
         segments,
+        item_proofs,
         demanded_rows: demanded.into_values().collect(),
     }))
 }
