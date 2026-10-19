@@ -22530,11 +22530,11 @@ pub(crate) mod request_tests {
             tidepool_mcp::sleep_decl(),
         ])
         .unwrap();
-        let preamble = format!(
-            "{}\nimport Tidepool.Duration (minutes)\n",
-            effects.preamble()
+        let templates = resident_workbench_templates(
+            effects.preamble(),
+            effects.row(),
+            "Tidepool.Duration (minutes)",
         );
-        let templates = resident_workbench_templates(&preamble, effects.row(), "");
         let include = effects
             .include_paths()
             .iter()
