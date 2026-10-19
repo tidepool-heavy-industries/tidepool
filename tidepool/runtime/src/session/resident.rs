@@ -9908,7 +9908,14 @@ mod authored_publication_tests {
             assert!(source.validate_source_issuer().is_ok());
             assert!(matches!(
                 source.source_admission().admit(),
-                Err(super::super::SourceAdmissionError::Closed { .. })
+                Err(super::super::SourceAdmissionError::Unconfirmed { count: 1, .. })
+            ));
+            assert!(matches!(
+                source.source_admission().fence(),
+                Err(super::super::SourceAdmissionError::Closed {
+                    phase: super::super::SourceAdmissionPhase::Fenced { .. },
+                    ..
+                })
             ));
             drop(_next);
             drop(recipient);
