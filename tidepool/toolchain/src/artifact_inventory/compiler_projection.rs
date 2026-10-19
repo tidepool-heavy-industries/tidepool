@@ -82,7 +82,7 @@ impl PublicationNativeAuthority {
             .bind_publications(&artifacts)?;
         let empty = CompilerSourceSupport::new(prior.clone(), artifacts, [], Default::default())?;
         let restored = empty.restore_native_maps(
-            &prior.roles,
+            &prior.recorded_roles,
             &facts.offers,
             &facts.native_availability,
             &facts.input_decisions,

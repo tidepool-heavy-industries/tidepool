@@ -14333,7 +14333,7 @@ mod tests {
             "durable role facts include complete proof availability"
         );
         let mut next = context.snapshot();
-        next.roles.insert(root, changed_role);
+        next.roles.insert(root, changed_role.recorded_fact());
         let store = MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
         let base = materializer

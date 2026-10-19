@@ -2003,7 +2003,8 @@ impl SnapshotValueCodec<crate::artifact_inventory::RecordedInputNativeDecision>
                 return Err(malformed("input decision repeats an ordinal"));
             }
         }
-        let role = CompilerRoleCodec::decode(store, wire.role)?;
+        let role: crate::artifact_inventory::RecordedCompilerRole =
+            CompilerRoleCodec::decode(store, wire.role)?;
         let original = role
             .original()
             .ok_or_else(|| malformed("input decision has no original role"))?;

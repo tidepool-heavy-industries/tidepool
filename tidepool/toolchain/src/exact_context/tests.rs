@@ -876,7 +876,8 @@ fn recorded_input_domain_distinguishes_empty_from_absent_without_issuing_authori
             role: CompilerInputRole::ReusableOriginal {
                 interface: ArtifactId([1; 32]),
                 original: ArtifactId([2; 32]),
-            },
+            }
+            .recorded_fact(),
             groups: OrdMap::new(),
         },
     );
