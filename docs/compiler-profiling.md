@@ -1,5 +1,8 @@
 # Resident compiler profiling
 
+Use the [compiler work and authority map](compiler-work-map.md) to locate P1–P10
+owners, current admission work and nesting before attributing a profile.
+
 ## Choose the question and measurement
 
 Start with an observed workload and a decision the profile could change. Retain
