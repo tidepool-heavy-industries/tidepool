@@ -585,7 +585,10 @@ withRetainedCountFault fired fault action = mask $ \restore -> do
                 result@(_, consumed, _) <- encode input output
                 active <- readIORef armed
                 when active $ do
-                  chars <- consumedChars input (bufL consumed)
+                  -- UTF-8 resets a fully consumed character buffer to 0/0.
+                  let end = if bufL consumed == 0 && bufR consumed == 0
+                        then bufR input else bufL consumed
+                  chars <- consumedChars input end
                   previous <- readIORef suffix
                   let observed = previous ++ chars
                   if marker `isInfixOf` observed
