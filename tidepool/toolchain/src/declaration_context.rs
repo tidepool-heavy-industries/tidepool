@@ -15438,11 +15438,37 @@ mod tests {
             .unwrap()
             .binders()[0]
             .clone();
+        let support = {
+            let entry = Arc::new(
+                ArtifactEntry::original(issuer.owner.facts.producer, consumer.clone()).unwrap(),
+            );
+            let artifacts = publication
+                .context()
+                .artifact_view()
+                .inventory()
+                .admit_shared_with_demand(
+                    publication.context().artifact_view(),
+                    vec![entry.clone()],
+                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+            let selected =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &PackageInterfaceValidation::default().inventory,
+                )
+                .unwrap();
+            let output = OriginalCompilerInputs::from_selection(&selected, &artifacts).unwrap();
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                .unwrap()
+        };
         let mut context = publication
             .context()
             .as_ref()
             .clone()
-            .extend_checked_original_products(issuer.owner.facts.producer, &[consumer])
+            .extend_issued_compiler_support(&support)
             .unwrap();
         edit_lexical(&mut context, |nodes| {
             nodes.push(ExactLexicalNode {
@@ -17349,12 +17375,37 @@ mod tests {
                 .remove(0)
                 .product
         };
-        let extend = |context: &Arc<ExactDeclarationContext>, product| {
+        let extend = |context: &Arc<ExactDeclarationContext>, product: CertifiedRecoveryProduct| {
+            let support = {
+                let entry = Arc::new(
+                    ArtifactEntry::original(context.owner.facts.producer, product.clone()).unwrap(),
+                );
+                let artifacts = context
+                    .artifact_view()
+                    .inventory()
+                    .admit_shared_with_demand(
+                        context.artifact_view(),
+                        vec![entry.clone()],
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+                let selected =
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        &projection,
+                        &artifacts.metadata_snapshot(),
+                        &PackageInterfaceValidation::default().inventory,
+                    )
+                    .unwrap();
+                let output = OriginalCompilerInputs::from_selection(&selected, &artifacts).unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            };
             Arc::new(
                 context
                     .as_ref()
                     .clone()
-                    .extend_checked_original_products(context.owner.facts.producer, &[product])
+                    .extend_issued_compiler_support(&support)
                     .unwrap(),
             )
         };
@@ -17925,11 +17976,36 @@ mod tests {
         let native = crate::certified_products::tests::recovered_witness_fixtures(&[native])
             .remove(0)
             .product;
+        let support = {
+            let entry = Arc::new(
+                ArtifactEntry::original(initial.owner.facts.producer, native.clone()).unwrap(),
+            );
+            let artifacts = initial
+                .artifact_view()
+                .inventory()
+                .admit_shared_with_demand(
+                    initial.artifact_view(),
+                    vec![entry.clone()],
+                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+            let selected =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &PackageInterfaceValidation::default().inventory,
+                )
+                .unwrap();
+            let output = OriginalCompilerInputs::from_selection(&selected, &artifacts).unwrap();
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                .unwrap()
+        };
         let context = Arc::new(
             initial
                 .as_ref()
                 .clone()
-                .extend_checked_original_products(initial.owner.facts.producer, &[native])
+                .extend_issued_compiler_support(&support)
                 .unwrap(),
         );
         let scratch = tempfile::tempdir().unwrap();
@@ -19241,12 +19317,38 @@ mod tests {
             owner: identity("main", "A"),
             imports: vec![],
         }];
+        let initial = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_with_value_interfaces(std::slice::from_ref(&value), vec![])
+            .unwrap();
+        let support = {
+            let entry = Arc::new(ArtifactEntry::original([7; 32], product.clone()).unwrap());
+            let artifacts = initial
+                .artifact_view()
+                .inventory()
+                .admit_shared_with_demand(
+                    initial.artifact_view(),
+                    vec![entry.clone()],
+                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+            let selected =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &PackageInterfaceValidation::default().inventory,
+                )
+                .unwrap();
+            let output = OriginalCompilerInputs::from_selection(&selected, &artifacts).unwrap();
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                .unwrap()
+        };
         let context = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
+            initial
+                .extend_issued_compiler_support(&support)
                 .unwrap()
-                .extend_checked_original_products([7; 32], &[product])
-                .unwrap()
-                .extend_with_value_interfaces(std::slice::from_ref(&value), shared.clone())
+                .extend_lexical_joins(&[], &shared)
                 .unwrap(),
         );
         let inputs = crate::checked_cell::CheckedValueInputs::capture_raw(vec![(
