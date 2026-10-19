@@ -23726,9 +23726,15 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(
-            availability.projection,
-            *dependent_context.compiler_input_projection()
+            availability.projection.snapshot_roles()[&owner],
+            dependent_context
+                .compiler_input_projection()
+                .snapshot_roles()[&owner],
+            "contextual support does not select a different original"
         );
+        assert!(availability.projection.snapshot_roles()[&owner]
+            .original()
+            .is_none());
         let selected_private = OriginalCompilerInputs::reuse_selected_authored(&dependent_context)
             .unwrap()
             .expect("complete selected authored original can reuse exact selected support");
@@ -23737,7 +23743,7 @@ mod tests {
                 &root.join("selected-authored-scope"),
                 compiler_identity.producer_bytes(),
                 None,
-                Some(selected_private),
+                Some(selected_private.clone()),
             )
             .unwrap();
         assert_eq!(selected_request.context().as_ref(), &dependent_context);
@@ -23838,9 +23844,28 @@ mod tests {
             "changed fixture must require one exact selected support group"
         );
         let required_support_ordinal = *required_support_ordinals.first().unwrap();
+        let selected_original = Arc::new(
+            ArtifactEntry::original(producer.sha256(), changed.product().clone()).unwrap(),
+        );
+        let selected_projection = changed
+            .compiler_source_support()
+            .projection()
+            .merge(
+                &CompilerInputProjection::from_issued_entries(&[selected_original.clone()])
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            selected_projection.snapshot_roles()[&identity(
+                &changed.product().owner().unit,
+                &changed.product().owner().module
+            )]
+                .original(),
+            Some(selected_original.descriptor.id)
+        );
         let selected_output =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                changed.compiler_source_support().projection(),
+                &selected_projection,
                 &type_only.artifact_view().metadata_snapshot(),
                 &PackageInterfaceValidation::default().inventory,
             )
@@ -23855,23 +23880,31 @@ mod tests {
             } if *artifact == support_entry.descriptor.id && *original_ordinal == required_support_ordinal)),
             "unexpected absent-offer refusal: {missing_support:#?}"
         );
-        let conflicting_support = OriginalCompilerInputs::from_selected_authored_declarations(
-            &dependent_context,
-            producer,
-            &wrong_support,
+        let wrong_output = support_offer(&wrong_support);
+        let wrong_private = OriginalCompilerInputs::from_selection(
+            &wrong_output.source_selection().unwrap(),
+            wrong_output.artifacts(),
         )
-        .unwrap_err();
-        assert!(
-            matches!(conflicting_support, CompileError::ExtractFailed(detail)
-            if detail.contains("private native availability differs from selected canonical interface"))
-        );
-        let private = OriginalCompilerInputs::from_selected_authored_declarations(
-            &dependent_context,
-            producer,
-            &configured_support,
-        )
-        .unwrap()
         .unwrap();
+        let conflicting_support = ExactCompileContext::new(Arc::new(dependent_context.clone()))
+            .prepare_compilation_with_private_input(
+                &root.join("conflicting-authored-scope"),
+                compiler_identity.producer_bytes(),
+                None,
+                Some(wrong_private),
+            )
+            .unwrap_err();
+        assert!(matches!(conflicting_support,
+            CompileError::ArtifactInventory(error)
+                if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { owner: actual }
+                    if actual == owner)));
+        let configured_output = support_offer(&configured_support);
+        let configured_private = OriginalCompilerInputs::from_selection(
+            &configured_output.source_selection().unwrap(),
+            configured_output.artifacts(),
+        )
+        .unwrap();
+        let private = selected_private.merge(&configured_private).unwrap();
         let private_request = ExactCompileContext::new(Arc::new(dependent_context.clone()))
             .prepare_compilation_with_private_input(
                 &root.join("configured-authored-scope"),
