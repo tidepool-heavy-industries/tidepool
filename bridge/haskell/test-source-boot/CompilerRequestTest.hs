@@ -80,6 +80,16 @@ worldRequestBoundaries = do
       decode fields = case workerRequestFromArgv (workerArgv fields) of
         Right (Just request) -> pure request
         other -> fail ("invalid held cell fixture: " ++ show other)
+  let decodeSlots slots = workerRequestFromArgv (workerArgv
+        [WorldCellPrepare cellPrepare {worldCellPrepareSlots=slots}])
+  case decodeSlots [(0,PlannedDeclaration 1),(1,PlannedBind 1)] of
+    Right (Just _) -> pure ()
+    other -> fail ("held request conflated Lib1 and Val1 reservations: " ++ show other)
+  forM_ [[(0,PlannedBind 1),(1,PlannedExpression 1 "observation")]
+    ,[(0,PlannedPrologue 1),(1,PlannedDeclaration 1)]] $ \slots ->
+      case decodeSlots slots of
+        Left _ -> pure ()
+        other -> fail ("held request admitted duplicate module reservations: " ++ show other)
   planArgs <- decode [WorldCellPlan cellPlan]
   prepareArgs <- decode [WorldCellPrepare cellPrepare]
   (latePlan,latePrepare) <- withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \scope -> do

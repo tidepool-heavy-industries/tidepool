@@ -121,6 +121,8 @@ validWorldCellPlanRequest request = validWorldIdentity (worldCellPlanIdentity re
   && validWorldCellRecipe (worldCellPlanRecipe request)
   && validWorldCellPath (worldCellPlanOutput request)
 
+data PlannedCellModuleKind = PlannedLibrary | PlannedValue deriving (Eq,Ord)
+
 validWorldCellPrepareRequest :: WorldCellPrepareRequest -> Bool
 validWorldCellPrepareRequest request = validWorldIdentity (worldCellPrepareIdentity request)
   && validReference (worldCellPrepareRealization request)
@@ -130,13 +132,18 @@ validWorldCellPrepareRequest request = validWorldIdentity (worldCellPrepareIdent
   && length slots <= 10000
   && map fst slots == take (length slots) [0..]
   && all validSlot (map snd slots)
-  && Set.size (Set.fromList (map (generation . snd) slots)) == length slots
+  && Set.size (Set.fromList (map (owner . snd) slots)) == length slots
   && all validWorldCellPath [worldCellPrepareDirectory request,worldCellPrepareOutput request]
   where
     slots = worldCellPrepareSlots request
     generation slot = case slot of
       PlannedPrologue value -> value; PlannedDeclaration value -> value
       PlannedBind value -> value; PlannedExpression value _ -> value
+    owner slot = (case slot of
+      PlannedPrologue _ -> PlannedLibrary
+      PlannedDeclaration _ -> PlannedLibrary
+      PlannedBind _ -> PlannedValue
+      PlannedExpression _ _ -> PlannedValue, generation slot)
     validSlot slot = generation slot > 0 && case slot of
       PlannedExpression _ observation -> validReference observation && utf8Within 65536 observation
       _ -> True
