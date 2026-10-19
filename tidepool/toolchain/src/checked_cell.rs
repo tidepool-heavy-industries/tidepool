@@ -1092,7 +1092,7 @@ struct ProducedValueTypeInterface {
     input: ValueInterfaceBytes,
     // One produced output may be consumed through Ordinary and Prepared views.
     // Physical promotion belongs to this issuer, independently of either view.
-    row: std::sync::Mutex<Option<Arc<crate::declaration_context::RetainedArtifactRow>>>,
+    row: crate::declaration_context::CheckedValueRowIssuer,
 }
 
 impl ProducedValueTypeInterfaces {
@@ -1664,8 +1664,7 @@ impl HostBindingInterfaceOffer {
         let row =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
-                &certificate,
-                None,
+                crate::declaration_context::CheckedValueRowSource::Fresh(&certificate),
             )?;
         let compiler_support = context
             .compiler_source_support()
@@ -1839,7 +1838,7 @@ impl CheckedValueInputs {
             self.output_bytes_hashed
                 .fetch_add(bytes.len() as u64, Ordering::Relaxed);
             interfaces.push(ProducedValueTypeInterface {
-                row: std::sync::Mutex::new(None),
+                row: crate::declaration_context::CheckedValueRowIssuer::new(interface.clone()),
                 ordinal,
                 input: ValueInterfaceBytes {
                     owner,
@@ -2122,11 +2121,12 @@ impl CheckedValueInputs {
         let row =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
-                &certificate,
-                produced
-                    .map(|outputs| outputs.output(owner))
-                    .transpose()?
-                    .map(|output| &output.row),
+                match produced {
+                    Some(outputs) => crate::declaration_context::CheckedValueRowSource::Produced(
+                        &outputs.output(owner)?.row,
+                    ),
+                    None => crate::declaration_context::CheckedValueRowSource::Fresh(&certificate),
+                },
             )?;
         timing.advance("retain_output_surface");
         let crate::declaration_context::RetainedValueSourceSurface {
@@ -4987,6 +4987,38 @@ mod tests {
         (inputs, owner, path)
     }
 
+    fn empty_test_checked_cell(
+        producer: [u8; 32],
+        original: Arc<crate::declaration_context::ExactDeclarationContext>,
+        inputs: Arc<CheckedValueInputs>,
+    ) -> super::ExactCheckedCell {
+        use super::*;
+        ExactCheckedCell {
+            specification: CheckedCellSpecification {
+                admission_digest: [3; 32],
+                cell_source: String::new(),
+                template_source: String::new(),
+                turn_templates: vec![],
+                injected_modules: vec![],
+                reserved_declaration_modules: vec![],
+            },
+            producer,
+            context: original.semantic_sha256(),
+            declaration_context: original,
+            retained_projections: vec![],
+            receipt_digest: [4; 32],
+            checked_source: String::new(),
+            evidence: vec![],
+            observations: vec![],
+            items: vec![],
+            include: vec![],
+            planned_declaration: None,
+            planned_declarations: BTreeMap::new(),
+            typed_segments: vec![],
+            value_inputs: inputs,
+        }
+    }
+
     fn capture_test_produced_value_interface(
         producer: [u8; 32],
         owner: tidepool_repr::SessionModule,
@@ -5000,7 +5032,7 @@ mod tests {
             .unwrap();
         let bytes = interface.interface_bytes_owned();
         let output = ProducedValueTypeInterface {
-            row: std::sync::Mutex::new(None),
+            row: crate::declaration_context::CheckedValueRowIssuer::new(interface.clone()),
             ordinal,
             input: ValueInterfaceBytes {
                 owner,
@@ -5451,6 +5483,32 @@ mod tests {
             .unwrap();
         assert_ne!(value.interface.path, broad_value);
         let leaf_path = value.interface.path.clone();
+        let overlaid = context
+            .prepare_compilation(&scratch.path().join("same-view"), producer_bytes)
+            .unwrap();
+        assert_eq!(
+            overlaid
+                .artifacts
+                .iter()
+                .find(|row| row.interface.module == owner.module_name())
+                .unwrap()
+                .interface
+                .path,
+            leaf_path,
+            "existing complete cache must overlay its own new leaf"
+        );
+        assert_eq!(
+            broad
+                .artifacts
+                .iter()
+                .find(|row| row.interface.module == owner.module_name())
+                .unwrap()
+                .interface
+                .path,
+            broad_value,
+            "already issued requests keep their original complete owner"
+        );
+        drop(overlaid);
         drop(broad);
         drop(support);
         drop(context);
@@ -5493,48 +5551,216 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_produced_value_capture_shares_one_promoted_row() {
-        let context = Arc::new(
+    fn same_view_cold_materialization_borrows_its_own_produced_leaf() {
+        use super::*;
+        let producer_bytes = b"same view cold value";
+        let producer = Sha256::digest(producer_bytes).into();
+        let original = Arc::new(
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
         );
-        let value = capture_test_value(&context, false);
-        let issued = std::sync::Mutex::new(None);
-        let barrier = std::sync::Barrier::new(2);
-        let supports = [
-            value
-                .compiler_source_support()
-                .select_value_interface(value.certified_interface())
+        let (inputs, owner, path) = prepare_test_value_interface_files(1, false);
+        let produced = capture_test_produced_value_interface(producer, owner, &path, 0);
+        let context = Arc::new(
+            (*original)
+                .clone()
+                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
                 .unwrap(),
-            value
-                .compiler_source_support()
-                .select_value_interface(value.certified_interface())
-                .unwrap(),
-        ];
-        let rows = std::thread::scope(|scope| {
-            let tasks = supports.iter().map(|support| {
-                let value = &value;
-                let issued = &issued;
-                let barrier = &barrier;
-                scope.spawn(move || {
-                    barrier.wait();
-                    crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
-                        support, value.certified_interface(), Some(issued)).unwrap()
-                })
-            }).collect::<Vec<_>>();
-            tasks
-                .into_iter()
-                .map(|task| task.join().unwrap())
-                .collect::<Vec<_>>()
-        });
-        assert!(Arc::ptr_eq(&rows[0], &rows[1]));
-        assert!(Arc::ptr_eq(
-            issued.lock().unwrap().as_ref().unwrap(),
-            &rows[0]
-        ));
-        assert_eq!(
-            rows[0].checked_value_interface().path,
-            rows[1].checked_value_interface().path
         );
+        let support =
+            crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
+                .unwrap();
+        let cell = empty_test_checked_cell(producer, original.clone(), inputs.clone());
+        let value = inputs
+            .capture_output(
+                1,
+                &cell,
+                &context,
+                &[],
+                &original,
+                CheckedValueCaptureInput::Prepared {
+                    support: &support,
+                    produced: &produced,
+                },
+            )
+            .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let first = context
+            .prepare_compilation(&scratch.path().join("first"), producer_bytes)
+            .unwrap();
+        let second = context
+            .prepare_compilation(&scratch.path().join("second"), producer_bytes)
+            .unwrap();
+        for request in [&first, &second] {
+            assert_eq!(
+                request
+                    .artifacts
+                    .iter()
+                    .find(|row| row.interface.module == owner.module_name())
+                    .unwrap()
+                    .interface
+                    .path,
+                value.interface.path
+            );
+        }
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+    }
+
+    #[test]
+    fn concurrent_produced_value_capture_shares_one_promoted_row() {
+        use super::*;
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let (inputs, owner, path) = prepare_test_value_interface_files(1, false);
+        let produced = capture_test_produced_value_interface([2; 32], owner, &path, 0);
+        let context = Arc::new(
+            (*original)
+                .clone()
+                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .unwrap(),
+        );
+        let prepared =
+            crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
+                .unwrap();
+        let cell = empty_test_checked_cell([2; 32], original.clone(), inputs.clone());
+        let barrier = std::sync::Barrier::new(2);
+        let values = std::thread::scope(|scope| {
+            let ordinary = scope.spawn(|| {
+                barrier.wait();
+                inputs
+                    .capture_output(
+                        1,
+                        &cell,
+                        &original,
+                        &[],
+                        &original,
+                        CheckedValueCaptureInput::Ordinary {
+                            produced: Some(&produced),
+                        },
+                    )
+                    .unwrap()
+            });
+            let typed = scope.spawn(|| {
+                barrier.wait();
+                inputs
+                    .capture_output(
+                        1,
+                        &cell,
+                        &context,
+                        &[],
+                        &original,
+                        CheckedValueCaptureInput::Prepared {
+                            support: &prepared,
+                            produced: &produced,
+                        },
+                    )
+                    .unwrap()
+            });
+            [ordinary.join().unwrap(), typed.join().unwrap()]
+        });
+        assert!(Arc::ptr_eq(&values[0].row, &values[1].row));
+        assert_eq!(values[0], values[1]);
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+    }
+
+    #[test]
+    fn produced_value_promotion_refuses_a_context_selecting_another_output() {
+        use super::*;
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let (inputs, owner, path) = prepare_test_value_interface_files(1, false);
+        let produced = capture_test_produced_value_interface([2; 32], owner, &path, 0);
+        let (_other_inputs, other_owner, other_path) = prepare_test_value_interface_files(2, false);
+        let other = capture_test_produced_value_interface([2; 32], other_owner, &other_path, 0);
+        let context = Arc::new(
+            (*original)
+                .clone()
+                .extend_program_value_interface(
+                    other.output(other_owner).unwrap().interface.clone(),
+                )
+                .unwrap(),
+        );
+        let support =
+            crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
+                .unwrap();
+        let cell = empty_test_checked_cell([2; 32], original.clone(), inputs.clone());
+        assert!(inputs
+            .capture_output(
+                1,
+                &cell,
+                &context,
+                &[],
+                &original,
+                CheckedValueCaptureInput::Prepared {
+                    support: &support,
+                    produced: &produced
+                }
+            )
+            .is_err());
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
+        let value = inputs
+            .capture_output(
+                1,
+                &cell,
+                &original,
+                &[],
+                &original,
+                CheckedValueCaptureInput::Ordinary {
+                    produced: Some(&produced),
+                },
+            )
+            .unwrap();
+        assert_eq!(value.owner(), owner);
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+    }
+
+    #[test]
+    fn cancelled_produced_value_capture_leaves_promotion_empty_and_retries() {
+        use super::*;
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+        };
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let (inputs, owner, path) = prepare_test_value_interface_files(1, false);
+        let produced = capture_test_produced_value_interface([2; 32], owner, &path, 0);
+        let cell = empty_test_checked_cell([2; 32], original.clone(), inputs.clone());
+        let cancellation = CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        let refused = with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || {
+                inputs.capture_output(
+                    1,
+                    &cell,
+                    &original,
+                    &[],
+                    &original,
+                    CheckedValueCaptureInput::Ordinary {
+                        produced: Some(&produced),
+                    },
+                )
+            },
+        );
+        assert!(refused.action.is_err());
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
+        let value = inputs
+            .capture_output(
+                1,
+                &cell,
+                &original,
+                &[],
+                &original,
+                CheckedValueCaptureInput::Ordinary {
+                    produced: Some(&produced),
+                },
+            )
+            .unwrap();
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+        assert!(value.interface.path.exists());
     }
 
     #[test]

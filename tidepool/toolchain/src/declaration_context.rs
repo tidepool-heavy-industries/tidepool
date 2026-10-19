@@ -3961,7 +3961,7 @@ pub(crate) struct RetainedArtifactMaterialization {
     _parents: Vec<Arc<Self>>,
     rows: BTreeMap<ArtifactId, Arc<RetainedArtifactRow>>,
     groups: Arc<[PendingCertifiedGroup]>,
-    execution_scope: Option<Value>,
+    execution_scope: Option<Arc<Value>>,
     graph_paths: BTreeMap<[u8; 32], Arc<OwnedExecutionGraphFile>>,
     #[cfg(test)]
     payload_work: recovery_artifacts::RecoveryArtifactWork,
@@ -4012,14 +4012,78 @@ impl MaterializationFacts<'_> {
     }
 }
 
+/// A physical promotion belongs to one actual captured output certificate.
+/// Its row cannot be supplied or rebound independently of that issuer.
+#[derive(Debug)]
+pub(crate) struct CheckedValueRowIssuer {
+    certificate: Arc<CertifiedValueInterface>,
+    row: std::sync::Mutex<Option<Arc<RetainedArtifactRow>>>,
+    #[cfg(test)]
+    promotions: std::sync::atomic::AtomicU64,
+}
+
+impl CheckedValueRowIssuer {
+    pub(crate) fn new(certificate: Arc<CertifiedValueInterface>) -> Self {
+        Self {
+            certificate,
+            row: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            promotions: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn promotion_count(&self) -> u64 {
+        self.promotions.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+pub(crate) enum CheckedValueRowSource<'a> {
+    Fresh(&'a CertifiedValueInterface),
+    Produced(&'a CheckedValueRowIssuer),
+}
+
 impl RetainedArtifactMaterialization {
+    /// Overlay newly issued leaves without mutating an in-flight complete owner
+    /// or copying its execution graph/scope bytes.
+    pub(crate) fn overlay_checked_value_leaves(
+        complete: &Arc<Self>,
+        leaves: &[Arc<Self>],
+    ) -> Arc<Self> {
+        let rows = leaves
+            .iter()
+            .flat_map(|leaf| leaf.rows.iter())
+            .map(|(id, row)| (*id, row.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if rows.iter().all(|(id, row)| {
+            complete
+                .rows
+                .get(id)
+                .is_some_and(|old| Arc::ptr_eq(old, row))
+        }) {
+            return complete.clone();
+        }
+        Arc::new(Self {
+            _directory: None,
+            _parents: vec![complete.clone()],
+            rows,
+            groups: Arc::from([]),
+            execution_scope: complete.execution_scope.clone(),
+            graph_paths: BTreeMap::new(),
+            #[cfg(test)]
+            payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
+        })
+    }
+
     /// Issue a value-sized physical leaf on the value's existing support view.
     /// Descendant requests discover this same cache entry as inherited custody.
     pub(crate) fn capture_checked_value(
         support: &crate::artifact_inventory::CompilerSourceSupport,
-        value: &CertifiedValueInterface,
-        issued_row: Option<&std::sync::Mutex<Option<Arc<RetainedArtifactRow>>>>,
+        source: CheckedValueRowSource<'_>,
     ) -> Result<Arc<RetainedArtifactRow>, CompileError> {
+        let (value, issuer) = match source {
+            CheckedValueRowSource::Fresh(value) => (value, None),
+            CheckedValueRowSource::Produced(issuer) => (issuer.certificate.as_ref(), Some(issuer)),
+        };
         let owner = identity(value.interface().unit(), value.interface().module());
         let selected = support.selected_interfaces()?;
         let entry = selected
@@ -4038,7 +4102,7 @@ impl RetainedArtifactMaterialization {
             support
                 .artifacts()
                 .retain_checked_value_materialization(value, |entry| {
-                    let mut issued = issued_row.map(|row| crate::host_work::lock_with_wait(row, || {})).transpose()?;
+                    let mut issued = issuer.map(|issuer| crate::host_work::lock_with_wait(&issuer.row, || {})).transpose()?;
                     if let Some(row) = issued.as_ref().and_then(|row| row.as_ref()) {
                         return Ok(Self::checked_value_leaf(value.artifact_id(), row.clone()));
                     }
@@ -4105,6 +4169,8 @@ impl RetainedArtifactMaterialization {
                         promotion_hash_bytes = work.hash_bytes, "issued value-sized immutable input row");
                     let row = Arc::new(row);
                     if let Some(issued) = &mut issued { **issued = Some(row.clone()); }
+                    #[cfg(test)]
+                    if let Some(issuer) = issuer { issuer.promotions.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
                     let retained = Self::checked_value_leaf(value.artifact_id(), row);
                     #[cfg(test)]
                     let retained = Self { payload_work: work, ..retained };
@@ -10081,7 +10147,7 @@ impl ExactDeclarationContext {
                 .map(|(id, row)| (id, Arc::new(row)))
                 .collect(),
             groups: groups.into(),
-            execution_scope,
+            execution_scope: execution_scope.map(Arc::new),
             graph_paths: graph_paths
                 .into_iter()
                 .filter(|(digest, _)| !inherited_graphs.contains(digest))

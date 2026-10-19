@@ -6198,6 +6198,34 @@ impl ArtifactView {
         Ok(retained)
     }
 
+    fn checked_value_leaves(
+        &self,
+        retained: &BTreeMap<
+            MaterializationKey,
+            Arc<crate::declaration_context::RetainedArtifactMaterialization>,
+        >,
+        metadata: &CompilerArtifactMetadata,
+    ) -> Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>> {
+        retained
+            .iter()
+            .filter_map(|(key, leaf)| match key {
+                MaterializationKey::CheckedValueLeaf(binding)
+                    if self
+                        .lease
+                        .payloads
+                        .get(&binding.artifact)
+                        .and_then(|entry| metadata.entries.get(&entry.descriptor.owner))
+                        .is_some_and(|entry| entry.descriptor.id == binding.artifact)
+                        && self.lease.selection.namespace.get(&binding.artifact)
+                            == Some(binding) =>
+                {
+                    Some(leaf.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    }
+
     /// Private materialization belongs to this immutable graph view. Failed
     /// preparation leaves no retained entry; descendants borrow completed owners.
     pub(crate) fn retain_materialization(
@@ -6215,12 +6243,16 @@ impl ArtifactView {
         // stop edge without interrupting that producer or evicting its result.
         let mut retained = self.lease.lock_materialization()?;
         let key = MaterializationKey::Compilation(metadata.materialization_key());
-        if let Some(materialization) = retained.get(&key) {
-            return Ok(Arc::clone(materialization));
+        let leaves = self.checked_value_leaves(&retained, metadata);
+        if let Some(complete) = retained.get(&key) {
+            let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves);
+            retained.insert(key, complete.clone());
+            return Ok(complete);
         }
         let mut parents = Vec::new();
         self.lease
             .collect_inherited_materializations(&mut parents, &mut BTreeSet::new())?;
+        parents.extend(leaves);
         let parents =
             crate::declaration_context::RetainedArtifactMaterialization::select_custody_inputs(
                 &parents,
@@ -6280,13 +6312,15 @@ impl ArtifactView {
         Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
         CompileError,
     > {
-        Ok(self
-            .lease
-            .lock_materialization()?
-            .get(&MaterializationKey::Compilation(
-                metadata.materialization_key(),
-            ))
-            .cloned())
+        let mut retained = self.lease.lock_materialization()?;
+        let key = MaterializationKey::Compilation(metadata.materialization_key());
+        let Some(complete) = retained.get(&key) else {
+            return Ok(None);
+        };
+        let leaves = self.checked_value_leaves(&retained, metadata);
+        let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves);
+        retained.insert(key, complete.clone());
+        Ok(Some(complete))
     }
     pub(crate) fn retained_payloads(&self) -> RetainedArtifactPayloads<'_> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");

@@ -62,6 +62,42 @@ mod tests {
     };
 
     #[test]
+    fn cancelled_owner_wait_refuses_before_the_holder_releases() {
+        let owner = std::sync::Mutex::new(());
+        let held = owner.lock().unwrap();
+        let cancellation = CompilerTransactionCancellation::new();
+        let (waiting, observed) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let waiting_cancellation = cancellation.clone();
+            let task = scope.spawn(|| {
+                with_compiler_transaction_cancellable(
+                    waiting_cancellation,
+                    |_| {},
+                    || {
+                        let mut waiting = Some(waiting);
+                        lock_with_wait(&owner, || {
+                            if let Some(waiting) = waiting.take() {
+                                waiting.send(()).unwrap();
+                            }
+                        })
+                        .map(drop)
+                    },
+                )
+            });
+            observed.recv().unwrap();
+            cancellation.cancel();
+            let refused = task.join().unwrap();
+            assert_eq!(
+                refused.action.unwrap_err().kind(),
+                io::ErrorKind::Interrupted
+            );
+            assert_eq!(refused.close, CompilerTransactionClose::NotStarted);
+        });
+        drop(held);
+        drop(lock_with_wait(&owner, || {}).unwrap());
+    }
+
+    #[test]
     fn transient_read_interruption_recovers_but_cancelled_retry_refuses() {
         struct InterruptedOnce {
             first: bool,
