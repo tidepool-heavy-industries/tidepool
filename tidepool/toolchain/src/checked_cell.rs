@@ -8168,6 +8168,135 @@ mod tests {
         }
     }
 
+    fn world_binder_fixture(name: &str, varid: u64) -> ciborium::Value {
+        use super::*;
+        array([
+            text(name),
+            Value::Integer(varid.into()),
+            text("SessionMain"),
+            text("ForceData"),
+            text("Int"),
+            array([
+                array([
+                    text("main"),
+                    text("Owner"),
+                    text("data"),
+                    text("Original"),
+                    array([Value::Integer(0.into())]),
+                ]),
+                array([Value::Integer(1.into()), Value::Bytes(vec![3; 16])]),
+            ]),
+            text("Text"),
+        ])
+    }
+
+    #[test]
+    fn world_item_binders_decode_exact_reservation_and_reject_substitution() {
+        use super::*;
+        let expected = vec![
+            ("x".to_owned(), tidepool_repr::SessionVarId::from_extract(7)),
+            ("y".to_owned(), tidepool_repr::SessionVarId::from_extract(9)),
+        ];
+        let wire = array([world_binder_fixture("x", 7), world_binder_fixture("y", 9)]);
+        let decoded = decode_world_item_binders(&wire, &expected).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].name(), "x");
+        assert_eq!(decoded[0].varid(), 7);
+        assert_eq!(decoded[0].module(), "SessionMain");
+        assert_eq!(decoded[0].tier(), WorldItemBinderTier::ForceData);
+        assert_eq!(decoded[0].type_display(), "Int");
+        assert_eq!(decoded[0].host_authority(), Some(WorldItemHostAuthority::Text));
+        assert!(decoded[0].root_head().is_some());
+
+        for (wire, message) in [
+            (
+                array([world_binder_fixture("y", 7), world_binder_fixture("y", 9)]),
+                "binder order is part of the exact reservation",
+            ),
+            (
+                array([world_binder_fixture("x", 8), world_binder_fixture("y", 9)]),
+                "binder id is part of the exact reservation",
+            ),
+            (
+                array([world_binder_fixture("x", 7)]),
+                "binder count is part of the exact reservation",
+            ),
+            (
+                array([world_binder_fixture("x", 7), world_binder_fixture("x", 7)]),
+                "duplicate stable ids cannot define two binders",
+            ),
+        ] {
+            assert!(
+                decode_world_item_binders(&wire, &expected).is_err(),
+                "{message}"
+            );
+        }
+
+        let mut unknown_tier = world_binder_fixture("x", 7);
+        unknown_tier.as_array_mut().unwrap()[3] = text("ForceLazy");
+        assert!(decode_world_item_binders(
+            &array([unknown_tier, world_binder_fixture("y", 9)]),
+            &expected
+        )
+        .is_err());
+        let mut unknown_authority = world_binder_fixture("x", 7);
+        unknown_authority.as_array_mut().unwrap()[6] = text("Process");
+        assert!(decode_world_item_binders(
+            &array([unknown_authority, world_binder_fixture("y", 9)]),
+            &expected
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn world_binder_root_head_uses_short_version_arrays_not_cbor_tags() {
+        use super::*;
+        let expected = vec![("x".to_owned(), tidepool_repr::SessionVarId::from_extract(7))];
+        let mut wired = world_binder_fixture("x", 7);
+        {
+            let Value::Array(root_head) = &mut wired.as_array_mut().unwrap()[5] else {
+                unreachable!()
+            };
+            root_head[1] = array([Value::Integer(0.into())]);
+        }
+        let decoded = decode_world_item_binders(&array([wired]), &expected).unwrap();
+        assert_eq!(decoded[0].type_display(), "Int");
+        for version in [
+            array([Value::Integer(2.into())]),
+            array([Value::Integer(1.into()), Value::Bytes(vec![3; 8])]),
+            array([Value::Integer(1.into())]),
+            Value::Integer(1.into()),
+        ] {
+            let mut invalid = world_binder_fixture("x", 7);
+            let Value::Array(root_head) = &mut invalid.as_array_mut().unwrap()[5] else {
+                unreachable!()
+            };
+            root_head[1] = version;
+            assert!(decode_world_item_binders(&array([invalid]), &expected).is_err());
+        }
+    }
+
+    #[test]
+    fn world_item_signatures_key_entry_and_capture_order() {
+        use super::*;
+        let signature = |key: &str| {
+            let mut value = signature_codec_fixture();
+            value.as_array_mut().unwrap()[1] = text(key);
+            value
+        };
+        let wire = array([signature("Entry:x")]);
+        let decoded = decode_world_item_signatures(&wire, "Entry", &["x"]).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].key(), "Entry:x");
+        assert!(decode_world_item_signatures(&wire, "Other", &["x"]).is_err());
+        assert!(decode_world_item_signatures(&wire, "Entry", &["y"]).is_err());
+        assert!(decode_world_item_signatures(&wire, "Entry", &["x", "y"]).is_err());
+        assert!(
+            decode_world_item_signatures(&array([]), "Entry", &["x"]).is_err(),
+            "an item with one capture cannot omit its signature"
+        );
+    }
+
     fn witness_bytes(shape: ciborium::Value, seal: &str) -> Vec<u8> {
         use super::*;
         let mut structure = Vec::new();
