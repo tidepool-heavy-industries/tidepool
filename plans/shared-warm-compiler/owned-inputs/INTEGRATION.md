@@ -1,8 +1,11 @@
 # Owned row integration packet
 
 Status: complete reviewed row ancestry folded into the area at
-`2970ef611b886db472872c9e85aae7ec58efa66d`; campaign receiving review and joined
-qualification are next. No deployment or measured performance claim.
+`2970ef611b886db472872c9e85aae7ec58efa66d`, finalized area
+`f3309fed5252b5afad30d57c1dea08dcabc22c18`. Campaign receiving fold
+`f088e3e7837c72cf0e82aab8e71a2687d767da34` is complete alongside host b5
+and worker0bd; joined production/cfgtest/resources -j1 build and subsequent
+actual cases are campaign-owned and pending. No deployment or measured performance claim.
 
 Base `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`; full leaf candidate
 `5113d9c962bdc06179628a0758cb0c768f3e5491` including production29d6467c,
@@ -112,9 +115,12 @@ transaction custody and uncertainty owners. Warm owner confirms existing END
 carrier suffices; semantic registration, worker realization/source binding and
 probe-before-full-manifest/FD-enumeration integration remain separate work.
 Package observations stay operation-local without a consumed-source owner.
-Root/campaign review PACKAGE-SOURCE-BRIDGE.md before source/API implementation:
-reuse actual offline retention provider, independently rooted execution lifetime,
-fresh boot/profile and actual DB/interface/native coverage; no posthoc EPS proof.
-Supervisor owns an approved bounded successor. Campaign owns receiving merge,
+Root/user architecture amendment pauses new shared host/worker/package APIs
+pending bounded C2/C5 review. Revised private PACKAGE-SOURCE-SERVICE-OPTION.md
+supersedes per-host retention: borrow the actual deployment/service owner or
+retain once per actual service epoch, confirmed normal retirement and uncertainty
+retention. Fresh boot/profile and actual DB/interface/native coverage remain
+required; no posthoc EPS proof. No source/API implementation was started.
+Supervisor owns a successor only after the architectural/contract decision. Campaign owns receiving merge,
 joined compile and actor/Persona/frozen-bundle acceptance. No native goals or
 periodic polling; reserved children reactivate on concrete events.
