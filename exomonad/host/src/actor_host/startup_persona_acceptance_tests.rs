@@ -635,7 +635,7 @@ async fn persona_with_shared_workspace_keeps_lookup_and_later_cells_usable() {
                  import qualified Tidepool.Lookup.Tools as LookupTools\n\
                  topics <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"getRuntimeInfo\", \"Cmd.run\", \":: Text -> Eff effs _\", \"forkAgent\", \"spawnAgent\"])\n\
                  display (LookupTools.renderBatch topics)\n\
-                 display (case LookupApi.lookupIssue topics of Nothing -> True; Just _ -> False)",
+                 display (case LookupApi.lookupIssue topics of { Nothing -> True; Just _ -> False })",
             );
             round = host
                 .while_operation_succeeds(
