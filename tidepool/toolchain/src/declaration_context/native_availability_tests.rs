@@ -4941,12 +4941,27 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         assert_eq!(wire_groups(&request)["TypeOnlyHelper"], Vec::<u32>::new());
     }
     let mut history = context.as_ref().clone();
-    for products in [
+    for (step, products) in [
         vec![available_authored.clone()],
         Vec::new(),
         vec![available_authored],
         Vec::new(),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let available = !products.is_empty();
+        let source_available = history
+            .artifact_view()
+            .artifact_ids()
+            .contains(&available_authored_id);
+        eprintln!("authored_custody_history stage=before_fallback step={step} candidate_empty={} source_available={source_available}", !available);
+        if step > 0 {
+            assert!(
+                source_available,
+                "the receiving context retains B before step={step} available={available}"
+            );
+        }
         let candidates = crate::module_candidates::CandidateSet {
             manifest_path: PathBuf::from("retained-authored-availability-history"),
             by_owner: BTreeMap::new(),
@@ -4957,6 +4972,8 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         let received = OriginalCompilerInputs::from_candidates(&history, producer, &candidates)
             .unwrap()
             .expect("the issued authored fallback remains available");
+        eprintln!("authored_custody_history stage=after_fallback step={step} candidate_empty={} retained_available={}",
+            !available, received.issued_artifacts().artifact_ids().contains(&available_authored_id));
         assert_eq!(received.role_projection(), input.role_projection());
         assert_eq!(received.native_availability(), input.native_availability());
         assert_eq!(received.issued_offers(), input.issued_offers());
@@ -4964,10 +4981,15 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             received.issued_input_decisions(),
             input.issued_input_decisions()
         );
-        assert!(received
-            .issued_artifacts()
-            .artifact_ids()
-            .contains(&available_authored_id));
+        if available {
+            assert!(
+                received
+                    .issued_artifacts()
+                    .artifact_ids()
+                    .contains(&available_authored_id),
+                "nonempty receipt acquires B custody at step={step}"
+            );
+        }
         let directory = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(history.clone()))
             .prepare_compilation_with_private_input(
@@ -4982,6 +5004,22 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             .native_availability(available_authored_id)
             .is_none());
         assert_eq!(wire_groups(&request)[&module], Vec::<u32>::new());
+        assert!(
+            request
+                .compiler_inputs()
+                .artifacts()
+                .binding_dependencies()
+                .iter()
+                .any(|(from, to, edge)| {
+                    matches!((from, to, edge),
+                (crate::artifact_inventory::ArtifactBindingNode::Group(from),
+                 crate::artifact_inventory::ArtifactBindingNode::Group(to),
+                 crate::artifact_inventory::ArtifactDependency::NativeGroup { .. })
+                if from.binding.artifact() == authored_id && from.original_ordinal == 7
+                    && to.binding.artifact() == helper_id && to.original_ordinal == 7)
+                }),
+            "authored closure retains its exact required helper group at step={step}"
+        );
         let retained = history
             .compiler_source_support()
             .retain_custody(request.compiler_inputs().artifacts())
