@@ -188,3 +188,16 @@ Only Restage chooses Publishing; normal Active and eager source-claim paths reta
 refusals. Actual notebook4 passed. The remaining cancel-close fixture resource
 mismatch is retained until an actual owned-resident strict rerun; no broad variant
 waiver or physical END acceptance.
+
+## Canonical reload receiving checkpoint38b6
+
+Campaign received full area24748ad/code6543/productce554 histories, directly reviewed
+source claim, lease, epoch, actual END, target-execution and actor publication paths,
+and verified eight review/native receipt hashes. Private receiving review:
+`campaign/RECEIVING-REVIEW-C6-247.md`. Two joined test compilation failures were
+repaired at38b6 and independently source accepted by Reload; exact disposition:
+`campaign/reload-join-retry/RECEIVING-FIXTURE-REVIEW.json`. Joined21-target compile,
+154 workflow cases,14 Rust including actual MCP and notebook consumers, and1corpus
+program passed;65 evidence hashes reconciled. This is bounded canonical foundation
+acceptance. R1/Form/R2 successors, actual compiler-world query, ordinary cells and
+performance remain independently unqualified.

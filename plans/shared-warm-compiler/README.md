@@ -4,8 +4,11 @@ Status: active implementation campaign. Reviewed host, input-custody and worker
 protocol tranches are integrated and joined verified; see [current status](STATUS.md)
 for exact source and evidence. The demand-service architecture amendment is
 accepted after bounded owner and independent review. Paired inspect/prepareCell contracts are accepted; the first actual service query
-and required ordinary-cell/publication/recovery migration are active. Joined source
-capture/observation checks passed; no service query or speedup is qualified.
+and required ordinary-cell/publication/recovery migration are active. Canonical reload
+source ownership is now integrated with joined schema, lifecycle and notebook checks
+passed. Actual Rooted query tests still refuse cold acquisition; the canonical producer
+and retained-diagnostic repair is under native qualification. No service query or
+speedup is qualified.
 
 
 This directory is the handoff for a Sol supervision tree. Read this file, the

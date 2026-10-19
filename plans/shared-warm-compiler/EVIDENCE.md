@@ -163,10 +163,35 @@ under14GiB. Process cleanup confirmed for Rust; compiler/hosted not_observed and
 directory resource hashes UNKNOWN retained. No actual world query, runtime
 successor, frozen qualification or performance acceptance.
 
-Area evidence remains separate: exact864 fourtarget compile26local+matched
-worker/wrappers14local and key2/2PASS; exactce554 owning9+notebook4/4 and total
-controls7/8PASS. Its remaining ActualRetired assertion ran DIRECT, whose cancelled
-abort is conservatively Unconfirmed; owned-resident rerun is pending. Qualification
-bb95724executed20PASS4FAIL includes real paired source proof PASS; catalog evidence
-shows FilePath InterfaceOnly at actual shadow source with fresh Prelude, rather
-than missing compilation. New genuinely demanded native positive remains unrun.
+## Joined canonical reload checkpoint38b6fbaf70
+
+Full independently reviewed area24748ad (code6543, productce554) folded at21d61e9.
+Campaign directly read original-to-candidate histories and critical joined consumers;
+eight receiving review/native receipt hashes matched. The first21-target build at
+a2e executed60 local actions but failed two cfg(test) consumers: codec moved fields
+from Drop HaskellValue, and the joined public-module refusal fixture lacked the new
+source_dependency field. Zero tests ran. Exact logs/action arguments/source inputs
+are retained in `campaign/reload-join/`; no failure is relabelled as a pass.
+
+Independent source-accepted test-only repairs38b6 borrow the same encoded codec
+value and use honest Unqualified for the early-refusal fixture. At exact38b6,
+21 owning production/cfg(test)/Haskell/schema targets passed27local0remote/345.1s.
+The154-case native workflow suite passed. Fourteen Rust cases passed: runtime5,
+actor2, codec1, actual GHC MCP2 and maintained notebook4. The recovered-base corpus
+validated1program. All nine command phases exited0;65 report/stream/executable/
+resource hashes independently reconciled before any further source edits.
+`campaign/reload-join-retry/TERMINAL.json` binds exact commands and counts.
+Actual notebook client, worker and compiler endpoint were observed in build.slice,
+with the existing Buck daemon separately retained. Cumulative Buck peak13,583,900,672B
+and notebook client peak3,445,911,552B are distinct, non-simultaneous measurements.
+Directory resource hashes and per-report cleanup/diagnostic limits remain explicit.
+No compiler-world query, ordinary-cell successor, force drain, frozen or performance
+acceptance follows from this checkpoint.
+
+Area evidence remains separate. Hosteea executed2 genuine Rooted bodies, both failed
+first Complete acquisition; process/compiler cleanup confirmed. Old575 startup
+cleanup remains UNKNOWN. Warm45f diagnostic+canonical producer source is accepted,
+six targets compiled1022local actions, and native controls are running; prior missing cold carrier prevents retrospective
+attribution of eea failure. Qualification passed actual quotation/pairing/catalog
+and NativeScope SOURCE boot consumer histories; its current fixture migration has
+remaining failures. Reload route/Form/retirement successors are outside38b6.
