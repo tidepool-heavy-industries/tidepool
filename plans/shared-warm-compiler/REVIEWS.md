@@ -164,3 +164,27 @@ closed compiler-support fixtures and existing native observers replace obsolete
 factory/private-field assumptions. Actual ambiguity-only custody positive and
 explicit selected-A/B conflict negative remain distinct. The prior a286 compile
 failure and baseline-discriminated fixture failures remain evidence.
+
+## Current-root frontier receiving foldae1c
+
+Accepted full Warmade307 history with exact testedacb282 source. Independent
+frontier source b41 and execution receipt85c2266 cover actual changed/zero HAMT
+work, shared multiplicity, final-fork byte release, malformed links and partial
+update rollback. Campaign read the complete production delta, cold consumer and
+critical controls, independently verified26 component evidence hashes, then
+compiled joined15targets and ran8Rust/5Haskell/25projection/corpus1 controls.
+No conflicts; the campaign CompileViewBuild/Digest counters remain present.
+The fold excludes typed binding and new hash-profile successors.
+
+Independent binding260 review found payload/receipt equality insufficient for
+sharing physical row custody. The repaired owner compares the actual immutable
+RetainedArtifactRow Arc, authority and certified artifact ID. Binding526 compile
+and one budget test passed; actual aliases/runtime publication/new receiver remain
+pending. The next receiver must traverse both primary and binding roots and
+validate nonempty actual fact codecs/image correlation, not only passive CID shape.
+
+Reload26f publication purpose was read directly with existing ticket/close owners.
+Only Restage chooses Publishing; normal Active and eager source-claim paths retain
+refusals. Actual notebook4 passed. The remaining cancel-close fixture resource
+mismatch is retained until an actual owned-resident strict rerun; no broad variant
+waiver or physical END acceptance.

@@ -2,7 +2,7 @@
 
 The campaign is incomplete. Reviewed input sharing, custody, transport, source
 capture and observation repairs are integrated. Joined production/test compilation
-passed; the latest execution passed25 projection cases,9 selected Rust cases,
+passed; the latest execution passed25 projection cases,8 selected Rust cases,
 five Haskell leaves and one recovered-base corpus program. Real package lifetime controls also passed in the area.
 The actual service-backed public-module query, ordinary-cell migration, exact
 successor publication/recovery, forced reload and measured improvement remain
@@ -27,27 +27,22 @@ source owner923fd554, and required Rust client migration2a67faf29c (root24ec0b).
 Read [RUST-CLIENT-MIGRATION.md](RUST-CLIENT-MIGRATION.md),
 [SERVICE-API.md](SERVICE-API.md) and [CONTRACTS.md](CONTRACTS.md).
 
-Latest integrated code:3bacb5687e includes qualified hostfc1bae via ced803f,
-standalone fixture-wrapper6b8 via eb915, and scoped package-ownera7c125 via3bac.
-Exact prebuild de23ab76bd joined15 targets successfully (2420local0remote), then
-637 script cases,16 Rust cases and3 Haskell leaves passed. All commands settled;
-79 report/stream/resource/executable hashes were reconciled. The package fold
-includes Warm20c+0b prerequisites, without accepting later world retention/query.
-Reviewed Warm5ac4dd38 (tested a3c033) is now folded; four conflict resolutions
-preserve the new bounded world cache/held token/typed response refusal and the
-campaign CompileViewBuild/Digest counters. Exact159ee05fc4 joined15 targets
-(80local0remote,620.9s),25 projection cases,9 Rust cases,5 Haskell leaves and
-one recovered-base corpus program all passed;59 hashes reconciled. Actual
-world-query and retention histories remain unqualified.
+Latest integrated codeae1c84bf92 joins qualified host/package foundations, Warm5ac
+world cache/held ownership, and reviewed Warmade307 (test productacb282). The
+latest parcel adds actual acquisition/retirement observations and current reachable
+block custody. It has independent full-history source/execution reviews; campaign
+also read the critical full delta and verified the receiving evidence directly.
+Current-root publication now preserves shared block multiplicity and forks without
+retaining predecessor frontiers; the production consumer is still cold construction.
+Ordinary-cell incremental successors and actual Rooted service queries are pending.
 
 | Exact source | Joined evidence | Acceptance limits |
 | --- | --- | --- |
-| f088e3e783 | Production/cfg(test)/runner resources52local0remote;36 selected/executed/passed (25toolchain,2real-worker runtime histories,4Rust protocol,5Tasty). `campaign/CORE-JOINED-TERMINAL.json` | Compiler/host cleanup not_observed; runtime diagnostics incomplete. |
-| e1cfc49e68 | Production/cfg(test)1243local0remote; four fact-key/counter controls4/4. `campaign/fact-key-counter-join/TERMINAL.json` | No service query; later digest-only observer gap repaired in cb888. |
-| 732d345691 | Host production/cfg(test)1157local0remote; scaffold/recovery controls2/2. `campaign/joined-host-fixture/TERMINAL.json` | Real worker execution, no Rooted service; recovery diagnostics incomplete. |
-| 80db8e5c6b compile;40471e8441 execution | Eight toolchain/runtime/actor/host production+test targets52local0remote in476.6s; scripts438+154=592 PASS; Rust14/14 (7toolchain,4runtime,1actor,2host). `campaign/source-owner-join/TERMINAL.json` | Prior script fixture NameError retained and repaired; all selected reports/streams/executable hashes reconciled. Process cleanup confirmed; host/compiler not_observed. No actual service query. |
-| de23ab76bd | Fifteen production/cfg(test)/Haskell targets2420local0remote in1366.2s; scripts637/637 (458+154+25), Rust16/16, Haskell3/3. `campaign/package-host-join/TERMINAL.json` | All79 hashes reconciled; peak12,806,127,616B within14GiB grant. Process cleanup confirmed; host/compiler cleanup and diagnostic limits preserved per report. No actual service-world query. |
-|159ee05fc4 | Fifteen production/cfg(test)/Haskell targets80local0remote in620.9s; projection25/25, Rust9/9, Haskell5/5 and recovered-base corpus1program PASS. `campaign/world-component-join/TERMINAL.json` | All59 hashes reconciled; peak13,501,480,960B within14GiB. Cleanup/diagnostic limits retained per report; no actual world-query acceptance. |
+|159ee05fc4 | Fifteen production/cfg(test)/Haskell targets80local0remote in620.9s; projection25/25, Rust9/9, Haskell5/5 and recovered-base corpus1program PASS. `campaign/world-component-join/TERMINAL.json` |59 hashes reconciled; cleanup/diagnostic limits retained per report; no actual world-query acceptance. |
+|ae1c84bf92 | Fifteen production/cfg(test)/Haskell targets80local0remote in630.6s; projection25/25, Rust8/8 including all five frontier histories/refusals/work controls, Haskell5/5 and recovered-base corpus1program PASS. `campaign/frontier-join/TERMINAL.json` |46 hashes reconciled; cumulative scope peak13,501,480,960B within14GiB. All eight command phases terminal0. No actual service query, runtime successor, frozen or performance acceptance. |
+
+Earlier exact-source checkpoint evidence remains in [EVIDENCE.md](EVIDENCE.md)
+and the private receipts; it is not repeated as the active frontier.
 
 All evidence paths above are under
 `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`.
@@ -62,11 +57,12 @@ No new actors are needed. Reserved grants persist across event-bound yields.
 
 | Area | Current candidate/evidence | Next owned action |
 | --- | --- | --- |
-| host_inputs (2leaves) | Finite query route20c016a reviewed; four production/cfg(test) targets passed16ed, runtime caller repairc8b passed actual world-base CAS1/1; actor guard1/1. | Actual Info/Type effect→resume→settle and Rooted lifecycle controls in coherent Warm e2cf+reload69bf source. Cold provenance, eviction/reacquire, budget0 through actual END and cleanup-failure retirement remain required. Leaf emits exact terminal and wakes parent/campaign. |
-| owned_inputs (2leaves) | Fulla7c125 folded/joined; package lifetime2/2+4GHC passed. Failed e695 original73pins remain unknown. Independent Warm b41 frontier and Haskell5f8 CID source reviews accepted. | No owned jobs. Reserved reviewer wakes on exact new native/profile evidence; new crypton dependency requires serial realization, actual compile/counts and fresh service profile/provider/boot. Old package evidence cannot qualify it. |
-| warm_workers (1leaf) | Folded5ac/a3 now joined159ee. b41 current-block frontier independently source accepted with actual work counters/rollback/fork oracle; native prod/cfg(test) active in isolated cell checkout. | Own8ADDITIONAL/8growth Rust gate; paired CELL-WORLD-CONTRACT implementation continues with typed bindings/current roots. Separate Haskell5f8 crypton CID parser source accepted, native/profile not qualified. No actual ordinary prepareCell yet. |
-| reload (2leaves) |69bf owning9 compile PASS; exact21 controls13PASS8FAIL (runtime9/12, actor4/5, notebook0/4). All settled; strict physical Sleep fails after compiler completion on missing native child before resume. | Repair actual Active→Publishing continuation purpose without reopening source authority; rerun four real notebooks. Exact epoch/prepared-root fixture corrections and bounded R2 actual pending owner/lifetime freeze proceed. Physical END-loss relay waits for genuine positive. No reload acceptance. |
-| qualification (1leaf) | Typed availability/selection repair667 compilePASS;18controls14PASS4FAIL. Primary A/B, strict conflicts and Request48 passed. Baseline c3 reproduced old fixture premises; actual GHC3 failed separate construction premises. a286 cfg(test) failed12 compile errors, no tests. | Exact3a8 reviewed test-only repairs use genuine closed support and existing observers, retain strict negatives. Conditional8ADDITIONAL/8growth narrow compile+changed controls+actualGHC retry; observe terminal. Legacy bypass removal, full review/fold and exact frozen Persona retry remain. |
+| host_inputs (2leaves) | Coherent864 runtime/actor production+cfg(test)4targets PASS26local/196s, worker/wrappers PASS14local/120s, exact key controls2/2PASS; full area45a74. | Reviewed5752304 adds full Reloadce554 publication repair with unchanged query blobs. Conditional14TOTAL/8growth actual fourtarget compile→Rooted2/fulltrace is assigned to selected_root. Info/Type effect→resume→settle, source provenance and residency controls remain unqualified. Parent wakes on exact terminal and owns successive retention/fold waves. |
+| owned_inputs (2leaves) | Qualifieda7c125 folded/joined; package lifetime2/2+4GHC passed. Original e69573pins remain unknown. Independent frontier acb5/5 and binding526 one budget control accepted; typedbinding260 source accepted after exact-row custody repair. | No jobs. Reserved reviewer wakes for exact new native/profile/consumer evidence. Haskellb46 closed HAMT source may compile, but nonempty typed Context/binding/alias positives and actual two-root/image correlation remain required. |
+| warm_workers (1leaf) | Reviewedade307/acb frontier folded and joinedae1. Typedbinding526 production/cfg(test)+budget1/1 passed; new dfb binding-HAMT/current two-root producer is source-only. | Paired runtime binding and ordinary prepareCell/current-root successor consumers continue. Approved serialb46 configure-only new crypton phase4GiB ADDITIONAL expected outside build.slice,8GiB transient growth; exact Nix daemon/physical accounting, max-jobs1/cores2, observer required. Metadata/native compilation and fresh profile/provider/boot follow separately. No old EPS upgrade. |
+| reload (2leaves) | Reviewedce554 owning9 compilePASS; notebook4/4PASS; actual runtime/phase controls total8executed7PASS1FAIL. Publication now uses existing Publishing continuation cleanup with lazy source claims, without reopening Active. | Remaining close fixture ran DIRECT but required confirmed daemonRetired; canonical exact owned-resident resource declaration+trace+strict rerun is active. R1 route/source candidate and R2 actual pending owner/lifetime fence continue. Physical Sleep still fails after compiler completion on native child construction; no END-loss relay or force-drain acceptance. |
+| qualification (1leaf) | bb957 production/cfg(test)PASS;24executed20PASS4FAIL. Actual quotation and source-proof pairing passed in their exact retry tranches. Core historicalA/optionalB, real producer and strict conflict controls passed earlier; no frozen retry yet. | Test-only3e2 adds truthful type-only FilePath shadow checks plus a genuine NOINLINE native-demand positive, cached-metadata zero-work assertion and unchanged late private-file custody diagnostic. Later retained-core histories must consume exact actual issued output/ArtifactId, not mint roles from custody. Narrow next compile/counts, physical row ownership diagnosis and final legacy bypass deletion remain owned. |
+
 
 Campaign directly reviews critical source/consumers, shared contracts and exact
 joined evidence, folds reviewed area histories, publishes checkpoints and owns
@@ -136,12 +132,14 @@ Installed swarm-build lacks staged reservation switches. Use supported pinned,
 local-only Buck workflow and verified bind mounts; no substitute wrapper. Preserve
 100GiB unreserved including expected growth. Sample actual global memory plus
 remaining expected increments of EXACT active scopes below80GiB pressure threshold.
-Idle daemons stay in global current. Latest campaign gate is terminal; cumulative
-scope peak13,501,480,960B, idle daemon current about6.01GB remains globally
-accounted. Campaign14TOTAL/8growth is released. Current area allowances are
-Warm8ADDITIONAL/8growth and qualification conditional8ADDITIONAL/8growth;
-host/reload/owned terminal grants0. Actual status can change only through owned
-LIVE entries and fresh admission samples, not this documentation snapshot.
+Idle daemons stay in global current. Latest campaign lane is terminal/released,
+with idle current about5.29GB; cumulative scope peak13,501,480,960B. Host575 has
+conditional14TOTAL/8growth actual query lane. Warm configure-only has conditional
+4GiB additional Nix memory/8growth, separately outside build.slice; the Nix daemon
+was2.20GB current with7GiB high/8GiB max and physical MemAvailable97.55GB at
+admission review. Qualification8ADDITIONAL/8growth persists for bounded successors,
+with fresh launch accounting; reload currently released0 pending next exact gate.
+Actual status can change through owned LIVE entries; refresh before every launch.
 Each new launch needs fresh actual-scope arithmetic and updates only its own
 existing LIVE entry. Operational
 current receipts are `campaign/LIVE.json` plus each owner's exact admission record;

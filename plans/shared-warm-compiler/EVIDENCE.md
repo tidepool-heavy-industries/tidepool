@@ -151,3 +151,22 @@ Private receipt `campaign/world-component-join/TERMINAL.json`; cumulative scope
 peak13,501,480,960B under14GiB. Directory resource hashes remain UNKNOWN; individual
 cleanup/diagnostic limits are preserved. No actual world query, retention history,
 ordinary-cell successor, frozen qualification or speedup acceptance.
+
+## Joined reachable frontier checkpointae1c84bf92
+
+Exactae1c84bf9268f3dd92ec6f390be09b67e26c3599:15 owning production/cfg(test)/Haskell
+targets80local0remote630.6s;25 projection,8 Rust including five maintained frontier
+controls,5 Haskell leaves and recovered-base corpus1program passed. All eight
+command phases terminal0;46 report/stream/executable/resource hashes reconciled.
+Private `campaign/frontier-join/TERMINAL.json`; cumulative peak13,501,480,960B
+under14GiB. Process cleanup confirmed for Rust; compiler/hosted not_observed and
+directory resource hashes UNKNOWN retained. No actual world query, runtime
+successor, frozen qualification or performance acceptance.
+
+Area evidence remains separate: exact864 fourtarget compile26local+matched
+worker/wrappers14local and key2/2PASS; exactce554 owning9+notebook4/4 and total
+controls7/8PASS. Its remaining ActualRetired assertion ran DIRECT, whose cancelled
+abort is conservatively Unconfirmed; owned-resident rerun is pending. Qualification
+bb95724executed20PASS4FAIL includes real paired source proof PASS; catalog evidence
+shows FilePath InterfaceOnly at actual shadow source with fresh Prelude, rather
+than missing compilation. New genuinely demanded native positive remains unrun.
