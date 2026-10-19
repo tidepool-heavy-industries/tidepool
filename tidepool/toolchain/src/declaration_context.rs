@@ -21710,8 +21710,41 @@ mod tests {
                 .unwrap();
             public = public.rebuild(|facts| facts.compiler_support = support);
         }
-        let projection = public.compiler_input_projection().interface_only();
-        let public = Arc::new(public.recover_fixture_projection(projection).unwrap());
+        let prior_support = public.compiler_source_support().clone();
+        let support = prior_support.for_source_owners(&BTreeSet::new()).unwrap();
+        assert_eq!(
+            support.artifacts().capture_graph_selection(),
+            prior_support.artifacts().capture_graph_selection(),
+            "source policy demotion preserves exact issued custody"
+        );
+        assert_eq!(
+            support
+                .native_availability()
+                .semantic_observations()
+                .unwrap(),
+            prior_support
+                .native_availability()
+                .semantic_observations()
+                .unwrap(),
+            "source policy demotion preserves normalized native permission facts"
+        );
+        for prior in prior_support.native_offers() {
+            assert!(support
+                .native_offers()
+                .iter()
+                .any(|offer| offer.same_issuance(prior)));
+        }
+        assert!(support
+            .projection()
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        let public = Arc::new(
+            public
+                .rebuild(|facts| facts.compiler_support = support)
+                .finish()
+                .unwrap(),
+        );
         let source = "{-# LANGUAGE PackageImports #-}\nmodule Consumer where\nimport qualified \"tidepool-resume\" Tidepool.Internal.Resume as TidepoolResume\n";
         assert!(!template_selects_owner(
             &[source.to_owned()],
