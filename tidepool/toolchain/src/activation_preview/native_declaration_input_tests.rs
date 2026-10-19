@@ -710,10 +710,21 @@ fn original_role_preview_keeps_exact_native_identity_and_refuses_substitution() 
         1,
         "repeated availability of the same issued original retains one owner"
     );
+    let selected_interfaces = |context: &ExactDeclarationContext| {
+        context
+            .compiler_input_roles()
+            .iter()
+            .map(|role| role.interface())
+            .collect::<BTreeSet<_>>()
+    };
     assert_eq!(
-        offered_native_owners(&original),
-        offered_native_owners(&canonical),
+        selected_interfaces(&original),
+        selected_interfaces(&canonical),
         "an original role retains its selected canonical type evidence"
+    );
+    assert!(
+        offered_native_owners(&canonical).is_empty(),
+        "raw native custody under interface-only roles cannot issue an offer"
     );
     let recovered =
         crate::certified_products::tests::recovered_witness_fixtures(&[declaration_groups(

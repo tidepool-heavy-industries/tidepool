@@ -8115,10 +8115,18 @@ mod module_product_tests {
             .collect();
         assert!(cohort.contains("Tidepool.Prelude"));
         assert!(cohort.contains("Tidepool.FilePath"));
-        for variable in ["TIDEPOOL_COMPILE_CACHE_DIR", "TIDEPOOL_BUILD_PRODUCTS_DIR"] {
-            let directory =
-                PathBuf::from(std::env::var_os(variable).expect("isolated empty cache"));
-            assert_eq!(std::fs::read_dir(directory).unwrap().count(), 0);
+        let compile_cache = PathBuf::from(
+            std::env::var_os("TIDEPOOL_COMPILE_CACHE_DIR").expect("isolated runner cache"),
+        );
+        let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
+        let products = crate::paths::build_products_dir(&endpoint.identity().producer_hex());
+        assert!(products.starts_with(&compile_cache));
+        for directory in [&compile_cache, &products] {
+            match std::fs::read_dir(directory) {
+                Ok(entries) => assert_eq!(entries.count(), 0),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("isolated cache inspection {}: {error}", directory.display()),
+            }
         }
         let source = include_str!("../tests/fixtures/deployment-module-package/Consumer.hs");
         let original = crate::artifacts::test_support::compile_targets(
@@ -10550,10 +10558,46 @@ mod source_proof_pairing_tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(products.len(), 1);
-            let issued = certificate
-                .compiler_source_support()
-                .source_support(&BTreeSet::from([owner.clone()]))
+            let product = &products[0];
+            let producer = certificate.toolchain_identity_sha256();
+            let entry = Arc::new(
+                crate::artifact_inventory::ArtifactEntry::original(producer, product.clone())
+                    .unwrap(),
+            );
+            assert!(entry.requirements.is_empty());
+            assert!(
+                crate::certified_products::original_available_groups(product)
+                    .unwrap()
+                    .all(|group| group.imports().iter().all(|import| !matches!(
+                        import,
+                        crate::certified_products::PendingImportOwner::Source { .. }
+                    )))
+            );
+            let inventory = crate::artifact_inventory::ArtifactInventory::default();
+            let artifacts = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    vec![entry.clone()],
+                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                )
                 .unwrap();
+            let projection =
+                crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&[entry])
+                    .unwrap();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )
+                .unwrap();
+            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &selection, &artifacts,
+            )
+            .unwrap();
+            let issued =
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap();
             let persisted =
                 crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
