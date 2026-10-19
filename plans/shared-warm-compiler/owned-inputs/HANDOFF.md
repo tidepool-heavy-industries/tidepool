@@ -155,3 +155,33 @@ The empty-native V+S regression must prove unrelated sibling backing release;
 V requiring A separately preserves A's exact original physical owner and reports
 its actual retained backing. Source_lifetime's review report records these
 distinctions, without executed lifetime evidence yet.
+
+## First exact candidate review
+
+Rows delivered `3716265d2270a0a7ad77556e02a24c998cec2f9b`, refined to
+`26e0f31df52a04a88dd07913e990b2e9048e9103`, both based on `5b74c2f1`.
+Owned files: `checked_cell.rs`, `declaration_context.rs`,
+`artifact_inventory.rs`, `host_work.rs`, and `HANDOFF-rows.md`.
+Supervisor read the full diff and production runtime binding equality consumer;
+source_lifetime is the independent exact-candidate reviewer. Formatting passed
+through pinned admitted command; no production/test compilation or executed
+behavior is established. Nothing from this candidate is folded into the area.
+
+Two independent findings require repair before source acceptance:
+
+1. `capture_checked_value` accepted a certificate and independent prefilled
+   row mutex, allowing the private reuse branch to associate the wrong physical
+   row packet. Bind the certificate and row state in the actual produced-output
+   owner, derive reused identity there, and test concurrency/failure through that
+   production packet.
+2. Same-view `retain_materialization` ignored own leaf entries when preparing
+   a new complete context and returned an existing complete entry before newer
+   leaves were considered. Promotion followed by preparation on the same view
+   could recopy V or retain the old broad V+S backing. Overlay leaf facts into
+   a new immutable request materialization while preserving complete native
+   facts/leases; test both cold and already-complete same-view requests.
+
+Rows owns these bounded repairs. Its next event is the repaired exact candidate
+to supervisor and independent reviewer using status-aware delivery. Required
+follow-up remains production/test compilation, counted controls and a joined
+host-to-worker history once a measured native lane can be admitted.
