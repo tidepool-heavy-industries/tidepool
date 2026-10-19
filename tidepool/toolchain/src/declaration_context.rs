@@ -5975,9 +5975,74 @@ impl ExactProgramSegmentAdmission {
 
 /// Borrowed issued facts needed by output certification. This view performs no
 /// input selection, physical materialization or authority issuance.
+#[derive(Clone, Copy)]
+pub(crate) struct ProductCompilerInputs<'a> {
+    source_support: &'a Arc<crate::artifact_inventory::CompilerSourceSupport>,
+    pub(crate) metadata: &'a CompilerArtifactMetadata,
+    native_selection: &'a NativeInputSelection,
+    original_sources: &'a crate::certified_products::RetainedOriginalSources,
+}
+
+impl<'a> ProductCompilerInputs<'a> {
+    pub(crate) fn from_exact(inputs: &'a RequestCompilerInputs) -> Self {
+        Self {
+            source_support: &inputs.source_support,
+            metadata: &inputs.metadata,
+            native_selection: &inputs.native_selection,
+            original_sources: &inputs.original_sources,
+        }
+    }
+
+    pub(crate) fn compiler_source_support(
+        &self,
+    ) -> &'a crate::artifact_inventory::CompilerSourceSupport {
+        self.source_support
+    }
+
+    pub(crate) fn shared_compiler_source_support(
+        &self,
+    ) -> Arc<crate::artifact_inventory::CompilerSourceSupport> {
+        Arc::clone(self.source_support)
+    }
+
+    pub(crate) fn projection(&self) -> &'a CompilerInputProjection {
+        self.source_support.projection()
+    }
+
+    pub(crate) fn artifacts(&self) -> &'a ArtifactView {
+        self.source_support.artifacts()
+    }
+
+    pub(crate) fn native_availability(
+        &self,
+        original: ArtifactId,
+    ) -> Option<Arc<NativeTransportAvailability>> {
+        self.native_selection.availability.get(&original).cloned()
+    }
+
+    pub(crate) fn private_native_availability(&self) -> RequestNativeAvailability {
+        RequestNativeAvailability(Arc::clone(&self.native_selection.availability))
+    }
+
+    pub(crate) fn advertised_native_originals(&self) -> AdvertisedNativeOriginals {
+        self.native_selection.advertised.clone()
+    }
+
+    pub(crate) fn available_original_sources(
+        &self,
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<
+        Arc<crate::certified_products::AvailableOriginalSources>,
+        crate::certified_products::CertificationError,
+    > {
+        self.original_sources.admit(products, operation)
+    }
+}
+
 struct ProductInputFacts<'a> {
     context: &'a Arc<ExactDeclarationContext>,
-    compiler: &'a RequestCompilerInputs,
+    compiler: ProductCompilerInputs<'a>,
     groups: &'a [PendingCertifiedGroup],
     source_lexical: &'a [ExactLexicalNode],
     program_support: Option<&'a ProgramSourceSupport>,
@@ -5997,7 +6062,7 @@ impl<'a> ProductInputFacts<'a> {
     ) -> Self {
         Self {
             context: inputs.context(),
-            compiler: inputs.compiler(),
+            compiler: ProductCompilerInputs::from_exact(inputs.compiler()),
             groups,
             source_lexical: &program.program_source_lexical,
             program_support: program.program_support.as_ref(),
@@ -6274,7 +6339,7 @@ impl<'a> ExactProductAdmission<'a> {
         self.source
     }
 
-    pub(crate) fn compiler_inputs(&self) -> &'a RequestCompilerInputs {
+    pub(crate) fn compiler_inputs(&self) -> ProductCompilerInputs<'a> {
         self.facts.compiler
     }
     pub(crate) fn context(&self) -> &'a Arc<ExactDeclarationContext> {
@@ -6328,7 +6393,7 @@ impl<'a> ExactProductAdmission<'a> {
         inputs: &OriginalCompilerInputs,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let support = crate::artifact_inventory::CompilerSourceSupport::from_original_output(
-            self.facts.compiler,
+            self.facts.compiler.compiler_source_support(),
             self.facts.context.compiler_source_support(),
             inputs,
         )?;
@@ -7711,7 +7776,28 @@ fn decode_exact_compilation_receipt_with_operation(
     let source = std::str::from_utf8(&source_bytes)
         .map_err(failure)?
         .to_owned();
-    let evidence_bytes = string(&header[7])?.as_bytes().to_vec();
+    decode_compilation_source_payload(
+        source_path,
+        source_sha256,
+        source,
+        string(&header[7])?.as_bytes().to_vec(),
+        &header[8],
+        &header[9],
+        operation,
+    )
+}
+
+/// Decode the common source facts only after the owning entry point has
+/// authenticated its envelope and captured source bytes.
+fn decode_compilation_source_payload(
+    source_path: PathBuf,
+    source_sha256: [u8; 32],
+    source: String,
+    evidence_bytes: Vec<u8>,
+    import_rows: &Value,
+    source_selection: &Value,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<DecodedExactCompilationReceipt, CompileError> {
     operation
         .charge(
             evidence_bytes
@@ -7725,7 +7811,7 @@ fn decode_exact_compilation_receipt_with_operation(
     if evidence.version != 4 {
         return Err(failure("compile receipt dependency evidence version"));
     }
-    let edges = list(&header[8], 4096)?
+    let edges = list(import_rows, 4096)?
         .iter()
         .map(|module| {
             let module = row(module, 4)?;
@@ -7753,7 +7839,7 @@ fn decode_exact_compilation_receipt_with_operation(
             })
         })
         .collect::<Result<Vec<_>, CompileError>>()?;
-    let source_selection = row(&header[9], 2)?;
+    let source_selection = row(source_selection, 2)?;
     let claims = list(&source_selection[0], 4096)?
         .iter()
         .map(|claim| {
