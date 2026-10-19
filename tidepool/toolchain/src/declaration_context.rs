@@ -1154,6 +1154,10 @@ impl NativeTransportAvailability {
         Ok(())
     }
 
+    pub(crate) fn original_artifact_id(&self) -> ArtifactId {
+        self.original.descriptor.id
+    }
+
     pub(crate) fn original_owner(&self) -> &tidepool_repr::execution_schema::CachedHomeOwner {
         let ArtifactPayload::Original(product) = &self.original.payload else {
             unreachable!("native selection issuer checked original payload")
@@ -18193,6 +18197,35 @@ mod tests {
                         CompileError::CompilerEvidence(_)
                     ))
                 ));
+            }
+        }
+    }
+
+    #[test]
+    fn unchanged_native_availability_reuses_fact_root_across_histories() {
+        use crate::artifact_inventory::NativeArtifactDemand;
+        for unrelated in [0, 32, 128] {
+            NATIVE_AVAILABILITY_FACT_WORK.with(|work| work.set((0, 0)));
+            let cold = demanded_native_fixture(unrelated, NativeArtifactDemand::AllGroups, false);
+            assert!(
+                NATIVE_AVAILABILITY_FACT_WORK.with(|work| work.get().0) > 0,
+                "positive control: genuine cold issuer actually constructs native facts"
+            );
+            assert_eq!(
+                cold.native_selection.availability.persistent_facts().len(),
+                unrelated + 2
+            );
+            for _ in 0..3 {
+                take_native_demand_fact_edits();
+                let repeated = cold
+                    .native_selection
+                    .availability
+                    .for_compiler_roles(cold.projection(), cold.artifacts())
+                    .unwrap();
+                assert_eq!(repeated.rows().count(), unrelated + 2);
+                assert_eq!(repeated.persistent_facts().len(), unrelated + 2);
+                assert_eq!(take_native_demand_fact_edits(), (0, 0),
+                    "unchanged all-role wrapper must not copy or insert any maintained fact at any history size");
             }
         }
     }
