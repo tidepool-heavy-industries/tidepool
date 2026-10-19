@@ -206,7 +206,7 @@ impl ExecutionResourceOwners {
             && context.placement.resource_scope == original.resource_scope
             && (context.placement.lexical_scope == original.lexical_scope
                 || self.private.get().is_some_and(|private| {
-                    private.view().session() == context.placement.session
+                    private.session() == context.placement.session
                         && private.private_scope() == context.placement.lexical_scope
                 }))
     }
@@ -220,8 +220,8 @@ impl ExecutionResourceOwners {
                 "inspection resources cannot admit a private authored execution".into(),
             ));
         }
-        if admission.view().session() != self.public.placement.session
-            || admission.admitted_public().scope != self.public.placement.lexical_scope
+        if admission.session() != self.public.placement.session
+            || admission.public_scope() != self.public.placement.lexical_scope
         {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "private resources differ from the original publication owner".into(),

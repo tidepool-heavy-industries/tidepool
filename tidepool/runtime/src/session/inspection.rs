@@ -747,7 +747,9 @@ fn run_admitted_world_inspection_inner(
             let cold = tidepool_toolchain::artifacts::ModuleCandidateOffer::compiler_world_inputs(
                 primary, bindings, sources,
             )?;
-            compiler_world::open_world(cold, &endpoint()?, question.clone())?
+            let endpoint = endpoint()?;
+            let world = compiler_world::open_world(cold, &endpoint)?;
+            compiler_world::query_public_module(&endpoint, &world, question.clone())?
         }
     };
     if expected_world.is_some_and(|expected| &expected != result.world().logical_id()) {

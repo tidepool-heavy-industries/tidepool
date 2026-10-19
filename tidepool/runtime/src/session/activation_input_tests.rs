@@ -1184,7 +1184,7 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
             ..SessionRunContext::ROOT
         })
         .unwrap();
-    let view = execution.view();
+    let view = execution.view().unwrap();
     let imports = view.turn_imports(&SourceImports::new());
     let template =
         resident_cell_check_template(&fixture.recipe.preamble, &fixture.recipe.row, &imports);

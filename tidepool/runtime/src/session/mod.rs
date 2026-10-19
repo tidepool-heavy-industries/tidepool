@@ -424,6 +424,12 @@ pub enum SessionError {
     DeadScope(ScopeId),
     #[error("session has no persistent declaration library")]
     MissingDeclarationLibrary,
+    #[error("scope {0:?} has no current published compiler world")]
+    MissingPublishedCompilerWorld(ScopeId),
+    #[error("world-owned execution requires service cell preparation")]
+    WorldCellRequiresServicePreparation,
+    #[error("world cell item {ordinal} requires an observation-name reservation")]
+    WorldCellExpressionReservationUnsupported { ordinal: usize },
     #[error("live value module {0:?} has no retained compiler-certified interface")]
     MissingRetainedValueInterface(SessionModule),
     #[error("compiler world cannot capture generic source binding {id:?} in {module:?} (scope={scope:?})")]

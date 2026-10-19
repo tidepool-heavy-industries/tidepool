@@ -4087,7 +4087,7 @@ where
             || !Arc::ptr_eq(&input.owner, self.state.admission_owner())
             || input.owner_epoch != self.state.admission_owner().epoch()
             || self
-                .current_decl_heads_in(execution.admitted_public().scope)
+                .current_decl_heads_in(execution.public_scope())
                 .iter()
                 .any(|(name, _)| name == "sessionInput")
         {
@@ -4097,7 +4097,7 @@ where
         }
         let mut base = self.state.snapshot_publication_target(
             execution.durable_owner.clone(),
-            execution.admitted_public().scope,
+            execution.public_scope(),
             execution.private_scope(),
             vec![input.mounted.binding],
             Vec::new(),

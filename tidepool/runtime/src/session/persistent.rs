@@ -1809,7 +1809,7 @@ impl PersistentSession {
         })
     }
 
-    fn inspection_world_base_is_current(
+    pub(super) fn inspection_world_base_is_current(
         &self,
         base: &super::inspection::InspectionWorldBase,
         source: &super::GenerationArtifactReference,

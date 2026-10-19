@@ -166,18 +166,30 @@ impl NativeSetupInputInventory {
 /// binding-store owner; completion must retire that scope once.
 pub struct PrivateExecutionAdmission {
     pub(super) library: uuid::Uuid,
+    session: super::SessionId,
     pub(super) owner: Arc<RuntimeAdmissionOwner>,
     pub(super) owner_epoch: u64,
     pub(super) durable_owner: Option<super::RecoveryPublicOwner>,
     pub(super) scope_lease: Arc<RuntimeLexicalScopeLease>,
-    admitted: PublicVisibilitySnapshot,
+    public_scope: ScopeId,
     private_scope: ScopeId,
-    view: SessionCompileView,
+    compiler_basis: PrivateExecutionCompilerBasis,
     binding_tip: BindingTipId,
     pub(super) completed_values: parking_lot::Mutex<
         std::collections::HashMap<tidepool_repr::SessionVarId, CertifiedPrivateValueWrite>,
     >,
     pub(super) final_intent: OnceLock<Arc<super::FinalExecutionIntent>>,
+}
+
+enum PrivateExecutionCompilerBasis {
+    Finite {
+        view: SessionCompileView,
+        admitted: PublicVisibilitySnapshot,
+    },
+    World {
+        published: Arc<super::inspection::InspectionWorldAssociation>,
+        private_key: super::persistent::CompileViewKey,
+    },
 }
 
 pub(super) struct CertifiedPrivateValueWrite {
@@ -504,14 +516,51 @@ impl PrivateExecutionAdmission {
         self.scope_lease.clone()
     }
 
-    pub fn admitted_public(&self) -> &PublicVisibilitySnapshot {
-        &self.admitted
+    /// Explicit finite consumers retain the complete runtime visibility snapshot.
+    /// World preparation validates the issued base key and binding tip instead.
+    pub fn admitted_public(&self) -> Result<&PublicVisibilitySnapshot, SessionError> {
+        match &self.compiler_basis {
+            PrivateExecutionCompilerBasis::Finite { admitted, .. } => Ok(admitted),
+            PrivateExecutionCompilerBasis::World { .. } => {
+                Err(SessionError::WorldCellRequiresServicePreparation)
+            }
+        }
+    }
+    pub fn public_scope(&self) -> ScopeId {
+        self.public_scope
     }
     pub fn private_scope(&self) -> ScopeId {
         self.private_scope
     }
-    pub fn view(&self) -> &SessionCompileView {
-        &self.view
+    pub fn session(&self) -> super::SessionId {
+        self.session
+    }
+    pub fn view(&self) -> Result<&SessionCompileView, SessionError> {
+        match &self.compiler_basis {
+            PrivateExecutionCompilerBasis::Finite { view, .. } => Ok(view),
+            PrivateExecutionCompilerBasis::World { .. } => {
+                Err(SessionError::WorldCellRequiresServicePreparation)
+            }
+        }
+    }
+    pub(super) fn world_basis(
+        &self,
+    ) -> Result<
+        (
+            &Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
+            &super::persistent::CompileViewKey,
+        ),
+        SessionError,
+    > {
+        match &self.compiler_basis {
+            PrivateExecutionCompilerBasis::World {
+                published,
+                private_key,
+            } => Ok((&published.world, private_key)),
+            PrivateExecutionCompilerBasis::Finite { .. } => Err(
+                SessionError::MissingPublishedCompilerWorld(self.public_scope),
+            ),
+        }
     }
     pub fn binding_tip(&self) -> BindingTipId {
         self.binding_tip
@@ -2719,6 +2768,38 @@ impl PersistentSession {
         &mut self,
         public_scope: ScopeId,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
+        self.begin_private_execution_with_world(public_scope, None)
+    }
+
+    /// Borrow the published world only for the actual requesting source and
+    /// original canonical lease. Neither compiler inputs nor visibility are rebuilt.
+    pub(crate) fn begin_world_private_execution(
+        &mut self,
+        public_scope: ScopeId,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<RuntimeLexicalScopeLease>,
+    ) -> Result<PrivateExecutionAdmission, SessionError> {
+        if !self.has_lib() {
+            return Err(SessionError::MissingDeclarationLibrary);
+        }
+        let published = self
+            .lib()
+            .tips
+            .get(&public_scope)
+            .and_then(|state| state.inspection_world.as_ref())
+            .filter(|association| {
+                self.inspection_world_base_is_current(&association.base, source, original_source)
+            })
+            .cloned()
+            .ok_or(SessionError::MissingPublishedCompilerWorld(public_scope))?;
+        self.begin_private_execution_with_world(public_scope, Some(published))
+    }
+
+    fn begin_private_execution_with_world(
+        &mut self,
+        public_scope: ScopeId,
+        published: Option<Arc<super::inspection::InspectionWorldAssociation>>,
+    ) -> Result<PrivateExecutionAdmission, SessionError> {
         self.admit_source_work_in(public_scope)?;
 
         let store = self.held_admission_store()?;
@@ -2729,17 +2810,22 @@ impl PersistentSession {
             .durable_public_scopes
             .iter()
             .find_map(|(owner, scope)| (*scope == public_scope).then(|| owner.clone()));
-        let admitted = self
-            .public_visibility_snapshot_in(public_scope)
-            .ok_or(SessionError::DeadScope(public_scope))?;
+        let admitted = if published.is_none() {
+            Some(
+                self.public_visibility_snapshot_in(public_scope)
+                    .ok_or(SessionError::DeadScope(public_scope))?,
+            )
+        } else {
+            None
+        };
+        let public_tip = self.lib().scope_tip(public_scope);
         let private_scope = {
             let admission = store
                 .as_ref()
                 .map(|store| store.begin_native_transition())
                 .transpose()
                 .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-            self.lib_mut()
-                .seed_scope(public_scope, admitted.declaration_tip);
+            self.lib_mut().seed_scope(public_scope, public_tip);
             let private_scope = self
                 .mint_detached_scope(public_scope)
                 .ok_or(SessionError::DeadScope(public_scope))?;
@@ -2747,22 +2833,34 @@ impl PersistentSession {
             private_scope
         };
         let scope_lease = self.prepared_lexical_scope_lease(private_scope)?;
-        let view = self
-            .compile_view_in(private_scope)
-            .expect("fresh detached scope has a library")
-            .with_scoped_injection();
+        let compiler_basis = match published {
+            Some(published) => PrivateExecutionCompilerBasis::World {
+                published,
+                private_key: self
+                    .compile_view_key_in(private_scope)
+                    .ok_or(SessionError::StaleStagedDeclaration)?,
+            },
+            None => PrivateExecutionCompilerBasis::Finite {
+                view: self
+                    .compile_view_in(private_scope)
+                    .expect("fresh detached scope has a library")
+                    .with_scoped_injection(),
+                admitted: admitted.expect("finite execution captures its publication facts"),
+            },
+        };
         let binding_tip = self
             .binding_tip_id(private_scope)
             .expect("detached scope captures a binding tip");
         let prepared = PrivateExecutionAdmission {
             library: self.lib().compile_view_identity,
+            session: self.lib().session_id(),
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
             durable_owner,
             scope_lease,
-            admitted,
+            public_scope,
             private_scope,
-            view,
+            compiler_basis,
             binding_tip,
             completed_values: parking_lot::Mutex::new(std::collections::HashMap::new()),
             final_intent: OnceLock::new(),
@@ -3662,12 +3760,13 @@ impl PersistentSession {
         if !Arc::ptr_eq(&execution.owner, self.admission_owner())
             || execution.owner_epoch != self.admission_owner().epoch()
             || !self.has_lib()
-            || execution.view().session() != self.lib().session_id()
+            || execution.session() != self.lib().session_id()
             || execution.library != self.lib().compile_view_identity
             || self.binding_tip_id(execution.private_scope()) != Some(execution.binding_tip())
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        execution.view()?;
         super::generation_lease::requested_end(self.val_gen(), 1)?;
         self.compile_view_in(execution.private_scope())
             .map(SessionCompileView::with_scoped_injection)
@@ -4382,7 +4481,7 @@ mod tests {
             crate::session::prepared::tests::rooted_publication_fixture(&mut session, "input", 919);
         let setup_module = setup.module;
         session.bind_in(execution.private_scope(), setup).unwrap();
-        assert!(execution.view().injected_values().is_empty());
+        assert!(execution.view().unwrap().injected_values().is_empty());
         let ordinary = session.compile_view_in(execution.private_scope()).unwrap();
         assert!(ordinary.injected_values().contains(&foreign_module));
         let protected = session.compile_view_for_execution(&execution).unwrap();
@@ -4450,7 +4549,7 @@ mod tests {
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let first = Arc::new(session.begin_private_execution(public).unwrap());
         let second = Arc::new(session.begin_private_execution(public).unwrap());
-        assert_eq!(first.admitted_public().machine_incarnation, None);
+        assert_eq!(first.admitted_public().unwrap().machine_incarnation, None);
         let first_cell = session
             .admit_cell_for_execution(first.clone(), 0, Arc::new(()), [7; 32], [8; 32], Vec::new())
             .unwrap();
@@ -4799,9 +4898,15 @@ mod tests {
         let second_private = second.begin_private_execution(second_public).unwrap();
         assert_eq!(private.private_scope(), second_private.private_scope());
         assert_eq!(private.binding_tip(), second_private.binding_tip());
-        assert_eq!(private.view().session(), second_private.view().session());
-        assert_eq!(private.admitted_public().machine_incarnation, None);
-        assert_eq!(second_private.admitted_public().machine_incarnation, None);
+        assert_eq!(private.session(), second_private.session());
+        assert_eq!(private.admitted_public().unwrap().machine_incarnation, None);
+        assert_eq!(
+            second_private
+                .admitted_public()
+                .unwrap()
+                .machine_incarnation,
+            None
+        );
         assert!(matches!(
             second.freeze_execution_intent(&private, vec![], vec![]),
             Err(SessionError::StaleStagedDeclaration)
