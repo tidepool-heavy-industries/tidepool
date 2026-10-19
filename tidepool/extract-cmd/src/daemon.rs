@@ -1937,7 +1937,7 @@ fn service_transaction(
             // while bounding GHC state. The worker executable is boot-pinned
             // by `PreparedWorker`, so replacing only this child does not
             // change the endpoint's producer.
-            worker.shutdown();
+            worker.shutdown_confirmed()?;
             worker.respawn(prepared)?;
             *served = 0;
             *followed_rotation = true;
@@ -2715,7 +2715,14 @@ fn serve_workers(
                         }
                     }
                 }
-                worker.shutdown();
+                if let Err(error)=worker.shutdown_confirmed() {
+                    let retirement=worker.abort();
+                    if matches!(&retirement.worker,crate::CompilerWorkerRetirement::WaitUnconfirmed(_)) {
+                        resident.quarantine();
+                        return Ok(Some(QuarantinedSlot {worker,retirement,_resource_permit:None,_admission_permit:None,prior:Some(Box::new(error))}));
+                    }
+                    return Err(error);
+                }
                 Ok(None)
             }));
         }
@@ -4062,8 +4069,11 @@ impl Worker {
     /// retirement of its exact worker, rather than merely requesting shutdown.
     pub(crate) fn shutdown_confirmed(&mut self) -> Result<(), FrontendError> {
         drop(self.stdin.take());
-        match self.child.wait() {
-            Ok(status) => {
+        match observe_aborted_worker(
+            || self.child.try_wait(),
+            Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT,
+        ) {
+            crate::CompilerWorkerRetirement::Reaped(status) => {
                 let scratch = self.build_products_namespace.cleanup_checked();
                 if status.success() {
                     scratch.map_err(|failures| FrontendError::ScratchCleanup { status, failures })
@@ -4074,16 +4084,17 @@ impl Worker {
                     })
                 }
             }
-            Err(source) => {
-                // Products may still be in use. Preserve the primary wait
-                // failure and keep their existing owner attached to the child.
-                self.abort();
-                Err(FrontendError::WorkerWait(source))
+            crate::CompilerWorkerRetirement::WaitUnconfirmed(cause) => {
+                Err(FrontendError::WorkerWait(match cause.raw_os_error {
+                    Some(code) => io::Error::from_raw_os_error(code),
+                    None => io::Error::new(cause.kind, cause.message),
+                }))
             }
         }
     }
 
-    pub(crate) fn shutdown(&mut self) {
+    #[cfg(test)]
+    fn shutdown(&mut self) {
         drop(self.stdin.take());
         if self.child.wait().is_err() {
             if let Err(error) = self.child.kill() {
@@ -7222,6 +7233,48 @@ tidepool-reuse-error: witness failed\n";
             .unwrap();
         assert!(built.success());
         fixture
+    }
+
+    #[test]
+    fn daemon_stop_preserves_failed_worker_outer_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = compile_control_ack_worker(directory.path());
+        std::fs::write(directory.path().join("phase"), [19]).unwrap();
+        let socket = directory.path().join("compiler.sock");
+        let prepared = PreparedWorker::for_test(executable).unwrap();
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: Some(100),
+            rss_ceiling_mb: Some(u64::MAX),
+            request_deadline_secs: Some(10),
+            watch_stamp: None,
+            persistent: true,
+            run_id: None,
+            log_path: None,
+            workers: Some(1),
+            foreground_jobs: None,
+            preparation_jobs: None,
+        };
+        let server = std::thread::spawn(move || serve(&config, prepared));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if preflight(&socket).is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "test waits for actual daemon readiness"
+            )]
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        request_stop(&socket).unwrap();
+        let result = server.join().unwrap();
+        assert!(
+            matches!(result,Err(FrontendError::WorkerClose {status,..}) if status.code()==Some(17)),
+            "daemon must not advertise successful retirement after worker bracket failure"
+        );
+        assert!(!socket.exists());
     }
 
     #[test]
