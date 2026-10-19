@@ -520,6 +520,11 @@ completedRequestRelease = withScratch $ \work -> do
     refused <- try (void (prepareArtifacts originals work first [] [] Map.empty []))
       :: IO (Either SomeException ())
     requireCancellation refused
+    -- A later live allowance on this same GHC scope cannot substitute for the
+    -- completed result's closed issuing allowance, even before pending lookup.
+    (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \later -> do
+      stolen <- try (commitPreparedWorldDependencies later first) :: IO (Either SomeException ())
+      requireCancellation stolen
 
 requireCancellation :: Either SomeException () -> IO ()
 requireCancellation result = case result of
