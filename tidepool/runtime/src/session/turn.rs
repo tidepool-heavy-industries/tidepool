@@ -6341,7 +6341,23 @@ mod tests {
             .with_validation_include(effects.include_paths().to_vec());
             let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
             let public = state.mint_scope(ScopeId::ROOT).unwrap();
-            let execution = Arc::new(state.begin_private_execution(public).unwrap());
+            let source = state.adopt_initial_notebook_scope(public).unwrap();
+            let admitted = state
+                .with_source_compiler_transaction(
+                    source,
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |state, _| state.begin_private_execution(public),
+                )
+                .unwrap();
+            assert!(matches!(
+                admitted.close(),
+                crate::CompilerTransactionClose::Clean
+                    | crate::CompilerTransactionClose::NotStarted
+            ));
+            let execution = Arc::new(admitted.into_outcome().action.unwrap());
             let mut resident =
                 ResidentSession::from_persistent_for_test(frunk::HNil, CheckedHomeOutput, state);
             resident
@@ -6408,25 +6424,43 @@ mod tests {
                 roots.insert(0, first.to_owned());
             }
             let include_paths = view.include_paths(&roots);
-            let plan = tidepool_testing::with_settlement(|settlement| {
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(specification.clone()),
-                    &include_paths,
-                    settlement,
-                )
-            })?;
-            let admission = resident
-                .admit_planned_cell_for_execution(
-                    execution.clone(),
-                    plan,
-                    Arc::new(specification.clone()),
-                    specification.specification_digest(),
-                    [1; 32],
-                    include_paths,
+            let admitted = resident
+                .with_source_compiler_transaction(
+                    execution.retained_lexical_scope(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
                     None,
+                    |_| {},
+                    |resident, settlement| {
+                        resident
+                            .admit_source_mutation(execution.private_scope())
+                            .unwrap();
+                        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+                            Arc::new(specification.clone()),
+                            &include_paths,
+                            settlement,
+                        )?;
+                        let admission = resident
+                            .admit_planned_cell_for_execution(
+                                execution.clone(),
+                                plan,
+                                Arc::new(specification.clone()),
+                                specification.specification_digest(),
+                                [1; 32],
+                                include_paths,
+                                None,
+                            )
+                            .unwrap();
+                        Ok(admission)
+                    },
                 )
                 .unwrap();
-            Ok(admission)
+            assert!(matches!(
+                admitted.close(),
+                crate::CompilerTransactionClose::Clean
+                    | crate::CompilerTransactionClose::NotStarted
+            ));
+            admitted.into_outcome().action
         }
 
         fn check_in(
@@ -6479,6 +6513,11 @@ mod tests {
             resident: &mut crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
             cell: CheckedHomeCell,
         ) -> Vec<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
+            let source = cell.admission.source_lease();
+            let executed = resident.with_source_compiler_transaction(
+                source, tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(), None, |_| {},
+                |resident, settlement| {
             let prefix = resident
                 .begin_cell_program(cell.admission.clone(), cell.program)
                 .unwrap()
@@ -6517,7 +6556,7 @@ mod tests {
                         if kind
                             == tidepool_toolchain::checked_cell::CheckedItemKind::Expression =>
                     {
-                        tidepool_testing::with_settlement(|settlement| resident.run_observation_with_sites(
+                        resident.run_observation_with_sites(
                             compiled.code(),
                             binder,
                             reservation.generation(),
@@ -6525,20 +6564,20 @@ mod tests {
                                 == Some(
                                     tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful,
                                 ),
-                         settlement))
+                         settlement)
                     }
-                    [binder] => tidepool_testing::with_settlement(|settlement| resident.run_bind_with_sites(
+                    [binder] => resident.run_bind_with_sites(
                         &binder.name,
                         compiled.code(),
                         binder,
                         reservation.generation(),
-                     settlement)),
-                    binders => tidepool_testing::with_settlement(|settlement| resident.run_projected_bind_with_sites(
+                     settlement),
+                    binders => resident.run_projected_bind_with_sites(
                         "checkedHome",
                         compiled.code(),
                         binders,
                         reservation.generation(),
-                     settlement)),
+                     settlement),
                 }
                 .unwrap();
                 assert!(
@@ -6576,6 +6615,14 @@ mod tests {
                     .count()
             );
             artifacts
+                },
+            ).unwrap();
+            assert!(matches!(
+                executed.close(),
+                crate::CompilerTransactionClose::Clean
+                    | crate::CompilerTransactionClose::NotStarted
+            ));
+            executed.into_outcome().action
         }
 
         fn execute(&mut self, cell: CheckedHomeCell) {
@@ -6625,16 +6672,46 @@ mod tests {
                 .filter(|(name, _)| expected.contains(name))
                 .collect::<Vec<_>>();
             assert_eq!(private_winners.len(), expected.len());
-            let publication = self
+            let source = self.execution.retained_lexical_scope();
+            let restaged = self
                 .resident
-                .restage_ephemeral_execution_publication(intent)
+                .with_source_compiler_transaction(
+                    source.clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |resident, _| resident.restage_ephemeral_execution_publication(intent),
+                )
                 .unwrap();
+            assert!(matches!(
+                restaged.close(),
+                crate::CompilerTransactionClose::Clean
+                    | crate::CompilerTransactionClose::NotStarted
+            ));
+            let publication = restaged.into_outcome().action.unwrap();
             let ticket = match publication {
                 crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
                 crate::session::ExecutionPublication::Declarations(base) => {
+                    let certified = source
+                        .with_source_compiler_transaction(
+                            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                            crate::CompilerTransactionCancellation::new(),
+                            None,
+                            |_| {},
+                            |owner, settlement| {
+                                owner.admitted_original_source().unwrap();
+                                base.certify(settlement)
+                            },
+                        )
+                        .unwrap();
+                    assert!(matches!(
+                        certified.close(),
+                        crate::CompilerTransactionClose::Clean
+                            | crate::CompilerTransactionClose::NotStarted
+                    ));
                     let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
-                        tidepool_testing::with_settlement(|settlement| base.certify(settlement))
-                            .unwrap()
+                        certified.into_outcome().action.unwrap()
                     else {
                         panic!("checked history publication must be accepted");
                     };
@@ -6666,7 +6743,23 @@ mod tests {
 
         fn begin_next_execution(&mut self) {
             let public = self.execution.admitted_public().scope;
-            self.execution = Arc::new(self.resident.begin_private_execution(public).unwrap());
+            let admitted = self
+                .resident
+                .with_source_compiler_transaction(
+                    self.execution.retained_lexical_scope(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |resident, _| resident.begin_private_execution(public),
+                )
+                .unwrap();
+            assert!(matches!(
+                admitted.close(),
+                crate::CompilerTransactionClose::Clean
+                    | crate::CompilerTransactionClose::NotStarted
+            ));
+            self.execution = Arc::new(admitted.into_outcome().action.unwrap());
             let mut context = self.resident.run_context();
             context.lexical_scope = self.execution.private_scope();
             self.resident.set_run_context(context).unwrap();
