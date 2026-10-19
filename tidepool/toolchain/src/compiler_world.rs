@@ -1288,6 +1288,7 @@ pub(crate) fn world_context_fixture(
         images: BTreeMap::new(),
         rows: BTreeMap::new(),
         arenas: Default::default(),
+        diagnostics: None,
     };
     let mut remaining = capture_allowance()?;
     let (base, associations) = materialize_primary_associations(
