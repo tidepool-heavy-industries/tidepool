@@ -974,9 +974,8 @@ impl CellProgramItem {
     }
 }
 
-/// The existing checked-cell artifact owner retains one directory for exact
-/// input bytes. Directory membership is never authority: every request lists
-/// only the original inventory and its sealed completed deltas.
+/// Checked baselines borrow the issuing value rows. This directory contains
+/// only fresh outputs; membership never establishes input authority.
 #[derive(Debug)]
 pub(crate) struct CheckedValueInputs {
     directory: Arc<ValueInterfaceDirectory>,
@@ -1091,6 +1090,9 @@ struct ProducedValueTypeInterface {
     ordinal: usize,
     interface: Arc<crate::recovery_artifacts::CertifiedValueInterface>,
     input: ValueInterfaceBytes,
+    // One produced output may be consumed through Ordinary and Prepared views.
+    // Physical promotion belongs to this issuer, independently of either view.
+    row: crate::declaration_context::CheckedValueRowIssuer,
 }
 
 impl ProducedValueTypeInterfaces {
@@ -1262,7 +1264,7 @@ impl PartialEq for ValueInterfaceDirectory {
 }
 impl Eq for ValueInterfaceDirectory {}
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum CapturedValueInterface {
     #[cfg(test)]
     Raw(ValueInterfaceBytes),
@@ -1284,8 +1286,8 @@ impl CapturedValueInterface {
 
 /// An original checked output owns its certification and selected compiler
 /// support, including the exact native byte custody needed by later consumers.
-/// The directory lease preserves its immutable compiler input path after the cell drops.
-#[derive(Debug, PartialEq, Eq)]
+/// Its value-sized immutable row survives independently of producing staging.
+#[derive(Debug)]
 pub struct CheckedValueArtifact {
     interface: ValueInterfaceBytes,
     authority: ([u8; 32], [u8; 32]),
@@ -1293,9 +1295,23 @@ pub struct CheckedValueArtifact {
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
     template_imports: Option<Arc<crate::declaration_context::TemplateImportEvidence>>,
-    directory: Arc<ValueInterfaceDirectory>,
+    row: Arc<crate::declaration_context::RetainedArtifactRow>,
     original_interface_prototype: Option<Arc<ExactHostBindingPrototype>>,
 }
+
+impl PartialEq for CheckedValueArtifact {
+    fn eq(&self, other: &Self) -> bool {
+        self.interface == other.interface
+            && Arc::ptr_eq(&self.row, &other.row)
+            && self.authority == other.authority
+            && self.certified_interface == other.certified_interface
+            && self.compiler_support == other.compiler_support
+            && self.source_lexical == other.source_lexical
+            && self.template_imports == other.template_imports
+            && self.original_interface_prototype == other.original_interface_prototype
+    }
+}
+impl Eq for CheckedValueArtifact {}
 
 /// Type-only issuance purpose. Neither purpose grants runtime value transfer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1645,9 +1661,15 @@ impl HostBindingInterfaceOffer {
         let context = (*self.prototype.context)
             .clone()
             .extend_with_value_interfaces(std::slice::from_ref(&certificate), Vec::new())?;
+        let row =
+            crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
+                context.compiler_source_support(),
+                crate::declaration_context::CheckedValueRowSource::Fresh(&certificate),
+            )?;
         let compiler_support = context
             .compiler_source_support()
             .select_value_interface(&certificate)?;
+        let path = row.checked_value_interface().path.clone();
         let interface = Arc::new(CheckedValueArtifact {
             interface: ValueInterfaceBytes {
                 owner,
@@ -1661,7 +1683,7 @@ impl HostBindingInterfaceOffer {
             compiler_support,
             source_lexical: Vec::new(),
             template_imports: None,
-            directory: self.directory,
+            row,
             original_interface_prototype: Some(self.prototype.clone()),
         });
         Ok(Arc::new(ExactHostBindingInterface {
@@ -1679,24 +1701,15 @@ impl HostBindingInterfaceOffer {
 /// This permits their imports without making other hydrated owners lexical.
 #[derive(Clone, Default)]
 pub(crate) struct CheckedValueImportAuthority {
-    values: Arc<BTreeMap<String, (Arc<[u8]>, String, std::path::PathBuf)>>,
+    values: Arc<BTreeMap<String, CapturedValueInterface>>,
 }
 
 impl CheckedValueImportAuthority {
-    fn capture<'a>(values: impl Iterator<Item = &'a ValueInterfaceBytes>) -> Self {
+    fn capture(values: impl Iterator<Item = CapturedValueInterface>) -> Self {
         Self {
             values: Arc::new(
                 values
-                    .map(|artifact| {
-                        (
-                            artifact.module.clone(),
-                            (
-                                artifact.bytes.clone(),
-                                artifact.digest.clone(),
-                                artifact.path.clone(),
-                            ),
-                        )
-                    })
+                    .map(|value| (value.input().module.clone(), value))
                     .collect(),
             ),
         }
@@ -1714,17 +1727,33 @@ impl CheckedValueImportAuthority {
             && self
                 .values
                 .get(interface.module())
-                .is_some_and(|(bytes, digest, _)| {
-                    interface.interface_bytes() == bytes.as_ref()
-                        && hash(interface.interface_bytes()) == *digest
+                .is_some_and(|value| match value {
+                    CapturedValueInterface::Certified { original, .. } => {
+                        original.certified_interface.interface() == interface
+                    }
+                    #[cfg(test)]
+                    CapturedValueInterface::Raw(input) => {
+                        interface.interface_bytes() == input.bytes.as_ref()
+                            && hash(interface.interface_bytes()) == input.digest
+                    }
                 })
     }
 
     pub(crate) fn validate(&self) -> Result<(), CompileError> {
-        for (bytes, digest, path) in self.values.values() {
-            let observed = read(path, 32 * 1024 * 1024)?;
-            if hash(&observed) != *digest || observed.as_slice() != bytes.as_ref() {
-                return Err(failure("checked value import interface changed"));
+        for value in self.values.values() {
+            match value {
+                // The selected request borrows the already authenticated row,
+                // including its immutable transport and actual descriptor lease.
+                CapturedValueInterface::Certified { .. } => {}
+                #[cfg(test)]
+                CapturedValueInterface::Raw(input) => {
+                    let observed = read(&input.path, 32 * 1024 * 1024)?;
+                    if hash(&observed) != input.digest
+                        || observed.as_slice() != input.bytes.as_ref()
+                    {
+                        return Err(failure("checked value import interface changed"));
+                    }
+                }
             }
         }
         Ok(())
@@ -1809,6 +1838,7 @@ impl CheckedValueInputs {
             self.output_bytes_hashed
                 .fetch_add(bytes.len() as u64, Ordering::Relaxed);
             interfaces.push(ProducedValueTypeInterface {
+                row: crate::declaration_context::CheckedValueRowIssuer::new(interface.clone()),
                 ordinal,
                 input: ValueInterfaceBytes {
                     owner,
@@ -1850,18 +1880,21 @@ impl CheckedValueInputs {
                 .tempdir()?,
         ));
         let mut baseline = Vec::with_capacity(values.len());
-        let mut initial_bytes = 0;
+        let initial_bytes = 0;
+        let mut unshared_comparison_bytes = 0u64;
         for (owner, bytes) in values {
             let original = originals
                 .remove(&owner.module_name())
                 .ok_or_else(|| failure("checked input lacks its original value certificate"))?;
-            if bytes.as_ref() != original.bytes_owned().as_ref() {
-                return Err(failure(
-                    "retained value certificate differs from selected interface bytes",
-                ));
+            if !Arc::ptr_eq(&bytes, original.bytes_owned()) {
+                unshared_comparison_bytes += bytes.len() as u64;
+                if bytes.as_ref() != original.bytes_owned().as_ref() {
+                    return Err(failure(
+                        "retained value certificate differs from selected interface bytes",
+                    ));
+                }
             }
-            let input = Self::write_input(&directory, owner, original.bytes_owned().clone())?;
-            initial_bytes += input.bytes.len() as u64;
+            let input = original.interface.clone();
             baseline.push(CapturedValueInterface::Certified { input, original });
         }
         if !originals.is_empty() {
@@ -1869,6 +1902,10 @@ impl CheckedValueInputs {
                 "retained value certificates exceed selected input inventory",
             ));
         }
+        tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_baseline_capture",
+            selected_references = baseline.len(), unshared_comparison_bytes, baseline_files_written = 0,
+            baseline_bytes_written = 0, baseline_reauthentication_bytes = 0,
+            "borrowed exact checked-value row owners");
         Ok(Arc::new(Self {
             directory,
             baseline,
@@ -1903,6 +1940,7 @@ impl CheckedValueInputs {
         }))
     }
 
+    #[cfg(test)]
     fn write_input(
         directory: &ValueInterfaceDirectory,
         owner: tidepool_repr::SessionModule,
@@ -1933,7 +1971,15 @@ impl CheckedValueInputs {
 
     fn work(&self) -> CheckedInputWork {
         CheckedInputWork {
-            initial_files_written: self.baseline.len() as u64,
+            initial_files_written: self
+                .baseline
+                .iter()
+                .filter(|value| match value {
+                    #[cfg(test)]
+                    CapturedValueInterface::Raw(_) => true,
+                    CapturedValueInterface::Certified { .. } => false,
+                })
+                .count() as u64,
             initial_bytes_written_and_hashed: self.initial_bytes,
             output_files_hashed: self.output_files_hashed.load(Ordering::Relaxed),
             output_bytes_hashed: self.output_bytes_hashed.load(Ordering::Relaxed),
@@ -1954,21 +2000,32 @@ impl CheckedValueInputs {
     }
 
     pub(crate) fn import_authority(&self) -> CheckedValueImportAuthority {
-        CheckedValueImportAuthority::capture(
-            self.baseline.iter().map(CapturedValueInterface::input),
-        )
+        CheckedValueImportAuthority::capture(self.baseline.iter().cloned())
     }
 
     pub(crate) fn retain_diagnostics(&self, destination: &Path) -> std::io::Result<()> {
         let inputs = self
             .baseline
             .iter()
-            .map(|artifact| (artifact.input().module.as_str(), artifact.input()))
+            .map(|artifact| (artifact.input().module.as_str(), artifact))
             .collect::<BTreeMap<_, _>>();
         let destination = destination.join("checked-value-inputs");
         std::fs::create_dir(&destination)?;
         let mut captured = Vec::with_capacity(inputs.len());
-        for artifact in inputs.into_values() {
+        for value in inputs.into_values() {
+            let artifact = value.input();
+            let selected_transport = match value {
+                CapturedValueInterface::Certified { original, .. } => {
+                    let transport = original.row.checked_value_transport();
+                    Some(serde_json::json!({
+                        "endpoint": transport.endpoint(), "offset": transport.offset(),
+                        "length": transport.len(), "arena_bytes": transport.arena_len(),
+                        "sha256_bytes": transport.sha256(),
+                    }))
+                }
+                #[cfg(test)]
+                CapturedValueInterface::Raw(_) => None,
+            };
             let relative = artifact.owner.relative_hi_path();
             let expected = destination.join("expected").join(&relative);
             std::fs::create_dir_all(expected.parent().expect("generated interface parent"))?;
@@ -1990,6 +2047,8 @@ impl CheckedValueInputs {
                 "original_path": artifact.path,
                 "relative_path": relative,
                 "expected_sha256": artifact.digest,
+                "selected_transport": selected_transport,
+                "observed_source": "alias_file",
                 "observed_sha256": observed_digest,
                 "observation_error": observation_error,
             }));
@@ -2072,6 +2131,18 @@ impl CheckedValueInputs {
                 context.lexical_graph().to_vec(),
             )?),
         };
+        // Promote into the completed issuer before its existing physical
+        // projection chooses the value's independently retained support.
+        let row =
+            crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
+                context.compiler_source_support(),
+                match produced {
+                    Some(outputs) => crate::declaration_context::CheckedValueRowSource::Produced(
+                        &outputs.output(owner)?.row,
+                    ),
+                    None => crate::declaration_context::CheckedValueRowSource::Fresh(&certificate),
+                },
+            )?;
         timing.advance("retain_output_surface");
         let crate::declaration_context::RetainedValueSourceSurface {
             compiler_support: retained_support,
@@ -2099,6 +2170,8 @@ impl CheckedValueInputs {
             None => (retained_support, None),
         };
         timing.advance("assemble_value_artifact");
+        let mut input = input;
+        input.path = row.checked_value_interface().path.clone();
         let artifact = Arc::new(CheckedValueArtifact {
             interface: input,
             authority: (cell.producer, cell.receipt_digest),
@@ -2106,7 +2179,7 @@ impl CheckedValueInputs {
             compiler_support,
             source_lexical,
             template_imports,
-            directory: self.directory.clone(),
+            row,
             original_interface_prototype: None,
         });
         timing.finish(true);
@@ -4929,6 +5002,38 @@ mod tests {
         (inputs, owner, path)
     }
 
+    fn empty_test_checked_cell(
+        producer: [u8; 32],
+        original: Arc<crate::declaration_context::ExactDeclarationContext>,
+        inputs: Arc<CheckedValueInputs>,
+    ) -> super::ExactCheckedCell {
+        use super::*;
+        ExactCheckedCell {
+            specification: CheckedCellSpecification {
+                admission_digest: [3; 32],
+                cell_source: String::new(),
+                template_source: String::new(),
+                turn_templates: vec![],
+                injected_modules: vec![],
+                reserved_declaration_modules: vec![],
+            },
+            producer,
+            context: original.semantic_sha256(),
+            declaration_context: original,
+            retained_projections: vec![],
+            receipt_digest: [4; 32],
+            checked_source: String::new(),
+            evidence: vec![],
+            observations: vec![],
+            items: vec![],
+            include: vec![],
+            planned_declaration: None,
+            planned_declarations: BTreeMap::new(),
+            typed_segments: vec![],
+            value_inputs: inputs,
+        }
+    }
+
     fn capture_test_produced_value_interface(
         producer: [u8; 32],
         owner: tidepool_repr::SessionModule,
@@ -4942,6 +5047,7 @@ mod tests {
             .unwrap();
         let bytes = interface.interface_bytes_owned();
         let output = ProducedValueTypeInterface {
+            row: crate::declaration_context::CheckedValueRowIssuer::new(interface.clone()),
             ordinal,
             input: ValueInterfaceBytes {
                 owner,
@@ -5060,6 +5166,7 @@ mod tests {
                 prepared, captured,
                 "ordinary and prepared retain the same issued value authority"
             );
+
             assert_eq!(
                 prepared.compiler_artifact_view().capture_graph_selection(),
                 captured.compiler_artifact_view().capture_graph_selection()
@@ -5224,6 +5331,722 @@ mod tests {
     #[test]
     fn checked_value_capture_preserves_selected_child_over_relevant_historical_offer() {
         checked_value_custody_histories(|_, _, _| Ok(()));
+    }
+
+    #[test]
+    fn checked_baseline_borrows_issued_rows_and_releases_actual_backing() {
+        let context = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let value = capture_test_value(&context, false);
+        let sibling = capture_test_value_from_output_for_generation(&context, false, false, 2);
+        let sibling_path = sibling.interface.path.clone();
+        let path = value.interface.path.clone();
+        let endpoint = value.row.checked_value_transport().endpoint().to_owned();
+        let row = Arc::downgrade(&value.row);
+        assert_eq!(
+            value.row.checked_value_transport().arena_len(),
+            (value.bytes_owned().len()
+                + value
+                    .certified_interface()
+                    .interface()
+                    .package_imports_bytes()
+                    .len()) as u64
+        );
+        let inputs = CheckedValueInputs::capture_checked(
+            vec![(value.owner(), value.bytes_owned().clone())],
+            &[value.clone()],
+        )
+        .unwrap();
+        assert_eq!(inputs.baseline[0].input().path, path);
+        assert!(Arc::ptr_eq(
+            &inputs.certified_artifacts()[0].row,
+            &value.row
+        ));
+        assert!(!inputs
+            .root()
+            .join(value.owner().relative_hi_path())
+            .exists());
+        assert_eq!(inputs.work().initial_files_written, 0);
+        assert_eq!(inputs.work().initial_bytes_written_and_hashed, 0);
+        let authority = inputs.import_authority();
+        let expected = value.bytes_owned().clone();
+        std::fs::write(&path, b"changed diagnostic alias").unwrap();
+        authority.validate().unwrap();
+        assert!(std::fs::read(&endpoint).unwrap().starts_with(&expected));
+        let diagnostics = tempfile::tempdir().unwrap();
+        inputs.retain_diagnostics(diagnostics.path()).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(diagnostics.path().join("checked-value-inputs/inputs.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest[0]["observed_source"], "alias_file");
+        assert!(manifest[0]["selected_transport"].is_object());
+        assert_ne!(
+            manifest[0]["expected_sha256"],
+            manifest[0]["observed_sha256"]
+        );
+        drop(context);
+        drop(sibling);
+        assert!(
+            !sibling_path.exists(),
+            "an unrelated value has independent physical backing"
+        );
+        drop(value);
+        assert!(row.upgrade().is_some());
+        assert!(path.exists());
+        assert!(!std::fs::read(&endpoint).unwrap().is_empty());
+        authority.validate().unwrap();
+        drop(inputs);
+        assert!(path.exists(), "the import borrower retains its exact row");
+        drop(authority);
+        assert!(row.upgrade().is_none());
+        assert!(!path.exists());
+        assert!(
+            !endpoint.exists(),
+            "last borrower closes the actual arena FD"
+        );
+    }
+
+    #[test]
+    fn original_value_materialization_is_dedicated_and_reused_after_sibling_drop() {
+        use super::*;
+        let producer_bytes = b"checked value broad sibling";
+        let producer = Sha256::digest(producer_bytes).into();
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let (inputs, owner, path) = prepare_test_value_interface_files(1, false);
+        let produced = capture_test_produced_value_interface(producer, owner, &path, 0);
+        let (sibling_inputs, sibling_owner, sibling_path) =
+            prepare_test_value_interface_files(2, false);
+        let sibling_bytes = vec![b'S'; 1024 * 1024];
+        std::fs::write(&sibling_path, &sibling_bytes).unwrap();
+        let packages = array([
+            text("TPPKGROOTS"),
+            text("2"),
+            array([
+                text("main"),
+                text(sibling_owner.module_name()),
+                text(hash(&sibling_bytes)),
+            ]),
+            array([]),
+            array([]),
+        ]);
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&packages, &mut encoded).unwrap();
+        std::fs::write(sibling_path.with_extension("hi.packages"), encoded).unwrap();
+        let sibling =
+            capture_test_produced_value_interface(producer, sibling_owner, &sibling_path, 1);
+        let context = Arc::new(
+            (*original)
+                .clone()
+                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .unwrap()
+                .extend_program_value_interface(
+                    sibling.output(sibling_owner).unwrap().interface.clone(),
+                )
+                .unwrap(),
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let broad = context
+            .prepare_compilation(&scratch.path().join("broad"), producer_bytes)
+            .unwrap();
+        let broad_value = broad
+            .artifacts
+            .iter()
+            .find(|row| row.interface.module == owner.module_name())
+            .unwrap()
+            .interface
+            .path
+            .clone();
+        let broad_sibling = broad
+            .artifacts
+            .iter()
+            .find(|row| row.interface.module == sibling_owner.module_name())
+            .unwrap()
+            .interface
+            .path
+            .clone();
+        let broad_files = {
+            let files = broad.input_transport_files();
+            files.iter().map(Arc::downgrade).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            broad_files.len(),
+            2,
+            "two value rows have independent backing descriptors"
+        );
+        let full_context = context;
+        let selected = full_context
+            .compiler_source_support()
+            .select_value_interface(produced.output(owner).unwrap().interface.as_ref())
+            .unwrap();
+        let context = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&selected)
+                .unwrap(),
+        );
+        drop(selected);
+        let before = context
+            .prepare_compilation(&scratch.path().join("narrow-before"), producer_bytes)
+            .unwrap();
+        assert_eq!(
+            before.input_transport_files().len(),
+            1,
+            "V-only source owns only its own descriptor"
+        );
+        let support =
+            crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
+                .unwrap();
+        let cell = ExactCheckedCell {
+            specification: CheckedCellSpecification {
+                admission_digest: [3; 32],
+                cell_source: String::new(),
+                template_source: String::new(),
+                turn_templates: vec![],
+                injected_modules: vec![],
+                reserved_declaration_modules: vec![],
+            },
+            producer,
+            context: original.semantic_sha256(),
+            declaration_context: original.clone(),
+            retained_projections: vec![],
+            receipt_digest: [4; 32],
+            checked_source: String::new(),
+            evidence: vec![],
+            observations: vec![],
+            items: vec![],
+            include: vec![],
+            planned_declaration: None,
+            planned_declarations: BTreeMap::new(),
+            typed_segments: vec![],
+            value_inputs: inputs.clone(),
+        };
+        let value = inputs
+            .capture_output(
+                1,
+                &cell,
+                &context,
+                &[],
+                &original,
+                CheckedValueCaptureInput::Prepared {
+                    support: &support,
+                    produced: &produced,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            value.interface.path, broad_value,
+            "P6 borrows the original dedicated row"
+        );
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
+        let leaf_path = value.interface.path.clone();
+        let overlaid = context
+            .prepare_compilation(&scratch.path().join("same-view"), producer_bytes)
+            .unwrap();
+        assert_eq!(
+            overlaid
+                .artifacts
+                .iter()
+                .find(|row| row.interface.module == owner.module_name())
+                .unwrap()
+                .interface
+                .path,
+            leaf_path,
+            "existing complete cache must overlay its own new leaf"
+        );
+        assert_eq!(
+            broad
+                .artifacts
+                .iter()
+                .find(|row| row.interface.module == owner.module_name())
+                .unwrap()
+                .interface
+                .path,
+            broad_value,
+            "already issued requests keep their original complete owner"
+        );
+        drop(broad);
+        drop(full_context);
+        drop(support);
+        drop(produced);
+        drop(sibling);
+        drop(sibling_inputs);
+        drop(cell);
+        drop(inputs);
+        drop(original);
+        assert!(leaf_path.exists());
+        assert!(broad_value.exists());
+        assert!(!broad_sibling.exists());
+        let survivor_file = value.row.checked_value_transport().compiler_file_lease();
+        assert!(
+            broad_files.iter().all(|file| file
+                .upgrade()
+                .is_none_or(|file| Arc::ptr_eq(&file, &survivor_file))),
+            "only the original dedicated V descriptor survives sibling drop"
+        );
+        drop(survivor_file);
+        let next = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_retained_value_artifacts(&[value.clone()])
+                .unwrap(),
+        );
+        let request = next
+            .prepare_compilation(&scratch.path().join("next"), producer_bytes)
+            .unwrap();
+        assert_eq!(
+            request
+                .artifacts
+                .iter()
+                .find(|row| row.interface.module == owner.module_name())
+                .unwrap()
+                .interface
+                .path,
+            leaf_path
+        );
+        drop(request);
+        drop(next);
+        drop(before);
+        drop(overlaid);
+        drop(context);
+        drop(value);
+        assert!(!leaf_path.exists());
+    }
+
+    #[test]
+    fn direct_complete_promotion_reuses_owner_without_fact_detach() {
+        use super::*;
+        use crate::declaration_context::RetainedArtifactMaterialization;
+        let producer_bytes = b"direct generic value row";
+        let producer = Sha256::digest(producer_bytes).into();
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let (inputs, owner, path) = prepare_test_value_interface_files(1, false);
+        let produced = capture_test_produced_value_interface(producer, owner, &path, 0);
+        let context = Arc::new(
+            (*original)
+                .clone()
+                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .unwrap(),
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let before_request = context
+            .prepare_compilation(&scratch.path().join("before"), producer_bytes)
+            .unwrap();
+        let metadata = context.compiler_metadata_snapshot().unwrap();
+        let before = context
+            .artifact_view()
+            .retained_materialization(&metadata)
+            .unwrap()
+            .unwrap();
+        let detaches = RetainedArtifactMaterialization::test_fact_detach_count();
+        let support =
+            crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
+                .unwrap();
+        let cell = empty_test_checked_cell(producer, original.clone(), inputs.clone());
+        let value = inputs
+            .capture_output(
+                1,
+                &cell,
+                &context,
+                &[],
+                &original,
+                CheckedValueCaptureInput::Prepared {
+                    support: &support,
+                    produced: &produced,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            value.interface.path,
+            before_request.artifacts[0].interface.path
+        );
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
+        for index in 0..4 {
+            let retained = context
+                .artifact_view()
+                .retained_materialization(&metadata)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&before, &retained));
+            let request = context
+                .prepare_compilation(
+                    &scratch.path().join(format!("after-{index}")),
+                    producer_bytes,
+                )
+                .unwrap();
+            assert_eq!(request.artifacts[0].interface.path, value.interface.path);
+            let after = context
+                .artifact_view()
+                .retained_materialization(&metadata)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&before, &after));
+            assert_eq!(
+                RetainedArtifactMaterialization::test_fact_detach_count(),
+                detaches
+            );
+        }
+    }
+
+    #[test]
+    fn same_view_cold_materialization_borrows_its_own_produced_leaf() {
+        use super::*;
+        let producer_bytes = b"same view cold value";
+        let producer = Sha256::digest(producer_bytes).into();
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let (inputs, owner, path) = prepare_test_value_interface_files(1, false);
+        let produced = capture_test_produced_value_interface(producer, owner, &path, 0);
+        let context = Arc::new(
+            (*original)
+                .clone()
+                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .unwrap(),
+        );
+        let support =
+            crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
+                .unwrap();
+        let cell = empty_test_checked_cell(producer, original.clone(), inputs.clone());
+        let value = inputs
+            .capture_output(
+                1,
+                &cell,
+                &context,
+                &[],
+                &original,
+                CheckedValueCaptureInput::Prepared {
+                    support: &support,
+                    produced: &produced,
+                },
+            )
+            .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let first = context
+            .prepare_compilation(&scratch.path().join("first"), producer_bytes)
+            .unwrap();
+        let second = context
+            .prepare_compilation(&scratch.path().join("second"), producer_bytes)
+            .unwrap();
+        for request in [&first, &second] {
+            assert_eq!(
+                request
+                    .artifacts
+                    .iter()
+                    .find(|row| row.interface.module == owner.module_name())
+                    .unwrap()
+                    .interface
+                    .path,
+                value.interface.path
+            );
+        }
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+    }
+
+    #[test]
+    fn same_view_many_promotions_keep_one_current_physical_frontier() {
+        use super::*;
+        let producer_bytes = b"many same-view promoted values";
+        let producer = Sha256::digest(producer_bytes).into();
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let mut staged = Vec::new();
+        let mut selected = (*original).clone();
+        for generation in 1..=16 {
+            let (inputs, owner, path) = prepare_test_value_interface_files(generation, false);
+            let produced = capture_test_produced_value_interface(
+                producer,
+                owner,
+                &path,
+                generation as usize - 1,
+            );
+            selected = selected
+                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .unwrap();
+            staged.push((inputs, owner, produced));
+        }
+        let context = Arc::new(selected);
+        let support =
+            crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
+                .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let escaped = staged
+            .iter()
+            .enumerate()
+            .map(|(index, (inputs, _, produced))| {
+                let cell = empty_test_checked_cell(producer, original.clone(), inputs.clone());
+                inputs
+                    .capture_output(
+                        index as u64 + 1,
+                        &cell,
+                        &original,
+                        &[],
+                        &original,
+                        CheckedValueCaptureInput::Ordinary {
+                            produced: Some(produced),
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let base = context
+            .prepare_compilation(&scratch.path().join("base"), producer_bytes)
+            .unwrap();
+        let old_path = base.artifacts[0].interface.path.clone();
+        let old_files = {
+            let files = base.input_transport_files();
+            files.iter().map(Arc::downgrade).collect::<Vec<_>>()
+        };
+        let mut current = None;
+        let mut values = Vec::new();
+        for (index, (inputs, owner, produced)) in staged.iter().enumerate() {
+            let cell = empty_test_checked_cell(producer, original.clone(), inputs.clone());
+            let value = inputs
+                .capture_output(
+                    index as u64 + 1,
+                    &cell,
+                    &context,
+                    &[],
+                    &original,
+                    CheckedValueCaptureInput::Prepared {
+                        support: &support,
+                        produced,
+                    },
+                )
+                .unwrap();
+            let request = context
+                .prepare_compilation(
+                    &scratch.path().join(format!("step-{index}")),
+                    producer_bytes,
+                )
+                .unwrap();
+            let physical = context
+                .artifact_view()
+                .retained_materialization(&context.compiler_metadata_snapshot().unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                physical.test_ownership_shape(),
+                (1, 16),
+                "current overlay owns linear facts with no predecessor graph"
+            );
+            assert_eq!(
+                request
+                    .artifacts
+                    .iter()
+                    .find(|row| row.interface.module == owner.module_name())
+                    .unwrap()
+                    .interface
+                    .path,
+                value.interface.path
+            );
+            assert_eq!(base.artifacts[0].interface.path, old_path);
+            assert!(
+                old_path.exists(),
+                "original in-flight request retains its original bytes"
+            );
+            current = Some(request);
+            values.push(value);
+        }
+        drop(base);
+        assert!(!old_path.exists());
+        assert!(old_files.iter().all(|file| file.upgrade().is_none()));
+        assert!(current
+            .as_ref()
+            .unwrap()
+            .artifacts
+            .iter()
+            .all(|row| row.interface.path.exists()));
+        assert_eq!(values.len(), 16);
+        assert_eq!(escaped.len(), 16);
+    }
+
+    #[test]
+    fn concurrent_produced_value_capture_shares_one_promoted_row() {
+        use super::*;
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let (inputs, owner, path) = prepare_test_value_interface_files(1, false);
+        let produced = capture_test_produced_value_interface([2; 32], owner, &path, 0);
+        let context = Arc::new(
+            (*original)
+                .clone()
+                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .unwrap(),
+        );
+        let prepared =
+            crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
+                .unwrap();
+        let cell = empty_test_checked_cell([2; 32], original.clone(), inputs.clone());
+        let barrier = std::sync::Barrier::new(2);
+        let values = std::thread::scope(|scope| {
+            let ordinary = scope.spawn(|| {
+                barrier.wait();
+                inputs
+                    .capture_output(
+                        1,
+                        &cell,
+                        &original,
+                        &[],
+                        &original,
+                        CheckedValueCaptureInput::Ordinary {
+                            produced: Some(&produced),
+                        },
+                    )
+                    .unwrap()
+            });
+            let typed = scope.spawn(|| {
+                barrier.wait();
+                inputs
+                    .capture_output(
+                        1,
+                        &cell,
+                        &context,
+                        &[],
+                        &original,
+                        CheckedValueCaptureInput::Prepared {
+                            support: &prepared,
+                            produced: &produced,
+                        },
+                    )
+                    .unwrap()
+            });
+            [ordinary.join().unwrap(), typed.join().unwrap()]
+        });
+        assert!(Arc::ptr_eq(&values[0].row, &values[1].row));
+        assert_eq!(values[0], values[1]);
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+    }
+
+    #[test]
+    fn produced_value_promotion_refuses_a_context_selecting_another_output() {
+        use super::*;
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let (inputs, owner, path) = prepare_test_value_interface_files(1, false);
+        let produced = capture_test_produced_value_interface([2; 32], owner, &path, 0);
+        let (_other_inputs, other_owner, other_path) = prepare_test_value_interface_files(2, false);
+        let other = capture_test_produced_value_interface([2; 32], other_owner, &other_path, 0);
+        let context = Arc::new(
+            (*original)
+                .clone()
+                .extend_program_value_interface(
+                    other.output(other_owner).unwrap().interface.clone(),
+                )
+                .unwrap(),
+        );
+        let support =
+            crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
+                .unwrap();
+        let cell = empty_test_checked_cell([2; 32], original.clone(), inputs.clone());
+        assert!(inputs
+            .capture_output(
+                1,
+                &cell,
+                &context,
+                &[],
+                &original,
+                CheckedValueCaptureInput::Prepared {
+                    support: &support,
+                    produced: &produced
+                }
+            )
+            .is_err());
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
+        let value = inputs
+            .capture_output(
+                1,
+                &cell,
+                &original,
+                &[],
+                &original,
+                CheckedValueCaptureInput::Ordinary {
+                    produced: Some(&produced),
+                },
+            )
+            .unwrap();
+        assert_eq!(value.owner(), owner);
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+    }
+
+    #[test]
+    fn cancelled_produced_value_capture_leaves_promotion_empty_and_retries() {
+        use super::*;
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+        };
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let (inputs, owner, path) = prepare_test_value_interface_files(1, false);
+        let produced = capture_test_produced_value_interface([2; 32], owner, &path, 0);
+        let cell = empty_test_checked_cell([2; 32], original.clone(), inputs.clone());
+        let cancellation = CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        let refused = with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || {
+                inputs.capture_output(
+                    1,
+                    &cell,
+                    &original,
+                    &[],
+                    &original,
+                    CheckedValueCaptureInput::Ordinary {
+                        produced: Some(&produced),
+                    },
+                )
+            },
+        );
+        assert!(refused.action.is_err());
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
+        let value = inputs
+            .capture_output(
+                1,
+                &cell,
+                &original,
+                &[],
+                &original,
+                CheckedValueCaptureInput::Ordinary {
+                    produced: Some(&produced),
+                },
+            )
+            .unwrap();
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+        assert!(value.interface.path.exists());
+    }
+
+    #[test]
+    fn checked_baseline_keeps_distinct_equal_byte_issuers_and_refuses_mismatch() {
+        let context = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let first = capture_test_value(&context, false);
+        let second = capture_test_value(&context, false);
+        assert_eq!(first.bytes_owned(), second.bytes_owned());
+        assert_ne!(
+            first, second,
+            "independent physical issuers cannot substitute for a retained value"
+        );
+        assert!(CheckedValueInputs::capture_checked(
+            vec![(first.owner(), first.bytes_owned().clone())],
+            &[first.clone(), second]
+        )
+        .is_err());
+        assert!(CheckedValueInputs::capture_checked(
+            vec![(first.owner(), Arc::from(&b"wrong"[..]))],
+            &[first]
+        )
+        .is_err());
     }
 
     #[test]
@@ -5807,6 +6630,24 @@ mod tests {
         Vec<u8>,
         crate::artifact_inventory::ArtifactBinding,
     )> {
+        capture_value_custody_histories_with_materialized_source(false)
+    }
+
+    #[test]
+    fn checked_value_leaf_preserves_preexisting_dependency_rows_through_next_request() {
+        assert_eq!(
+            capture_value_custody_histories_with_materialized_source(true).len(),
+            16
+        );
+    }
+
+    fn capture_value_custody_histories_with_materialized_source(
+        materialize_source: bool,
+    ) -> Vec<(
+        Arc<super::CheckedValueArtifact>,
+        Vec<u8>,
+        crate::artifact_inventory::ArtifactBinding,
+    )> {
         use super::*;
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
@@ -5997,6 +6838,23 @@ mod tests {
                 .extend_issued_compiler_support(&support)
                 .unwrap();
                 let original = Arc::new(original);
+                let source_scratch = tempfile::tempdir().unwrap();
+                let inherited_path = materialize_source.then(|| {
+                    let request = original
+                        .prepare_compilation(
+                            &source_scratch.path().join("source"),
+                            VALUE_CUSTODY_PRODUCER,
+                        )
+                        .unwrap();
+                    request
+                        .artifacts
+                        .iter()
+                        .find(|artifact| artifact.interface.module == "Epoch")
+                        .unwrap()
+                        .interface
+                        .path
+                        .clone()
+                });
                 let narrowed = original
                     .compiler_source_support()
                     .source_support(&BTreeSet::from([epoch.clone()]))
@@ -6162,6 +7020,35 @@ mod tests {
                             .unwrap()
                             .extend_retained_value_artifacts(&[captured.clone()])
                             .unwrap();
+                        if let Some(inherited_path) = &inherited_path {
+                            let scratch = tempfile::tempdir().unwrap();
+                            let request = Arc::new(next.clone())
+                                .prepare_compilation(
+                                    &scratch.path().join("descendant"),
+                                    VALUE_CUSTODY_PRODUCER,
+                                )
+                                .unwrap();
+                            let parent = request
+                                .artifacts
+                                .iter()
+                                .find(|artifact| artifact.interface.module == "Epoch")
+                                .unwrap();
+                            assert_eq!(
+                                &parent.interface.path, inherited_path,
+                                "value leaf cannot hide or recopy inherited A"
+                            );
+                            let value_row = request
+                                .artifacts
+                                .iter()
+                                .find(|artifact| {
+                                    artifact.interface.module == captured.owner().module_name()
+                                })
+                                .unwrap();
+                            assert_eq!(
+                                value_row.interface.path, captured.interface.path,
+                                "next request borrows the exact V leaf"
+                            );
+                        }
                         assert_eq!(
                             next.compiler_input_projection().snapshot_roles()[&child_owner]
                                 .interface(),
@@ -6371,7 +7258,15 @@ mod tests {
                     value.template_imports().is_some(),
                     "actual template capture"
                 );
-                directories.push(value.directory.0.path().to_owned());
+                directories.push(
+                    value
+                        .row
+                        .checked_value_interface()
+                        .path
+                        .parent()
+                        .unwrap()
+                        .to_owned(),
+                );
             }
             let context = ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
