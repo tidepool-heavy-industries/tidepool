@@ -754,20 +754,22 @@ impl CompilerSourceSupport {
         native_offers: impl IntoIterator<Item = IssuedNativeOffer>,
         native_availability: crate::declaration_context::RequestNativeAvailability,
     ) -> Result<Self, CompileError> {
-        Self::new_with_offer_facts(
+        Self::new_with_native_facts(
             projection,
             artifacts,
             native_offers,
             native_availability,
+            IssuedInputNativeDecisions::default(),
             None,
         )
     }
 
-    fn new_with_offer_facts(
+    fn new_with_native_facts(
         projection: CompilerInputProjection,
         artifacts: ArtifactView,
         native_offers: impl IntoIterator<Item = IssuedNativeOffer>,
         native_availability: crate::declaration_context::RequestNativeAvailability,
+        input_decisions: IssuedInputNativeDecisions,
         prior: Option<&Arc<crate::exact_context::PublicationNativeFacts>>,
     ) -> Result<Self, CompileError> {
         let mut timing = crate::timing::InvocationTiming::start_scoped(
@@ -782,7 +784,7 @@ impl CompilerSourceSupport {
                 artifacts,
                 projection,
                 selected,
-                input_decisions: IssuedInputNativeDecisions::default(),
+                input_decisions,
             },
             native_offers,
             native_availability,
@@ -882,11 +884,12 @@ impl CompilerSourceSupport {
         offers: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
         let decisions = self.input_decisions.for_exact_roles(&projection);
-        let mut support = Self::new_with_offer_facts(
+        let mut support = Self::new_with_native_facts(
             projection,
             artifacts,
             offers,
             self.native_availability.clone(),
+            decisions.clone(),
             self.native_fact_owner.as_ref(),
         )?;
         support.input_decisions = decisions;
@@ -900,11 +903,12 @@ impl CompilerSourceSupport {
         offers: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
         let decisions = self.input_decisions.restricted(&projection, &artifacts);
-        let mut support = Self::new_with_offer_facts(
+        let mut support = Self::new_with_native_facts(
             projection,
             artifacts,
             offers,
             self.native_availability.clone(),
+            decisions.clone(),
             self.native_fact_owner.as_ref(),
         )?;
         support.input_decisions = decisions;
@@ -1111,7 +1115,14 @@ impl CompilerSourceSupport {
             .artifacts
             .retain_issued_offer_custody(offers.iter().cloned())?;
         timing.advance("construct_support");
-        let support = Self::new(self.projection.clone(), retained, offers, availability)?;
+        let support = Self::new_with_native_facts(
+            self.projection.clone(),
+            retained,
+            offers,
+            availability,
+            self.input_decisions.clone(),
+            self.native_fact_owner.as_ref(),
+        )?;
         timing.advance("carry_input_decisions");
         let result = support.with_additional_decisions(Some(&original.input_decisions));
         timing.finish(result.is_ok());
@@ -1177,7 +1188,14 @@ impl CompilerSourceSupport {
                 .into_rows(),
             None => self.native_availability.clone(),
         };
-        let mut support = Self::new(projection, artifacts, offers, availability)?;
+        let mut support = Self::new_with_native_facts(
+            projection,
+            artifacts,
+            offers,
+            availability,
+            decisions.clone(),
+            self.native_fact_owner.as_ref(),
+        )?;
         support.input_decisions = decisions;
         let has_unissued_original =
             support
@@ -1206,11 +1224,13 @@ impl CompilerSourceSupport {
                     },
                     CompilerInputValidation::ReceivedFragment,
                 )?;
-            let mut resolved = Self::new(
+            let mut resolved = Self::new_with_native_facts(
                 projection,
                 artifacts,
                 support.native_offers.iter().cloned(),
                 support.native_availability.clone(),
+                decisions.clone(),
+                support.native_fact_owner.as_ref(),
             )?;
             resolved.input_decisions = decisions;
             return resolved.refreshed_native_facts();
@@ -1517,6 +1537,13 @@ impl CompilerSourceSupport {
             // retained order. No new acquisition or seed is being attached.
             return Ok(self.clone());
         }
+        let mut native_offer_facts = self.native_offer_facts.clone();
+        for offer in &incoming {
+            let identity = offer.snapshot_identity()?;
+            if !native_offer_facts.contains_key(&identity) {
+                native_offer_facts.insert(identity, offer.snapshot_facts());
+            }
+        }
         let mut offers = Vec::new();
         let artifacts = self.artifacts.retain_issued_offer_custody(
             self.native_offers
@@ -1539,10 +1566,7 @@ impl CompilerSourceSupport {
             projection: self.projection.clone(),
             artifacts,
             native_fact_owner: self.native_fact_owner.clone(),
-            native_offer_facts: offers
-                .iter()
-                .map(|offer| Ok((offer.snapshot_identity()?, offer.snapshot_facts())))
-                .collect::<Result<_, CompileError>>()?,
+            native_offer_facts,
             native_offers: offers.into(),
             native_availability: self.native_availability.clone(),
             selected: Arc::new(AdmittedCompilerRoles {
@@ -1812,11 +1836,12 @@ impl CompilerSourceSupport {
                 ));
             }
             let projection = saved.projection.clone();
-            let mut prior = Self::new_with_offer_facts(
+            let mut prior = Self::new_with_native_facts(
                 projection,
                 saved.artifacts.clone(),
                 saved.offers.iter().cloned(),
                 saved.availability.clone(),
+                saved.decisions.clone(),
                 Some(&saved.facts),
             )?;
             prior.input_decisions = saved.decisions.clone();
