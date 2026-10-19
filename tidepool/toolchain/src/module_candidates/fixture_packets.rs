@@ -689,8 +689,8 @@ fn source_boot_candidate_packet_producer() {
                     &required,
                 )
                 .expect("published fixture requires actual completed source selection");
-                let revision = hex::encode(Sha256::digest(source.as_bytes()));
-                let input_identity = hex::encode(completion.request_sha);
+                let revision = hex(&Sha256::digest(source.as_bytes()));
+                let input_identity = hex(&completion.request_sha);
                 let mut published = empty_fixture_scope(producer_sha);
                 for root in roots {
                     let issued = source_context.issue_published_source_original(

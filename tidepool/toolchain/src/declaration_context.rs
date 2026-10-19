@@ -6137,11 +6137,11 @@ impl<'a> ProductCompilerInputs<'a> {
         &self,
         original: ArtifactId,
     ) -> Option<Arc<NativeTransportAvailability>> {
-        self.native_selection.availability.get(&original).cloned()
+        self.native_selection.availability.0.get(&original).cloned()
     }
 
     pub(crate) fn private_native_availability(&self) -> RequestNativeAvailability {
-        RequestNativeAvailability(Arc::clone(&self.native_selection.availability))
+        self.native_selection.availability.clone()
     }
 
     pub(crate) fn advertised_native_originals(&self) -> AdvertisedNativeOriginals {
@@ -24436,13 +24436,14 @@ mod tests {
             captured
                 .native_selection
                 .availability
+                .0
                 .keys()
                 .copied()
                 .collect::<BTreeSet<_>>(),
             expected_originals,
         );
         let retained = context.artifact_view().metadata_snapshot();
-        for (id, availability) in captured.native_selection.availability.iter() {
+        for (id, availability) in captured.native_selection.availability.0.iter() {
             assert_eq!(availability.original.descriptor.id, *id);
             let selected = retained.artifacts.get(id).unwrap();
             assert!(Arc::ptr_eq(&availability.original, selected));
