@@ -1,24 +1,49 @@
 -- | Parsed-source lowering for compiler-owned typed effect segments.
 -- Authored nested do expressions remain opaque to this rewrite.
 module Tidepool.TypedSegment.Source
-  ( rewriteParsedSegmentRoot
+  ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences
   ) where
 
 import Control.Exception (throwIO)
 import Data.Data (Data)
 import Data.Generics (everything, mkQ)
 import Data.List (intersect, nub)
+import qualified Data.Set as Set
 import GHC (ParsedModule (..))
 import GHC.Driver.DynFlags (DynFlags)
+import GHC.Driver.Config.Parser (initParserOpts)
+import GHC.Parser qualified as Parser
+import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
+import GHC.Data.FastString (mkFastString)
+import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Ppr (showPpr)
 import GHC.Hs
 import GHC.Types.Basic (Boxity (Boxed), DoPmc (SkipPmc), GenReason (OtherExpansion), Origin (Generated))
-import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
+import GHC.Types.Name.Occurrence (isVarOcc, mkVarOcc, occNameString)
 import GHC.Types.Name.Reader (RdrName, isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc)
-import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan)
+import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan, mkRealSrcLoc)
 import GHC.Unit.Module.ModSummary (ms_hspp_opts)
 import GHC.Utils.Outputable (ppr, text, (<+>))
 import Tidepool.TypedSegment.Types
+
+-- Lookup work follows the submitted root's syntax, not the size of the held
+-- namespace. This conservative candidate set includes locally shadowed names;
+-- ordinary GHC renaming still decides which imported aliases are actually used.
+typedSegmentInputOccurrences :: DynFlags -> TypedSegmentPlan -> String -> Either TypedSegmentFailure [String]
+typedSegmentInputOccurrences flags plan source = case unP Parser.parseModule parser of
+  PFailed _ -> Left UnprovedRootAbstraction
+  POk _ parsed -> Right (Set.toAscList (Set.fromList
+  [ name
+  | L _ (ValD _ binding@FunBind {fun_id=identifier}) <- hsmodDecls (unLoc parsed)
+  , occNameString (rdrNameOcc (unLoc identifier)) == typedSegmentPlanRoot plan
+  , name <- everything (++) (mkQ [] selected) (fun_matches binding)
+  ]))
+  where
+    parser = initParserState (initParserOpts flags) (stringToStringBuffer source)
+      (mkRealSrcLoc (mkFastString "<held-world-segment>") 1 1)
+    selected :: RdrName -> [String]
+    selected name | isUnqual name && isVarOcc (rdrNameOcc name) = [occNameString (rdrNameOcc name)]
+    selected _ = []
 
 rewriteParsedSegmentRoot :: GeneratedSegmentOperations -> TypedSegmentPlan -> ParsedModule -> IO ParsedModule
 rewriteParsedSegmentRoot operations plan parsed = case rewriteModule of

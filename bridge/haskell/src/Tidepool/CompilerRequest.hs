@@ -10,7 +10,7 @@ module Tidepool.CompilerRequest
   , compileBoundRequest, compilePreparedRequest, compilePreparedSegmentRequest
   , runBoundGhc, withBoundExactInterfaceTransaction, cellSegmentRequest
   , runBoundWorldQuery, runBoundWorldCellPlan, validateBoundWorldCell
-  , PreparedCompilation, preparedCompilationResult, prepareCompilationOriginals
+  , PreparedCompilation, preparedCompilationResult, preparedCompilationWorldInputs, prepareCompilationOriginals
   , PreparedArtifact(..), PreparedArtifactOutput(..), PreparedOutputIntent(..), preparedOutputIntent, prepareArtifacts, prepareArtifactsWithIntent
   , prepareArtifactsWithProjection, PreviewOriginalDependenciesUnavailable, requirePreviewProjection
   ) where
@@ -213,15 +213,18 @@ compileBoundRequest request selection retained purpose session path =
 -- bracket closes; projection checks operation entry, while submissions fence a
 -- concurrent close. GHC's retained mutable package cells keep their existing owner.
 data PreparedCompilation = PreparedCompilation PreparedPipelineResult CompilerRecoveryCaches
-  CompilerExecutor (IO ()) (Maybe OriginalProductWorklist)
+  CompilerExecutor (IO ()) (Maybe OriginalProductWorklist) (Maybe WorldCellInputs)
 
 preparedCompilationResult :: PreparedCompilation -> PreparedPipelineResult
-preparedCompilationResult (PreparedCompilation result _ _ _ _) = result
+preparedCompilationResult (PreparedCompilation result _ _ _ _ _) = result
+
+preparedCompilationWorldInputs :: PreparedCompilation -> Maybe WorldCellInputs
+preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ inputs) = inputs
 
 withPreparedCompilation :: PreparedCompilation
   -> (PreparedPipelineResult -> CompilerRecoveryCaches -> CompilerExecutor -> Maybe OriginalProductWorklist -> IO a)
   -> IO a
-withPreparedCompilation (PreparedCompilation result recovery executor guard worklist) use = do
+withPreparedCompilation (PreparedCompilation result recovery executor guard worklist _) use = do
   guard
   requireCompilerExecutorOpen executor
   use result recovery executor worklist
@@ -275,7 +278,8 @@ compilePreparedRequest request@(BoundCompilerRequest _ args _ _ _ executor _) se
     PortableExecutable -> do
       completed <- compileBoundCompleted request selection retained purpose session path
       pure (completed,Nothing)
-  pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) worklist)
+  pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) worklist
+    (completedCompilerWorldInputs completed))
 
 compilePreparedSegmentRequest :: BoundCompilerRequest -> PipelineSelection PreparedSegmentProductsResult
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO (PreparedCompilation,TypedSegment)
@@ -285,7 +289,8 @@ compilePreparedSegmentRequest request@(BoundCompilerRequest _ _ _ _ _ executor _
   -- captured recovery context and the existing fallback path.
   completed <- compileBoundCompleted request selection retained purpose session path
   let result = completedCompilerResult completed
-  pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) Nothing,
+  pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) Nothing
+      (completedCompilerWorldInputs completed),
     preparedSegmentCaptures result)
 
 runBoundGhc :: BoundCompilerRequest -> Ghc a -> IO a
