@@ -190,6 +190,9 @@ workload success and acknowledged cleanup remain independent observations.
 Every process edge in the extractor chain uses the crate's parent-death
 contract. Killing a caller, frontend, or daemon must reap its frontend or GHC
 worker descendants; process-tree ownership is not delegated to test scripts.
+Retirement controls keep the client transport open until they observe the
+worker's owned exit. Client EOF is an independent termination cause and cannot
+establish that unsafe cleanup retired the worker.
 
 ## Wire boundary
 
