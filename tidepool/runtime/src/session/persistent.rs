@@ -1503,10 +1503,12 @@ impl PersistentSession {
     /// import (caller recompiles from a fresh snapshot, or falls back).
     pub(crate) fn revalidate_and_install_prepared(
         &mut self,
+        scope: ScopeId,
         snapshot: InstallSnapshot,
         compiled: std::sync::Arc<tidepool_codegen::prepared_program::CompiledProgram>,
         metadata: Option<&DataConTable>,
     ) -> Result<Option<tidepool_codegen::prepared_program::ProgramId>, PreparedRuntimeError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
         let admitted_metadata = self.stage_install_metadata(
             metadata,
             compiled.constructor_declarations(),

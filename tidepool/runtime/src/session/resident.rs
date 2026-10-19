@@ -7479,6 +7479,7 @@ where
         let (program, source_keys) = match source {
             ReadyPreparedSource::Legacy { snapshot, image } => {
                 match self.state.revalidate_and_install_prepared(
+                    lexical_scope,
                     snapshot,
                     image,
                     Some(&constructor_table),
@@ -9838,7 +9839,7 @@ mod authored_publication_tests {
                 StartupCompileIdentity::Fixture,
             )
             .unwrap();
-        let ready = session
+        let open_ready = session
             .snapshot_run_prepared(
                 startup_code_with_value(false, Some(22)),
                 PendingPreparedMode::Value,
@@ -9847,7 +9848,56 @@ mod authored_publication_tests {
             .unwrap()
             .compile_off_checkout()
             .unwrap();
+        let open_outcome = tidepool_testing::with_settlement(|settlement| {
+            session.revalidate_and_run_prepared(open_ready, settlement)
+        })
+        .unwrap();
+        let Some(ResidentOutcome::Completed { result, .. }) = open_outcome else {
+            panic!("fresh legacy Ready capsule must install while open")
+        };
+        assert_eq!(result.to_json(), serde_json::json!(22));
+
+        // Snapshot after the successful install so stale imports cannot account
+        // for refusal. No machine work intervenes between this snapshot and use.
+        let ready = session
+            .snapshot_run_prepared(
+                startup_code_with_value(false, Some(33)),
+                PendingPreparedMode::Value,
+                None,
+            )
+            .unwrap()
+            .compile_off_checkout()
+            .unwrap();
+        let before_exports = session.code_export_count();
+        let before_table = session.state.session_table().clone();
+        let before_bindings = session.binding_names();
+        let before_parked = session.parked_count();
+        session.set_run_context(SessionRunContext::ROOT).unwrap();
         let fence = scope.source_admission().fence().unwrap();
+        // Placement is now ROOT, and no source override is installed: admission
+        // must still use the capsule's original fenced lexical scope.
+        let refused = tidepool_testing::with_settlement(|settlement| {
+            session.revalidate_and_run_prepared(ready, settlement)
+        });
+        assert!(
+            matches!(
+                &refused,
+                Err(ResidentError::Prepared(
+                    PreparedRuntimeError::SourceAdmission(_)
+                ))
+            ),
+            "actual legacy Ready result: {refused:?}"
+        );
+        assert_eq!(session.code_export_count(), before_exports);
+        assert_eq!(session.state.session_table(), &before_table);
+        assert_eq!(session.binding_names(), before_bindings);
+        assert_eq!(session.parked_count(), before_parked);
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: scope.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
         let outcome = session
             .with_source_admission(Ok(Some(scope.source_admission().clone())), |session| {
                 tidepool_testing::with_settlement(|settlement| {
@@ -9864,18 +9914,6 @@ mod authored_publication_tests {
             0,
             "plain execution needs no fresh source authority"
         );
-        let refused =
-            session.with_source_admission(Ok(Some(scope.source_admission().clone())), |session| {
-                tidepool_testing::with_settlement(|settlement| {
-                    session.revalidate_and_run_prepared(ready, settlement)
-                })
-            });
-        assert!(matches!(
-            refused,
-            Err(ResidentError::Prepared(
-                PreparedRuntimeError::SourceAdmission(_)
-            ))
-        ));
         assert!(session.state.scope_tree().is_live(scope.scope()));
     }
 
