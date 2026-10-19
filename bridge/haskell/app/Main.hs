@@ -162,6 +162,7 @@ import Tidepool.TurnSource
   , captureCompilerDefaultRecipe, qualifyCompilerDefaultWithLineOffset, preambleImportMarker )
 import Tidepool.DependencyEvidence
   ( validateDependencyEvidence, writeDependencyEvidence )
+import Tidepool.PackageWitness (requireObservationPackageEnvironment)
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
 renderAsksJson sites = "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
@@ -190,6 +191,7 @@ main = do
             serveTransaction (\sink cwd argv ->
               setCurrentDirectory cwd >> runWorkerInvocation sink scope argv)
     else do
+      requireObservationPackageEnvironment
       hSetEncoding stdout utf8
       -- Direct transport boots the same compiler owner once for all helpers.
       result <- WorkerServer.runDirectRequest (runDirectInvocation rawWorkerRequest)

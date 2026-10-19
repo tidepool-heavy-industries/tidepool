@@ -286,7 +286,11 @@ import Tidepool.PackageWitness
   ( PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports, decodeCapturedPackageImports
   , validatePackageImportRoot
   , withPackageRootObservations, packageImportRootWithin, validatePackageImportRootWithin )
-import Tidepool.PackageWitness (captureSupportedPackageProfileWith, requireObservationPackageEnvironment)
+import Tidepool.PackageWitness
+  ( captureSupportedPackageProfileWith, requireObservationPackageEnvironment
+  , ServicePackageAssociation, readCompilerPackageBoot, validateCompilerPackageBoot
+  , validateCompilerPackageBootConfiguration
+  , emitCompilerPackageBootAcknowledgement )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..), CandidateGroup(..)
   , CapturedCandidateManifest, captureCandidateManifest
@@ -1247,6 +1251,7 @@ data CompilerUniverse = CompilerUniverse
   , universeInterpreter :: IORef CompilerInterpreterState
   , universePackageFinder :: PackageFinderFacts
   , universeOriginalInputs :: ExactInputOwner
+  , universePackageAssociation :: Maybe ServicePackageAssociation
   }
 
 -- Executable seals come from the same module-version owner as the products.
@@ -4863,6 +4868,7 @@ captureSupportedPackageProfile = do
 
 withResidentCompilerScopes :: [FilePath] -> (CompilerScopeRunner -> IO a) -> IO a
 withResidentCompilerScopes baseIncludes useRequests = do
+  packageBoot <- readCompilerPackageBoot
   producer <- captureCompilerProducerIdentity
   timing <- readTimingEnabled
   (libdir,startupMs) <- timeSection getLibdir
@@ -4874,21 +4880,26 @@ withResidentCompilerScopes baseIncludes useRequests = do
   unless available (fail "resident compiler GHC closure lacks ghc-iserv")
   runGhc (Just libdir) $ do
     parserFlags <- getSessionDynFlags
+    liftIO (validateCompilerPackageBootConfiguration packageBoot parserFlags)
     let bootstrapFlags = gopt_set (extractionDynFlags parserFlags baseIncludes) Opt_ExternalInterpreter
     _ <- setSessionDynFlags bootstrapFlags
     baseEnv <- getSession
     -- GHC initializes the target's platform constants with its package universe.
     -- Retained views must reset to that initialized profile, not the bootstrap.
     let baseFlags = hsc_dflags baseEnv
+    packageAssociation <- liftIO (validateCompilerPackageBoot packageBoot libdir baseEnv)
     auxiliaryRecovery <- liftIO freshCompilerRecoveryCaches
     initialRecovery <- liftIO (RecoveryContext <$> RequestUnique.newUnique <*> pure auxiliaryRecovery)
     interpreter <- liftIO (newIORef (CompilerInterpreterState 0 Map.empty))
     packageFinder <- liftIO (newPackageFinderFacts baseEnv)
     originalInputs <- liftIO newExactInputOwner
-    universe <- liftIO (newIORef (CompilerUniverse baseEnv Map.empty Map.empty initialRecovery interpreter packageFinder originalInputs))
+    universe <- liftIO (newIORef (CompilerUniverse baseEnv Map.empty Map.empty initialRecovery interpreter packageFinder originalInputs packageAssociation))
     active <- liftIO (newIORef Nothing)
     availability <- liftIO (newIORef ResidentAvailable)
     ownerThread <- liftIO myThreadId
+    -- This is the same freshly initialized NameCache/package owner that backs
+    -- the universe. Readiness cannot precede actual package comparison.
+    liftIO (emitCompilerPackageBootAcknowledgement packageAssociation)
     reifyGhc $ \session ->
       let restoreBase = reflectGhc (setSession baseEnv) session
           runRequest :: CompilerScopeRunner

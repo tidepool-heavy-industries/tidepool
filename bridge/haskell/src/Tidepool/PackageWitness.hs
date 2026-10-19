@@ -10,27 +10,33 @@ module Tidepool.PackageWitness
   , packageImportRootWithin, validatePackageImportRootWithin
   , packageInputClosure
   , captureSupportedPackageProfileWith, supportedPackageProfileIdentity
-  , requireObservationPackageEnvironment ) where
+  , requireObservationPackageEnvironment
+  , CompilerPackageBoot, ServicePackageAssociation, readCompilerPackageBoot
+  , validateCompilerPackageBootConfiguration
+  , validateCompilerPackageBoot, emitCompilerPackageBootAcknowledgement ) where
 
 import Codec.CBOR.Decoding
 import Codec.CBOR.Encoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, try, bracket, evaluate)
-import Control.Monad (replicateM, unless, when, foldM, forM)
-import Control.Monad.State.Strict (StateT, evalStateT, get, put)
+import Control.Monad (replicateM, unless, when, foldM, forM, forM_)
+import Control.Monad.State.Strict (StateT(..), evalStateT, get, put)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString.Builder (Builder, byteString, toLazyByteString, word32LE)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Text.Lazy qualified as LT
 import Data.Text.Lazy.Encoding qualified as LTE
 import Data.Word (Word32)
 import Data.List (groupBy, sortOn)
+import Data.Bits ((.|.), shiftL)
+import Data.Char (digitToInt)
 import GHC.Data.ShortText qualified as ST
-import GHC.Driver.Session (globalPackageDatabasePath, platformMisc, projectVersion)
+import GHC.Driver.Session (DynFlags, globalPackageDatabasePath, platformMisc, projectVersion)
 import GHC.Settings (platformMisc_targetPlatformString)
 import GHC.Unit.Info (UnitInfo, unitId, unitAbiHash, unitImportDirs, unitLibraryDirs, unitLibraryDynDirs, unitIncludeDirs)
 import GHC.Unit.State (listUnitInfo)
@@ -51,9 +57,9 @@ import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenWithIsBoot(..))
 import Numeric (showHex)
 import System.Directory (removeFile, canonicalizePath)
-import System.FilePath (isAbsolute, takeDirectory)
+import System.FilePath (isAbsolute, takeDirectory, (</>))
 import System.Environment (lookupEnv)
-import System.IO (openBinaryTempFile, hClose)
+import System.IO (openBinaryTempFile, hClose, stdout, hFlush)
 import System.Posix.Files (createLink)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
@@ -573,3 +579,188 @@ chargeProfile count = do
   remaining <- get
   unless (count <= remaining) (fail "package profile exceeds 16 MiB control-input budget")
   put (remaining - count)
+
+-- Only the actual service launcher supplies these six coupled fields. A
+-- connecting client or ordinary observation cannot issue this association.
+data CompilerPackageBoot
+  = ObservationPackageBoot
+  | RootedPackageBoot BS.ByteString [FilePath] FilePath ServicePackageAssociation
+
+data ServicePackageAssociation = ServicePackageAssociation
+  BS.ByteString BS.ByteString BS.ByteString BS.ByteString BS.ByteString
+  -- worker instance, service epoch, source identity, profile identity, facts SHA
+
+data SupportedPackageFacts = SupportedPackageFacts FilePath FilePath [FilePath]
+
+readCompilerPackageBoot :: IO CompilerPackageBoot
+readCompilerPackageBoot = do
+  fields <- traverse lookupEnv compilerPackageBootFields
+  case fields of
+    [Nothing,Nothing,Nothing,Nothing,Nothing,Nothing] -> pure ObservationPackageBoot
+    [Just path,Just rawSha,Just epoch,Just source,Just profile,Just worker] -> do
+      loaderPath <- lookupEnv "LD_LIBRARY_PATH"
+      loaderOverrides <- traverse lookupEnv ["LD_PRELOAD","LD_AUDIT"]
+      unless (loaderPath == Nothing && all (maybe True null) loaderOverrides)
+        (fail "rooted compiler requires the fixed Nix-only loader profile")
+      expectedSha <- hexIdentity rawSha
+      epochBytes <- hexIdentity epoch
+      sourceBytes <- hexIdentity source
+      profileBytes <- hexIdentity profile
+      workerBytes <- hexIdentity worker
+      canonicalProfile <- canonicalAbsolute path
+      unless (canonicalProfile == path && nixStoreObject path)
+        (fail "compiler service profile must be an immutable canonical Nix object")
+      bytes <- readFileAtMost path (maxSupportedPackageProfileBytes + 1)
+      unless (BS.length bytes <= maxSupportedPackageProfileBytes)
+        (fail "compiler service profile exceeds 16 MiB control-input budget")
+      unless (SHA.hash bytes == expectedSha) (fail "compiler service profile digest differs")
+      (expected,objects) <- either fail pure (decodePackageProfileWrapper bytes)
+      unless (supportedPackageProfileIdentity expected == profile)
+        (fail "compiler service profile identity differs")
+      forM_ objects $ \object -> do
+        canonical <- canonicalAbsolute object
+        unless (canonical == object && nixStoreObject object)
+          (fail "compiler service closure object is not a canonical Nix object")
+      SupportedPackageFacts expectedLibdir globalDB paths <- either fail pure (decodeSupportedPackageFacts expected)
+      libdir <- lookupEnv "TIDEPOOL_GHC_LIBDIR" >>= maybe
+        (fail "rooted compiler requires TIDEPOOL_GHC_LIBDIR") canonicalAbsolute
+      unless (libdir == expectedLibdir) (fail "compiler service libdir differs from profile")
+      settings <- canonicalAbsolute (libdir </> "settings")
+      interpreter <- canonicalAbsolute (libdir </> ".." </> "bin" </> "ghc-iserv")
+      -- Before runGhc reads settings or opens package databases, every declared
+      -- immutable input must be inside the actual preheld service closure.
+      forM_ (path:libdir:settings:interpreter:globalDB:paths) $ \input -> do
+        canonical <- canonicalAbsolute input
+        unless (canonical == input && coveredBy objects canonical)
+          (fail "compiler service profile input is outside its retained closure")
+      let association = ServicePackageAssociation workerBytes epochBytes sourceBytes profileBytes (SHA.hash expected)
+      pure (RootedPackageBoot expected objects globalDB association)
+    _ -> fail "compiler service boot fields must be supplied together"
+
+-- GHC has read the already-covered immutable settings, but has not yet opened
+-- the selected databases through the initial setSessionDynFlags call.
+validateCompilerPackageBootConfiguration :: CompilerPackageBoot -> DynFlags -> IO ()
+validateCompilerPackageBootConfiguration ObservationPackageBoot _ = pure ()
+validateCompilerPackageBootConfiguration (RootedPackageBoot _ objects expectedDB _) flags = do
+  actualDB <- canonicalAbsolute (globalPackageDatabasePath flags)
+  unless (actualDB == expectedDB && coveredBy objects actualDB)
+    (fail "configured GHC package database differs from retained profile")
+
+validateCompilerPackageBoot :: CompilerPackageBoot -> FilePath -> HscEnv
+  -> IO (Maybe ServicePackageAssociation)
+validateCompilerPackageBoot ObservationPackageBoot _ _ = pure Nothing
+validateCompilerPackageBoot (RootedPackageBoot expected objects _ association) libdir env = do
+  actual <- captureSupportedPackageProfileWith libdir env
+  unless (actual == expected) (fail "fresh GHC package facts differ from retained service profile")
+  SupportedPackageFacts actualLibdir globalDB paths <- either fail pure (decodeSupportedPackageFacts actual)
+  unless (all (coveredBy objects) (actualLibdir:globalDB:paths))
+    (fail "fresh GHC package facts escape retained service closure")
+  pure (Just association)
+
+emitCompilerPackageBootAcknowledgement :: Maybe ServicePackageAssociation -> IO ()
+emitCompilerPackageBootAcknowledgement Nothing = pure ()
+emitCompilerPackageBootAcknowledgement (Just (ServicePackageAssociation worker epoch source profile facts)) = do
+  BS.hPut stdout ("TPBOOT01" <> worker <> epoch <> source <> profile <> facts)
+  hFlush stdout
+
+coveredBy :: [FilePath] -> FilePath -> Bool
+coveredBy objects path = any (\object -> path == object || (object ++ "/") `prefixOf` path) objects
+  where prefixOf prefix value = take (length prefix) value == prefix
+
+nixStoreObject :: FilePath -> Bool
+nixStoreObject path = case splitAt 11 path of
+  ("/nix/store/",name) -> case splitAt 32 name of
+    (hash,'-':suffix) -> length hash == 32 && not (null suffix)
+      && all (`elem` ("0123456789abcdfghijklmnpqrsvwxyz" :: String)) hash
+      && '/' `notElem` suffix
+    _ -> False
+  _ -> False
+
+hexIdentity :: String -> IO BS.ByteString
+hexIdentity value = do
+  unless (length value == 64 && all (`elem` ("0123456789abcdef" :: String)) value)
+    (fail "compiler service identity must be canonical SHA-256 hex")
+  pure (BS.pack (pairs value))
+  where
+    pairs [] = []
+    pairs (a:b:rest) = fromIntegral (16 * digitToInt a + digitToInt b) : pairs rest
+    pairs _ = []
+
+type ProfileDecoding = StateT BS.ByteString (Either String)
+
+profileReject :: String -> ProfileDecoding a
+profileReject message = StateT (const (Left message))
+
+profileTake :: Int -> ProfileDecoding BS.ByteString
+profileTake count = do
+  remaining <- get
+  if count < 0 || count > BS.length remaining then profileReject "truncated compiler package profile"
+    else do
+      let (value,rest) = BS.splitAt count remaining
+      put rest
+      pure value
+
+profileWord :: ProfileDecoding Integer
+profileWord = do
+  bytes <- profileTake 4
+  pure (foldr (\index value -> (value `shiftL` 8) .|. toInteger (BS.index bytes index)) 0 [0..3])
+
+profileFrame :: ProfileDecoding BS.ByteString
+profileFrame = do
+  count <- profileWord
+  remaining <- get
+  if count > toInteger (BS.length remaining) then profileReject "compiler profile field leaves bounded body"
+    else profileTake (fromInteger count)
+
+profileString :: ProfileDecoding String
+profileString = do
+  value <- profileText
+  if null value then profileReject "compiler package profile contains empty text" else pure value
+
+profileText :: ProfileDecoding String
+profileText = do
+  bytes <- profileFrame
+  case TE.decodeUtf8' bytes of
+    Left _ -> profileReject "compiler package profile contains invalid UTF-8"
+    Right value | T.any (== '\0') value -> profileReject "compiler package profile contains NUL text"
+                | otherwise -> pure (T.unpack value)
+
+profileList :: Int -> ProfileDecoding a -> ProfileDecoding [a]
+profileList minimumBytes decode = do
+  count <- profileWord
+  remaining <- get
+  if count > toInteger (BS.length remaining `div` minimumBytes)
+    then profileReject "compiler package profile count exceeds remaining body"
+    else replicateM (fromInteger count) decode
+
+profileEnd :: ProfileDecoding ()
+profileEnd = do
+  remaining <- get
+  unless (BS.null remaining) (profileReject "trailing compiler package profile bytes")
+
+decodePackageProfileWrapper :: BS.ByteString -> Either String (BS.ByteString,[FilePath])
+decodePackageProfileWrapper = evalStateT $ do
+  magic <- profileTake 8
+  unless (magic == "TPSPF001") (profileReject "unsupported compiler service profile wrapper")
+  expected <- profileFrame
+  objects <- profileList 4 profileString
+  profileEnd
+  pure (expected,objects)
+
+decodeSupportedPackageFacts :: BS.ByteString -> Either String SupportedPackageFacts
+decodeSupportedPackageFacts = evalStateT $ do
+  magic <- profileTake 8
+  unless (magic == "TPGHC001") (profileReject "unsupported compiler package facts version")
+  _version <- profileString
+  _target <- profileString
+  libdir <- profileString
+  globalDB <- profileString
+  units <- profileList 24 $ do
+    identity <- profileString
+    _abi <- profileText
+    paths <- replicateM 4 (profileList 4 profileString)
+    pure (identity,concat paths)
+  unless (map fst units == Set.toAscList (Set.fromList (map fst units)))
+    (profileReject "compiler package units must be unique and sorted")
+  profileEnd
+  pure (SupportedPackageFacts libdir globalDB (concatMap snd units))
