@@ -28,3 +28,13 @@ Private evidence directory: `/srv/swarm/evidence/inanna/shared-warm-compiler-202
 ## Continuation
 
 All previous actions settled; daemon4119018 remains retained in build.slice. No native retry without fresh actual admission accounting; approved own lane8GiB/16GiB growth is not a permanent reservation. Latest source needs exact independent review, declared Python execution, and regenerated declared producer because provider seals change. Warm actual issuer/native finalizer must then be joined and compiled through production/cfgtest consumers, followed by real first PublicModule, boot refusal, partial registration, retry/GC and complete-retirement controls. No whole-bundle, final cleanup/END or integration-ready claim.
+
+## Matched supplier join and actual boot finding
+
+Exact joined source e6950eed9386c7af59c7c64254dc9b9f54ae0cf6 preserves a56 plus full committed Warm20c063b86faaaa653c18780b42efc4c6efe0a676, excluding all uncommitted client WIP. Six supplier conflicts were resolved byte-identical20c with Warm approval. Five selected producer/toolchain/extract production+cfgtest labels compiled exit0, Build66fcd65b,22local actions/tests0; join-e695/COMPILE-TERMINAL.json retains binary/resource hashes.
+
+First REAL owned-daemon control failed before actual preflight readiness, frontendexit2/driverexit1, clients0. Acquisition completed1epoch/73actual pins/319unique objects/NAR5,259,713,776B. Haskell incorrectly requires the separately authenticated and pinned profile object to occur in its own body closure; that would create a fixed-output selfhash cycle. Independent comparison of759inputs finds only the profile object uncovered. Normal-owner evidence remains private under join-e695, with exact copied failed resource/frontend/worker inputs. Outer/daemon identified processes are observed absent and production trace reports worker reaped; no complete-parent record/TPSFN exists. All73pins remain deliberately retained with release0; missing readiness does not authorize cleanup.
+
+Warm owns the narrow Haskell custody/body-membership repair and its regression. Parent released the own8GiB/8growth lane; no blocker control or pin cleanup is authorized at this frontier. Await Warm exact repaired source, independent disposition and new fresh resource admission before retry on a FRESH owner path. Producer Warm -> observer rows/area; no polling.
+
+Private future-control oracle now aggregates all daemon task children with pid/start identities and asserts exact TPINSP008 Complete/Type(answer,Int,Available) CBOR bytes. It proves two finite clients share one immutable epoch rootset; it claims no rotation, multiworker or PublicModule coverage. These clients never ran in the failed epoch. Blocker/native-finish control remains pending.
