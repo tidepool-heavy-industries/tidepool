@@ -85,19 +85,22 @@ choices were reported to parent; both existing grants are retained.
 
 | Identity | Model / effort | Current assignment |
 | --- | --- | --- |
-| owned_inputs/rows | gpt-6.1-sol / medium, fresh context | Completed5113 repair/native gates; dormant reserved for actual integration findings |
-| owned_inputs/source_lifetime | gpt-6.1-sol / high, fresh context | Completed revised service-owner proposal and5113 source/native review; dormant reserved |
+| owned_inputs/rows | gpt-6.1-sol / medium, fresh context | Active WaveA independent boot/retirement/source-domain review; rows checkout remains clean5113 |
+| owned_inputs/source_lifetime | gpt-6.1-sol / high, fresh context | Active WaveA exact package-source constructor/provider/launch/retirement proposal |
 
-Root/user architecture amendment PAUSES all new shared host/worker/package APIs
-pending bounded C2/C5 review. No package source/API implementation is authorized.
+Root architecture2486ea4b94 is accepted in campaign
+ebb98b3f254940dcac99a743107356b6dfa74d5f; DEMAND-SERVICE.md Package source
+decision controls. The broad API pause is lifted. Paired constructor signatures
+still require campaign acceptance before dependent implementation. No source/API
+implementation or new native lane has started for WaveA.
 No current admitted deployment object owns package-source lifetime. Reviewer
 must propose borrowing a real provider interval or extending the existing
 offline qualification pin provider with independently registered execution-owned
 pins BEFORE fresh worker boot. A path/manifest/hash witness cannot bless old EPS
 or lazy state. Actual DB/interface/native path coverage and worker/iserv lifetime
 are required; mutable/uncovered inputs retain existing observation checks. Source
-or API implementation awaits the C2/C5 decision and explicit bounded contract
-approval; supervisor owns an approved successor coordinated with host/warm owners.
+or API implementation follows the exact paired contract; supervisor owns the
+bounded owner/provider/launch successor coordinated with host/warm owners.
 Revised private PACKAGE-SOURCE-SERVICE-OPTION.md supersedes per-host durable-pin
 proposal: transfer an actual deployment/service retention obligation, or register
 one set per actual service epoch with complete normal retirement and uncertainty
@@ -135,10 +138,42 @@ settled and row lane released (daemon current2,653,343,744bytes). Supervisor
 folded the complete accepted ancestry. Campaign accepted/integrated area f3309fed5252b5afad30d57c1dea08dcabc22c18
 and delivered its joined terminal success. Evidence is private campaign/
 CORE-JOINED-TERMINAL.json, core-joined-native-build.json and core-joined-tests.json.
-No new source action or test lane is needed. The only awaited event is root/
-campaign C2/C5 service-boundary decision with a concrete approved successor;
-package proposal and all new APIs remain held. Both children delivered
-terminal outcomes and are dormant with grants retained; neither owns live jobs. Producers check
+The stable row frontier needs no repair or repeat test lane. Current WaveA
+producers are source_lifetime (exact source/boot/provider/retirement packet)
+and rows (independent concrete consumer/counterexample review), resumed under
+the same grants at09:50–09:51UTC. Campaign accepts the paired contract, then
+supervisor implements/reviews/folds the approved bounded owner+launch slice.
+No unobserved native job is live. No periodic status polling. Producers check
 recipient status and use send_message for running recipients, followup_task for
 dormant ones. Every outcome requires a terminal event. No periodic polling or
 implicit continuation; external process observers remain attached until terminal.
+
+
+## WaveA concrete seams and shared ownership
+
+DefaultB acquires once per ACTUAL service epoch, after the existing endpoint
+lock/epoch is established and before GHC boots. Executable pinning/configuration
+is separate from the acquired source owner. Existing PreparedWorker and Worker
+consume the same source association; Worker/quarantine must retain it when
+PreparedWorker drops. Actual expanded DB/unit/fixed loader profile must be
+validated before pool-ready; a nonce/source-ID echo is insufficient. Existing
+owned_daemon_run's complete descendant retirement is the release consumer; END,
+socket unlink, Child.wait and host Drop are insufficient. Unknown retains its
+one service obligation/receipt. Clients and slot rotations create zero new pins.
+
+The same qualifier pin_nix_closure remains the sole provider. Exact declared
+resources already exist: //build/package:qualification_script, frozen bundled
+share/exomonad/qualification.py and configured runtime_tools/bin/python3/Nix.
+No ambient Python/Nix guess or duplicate Rust root provider. Provider acquisition
+and release subcommands, bounded immutable source/receipt codec and schema2
+issuer are the paired design scope, not yet implemented. Observed/cold fallback
+for uncovered profiles stays named and cannot bless old EPS.
+
+Warm owns cross-language actual boot acknowledgment, worker/service consumption
+and world protocol; final exact symbol split awaits its agreement. Host owns
+primary source-domain export from existing RetainedSourceGraph/SourceRootOwner
+and generation issue/restore v2. Selected row manifests do not establish the
+unimported module namespace or absence. Reuse those source owners; no second
+source snapshot engine. Controls include absent-then-created and sourceA-replaced-
+byB while worldA remains retained/restored, rootset/byte counts and exact normal/
+uncertain source retirement, fixed loader absolute paths/no ambient overrides.
