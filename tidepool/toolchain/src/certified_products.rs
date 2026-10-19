@@ -8512,7 +8512,7 @@ pub(crate) fn certify_products_with_validation(
                 let version = if let Some(admission) = exact {
                     crate::module_candidates::exact_module_version_for_product(
                         endpoint_identity,
-                        &admission.physical_request().semantic_sha256,
+                        &admission.product_context_digest(),
                         &key.0,
                         &key.1,
                         &source_sha,
@@ -9266,8 +9266,7 @@ pub(crate) fn certify_products_with_validation(
                         crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                             &raw_producer,
                         ),
-                    semantic_sha256: exact
-                        .map(|admission| admission.physical_request().semantic_sha256),
+                    semantic_sha256: exact.map(|admission| admission.product_context_digest()),
                     include,
                     source_path: fresh_input_path,
                     source: final_target_source,
@@ -20598,7 +20597,7 @@ pub(crate) mod tests {
             .as_ref()
             .map_or(CandidateVersionOrigin::Ordinary, |admission| {
                 CandidateVersionOrigin::Exact {
-                    semantic_sha256: admission.physical_request().semantic_sha256,
+                    semantic_sha256: admission.product_context_digest(),
                 }
             });
         let parsed = ParsedModuleProducts::decode(&bytes, &packages).unwrap();
@@ -20612,7 +20611,7 @@ pub(crate) mod tests {
                         exact
                             .source()
                             .match_product(
-                                exact.physical_request(),
+                                exact.physical_request().unwrap(),
                                 &input,
                                 source,
                                 &evidence_bytes,
@@ -20677,7 +20676,7 @@ pub(crate) mod tests {
                     exact
                         .source()
                         .match_product(
-                            exact.physical_request(),
+                            exact.physical_request().unwrap(),
                             &input,
                             source,
                             &evidence_bytes,
@@ -20842,7 +20841,7 @@ pub(crate) mod tests {
                 exact
                     .source()
                     .match_product(
-                        exact.physical_request(),
+                        exact.physical_request().unwrap(),
                         &input,
                         source,
                         &evidence_bytes,
@@ -21483,7 +21482,7 @@ None,
 &packet,
 &parsed,
 &crate::artifacts::SourceEvidenceAdmission::from_exact(exact.source().match_product(
-        exact.physical_request(), &input, source, &evidence_bytes, parsed.operation(),
+        exact.physical_request().unwrap(), &input, source, &evidence_bytes, parsed.operation(),
     ).unwrap()),
 root.path(),
 &producer,
@@ -21617,7 +21616,7 @@ None,
                     exact
                         .source()
                         .match_product(
-                            exact.physical_request(),
+                            exact.physical_request().unwrap(),
                             &input,
                             source,
                             &evidence_bytes,
@@ -21641,7 +21640,7 @@ None,
                     exact
                         .source()
                         .match_product(
-                            exact.physical_request(),
+                            exact.physical_request().unwrap(),
                             &input,
                             source,
                             &evidence_bytes,
@@ -22970,7 +22969,7 @@ None,
                     exact
                         .source()
                         .match_product(
-                            exact.physical_request(),
+                            exact.physical_request().unwrap(),
                             &input,
                             source,
                             &evidence_bytes,
@@ -23314,7 +23313,7 @@ None,
                             cached_exact
                                 .source()
                                 .match_product(
-                                    cached_exact.physical_request(),
+                                    cached_exact.physical_request().unwrap(),
                                     &input,
                                     source,
                                     &cached_evidence,

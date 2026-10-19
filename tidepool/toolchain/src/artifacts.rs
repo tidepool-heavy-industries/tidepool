@@ -3688,7 +3688,7 @@ fn seal_turn_outputs_with_validation(
             })?;
             let entry = crate::checked_cell::CheckedTypedEntry::issue_program_item(
                 output_dir,
-                &admission.physical_request().request_sha256,
+                admission.exact_request_identity()?.request_sha256(),
                 admission_digest,
                 plans,
                 index,
@@ -3922,7 +3922,7 @@ fn seal_turn_outputs_with_validation(
         let version_origin = exact.map_or(
             module_candidates::CandidateVersionOrigin::Ordinary,
             |admission| module_candidates::CandidateVersionOrigin::Exact {
-                semantic_sha256: admission.physical_request().semantic_sha256,
+                semantic_sha256: admission.product_context_digest(),
             },
         );
         let publication_products = ordinary_products.expect("ordinary product inputs");
@@ -5636,7 +5636,7 @@ fn compile_invocation_inner(
                 exact.as_ref().map_or(
                     module_candidates::CandidateVersionOrigin::Ordinary,
                     |admission| module_candidates::CandidateVersionOrigin::Exact {
-                        semantic_sha256: admission.physical_request().semantic_sha256,
+                        semantic_sha256: admission.product_context_digest(),
                     },
                 ),
                 &certified.recovery_products,
