@@ -33,11 +33,11 @@ typedSegmentInputOccurrences :: DynFlags -> TypedSegmentPlan -> String -> Either
 typedSegmentInputOccurrences flags plan source = case unP Parser.parseModule parser of
   PFailed _ -> Left UnprovedRootAbstraction
   POk _ parsed -> Right (Set.toAscList (Set.fromList
-  [ name
-  | L _ (ValD _ binding@FunBind {fun_id=identifier}) <- hsmodDecls (unLoc parsed)
-  , occNameString (rdrNameOcc (unLoc identifier)) == typedSegmentPlanRoot plan
-  , name <- everything (++) (mkQ [] selected) (fun_matches binding)
-  ]))
+      [ name
+      | L _ (ValD _ binding@FunBind {fun_id=identifier}) <- hsmodDecls (unLoc parsed)
+      , occNameString (rdrNameOcc (unLoc identifier)) == typedSegmentPlanRoot plan
+      , name <- everything (++) (mkQ [] selected) (fun_matches binding)
+      ]))
   where
     parser = initParserState (initParserOpts flags) (stringToStringBuffer source)
       (mkRealSrcLoc (mkFastString "<held-world-segment>") 1 1)
