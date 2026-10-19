@@ -120,3 +120,50 @@ observation; report that cost separately from persistent later replacements.
 Sent this verdict directly to rows and the area supervisor. Next event: exact
 repaired OID with V-only old-backing release, repeated-overlay growth and
 in-flight-old-owner controls, then cumulative independent re-review.
+
+## Independent fixed-frontier retainer and issuing-boundary recommendation
+
+Rows' concrete V-only test construction exposed an additional strong owner:
+N's immutable `ViewLease.materialization.fixed` retains its old V row directly.
+`materialization_sources` also stores cloned source caches/fixed owners.
+Suppressing their traversal after a complete cache entry is populated does not
+drop those fields. Therefore the no-parent overlay proposal above fixes its own
+predecessor chain but cannot, by itself, prove release of E while N remains.
+This is a confirmed source retainer through the existing view construction,
+projection, merge and prepare paths, not a garbage-collector inference.
+
+Bounded recommendation sent to rows, area and campaign: enforce the dedicated
+value-row invariant at the original `materialize_retained_artifacts` entrypoint
+for **every** `ArtifactPayload::Interface(_, ValueInterface)`. Reuse one private
+physical row factory from original materialization and P6 capture. It accepts an
+already admitted `Arc<ArtifactEntry>` and the operation's existing
+`PackageInterfaceValidation`, derives exact owner/parts/seals/requirements, and
+issues a directory/arena containing that value alone. Exclude value entries from
+both generic shared-arena appends and generic shared-directory writes. Generic
+native/canonical rows retain their separately justified packing and custody.
+
+Then immutable fixed frontiers can legitimately retain old exact V rows because
+those rows cannot pin unrelated sibling value S. This removes the impossible
+broad-V state at its issuer rather than rebasing semantic/acquisition owners or
+introducing a mutable whole-frontier service. Older live binary objects are not
+in-process upgraded; durable recovery reacquires rows through the new issuer.
+Existing older binaries remain outside this candidate's lifetime claim.
+
+Checked capture may reuse an already materialized dedicated row only after
+validating its exact selected binding and issuing acquisition facts, not artifact
+ID, byte length or a leaf marker alone. Retaining the existing issuing
+`ArtifactEntry`/fact handle with the row is one bounded way to authenticate that
+association; `ArtifactFactsHandle` distinguishes independent equal-byte joined
+issuers. Physical row sharing does not reissue logical support. The implementation
+owner decides the smallest API, preserving the typed output packet and avoiding
+another registry.
+
+Required controls: original materializer issues independently sized value rows;
+complete-before-P6 borrows that exact row with zero new factory writes; packet
+concurrency promotes once; same-view and next-view paths keep original A rows;
+V-only survives while S's actual directory/FD owner releases. Factory fresh-work
+counters must remain distinct from packet attach/borrow counters. FD growth and
+the existing arena-descriptor format bound remain explicit, without silently
+raising limits. This recommendation supersedes treating overlay detachment
+alone as sufficient physical-release acceptance. No implementation accepted or
+native check executed in this review.
