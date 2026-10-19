@@ -13789,8 +13789,24 @@ pub(crate) mod tests {
             "selected demand identity includes exact scoped issuer choices"
         );
         for (left, right) in [(&explicit_a, &explicit_b), (&explicit_b, &explicit_a)] {
+            let selected =
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(left)
+                    .unwrap();
+            let context = Arc::new(
+                ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_issued_compiler_support(&selected)
+                    .unwrap(),
+            );
+            let root = tempfile::tempdir().unwrap();
+            let result = ExactCompileContext::new(context).prepare_compilation_with_private_input(
+                root.path(),
+                PRODUCER,
+                None,
+                Some(right.clone()),
+            );
             assert!(
-                matches!(left.merge(right), Err(CompileError::ArtifactInventory(error))
+                matches!(result, Err(CompileError::ArtifactInventory(error))
                 if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
                     if artifact == entry.descriptor.id)),
                 "two explicit incompatible selected sources must refuse in either order"
