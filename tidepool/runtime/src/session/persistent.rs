@@ -317,6 +317,12 @@ pub(super) struct CompileViewKey {
     public_epoch: u64,
 }
 
+impl CompileViewKey {
+    pub(super) fn generation(&self) -> Generation {
+        self.tip
+    }
+}
+
 struct CachedCompileView {
     key: Option<CompileViewKey>,
     view: SessionCompileView,
@@ -1703,6 +1709,139 @@ impl PersistentSession {
         self.scoped_compile_view_in(scope).map(|view| view.digest)
     }
 
+    pub(super) fn capture_inspection_world_in(
+        &self,
+        scope: ScopeId,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        hidden: impl Fn(tidepool_repr::SessionVarId) -> bool,
+    ) -> Result<super::inspection::AdmittedInspectionWorld, SessionError> {
+        use super::inspection::{
+            AdmittedInspectionWorld, InspectionWorldBase, InspectionWorldInputs,
+        };
+        let key = self
+            .compile_view_key_in(scope)
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        if let Some(association) = self
+            .lib()
+            .tips
+            .get(&scope)
+            .and_then(|state| state.inspection_world.as_ref())
+            .filter(|association| {
+                self.inspection_world_base_is_current(&association.base, source, original_source)
+            })
+        {
+            tidepool_toolchain::timing::record_host_work(
+                tidepool_toolchain::timing::HostWorkCounter::WorldBorrowHit,
+                1,
+            );
+            return Ok(AdmittedInspectionWorld {
+                base: association.base.clone(),
+                inputs: InspectionWorldInputs::Published(association.world.clone()),
+            });
+        }
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::ColdBootstrap,
+            1,
+        );
+        let mut visible = self
+            .bindings
+            .iter_current_in(&self.scopes, scope)
+            .into_iter()
+            .filter(|(_, entry)| !hidden(entry.id))
+            .collect::<Vec<_>>();
+        visible.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0));
+        let visibility = visible
+            .iter()
+            .map(|(name, entry)| {
+                (
+                    name.0.clone(),
+                    entry.module.module_name(),
+                    entry.module.gen.0,
+                    entry.scope.0,
+                    entry.id.raw(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&("TPCWV001", scope.0, visibility), &mut encoded)
+            .map_err(|error| SessionError::Io(std::io::Error::other(error.to_string())))?;
+        let mut modules = HashSet::new();
+        let mut rows = Vec::new();
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::ValueInterfaceCapture,
+            1,
+        );
+        for (_, entry) in visible {
+            if self.is_stub_module(entry.module) || !modules.insert(entry.module) {
+                continue;
+            }
+            tidepool_toolchain::timing::record_host_work(
+                tidepool_toolchain::timing::HostWorkCounter::ReachableValueVisit,
+                1,
+            );
+            rows.push(
+                self.retained_checked_value_artifact(entry.module)
+                    .ok_or(SessionError::MissingRetainedValueInterface(entry.module))?
+                    .clone(),
+            );
+        }
+        Ok(AdmittedInspectionWorld {
+            base: InspectionWorldBase {
+                scope,
+                key,
+                owner: self.admission_owner().clone(),
+                epoch: self.admission_owner().epoch(),
+                source: Arc::new(source.clone()),
+                original_source: original_source.clone(),
+                target: self.source_lease_in(scope)?,
+            },
+            inputs: InspectionWorldInputs::Cold {
+                primary: self.lib().current_exact_context_in(scope),
+                rows,
+                visibility: encoded.into(),
+            },
+        })
+    }
+
+    fn inspection_world_base_is_current(
+        &self,
+        base: &super::inspection::InspectionWorldBase,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> bool {
+        Arc::ptr_eq(&base.owner, self.admission_owner())
+            && base.epoch == self.admission_owner().epoch()
+            && base.source.sha256() == source.sha256()
+            && Arc::ptr_eq(&base.original_source, original_source)
+            && self
+                .source_lease_in(base.scope)
+                .is_ok_and(|lease| Arc::ptr_eq(&lease, &base.target))
+            && self.compile_view_key_in(base.scope).as_ref() == Some(&base.key)
+    }
+
+    pub(super) fn install_inspection_world_if_current(
+        &mut self,
+        completed: &super::inspection::CompletedInspectionWorld,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> bool {
+        if completed.cancellation.checkpoint().is_err() {
+            return false;
+        }
+        let association = &completed.prepared.association;
+        if !self.inspection_world_base_is_current(&association.base, source, original_source) {
+            return false;
+        }
+        let state = self
+            .lib_mut()
+            .tips
+            .entry(association.base.scope)
+            .or_default();
+        state.inspection_world = Some(association.clone());
+        true
+    }
+
     /// Read mutation-owner facts without constructing a view or its digest.
     /// A missing stable witness requires a checked cold observation.
     pub(super) fn compile_view_key_in(&self, scope: ScopeId) -> Option<CompileViewKey> {
@@ -2662,6 +2801,7 @@ impl PersistentSession {
                 tip: generation,
                 exact_context: recovered_context,
                 published_sources,
+                inspection_world: None,
             },
         );
         if let Err(error) = lib.bind_durable_public_scope(owner.clone(), scope) {
@@ -2964,6 +3104,7 @@ impl PersistentSession {
                 tip: snapshot.declaration_tip,
                 exact_context: installing_context,
                 published_sources: lib.published_source_selections_in(target).to_vec(),
+                inspection_world: None,
             },
         );
         self.public_visibility_epochs.try_reserve(1).map_err(|e| {
@@ -3102,6 +3243,7 @@ impl PersistentSession {
                 tip: generation,
                 exact_context: context,
                 published_sources,
+                inspection_world: None,
             },
         );
         let mut public_scopes = lib.durable_public_scopes.clone();
@@ -4441,6 +4583,49 @@ mod checkpoint_scope_tests {
                 .prepared_handle_of(own.value.handle.raw()),
             Some(own.value.handle),
         );
+    }
+
+    #[test]
+    fn world_observation_refuses_changed_or_foreign_base() {
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 420);
+        let scope = session.mint_isolated_scope();
+        let original_source = session.adopt_initial_notebook_scope(scope).unwrap();
+        let source = super::super::GenerationArtifactReference::capture(b"source A".to_vec());
+        let admitted = session
+            .capture_inspection_world_in(scope, &source, &original_source, |_| false)
+            .unwrap();
+        assert!(admitted.needs_source_capture());
+        assert!(session.inspection_world_base_is_current(
+            &admitted.base,
+            &source,
+            &original_source
+        ));
+        let other_source = super::super::GenerationArtifactReference::capture(b"source B".to_vec());
+        assert!(!session.inspection_world_base_is_current(
+            &admitted.base,
+            &other_source,
+            &original_source
+        ));
+        let other = publication_session(&recovery, root.path(), 421);
+        assert!(!other.inspection_world_base_is_current(&admitted.base, &source, &original_source));
+        let tip = session.lib().scope_tip(scope);
+        let entry =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "changed", 999);
+        session.bind_in(scope, entry).unwrap();
+        assert_eq!(session.lib().scope_tip(scope), tip);
+        assert!(!session.inspection_world_base_is_current(
+            &admitted.base,
+            &source,
+            &original_source
+        ));
+        let fresh = session
+            .capture_inspection_world_in(scope, &source, &original_source, |_| true)
+            .unwrap();
+        assert!(session.inspection_world_base_is_current(&fresh.base, &source, &original_source));
+        session.retire_scope(scope);
+        assert!(!session.inspection_world_base_is_current(&fresh.base, &source, &original_source));
     }
 
     #[test]
@@ -8231,6 +8416,7 @@ impl PersistentSession {
                 tip: snapshot.declaration_tip,
                 exact_context: None,
                 published_sources: Vec::new(),
+                inspection_world: None,
             });
         if let Some(source) = &source {
             tip.exact_context = Some(source.context.clone());

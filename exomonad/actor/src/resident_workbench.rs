@@ -5611,6 +5611,8 @@ pub enum ResidentActorWorkbenchError {
     Checkout(CheckoutError<String>),
     #[error("resident workbench compiler failed: {0}")]
     Compile(CompileError),
+    #[error(transparent)]
+    WorldInspection(tidepool_runtime::session::WorldInspectionError),
     #[error("resident cell check failed: {0}")]
     CellCheck(tidepool_runtime::session::CellCheckFailure),
     #[error("resident workbench compiler infrastructure failed:\n{0}")]
@@ -8519,6 +8521,38 @@ where
         query: tidepool_runtime::session::NameQuery,
         kind: StructuredInspectionKind,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        if matches!(
+            query.scope,
+            tidepool_runtime::session::NameScope::PublicModule(_)
+        ) {
+            let source = match public_module_query_source(&context.source_layer) {
+                Ok(source) => source,
+                Err(error) => {
+                    return self
+                        .access
+                        .with_continuation_machine(context, move |session, _, _, settlement| {
+                            session
+                                .resume_classified(
+                                    hole,
+                                    StructuredIntrospectionAnswer::QueryError(error),
+                                    settlement,
+                                )
+                                .map_err(classify_resumption)
+                        })
+                        .await;
+                }
+            };
+            return self
+                .resume_public_module_introspection(
+                    context,
+                    hole,
+                    query,
+                    kind,
+                    source,
+                    tidepool_toolchain::timing::HostWorkObservation::when_timing_enabled(),
+                )
+                .await;
+        }
         let source = self.access.source.config.clone();
         let snapshot_source = source.clone();
         let query_scope = query.scope.clone();
@@ -8619,6 +8653,145 @@ where
                     .map_err(classify_resumption)
             })
             .await
+    }
+
+    async fn query_public_module_world(
+        &self,
+        context: crate::ActorSessionContext,
+        query: tidepool_runtime::session::NameQuery,
+        kind: StructuredInspectionKind,
+        observation: Option<Arc<tidepool_toolchain::timing::HostWorkObservation>>,
+    ) -> Result<tidepool_runtime::session::CompletedInspectionWorld, ResidentActorWorkbenchError>
+    {
+        let source = public_module_query_source(&context.source_layer)
+            .map_err(|_| ActorCompileViewError::UnownedSourceLayer)?;
+        let snapshot_source = source.clone();
+        let snapshot_observation = observation.clone();
+        let admitted = self
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                observe_inspection_work(snapshot_observation.as_ref(), || {
+                    let evidence = snapshot_source.generation_evidence().ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "world query lacks retained source evidence".into(),
+                        )
+                    })?;
+                    let original_source = context.source_dependency().source_lease()?;
+                    session
+                        .capture_inspection_world_in(
+                            context.placement.lexical_scope,
+                            &evidence.reference,
+                            &original_source,
+                        )
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })
+                })
+            })
+            .await?;
+        tracing::debug!(
+            cold = admitted.needs_source_capture(),
+            "compiler world observation captured"
+        );
+        let compiler_work =
+            crate::capabilities::CompilerOwnerScope::current().and_then(|scope| {
+                scope
+                    .with_source_dependency(context.source_dependency())
+                    .admit_work()
+            })?;
+        let compiler_dependency = context.source_dependency().clone();
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
+        let compiler_source = source.clone();
+        let compiler_observation = observation.clone();
+        let compiler_kind = match kind {
+            StructuredInspectionKind::Info => {
+                tidepool_toolchain::compiler_world::PublicModuleQuestionKind::StructuredInfo
+            }
+            StructuredInspectionKind::Type => {
+                tidepool_toolchain::compiler_world::PublicModuleQuestionKind::StructuredType
+            }
+        };
+        let compiler_query = query.clone();
+        let inspected = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+            observe_inspection_work(compiler_observation.as_ref(), || {
+                let settled = compiler_work.run_source_compiler_phase(
+                    &compiler_dependency,
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    |source_owner, _| {
+                        tidepool_runtime::session::run_admitted_world_inspection(
+                            source_owner, admitted,
+                            || compiler_source.capture_compiler_sources().map_err(|error| match error {
+                                crate::SourceInspectionError::Unavailable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnavailable(detail),
+                                crate::SourceInspectionError::Unreadable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnreadable(detail),
+                            }),
+                            compiler_query, compiler_kind,
+                        )
+                    },
+                ).map_err(ResidentActorWorkbenchError::from)?;
+                tidepool_runtime::session::finish_admitted_world_inspection(settled)
+                    .map_err(|error| match error {
+                        tidepool_runtime::session::WorldInspectionError::Runtime(error) => ResidentActorWorkbenchError::Resident(ResidentError::Run(error)),
+                        error => ResidentActorWorkbenchError::WorldInspection(error),
+                    })
+            })
+        })).await.map_err(ResidentActorWorkbenchError::Join)?;
+        cancel_on_drop.0 = None;
+        inspected
+    }
+
+    async fn resume_public_module_introspection(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        query: tidepool_runtime::session::NameQuery,
+        kind: StructuredInspectionKind,
+        source: crate::CheckpointSourceLayer,
+        observation: Option<Arc<tidepool_toolchain::timing::HostWorkObservation>>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let inspected = self
+            .query_public_module_world(context.clone(), query, kind, observation.clone())
+            .await;
+        let resume_observation = observation.clone();
+        let outcome = self
+            .access
+            .with_compiler_machine(context, move |session, context, _, settlement| {
+                observe_inspection_work(resume_observation.as_ref(), || {
+                    let answer = match inspected {
+                        Ok(completed) => {
+                            tracing::debug!(resolution = ?completed.resolution(), "compiler world observation settled");
+                            let evidence = source.generation_evidence().ok_or_else(|| {
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "world query lost source evidence".into(),
+                                )
+                            })?;
+                            let original_source = context.source_dependency().source_lease()?;
+                            if session.install_inspection_world_if_current(
+                                &completed,
+                                &evidence.reference,
+                                &original_source,
+                            ) {
+                                world_introspection_answer(kind, &completed)
+                            } else {
+                                StructuredIntrospectionAnswer::CompilerUnavailable(
+                                    "inspection world base changed before resumption".into(),
+                                )
+                            }
+                        }
+                        Err(ResidentActorWorkbenchError::WorldInspection(tidepool_runtime::session::WorldInspectionError::UnsupportedSource)) => StructuredIntrospectionAnswer::QueryError(
+                            tidepool_runtime::session::QueryError::Unsupported("source owner cannot represent this compiler source domain".into())
+                        ),
+                        Err(error) => StructuredIntrospectionAnswer::CompilerUnavailable(error.to_string()),
+                    };
+                    session
+                        .resume_classified(hole, answer, settlement)
+                        .map_err(classify_resumption)
+                })
+            })
+            .await;
+        if let Some(observation) = observation {
+            observation.snapshot().emit();
+        }
+        outcome
     }
 
     /// Settle a resumed fragment outcome. Nominal suspensions retain
@@ -14001,6 +14174,57 @@ fn inspect_compile_view(
     }
 }
 
+fn public_module_query_source(
+    roots: &crate::ActorSourceRoots,
+) -> Result<crate::CheckpointSourceLayer, tidepool_runtime::session::QueryError> {
+    match roots {
+        crate::ActorSourceRoots::Complete(source) if source.generation_evidence().is_some() => {
+            Ok(source.clone())
+        }
+        _ => Err(tidepool_runtime::session::QueryError::Unsupported(
+            "public-module inspection requires a retained captured source owner".into(),
+        )),
+    }
+}
+
+fn world_introspection_answer(
+    kind: StructuredInspectionKind,
+    completed: &tidepool_runtime::session::CompletedInspectionWorld,
+) -> StructuredIntrospectionAnswer {
+    // Runtime CAS has checked the exact private world base. The displayed
+    // world observation is not the checked-source compile-view fingerprint.
+    match (kind, completed.result()) {
+        (
+            StructuredInspectionKind::Info,
+            Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info))),
+        ) => StructuredIntrospectionAnswer::Info(info.clone()),
+        (
+            StructuredInspectionKind::Type,
+            Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))),
+        ) => StructuredIntrospectionAnswer::Type(info.clone()),
+        (
+            _,
+            Ok(
+                tidepool_runtime::session::InspectionResult::StructuredInfo(Err(error))
+                | tidepool_runtime::session::InspectionResult::StructuredType(Err(error)),
+            ),
+        ) => StructuredIntrospectionAnswer::QueryError(error.clone()),
+        (_, Err(tidepool_toolchain::compiler_world::WorldQueryRejection::Unsupported)) => {
+            StructuredIntrospectionAnswer::QueryError(
+                tidepool_runtime::session::QueryError::Unsupported(
+                    "compiler world does not support this public-module query".into(),
+                ),
+            )
+        }
+        (_, Err(reason)) => StructuredIntrospectionAnswer::CompilerUnavailable(format!(
+            "compiler world refused the query: {reason:?}"
+        )),
+        (_, Ok(_)) => StructuredIntrospectionAnswer::CompilerUnavailable(
+            "world inspection returned the wrong structured answer".into(),
+        ),
+    }
+}
+
 fn structured_introspection_answer(
     kind: StructuredInspectionKind,
     inspected: Result<tidepool_runtime::session::InspectionResult, String>,
@@ -14179,6 +14403,16 @@ mod lookup_inspection_probe {
                 .unwrap_or_else(|poison| poison.into_inner())
                 .recv();
         }
+    }
+}
+
+fn observe_inspection_work<T>(
+    observation: Option<&Arc<tidepool_toolchain::timing::HostWorkObservation>>,
+    work: impl FnOnce() -> T,
+) -> T {
+    match observation {
+        Some(observation) => observation.scope(work),
+        None => work(),
     }
 }
 
@@ -16567,6 +16801,360 @@ pub(crate) mod request_tests {
         );
     }
 
+    struct WorldQueryTestSource {
+        evidence: crate::SourceGenerationEvidence,
+        roots: Vec<tidepool_toolchain::compiler_world::CapturedCompilerSourceRoot>,
+        owners: Vec<Arc<tempfile::TempDir>>,
+        paths: Vec<PathBuf>,
+        identities: Vec<String>,
+        captured: Mutex<Option<Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>>,
+        captures: std::sync::atomic::AtomicUsize,
+        unsupported: std::sync::atomic::AtomicBool,
+    }
+
+    impl crate::RetainedSourceLayer for WorldQueryTestSource {
+        fn identities(&self) -> &[String] {
+            &self.identities
+        }
+        fn include_paths(&self) -> &[PathBuf] {
+            &self.paths
+        }
+        fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
+            tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
+        }
+        fn generation_evidence(&self) -> Option<&crate::SourceGenerationEvidence> {
+            Some(&self.evidence)
+        }
+        fn capture_compiler_sources(
+            &self,
+        ) -> Result<
+            Option<Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+            crate::SourceInspectionError,
+        > {
+            if self.unsupported.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(None);
+            }
+            let mut captured = self.captured.lock();
+            if let Some(captured) = &*captured {
+                return Ok(Some(captured.clone()));
+            }
+            self.captures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let owner: Arc<dyn std::any::Any + Send + Sync> = Arc::new(self.owners.clone());
+            let sources = Arc::new(
+                tidepool_toolchain::compiler_world::CapturedCompilerSources::from_captured_roots(
+                    self.roots.clone(),
+                    Arc::from(self.evidence.reference.bytes()),
+                    owner,
+                )
+                .map_err(|error| crate::SourceInspectionError::Unavailable(error.to_string()))?,
+            );
+            *captured = Some(sources.clone());
+            Ok(Some(sources))
+        }
+    }
+
+    fn world_query_test_source(
+        bodies: &[Option<&str>],
+    ) -> (crate::CheckpointSourceLayer, Arc<WorldQueryTestSource>) {
+        use tidepool_toolchain::compiler_world::CapturedCompilerSourceRoot;
+        let mut roots = Vec::new();
+        let mut owners = Vec::new();
+        for body in bodies {
+            let owner = Arc::new(tempfile::tempdir().unwrap());
+            let mut files = std::collections::BTreeMap::new();
+            if let Some(body) = body {
+                std::fs::write(owner.path().join("WorldQuestion.hs"), body).unwrap();
+                files.insert(
+                    PathBuf::from("WorldQuestion.hs"),
+                    Arc::<[u8]>::from(body.as_bytes()),
+                );
+            }
+            let manifest = tidepool_toolchain::cache::SourceRootManifest::from_file_digests(
+                files
+                    .iter()
+                    .map(|(name, bytes)| (name.clone(), blake3::hash(bytes).to_hex().to_string())),
+            )
+            .unwrap();
+            roots.push(CapturedCompilerSourceRoot {
+                manifest,
+                bodies: files,
+            });
+            owners.push(owner);
+        }
+        let reference = tidepool_runtime::session::GenerationArtifactReference::capture(
+            serde_json::to_vec(&owners.iter().map(|owner| owner.path()).collect::<Vec<_>>())
+                .unwrap(),
+        );
+        let owner = Arc::new(WorldQueryTestSource {
+            evidence: crate::SourceGenerationEvidence {
+                reference,
+                configuration_digest: [0; 32],
+            },
+            paths: owners.iter().map(|owner| owner.path().to_owned()).collect(),
+            identities: vec!["retained test source bytes".into()],
+            roots,
+            owners,
+            captured: Mutex::new(None),
+            captures: std::sync::atomic::AtomicUsize::new(0),
+            unsupported: std::sync::atomic::AtomicBool::new(false),
+        });
+        (
+            crate::SourceLayerIssuer::default().issue(owner.clone()),
+            owner,
+        )
+    }
+
+    async fn installed_world_query(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        context: crate::ActorSessionContext,
+        source: crate::CheckpointSourceLayer,
+        module: &str,
+        kind: StructuredInspectionKind,
+        observation: Arc<tidepool_toolchain::timing::HostWorkObservation>,
+    ) -> tidepool_runtime::session::CompletedInspectionWorld {
+        let completed = workbench
+            .query_public_module_world(
+                context.clone(),
+                tidepool_runtime::session::NameQuery {
+                    scope: tidepool_runtime::session::NameScope::PublicModule(module.into()),
+                    namespace: tidepool_runtime::session::NameNamespace::Value,
+                    name: "known".into(),
+                },
+                kind,
+                Some(observation.clone()),
+            )
+            .await
+            .expect("actual actor world question");
+        workbench
+            .access
+            .with_machine(context, move |session, context, _| {
+                observation.scope(|| {
+                    let original = context.source_dependency().source_lease()?;
+                    assert!(session.install_inspection_world_if_current(
+                        &completed,
+                        &source.generation_evidence().unwrap().reference,
+                        &original
+                    ));
+                    Ok(completed)
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    fn assert_world_hot_work(snapshot: &tidepool_toolchain::timing::HostWorkSnapshot) {
+        use tidepool_toolchain::timing::HostWorkCounter;
+        assert_eq!(snapshot.get(HostWorkCounter::WorldBorrowHit), 1);
+        assert!(snapshot.get(HostWorkCounter::WorldKeyFactRead) > 0);
+        for counter in HostWorkCounter::ALL {
+            if !matches!(
+                counter,
+                HostWorkCounter::WorldBorrowHit | HostWorkCounter::WorldKeyFactRead
+            ) {
+                assert_eq!(snapshot.get(counter), 0, "hot query performed {counter:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn public_module_world_hot_queries_skip_retained_history_preparation() {
+        with_test_compiler_owner(|preparation_client| async move {
+            use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
+            let (machines, mut context, source, _root) = actor_registry_fixture();
+            let (captured, owner) = world_query_test_source(&[Some("module WorldQuestion where\nknown :: Int\nknown = 7\n")]);
+            context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            let workbench = ResidentActorWorkbench::new(machines, source.bind_preparation(preparation_client), None);
+            workbench.adopt_final_source_scope(context.clone()).await.unwrap();
+            let cold = HostWorkObservation::new();
+            let first = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Info, cold.clone()).await;
+            assert!(matches!(first.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info))) if info.identifier.name == "known"));
+            assert_eq!(cold.snapshot().get(HostWorkCounter::ColdBootstrap), 1);
+            assert!(cold.snapshot().get(HostWorkCounter::CompilerMetadataSnapshot) > 0);
+            let fingerprint = first.provenance().fingerprint.clone();
+
+            let history_context = workbench.access.with_machine(context.clone(), |session, context, _| {
+                let placement = crate::ActorPlacement { lexical_scope: session.mint_isolated_scope(), ..context.placement };
+                Ok(crate::ActorDescriptor::new("unrelated history", placement)
+                    .admit_independent_world().session_context(crate::ActorRef::first(crate::ActorId(2))))
+            }).await.unwrap();
+            workbench.adopt_final_source_scope(history_context.clone()).await.unwrap();
+            for retained in 0..=3 {
+                if retained > 0 {
+                    workbench.publish_cell_for_test(history_context.clone(), &format!("history{retained} <- pure ({retained} :: Int)")).await.unwrap();
+                }
+                for kind in [StructuredInspectionKind::Info, StructuredInspectionKind::Type] {
+                    let observation = HostWorkObservation::new();
+                    let answer = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", kind, observation.clone()).await;
+                    assert_eq!(answer.provenance().fingerprint, fingerprint);
+                    assert!(answer.result().is_ok());
+                    assert_world_hot_work(&observation.snapshot());
+                }
+            }
+            assert_eq!(owner.captures.load(std::sync::atomic::Ordering::Relaxed), 1);
+            let mut transferred = context.clone();
+            transferred.placement = history_context.placement;
+            let transferred_cold = HostWorkObservation::new();
+            let transferred_answer = installed_world_query(&workbench, transferred.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Type, transferred_cold.clone()).await;
+            assert!(matches!(transferred_answer.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))) if info.expression.canonical == "Int"));
+            assert_eq!(transferred_cold.snapshot().get(HostWorkCounter::RetainedValueSupportMerge), 0);
+            assert!(transferred_cold.snapshot().get(HostWorkCounter::ReachableValueVisit) >= 3);
+            let original = context.source_dependency().source_lease().unwrap();
+            let target = history_context.source_dependency().source_lease().unwrap();
+            assert!(!Arc::ptr_eq(&original, &target));
+            for gate in [original.source_admission(), target.source_admission()] {
+                let fence = gate.fence().unwrap();
+                let refusal = HostWorkObservation::new();
+                let rejected = workbench.query_public_module_world(transferred.clone(), tidepool_runtime::session::NameQuery {
+                    scope: tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()),
+                    namespace: tidepool_runtime::session::NameNamespace::Value, name: "known".into(),
+                }, StructuredInspectionKind::Info, Some(refusal.clone())).await;
+                assert!(matches!(rejected, Err(ResidentActorWorkbenchError::Resident(ResidentError::Run(
+                    tidepool_runtime::RuntimeError::SourceAdmission(tidepool_runtime::session::SourceAdmissionError::Closed { .. }))))));
+                assert_world_hot_work(&refusal.snapshot());
+                fence.reopen().unwrap();
+            }
+            let checked = HostWorkObservation::new();
+            let check_observation = checked.clone();
+            workbench.access.with_machine(history_context, move |session, context, source| {
+                check_observation.scope(|| {
+                    let view = actor_compile_view(session, context, source)?;
+                    let _ = structured_provenance(&view, source, tidepool_runtime::session::NameScope::Current);
+                    session.capture_inspection_inputs(view.session_view())
+                        .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
+                    Ok(())
+                })
+            }).await.unwrap();
+            assert!(checked.snapshot().get(HostWorkCounter::CompileViewBuild) > 0);
+            assert!(checked.snapshot().get(HostWorkCounter::InjectedValueVisit) > 0);
+            assert!(checked.snapshot().get(HostWorkCounter::ReachableValueVisit) > 0);
+        }).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn public_module_world_retains_source_domain_and_invalidates_runtime_base() {
+        with_test_compiler_owner(|preparation_client| async move {
+            use tidepool_toolchain::compiler_world::{WorldModuleOrigin, WorldModuleResolution};
+            use tidepool_toolchain::timing::HostWorkObservation;
+            let (machines, mut context, source, _root) = actor_registry_fixture();
+            let first_body = "module WorldQuestion where\nknown :: Int\nknown = 7\n";
+            let second_body = "module WorldQuestion where\nknown :: Bool\nknown = True\n";
+            let mut bodies = vec![None; 11]; bodies[4] = Some(first_body); bodies[10] = Some(second_body);
+            let (captured, owner) = world_query_test_source(&bodies);
+            context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            let workbench = ResidentActorWorkbench::new(machines, source.bind_preparation(preparation_client), None);
+            workbench.adopt_final_source_scope(context.clone()).await.unwrap();
+            let first = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Type, HostWorkObservation::new()).await;
+            let expected = tidepool_runtime::session::GenerationArtifactReference::capture(first_body.as_bytes().to_vec());
+            assert!(matches!(first.resolution(), WorldModuleResolution::Resolved(receipt)
+                if !receipt.unit.is_empty() && receipt.module == "WorldQuestion"
+                    && matches!(&receipt.origin, WorldModuleOrigin::Home { root: 4, path, source_sha256 }
+                        if path == "WorldQuestion.hs" && source_sha256 == expected.sha256())));
+            assert!(matches!(first.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))) if info.expression.canonical == "Int"));
+            let initially_absent = installed_world_query(&workbench, context.clone(), captured.clone(), "CreatedLater", StructuredInspectionKind::Info, HostWorkObservation::new()).await;
+            assert!(matches!(initially_absent.resolution(), WorldModuleResolution::Absent(missing) if missing.module == "CreatedLater"));
+            let mut reversed_bodies = bodies.clone();
+            reversed_bodies.swap(4, 10);
+            let (reversed, _reversed_owner) = world_query_test_source(&reversed_bodies);
+            let reversed_for_context = reversed.clone();
+            let reversed_context = workbench.access.with_machine(context.clone(), move |session, context, _| {
+                let placement = crate::ActorPlacement { lexical_scope: session.mint_isolated_scope(), ..context.placement };
+                let mut selected = crate::ActorDescriptor::new("reversed source order", placement)
+                    .admit_independent_world().session_context(crate::ActorRef::first(crate::ActorId(3)));
+                selected.source_layer = crate::ActorSourceRoots::Complete(reversed_for_context);
+                Ok(selected)
+            }).await.unwrap();
+            workbench.adopt_final_source_scope(reversed_context.clone()).await.unwrap();
+            let second = installed_world_query(&workbench, reversed_context, reversed, "WorldQuestion", StructuredInspectionKind::Type, HostWorkObservation::new()).await;
+            let expected_second = tidepool_runtime::session::GenerationArtifactReference::capture(second_body.as_bytes().to_vec());
+            assert!(matches!(second.resolution(), WorldModuleResolution::Resolved(receipt)
+                if !receipt.unit.is_empty() && receipt.module == "WorldQuestion"
+                    && matches!(&receipt.origin, WorldModuleOrigin::Home { root: 4, path, source_sha256 }
+                        if path == "WorldQuestion.hs" && source_sha256 == expected_second.sha256())));
+            assert!(matches!(second.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))) if info.expression.canonical == "Bool"));
+            assert_ne!(first.provenance().fingerprint, second.provenance().fingerprint);
+            std::fs::write(owner.paths[4].join("WorldQuestion.hs"), second_body).unwrap();
+            std::fs::write(owner.paths[4].join("CreatedLater.hs"), "module CreatedLater where\nknown = True\n").unwrap();
+            let hot = HostWorkObservation::new();
+            let retained = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Type, hot.clone()).await;
+            assert!(matches!(retained.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))) if info.expression.canonical == "Int"));
+            assert_world_hot_work(&hot.snapshot());
+            let absent = installed_world_query(&workbench, context.clone(), captured.clone(), "CreatedLater", StructuredInspectionKind::Info, HostWorkObservation::new()).await;
+            assert!(matches!(absent.resolution(), WorldModuleResolution::Absent(missing) if missing.module == "CreatedLater"));
+            assert!(matches!(absent.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Err(tidepool_runtime::session::QueryError::UnknownModule(module)))) if module == "CreatedLater"));
+            let stale = workbench.query_public_module_world(context.clone(), tidepool_runtime::session::NameQuery {
+                scope: tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()),
+                namespace: tidepool_runtime::session::NameNamespace::Value, name: "known".into(),
+            }, StructuredInspectionKind::Type, Some(HostWorkObservation::new())).await.unwrap();
+            workbench.access.with_machine(context.clone(), move |session, context, _| {
+                let original = context.source_dependency().source_lease()?;
+                session.set_catalog_selection(tidepool_toolchain::toolchain::CatalogSelection::Acquired(None));
+                assert!(!session.install_inspection_world_if_current(&stale, &captured.generation_evidence().unwrap().reference, &original));
+                Ok(())
+            }).await.unwrap();
+            let (unsupported, unsupported_owner) = world_query_test_source(&[]);
+            unsupported_owner.unsupported.store(true, std::sync::atomic::Ordering::Relaxed);
+            let unsupported_layer = unsupported.clone();
+            let unsupported_context = workbench.access.with_machine(context.clone(), move |session, context, _| {
+                let placement = crate::ActorPlacement { lexical_scope: session.mint_isolated_scope(), ..context.placement };
+                let mut selected = crate::ActorDescriptor::new("unrepresentable source domain", placement)
+                    .admit_independent_world().session_context(crate::ActorRef::first(crate::ActorId(5)));
+                selected.source_layer = crate::ActorSourceRoots::Complete(unsupported_layer);
+                Ok(selected)
+            }).await.unwrap();
+            workbench.adopt_final_source_scope(unsupported_context.clone()).await.unwrap();
+            let unsupported_work = HostWorkObservation::new();
+            let refused = workbench.query_public_module_world(unsupported_context, tidepool_runtime::session::NameQuery {
+                scope: tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()),
+                namespace: tidepool_runtime::session::NameNamespace::Value, name: "known".into(),
+            }, StructuredInspectionKind::Type, Some(unsupported_work.clone())).await;
+            assert!(matches!(refused, Err(ResidentActorWorkbenchError::WorldInspection(tidepool_runtime::session::WorldInspectionError::UnsupportedSource))));
+            for counter in [HostWorkCounter::ActorCompileViewCapture, HostWorkCounter::StructuredProvenance,
+                HostWorkCounter::InspectionInputCapture, HostWorkCounter::ColdWorldBuilderRowVisit,
+                HostWorkCounter::InputFdEnumeration, HostWorkCounter::HashByte] {
+                assert_eq!(unsupported_work.snapshot().get(counter), 0, "unsupported source performed {counter:?}");
+            }
+            let (mismatched, _mismatched_owner) = world_query_test_source(&[Some("module Different where\nknown :: Int\nknown = 7\n")]);
+            let mismatch_layer = mismatched.clone();
+            let mismatch_context = workbench.access.with_machine(context, move |session, context, _| {
+                let placement = crate::ActorPlacement { lexical_scope: session.mint_isolated_scope(), ..context.placement };
+                let mut selected = crate::ActorDescriptor::new("mismatched source name", placement)
+                    .admit_independent_world().session_context(crate::ActorRef::first(crate::ActorId(4)));
+                selected.source_layer = crate::ActorSourceRoots::Complete(mismatch_layer);
+                Ok(selected)
+            }).await.unwrap();
+            workbench.adopt_final_source_scope(mismatch_context.clone()).await.unwrap();
+            let refused = installed_world_query(&workbench, mismatch_context, mismatched, "WorldQuestion", StructuredInspectionKind::Type, HostWorkObservation::new()).await;
+            assert!(matches!(refused.resolution(), WorldModuleResolution::Rejected(
+                tidepool_toolchain::compiler_world::WorldQueryRejection::Unavailable
+                | tidepool_toolchain::compiler_world::WorldQueryRejection::Corrupt)));
+        }).await;
+    }
+
+    #[test]
+    fn public_module_world_missing_capture_refuses_before_preparation() {
+        use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
+        let observation = HostWorkObservation::new();
+        for roots in [
+            crate::ActorSourceRoots::Deployment(Vec::new().into()),
+            crate::ActorSourceRoots::Complete(crate::CheckpointSourceLayer::default()),
+        ] {
+            assert!(matches!(
+                observation.scope(|| public_module_query_source(&roots)),
+                Err(tidepool_runtime::session::QueryError::Unsupported(_))
+            ));
+        }
+        for counter in HostWorkCounter::ALL {
+            assert_eq!(
+                observation.snapshot().get(counter),
+                0,
+                "unsupported source performed {counter:?}"
+            );
+        }
+    }
+
     #[test]
     fn public_module_batch_refuses_before_checked_preparation() {
         use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
@@ -16585,6 +17173,16 @@ pub(crate) mod request_tests {
             haskell_effects_alias: "'[]".into(),
             current_model: None,
             source_layer: Vec::new().into(),
+            ..crate::ActorDescriptor::new(
+                "fixture",
+                crate::ActorPlacement {
+                    session: session_id,
+                    resource_scope: RealmId::ROOT,
+                    lexical_scope: ScopeId::ROOT,
+                },
+            )
+            .admit_independent_world()
+            .session_context(crate::ActorRef::first(crate::ActorId(1)))
         };
         let source = ActorWorkbenchSource::new("unused", Vec::new());
         let query = tidepool_runtime::session::NameQuery {
