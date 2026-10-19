@@ -2352,7 +2352,6 @@ impl PersistentSession {
         scope: ScopeId,
         lease: &RuntimeLexicalScopeLease,
     ) -> Result<(), SessionError> {
-        lease.validate_source_issuer()?;
         if !Arc::ptr_eq(&lease.owner, self.admission_owner())
             || lease.owner_epoch != self.admission_owner().epoch()
             || lease.scope != scope
@@ -2362,6 +2361,7 @@ impl PersistentSession {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        lease.validate_source_issuer()?;
         Ok(())
     }
     pub fn mint_scope_from_lease(
