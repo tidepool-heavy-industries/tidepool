@@ -16,7 +16,7 @@ mod properties;
 
 mod compiler_projection;
 mod native_availability;
-pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
+pub use compiler_projection::{CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority};
 pub(crate) use compiler_projection::{
     CompilerSourceSupport, InputNativeDecision, IssuedInputNativeDecisions,
     RecordedInputNativeDecision,

@@ -10,9 +10,9 @@ use cid::Cid;
 use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
 use fvm_ipld_encoding::DAG_CBOR;
 use fvm_ipld_hamt::{BytesKey, Config, Hamt};
-use imbl::{ordmap::DiffItem, OrdMap};
+use imbl::{OrdMap, ordmap::DiffItem};
 use multihash_codetable::{Code, MultihashDigest};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::artifact_inventory::{
     ArtifactBinding, ArtifactBindingNode, ArtifactGraphSelection, ArtifactId, ArtifactSelectionId,
@@ -22,6 +22,49 @@ use crate::declaration_context::{
     NativeAvailabilitySnapshotFacts, NativeContributionSnapshotFacts, NativeTransportMode,
 };
 use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
+
+// Transport facts retain canonical tuple order; decoding never acquires a view.
+pub(crate) mod serde_ord_map {
+    use super::*;
+    pub fn serialize<K: Ord + Clone + Serialize, V: Clone + Serialize, S: serde::Serializer>(
+        map: &OrdMap<K, V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(map.iter())
+    }
+    pub fn deserialize<
+        'de,
+        K: Ord + Clone + Deserialize<'de>,
+        V: Clone + Deserialize<'de>,
+        D: serde::Deserializer<'de>,
+    >(
+        deserializer: D,
+    ) -> Result<OrdMap<K, V>, D::Error> {
+        let rows = Vec::<(K, V)>::deserialize(deserializer)?;
+        if rows.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(serde::de::Error::custom("noncanonical immutable map"));
+        }
+        Ok(rows.into_iter().collect())
+    }
+}
+pub(crate) mod serde_ord_set {
+    use super::*;
+    pub fn serialize<K: Ord + Clone + Serialize, S: serde::Serializer>(
+        set: &imbl::OrdSet<K>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(set.iter())
+    }
+    pub fn deserialize<'de, K: Ord + Clone + Deserialize<'de>, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<imbl::OrdSet<K>, D::Error> {
+        let rows = Vec::<K>::deserialize(deserializer)?;
+        if rows.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(serde::de::Error::custom("noncanonical immutable set"));
+        }
+        Ok(rows.into_iter().collect())
+    }
+}
 
 const HAMT_CONFIG: Config = Config {
     bit_width: 5,
@@ -186,6 +229,165 @@ impl StagedBlocks {
     }
 }
 
+/// Current-root block custody for an immutable snapshot. Reference counts are
+/// local to this frontier, so forks share bytes without owning predecessor
+/// frontiers. Only staged/replaced paths change during publication.
+#[derive(Clone, Default)]
+pub(crate) struct ReachableBlocks {
+    roots: Vec<Cid>,
+    blocks: OrdMap<Cid, ReachableBlock>,
+    work: FrontierWork,
+}
+
+#[derive(Clone, Copy, Default, Debug, Eq, PartialEq)]
+pub(crate) struct FrontierWork {
+    pub(crate) link_visits: u64,
+    pub(crate) unlink_visits: u64,
+    pub(crate) verified_bytes: u64,
+    pub(crate) decoded_bytes: u64,
+}
+
+#[derive(Clone)]
+struct ReachableBlock {
+    bytes: Arc<[u8]>,
+    children: Arc<[Cid]>,
+    incoming: u64,
+}
+
+impl ReachableBlocks {
+    pub(crate) fn work(&self) -> FrontierWork {
+        self.work
+    }
+
+    pub(crate) fn blocks(&self) -> impl Iterator<Item = (&Cid, &Arc<[u8]>)> {
+        self.blocks.iter().map(|(cid, block)| (cid, &block.bytes))
+    }
+
+    /// Link all new roots before removing old roots: shared descendants never
+    /// transiently disappear. Staged blocks outside the new closure are dropped.
+    pub(crate) fn replace_roots(
+        &self,
+        staged: &StagedBlocks,
+        roots: Vec<Cid>,
+    ) -> Result<Self, SnapshotError> {
+        if roots == self.roots {
+            let mut unchanged = self.clone();
+            unchanged.work = FrontierWork::default();
+            return Ok(unchanged);
+        }
+        let pending = staged
+            .blocks
+            .iter()
+            .map(|(cid, bytes)| (*cid, bytes))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut next = self.clone();
+        next.work = FrontierWork::default();
+        for root in &roots {
+            next.retain(*root, &pending)?;
+        }
+        for root in &self.roots {
+            next.release(*root)?;
+        }
+        next.roots = roots;
+        Ok(next)
+    }
+
+    fn retain(
+        &mut self,
+        cid: Cid,
+        staged: &std::collections::BTreeMap<Cid, &Arc<[u8]>>,
+    ) -> Result<(), SnapshotError> {
+        self.work.link_visits = self.work.link_visits.saturating_add(1);
+        if let Some(block) = self.blocks.get_mut(&cid) {
+            block.incoming = block
+                .incoming
+                .checked_add(1)
+                .ok_or_else(|| malformed("snapshot block reference overflow"))?;
+            return Ok(());
+        }
+        let bytes = staged.get(&cid).ok_or(SnapshotError::MissingBlock(cid))?;
+        self.work.verified_bytes = self.work.verified_bytes.saturating_add(bytes.len() as u64);
+        verify_block(&cid, bytes)?;
+        self.work.decoded_bytes = self.work.decoded_bytes.saturating_add(bytes.len() as u64);
+        let value: ciborium::value::Value =
+            ciborium::de::from_reader(&bytes[..]).map_err(malformed)?;
+        let mut children = Vec::new();
+        snapshot_links(&value, &mut children)?;
+        // Preserve edge multiplicity, including identical child CIDs.
+        for child in &children {
+            self.retain(*child, staged)?;
+        }
+        self.blocks.insert(
+            cid,
+            ReachableBlock {
+                bytes: Arc::clone(bytes),
+                children: children.into(),
+                incoming: 1,
+            },
+        );
+        Ok(())
+    }
+
+    fn release(&mut self, cid: Cid) -> Result<(), SnapshotError> {
+        self.work.unlink_visits = self.work.unlink_visits.saturating_add(1);
+        let block = self
+            .blocks
+            .get_mut(&cid)
+            .ok_or_else(|| malformed("released snapshot block is not retained"))?;
+        if block.incoming > 1 {
+            block.incoming -= 1;
+            return Ok(());
+        }
+        let children = Arc::clone(&block.children);
+        self.blocks.remove(&cid);
+        for child in children.iter() {
+            self.release(*child)?;
+        }
+        Ok(())
+    }
+}
+
+impl Blockstore for ReachableBlocks {
+    fn get(&self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self.blocks.get(cid).map(|block| block.bytes.to_vec()))
+    }
+    fn put_keyed(&self, _: &Cid, _: &[u8]) -> anyhow::Result<()> {
+        Err(malformed("immutable snapshot frontier cannot accept writes").into())
+    }
+}
+
+fn snapshot_links(
+    value: &ciborium::value::Value,
+    links: &mut Vec<Cid>,
+) -> Result<(), SnapshotError> {
+    use ciborium::value::Value;
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                snapshot_links(value, links)?;
+            }
+        }
+        Value::Map(values) => {
+            for (key, value) in values {
+                snapshot_links(key, links)?;
+                snapshot_links(value, links)?;
+            }
+        }
+        Value::Tag(42, body) => {
+            let Value::Bytes(bytes) = body.as_ref() else {
+                return Err(malformed("snapshot CID link is not bytes"));
+            };
+            let Some((&0, cid)) = bytes.split_first() else {
+                return Err(malformed("snapshot CID link lacks identity prefix"));
+            };
+            links.push(Cid::try_from(cid).map_err(malformed)?);
+        }
+        Value::Tag(_, _) => return Err(malformed("unsupported snapshot CBOR tag")),
+        _ => (),
+    }
+    Ok(())
+}
+
 /// FVM HAMTs and their unsynchronized child caches never leave this owner.
 /// The caller retains immutable CID storage for this operation. Another store
 /// or publication attempt requires a fresh materializer and authentication.
@@ -202,6 +404,8 @@ pub struct Materializer<'a, BS: Blockstore> {
     >,
     scopes: std::collections::BTreeMap<ArtifactSelectionId, MaterializedScope>,
     selections: std::collections::BTreeMap<usize, MaterializedSelection>,
+    publication_native: std::collections::BTreeMap<usize, (Arc<PublicationNativeFacts>, Cid)>,
+    publication_native_base: Option<Arc<PublicationNativeFacts>>,
 }
 
 struct MaterializedScope {
@@ -222,6 +426,8 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
             native_availability_base: None,
             scopes: Default::default(),
             selections: Default::default(),
+            publication_native: Default::default(),
+            publication_native_base: None,
         }
     }
 
@@ -520,6 +726,7 @@ where
 /// One read operation shares immutable decoded graph owners by exact CID.
 /// These decoded facts still require inventory authentication before use.
 pub struct SnapshotHydrator<'a, BS> {
+    publication_native: RefCell<std::collections::BTreeMap<Cid, Arc<PublicationNativeFacts>>>,
     store: &'a BS,
     selections: RefCell<std::collections::BTreeMap<SelectionRoot, MaterializedSelection>>,
     scopes: RefCell<std::collections::BTreeMap<Cid, ImmutableScopeProofRef>>,
@@ -527,6 +734,7 @@ pub struct SnapshotHydrator<'a, BS> {
 impl<'a, BS: Blockstore> SnapshotHydrator<'a, BS> {
     fn new(store: &'a BS) -> Self {
         Self {
+            publication_native: Default::default(),
             store,
             selections: RefCell::new(Default::default()),
             scopes: RefCell::new(Default::default()),
@@ -1113,13 +1321,14 @@ impl SnapshotValueCodec<ImmutableLexicalFactRef> for LexicalFactCodec {
 }
 
 /// Availability is an issuance fact independent of compiler roles and execution.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum NativeOfferSnapshotBody {
     Empty(crate::artifact_inventory::ExactArtifactSelection),
     Partial(crate::artifact_inventory::ExactArtifactSelection),
     Full(crate::artifact_inventory::ExactArtifactSelection),
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NativeOfferSnapshotFacts {
     pub(crate) original: ArtifactId,
     pub(crate) interface: ArtifactId,
@@ -1386,10 +1595,146 @@ impl SnapshotValueCodec<NativeAvailabilitySnapshotFacts> for NativeAvailabilityC
     }
 }
 
+/// Already-maintained typed maps and their compact semantic root. Neither
+/// decoding nor owning immutable bytes acquires native execution authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublicationNativeMaps {
+    #[serde(with = "serde_ord_map")]
+    pub(crate) roles: OrdMap<ExactModuleIdentity, CompilerInputRole>,
+    #[serde(with = "serde_ord_map")]
+    pub(crate) offers: OrdMap<[u8; 32], NativeOfferSnapshotFacts>,
+    #[serde(with = "serde_ord_map")]
+    pub(crate) native_availability: OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>,
+    #[serde(with = "serde_ord_map")]
+    pub(crate) input_decisions:
+        OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedInputNativeDecision>,
+}
+pub(crate) struct PublicationNativeFacts {
+    maps: PublicationNativeMaps,
+    receipt: NativeFactReceipt,
+}
+impl std::ops::Deref for PublicationNativeFacts {
+    type Target = PublicationNativeMaps;
+    fn deref(&self) -> &Self::Target {
+        &self.maps
+    }
+}
+impl std::fmt::Debug for PublicationNativeFacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublicationNativeFacts")
+            .field("root", &self.receipt.root)
+            .finish()
+    }
+}
+impl PartialEq for PublicationNativeFacts {
+    fn eq(&self, other: &Self) -> bool {
+        self.receipt.root == other.receipt.root
+    }
+}
+impl Eq for PublicationNativeFacts {}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicationNativeTransport {
+    root: Cid,
+    maps: PublicationNativeMaps,
+}
+impl Serialize for PublicationNativeFacts {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut wire = serializer.serialize_struct("PublicationNativeFacts", 2)?;
+        wire.serialize_field("root", &self.receipt.root)?;
+        wire.serialize_field("maps", &self.maps)?;
+        wire.end()
+    }
+}
+impl<'de> Deserialize<'de> for PublicationNativeFacts {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = PublicationNativeTransport::deserialize(deserializer)?;
+        let facts = Self::maintain(None, wire.maps).map_err(serde::de::Error::custom)?;
+        if facts.receipt.root != wire.root {
+            return Err(serde::de::Error::custom(
+                "publication native commitment differs",
+            ));
+        }
+        Arc::try_unwrap(facts)
+            .map_err(|_| serde::de::Error::custom("decoded publication facts unexpectedly shared"))
+    }
+}
+impl PublicationNativeFacts {
+    pub(crate) fn commitment(&self) -> Cid {
+        self.receipt.root
+    }
+    pub(crate) fn maintain(
+        prior: Option<&Arc<Self>>,
+        maps: PublicationNativeMaps,
+    ) -> Result<Arc<Self>, SnapshotError> {
+        if let Some(prior) = prior {
+            if prior.roles.diff(&maps.roles).next().is_none()
+                && prior.offers.diff(&maps.offers).next().is_none()
+                && prior
+                    .native_availability
+                    .diff(&maps.native_availability)
+                    .next()
+                    .is_none()
+                && prior
+                    .input_decisions
+                    .diff(&maps.input_decisions)
+                    .next()
+                    .is_none()
+            {
+                return Ok(Arc::clone(prior));
+            }
+        }
+        let empty = ReachableBlocks::default();
+        let frontier = prior.map_or(&empty, |p| &p.receipt.frontier);
+        let mut writer = Materializer::new(frontier);
+        writer.publication_native_base = prior.cloned();
+        writer.native_availability_base = prior.map(|p| p.receipt.native_availability.clone());
+        let roles = writer.materialize_map_with::<_, _, CompilerRoleCodec>(
+            prior.map(|p| &p.receipt.roles),
+            &maps.roles,
+        )?;
+        let offers = writer.materialize_map_with::<_, _, NativeOfferCodec>(
+            prior.map(|p| &p.receipt.offers),
+            &maps.offers,
+        )?;
+        let native_availability = writer.materialize_map_with::<_, _, NativeAvailabilityCodec>(
+            prior.map(|p| &p.receipt.native_availability),
+            &maps.native_availability,
+        )?;
+        let input_decisions = writer.materialize_map_with::<_, _, InputNativeDecisionCodec>(
+            prior.map(|p| &p.receipt.input_decisions),
+            &maps.input_decisions,
+        )?;
+        let root = writer.materialize_value(&PublicationNativeDescriptor {
+            version: 2,
+            roles: roles.root.clone(),
+            offers: offers.root.clone(),
+            native_availability: native_availability.root.clone(),
+            input_decisions: input_decisions.root.clone(),
+        })?;
+        let staged = writer.finish()?;
+        let frontier = frontier.replace_roots(&staged, vec![root])?;
+        Ok(Arc::new(Self {
+            maps,
+            receipt: NativeFactReceipt {
+                root,
+                roles,
+                offers,
+                native_availability,
+                input_decisions,
+                frontier,
+            },
+        }))
+    }
+}
+
 /// Exact compiler facts. Source-instance authority remains with the live
 /// declaration/transaction owner and is deliberately absent from this snapshot.
 #[derive(Clone, Debug, Default)]
 pub struct ExactContextSnapshot {
+    pub(crate) native_fact_owner: Option<Arc<PublicationNativeFacts>>,
     pub(crate) producer: [u8; 32],
     pub(crate) selection: Arc<ExactSelectionSnapshot>,
     pub(crate) roles: OrdMap<ExactModuleIdentity, CompilerInputRole>,
@@ -1452,6 +1797,7 @@ pub enum CompilerRoleFact {
         original_input_identity: String,
         selection: SelectionRoot,
         selection_sha256: [u8; 32],
+        native_authority: Cid,
     },
 }
 #[derive(Clone, Copy, Debug)]
@@ -1480,7 +1826,9 @@ impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
                 original_input_identity,
                 selection,
                 selection_sha256,
+                native_authority,
             } => {
+                let authority = store.materialize_publication_native(native_authority.facts())?;
                 let base = store.selection_base.clone();
                 let selection = store.materialize_selection(base.as_ref(), selection.snapshot())?;
                 CompilerRoleFact::PublishedSourceOriginal {
@@ -1490,6 +1838,7 @@ impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
                     original_input_identity: original_input_identity.clone(),
                     selection: selection.root,
                     selection_sha256: *selection_sha256,
+                    native_authority: authority,
                 }
             }
         };
@@ -1517,7 +1866,9 @@ impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
                 original_input_identity,
                 selection,
                 selection_sha256,
+                native_authority,
             } => {
+                let native_authority = hydrate_publication_native(store, &native_authority)?;
                 let selection = store.selection(&selection)?;
                 CompilerInputRole::PublishedSourceOriginal {
                     interface,
@@ -1528,6 +1879,10 @@ impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
                         selection.snapshot,
                     ),
                     selection_sha256,
+                    native_authority:
+                        crate::artifact_inventory::PublicationNativeAuthority::recorded(
+                            native_authority,
+                        ),
                 }
             }
         })
@@ -1582,6 +1937,123 @@ impl SnapshotValueCodec<crate::artifact_inventory::RecordedInputNativeDecision>
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicationNativeDescriptor {
+    version: u32,
+    roles: SnapshotMapRoot,
+    offers: SnapshotMapRoot,
+    native_availability: SnapshotMapRoot,
+    input_decisions: SnapshotMapRoot,
+}
+struct NativeFactReceipt {
+    root: Cid,
+    roles: MaterializedMap<ExactModuleIdentity, CompilerInputRole, CompilerRoleCodec>,
+    offers: MaterializedMap<[u8; 32], NativeOfferSnapshotFacts, NativeOfferCodec>,
+    native_availability:
+        MaterializedMap<ArtifactId, NativeAvailabilitySnapshotFacts, NativeAvailabilityCodec>,
+    input_decisions: MaterializedMap<
+        ExactModuleIdentity,
+        crate::artifact_inventory::RecordedInputNativeDecision,
+        InputNativeDecisionCodec,
+    >,
+    frontier: ReachableBlocks,
+}
+impl<BS: Blockstore> Materializer<'_, BS> {
+    fn materialize_publication_native(
+        &mut self,
+        facts: &Arc<PublicationNativeFacts>,
+    ) -> Result<Cid, SnapshotError> {
+        let key = Arc::as_ptr(facts) as usize;
+        if let Some((_, cid)) = self.publication_native.get(&key) {
+            return Ok(*cid);
+        }
+        let empty = OrdMap::new();
+        let previous = self
+            .publication_native_base
+            .as_ref()
+            .map_or(&empty, |base| &base.receipt.frontier.blocks);
+        for change in previous.diff(&facts.receipt.frontier.blocks) {
+            if let DiffItem::Add(cid, block)
+            | DiffItem::Update {
+                new: (cid, block), ..
+            } = change
+            {
+                self.put_keyed(cid, &block.bytes).map_err(storage_error)?;
+            }
+        }
+        // A context references the four map roots directly, so its native-domain
+        // descriptor itself need not have been present in the base store.
+        let descriptor = facts
+            .receipt
+            .frontier
+            .blocks
+            .get(&facts.receipt.root)
+            .ok_or(SnapshotError::MissingBlock(facts.receipt.root))?;
+        self.put_keyed(&facts.receipt.root, &descriptor.bytes)
+            .map_err(storage_error)?;
+        self.publication_native
+            .insert(key, (Arc::clone(facts), facts.receipt.root));
+        Ok(facts.receipt.root)
+    }
+}
+fn hydrate_publication_native<BS: Blockstore>(
+    store: &SnapshotHydrator<'_, BS>,
+    cid: &Cid,
+) -> Result<Arc<PublicationNativeFacts>, SnapshotError> {
+    if let Some(facts) = store.publication_native.borrow().get(cid) {
+        return Ok(Arc::clone(facts));
+    }
+    let descriptor: PublicationNativeDescriptor = read_value(store, cid)?;
+    if descriptor.version != 2 {
+        return Err(malformed(
+            "publication native authority requires version 2 with born roles",
+        ));
+    }
+    let roles = hydrate_map_owned::<_, _, CompilerRoleCodec, _>(store, &descriptor.roles)?;
+    let offers = hydrate_map_owned::<_, _, NativeOfferCodec, _>(store, &descriptor.offers)?;
+    let native_availability = hydrate_map_owned::<_, _, NativeAvailabilityCodec, _>(
+        store,
+        &descriptor.native_availability,
+    )?;
+    let input_decisions =
+        hydrate_map_owned::<_, _, InputNativeDecisionCodec, _>(store, &descriptor.input_decisions)?;
+    for (key, offer) in &offers.facts {
+        if *key != offer.identity().map_err(malformed)? {
+            return Err(malformed("publication native offer key differs"));
+        }
+    }
+    for (key, row) in &native_availability.facts {
+        if *key != row.original {
+            return Err(malformed("publication native row key differs"));
+        }
+        if row
+            .contributions
+            .values()
+            .any(|c| !offers.facts.contains_key(&c.offer))
+        {
+            return Err(malformed("publication native row references missing offer"));
+        }
+    }
+    let facts = PublicationNativeFacts::maintain(
+        None,
+        PublicationNativeMaps {
+            roles: roles.facts,
+            offers: offers.facts,
+            native_availability: native_availability.facts,
+            input_decisions: input_decisions.facts,
+        },
+    )?;
+    if facts.commitment() != *cid {
+        return Err(malformed("publication native descriptor is not canonical"));
+    }
+    store
+        .publication_native
+        .borrow_mut()
+        .insert(*cid, Arc::clone(&facts));
+    Ok(facts)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContextDescriptor {
@@ -1592,8 +2064,7 @@ struct ContextDescriptor {
     lexical: SnapshotMapRoot,
     offers: SnapshotMapRoot,
     native_availability: SnapshotMapRoot,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    input_decisions: Option<SnapshotMapRoot>,
+    input_decisions: SnapshotMapRoot,
 }
 #[derive(Clone, Debug)]
 pub struct MaterializedContext {
@@ -1625,6 +2096,8 @@ impl<BS: Blockstore> Materializer<'_, BS> {
         base: Option<&MaterializedContext>,
         next: &ExactContextSnapshot,
     ) -> Result<MaterializedContext, SnapshotError> {
+        self.publication_native_base =
+            base.and_then(|base| base.snapshot.native_fact_owner.clone());
         self.selection_base = base.map(|base| base.selection.clone());
         self.native_availability_base = base.map(|base| base.native_availability.clone());
         let selection =
@@ -1650,14 +2123,14 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             &next.input_decisions,
         )?;
         let descriptor = ContextDescriptor {
-            version: 5,
+            version: 6,
             producer: next.producer,
             selection: selection.root.clone(),
             roles: roles.root.clone(),
             lexical: lexical.root.clone(),
             offers: offers.root.clone(),
             native_availability: native_availability.root.clone(),
-            input_decisions: Some(input_decisions.root.clone()),
+            input_decisions: input_decisions.root.clone(),
         };
         let root = if base.is_some_and(|base| {
             base.snapshot.producer == next.producer
@@ -1691,9 +2164,9 @@ pub fn hydrate_context<BS: Blockstore>(
     let hydrator = SnapshotHydrator::new(store);
     let store = &hydrator;
     let descriptor: ContextDescriptor = read_value(store, root.cid())?;
-    if descriptor.version != 5 {
+    if descriptor.version != 6 {
         return Err(malformed(
-            "context encoding requires version 5 with normalized native availability",
+            "context encoding requires version 6 with publication native authority",
         ));
     }
     let selection = store.selection(&descriptor.selection)?;
@@ -1727,14 +2200,19 @@ pub fn hydrate_context<BS: Blockstore>(
             }
         }
     }
-    let input_decisions = hydrate_map_owned::<_, _, InputNativeDecisionCodec, _>(
-        store,
-        descriptor
-            .input_decisions
-            .as_ref()
-            .ok_or_else(|| malformed("context version 5 omits input decisions"))?,
-    )?;
+    let input_decisions =
+        hydrate_map_owned::<_, _, InputNativeDecisionCodec, _>(store, &descriptor.input_decisions)?;
+    let native_fact_owner = Some(PublicationNativeFacts::maintain(
+        None,
+        PublicationNativeMaps {
+            roles: roles.facts.clone(),
+            offers: offers.facts.clone(),
+            native_availability: native_availability.facts.clone(),
+            input_decisions: input_decisions.facts.clone(),
+        },
+    )?);
     let snapshot = ExactContextSnapshot {
+        native_fact_owner,
         producer: descriptor.producer,
         selection: selection.snapshot.clone(),
         roles: roles.facts.clone(),

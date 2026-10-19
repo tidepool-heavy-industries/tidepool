@@ -29,6 +29,9 @@ pub(crate) struct PublishedOriginalEndorsement {
 }
 
 impl PublishedOriginalEndorsement {
+    pub(crate) fn new(owner: ExactModuleIdentity, role: CompilerInputRole) -> Self {
+        Self { owner, role }
+    }
     pub(crate) fn owner(&self) -> &ExactModuleIdentity {
         &self.owner
     }
@@ -134,6 +137,7 @@ impl ExactDeclarationContext {
             source_revision,
             original_input_identity,
             selection,
+            native_authority,
             ..
         } = role
         else {
@@ -218,7 +222,8 @@ impl ExactDeclarationContext {
             }
         }
         let bytes = serde_json::to_vec(&(
-            "published-source-original3",
+            "published-source-original4",
+            native_authority.facts().commitment(),
             self.owner.facts.producer,
             root,
             interface,
@@ -484,6 +489,29 @@ impl ExactDeclarationContext {
             .find(|role| role.original() == Some(entry.descriptor.id))
             .ok_or_else(|| failure("published root lacks its exact interface role"))?
             .interface();
+        if let Some(CompilerInputRole::PublishedSourceOriginal {
+            source_revision,
+            original_input_identity,
+            ..
+        }) = context
+            .owner
+            .facts
+            .compiler_support
+            .projection()
+            .snapshot_roles()
+            .get(root)
+        {
+            if source_revision == revision && original_input_identity == input_identity {
+                return Ok(Arc::new(PublishedSourceOriginalSelection {
+                    context: Arc::new(context.finish()?),
+                    revision: revision.into(),
+                    public_root: root.clone(),
+                }));
+            }
+            return Err(failure(
+                "publication reissue conflicts with its issued source identity",
+            ));
+        }
         let mut role = CompilerInputRole::PublishedSourceOriginal {
             interface,
             original: entry.descriptor.id,
@@ -493,6 +521,9 @@ impl ExactDeclarationContext {
                 &context.owner.facts.compiler_support.artifacts(),
             ),
             selection_sha256: [0; 32],
+            native_authority: crate::artifact_inventory::PublicationNativeAuthority::capture(
+                &context.owner.facts.compiler_support,
+            )?,
         };
         let digest = context.published_selection_sha256(root, &role)?;
         if let CompilerInputRole::PublishedSourceOriginal {
@@ -699,10 +730,12 @@ mod tests {
             .support_for_owners(vec![root_owner.clone()])
             .unwrap();
         let interfaces = types.artifacts();
-        assert!(interfaces
-            .capture_graph_selection()
-            .namespace
-            .contains(&canonical_binding));
+        assert!(
+            interfaces
+                .capture_graph_selection()
+                .namespace
+                .contains(&canonical_binding)
+        );
         assert!(interfaces.selected_native_groups().is_empty());
         let expected_edges = interfaces.binding_dependencies();
         let empty = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
@@ -715,11 +748,13 @@ mod tests {
         assert_eq!(roles[&identity("fixture", "Child")].interface(), child);
         assert_eq!(roles.len(), 2);
         assert!(roles.values().all(|role| role.original().is_none()));
-        assert!(extended
-            .artifact_view()
-            .capture_graph_selection()
-            .namespace
-            .contains(&canonical_binding));
+        assert!(
+            extended
+                .artifact_view()
+                .capture_graph_selection()
+                .namespace
+                .contains(&canonical_binding)
+        );
         assert_eq!(
             extended.artifact_view().binding_dependencies(),
             expected_edges
@@ -799,12 +834,14 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([7])
         );
-        assert!(context
-            .artifact_view()
-            .capture_graph_selection()
-            .native_groups
-            .iter()
-            .all(|group| group.binding.artifact() != original || group.original_ordinal == 7));
+        assert!(
+            context
+                .artifact_view()
+                .capture_graph_selection()
+                .native_groups
+                .iter()
+                .all(|group| group.binding.artifact() != original || group.original_ordinal == 7)
+        );
         let transport = NativeInputSelection::issue_checked(
             context.compiler_input_projection(),
             &context.compiler_metadata_snapshot().unwrap(),
@@ -812,7 +849,7 @@ mod tests {
             offers,
         )
         .unwrap();
-        let availability = &transport.availability[&original];
+        let availability = &transport.availability.0[&original];
         assert!(availability.permits(7));
         assert!(!availability.permits(11));
         assert!(
@@ -1075,13 +1112,14 @@ mod tests {
                                             .interface(),
                                         children[selected].descriptor.id
                                     );
-                                    assert!(next
-                                        .compiler_input_projection()
-                                        .snapshot_roles()
-                                        .keys()
-                                        .all(|owner| owner == &root_owner
-                                            || owner == &child_owner
-                                            || owner == &target.descriptor.owner));
+                                    assert!(
+                                        next.compiler_input_projection()
+                                            .snapshot_roles()
+                                            .keys()
+                                            .all(|owner| owner == &root_owner
+                                                || owner == &child_owner
+                                                || owner == &target.descriptor.owner)
+                                    );
                                     assert_eq!(
                                         next.artifact_view().selected_native_groups(),
                                         expected_groups
@@ -1349,11 +1387,13 @@ mod tests {
                 "published policy replaced the complete issued demand"
             );
         }
-        assert!(originals
-            .native_closure()
-            .binding_dependencies()
-            .iter()
-            .all(|edge| support.artifacts().binding_dependencies().contains(edge)));
+        assert!(
+            originals
+                .native_closure()
+                .binding_dependencies()
+                .iter()
+                .all(|edge| support.artifacts().binding_dependencies().contains(edge))
+        );
         assert_eq!(published.artifact_view().capture_graph_selection(), before);
         assert_eq!(
             published.semantic_sha256(),
@@ -1454,28 +1494,32 @@ mod tests {
                         )
                     })
                 {
-                    assert!(certified
-                        .artifacts()
-                        .capture_graph_selection()
-                        .roots
-                        .contains(selected));
+                    assert!(
+                        certified
+                            .artifacts()
+                            .capture_graph_selection()
+                            .roots
+                            .contains(selected)
+                    );
                 }
                 assert_eq!(
                     certified.projection().snapshot_roles()[&root.descriptor.owner],
                     role
                 );
-                assert!(certified
-                    .artifacts()
-                    .capture_graph_selection()
-                    .roots
-                    .contains(&crate::artifact_inventory::ArtifactBindingNode::Group(
-                        *policy
-                            .selection
-                            .graph_selection()
-                            .native_groups
-                            .first()
-                            .unwrap()
-                    )));
+                assert!(
+                    certified
+                        .artifacts()
+                        .capture_graph_selection()
+                        .roots
+                        .contains(&crate::artifact_inventory::ArtifactBindingNode::Group(
+                            *policy
+                                .selection
+                                .graph_selection()
+                                .native_groups
+                                .first()
+                                .unwrap()
+                        ))
+                );
             }
         }
     }
@@ -1655,14 +1699,18 @@ mod tests {
                 .issue_published_source_original("revision", "input", &root.descriptor.owner)
                 .unwrap();
             let published = publication.context();
-            assert!(published
-                .artifact_view()
-                .artifact_ids()
-                .contains(&old.descriptor.id));
-            assert!(published
-                .artifact_view()
-                .artifact_ids()
-                .contains(&leaf.descriptor.id));
+            assert!(
+                published
+                    .artifact_view()
+                    .artifact_ids()
+                    .contains(&old.descriptor.id)
+            );
+            assert!(
+                published
+                    .artifact_view()
+                    .artifact_ids()
+                    .contains(&leaf.descriptor.id)
+            );
             assert_eq!(
                 published
                     .artifact_view()
@@ -1782,11 +1830,13 @@ mod tests {
                 frozen[0].context().semantic_sha256(),
                 published.semantic_sha256()
             );
-            assert!(!frozen[0]
-                .context()
-                .artifact_view()
-                .artifact_ids()
-                .contains(&future.descriptor.id));
+            assert!(
+                !frozen[0]
+                    .context()
+                    .artifact_view()
+                    .artifact_ids()
+                    .contains(&future.descriptor.id)
+            );
             let published_role = published
                 .compiler_input_roles()
                 .into_iter()
@@ -1838,10 +1888,12 @@ mod tests {
                 ],
             )
             .expect("ordinary Future issuer must complete before composition");
-            assert!(future_context
-                .compiler_input_roles()
-                .iter()
-                .any(|role| role.original() == Some(future.descriptor.id)));
+            assert!(
+                future_context
+                    .compiler_input_roles()
+                    .iter()
+                    .any(|role| role.original() == Some(future.descriptor.id))
+            );
             let future_offer = future_context
                 .compiler_source_support()
                 .native_offers()
@@ -1870,10 +1922,12 @@ mod tests {
                         && existing == future.descriptor.id && incoming == current.descriptor.id));
             } else {
                 let replacement = replacement.unwrap();
-                assert!(replacement
-                    .compiler_input_roles()
-                    .iter()
-                    .any(|role| role.original() == Some(future.descriptor.id)));
+                assert!(
+                    replacement
+                        .compiler_input_roles()
+                        .iter()
+                        .any(|role| role.original() == Some(future.descriptor.id))
+                );
                 let reopened = replacement.published_source_original_selections().unwrap();
                 let frozen = reopened[0].context();
                 assert!(frozen.compiler_input_roles().contains(&published_role));
@@ -1881,27 +1935,35 @@ mod tests {
                     frozen.artifact_view().selected_native_groups(),
                     BTreeSet::from([early])
                 );
-                assert!(frozen
-                    .artifact_view()
-                    .capture_graph_selection()
-                    .namespace
-                    .contains(&canonical_binding));
-                assert!(!frozen
-                    .artifact_view()
-                    .contains_namespace_artifact(future.descriptor.id));
-                assert!(!frozen
-                    .compiler_input_roles()
-                    .iter()
-                    .any(|role| role.original() == Some(future.descriptor.id)));
+                assert!(
+                    frozen
+                        .artifact_view()
+                        .capture_graph_selection()
+                        .namespace
+                        .contains(&canonical_binding)
+                );
+                assert!(
+                    !frozen
+                        .artifact_view()
+                        .contains_namespace_artifact(future.descriptor.id)
+                );
+                assert!(
+                    !frozen
+                        .compiler_input_roles()
+                        .iter()
+                        .any(|role| role.original() == Some(future.descriptor.id))
+                );
                 let CompilerInputRole::PublishedSourceOriginal { selection, .. } = &published_role
                 else {
                     unreachable!()
                 };
-                assert!(!selection
-                    .graph_selection()
-                    .bindings
-                    .iter()
-                    .any(|binding| binding.artifact == future.descriptor.id));
+                assert!(
+                    !selection
+                        .graph_selection()
+                        .bindings
+                        .iter()
+                        .any(|binding| binding.artifact == future.descriptor.id)
+                );
                 let frozen_graph = frozen.artifact_view().capture_graph_selection();
                 assert_eq!(frozen_graph.roots, selection.graph_selection().roots);
                 assert_eq!(
@@ -1909,21 +1971,25 @@ mod tests {
                     selection.graph_selection().namespace
                 );
                 for edge in published.artifact_view().binding_dependencies() {
-                    assert!(frozen
-                        .artifact_view()
-                        .binding_dependencies()
-                        .contains(&edge));
+                    assert!(
+                        frozen
+                            .artifact_view()
+                            .binding_dependencies()
+                            .contains(&edge)
+                    );
                 }
                 if frozen
                     .artifact_view()
                     .artifact_ids()
                     .contains(&future.descriptor.id)
                 {
-                    assert!(frozen
-                        .compiler_source_support()
-                        .native_offers()
-                        .iter()
-                        .any(|offer| offer.same_issuance(&future_offer)));
+                    assert!(
+                        frozen
+                            .compiler_source_support()
+                            .native_offers()
+                            .iter()
+                            .any(|offer| offer.same_issuance(&future_offer))
+                    );
                 }
                 // The genuine Future offer may retain private payload custody;
                 // it does not change the frozen publication's namespace or roots.
@@ -2036,14 +2102,18 @@ mod tests {
                     receipts_by_artifact(&interfaces, interface_id),
                 );
                 for interface in &reused_interfaces {
-                    assert!(reused_root
-                        .path()
-                        .join(&interface.certificate_path)
-                        .is_file());
-                    assert!(reused_root
-                        .path()
-                        .join(&interface.interface.interface_path)
-                        .is_file());
+                    assert!(
+                        reused_root
+                            .path()
+                            .join(&interface.certificate_path)
+                            .is_file()
+                    );
+                    assert!(
+                        reused_root
+                            .path()
+                            .join(&interface.interface.interface_path)
+                            .is_file()
+                    );
                 }
                 // Complete owner evidence uses the strong recorded roles;
                 // legacy graph DTOs can omit unused available proof scopes.

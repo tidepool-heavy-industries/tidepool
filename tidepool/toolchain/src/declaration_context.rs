@@ -3411,14 +3411,14 @@ impl RecoveredArtifactInventory {
             template_imports: None,
             lexical: crate::exact_context::ExactLexicalSnapshot::default()
                 .replace(snapshot.lexical())?,
-        })
-        .finish()?;
+        });
         let updated = context
             .owner
             .facts
             .compiler_support
             .restore_snapshot_evidence(snapshot)?;
         context = context.rebuild(|facts| facts.compiler_support = updated);
+        context = context.finish()?;
         context.bind_snapshot_baseline(acquired)?;
         Ok(context)
     }
