@@ -1003,7 +1003,7 @@ mod tests {
         assert_eq!(
             prepared
                 .run(
-                    "result",
+                    session::PREPARED_SCAFFOLD_TARGET,
                     DEFAULT_NURSERY_SIZE,
                     &mut frunk::HNil,
                     &(),
