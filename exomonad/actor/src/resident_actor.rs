@@ -8980,6 +8980,10 @@ where
         context: &ActorSessionContext,
         initial_user_message: Option<String>,
     ) -> Result<LocalResidentInstallation, ResidentActorWorkbenchError> {
+        self.environment
+            .runner
+            .adopt_final_source_scope(context.clone())
+            .await?;
         self.select_initial_configuration(context).await?;
         let source = self.freeze_installed_source(context.actor)?;
         self.prepare_interactive_policy_from_source(kernel, context, initial_user_message, source)
@@ -14830,14 +14834,14 @@ where
                     })
                 }));
                 let result = async {
-                    let (publication, outcome) = environment
+                    let (publication, outcome, source_dependency) = environment
                         .runner
                         .prepare_root_program_tracked(session, compiled, publisher.into_mint())
                         .await?;
                     let placement = publication.placement();
                     let descriptor = ActorDescriptor::new(label, placement)
                         .with_capabilities(role)
-                        .admit_independent_world();
+                        .with_source_dependency(source_dependency);
                     let mut behavior =
                         ResidentKernelBehavior::prepared(descriptor, environment.clone(), outcome);
                     if let Some(replay) = replay {
@@ -17349,7 +17353,7 @@ mod tests {
                 }]),
             };
             let response = super::cell_check_rejection(tidepool_runtime::session::CellCheckFailure {
-                error: tidepool_runtime::CompileError::Diagnostics(diagnostics), items,
+                error: tidepool_runtime::CompileError::Diagnostics(diagnostics), items, source_admission: None,
             }, "-- λ\n:}");
             prop_assert_eq!(response.status, WorkbenchRunStatus::Rejected);
             prop_assert_eq!(response.items.len(), 1);

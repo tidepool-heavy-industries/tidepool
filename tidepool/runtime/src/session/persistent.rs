@@ -218,12 +218,8 @@ fn stage_interface_file(
 /// wrapping, decl/pure-bind routing, output draining, continuation-id minting)
 /// and delegate the machine and persistent-store operations here.
 pub struct PersistentSession {
-    pub(super) source_admission: Option<super::RuntimeSourceAdmission>,
-    pub(super) source_claim: Option<super::RuntimeSourceClaim>,
-    pub(super) source_refusal: Option<super::SourceAdmissionError>,
-    pub(super) source_context_active: bool,
-    pub(super) source_admission_hook: Option<super::SourceAdmissionHook>,
-    pub(super) source_hook_admitted: bool,
+    pub(super) source_transaction:
+        Option<Arc<super::source_admission::RuntimeSourceCompilerTransaction>>,
     catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
     admission_owner: Arc<super::admission::RuntimeAdmissionOwner>,
     /// The resident machine — `None` before the first turn bootstraps it,
@@ -359,6 +355,35 @@ pub struct DeclarationPlaneCommit {
 }
 
 impl PersistentSession {
+    /// Own source preparation for callers that hold the session substrate.
+    pub fn with_source_compiler_transaction<T>(
+        &mut self,
+        source: Arc<super::RuntimeLexicalScopeLease>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        cancellation: crate::CompilerTransactionCancellation,
+        supplemental_hook: Option<super::SourceAdmissionHook>,
+        close_sink: impl FnOnce(crate::CompilerTransactionClose),
+        action: impl FnOnce(&mut Self, &mut dyn FnMut(crate::CompilerTransactionClose)) -> T,
+    ) -> Result<crate::CompilerTransactionSettled<T>, super::SourceAdmissionError> {
+        super::source_admission::run_source_compiler_transaction(
+            source,
+            workload,
+            cancellation,
+            supplemental_hook,
+            close_sink,
+            |context, report| {
+                let previous = self.source_transaction.replace(context);
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self, report)));
+                self.source_transaction = previous;
+                match result {
+                    Ok(value) => value,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            },
+        )
+    }
+
     /// Build an idle session core. `lib` is the persistent declaration environment (`Some` for the repl
     /// and the accumulating harness; `None` for a session with no persistent declarations). The
     /// machine is not bootstrapped until the first turn.
@@ -371,12 +396,7 @@ impl PersistentSession {
                 .max(lib.log.retained_value_generation_high_water());
         }
         PersistentSession {
-            source_admission: None,
-            source_claim: None,
-            source_refusal: None,
-            source_context_active: false,
-            source_admission_hook: None,
-            source_hook_admitted: false,
+            source_transaction: None,
             admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new()),
             catalog_selection: Default::default(),
             machine: None,
@@ -1917,6 +1937,7 @@ impl PersistentSession {
         source_layer: &[PathBuf],
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<super::StagedDeclaration, SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
         let (persistent_imports, import_modules, visible_values) =
             self.declaration_staging_context_in(scope, receipt, external)?;
         #[allow(clippy::expect_used, reason = "decl plane present")]
@@ -1950,6 +1971,11 @@ impl PersistentSession {
         receipt: &super::DeclarationReceipt,
         external: &SourceImports,
     ) -> Result<(DeclarationCandidateRender, Vec<(SessionVarId, String)>), SessionError> {
+        let _source_claim = if self.lib().durable_graph.is_some() {
+            self.admit_source_work_in(scope)?
+        } else {
+            None
+        };
         let (persistent_imports, import_modules, visible_values) =
             self.declaration_staging_context_in(scope, receipt, external)?;
         #[allow(clippy::expect_used, reason = "decl plane present")]
@@ -2022,6 +2048,7 @@ impl PersistentSession {
         ) -> Result<A, SessionError>,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
         let scope = staged.scope();
+        let _source_claim = self.admit_source_work_in(scope)?;
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -3922,6 +3949,7 @@ impl PersistentSession {
         external: &SourceImports,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<DeclarationPlaneCommit, SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
@@ -7720,33 +7748,11 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
     ) -> Result<Option<super::RuntimeSourceClaim>, super::SourceAdmissionError> {
-        if let Some(refusal) = &self.source_refusal {
-            return Err(refusal.clone());
-        }
-        if self.source_context_active && !self.source_hook_admitted {
-            if let Some(hook) = &self.source_admission_hook {
-                hook()?;
-                self.source_hook_admitted = true;
-            }
-        }
-        if self.source_claim.is_some() {
+        if let Some(owner) = &self.source_transaction {
+            owner.admit(self.source_admission_in(scope))?;
             return Ok(None);
         }
-        let admission = if self.source_context_active {
-            self.source_admission.clone()
-        } else {
-            self.source_admission_in(scope)
-        };
-        let claim = admission
-            .as_ref()
-            .map(super::RuntimeSourceAdmission::admit)
-            .transpose()?;
-        if self.source_context_active {
-            self.source_claim = claim;
-            Ok(None)
-        } else {
-            Ok(claim)
-        }
+        Err(super::SourceAdmissionError::MissingTransaction)
     }
 
     pub fn active_notebook_generation(

@@ -266,7 +266,6 @@ pub(crate) struct CompilerWorkTicket {
     settled: bool,
     owner: crate::resident_workbench::CompilerCloseOwner,
     source_claim: Option<crate::resident_workbench::generation_admission::SourceClaim>,
-    runtime_source_claims: Arc<Mutex<Vec<tidepool_runtime::session::RuntimeSourceClaim>>>,
     lazy_source_claims:
         Arc<Mutex<Vec<crate::resident_workbench::generation_admission::SourceClaim>>>,
 }
@@ -343,7 +342,6 @@ impl CompilerWorkTicket {
             settled: false,
             owner,
             source_claim: None,
-            runtime_source_claims: Arc::new(Mutex::new(Vec::new())),
             lazy_source_claims: Arc::new(Mutex::new(Vec::new())),
         };
         if ticket.owner.register_receipt(registration, admission) {
@@ -366,31 +364,60 @@ impl CompilerWorkTicket {
             &mut tidepool_runtime::session::ResidentSession<H, O>,
             &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
         ) -> T,
-    ) -> T
+    ) -> Result<T, crate::resident_workbench::generation_admission::GenerationAdmissionError>
     where
         H: tidepool_effect::dispatch::DispatchEffect<O> + Send,
         O: tidepool_runtime::session::OutputSink + Sync,
     {
-        // The hook retains the actor world's obligation even before it has a
-        // notebook gate. The concrete runtime claim independently enforces
-        // lexical source admission; both settle with this exact native END.
-        let claims = ticket.runtime_source_claims();
+        let source = match dependency.source_lease() {
+            Ok(source) => source,
+            Err(error) => {
+                ticket.consume_close(tidepool_runtime::CompilerTransactionClose::NotStarted);
+                return Err(error);
+            }
+        };
         let hook = ticket.source_admission_hook(dependency.clone());
-        let admission = dependency.runtime_admission();
-        ticket.run(|settlement| {
-            session.with_source_admission(admission, |session| {
-                session.with_source_admission_hook(hook, |session| {
-                    session.with_source_claim_transfer(
-                        |claim| {
-                            if let Some(claim) = claim {
-                                claims.lock().push(claim);
-                            }
-                        },
-                        |session| action(session, settlement),
-                    )
-                })
-            })
-        })
+        let cancellation = ticket.control.cancellation.clone();
+        session
+            .with_source_compiler_transaction(
+                source,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation,
+                Some(hook),
+                move |close| ticket.consume_close(close),
+                action,
+            )
+            .map(|settled| settled.into_outcome().action)
+    }
+
+    pub(crate) fn run_source_compiler_phase<T>(
+        self,
+        dependency: &crate::resident_workbench::generation_admission::SourceDependency,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        action: impl FnOnce(
+            &tidepool_runtime::session::RuntimeSourceCompilerTransaction,
+            &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+        ) -> T,
+    ) -> Result<
+        tidepool_runtime::CompilerTransactionSettled<T>,
+        crate::resident_workbench::generation_admission::GenerationAdmissionError,
+    > {
+        let source = match dependency.source_lease() {
+            Ok(source) => source,
+            Err(error) => {
+                self.consume_close(tidepool_runtime::CompilerTransactionClose::NotStarted);
+                return Err(error);
+            }
+        };
+        let hook = self.source_admission_hook(dependency.clone());
+        let cancellation = self.control.cancellation.clone();
+        source.with_source_compiler_transaction(
+            workload,
+            cancellation,
+            Some(hook),
+            move |close| self.consume_close(close),
+            action,
+        )
     }
 
     pub(crate) fn source_admission_hook(
@@ -402,18 +429,13 @@ impl CompilerWorkTicket {
         Arc::new(move || {
             let mut admitted = admitted.lock();
             if !*admitted {
-                let claim = dependency.claim()?;
-                claims.lock().push(claim);
+                if let Some(claim) = dependency.claim_actor_world()? {
+                    claims.lock().push(claim);
+                }
                 *admitted = true;
             }
             Ok(())
         })
-    }
-
-    pub(crate) fn runtime_source_claims(
-        &self,
-    ) -> Arc<Mutex<Vec<tidepool_runtime::session::RuntimeSourceClaim>>> {
-        self.runtime_source_claims.clone()
     }
 
     pub(crate) fn with_source_claim(
@@ -468,11 +490,8 @@ impl CompilerWorkTicket {
     }
 
     fn consume_close(mut self, close: tidepool_runtime::CompilerTransactionClose) {
-        if !close.resources_retired() {
+        if !close.resources_retired() || std::thread::panicking() {
             for claim in self.lazy_source_claims.lock().drain(..) {
-                claim.retain_unconfirmed();
-            }
-            for claim in self.runtime_source_claims.lock().drain(..) {
                 claim.retain_unconfirmed();
             }
             if let Some(claim) = self.source_claim.take() {
@@ -489,9 +508,6 @@ impl Drop for CompilerWorkTicket {
     fn drop(&mut self) {
         if !self.settled {
             for claim in self.lazy_source_claims.lock().drain(..) {
-                claim.retain_unconfirmed();
-            }
-            for claim in self.runtime_source_claims.lock().drain(..) {
                 claim.retain_unconfirmed();
             }
             if let Some(claim) = self.source_claim.take() {

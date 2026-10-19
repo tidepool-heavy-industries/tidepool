@@ -386,13 +386,28 @@ fn encode_checked_expression(plan: &CheckedExpressionPlan) -> CborValue {
 #[derive(Debug, thiserror::Error)]
 #[error("{error}")]
 pub struct CellCheckFailure {
+    pub source_admission: Option<super::SourceAdmissionError>,
     pub error: CompileError,
     pub items: Option<Vec<CellAnalysisItem>>,
 }
 
 impl From<CompileError> for CellCheckFailure {
     fn from(error: CompileError) -> Self {
-        Self { error, items: None }
+        Self {
+            error,
+            items: None,
+            source_admission: None,
+        }
+    }
+}
+
+impl From<super::SourceAdmissionError> for CellCheckFailure {
+    fn from(error: super::SourceAdmissionError) -> Self {
+        Self {
+            error: CompileError::ExtractFailed(error.to_string()),
+            items: None,
+            source_admission: Some(error),
+        }
     }
 }
 
@@ -2697,6 +2712,7 @@ impl From<std::io::Error> for ActivationRendererFailure {
 /// Specialize immutable pure renderer code against the original compiler context.
 #[tracing::instrument(name = "activation_renderer_specialize", skip_all, fields(original_execution = ?admission.original_execution_digest(), original_display = ?admission.original_context_digest()))]
 pub fn compile_activation_renderer(
+    source: &super::RuntimeSourceCompilerTransaction,
     admission: &super::RuntimeActivationPreviewAdmission,
     template_source: &str,
     budget: u64,
@@ -2708,6 +2724,9 @@ pub fn compile_activation_renderer(
     >,
     ActivationRendererFailure,
 > {
+    source
+        .admit(Some(admission.source_lease().source_admission().clone()))
+        .map_err(super::PreparedRuntimeError::from)?;
     super::resident::PreparedRenderer::prepare(|| {
         compile_activation_renderer_inner(admission, template_source, budget, includes, settlement)
     })
@@ -3039,9 +3058,11 @@ pub struct PreparedRuntimeCell {
 }
 
 pub fn prepare_cell_program_admitted(
+    source: &super::RuntimeSourceCompilerTransaction,
     admission: Arc<super::RuntimeCellAdmission>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
+    source.admit(Some(admission.source_lease().source_admission().clone()))?;
     prepare_cell_program_admitted_inner(
         admission,
         #[cfg(test)]
@@ -3143,10 +3164,14 @@ fn compile_cell_program_admitted_inner(
 > {
     let cancellation = crate::CompilerTransactionCancellation::new();
     let settlement = std::cell::RefCell::new(settlement);
-    let outcome = crate::settle_compiler_transaction_cancellable(
+    let source = admission.source_lease();
+    let outcome = source.with_source_compiler_transaction(
+        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
         cancellation,
+        None,
         |close| settlement.borrow_mut()(close),
-        || {
+        |owner, _| {
+            owner.admit(None)?;
             prepare_cell_program_admitted_inner(
                 admission,
                 #[cfg(test)]
@@ -3154,7 +3179,7 @@ fn compile_cell_program_admitted_inner(
                 &mut |close| settlement.borrow_mut()(close),
             )
         },
-    );
+    )?;
     #[cfg(test)]
     let evidence = outcome
         .action()
@@ -3448,6 +3473,7 @@ fn check_cell_impl(
                     Err(error) => return Err(error.into()),
                 };
                 return Err(CellCheckFailure {
+                    source_admission: None,
                     error: offer.retain_failure(temp.path(), &cmd, &output.stderr, error),
                     items,
                 });
@@ -7314,11 +7340,18 @@ mod tests {
         .unwrap();
         // Fixture bootstrap has its own real checked compilation; exclude it.
         let baseline = counts();
-        let outcome = crate::settle_compiler_transaction_cancellable(
-            crate::CompilerTransactionCancellation::new(),
-            |_| {},
-            || prepare_cell_program_admitted(admission.clone(), &mut |_| {}),
-        );
+        let outcome = admission
+            .source_lease()
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |source_owner, _| {
+                    prepare_cell_program_admitted(source_owner, admission.clone(), &mut |_| {})
+                },
+            )
+            .unwrap();
         let prepared = outcome.action().as_ref().unwrap();
         let absolute_before = counts();
         let before = (
@@ -7490,11 +7523,18 @@ mod tests {
         .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let outcome = crate::settle_compiler_transaction_cancellable(
-            cancellation.clone(),
-            |_| {},
-            || prepare_cell_program_admitted(admission, &mut |_| {}),
-        );
+        let outcome = admission
+            .source_lease()
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation.clone(),
+                None,
+                |_| {},
+                |source_owner, _| {
+                    prepare_cell_program_admitted(source_owner, admission, &mut |_| {})
+                },
+            )
+            .unwrap();
         assert!(outcome.action().is_ok());
         assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
         let after = tidepool_extract_cmd::extract_spawn_count();
@@ -7543,19 +7583,25 @@ mod tests {
         let cancellation = crate::CompilerTransactionCancellation::new();
         let observed = std::cell::RefCell::new(None);
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let outcome = crate::settle_compiler_transaction_cancellable(
-            cancellation.clone(),
-            |close| *observed.borrow_mut() = Some(close),
-            || {
-                let prepared = prepare_cell_program_admitted(admission, &mut |_| {});
-                assert!(
-                    prepared.is_ok(),
-                    "physical preparation completes before cancellation"
-                );
-                cancellation.cancel();
-                prepared
-            },
-        );
+        let outcome = admission
+            .source_lease()
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation.clone(),
+                None,
+                |close| *observed.borrow_mut() = Some(close),
+                |source_owner, _| {
+                    let prepared =
+                        prepare_cell_program_admitted(source_owner, admission, &mut |_| {});
+                    assert!(
+                        prepared.is_ok(),
+                        "physical preparation completes before cancellation"
+                    );
+                    cancellation.cancel();
+                    prepared
+                },
+            )
+            .unwrap();
         assert!(matches!(
             outcome.close(),
             crate::CompilerTransactionClose::Retired(_)
@@ -7606,16 +7652,23 @@ mod tests {
         let cancellation = crate::CompilerTransactionCancellation::new();
         let observed = std::cell::RefCell::new(None);
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let original = crate::with_compiler_transaction_cancellable(
-            cancellation.clone(),
-            |close| *observed.borrow_mut() = Some(close),
-            || {
-                let prepared = prepare_cell_program_admitted(admission, &mut |_| {});
-                assert!(prepared.is_ok());
-                cancellation.cancel();
-                prepared
-            },
-        );
+        let original = admission
+            .source_lease()
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation.clone(),
+                None,
+                |close| *observed.borrow_mut() = Some(close),
+                |source_owner, _| {
+                    let prepared =
+                        prepare_cell_program_admitted(source_owner, admission, &mut |_| {});
+                    assert!(prepared.is_ok());
+                    cancellation.cancel();
+                    prepared
+                },
+            )
+            .unwrap()
+            .into_outcome();
         assert!(matches!(
             original.close,
             crate::CompilerTransactionClose::Retired(_)
@@ -7666,11 +7719,18 @@ mod tests {
         .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let outcome = crate::settle_compiler_transaction_cancellable(
-            cancellation,
-            |_| {},
-            || prepare_cell_program_admitted(admission, &mut |_| {}),
-        );
+        let outcome = admission
+            .source_lease()
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation,
+                None,
+                |_| {},
+                |source_owner, _| {
+                    prepare_cell_program_admitted(source_owner, admission, &mut |_| {})
+                },
+            )
+            .unwrap();
         assert!(outcome.action().is_ok());
         assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
         let after = tidepool_extract_cmd::extract_spawn_count();

@@ -814,13 +814,16 @@ mod tests {
         let dependency = SourceDependency::World(BootstrapWorld::new(None));
         let mut context = context.clone();
         context.source_dependency = dependency.clone();
+        dependency
+            .adopt_final_scope(session, context.placement.lexical_scope)
+            .unwrap();
         let services = crate::capabilities::WorkbenchServices::new();
         let owner = services.with_compiler_owner(
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
                 crate::RetainedActorExit::new(),
             ),
         );
-        let facades = session.with_source_admission(Ok(None), |session| {
+        let facades = {
             crate::termination::CompilerWorkTicket::run_source_transaction(
                 session,
                 owner.admit_continuation().unwrap(),
@@ -841,7 +844,8 @@ mod tests {
                     facades
                 },
             )
-        });
+            .unwrap()
+        };
         if compiler_work {
             assert!(!facades.is_empty());
             assert!(matches!(

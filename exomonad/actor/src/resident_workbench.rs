@@ -418,6 +418,9 @@ fn cell_check_error(
     failure: tidepool_runtime::session::CellCheckFailure,
     cell_source: &str,
 ) -> ResidentActorWorkbenchError {
+    if let Some(error) = &failure.source_admission {
+        return error.clone().into();
+    }
     if classify_compile(&failure.error).class == FailureClass::UserHaskell {
         let mut failure = failure;
         explain_source_order(&mut failure, cell_source);
@@ -2410,7 +2413,7 @@ where
             .and_then(|_| observed.lease.tools.as_ref())
             .and_then(|tools| tools._source_original.clone());
         self.access
-            .with_machine(context, move |session, context, _| {
+            .with_continuation_machine(context, move |session, context, _, _| {
                 let _source_claim = context.source_dependency().claim()?;
                 let mut next_context = context.clone();
                 let prerequisite = expected.as_ref().map_or_else(
@@ -5040,49 +5043,75 @@ impl<H, O> ResidentActorRunner<H, O> {
         // The blocking task owns only an unregistered session. Cancellation
         // drops its eventual result, so it cannot register an orphan after the
         // awaiting launch's cleanup has already run.
-        let compiler_work = crate::capabilities::CompilerOwnerScope::current()
-            .and_then(|scope| scope.with_source_dependency(source_dependency).admit_work())
+        let compiler_owner = crate::capabilities::CompilerOwnerScope::current()
             .map_err(|error| error.to_string())?;
+        let compiler_work = compiler_owner
+            .clone()
+            .with_source_dependency(source_dependency)
+            .admit_work()
+            .map_err(|error| error.to_string())?;
+        let dependency = source_dependency.clone();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
         let (machine, lexical_scope) = spawn_blocking_in_span(move || {
-            compiler_work.run(|settlement| {
-                let mut machine = factory(session_id, &source_layer, settlement)?;
-                let lexical_scope = machine.mint_isolated_scope();
-                machine
-                    .set_actor_execution(
-                        tidepool_runtime::session::SessionRunContext {
-                            resource_scope,
-                            lexical_scope,
-                            ..tidepool_runtime::session::SessionRunContext::ROOT
-                        },
-                        tidepool_effect::EffectRunPolicy::HandleOrSuspend,
-                        tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-                    )
-                    .map_err(|error| format!("child session bootstrap context: {error}"))?;
-                if let Some((val_generation, declaration_high_water)) = seed {
-                    machine.set_val_gen(val_generation);
-                    if let Some(high_water) = declaration_high_water {
-                        machine
-                            .initialize_captured_declaration_high_water(high_water)
-                            .map_err(|error| {
-                                format!("child declaration identity reservation: {error}")
-                            })?;
+            let prepared = compiler_work
+                .run_with_close(|settlement| factory(session_id, &source_layer, settlement))
+                .into_outcome();
+            if !prepared.close.resources_retired() {
+                return Err(format!(
+                    "child factory preparation did not close: {:?}; action: {:?}",
+                    prepared.close,
+                    prepared.action.as_ref().err()
+                ));
+            }
+            let mut machine = prepared.action?;
+            let lexical_scope = machine.mint_isolated_scope();
+            machine
+                .set_actor_execution(
+                    tidepool_runtime::session::SessionRunContext {
+                        resource_scope,
+                        lexical_scope,
+                        ..tidepool_runtime::session::SessionRunContext::ROOT
+                    },
+                    tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+                    tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                )
+                .map_err(|error| format!("child session bootstrap context: {error}"))?;
+            dependency
+                .adopt_final_scope(&mut machine, lexical_scope)
+                .map_err(|error| error.to_string())?;
+            let runtime_work = compiler_owner
+                .admit_continuation()
+                .map_err(|error| error.to_string())?;
+            crate::termination::CompilerWorkTicket::run_source_transaction(
+                &mut machine,
+                runtime_work,
+                &dependency,
+                |machine, settlement| {
+                    if let Some((val_generation, declaration_high_water)) = seed {
+                        machine.set_val_gen(val_generation);
+                        if let Some(high_water) = declaration_high_water {
+                            machine
+                                .initialize_captured_declaration_high_water(high_water)
+                                .map_err(|error| {
+                                    format!("child declaration identity reservation: {error}")
+                                })?;
+                        }
                     }
-                }
-                if let Some(registry) = &image_registry {
-                    // Before the bootstrap, so the child's first install is the
-                    // run's shared driver image rather than a second compile of it.
-                    machine.set_image_registry(Arc::clone(registry));
-                }
-                machine
-                    .run_with_sites(
-                        "child_session_bootstrap",
-                        bootstrap_program.code(),
-                        settlement,
-                    )
-                    .map_err(|error| format!("child session bootstrap install: {error}"))?;
-                Ok::<_, String>((machine, lexical_scope))
-            })
+                    if let Some(registry) = &image_registry {
+                        machine.set_image_registry(Arc::clone(registry));
+                    }
+                    machine
+                        .run_with_sites(
+                            "child_session_bootstrap",
+                            bootstrap_program.code(),
+                            settlement,
+                        )
+                        .map_err(|error| format!("child session bootstrap install: {error}"))?;
+                    Ok::<_, String>(())
+                },
+            )
+            .map_err(|error| error.to_string())??;
+            Ok::<_, String>((machine, lexical_scope))
         })
         .await
         .map_err(|error| format!("child session preparation task: {error}"))??;
@@ -5847,10 +5876,10 @@ where
         self.with_machine(context, move |session, context, source| {
             crate::termination::CompilerWorkTicket::run_source_transaction(
                 session,
-                owner.admit_work()?,
+                owner.admit_continuation()?,
                 context.source_dependency(),
                 |session, settlement| operation(session, context, source, settlement),
-            )
+            )?
         })
         .await
     }
@@ -5877,7 +5906,7 @@ where
                 owner.admit_continuation()?,
                 context.source_dependency(),
                 |session, settlement| operation(session, context, source, settlement),
-            )
+            )?
         })
         .await
     }
@@ -5905,7 +5934,7 @@ where
                 owner.admit_continuation()?,
                 context.source_dependency(),
                 |session, settlement| operation(session, context, source, settlement),
-            )
+            )?
         })
         .await
     }
@@ -5931,10 +5960,10 @@ where
         self.with_machine_wait(context, admission, move |session, context, source| {
             crate::termination::CompilerWorkTicket::run_source_transaction(
                 session,
-                owner.admit_work()?,
+                owner.admit_continuation()?,
                 context.source_dependency(),
                 |session, settlement| operation(session, context, source, settlement),
-            )
+            )?
         })
         .await
     }
@@ -5985,7 +6014,7 @@ where
         &self,
         context: crate::ActorSessionContext,
         admission: impl Into<MachineCheckoutAdmission>,
-        bootstrap_claim: bool,
+        _bootstrap_claim: bool,
         operation: impl FnOnce(
                 &mut ResidentSession<H, O>,
                 &crate::ActorSessionContext,
@@ -6030,11 +6059,6 @@ where
                         context.live_payload,
                     )
                     .map_err(ResidentActorWorkbenchError::Resident)?;
-                let (source_admission, _bootstrap_claim) = if bootstrap_claim {
-                    context.source_dependency().checkout_admission()
-                } else {
-                    (context.source_dependency().runtime_admission(), None)
-                };
                 let admitted = |session: &mut ResidentSession<H, O>| {
                     if let Some(owner) = slot_owner {
                         let authority = owner.0.retained_authority.clone();
@@ -6054,10 +6078,10 @@ where
                         operation(session, &context, source)
                     }
                 };
-                session.with_source_admission(source_admission, |session| match invocation_cancel {
+                match invocation_cancel {
                     Some(cancel) => session.with_invocation_cancel(cancel, admitted),
                     None => admitted(session),
-                })
+                }
             },
         )
         .instrument(compile_span)
@@ -7447,13 +7471,14 @@ where
                     let mut cancel_on_drop =
                         CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
                     let compiler_admission = admission.clone();
+                    let compiler_source = context.source_dependency().clone();
                     let compiler_template = template.clone();
                     let compiler_includes = includes.clone();
                     #[cfg(test)]
                     let producer_observer = renderer_observer.clone();
                     let compiled =
                         crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                            let result = compiler_work.run_with_close(|settlement| {
+                            let result = compiler_work.run_source_compiler_phase(&compiler_source, tidepool_toolchain::artifacts::CompileWorkload::Foreground, |source_owner, settlement| {
                                 producer.begin_native().map_err(CompileError::from)?;
                                 #[cfg(test)]
                                 if let Some(observer) = &producer_observer {
@@ -7463,13 +7488,14 @@ where
                                         })?;
                                 }
                                 tidepool_runtime::session::turn::compile_activation_renderer(
-                                    &compiler_admission,
+                                    source_owner, &compiler_admission,
                                     &compiler_template,
                                     budget,
                                     &compiler_includes, settlement)
                             });
                             // The affine compiler ticket has closed before Ready or
                             // Empty is published, even if the async waiter vanished.
+                            let result = result.map_err(|error| tidepool_runtime::session::turn::ActivationRendererFailure::from(tidepool_runtime::session::PreparedRuntimeError::from(error)))?;
                             let settled = producer.settle_native(result).map_err(|failure| match failure {
                                 tidepool_runtime::session::RendererProductionFailure::Compile(error) => error,
                                 tidepool_runtime::session::RendererProductionFailure::Publication { error, action_error, .. } => {
@@ -8043,6 +8069,7 @@ where
             .await?;
         let check_specification = specification.clone();
         let check_admission = admission.clone();
+        let check_source = context.source_dependency().clone();
         let compiler_work =
             crate::capabilities::CompilerOwnerScope::current().and_then(|scope| {
                 scope
@@ -8052,12 +8079,18 @@ where
         cancel_on_drop.0 = Some(compiler_work.control());
         let (checked, program) =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                let prepared = compiler_work.run_with_close(|settlement| {
-                    tidepool_runtime::session::turn::prepare_cell_program_admitted(
-                        check_admission,
-                        settlement,
-                    )
-                });
+                let prepared = compiler_work.run_source_compiler_phase(
+                    &check_source,
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    |source_owner, settlement| {
+                        tidepool_runtime::session::turn::prepare_cell_program_admitted(
+                            source_owner,
+                            check_admission,
+                            settlement,
+                        )
+                    },
+                );
+                let prepared = prepared.map_err(ResidentActorWorkbenchError::from)?;
                 tidepool_runtime::session::turn::finish_cell_program_admitted(prepared).map_err(
                     |failure| cell_check_error(failure, &check_specification.cell.cell_source),
                 )
@@ -8378,7 +8411,8 @@ where
         tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_item_admit_started", "workbench phase");
         let reservation = self
             .access
-            .with_machine(context.clone(), move |session, _, _| {
+            .with_compiler_machine(context.clone(), move |session, context, _, _| {
+                session.admit_source_mutation(context.placement.lexical_scope)?;
                 session.admit_checked_item(prefix, item).map_err(|error| {
                     ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                 })
@@ -8392,7 +8426,7 @@ where
             let prologue_only = reservation.item().source().is_empty();
             let commit = self
                 .access
-                .with_machine(context.clone(), move |session, _, _| {
+                .with_compiler_machine(context.clone(), move |session, _, _, _| {
                     session
                         .adopt_checked_declaration(reservation)
                         .map_err(|error| {
@@ -8723,15 +8757,16 @@ where
         tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_snapshot_started", "workbench phase");
         let code = cloned_turn_code(&compiled_turn);
         let mode = pending_mode_for(&bound, generation, &observation);
-        let attempt_future = access.with_machine(context.clone(), move |session, _, _| {
-            if !session.prepared_machine_ready() {
-                return Ok(PreparedSnapshotAttempt::Bootstrap);
-            }
-            session
-                .snapshot_run_prepared(code, mode, None)
-                .map(|pending| PreparedSnapshotAttempt::Ready(Box::new(pending)))
-                .map_err(ResidentActorWorkbenchError::Resident)
-        });
+        let attempt_future =
+            access.with_continuation_machine(context.clone(), move |session, _, _, _| {
+                if !session.prepared_machine_ready() {
+                    return Ok(PreparedSnapshotAttempt::Bootstrap);
+                }
+                session
+                    .snapshot_run_prepared(code, mode, None)
+                    .map(|pending| PreparedSnapshotAttempt::Ready(Box::new(pending)))
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            });
         let attempt = attempt_future.await?;
         let pending = match attempt {
             PreparedSnapshotAttempt::Bootstrap => break 'split,
@@ -9407,6 +9442,19 @@ where
             .await
     }
 
+    pub(crate) async fn adopt_final_source_scope(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, |session, context, _| {
+                context
+                    .source_dependency()
+                    .adopt_final_scope(session, context.placement.lexical_scope)
+            })
+            .await
+    }
+
     /// Transfer only the journal-certified durable predecessor to this exact
     /// newly admitted placement. Runtime fences all pre-transfer offers.
     pub(crate) async fn transfer_recovered_root_public_owner(
@@ -9421,7 +9469,7 @@ where
         self.access
             .with_machine(context, move |session, context, _| {
                 let scope = context.placement.lexical_scope;
-                session
+                let publication = session
                     .transfer_recovered_public_owner_with_readiness(
                         &predecessor,
                         successor,
@@ -9430,7 +9478,11 @@ where
                     )
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
+                    })?;
+                context
+                    .source_dependency()
+                    .adopt_final_scope(session, scope)?;
+                Ok(publication)
             })
             .await
     }
@@ -12648,29 +12700,37 @@ where
         (
             crate::local_actor::run_control::PublishedRootPlacement,
             ResidentOutcome,
+            generation_admission::SourceDependency,
         ),
         ResidentActorWorkbenchError,
     > {
         let owner = crate::capabilities::CompilerOwnerScope::current()?;
         self.access
             .with_host_machine("root", session_id, None, move |session, _| {
-                owner.run(|settlement| {
-                    let placement = crate::ActorPlacement {
-                        session: session_id,
-                        resource_scope: RealmId::fresh(),
-                        lexical_scope: session.mint_isolated_scope(),
-                    };
-                    let publication = match mint.publish(placement) {
-                        Ok(record) => record,
-                        Err(error) => {
-                            let detail = error.to_string();
-                            session.close_realm(placement.resource_scope);
-                            session.retire_scope(placement.lexical_scope);
-                            let _ = error.into_record().release();
-                            return Err(ResidentActorWorkbenchError::ActorProtocol(detail));
-                        }
-                    };
-                    let prepared = (|| {
+                let placement = crate::ActorPlacement {
+                    session: session_id,
+                    resource_scope: RealmId::fresh(),
+                    lexical_scope: session.mint_isolated_scope(),
+                };
+                let publication = match mint.publish(placement) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        let detail = error.to_string();
+                        session.close_realm(placement.resource_scope);
+                        session.retire_scope(placement.lexical_scope);
+                        let _ = error.into_record().release();
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(detail));
+                    }
+                };
+                let dependency = generation_admission::SourceDependency::World(
+                    generation_admission::BootstrapWorld::new(None),
+                );
+                dependency.adopt_final_scope(session, placement.lexical_scope)?;
+                let prepared = crate::termination::CompilerWorkTicket::run_source_transaction(
+                    session,
+                    owner.admit_continuation()?,
+                    &dependency,
+                    |session, settlement| {
                         session
                             .set_actor_execution(
                                 tidepool_runtime::session::SessionRunContext {
@@ -12686,18 +12746,18 @@ where
                             .run_with_sites("forest-root", compiled.code(), settlement)
                             .map_err(ResidentActorWorkbenchError::Resident)?;
                         Ok::<_, ResidentActorWorkbenchError>(outcome)
-                    })();
-                    let outcome = match prepared {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
-                            session.close_realm(placement.resource_scope);
-                            session.retire_scope(placement.lexical_scope);
-                            let _ = publication.release();
-                            return Err(error);
-                        }
-                    };
-                    Ok((publication, outcome))
-                })?
+                    },
+                )?;
+                let outcome = match prepared {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        session.close_realm(placement.resource_scope);
+                        session.retire_scope(placement.lexical_scope);
+                        let _ = publication.release();
+                        return Err(error);
+                    }
+                };
+                Ok((publication, outcome, dependency))
             })
             .await
     }
@@ -22493,6 +22553,7 @@ pub(crate) mod request_tests {
 
     fn lazy_binding_install(
         session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        source: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     ) -> tidepool_runtime::session::ReadyPreparedInstall {
         let generation = tidepool_repr::Generation(871);
         let binder = BoundBinder {
@@ -22504,27 +22565,49 @@ pub(crate) mod request_tests {
             root_head: None,
             host_authority: None,
         };
-        session
-            .snapshot_run_prepared(
-                Arc::try_unwrap(child_bootstrap_fixture())
-                    .unwrap()
-                    .into_code(),
-                PendingPreparedMode::Binding {
-                    binder,
-                    generation,
-                    observation: None,
-                },
+        let pending = session
+            .with_source_compiler_transaction(
+                source,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
                 None,
+                |_| {},
+                |session, settlement| {
+                    if !session.prepared_machine_ready() {
+                        session
+                            .run_with_sites(
+                                "lazy_fixture_bootstrap",
+                                child_bootstrap_fixture().code(),
+                                settlement,
+                            )
+                            .unwrap();
+                    }
+                    session
+                        .snapshot_run_prepared(
+                            Arc::try_unwrap(child_bootstrap_fixture())
+                                .unwrap()
+                                .into_code(),
+                            PendingPreparedMode::Binding {
+                                binder,
+                                generation,
+                                observation: None,
+                            },
+                            None,
+                        )
+                        .unwrap()
+                },
             )
             .unwrap()
-            .compile_off_checkout()
-            .unwrap()
+            .into_outcome()
+            .action;
+        pending.compile_off_checkout().unwrap()
     }
 
     fn suspended_source_binding(
         session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
         session_id: tidepool_repr::SessionId,
         root: &std::path::Path,
+        source: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     ) -> ResidentHole {
         let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
             tidepool_mcp::sleep_decl(),
@@ -22565,16 +22648,27 @@ pub(crate) mod request_tests {
         else {
             panic!("fixture must be a legacy binding");
         };
-        let outcome = tidepool_testing::with_settlement(|settlement| {
-            session.run_bind_with_sites(
-                "lazy_source_binding",
-                compiled.code(),
-                &bound[0],
-                tidepool_repr::Generation(872),
-                settlement,
+        let outcome = session
+            .with_source_compiler_transaction(
+                source,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| {
+                    session.run_bind_with_sites(
+                        "lazy_source_binding",
+                        compiled.code(),
+                        &bound[0],
+                        tidepool_repr::Generation(872),
+                        settlement,
+                    )
+                },
             )
-        })
-        .unwrap();
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
         let ResidentOutcome::Suspended { hole, .. } = outcome else {
             panic!("fixture must suspend before binding publication");
         };
@@ -22626,10 +22720,14 @@ pub(crate) mod request_tests {
                     tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
                 )
                 .unwrap();
+            dependency
+                .adopt_final_scope(&mut session, scope.scope())
+                .unwrap();
             let hole = suspended_source_binding(
                 &mut session,
                 tidepool_repr::SessionId(870 + kind),
                 root.path(),
+                dependency.source_lease().unwrap(),
             );
             assert!(!session
                 .binding_names_in(scope.scope())
@@ -22641,14 +22739,15 @@ pub(crate) mod request_tests {
             ));
             // The real wrapper installs a lazy hook, but a pure continuation
             // earns neither an own-world nor lower runtime source claim.
-            session.with_source_admission(dependency.runtime_admission(), |session| {
+            {
                 crate::termination::CompilerWorkTicket::run_source_transaction(
-                    session,
+                    &mut session,
                     owner.admit_continuation().unwrap(),
                     &dependency,
                     |_, _| (),
                 )
-            });
+                .unwrap()
+            };
             match &dependency {
                 SourceDependency::Generation(generation) => {
                     let fence = generation.fence().unwrap();
@@ -22660,8 +22759,8 @@ pub(crate) mod request_tests {
                 }
                 _ => unreachable!(),
             }
-            session.with_source_admission(dependency.runtime_admission(), |session| {
-                crate::termination::CompilerWorkTicket::run_source_transaction(session, owner.admit_continuation().unwrap(), &dependency, |session, settlement| {
+            {
+                crate::termination::CompilerWorkTicket::run_source_transaction(&mut session, owner.admit_continuation().unwrap(), &dependency, |session, settlement| {
                     let outcome = session.resume(hole, (), settlement).unwrap();
                     assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
                     settlement(tidepool_runtime::CompilerTransactionClose::Unconfirmed(
@@ -22670,8 +22769,8 @@ pub(crate) mod request_tests {
                             tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None },
                         ),
                     ));
-                })
-            });
+                }).unwrap()
+            };
             assert!(session
                 .binding_names_in(scope.scope())
                 .iter()
@@ -22699,7 +22798,13 @@ pub(crate) mod request_tests {
                 ..tidepool_runtime::session::SessionRunContext::ROOT
             })
             .unwrap();
-        let ready = lazy_binding_install(&mut session);
+        let dependency = generation_admission::SourceDependency::World(
+            generation_admission::BootstrapWorld::new(None),
+        );
+        dependency
+            .adopt_final_scope(&mut session, scope.scope())
+            .unwrap();
+        let ready = lazy_binding_install(&mut session, dependency.source_lease().unwrap());
         let before = (
             session.code_export_count(),
             session.scope_binding_count(scope.scope()),
@@ -22708,23 +22813,20 @@ pub(crate) mod request_tests {
         let owner = services.with_compiler_owner(CompilerCloseOwner::ActorLifecycle(
             crate::RetainedActorExit::new(),
         ));
-        let dependency = generation_admission::SourceDependency::World(
-            generation_admission::BootstrapWorld::new(None),
-        );
         dependency.claim().unwrap().retain_unconfirmed();
         assert!(
-            dependency.runtime_admission().unwrap().is_none(),
-            "fault must be refused by the actual lazy issuer hook"
+            dependency.source_lease().is_ok(),
+            "original canonical runtime authority remains independently required"
         );
-        let result = session.with_source_admission(Ok(None), |session| {
+        let result = {
             crate::termination::CompilerWorkTicket::run_source_transaction(
-                session,
+                &mut session,
                 owner.admit_continuation().unwrap(),
                 &dependency,
                 |session, settlement| session.revalidate_and_run_prepared(ready, settlement),
             )
-        });
-        assert!(result.is_err());
+        };
+        assert!(result.unwrap().is_err());
         assert_eq!(
             (
                 session.code_export_count(),

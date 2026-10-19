@@ -1330,6 +1330,10 @@ pub struct RuntimeActivationPreviewAdmission {
 }
 
 impl RuntimeActivationPreviewAdmission {
+    pub fn source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
+        self.scope_lease.clone()
+    }
+
     pub fn view(&self) -> &super::SessionCompileView {
         &self.view
     }
@@ -2508,6 +2512,7 @@ impl PendingPreparedMode {
 /// [`Self::compile_off_checkout`] then
 /// [`ResidentSession::revalidate_and_run_prepared`].
 pub struct PendingPreparedInstall {
+    source: Arc<super::RuntimeLexicalScopeLease>,
     snapshot: PendingPreparedSource,
     metadata: PreparedInstallMetadata,
 }
@@ -2723,11 +2728,23 @@ impl PendingPreparedInstall {
     /// Compile this install off checkout, consuming its source and completion
     /// metadata into one capsule for final revalidation and execution.
     pub fn compile_off_checkout(self) -> Result<ReadyPreparedInstall, PreparedRuntimeError> {
-        let source = self.snapshot.compile_off_checkout()?;
-        Ok(ReadyPreparedInstall {
-            source,
-            metadata: self.metadata,
-        })
+        super::source_admission::run_source_compiler_transaction(
+            self.source,
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, _| {
+                owner.admit(None)?;
+                let source = self.snapshot.compile_off_checkout()?;
+                Ok(ReadyPreparedInstall {
+                    source,
+                    metadata: self.metadata,
+                })
+            },
+        )?
+        .into_outcome()
+        .action
     }
 }
 
@@ -3524,71 +3541,41 @@ where
         )
     }
 
-    /// Select source authority separately from recipient placement. Read-only
-    /// observation and pure continuation evaluation do not claim source work.
-    /// The first actual source action earns one claim for this synchronous
-    /// checkout operation, including its nested installation/publication work.
-    pub fn with_source_admission<R>(
-        &mut self,
-        admission: Result<Option<super::RuntimeSourceAdmission>, super::SourceAdmissionError>,
-        action: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let (admission, refusal) = match admission {
-            Ok(admission) => (admission, None),
-            Err(error) => (None, Some(error)),
-        };
-        let previous_admission = std::mem::replace(&mut self.state.source_admission, admission);
-        let previous_refusal = std::mem::replace(&mut self.state.source_refusal, refusal);
-        let previous_claim = self.state.source_claim.take();
-        let previous_active = std::mem::replace(&mut self.state.source_context_active, true);
-        let previous_hook = self.state.source_admission_hook.take();
-        let previous_hook_admitted = std::mem::replace(&mut self.state.source_hook_admitted, false);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self)));
-        self.state.source_claim = previous_claim;
-        self.state.source_refusal = previous_refusal;
-        self.state.source_admission = previous_admission;
-        self.state.source_context_active = previous_active;
-        self.state.source_admission_hook = previous_hook;
-        self.state.source_hook_admitted = previous_hook_admitted;
-        match result {
-            Ok(result) => result,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
+    /// Claim an actual source mutation before its first affine reservation.
+    pub fn admit_source_mutation(&mut self, scope: ScopeId) -> Result<(), ResidentError> {
+        self.state
+            .admit_source_work_in(scope)
+            .map_err(SessionError::from)?;
+        Ok(())
     }
 
-    /// Install an additional source issuer for one actual compiler action.
-    /// Pure continuations never call it; nested actions restore their issuer.
-    pub fn with_source_admission_hook<R>(
+    /// Own the exact source lease and all lower claims through physical END.
+    pub fn with_source_compiler_transaction<T>(
         &mut self,
-        hook: super::SourceAdmissionHook,
-        action: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let previous = self.state.source_admission_hook.replace(hook);
-        let previous_admitted = std::mem::replace(&mut self.state.source_hook_admitted, false);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self)));
-        self.state.source_admission_hook = previous;
-        self.state.source_hook_admitted = previous_admitted;
-        match result {
-            Ok(result) => result,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
-    }
-
-    /// Transfer a lazily earned source claim to the actual compiler transaction
-    /// owner before its END settlement, including when the action unwinds.
-    pub fn with_source_claim_transfer<R>(
-        &mut self,
-        transfer: impl FnOnce(Option<super::RuntimeSourceClaim>),
-        action: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let previous = self.state.source_claim.take();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self)));
-        let claim = std::mem::replace(&mut self.state.source_claim, previous);
-        transfer(claim);
-        match result {
-            Ok(result) => result,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
+        source: Arc<super::RuntimeLexicalScopeLease>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        cancellation: crate::CompilerTransactionCancellation,
+        supplemental_hook: Option<super::SourceAdmissionHook>,
+        close_sink: impl FnOnce(crate::CompilerTransactionClose),
+        action: impl FnOnce(&mut Self, &mut dyn FnMut(crate::CompilerTransactionClose)) -> T,
+    ) -> Result<crate::CompilerTransactionSettled<T>, super::SourceAdmissionError> {
+        super::source_admission::run_source_compiler_transaction(
+            source,
+            workload,
+            cancellation,
+            supplemental_hook,
+            close_sink,
+            |context, report| {
+                let previous = self.state.source_transaction.replace(context);
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self, report)));
+                self.state.source_transaction = previous;
+                match result {
+                    Ok(value) => value,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            },
+        )
     }
 
     /// Observe the interpreters installed on this exact machine. The caller
@@ -5979,6 +5966,10 @@ where
         };
         self.validate_host_mount_geometry(scope, &binder, gen)?;
 
+        let _source_claim = self
+            .state
+            .admit_source_work_in(scope)
+            .map_err(SessionError::from)?;
         let stub_source = carrier.stub_source(&module, name);
         let stub_path = session_root.join(SessionModule::val(gen).relative_hs_path());
         if let Some(parent) = stub_path.parent() {
@@ -6217,6 +6208,10 @@ where
         ) -> Result<PreparedHandle, PreparedRuntimeError>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
+        let _source_claim = self
+            .state
+            .admit_source_work_in(scope)
+            .map_err(SessionError::from)?;
         self.state
             .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])?;
         let table = code
@@ -7433,7 +7428,17 @@ where
             effect_policy: self.state.effect_policy(),
             live_payload: self.state.live_payload_policy(),
         };
+        let source = match &self.state.source_transaction {
+            Some(owner) => owner.source.clone(),
+            None => {
+                return Err(SessionError::SourceAdmission(
+                    super::SourceAdmissionError::MissingTransaction,
+                )
+                .into())
+            }
+        };
         Ok(PendingPreparedInstall {
+            source,
             snapshot,
             metadata: PreparedInstallMetadata {
                 constructor_table: constructor_table.into_owned(),
@@ -9776,51 +9781,56 @@ mod authored_publication_tests {
     }
 
     #[test]
-    fn lazy_binding_claim_transfers_before_checkout_and_unwind_release() {
+    fn runtime_source_owner_keeps_binding_claim_through_close_and_unwind() {
         for unwind in [false, true] {
             let (_root, mut session) = startup_session();
             let scope = session.mint_isolated_scope_with_lease().unwrap();
-            let mut value = super::super::prepared::tests::rooted_publication_fixture(
-                &mut session.state,
-                "lazy",
-                870,
-            );
+            let mut value = source_action(&mut session, &scope, |session, _| {
+                super::super::prepared::tests::rooted_publication_fixture(
+                    &mut session.state,
+                    "lazy",
+                    870,
+                )
+            });
             value.scope = scope.scope();
-            let mut transferred = None;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                session.with_source_admission(
-                    Ok(Some(scope.source_admission().clone())),
-                    |session| {
-                        session.with_source_claim_transfer(
-                            |claim| transferred = claim,
-                            |session| {
-                                session
-                                    .state
-                                    .bind_replacing_decls_in(
-                                        scope.scope(),
-                                        vec![value],
-                                        &mut |_| {},
-                                    )
-                                    .unwrap();
-                                if unwind {
-                                    panic!("compiler action unwind");
-                                }
-                            },
-                        )
-                    },
-                );
+                let _settled = session.with_source_compiler_transaction(scope.clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground, crate::CompilerTransactionCancellation::new(), None, |_| {}, |session, report| {
+                    session.state.bind_replacing_decls_in(scope.scope(), vec![value], report).unwrap();
+                    let fence = scope.source_admission().fence().unwrap();
+                    assert_eq!(fence.pending_claims(), 1, "actual binding claim remains held inside its owner");
+                    fence.reopen().unwrap();
+                    if unwind { panic!("compiler action unwind"); }
+                    // Synthetic aggregate uncertainty checks joined custody, not a GHC END fault.
+                    report(crate::CompilerTransactionClose::Unconfirmed(tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled, tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None })));
+                }).unwrap();
             }));
             assert_eq!(result.is_err(), unwind);
             let fence = scope.source_admission().fence().unwrap();
-            assert_eq!(fence.pending_claims(), 1);
-            transferred
-                .expect("actual lazy binding admitted its claim")
-                .retain_unconfirmed();
+            assert_eq!(fence.pending_claims(), 0);
             assert!(matches!(
                 fence.reopen(),
                 Err(super::super::SourceAdmissionError::Unconfirmed { .. })
             ));
         }
+    }
+
+    fn source_action<T>(
+        session: &mut TestSession,
+        source: &Arc<super::super::RuntimeLexicalScopeLease>,
+        action: impl FnOnce(&mut TestSession, &mut dyn FnMut(crate::CompilerTransactionClose)) -> T,
+    ) -> T {
+        session
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                action,
+            )
+            .unwrap()
+            .into_outcome()
+            .action
     }
 
     #[test]
@@ -9833,22 +9843,24 @@ mod authored_publication_tests {
                 ..SessionRunContext::ROOT
             })
             .unwrap();
-        let entry = session
-            .prepare_startup_entry_installed(
+        let entry = source_action(&mut session, &scope, |session, _| {
+            session.prepare_startup_entry_installed(
                 startup_code_with_value(false, Some(11)),
                 StartupCompileIdentity::Fixture,
             )
-            .unwrap();
-        let open_ready = session
-            .snapshot_run_prepared(
+        })
+        .unwrap();
+        let open_ready = source_action(&mut session, &scope, |session, _| {
+            session.snapshot_run_prepared(
                 startup_code_with_value(false, Some(22)),
                 PendingPreparedMode::Value,
                 None,
             )
-            .unwrap()
-            .compile_off_checkout()
-            .unwrap();
-        let open_outcome = tidepool_testing::with_settlement(|settlement| {
+        })
+        .unwrap()
+        .compile_off_checkout()
+        .unwrap();
+        let open_outcome = source_action(&mut session, &scope, |session, settlement| {
             session.revalidate_and_run_prepared(open_ready, settlement)
         })
         .unwrap();
@@ -9859,31 +9871,33 @@ mod authored_publication_tests {
 
         // Snapshot after the successful install so stale imports cannot account
         // for refusal. No machine work intervenes between this snapshot and use.
-        let ready = session
-            .snapshot_run_prepared(
+        let ready = source_action(&mut session, &scope, |session, _| {
+            session.snapshot_run_prepared(
                 startup_code_with_value(false, Some(33)),
                 PendingPreparedMode::Value,
                 None,
             )
-            .unwrap()
-            .compile_off_checkout()
-            .unwrap();
+        })
+        .unwrap()
+        .compile_off_checkout()
+        .unwrap();
         let before_exports = session.code_export_count();
         let before_table = session.state.session_table().clone();
         let before_bindings = session.binding_names();
         let before_parked = session.parked_count();
         session.set_run_context(SessionRunContext::ROOT).unwrap();
         let fence = scope.source_admission().fence().unwrap();
-        // Placement is now ROOT, and no source override is installed: admission
-        // must still use the capsule's original fenced lexical scope.
-        let refused = tidepool_testing::with_settlement(|settlement| {
+        // The transaction retains original source S independently of ROOT placement.
+        let refused = source_action(&mut session, &scope, |session, settlement| {
             session.revalidate_and_run_prepared(ready, settlement)
         });
         assert!(
             matches!(
                 &refused,
                 Err(ResidentError::Prepared(
-                    PreparedRuntimeError::SourceAdmission(_)
+                    PreparedRuntimeError::SourceAdmission(
+                        super::super::SourceAdmissionError::Closed { .. }
+                    )
                 ))
             ),
             "actual legacy Ready result: {refused:?}"
@@ -9899,11 +9913,17 @@ mod authored_publication_tests {
             })
             .unwrap();
         let outcome = session
-            .with_source_admission(Ok(Some(scope.source_admission().clone())), |session| {
-                tidepool_testing::with_settlement(|settlement| {
-                    session.run_startup_entry(entry, settlement)
-                })
-            })
+            .with_source_compiler_transaction(
+                scope.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.run_startup_entry(entry, settlement),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
             .unwrap();
         let ResidentOutcome::Completed { result, .. } = outcome else {
             panic!("precompiled plain result must settle")
