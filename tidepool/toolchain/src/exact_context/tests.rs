@@ -1317,7 +1317,9 @@ fn reachable_blocks_count_duplicate_edges_and_release_obsolete_fork_paths() {
 #[test]
 fn current_block_frontier_materializes_only_changed_hamt_paths() {
     let empty = ReachableBlocks::default();
-    let facts = (0u64..1024)
+    // A corpus larger than a single HAMT fanout separates bounded path
+    // reference edits from a whole-frontier traversal.
+    let facts = (0u64..8192)
         .map(|n| (n, format!("value-{n}")))
         .collect::<OrdMap<_, _>>();
     let mut first = Materializer::new(&empty);
