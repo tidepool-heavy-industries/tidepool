@@ -58,7 +58,7 @@ impl IssuedOriginal {
         self
     }
 
-    fn completed_output(&self) -> &crate::declaration_context::IssuedOriginalOutput {
+    pub(super) fn completed_output(&self) -> &crate::declaration_context::IssuedOriginalOutput {
         self.completed_output
             .as_ref()
             .expect("this fixture completed the physical issuer")
