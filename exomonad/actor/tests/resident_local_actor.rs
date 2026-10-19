@@ -1537,12 +1537,14 @@ async fn resident_await_watch_case(case: WatchCase) {
                 3,
                 "start, retain binding, and await committed before the later cell failure: {receipt:?}"
             );
-            assert!(
+            assert_eq!(
                 receipt
                     .operations
                     .iter()
-                    .all(|operation| operation.effect == "command job"),
-                "all three operations belong to the Commands effect: {receipt:?}"
+                    .map(|operation| operation.effect.as_str())
+                    .collect::<Vec<_>>(),
+                ["command start", "command job", "command wait"],
+                "start, retain binding, and await remain distinct Commands operations: {receipt:?}"
             );
             for (ordinal, operation) in receipt.operations.iter().enumerate() {
                 assert_eq!(operation.id.effect_ordinal, ordinal);
@@ -1651,11 +1653,10 @@ async fn resident_await_watch_case(case: WatchCase) {
                     .as_array()
                     .expect("retained binding effect receipts");
                 assert_eq!(operations.len(), 3, "{settled:?}");
-                assert!(
-                    operations
-                        .iter()
-                        .all(|operation| operation["effect"] == "command job"),
-                    "retaining and awaiting the job does not emit a presentation operation: {settled:?}"
+                assert_eq!(
+                    operations.iter().map(|operation| operation["effect"].as_str().unwrap()).collect::<Vec<_>>(),
+                    ["command start", "command job", "command wait"],
+                    "start, retain binding, and await do not emit a presentation operation: {settled:?}"
                 );
                 assert!(
                     operations
@@ -1671,7 +1672,7 @@ async fn resident_await_watch_case(case: WatchCase) {
                 .expect("the retained binding can be used by a later cell");
                 assert_eq!(binding_read["status"], "committed", "{binding_read:?}");
                 assert_eq!(
-                    binding_read["items"][0]["operations"][0]["effect"], "command job",
+                    binding_read["items"][0]["operations"][0]["effect"], "command wait",
                     "{binding_read:?}"
                 );
                 forest.shutdown().await;
@@ -1686,7 +1687,7 @@ async fn resident_await_watch_case(case: WatchCase) {
                     .map(|operation| operation["effect"].as_str().unwrap())
                     .collect::<Vec<_>>(),
                 [
-                    "command job",
+                    "command start",
                     "watch",
                     "watch",
                     "awaitWatch",
