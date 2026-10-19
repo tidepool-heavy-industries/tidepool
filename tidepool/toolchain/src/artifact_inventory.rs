@@ -10525,25 +10525,39 @@ mod tests {
                 .remove(0)
                 .product
         };
-        let ancestor = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_checked_original_products(
-                    producer_identity.sha256(),
-                    &[product("Ancestor", 1)],
+        let mut context = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
+        let mut versions = Vec::new();
+        for output in [product("Ancestor", 1), product("Descendant", 2)] {
+            let entry =
+                Arc::new(ArtifactEntry::original(producer_identity.sha256(), output).unwrap());
+            assert!(entry.requirements.is_empty());
+            assert!(entry.native_requirements.is_empty());
+            let inventory = ArtifactInventory::default();
+            let physical = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    vec![entry.clone()],
+                    NativeArtifactDemand::ScopeInterfaces,
                 )
-                .unwrap(),
-        );
-        let descendant = Arc::new(
-            ancestor
-                .as_ref()
-                .clone()
-                .extend_checked_original_products(
-                    producer_identity.sha256(),
-                    &[product("Descendant", 2)],
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &physical.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
                 )
-                .unwrap(),
-        );
+                .unwrap();
+            let inputs = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &selection, &physical,
+            )
+            .unwrap();
+            let support = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
+            context = context.extend_issued_compiler_support(&support).unwrap();
+            versions.push(Arc::new(context.clone()));
+        }
+        let ancestor = versions.remove(0);
+        let descendant = versions.remove(0);
         let scratch = tempfile::tempdir().unwrap();
         let completed = descendant
             .prepare_compilation(scratch.path(), producer)

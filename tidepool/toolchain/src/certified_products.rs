@@ -19454,6 +19454,7 @@ pub(crate) mod tests {
             WorkerExecutionSource::ExactUnavailable(SourceRecipeUnavailable::NoFreshOriginals);
         let mut expected_owners = BTreeSet::from([prior[0].owner().clone()]);
         let mut first_promoted = None;
+        let mut promoted_support = BTreeMap::new();
         // Current source compilation owns Target only. Fresh is emitted from
         // authenticated retained Core, without a fresh source observation.
         let mut current_evidence = evidence(source);
@@ -19804,42 +19805,47 @@ None,
                 None,
             )
             .is_err());
+            let completed_support = {
+                let inputs = request.compiler_inputs();
+                let entry = Arc::new(
+                    crate::artifact_inventory::ArtifactEntry::original(
+                        canonical_producer,
+                        current.clone(),
+                    )
+                    .unwrap(),
+                );
+                let physical = inputs
+                    .artifacts()
+                    .inventory()
+                    .admit_certified_with_demand(
+                        inputs.artifacts(),
+                        vec![entry],
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                        &issued.source_selection,
+                    )
+                    .unwrap();
+                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                    &issued.source_selection,
+                    &physical,
+                )
+                .unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            };
+            let emitted_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                canonical_producer,
+                current,
+            );
+            promoted_support.insert(emitted_id, completed_support.clone());
             context = context
-                .extend_issued_compiler_support(&{
-                    let inputs = request.compiler_inputs();
-                    let entry = Arc::new(
-                        crate::artifact_inventory::ArtifactEntry::original(
-                            canonical_producer,
-                            current.clone(),
-                        )
-                        .unwrap(),
-                    );
-                    let physical = inputs
-                        .artifacts()
-                        .inventory()
-                        .admit_certified_with_demand(
-                            inputs.artifacts(),
-                            vec![entry],
-                            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                            &issued.source_selection,
-                        )
-                        .unwrap();
-                    let output =
-                        crate::declaration_context::OriginalCompilerInputs::from_selection(
-                            &issued.source_selection,
-                            &physical,
-                        )
-                        .unwrap();
-                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                        .unwrap()
-                })
+                .extend_issued_compiler_support(&completed_support)
                 .unwrap();
             prior = context.recovery_products();
         }
         assert_eq!(expected_owners.len(), 4);
 
-        // A new planned module can retain an exact historical native edge
-        // while the compiler projection selects the current Fresh original.
+        // Historical native edges survive an interface-only compiler role;
+        // explicitly selecting a competing current Original remains a refusal.
         let historical_child = historical_child.unwrap();
         let current_child = current_child.unwrap();
         assert_ne!(historical_child, current_child);
@@ -19856,43 +19862,113 @@ None,
             .iter()
             .any(|product| product.owner() == &current_child));
 
-        let make_projection = |products: &[CertifiedRecoveryProduct]| {
-            crate::artifact_inventory::CompilerInputProjection::from_issued_entries(
-                &products
-                    .iter()
-                    .cloned()
-                    .map(|product| {
-                        Arc::new(
-                            crate::artifact_inventory::ArtifactEntry::original(
-                                canonical_producer,
-                                product,
-                            )
-                            .unwrap(),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        };
-        let historical_projection = make_projection(std::slice::from_ref(child)).unwrap();
         let fresh_identity = ExactModuleIdentity {
             unit: historical_child.unit.clone(),
             module: historical_child.module.clone(),
         };
-        let historical_context = context
-            .compiler_input_projection()
-            .interface_only()
-            .merge(&historical_projection)
-            .and_then(|projection| context.clone().recover_fixture_projection(projection))
-            .and_then(|context| {
-                context.extend_lexical_joins(
+        let mut selected_contexts = Vec::new();
+        for product in [child, current] {
+            let entry = Arc::new(
+                crate::artifact_inventory::ArtifactEntry::original(
+                    canonical_producer,
+                    product.clone(),
+                )
+                .unwrap(),
+            );
+            let emitted = &promoted_support[&entry.descriptor.id];
+            assert_eq!(
+                emitted.native_availability().snapshot_facts().unwrap()[&entry.descriptor.id].mode,
+                crate::declaration_context::NativeTransportMode::Full
+            );
+            assert!(emitted
+                .native_offers()
+                .iter()
+                .any(|offer| offer.original() == entry.descriptor.id && offer.is_full()));
+            let projection = context
+                .compiler_input_projection()
+                .interface_only()
+                .merge(
+                    &crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&[
+                        entry.clone(),
+                    ])
+                    .unwrap(),
+                )
+                .unwrap();
+            let catalog =
+                crate::artifact_inventory::NativeDependencyCatalog::from_source(emitted).unwrap();
+            let selected = projection
+                .admit_interfaces_with_native_offers(
+                    context.artifact_view(),
+                    vec![entry.clone()],
+                    emitted.native_offers(),
+                    &catalog,
+                )
+                .unwrap();
+            assert!(selected
+                .capture_graph_selection()
+                .namespace
+                .iter()
+                .any(|binding| binding.artifact == entry.descriptor.id));
+            assert_eq!(
+                projection
+                    .project_metadata(selected.metadata_snapshot())
+                    .unwrap()
+                    .entries[&fresh_identity]
+                    .descriptor
+                    .id,
+                entry.descriptor.id
+            );
+            let support = crate::declaration_context::recover_fixture_compiler_support(
+                projection,
+                selected,
+                emitted.native_offers().iter().cloned(),
+            )
+            .unwrap()
+            .retain_normalized_availability(emitted.native_availability())
+            .unwrap();
+            let selected_context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&support)
+                .unwrap()
+                .extend_lexical_joins(
                     &[],
                     &[ExactLexicalNode {
                         owner: fresh_identity.clone(),
                         imports: vec![],
                     }],
                 )
-            })
-            .unwrap();
+                .unwrap();
+            assert_eq!(
+                selected_context
+                    .compiler_input_projection()
+                    .snapshot_roles()[&fresh_identity]
+                    .original(),
+                Some(entry.descriptor.id)
+            );
+            assert_eq!(
+                selected_context
+                    .compiler_source_support()
+                    .native_availability()
+                    .snapshot_facts()
+                    .unwrap()[&entry.descriptor.id]
+                    .mode,
+                crate::declaration_context::NativeTransportMode::Full
+            );
+            let row = selected_context
+                .compiler_source_support()
+                .native_availability()
+                .rows()
+                .find(|row| row.original_owner() == product.owner())
+                .unwrap();
+            assert!(row.permits(7) && row.permits(11));
+            assert!(selected_context
+                .artifact_view()
+                .selected_native_groups()
+                .is_empty());
+            selected_contexts.push(selected_context);
+        }
+        let historical_context = selected_contexts.remove(0);
+        let current_context = selected_contexts.remove(0);
         let prior_module = SessionModule::lib(Generation(6));
         let prior_planned =
             planned_original_history_tests::issue_planned_original_with_retained_child(
@@ -19913,43 +19989,165 @@ None,
             "the existing A original was issued while the old Fresh version was selected"
         );
         let prior_module_product = prior_planned.certified.recovery_products[0].clone();
-        let planned_context = context
-            .clone()
-            .extend_checked_original_products(
-                canonical_producer,
-                std::slice::from_ref(&prior_module_product),
+        let completed_prior = prior_planned.completed_output().compiler_inputs();
+        let prior_support =
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                completed_prior,
             )
+            .unwrap()
+            .for_source_owners(&BTreeSet::from([ExactModuleIdentity {
+                unit: prior_module_product.owner().unit.clone(),
+                module: prior_module_product.owner().module.clone(),
+            }]))
             .unwrap();
-        let current_projection =
-            make_projection(&[current.clone(), prior_module_product.clone()]).unwrap();
-        let planned_context = planned_context
-            .compiler_input_projection()
-            .interface_only()
-            .merge(&current_projection)
-            .and_then(|projection| planned_context.recover_fixture_projection(projection))
-            .and_then(|context| {
-                context.extend_lexical_joins(
-                    &[],
-                    &[
-                        ExactLexicalNode {
-                            owner: fresh_identity.clone(),
-                            imports: vec![],
-                        },
-                        ExactLexicalNode {
-                            owner: ExactModuleIdentity {
-                                unit: prior_module_product.owner().unit.clone(),
-                                module: prior_module_product.owner().module.clone(),
-                            },
-                            imports: vec![fresh_identity.clone()],
-                        },
-                    ],
-                )
+        let issued_prior_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+            canonical_producer,
+            &prior_module_product,
+        );
+        let issued_historical_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+            canonical_producer,
+            child,
+        );
+        let issued_current_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+            canonical_producer,
+            current,
+        );
+        assert_eq!(
+            prior_support.projection().snapshot_roles()[&fresh_identity].original(),
+            None
+        );
+        assert_eq!(
+            current_context.compiler_input_projection().snapshot_roles()[&fresh_identity]
+                .original(),
+            Some(issued_current_id)
+        );
+        assert_ne!(issued_current_id, issued_historical_id);
+        let prior_offer = prior_support
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == issued_prior_id)
+            .unwrap();
+        let issued_groups = prior_offer.issued_group_carriers().unwrap();
+        let prior_group = *issued_groups
+            .keys()
+            .find(|group| {
+                group.binding.artifact() == issued_prior_id && group.original_ordinal == 7
             })
             .unwrap();
+        let historical_group = *issued_groups
+            .keys()
+            .find(|group| {
+                group.binding.artifact() == issued_historical_id && group.original_ordinal == 7
+            })
+            .unwrap();
+        assert!(prior_offer
+            .custody_snapshot()
+            .binding_dependencies()
+            .unwrap()
+            .contains(&(
+                crate::artifact_inventory::ArtifactBindingNode::Group(prior_group),
+                crate::artifact_inventory::ArtifactBindingNode::Group(historical_group),
+                crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                    dependent_ordinal: 7,
+                    required_ordinal: 7
+                },
+            )));
+        let prior_input =
+            crate::declaration_context::OriginalCompilerInputs::from_issued_support(&prior_support);
+        let conflict = Arc::new(current_context.clone()).prepare_compilation_with_private_input(
+            &root.path().join("current-original-conflict"),
+            &producer,
+            None,
+            Some(prior_input),
+        );
+        assert!(matches!(conflict, Err(crate::CompileError::ExtractFailed(_))),
+            "explicit current Original cannot replace the completed prior output's exact historical child");
+        let compatible_root = root.path().join("compatible-current");
+        std::fs::create_dir_all(&compatible_root).unwrap();
+        let compatible =
+            planned_original_history_tests::issue_planned_original_with_retained_child(
+                &compatible_root,
+                &current_context,
+                prior_module,
+                &producer,
+                &include,
+                "ancestor_7",
+                current,
+                "entry_7",
+            )
+            .unwrap()
+            .complete_native_availability(&producer);
+        let compatible_support =
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                compatible.completed_output().compiler_inputs(),
+            )
+            .unwrap()
+            .for_source_owners(&BTreeSet::from([ExactModuleIdentity {
+                unit: prior_module_product.owner().unit.clone(),
+                module: prior_module_product.owner().module.clone(),
+            }]))
+            .unwrap();
+        let compatible_id = compatible
+            .completed_output()
+            .compiler_inputs()
+            .role_projection()
+            .snapshot_roles()[&ExactModuleIdentity {
+            unit: prior_module_product.owner().unit.clone(),
+            module: prior_module_product.owner().module.clone(),
+        }]
+            .original()
+            .unwrap();
+        let compatible_offer = compatible_support
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == compatible_id)
+            .unwrap();
+        let compatible_groups = compatible_offer.issued_group_carriers().unwrap();
+        let compatible_root_group = *compatible_groups
+            .keys()
+            .find(|group| group.binding.artifact() == compatible_id && group.original_ordinal == 7)
+            .unwrap();
+        let compatible_child = *compatible_groups
+            .keys()
+            .find(|group| {
+                group.binding.artifact() == issued_current_id && group.original_ordinal == 7
+            })
+            .unwrap();
+        assert!(compatible_offer
+            .custody_snapshot()
+            .binding_dependencies()
+            .unwrap()
+            .contains(&(
+                crate::artifact_inventory::ArtifactBindingNode::Group(compatible_root_group),
+                crate::artifact_inventory::ArtifactBindingNode::Group(compatible_child),
+                crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                    dependent_ordinal: 7,
+                    required_ordinal: 7
+                },
+            )));
+        let compatible_request = Arc::new(current_context.clone())
+            .prepare_compilation_with_private_input(
+                &root.path().join("current-original-compatible"),
+                &producer,
+                None,
+                Some(
+                    crate::declaration_context::OriginalCompilerInputs::from_issued_support(
+                        &compatible_support,
+                    ),
+                ),
+            )
+            .unwrap();
+        assert!(compatible_request
+            .compiler_inputs()
+            .native_availability(issued_current_id)
+            .unwrap()
+            .permits(7));
+        // A new direct source import must also respect the independently
+        // selected current Original, before the positive interface-only branch.
         let stale_fresh =
             planned_original_history_tests::issue_planned_original_with_retained_child(
                 root.path(),
-                &planned_context,
+                &current_context,
                 SessionModule::lib(Generation(8)),
                 &producer,
                 &include,
@@ -19958,12 +20156,54 @@ None,
                 "entry_7",
             );
         assert!(
-            matches!(
-                stale_fresh,
-                Err(crate::CompileError::CompilerEvidence(error))
-                    if matches!(error.as_ref(), CertificationError::Mismatch("source module version"))
-            ),
+            matches!(stale_fresh, Err(crate::CompileError::CompilerEvidence(error))
+            if matches!(error.as_ref(), CertificationError::Mismatch("source module version"))),
             "a new Fresh import cannot bypass the current compiler-selected version"
+        );
+        let canonical_only = ExactDeclarationContext::from_authenticated_interfaces(
+            canonical_producer,
+            current_context.artifact_view(),
+            current_context.compiler_input_projection().clone(),
+        )
+        .unwrap();
+        let custody = canonical_only
+            .compiler_source_support()
+            .retain_custody(current_context.artifact_view())
+            .unwrap();
+        let planned_context = canonical_only
+            .extend_issued_compiler_support(&custody)
+            .unwrap()
+            .extend_issued_compiler_support(&prior_support)
+            .unwrap()
+            .extend_lexical_joins(
+                &[],
+                &[
+                    ExactLexicalNode {
+                        owner: fresh_identity.clone(),
+                        imports: vec![],
+                    },
+                    ExactLexicalNode {
+                        owner: ExactModuleIdentity {
+                            unit: prior_module_product.owner().unit.clone(),
+                            module: prior_module_product.owner().module.clone(),
+                        },
+                        imports: vec![fresh_identity.clone()],
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            planned_context.compiler_input_projection().snapshot_roles()[&fresh_identity]
+                .original(),
+            None
+        );
+        assert_eq!(
+            planned_context.compiler_input_projection().snapshot_roles()[&ExactModuleIdentity {
+                unit: prior_module_product.owner().unit.clone(),
+                module: prior_module_product.owner().module.clone(),
+            }]
+                .original(),
+            Some(issued_prior_id)
         );
         let planned_module = SessionModule::lib(Generation(7));
         let planned_source = format!(
@@ -19986,7 +20226,7 @@ None,
         let compiler_originals = planned.request.compiler_original_products().unwrap();
         assert!(compiler_originals
             .iter()
-            .any(|product| product.owner() == &current_child));
+            .all(|product| product.owner().module != "Fresh"));
         assert!(compiler_originals
             .iter()
             .any(|product| product.owner() == prior_module_product.owner()));
@@ -20121,7 +20361,7 @@ None,
             .filter(|product| product.owner().module == "Fresh")
             .map(|product| product.owner().clone())
             .collect::<BTreeSet<_>>();
-        assert_eq!(selected_fresh, BTreeSet::from([current_child]));
+        assert!(selected_fresh.is_empty());
         assert!(!selected_fresh.contains(&historical_child));
         assert!(selected
             .products()
