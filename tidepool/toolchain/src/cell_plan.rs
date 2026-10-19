@@ -236,7 +236,7 @@ fn validate_world_cell_reservations(
     {
         return Err(failure("world cell reservation differs from parser plan"));
     }
-    let mut generations = std::collections::BTreeSet::new();
+    let mut generations = std::collections::HashSet::new();
     let mut identifiers = std::collections::BTreeSet::new();
     for ((item, slot), bindings) in items.iter().zip(slots).zip(expected_bindings) {
         let (generation, names): (u64, Vec<&str>) = match (item.kind(), slot) {
@@ -261,8 +261,16 @@ fn validate_world_cell_reservations(
             }
             _ => return Err(failure("world cell slot differs from parsed item kind")),
         };
+        let module = match slot {
+            Slot::Prologue { .. } | Slot::Declaration { .. } => {
+                tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation))
+            }
+            Slot::Bind { .. } | Slot::Expression { .. } => {
+                tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation))
+            }
+        };
         if generation == 0
-            || !generations.insert(generation)
+            || !generations.insert(module)
             || names.len() != bindings.len()
             || names
                 .iter()
@@ -724,6 +732,74 @@ mod tests {
         ]);
         (specification, vec![PathBuf::from("/original")], receipt)
     }
+    #[test]
+    fn world_reservations_keep_declaration_and_value_generations_separate() {
+        use crate::checked_cell::CheckedPlannedCellSlot as Slot;
+        let item = |kind, binder: &str| ParsedCellPlanItem {
+            index: 0,
+            kind,
+            binding_form: None,
+            binders: if binder.is_empty() {
+                Vec::new()
+            } else {
+                vec![binder.into()]
+            },
+            source: String::new(),
+            span: ParsedCellPlanSpan {
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 1,
+            },
+            source_ordinals: Vec::new(),
+        };
+        let declaration = item(ParsedCellPlanKind::Declaration, "");
+        let value = item(ParsedCellPlanKind::Bind, "x");
+        let bindings = vec![("x".into(), tidepool_repr::SessionVarId::from_extract(91))];
+        assert!(validate_world_cell_reservations(
+            &[declaration, value],
+            [3; 32],
+            &[
+                Slot::Declaration { declaration: 1 },
+                Slot::Bind { value: 1 }
+            ],
+            &[Vec::new(), bindings],
+        )
+        .is_ok());
+        assert!(validate_world_cell_reservations(
+            &[
+                item(ParsedCellPlanKind::Prologue, ""),
+                item(ParsedCellPlanKind::Declaration, "")
+            ],
+            [3; 32],
+            &[
+                Slot::Prologue { declaration: 1 },
+                Slot::Declaration { declaration: 1 }
+            ],
+            &[Vec::new(), Vec::new()],
+        )
+        .is_err());
+        assert!(validate_world_cell_reservations(
+            &[
+                item(ParsedCellPlanKind::Bind, "x"),
+                item(ParsedCellPlanKind::Expression, "")
+            ],
+            [3; 32],
+            &[
+                Slot::Bind { value: 1 },
+                Slot::Expression {
+                    capture: 1,
+                    observation_name: "it".into()
+                }
+            ],
+            &[
+                vec![("x".into(), tidepool_repr::SessionVarId::from_extract(91))],
+                vec![("it".into(), tidepool_repr::SessionVarId::from_extract(92))]
+            ],
+        )
+        .is_err());
+    }
+
     #[test]
     fn world_parser_receipt_binds_world_canonical_producer_and_authored_recipe() {
         let (specification, _, legacy) = fixture();
