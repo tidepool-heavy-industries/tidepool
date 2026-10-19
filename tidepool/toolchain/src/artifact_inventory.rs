@@ -8772,6 +8772,112 @@ mod tests {
     }
 
     #[test]
+    fn acquired_compiler_bindings_serve_a_fresh_view_without_cold_projection() {
+        use crate::host_work::{HostWorkCounter, HostWorkObservation};
+        use tidepool_repr::execution_schema::InventoryOperation;
+        let inventory = ArtifactInventory::default();
+        let seed = Arc::new(entry("Seed", &["Required"]));
+        let required = Arc::new(entry("Required", &[]));
+        let unrelated = Arc::new(entry("Unrelated", &[]));
+        let seed_id = seed.descriptor.id;
+        let required_id = required.descriptor.id;
+        let unrelated_id = unrelated.descriptor.id;
+        let cold = inventory
+            .admit_shared(&inventory.empty_view(), vec![seed, required, unrelated])
+            .unwrap();
+        assert!(
+            cold.reads.read_projection.get().is_none(),
+            "the fixture must start without a captured cold projection"
+        );
+        let mut namespace = cold.namespace();
+        namespace.retain(|id, _| *id == seed_id);
+        let roots = namespace
+            .values()
+            .copied()
+            .map(InventoryNodeKey::Artifact)
+            .collect::<Vec<_>>();
+        let groups = BTreeMap::new();
+        let operation = InventoryOperation::new(Default::default());
+        let observation = HostWorkObservation::new();
+        let selected = observation
+            .scope(|| {
+                cold.select_acquired_compiler_bindings(&namespace, &groups, &operation)
+            })
+            .unwrap();
+
+        // R7: demand must not require or capture a cold read projection, and
+        // the demanded view's own projection must be its acquired closure.
+        assert!(
+            cold.reads.read_projection.get().is_none(),
+            "demand captured the cold projection it must not depend on"
+        );
+        let demanded_projection = {
+            let state = selected.lease.inventory.0.lock().expect("inventory lock");
+            selected.read_projection(&state).nodes.clone()
+        };
+        let mut expected_projection = imbl::OrdSet::new();
+        for root in selected.roots() {
+            expected_projection.insert(*root);
+        }
+        for node in selected.custody_roots() {
+            expected_projection.insert(*node);
+        }
+        assert_eq!(
+            demanded_projection, expected_projection,
+            "the demanded view projects its own closure, not the cold history"
+        );
+        assert!(
+            !demanded_projection
+                .iter()
+                .any(|node| node.artifact() == unrelated_id),
+            "a cold-only artifact must not leak into the demanded projection"
+        );
+        assert!(operation.work_usage().unwrap().0 > 0);
+
+        // R9: the closure work actually performed is recorded, and matches the
+        // demanded closure rather than the cold view's unrelated history.
+        let (nodes, closure) = {
+            let state = cold.lease.inventory.0.lock().expect("inventory lock");
+            admitted_closure_with_operation(&state, roots.iter().copied(), None).unwrap()
+        };
+        let counts = observation.snapshot();
+        assert_eq!(
+            counts.get(HostWorkCounter::InputProjectionClosureNode),
+            closure.nodes as u64
+        );
+        assert_eq!(
+            counts.get(HostWorkCounter::InputProjectionClosureEdge),
+            closure.edges as u64
+        );
+        assert_eq!(
+            counts.get(HostWorkCounter::InputProjectionBindingVisit),
+            roots.len() as u64
+        );
+        assert!(counts.get(HostWorkCounter::InputProjectionProofVisit) >= 1);
+        assert_eq!(nodes.len(), 2, "the demanded closure is Seed + Required");
+
+        // R6: the demanded closure owns payloads, while cold-only payloads and
+        // closure-only artifacts stay out of the executable roots.
+        assert_eq!(selected.roots().len(), 1);
+        assert_eq!(selected.roots()[0].artifact(), seed_id);
+        assert_eq!(selected.custody_roots().len(), 1);
+        assert_eq!(selected.custody_roots()[0].artifact(), required_id);
+        assert!(Arc::ptr_eq(
+            &selected.lease.payloads[&seed_id],
+            &cold.lease.payloads[&seed_id]
+        ));
+        assert!(Arc::ptr_eq(
+            &selected.lease.payloads[&required_id],
+            &cold.lease.payloads[&required_id]
+        ));
+        assert!(!selected.lease.payloads.contains_key(&unrelated_id));
+        assert!(!selected
+            .custody_roots()
+            .iter()
+            .any(|node| node.artifact() == unrelated_id));
+    }
+
+    #[test]
     fn acquired_owner_index_preserves_hidden_collision_and_last_payload_removal() {
         let inventory = ArtifactInventory::default();
         let native = Arc::new(native_entry("HiddenOwner", &[]));
