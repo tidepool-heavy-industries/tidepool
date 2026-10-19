@@ -1129,11 +1129,24 @@ impl Helper {
     #[must_use]
     pub fn signature(&self, eff: &Effect) -> String {
         let signature = if let HelperBody::Projection { arg, fields, .. } = &self.body {
-            format!("{} -> {}", arg.render(), eff.project(arg, fields).unwrap().render())
+            format!(
+                "{} -> {}",
+                arg.render(),
+                eff.project(arg, fields).unwrap().render()
+            )
         } else {
-            let verb = eff.verb(self.ctor.expect("non-projection helper has a verb")).unwrap();
+            let verb = eff
+                .verb(self.ctor.expect("non-projection helper has a verb"))
+                .unwrap();
             if matches!(self.body, HelperBody::AsyncSpawnBody { .. }) {
-                render_member_signature(&[HsType::app(HsType::app(HsType::Named("Eff"), HsType::Var("effs")), HsType::Unit)], eff.name, &HsType::Int)
+                render_member_signature(
+                    &[HsType::app(
+                        HsType::app(HsType::Named("Eff"), HsType::Var("effs")),
+                        HsType::Unit,
+                    )],
+                    eff.name,
+                    &HsType::Int,
+                )
             } else {
                 let args: Vec<_> = verb.args.iter().map(|a| a.ty.clone()).collect();
                 let result = match &self.body {
@@ -1144,7 +1157,9 @@ impl Helper {
                 let mut extra = Vec::new();
                 for ty in args.iter().chain(std::iter::once(&result)) {
                     for variable in free_type_vars(ty) {
-                        if !extra.contains(&variable) { extra.push(variable); }
+                        if !extra.contains(&variable) {
+                            extra.push(variable);
+                        }
                     }
                 }
                 if matches!(self.body, HelperBody::IntDecode { .. }) {

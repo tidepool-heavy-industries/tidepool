@@ -3671,13 +3671,37 @@ impl CurrentEffectOwner<'_> {
             Self::Scoped { base, .. } => base.effect_keys(),
             Self::Workbench(execution) => {
                 if execution.initial_context {
-                    Some(&execution.issued_snapshot.as_ref()?.installation().tools()?
-                        .initial_context.as_ref()?.effect_keys)
+                    Some(
+                        &execution
+                            .issued_snapshot
+                            .as_ref()?
+                            .installation()
+                            .tools()?
+                            .initial_context
+                            .as_ref()?
+                            .effect_keys,
+                    )
                 } else if execution.after_tool_active {
-                    Some(&execution.issued_snapshot.as_ref()?.installation().tools()?
-                        .after_tool.as_ref()?.effect_keys)
+                    Some(
+                        &execution
+                            .issued_snapshot
+                            .as_ref()?
+                            .installation()
+                            .tools()?
+                            .after_tool
+                            .as_ref()?
+                            .effect_keys,
+                    )
                 } else {
-                    Some(execution.operation.selected()?.selected().endpoint().plan().effect_keys())
+                    Some(
+                        execution
+                            .operation
+                            .selected()?
+                            .selected()
+                            .endpoint()
+                            .plan()
+                            .effect_keys(),
+                    )
                 }
             }
             // These continuations retain source custody but no endpoint/slot row.
@@ -6214,7 +6238,10 @@ where
                 });
                 return Box::pin(std::future::ready(Ok(operation)));
             }
-            ResidentActorBoundary::RuntimeInfo { continuation, request } => {
+            ResidentActorBoundary::RuntimeInfo {
+                continuation,
+                request,
+            } => {
                 macro_rules! resume_observation {
                     ($answer:expr) => {{
                         let answer = $answer;
@@ -6229,7 +6256,8 @@ where
                                 disposition,
                                 runner.resume_value(context, continuation, answer).await,
                             )
-                        }) as futures_util::future::BoxFuture<'static, commands::CommandResolution>
+                        })
+                            as futures_util::future::BoxFuture<'static, commands::CommandResolution>
                     }};
                 }
                 let operation = match request {
@@ -6237,7 +6265,10 @@ where
                         resume_observation!(self.runtime_info(effect_owner.issued_snapshot()))
                     }
                     crate::generated::runtime_info::RuntimeInfoReq::CurrentEffectDocsWith => {
-                        resume_observation!(self.current_effect_docs(effect_owner.issued_snapshot(), effect_owner.effect_keys()))
+                        resume_observation!(self.current_effect_docs(
+                            effect_owner.issued_snapshot(),
+                            effect_owner.effect_keys()
+                        ))
                     }
                 };
                 return Box::pin(std::future::ready(Ok(operation)));

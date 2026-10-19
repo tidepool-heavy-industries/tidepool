@@ -13,7 +13,7 @@ mod spec_preflight_tests;
 /// Both products of one source installation are published together.
 pub(crate) struct SpecInstallation {
     pub(crate) tools: Vec<ToolDeclaration>,
-    slot_effect_keys: BTreeMap<String, Vec<ToolEffectKey>>,
+    pub(crate) slots: Vec<String>,
     pub(crate) slot_effect_keys: BTreeMap<String, Vec<ToolEffectKey>>,
 }
 
@@ -95,7 +95,7 @@ pub(crate) struct AdmittedInstallation {
 /// Checked metadata without a dispatcher, actor, workspace or resource allocation.
 pub(crate) struct ValidatedSpecMetadata {
     pub(crate) plans: Vec<exomonad_tool::EndpointPlan>,
-    pub(crate) slots: Vec<String>,
+    slot_effect_keys: BTreeMap<String, Vec<ToolEffectKey>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, tidepool_bridge_derive::ToHaskell)]
@@ -321,7 +321,10 @@ fn admit_spec_metadata_for(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(ValidatedSpecMetadata { plans, slot_effect_keys })
+    Ok(ValidatedSpecMetadata {
+        plans,
+        slot_effect_keys,
+    })
 }
 
 pub(crate) fn admit_installation(
@@ -360,10 +363,12 @@ fn admit_installation_for(
     dispatcher_effects: &tidepool_runtime::session::HaskellTypeSource,
     reply: bool,
 ) -> Result<AdmittedInstallation, crate::ResidentActorWorkbenchError> {
-    let ValidatedSpecMetadata { plans, slot_effect_keys } =
-        admit_spec_metadata_for(installation, admitted_base, installed_support, reply).map_err(
-            |failure| crate::ResidentActorWorkbenchError::ActorProtocol(failure.to_string()),
-        )?;
+    let ValidatedSpecMetadata {
+        plans,
+        slot_effect_keys,
+    } = admit_spec_metadata_for(installation, admitted_base, installed_support, reply).map_err(
+        |failure| crate::ResidentActorWorkbenchError::ActorProtocol(failure.to_string()),
+    )?;
     let endpoints = plans
         .into_iter()
         .map(|plan| {
@@ -399,14 +404,18 @@ fn admit_installation_for(
             }
         })
         .collect();
-    let after_tool = slot_effect_keys.get("afterTool").map(|keys| AfterToolEntry {
-        effect_keys: keys.clone(),
-        execution_effects: dispatcher_effects.clone(),
-    });
-    let initial_context = slot_effect_keys.get("initialContext").map(|keys| InitialContextEntry {
-        effect_keys: keys.clone(),
-        execution_effects: dispatcher_effects.clone(),
-    });
+    let after_tool = slot_effect_keys
+        .get("afterTool")
+        .map(|keys| AfterToolEntry {
+            effect_keys: keys.clone(),
+            execution_effects: dispatcher_effects.clone(),
+        });
+    let initial_context = slot_effect_keys
+        .get("initialContext")
+        .map(|keys| InitialContextEntry {
+            effect_keys: keys.clone(),
+            execution_effects: dispatcher_effects.clone(),
+        });
     Ok(AdmittedInstallation {
         endpoints,
         after_tool,

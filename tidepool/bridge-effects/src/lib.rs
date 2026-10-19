@@ -668,6 +668,11 @@ mod nominal_wire_tests {
             let wire = super::ToolEffectKeyWire::try_from(*key).unwrap();
             assert_eq!(exomonad_tool::ToolEffectKey::from(wire), *key);
         }
-        assert!(super::ToolEffectKeyWire::try_from(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Forks)).is_err());
+        assert!(
+            super::ToolEffectKeyWire::try_from(exomonad_tool::ToolEffectKey::Actor(
+                exomonad_tool::ActorEffectKey::Forks
+            ))
+            .is_err()
+        );
     }
 }

@@ -448,7 +448,13 @@ impl CompanionOperation {
         let ty = if self.effectful {
             crate::hs::render_member_signature(&self.arguments, "Commands", &self.result)
         } else {
-            self.arguments.iter().rev().fold(self.result.clone(), |ret, arg| HsType::func(arg.clone(), ret)).render()
+            self.arguments
+                .iter()
+                .rev()
+                .fold(self.result.clone(), |ret, arg| {
+                    HsType::func(arg.clone(), ret)
+                })
+                .render()
         };
         format!("Cmd.{} :: {}", self.name, ty)
     }
@@ -460,31 +466,147 @@ pub fn companion_operations() -> Vec<CompanionOperation> {
     let result = named("Cmd.RunResult");
     let output = HsType::either(named("Cmd.OutputIssue"), HsType::Text);
     let mut operations = Vec::new();
-    let mut add = |name, arguments, result, effectful, contract| operations.push(CompanionOperation {
-        name, arguments, result, effectful, contract,
-        source: "bridge/haskell/lib/Tidepool/Command.hs",
-        examples: &[],
-    });
-    add("argv", vec![HsType::list(HsType::Text)], command.clone(), false, &["Describe a command with exact argv; execution is explicit."]);
-    add("bashCommand", vec![HsType::Text], command.clone(), false, &["Describe a bash script; execution is explicit."]);
-    add("withMemory", vec![named("Cmd.Memory"), command.clone()], command.clone(), false, &["Set positive weighted admission memory using Cmd.MiB or Cmd.GiB."]);
-    add("inDirectory", vec![HsType::Text, command.clone()], command.clone(), false, &["Set the command working directory."]);
-    add("withEnvironment", vec![HsType::list(HsType::Tuple(vec![HsType::Text, HsType::Text])), command.clone()], command.clone(), false, &["Add environment overrides."]);
-    add("run", vec![command.clone()], result.clone(), true, &["Start and await completion; retain the result for output and terminal evidence."]);
-    add("start", vec![command], job.clone(), true, &["Start once and retain the Job for later observation or cancellation."]);
-    add("await", vec![job.clone()], result.clone(), true, &["Await an existing job without starting another execution."]);
-    add("job", vec![result.clone()], job.clone(), false, &["Recover the retained job from a completed result."]);
-    add("stdout", vec![result.clone()], output.clone(), false, &["Inspect captured stdout; Left preserves output gaps or incomplete capture."]);
-    add("failure", vec![result], HsType::maybe(HsType::Text), false, &["Inspect terminal failure separately from output decoding."]);
-    add("readStdout", vec![job.clone()], output, true, &["Read retained stdout, preserving partial-output issues."]);
-    add("observe", vec![named("Cmd.Observation"), job.clone()], named("Cmd.CommandStatus"), true, &["Observe with a finite wait and output budget; observation does not set job lifetime."]);
-    add("output", vec![job.clone()], named("Cmd.OutputPage"), true, &["Open retained output with paging continuation."]);
-    add("pageText", vec![named("Cmd.OutputPage")], HsType::Text, false, &["Inspect text on one output page."]);
-    add("next", vec![named("Cmd.OutputPage")], named("Cmd.OutputPage"), true, &["Read the next output page."]);
-    add("cancel", vec![job], HsType::Unit, true, &["Request cancellation; inspect subsequent status for terminal and cleanup evidence."]);
+    let mut add = |name, arguments, result, effectful, contract| {
+        operations.push(CompanionOperation {
+            name,
+            arguments,
+            result,
+            effectful,
+            contract,
+            source: "bridge/haskell/lib/Tidepool/Command.hs",
+            examples: &[],
+        })
+    };
+    add(
+        "argv",
+        vec![HsType::list(HsType::Text)],
+        command.clone(),
+        false,
+        &["Describe a command with exact argv; execution is explicit."],
+    );
+    add(
+        "bashCommand",
+        vec![HsType::Text],
+        command.clone(),
+        false,
+        &["Describe a bash script; execution is explicit."],
+    );
+    add(
+        "withMemory",
+        vec![named("Cmd.Memory"), command.clone()],
+        command.clone(),
+        false,
+        &["Set positive weighted admission memory using Cmd.MiB or Cmd.GiB."],
+    );
+    add(
+        "inDirectory",
+        vec![HsType::Text, command.clone()],
+        command.clone(),
+        false,
+        &["Set the command working directory."],
+    );
+    add(
+        "withEnvironment",
+        vec![
+            HsType::list(HsType::Tuple(vec![HsType::Text, HsType::Text])),
+            command.clone(),
+        ],
+        command.clone(),
+        false,
+        &["Add environment overrides."],
+    );
+    add(
+        "run",
+        vec![command.clone()],
+        result.clone(),
+        true,
+        &["Start and await completion; retain the result for output and terminal evidence."],
+    );
+    add(
+        "start",
+        vec![command],
+        job.clone(),
+        true,
+        &["Start once and retain the Job for later observation or cancellation."],
+    );
+    add(
+        "await",
+        vec![job.clone()],
+        result.clone(),
+        true,
+        &["Await an existing job without starting another execution."],
+    );
+    add(
+        "job",
+        vec![result.clone()],
+        job.clone(),
+        false,
+        &["Recover the retained job from a completed result."],
+    );
+    add(
+        "stdout",
+        vec![result.clone()],
+        output.clone(),
+        false,
+        &["Inspect captured stdout; Left preserves output gaps or incomplete capture."],
+    );
+    add(
+        "failure",
+        vec![result],
+        HsType::maybe(HsType::Text),
+        false,
+        &["Inspect terminal failure separately from output decoding."],
+    );
+    add(
+        "readStdout",
+        vec![job.clone()],
+        output,
+        true,
+        &["Read retained stdout, preserving partial-output issues."],
+    );
+    add(
+        "observe",
+        vec![named("Cmd.Observation"), job.clone()],
+        named("Cmd.CommandStatus"),
+        true,
+        &["Observe with a finite wait and output budget; observation does not set job lifetime."],
+    );
+    add(
+        "output",
+        vec![job.clone()],
+        named("Cmd.OutputPage"),
+        true,
+        &["Open retained output with paging continuation."],
+    );
+    add(
+        "pageText",
+        vec![named("Cmd.OutputPage")],
+        HsType::Text,
+        false,
+        &["Inspect text on one output page."],
+    );
+    add(
+        "next",
+        vec![named("Cmd.OutputPage")],
+        named("Cmd.OutputPage"),
+        true,
+        &["Read the next output page."],
+    );
+    add(
+        "cancel",
+        vec![job],
+        HsType::Unit,
+        true,
+        &["Request cancellation; inspect subsequent status for terminal and cleanup evidence."],
+    );
     for operation in &mut operations {
-        if operation.name == "run" { operation.examples = &[COMMAND_COMPOSITION_EXAMPLE]; }
-        if matches!(operation.name, "argv" | "bashCommand" | "withMemory" | "inDirectory" | "withEnvironment") {
+        if operation.name == "run" {
+            operation.examples = &[COMMAND_COMPOSITION_EXAMPLE];
+        }
+        if matches!(
+            operation.name,
+            "argv" | "bashCommand" | "withMemory" | "inDirectory" | "withEnvironment"
+        ) {
             operation.source = "bridge/haskell/lib/Tidepool/Command/Types.hs";
         }
     }

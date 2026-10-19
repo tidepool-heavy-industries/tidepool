@@ -102,7 +102,7 @@ pub fn runtime_info() -> Effect {
         helpers: vec![Helper { name: "getRuntimeInfo", ctor: Some("GetRuntimeInfoWith"), substrate: false,
             doc: &["Observe this execution's installed spec and configured inference, plus startup evidence as of the query. Safe during initialContext; no filesystem or memory-policy inference."], body: HelperBody::Nullary },
             Helper { name: "currentEffectDocs", ctor: Some("CurrentEffectDocsWith"), substrate: false,
-                doc: &["Observe structured documentation for this execution's exact installed interpreter row. Safe during initialContext; uses the shipped catalogue without GHC lookup. Membership does not establish runtime grants or credential availability."], body: HelperBody::Nullary }],
+                doc: &["Observe structured documentation for this execution's exact admitted endpoint or slot effect row. Safe during initialContext; uses the shipped catalogue without GHC lookup. Membership does not establish runtime grants or credential availability."], body: HelperBody::Nullary }],
         polymorphism: Polymorphism::None, generated_handler: false,
         handler_execution: crate::schema::HandlerExecution::Immediate, caller_principal: false,
     }

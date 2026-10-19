@@ -368,11 +368,16 @@ fn runtime_info_is_read_only_actor_routed_and_reuses_startup_observation() {
     effect.validate().unwrap();
     assert!(!effect.generated_handler);
     assert_eq!(effect.verbs.len(), 2);
-    assert!(effect.verbs.iter().all(|verb| verb.handling == HandlingClass::Actor));
+    assert!(effect
+        .verbs
+        .iter()
+        .all(|verb| verb.handling == HandlingClass::Actor));
     assert_eq!(
         effect.constructor_signatures(),
-        ["GetRuntimeInfoWith :: RuntimeInfo (Either RuntimeInfoError RuntimeInfoSnapshot)",
-         "CurrentEffectDocsWith :: RuntimeInfo (Either RuntimeInfoError EffectDocsSnapshot)"]
+        [
+            "GetRuntimeInfoWith :: RuntimeInfo (Either RuntimeInfoError RuntimeInfoSnapshot)",
+            "CurrentEffectDocsWith :: RuntimeInfo (Either RuntimeInfoError EffectDocsSnapshot)"
+        ]
     );
     let startup = effect
         .type_defs

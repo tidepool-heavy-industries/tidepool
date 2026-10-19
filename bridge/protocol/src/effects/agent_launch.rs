@@ -14,7 +14,11 @@ pub(crate) const MODEL_FAMILY_PARAMS: &[crate::schema::TypeParam] =
 pub fn agent_launch() -> Effect {
     Effect {
         name: "AgentLaunch",
-        authored_surface: crate::schema::AuthoredSurface::OPAQUE,
+        authored_surface: crate::schema::AuthoredSurface::Only {
+            verbs: &[],
+            type_defs: &["ActorEffectKey", "ToolEffectKey"],
+            helpers: &[],
+        },
         handler: "AgentLaunchDecodeHandler",
         handler_module: "agent_launch",
         req_enum: "AgentLaunchReq",

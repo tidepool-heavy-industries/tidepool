@@ -652,15 +652,24 @@ pub fn tool_key_definition() -> TypeDef {
         fields: VariantFields::Positional(vec![crate::hs::HsType::Named("ActorEffectKey")]),
         doc: &[],
     }];
-    variants.extend(EFFECTS.iter().filter(|effect| effect.scope == EffectScope::InvocationOnly).map(|effect| SumVariant {
-        ctor: effect.constructor,
-        fields: VariantFields::Positional(Vec::new()),
-        doc: &[],
-    }));
+    variants.extend(
+        EFFECTS
+            .iter()
+            .filter(|effect| effect.scope == EffectScope::InvocationOnly)
+            .map(|effect| SumVariant {
+                ctor: effect.constructor,
+                fields: VariantFields::Positional(Vec::new()),
+                doc: &[],
+            }),
+    );
     TypeDef {
-        name: "ToolEffectKey", wire_rust: None, haskell_module: None,
-        shape: TypeShape::Sum { variants }, json: JsonInstance::None,
-        derives: WireDerives(&[]), domain: None,
+        name: "ToolEffectKey",
+        wire_rust: None,
+        haskell_module: None,
+        shape: TypeShape::Sum { variants },
+        json: JsonInstance::None,
+        derives: WireDerives(&[]),
+        domain: None,
         doc: &["Nominal key for a selected actor or invocation effect."],
     }
 }
@@ -895,20 +904,32 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
     bridge.push_str("        }\n    }\n}\n");
     bridge.push_str("\nimpl TryFrom<exomonad_tool::ActorEffectKey> for ActorEffectKeyWire {\n    type Error = &'static str;\n    fn try_from(value: exomonad_tool::ActorEffectKey) -> Result<Self, Self::Error> {\n        Ok(match value {\n");
     for effect in &bridge_effects {
-        bridge.push_str(&format!("            exomonad_tool::ActorEffectKey::{} => Self::{},\n", effect.identity.rust_wire, effect.constructor));
+        bridge.push_str(&format!(
+            "            exomonad_tool::ActorEffectKey::{} => Self::{},\n",
+            effect.identity.rust_wire, effect.constructor
+        ));
     }
     bridge.push_str("            _ => return Err(\"legacy actor effect has no nominal wire identity\"),\n        })\n    }\n}\n");
     bridge.push_str("\n#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell, tidepool_bridge_derive::ToHaskell)]\npub enum ToolEffectKeyWire {\n    #[haskell(module = \"Tidepool.Effects.Core\")]\n    ActorEffect(ActorEffectKeyWire),\n");
     for effect in &invocation {
-        bridge.push_str(&format!("    #[haskell(module = \"Tidepool.Effects.Core\")]\n    {},\n", effect.constructor));
+        bridge.push_str(&format!(
+            "    #[haskell(module = \"Tidepool.Effects.Core\")]\n    {},\n",
+            effect.constructor
+        ));
     }
     bridge.push_str("}\n\nimpl TryFrom<exomonad_tool::ToolEffectKey> for ToolEffectKeyWire {\n    type Error = &'static str;\n    fn try_from(key: exomonad_tool::ToolEffectKey) -> Result<Self, Self::Error> {\n        Ok(match key {\n            exomonad_tool::ToolEffectKey::Actor(actor) => Self::ActorEffect(actor.try_into()?),\n");
     for effect in &invocation {
-        bridge.push_str(&format!("            exomonad_tool::ToolEffectKey::{} => Self::{},\n", effect.identity.rust_wire, effect.constructor));
+        bridge.push_str(&format!(
+            "            exomonad_tool::ToolEffectKey::{} => Self::{},\n",
+            effect.identity.rust_wire, effect.constructor
+        ));
     }
     bridge.push_str("        })\n    }\n}\n\nimpl From<ToolEffectKeyWire> for exomonad_tool::ToolEffectKey {\n    fn from(key: ToolEffectKeyWire) -> Self {\n        match key {\n            ToolEffectKeyWire::ActorEffect(actor) => Self::Actor(actor.into()),\n");
     for effect in &invocation {
-        bridge.push_str(&format!("            ToolEffectKeyWire::{} => Self::{},\n", effect.constructor, effect.identity.rust_wire));
+        bridge.push_str(&format!(
+            "            ToolEffectKeyWire::{} => Self::{},\n",
+            effect.constructor, effect.identity.rust_wire
+        ));
     }
     bridge.push_str("        }\n    }\n}\n");
     let mut profiles = crate::gen::header("//! ", "Default actor effects");
@@ -955,7 +976,9 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
             .collect::<Vec<_>>()
             .join(", "),
     );
-    hs.push_str("]\n\nactorEffectName :: ActorEffectKey -> Text\nactorEffectName key = case key of\n");
+    hs.push_str(
+        "]\n\nactorEffectName :: ActorEffectKey -> Text\nactorEffectName key = case key of\n",
+    );
     for effect in &actor {
         hs.push_str(&format!(
             "  {} -> \"{}\"\n",
@@ -1043,7 +1066,8 @@ fn render(effects: &[NominalEffect]) -> Vec<GeneratedFile> {
         },
         GeneratedFile {
             path: "exomonad/actor/src/generated/nominal_keys.rs".into(),
-            contents: crate::gen::header("//! ", "Nominal actor effect key bridge reexport") + "pub use tidepool_bridge_effects::ActorEffectKeyWire;\n",
+            contents: crate::gen::header("//! ", "Nominal actor effect key bridge reexport")
+                + "pub use tidepool_bridge_effects::ActorEffectKeyWire;\n",
         },
         GeneratedFile {
             path: "exomonad/tool/src/generated/effect_keys.rs".into(),

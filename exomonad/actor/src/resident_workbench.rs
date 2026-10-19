@@ -59,11 +59,11 @@ use tidepool_runtime::session::HostCarrier;
 use tidepool_runtime::session::{
     hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
     resident_cell_check_template, resident_workbench_templates, run_admitted_inspections,
-    BoundBinder, CellCheck, CompiledTurn, HostBindingAuthority, HostBindingType,
-    HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
-    PendingPreparedInstall, PendingPreparedMode, RequestReceiverEntry, ResidentContinuationEvent,
-    ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession,
-    RootCustody, SourceImports, TurnClassification, TurnCode, TurnKind, TurnResult,
+    BoundBinder, CellCheck, CompiledTurn, HostBindingAuthority, HostBindingType, HostPayload,
+    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, PendingPreparedInstall,
+    PendingPreparedMode, RequestReceiverEntry, ResidentContinuationEvent, ResidentError,
+    ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
+    SourceImports, TurnClassification, TurnCode, TurnKind, TurnResult,
 };
 #[cfg(test)]
 use tidepool_runtime::session::{run_inspections, run_turn, TurnRequest};
@@ -4220,8 +4220,12 @@ impl ResidentActorBoundary {
             Self::Model { .. } => "model call",
             Self::Context { .. } => "context transformation",
             Self::RuntimeInfo { request, .. } => match request {
-                crate::generated::runtime_info::RuntimeInfoReq::GetRuntimeInfoWith => "getRuntimeInfo",
-                crate::generated::runtime_info::RuntimeInfoReq::CurrentEffectDocsWith => "currentEffectDocs",
+                crate::generated::runtime_info::RuntimeInfoReq::GetRuntimeInfoWith => {
+                    "getRuntimeInfo"
+                }
+                crate::generated::runtime_info::RuntimeInfoReq::CurrentEffectDocsWith => {
+                    "currentEffectDocs"
+                }
             },
             Self::Source { request, .. } => source_operation(request),
             Self::Reload { .. } => "reloadSource",
