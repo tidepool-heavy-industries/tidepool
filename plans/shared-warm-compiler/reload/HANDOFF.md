@@ -46,59 +46,33 @@ The directory/R1 consumers have no passing compilation or test evidence; the
 std-only generator and snapshot check do not establish those claims. See
 [the independent review](REVIEW-BASE.md) for findings and untested boundaries.
 
-The cumulative `fe3ef791` source review completed with three repair findings:
-a continuation-only compiler ticket has no eager source claim, while
-hidden binding completion can compile and obtain a lazy runtime claim. Checkout
-restoration dropped that claim even when compiler END was uncertain. An unrelated
-SpawnOwnership check also named a nonexistent enum variant, and the new
-generation-history fixture dropped its lexical lease before subsequent minting.
-The frozen repair candidate is `9bb4c1eb4bf5a0775dae68beb119446bb34d06b9`,
-including `47f9442b`, `f2ab98b0` and `9bb4c1eb`. It transfers lazy runtime claims
-into the actual compiler ticket before END/unwind, restores the enum variant,
-and retains fixture scope leases. Pure continuation has no eager source claim.
-The supervisor inspected the claim-transfer wiring directly. Cumulative exact
-rereview confirmed those repairs but remains blocked on the same END category
-for bootstrap worlds. A real host OperatorService workbench stays unbound;
-Binding/Projected continuation completion can compile retraction with scoped
-runtime admission None. The ticket's runtime claim transfer then sees None,
-while its outer bootstrap checkout claim drops cleanly despite unknown END.
-Typed bootstrap also loses its own world obligation even if external A survives.
-Campaign approved the narrow scoped lazy source-use hook into the same compiler
-ticket's claim collection. The leaf is implementing it: invoke before actual
-source allocation/mutation, retain exact bootstrap/external prerequisites once
-per scoped operation, restore nested context on unwind, and settle only through
-actual END/abandon. Pure continuation never invokes it. The existing concrete
-runtime gate remains authoritative. No opaque foreign claim factory, registry,
-blanket continuation refusal or force-drain work is included.
-Joined Generation/root-bootstrap/typed-bootstrap hidden-bind-to-unknown-END
-controls are required; split component tests do not prove that wiring.
-The adjacent actual compiler-producer audit also confirmed facade materialization
-outside mutable runtime admission: continuation-only capture_boundary invokes
-capture_spawn/capture_decoded, whose local source claim precedes
-surface.materialize/select_exact_exports compiler work and drops before outer
-END. The mutation hook alone cannot retain that obligation. Campaign approved
-closing this same category at the actual facade producer. The leaf is moving
-source-bearing facade operations behind owning ResidentSession wrappers and
-privatizing the object producer methods, with deliberate caller migration.
-The same ticket hook runs before actual compilation after empty/unchanged
-selection returns, sharing one earned source claim across immutable and mutable
-producers. A joined nonempty/narrow facade-producer control is required alongside
-the binding controls. No eager refusal of every boundary-capture operation is
-acceptable.
-No R1 source has yet been folded into the area branch.
-The complete frozen repair candidate is now
-`fc92605eb78c52284f90249f6e5dd1200ba060de`. The same compiler ticket installs
-the scoped source hook and retains both actor and lower runtime claims through
-END; facade producer methods are private behind owning session wrappers.
+The complete frozen R1 source candidate is
+`fc92605eb78c52284f90249f6e5dd1200ba060de`. It is not folded or accepted.
+Cumulative exact independent review is active; native production and test
+compilation remain zero.
+
+The source repairs the earlier review findings: invalid SpawnOwnership variant,
+premature test-fixture lease release, and source-claim loss before uncertain
+compiler END. The same actual compiler ticket now owns a once-success scoped
+source hook for bootstrap and generation dependencies, alongside concrete runtime
+gate claims. Both mutable binding/install paths and immutable facade compiler
+production retain their exact obligations through END/abandon. Pure continuation
+and empty/unchanged facade selection avoid fresh source claims. Facade producer
+methods are private behind owning session wrappers; affected callers migrated.
+
 Joined legacy-Sleep binding, source-refusal and real facade local/narrow controls
 are authored but unexecuted. Pinned formatting, source-map and whitespace checks
-passed in the leaf checkout. Full cumulative exact review is active before fold;
-production and test compilation remain zero. Leaf evidence and exact selectors:
+passed in the leaf checkout. Exact independent review must assess hook timing,
+scoped restoration, original dependency, physical claim lifetime and actual
+consumer controls before fold. Leaf evidence and exact deferred selectors:
 `/srv/swarm/evidence/inanna/persona-1895-launch-20261019/compiler-failure/reload-admission-20261019/HANDOFF.md`
 and adjacent `DEFERRED-COMMANDS.txt`.
+
 The suspected pre-initial retained-lease/parent-gate alias has no demonstrated
 production path: retention mints a separate detached scope, and actual child
-target leasing first occurs at adoption. Keep this distinction in the review.
+target leasing first occurs at adoption. No different-selected-generation target
+gate bypass was established in transferred callback consumers. Preserve those
+qualified distinctions; do not invent enclosure dependencies from them.
 
 ## Owners and exact continuation
 
@@ -107,30 +81,19 @@ Both granted descendants use `gpt-6.1-sol`, high, fresh context, started
 two descendants across all depths; do not create replacements merely because
 an informed worker yields.
 
-- `/root/warm_compiler_campaign/reload/generation_admission` is implementing R1
-  in `/srv/swarm/checkouts/tidepool-shared-warm-reload-admission-20261019`,
-  branch `feature/shared-warm/reload-admission`. It incorporated area `dc2c858795`
-  and owns the lower runtime source gate, context/callback provenance, real
-  compile/install consumers and typed child reservation callers. Its committed
-  R1 source is `3d56ffcc344a12606f095d1f0bac2ff0abf69959`, joined with area
-  `a0d293d2a0` at `fe3ef791f96788d9d71ac1d2333b6d6436bac35d` in the leaf
-  checkout. The final source checkpoint is `9bb4c1eb4bf5a0775dae68beb119446bb34d06b9`;
-  its terminal source checkpoint is now `fc92605eb78c52284f90249f6e5dd1200ba060de`,
-  with the approved hook/facade repair, exact focused selectors and held
-  successor map. It is dormant, reserved for concrete review/compiler repairs.
-  The area owner then integrates the reviewed checkpoint,
+- `/root/warm_compiler_campaign/reload/generation_admission` owns R1 in
+  `/srv/swarm/checkouts/tidepool-shared-warm-reload-admission-20261019`, branch
+  `feature/shared-warm/reload-admission`. Its terminal source checkpoint is
+  `fc92605eb78c52284f90249f6e5dd1200ba060de`, incorporating area `a0d293d2a0`
+  through the `fe3ef791` merge. It is dormant, reserved for concrete review or
+  compiler repairs. The area owner integrates the reviewed checkpoint,
   regenerates source maps and owns the first admitted compile/repair stage.
-- `/root/warm_compiler_campaign/reload/authority_review` is read-only except
-  `REVIEW-BASE.md`. It reviewed the complete source delta through `804a4d3e2f`
-  and completed the bootstrap-world/typed-child strategy review with the settled
-  reopen-only recovery contract. It was reactivated for exact cumulative
-  `5b74..9bb4c1eb` repair review after the blocked `fe3ef791` report. That review
-  completed blocked on bootstrap END custody; reviewer is now active on the
-  exact cumulative `5b74..fc92605e` repair. Actual compile/focused-gate evidence
-  is still pending.
-  The area owner uses `followup_task` for that candidate, then supplies native
-  evidence and any compile repairs for cumulative review, then
-  repairs findings, requests exact rereview and owns the fold.
+- `/root/warm_compiler_campaign/reload/authority_review` owns only
+  `REVIEW-BASE.md` and is active on exact cumulative `5b74..fc92605e` review.
+  Its prior `9bb4c1eb` review blocked on bootstrap/facade END custody. The area
+  owner handles findings, activates the leaf for bounded repairs, requests exact
+  rereview and owns the fold. Native evidence and compile repairs also require
+  cumulative review before acceptance.
 
 Before yielding, retain the exact awaited event, producer/observer, recipient
 and continuation. A terminal producer sends exact base/candidate/evidence/status
