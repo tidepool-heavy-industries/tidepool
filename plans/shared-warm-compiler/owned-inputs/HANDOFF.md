@@ -9,7 +9,9 @@ custody and demand. No live host or deployment changes.
 
 Area checkout `/srv/swarm/checkouts/tidepool-shared-warm-owned-inputs-20261019`,
 branch `feature/shared-warm/owned-inputs`, remains docs only over the base.
-No row product fold has occurred. Complete integration packet: `INTEGRATION.md`.
+Complete reviewed row ancestry through5113 was folded at
+`2970ef611b886db472872c9e85aae7ec58efa66d`. Complete integration packet:
+`INTEGRATION.md`. Campaign owns the receiving merge and joined qualification.
 
 ## Current source and evidence
 
@@ -58,11 +60,15 @@ actual target/native-group, hidden-type, inspection, bind/capture, replay and
 edited-input refusal control. Opaque offers can retain exact native proof
 outside selected and public graph group lists; neither list is a full-offer
 oracle. Rows committed exact test-only successor `5113d9c962bdc06179628a0758cb0c768f3e5491`;
-supervisor read its critical diff. Independent review and native gates remain pending.
+supervisor read its critical diff. Independent exact source review accepted it;
+production/cfgtest compiled0 and all three requested cases passed1 each.
+Supervisor independently verified report counts, hashes and executable identities.
 Rows owns prod/cfgtest, full corrected case and two existing
 owner controls (disconnected opaque custody and competing private issuances).
-Any later failure is a new observation requiring investigation. Exact independent
-review follows the package proposal below; no fold before the terminal gates.
+Any later joined failure is a new observation requiring investigation.
+Receipt REVIEW-rows-5113d9c9.md and native-results-5113d9c9.json retain
+source and native dispositions separately. The full paired case has no input-work
+assertions; separate checked_expression_history accounting passed at49.
 
 ## Grants and successor ownership
 
@@ -71,8 +77,8 @@ choices were reported to parent; both existing grants are retained.
 
 | Identity | Model / effort | Current assignment |
 | --- | --- | --- |
-| owned_inputs/rows | gpt-6.1-sol / medium, fresh context | Approved test-only native-demand oracle repair, counted controls and terminal observer in existing rows checkout |
-| owned_inputs/source_lifetime | gpt-6.1-sol / high, fresh context | Root-authorized bounded consumed-package-source proposal, then independent exact row-successor review |
+| owned_inputs/rows | gpt-6.1-sol / medium, fresh context | Completed5113 repair/native gates; dormant reserved for actual integration findings |
+| owned_inputs/source_lifetime | gpt-6.1-sol / high, fresh context | Completed package proposal and5113 review; dormant reserved for contract/implementation review |
 
 No current admitted deployment object owns package-source lifetime. Reviewer
 must propose borrowing a real provider interval or extending the existing
@@ -110,9 +116,11 @@ unqualified. Required native/prototype owners may legitimately retain backing.
 Scoped cache scans, inherited traversal, genuine distinct-row initial detachment
 and FD enumeration remain; no O(delta), latency or release claim is made.
 
-Rows produces exact repaired candidate/native terminal; reviewer produces package
-proposal then cumulative review; supervisor repairs/folds complete accepted
-ancestry only after gates and sends exact OIDs to campaign. Producers check
+Rows and reviewer delivered their terminal events; all source/native clients
+settled and row lane released (daemon current2,653,343,744bytes). Supervisor
+folded the complete accepted ancestry. Campaign reviews/integrates this area
+revision and owns joined checks. Root/campaign next decide the bounded package
+proposal; supervisor owns approved source-retention implementation successor. Producers check
 recipient status and use send_message for running recipients, followup_task for
 dormant ones. Every outcome requires a terminal event. No periodic polling or
 implicit continuation; external process observers remain attached until terminal.
