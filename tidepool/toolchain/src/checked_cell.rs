@@ -5617,6 +5617,83 @@ mod tests {
     }
 
     #[test]
+    fn direct_complete_promotion_reuses_owner_without_fact_detach() {
+        use super::*;
+        use crate::declaration_context::RetainedArtifactMaterialization;
+        let producer_bytes = b"direct generic value row";
+        let producer = Sha256::digest(producer_bytes).into();
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let (inputs, owner, path) = prepare_test_value_interface_files(1, false);
+        let produced = capture_test_produced_value_interface(producer, owner, &path, 0);
+        let context = Arc::new(
+            (*original)
+                .clone()
+                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .unwrap(),
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let before_request = context
+            .prepare_compilation(&scratch.path().join("before"), producer_bytes)
+            .unwrap();
+        let metadata = context.compiler_metadata_snapshot().unwrap();
+        let before = context
+            .artifact_view()
+            .retained_materialization(&metadata)
+            .unwrap()
+            .unwrap();
+        let detaches = RetainedArtifactMaterialization::test_fact_detach_count();
+        let support =
+            crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
+                .unwrap();
+        let cell = empty_test_checked_cell(producer, original.clone(), inputs.clone());
+        let value = inputs
+            .capture_output(
+                1,
+                &cell,
+                &context,
+                &[],
+                &original,
+                CheckedValueCaptureInput::Prepared {
+                    support: &support,
+                    produced: &produced,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            value.interface.path,
+            before_request.artifacts[0].interface.path
+        );
+        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
+        for index in 0..4 {
+            let retained = context
+                .artifact_view()
+                .retained_materialization(&metadata)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&before, &retained));
+            let request = context
+                .prepare_compilation(
+                    &scratch.path().join(format!("after-{index}")),
+                    producer_bytes,
+                )
+                .unwrap();
+            assert_eq!(request.artifacts[0].interface.path, value.interface.path);
+            let after = context
+                .artifact_view()
+                .retained_materialization(&metadata)
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&before, &after));
+            assert_eq!(
+                RetainedArtifactMaterialization::test_fact_detach_count(),
+                detaches
+            );
+        }
+    }
+
+    #[test]
     fn same_view_cold_materialization_borrows_its_own_produced_leaf() {
         use super::*;
         let producer_bytes = b"same view cold value";

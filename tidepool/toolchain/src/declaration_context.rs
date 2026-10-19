@@ -4055,7 +4055,17 @@ pub(crate) enum CheckedValueRowSource<'a> {
     Produced(&'a CheckedValueRowIssuer),
 }
 
+#[cfg(test)]
+thread_local! {
+    static CHECKED_VALUE_FACT_DETACHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl RetainedArtifactMaterialization {
+    #[cfg(test)]
+    pub(crate) fn test_fact_detach_count() -> usize {
+        CHECKED_VALUE_FACT_DETACHES.with(std::cell::Cell::get)
+    }
+
     /// A complete physical view owns current facts directly. Overlay revisions
     /// share persistent rows and immutable graph/scope owners, never predecessors.
     pub(crate) fn overlay_checked_value_leaves(
@@ -4066,17 +4076,21 @@ impl RetainedArtifactMaterialization {
         if leaves.is_empty() {
             return complete.clone();
         }
-        if complete.kind == MaterializationKind::CheckedValueOverlay
-            && leaves
-                .iter()
-                .flat_map(|leaf| leaf.rows.iter())
-                .all(|(id, row)| {
-                    complete
-                        .rows
-                        .get(id)
-                        .is_some_and(|old| Arc::ptr_eq(old, row))
-                })
+        let mut selected_leaf_rows_visited = 0usize;
+        if leaves
+            .iter()
+            .flat_map(|leaf| leaf.rows.iter())
+            .all(|(id, row)| {
+                selected_leaf_rows_visited += 1;
+                complete
+                    .rows
+                    .get(id)
+                    .is_some_and(|old| Arc::ptr_eq(old, row))
+            })
         {
+            tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_value_row_overlay_reuse",
+                selected_leaf_rows_visited, baseline_fact_detaches = 0,
+                "reused unchanged direct physical facts");
             return complete.clone();
         }
         let mut owned = if complete.kind == MaterializationKind::CheckedValueOverlay {
@@ -4094,6 +4108,8 @@ impl RetainedArtifactMaterialization {
         } else {
             // Flatten an issued owner once using the existing exact physical
             // selection. Replacing its last obsolete row releases that backing.
+            #[cfg(test)]
+            CHECKED_VALUE_FACT_DETACHES.with(|count| count.set(count.get() + 1));
             let mut owners = vec![complete.clone()];
             owners.extend(leaves.iter().cloned());
             let facts = Self::select_custody_facts(
