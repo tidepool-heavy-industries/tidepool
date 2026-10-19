@@ -247,6 +247,18 @@ impl EmbeddedProjection {
                     (None, None, None)
                 };
             actors.push(HostActorProjection {
+                terminal: node.terminal().map(|terminal| {
+                    use harness::server::browser_contract::{HostActorExitKind, HostActorTerminal};
+                    HostActorTerminal {
+                        kind: match terminal.kind {
+                            ActorExitKind::Completed => HostActorExitKind::Completed,
+                            ActorExitKind::Failed => HostActorExitKind::Failed,
+                            ActorExitKind::Cancelled => HostActorExitKind::Cancelled,
+                            ActorExitKind::Interrupted => HostActorExitKind::Interrupted,
+                        },
+                        summary: terminal.summary.clone(),
+                    }
+                }),
                 workbench: Some(workbench_observation(&node.workbench)),
                 form_waits: Some(form_waits(node)),
                 identity,
@@ -471,6 +483,7 @@ mod tests {
             actors.borrow()[0].inference,
             Some((&HostInferenceState::Blocked { block }).into())
         );
+        assert!(actors.borrow()[0].terminal.is_none());
         root.lifecycle = Some(exomonad_actor::ActorLifecycle::Exited(ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "runtime failed".into(),
@@ -493,6 +506,12 @@ mod tests {
         assert!(actors.has_changed().unwrap());
         let actors = actors.borrow_and_update();
         assert_eq!(actors[0].lifecycle, HostActorLifecycle::Lost);
+        let terminal = actors[0].terminal.as_ref().expect("retained fatal cause");
+        assert_eq!(
+            terminal.kind,
+            harness::server::browser_contract::HostActorExitKind::Failed
+        );
+        assert_eq!(terminal.summary, "runtime failed");
         assert_eq!(actors[0].inference, None);
         assert_eq!(
             actors[0].model_head_request.as_deref(),
