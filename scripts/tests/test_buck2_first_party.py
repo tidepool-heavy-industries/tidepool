@@ -996,11 +996,13 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(result.returncode, 0, result.stderr)
         group = self.rule('exomonad/actor', 'exomonad_actor_unit_tests_all', 'tidepool_rust_test_cases')
         self.assertEqual(group['case_compiler_modes'], {
-            'resident_workbench::request_tests::' + name: 'owned-resident'
+            name: 'owned-resident'
             for name in [
-                'cancelled_lookup_interrupts_its_started_compiler_request_and_recovers',
-                'lookup_batches_qualified_export_facts_in_one_compiler_request',
-                'lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc',
+                'resident_workbench::request_tests::cancelled_lookup_interrupts_its_started_compiler_request_and_recovers',
+                'resident_workbench::request_tests::lookup_batches_qualified_export_facts_in_one_compiler_request',
+                'resident_workbench::request_tests::lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc',
+                'resident_actor::child_launch::tests::child_factory_requires_clean_uncancelled_preparation_before_runtime_adoption',
+                'resident_workbench::request_tests::durable_sleep_binding_observes_real_retraction_request_and_clean_end',
             ]
         })
         self.assertEqual(group['resource_env']['TIDEPOOL_COMPILER_DEPLOYMENT'],
@@ -1025,6 +1027,12 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                          '$(location //build/package:compiler_service_deployment)/compiler-service-source.bin')
         self.assertIn('//build/package:compiler_service_deployment', rooted['resources'])
         self.assertNotIn('//build/package:compiler_deployment', rooted['resources'])
+        self.assertNotIn('LD_LIBRARY_PATH', rooted['resource_env'])
+        self.assertNotIn('LD_LIBRARY_PATH', rooted['env'])
+        self.assertNotIn('TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES', rooted['resource_env'])
+        self.assertNotIn('//build/package:tidepool_extract_runtime_libraries', rooted['resources'])
+        self.assertIn('LD_LIBRARY_PATH', group['resource_env'])
+        self.assertIn('//build/package:tidepool_extract_runtime_libraries', group['resources'])
         self.assertNotIn('TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256', rooted['env'])
 
     def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):

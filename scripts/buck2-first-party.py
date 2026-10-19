@@ -1716,11 +1716,16 @@ tidepool_buildscript_run(
                 world_env, world_resources, world_worker = test_runtime_inputs(
                     package_name, "actor_compiler_world_queries_test", unit=True
                 )
+                # The Rooted service owns its Nix library closure. Generic finite
+                # test loader paths must not enter that service's environment.
+                world_env.pop("LD_LIBRARY_PATH", None)
+                world_env.pop("TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES", None)
                 deployment = "//build/package:compiler_service_deployment"
                 world_env["TIDEPOOL_COMPILER_DEPLOYMENT"] = "$(location " + deployment + ")/compiler-deployment.json"
                 world_env["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = "$(location " + deployment + ")/compiler-service-source.bin"
                 world_resources = [resource for resource in world_resources
-                                   if resource != "//build/package:compiler_deployment"]
+                                   if resource not in {"//build/package:compiler_deployment",
+                                                       "//build/package:tidepool_extract_runtime_libraries"}]
                 world_resources.append(deployment)
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",
