@@ -1111,6 +1111,7 @@ mod tests {
 
     #[test]
     fn recipe_preparation_uses_one_runtime_source_transaction() {
+        use super::*;
         let workspace = tempfile::tempdir().unwrap();
         crate::exomonad::workspace::copy_authored(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../exomonad/examples/workspace"),
