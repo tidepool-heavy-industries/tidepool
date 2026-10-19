@@ -15477,48 +15477,9 @@ mod tests {
 
         let view = context.artifact_view();
         let graph = view.capture_graph_selection();
-        let assert_consumer = |acquired: &Arc<ExactDeclarationContext>| {
-            let actual = ProtectedScaffoldRequirements::default()
-                .compiler_inputs(acquired, None)
-                .unwrap();
-            let selected =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                    &actual,
-                    &PackageInterfaceValidation::default().inventory,
-                )
-                .unwrap();
-            let mut segment = actual
-                .artifacts()
-                .inventory()
-                .bind_segment(actual.artifacts(), vec![], &selected)
-                .unwrap();
-            let demanded = actual
-                .artifacts()
-                .inventory()
-                .admit_bound_target(
-                    &mut segment,
-                    actual.artifacts(),
-                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
-                        &imports,
-                    ),
-                    vec![],
-                    &selected,
-                )
-                .unwrap()
-                .bind_target(None, imports.to_vec())
-                .resolve()
-                .unwrap()
-                .groups()
-                .clone();
-            assert!(!demanded.is_empty());
-            assert!(demanded
-                .iter()
-                .all(|group| group.binding.artifact() != original_role.original().unwrap()));
-            let survived = acquired
-                .published_source_original_selections_for_target(&demanded, &imports)
-                .unwrap();
-            if survived.as_slice() != std::slice::from_ref(&publication) {
-                for actual in &survived {
+        let assert_publication = |actuals: &[Arc<PublishedSourceOriginalSelection>]| {
+            if actuals != std::slice::from_ref(&publication) {
+                for actual in actuals {
                     let actual_context = actual.context();
                     let expected_context = publication.context();
                     let actual_support = actual_context.compiler_source_support();
@@ -15560,7 +15521,49 @@ mod tests {
                     );
                 }
             }
-            assert_eq!(survived.as_slice(), std::slice::from_ref(&publication));
+            assert_eq!(actuals, std::slice::from_ref(&publication));
+        };
+        let assert_consumer = |acquired: &Arc<ExactDeclarationContext>| {
+            let actual = ProtectedScaffoldRequirements::default()
+                .compiler_inputs(acquired, None)
+                .unwrap();
+            let selected =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    &actual,
+                    &PackageInterfaceValidation::default().inventory,
+                )
+                .unwrap();
+            let mut segment = actual
+                .artifacts()
+                .inventory()
+                .bind_segment(actual.artifacts(), vec![], &selected)
+                .unwrap();
+            let demanded = actual
+                .artifacts()
+                .inventory()
+                .admit_bound_target(
+                    &mut segment,
+                    actual.artifacts(),
+                    crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
+                        &imports,
+                    ),
+                    vec![],
+                    &selected,
+                )
+                .unwrap()
+                .bind_target(None, imports.to_vec())
+                .resolve()
+                .unwrap()
+                .groups()
+                .clone();
+            assert!(!demanded.is_empty());
+            assert!(demanded
+                .iter()
+                .all(|group| group.binding.artifact() != original_role.original().unwrap()));
+            let survived = acquired
+                .published_source_original_selections_for_target(&demanded, &imports)
+                .unwrap();
+            assert_publication(&survived);
         };
         let mut restored = Vec::new();
         let mut restored_births = Vec::new();
@@ -15592,7 +15595,7 @@ mod tests {
             let selections = acquired
                 .published_source_original_selections_for_target(&groups, &imports)
                 .unwrap();
-            assert_eq!(selections.as_slice(), std::slice::from_ref(&publication));
+            assert_publication(&selections);
             let born = selections[0].context();
             assert_eq!(
                 born.semantic_sha256(),
