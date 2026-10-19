@@ -16966,7 +16966,7 @@ pub(crate) mod request_tests {
             let (captured, owner) = world_query_test_source(&[Some("module WorldQuestion where\nknown :: Int\nknown = 7\n")]);
             context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
             let workbench = ResidentActorWorkbench::new(machines, source.bind_preparation(preparation_client), None);
-            workbench.adopt_final_source_scope(context.clone()).await.unwrap();
+            workbench_runner_for_test(&workbench).adopt_final_source_scope(context.clone()).await.unwrap();
             let cold = HostWorkObservation::new();
             let first = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Info, cold.clone()).await;
             assert!(matches!(first.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info))) if info.identifier.name == "known"));
@@ -16979,7 +16979,7 @@ pub(crate) mod request_tests {
                 Ok(crate::ActorDescriptor::new("unrelated history", placement)
                     .admit_independent_world().session_context(crate::ActorRef::first(crate::ActorId(2))))
             }).await.unwrap();
-            workbench.adopt_final_source_scope(history_context.clone()).await.unwrap();
+            workbench_runner_for_test(&workbench).adopt_final_source_scope(history_context.clone()).await.unwrap();
             for retained in 0..=3 {
                 if retained > 0 {
                     workbench.publish_cell_for_test(history_context.clone(), &format!("history{retained} <- pure ({retained} :: Int)")).await.unwrap();
@@ -17050,7 +17050,7 @@ pub(crate) mod request_tests {
             let (captured, owner) = world_query_test_source(&bodies);
             context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
             let workbench = ResidentActorWorkbench::new(machines, source.bind_preparation(preparation_client), None);
-            workbench.adopt_final_source_scope(context.clone()).await.unwrap();
+            workbench_runner_for_test(&workbench).adopt_final_source_scope(context.clone()).await.unwrap();
             let first = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Type, HostWorkObservation::new()).await;
             let expected = tidepool_runtime::session::GenerationArtifactReference::capture(first_body.as_bytes().to_vec());
             assert!(matches!(first.resolution(), WorldModuleResolution::Resolved(receipt)
@@ -17071,7 +17071,7 @@ pub(crate) mod request_tests {
                 selected.source_layer = crate::ActorSourceRoots::Complete(reversed_for_context);
                 Ok(selected)
             }).await.unwrap();
-            workbench.adopt_final_source_scope(reversed_context.clone()).await.unwrap();
+            workbench_runner_for_test(&workbench).adopt_final_source_scope(reversed_context.clone()).await.unwrap();
             let second = installed_world_query(&workbench, reversed_context, reversed, "WorldQuestion", StructuredInspectionKind::Type, HostWorkObservation::new()).await;
             let expected_second = tidepool_runtime::session::GenerationArtifactReference::capture(second_body.as_bytes().to_vec());
             assert!(matches!(second.resolution(), WorldModuleResolution::Resolved(receipt)
@@ -17109,7 +17109,7 @@ pub(crate) mod request_tests {
                 selected.source_layer = crate::ActorSourceRoots::Complete(unsupported_layer);
                 Ok(selected)
             }).await.unwrap();
-            workbench.adopt_final_source_scope(unsupported_context.clone()).await.unwrap();
+            workbench_runner_for_test(&workbench).adopt_final_source_scope(unsupported_context.clone()).await.unwrap();
             let unsupported_work = HostWorkObservation::new();
             let refused = workbench.query_public_module_world(unsupported_context, tidepool_runtime::session::NameQuery {
                 scope: tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()),
@@ -17132,7 +17132,7 @@ pub(crate) mod request_tests {
                 selected.source_layer = crate::ActorSourceRoots::Complete(mismatch_layer);
                 Ok(selected)
             }).await.unwrap();
-            workbench.adopt_final_source_scope(mismatch_context.clone()).await.unwrap();
+            workbench_runner_for_test(&workbench).adopt_final_source_scope(mismatch_context.clone()).await.unwrap();
             let refused = installed_world_query(&workbench, mismatch_context, mismatched, "WorldQuestion", StructuredInspectionKind::Type, HostWorkObservation::new()).await;
             assert!(matches!(refused.resolution(), WorldModuleResolution::Rejected(
                 tidepool_toolchain::compiler_world::WorldQueryRejection::Unavailable
