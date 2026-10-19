@@ -73,6 +73,11 @@ thread_local! {
     static CONTEXT_FACT_COMPARISONS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    // Cold row construction versus changed-row fact work (including borrowing
+    // an incoming row fact or removing a row). Snapshot-root clones do neither.
+    static NATIVE_AVAILABILITY_FACT_WORK: std::cell::Cell<(usize, usize)> = const {
+        std::cell::Cell::new((0, 0))
+    };
 }
 
 pub struct ExactDeclarationContext {
@@ -575,7 +580,7 @@ impl OriginalCompilerInputs {
         )?;
         timing.advance("finish_new_products");
         selection
-            .finish_new_product_availability(&metadata.retained, &native.availability)
+            .finish_new_product_availability(&metadata.retained, &native.availability.0)
             .map_err(compiler_evidence_failure)?;
         timing.finish(true);
         // Return only physical custody. Continuation decisions belong to a
@@ -1017,7 +1022,7 @@ enum NativeInputClassification {
     PrivateInput,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum NativeTransportMode {
     Full,
     IssuedGroups,
@@ -1216,9 +1221,11 @@ impl<'a> NativeDependencySupport<'a> {
 
 /// Durable membership in one already issued native contribution. Proof graph
 /// custody stays in the existing offer map, referenced by its stable identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NativeContributionSnapshotFacts {
     pub(crate) offer: [u8; 32],
+    #[serde(with = "crate::exact_context::serde_ord_set")]
     pub(crate) reachable: imbl::OrdSet<crate::artifact_inventory::ArtifactBindingNode>,
 }
 
@@ -1237,20 +1244,24 @@ impl NativeContributionSnapshotFacts {
 
 /// Available permissions for one exact payload. Carrier and canonical binding
 /// alternatives remain attached to each contribution's authenticated graph.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NativeAvailabilitySnapshotFacts {
     pub(crate) original: ArtifactId,
     pub(crate) owner: tidepool_repr::execution_schema::CachedHomeOwner,
     pub(crate) mode: NativeTransportMode,
+    #[serde(with = "crate::exact_context::serde_ord_map")]
     pub(crate) contributions: imbl::OrdMap<[u8; 32], NativeContributionSnapshotFacts>,
 }
 
 /// Issuer-bound input availability, independent of output visibility and roles.
 /// Only native selection issuance constructs a nonempty component; clones retain its
-/// exact payload owners and opaque availability handles.
+/// exact payload owners and opaque availability handles. The second persistent root
+/// records those same rows for capture without a deferred row/contribution census.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RequestNativeAvailability(
     Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
+    imbl::OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>,
 );
 
 /// Mutation of immutable rows does not establish qualification for a new context.
@@ -1273,6 +1284,51 @@ enum NativeAvailabilityRowMerge {
 }
 
 impl RequestNativeAvailability {
+    /// Derive immutable facts only at a real row construction or mutation. The
+    /// acquisition/permission owner remains the row, never these durable facts.
+    fn row_snapshot_facts(
+        row: &NativeTransportAvailability,
+    ) -> Result<NativeAvailabilitySnapshotFacts, CompileError> {
+        Ok(NativeAvailabilitySnapshotFacts {
+            original: row.original.descriptor.id,
+            owner: row.original_owner().clone(),
+            mode: row.mode.clone(),
+            contributions: row
+                .contributions
+                .iter()
+                .map(|contribution| Ok((contribution.identity()?, contribution.snapshot_facts()?)))
+                .collect::<Result<_, CompileError>>()?,
+        })
+    }
+
+    /// Cold construction owns the one row census. Successors carry both roots
+    /// and update facts only for a changed mode or contribution membership.
+    fn from_rows(
+        rows: Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
+    ) -> Result<Self, CompileError> {
+        let mut facts = imbl::OrdMap::new();
+        for (id, row) in rows.iter() {
+            #[cfg(test)]
+            NATIVE_AVAILABILITY_FACT_WORK.with(|work| {
+                let (cold, changed) = work.get();
+                work.set((cold + 1, changed));
+            });
+            facts.insert(*id, Self::row_snapshot_facts(row)?);
+        }
+        Ok(Self(rows, facts))
+    }
+
+    fn changed_row_facts(
+        row: &NativeTransportAvailability,
+    ) -> Result<NativeAvailabilitySnapshotFacts, CompileError> {
+        #[cfg(test)]
+        NATIVE_AVAILABILITY_FACT_WORK.with(|work| {
+            let (cold, changed) = work.get();
+            work.set((cold, changed + 1));
+        });
+        Self::row_snapshot_facts(row)
+    }
+
     fn semantic_observations(
         &self,
     ) -> Result<
@@ -1352,7 +1408,7 @@ impl RequestNativeAvailability {
         for row in rows {
             Self::merge_row(&mut result, row)?;
         }
-        Ok(Self(Arc::new(result)))
+        Self::from_rows(Arc::new(result))
     }
 
     fn merge_row(
@@ -1400,13 +1456,37 @@ impl RequestNativeAvailability {
     }
 
     pub(crate) fn merge(&self, incoming: &Self) -> Result<NativeAvailabilityMerge, CompileError> {
+        // The existing row-map copy is separate from fact maintenance; snapshot
+        // capture never copies this map or enumerates its rows.
         let mut rows = (*self.0).clone();
+        let mut facts = self.1.clone();
         let mut disposition = NativeAvailabilityRowMerge::Unchanged;
         for row in incoming.rows() {
+            let id = row.original.descriptor.id;
             if let NativeAvailabilityRowMerge::Changed =
                 Self::merge_row(&mut rows, Arc::clone(row))?
             {
                 disposition = NativeAvailabilityRowMerge::Changed;
+                let updated = &rows[&id];
+                match self.0.get(&id) {
+                    None => {
+                        #[cfg(test)]
+                        NATIVE_AVAILABILITY_FACT_WORK.with(|work| {
+                            let (cold, changed) = work.get();
+                            work.set((cold, changed + 1));
+                        });
+                        facts.insert(id, incoming.1[&id].clone());
+                    }
+                    Some(previous)
+                        if previous.mode == updated.mode
+                            && previous.contributions == updated.contributions => {}
+                    Some(_) => {
+                        let changed = Self::changed_row_facts(updated)?;
+                        if facts.get(&id) != Some(&changed) {
+                            facts.insert(id, changed);
+                        }
+                    }
+                }
             }
         }
         Ok(match disposition {
@@ -1414,7 +1494,7 @@ impl RequestNativeAvailability {
                 NativeAvailabilityMerge::Unchanged(self.clone())
             }
             NativeAvailabilityRowMerge::Changed => {
-                NativeAvailabilityMerge::Changed(Self(Arc::new(rows)))
+                NativeAvailabilityMerge::Changed(Self(Arc::new(rows), facts))
             }
         })
     }
@@ -1520,10 +1600,19 @@ impl RequestNativeAvailability {
                 "native availability closure observation coverage");
         }
         let mut rows = BTreeMap::new();
+        let mut facts = self.1.clone();
+        let mut changed_rows = false;
         let mut historical_observations = 0usize;
         for (id, row) in self.0.iter() {
             let direct = retained.contains(id);
             if !direct && !dependencies.contains_key(id) {
+                #[cfg(test)]
+                NATIVE_AVAILABILITY_FACT_WORK.with(|work| {
+                    let (cold, changed) = work.get();
+                    work.set((cold, changed + 1));
+                });
+                facts.remove(id);
+                changed_rows = true;
                 continue;
             }
             if payloads.get(id).is_none() {
@@ -1601,7 +1690,18 @@ impl RequestNativeAvailability {
             } else {
                 NativeInputClassification::PrivateInput
             };
-            rows.insert(*id, Arc::new(selected));
+            if selected.mode != row.mode || selected.contributions != row.contributions {
+                let changed = Self::changed_row_facts(&selected)?;
+                if facts.get(id) != Some(&changed) {
+                    facts.insert(*id, changed);
+                }
+            }
+            if selected == **row {
+                rows.insert(*id, Arc::clone(row));
+            } else {
+                changed_rows = true;
+                rows.insert(*id, Arc::new(selected));
+            }
         }
         if trace {
             tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
@@ -1611,33 +1711,17 @@ impl RequestNativeAvailability {
                 complete = historical_observations <= NATIVE_TRACE_ROWS,
                 "native availability historical dependency observation coverage");
         }
-        Ok(Self(Arc::new(rows)))
+        Ok(if changed_rows {
+            Self(Arc::new(rows), facts)
+        } else {
+            self.clone()
+        })
     }
 
     pub(crate) fn snapshot_facts(
         &self,
     ) -> Result<imbl::OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>, CompileError> {
-        self.0
-            .iter()
-            .map(|(id, row)| {
-                let contributions = row
-                    .contributions
-                    .iter()
-                    .map(|contribution| {
-                        Ok((contribution.identity()?, contribution.snapshot_facts()?))
-                    })
-                    .collect::<Result<_, CompileError>>()?;
-                Ok((
-                    *id,
-                    NativeAvailabilitySnapshotFacts {
-                        original: *id,
-                        owner: row.original_owner().clone(),
-                        mode: row.mode.clone(),
-                        contributions,
-                    },
-                ))
-            })
-            .collect()
+        Ok(self.1.clone())
     }
 
     pub(crate) fn restore(
@@ -1686,7 +1770,7 @@ impl RequestNativeAvailability {
             row.validate_full_evidence()?;
             rows.insert(*id, Arc::new(row));
         }
-        Ok(Self(Arc::new(rows)))
+        Ok(Self(Arc::new(rows), facts.clone()))
     }
 
     fn issue_checked_fragment(
@@ -1702,7 +1786,7 @@ impl RequestNativeAvailability {
             validated.offers(),
             validated.roots(),
         )?;
-        Ok((Self(normalized.availability), validated.into_offers()))
+        Ok((normalized.availability, validated.into_offers()))
     }
 
     pub(crate) fn issue_checked(
@@ -1711,9 +1795,7 @@ impl RequestNativeAvailability {
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
     ) -> Result<Self, CompileError> {
         let metadata = roles.project_metadata(artifacts.metadata_snapshot())?;
-        Ok(Self(
-            NativeInputSelection::issue_checked(roles, &metadata, artifacts, offers)?.availability,
-        ))
+        Ok(NativeInputSelection::issue_checked(roles, &metadata, artifacts, offers)?.availability)
     }
 
     pub(crate) fn issued(&self) -> impl Iterator<Item = &Arc<NativeTransportAvailability>> {
@@ -1775,7 +1857,7 @@ impl AdvertisedNativeOriginals {
 }
 
 struct NativeInputSelection {
-    availability: Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
+    availability: RequestNativeAvailability,
     advertised: AdvertisedNativeOriginals,
 }
 
@@ -1857,7 +1939,7 @@ impl NativeInputSelection {
             }
         }
         Ok(Self {
-            availability: normalized.0,
+            availability: normalized,
             advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
         })
     }
@@ -1871,7 +1953,7 @@ impl NativeInputSelection {
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
         mut retained: BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>,
     ) -> Result<BTreeMap<tidepool_extract_cmd::SymbolIdentity, u64>, CompileError> {
-        for (original, availability) in self.availability.iter() {
+        for (original, availability) in self.availability.0.iter() {
             let entry = metadata
                 .artifacts
                 .get(original)
@@ -1928,7 +2010,7 @@ impl NativeInputSelection {
             else {
                 continue;
             };
-            let Some(availability) = self.availability.get(&selected.artifact) else {
+            let Some(availability) = self.availability.0.get(&selected.artifact) else {
                 continue;
             };
             if !availability.permits(selected.original_ordinal) {
@@ -2107,7 +2189,7 @@ impl NativeInputSelection {
             roles,
             projection,
             artifacts,
-            RequestNativeAvailability(Arc::new(availability)),
+            RequestNativeAvailability::from_rows(Arc::new(availability))?,
             offers,
         )
     }
@@ -2133,7 +2215,7 @@ impl NativeCompilerTransport {
         for (owner, id) in inputs.native_selection.advertised.0.iter() {
             metadata.entries.insert(
                 owner.clone(),
-                Arc::clone(&inputs.native_selection.availability[id].original),
+                Arc::clone(&inputs.native_selection.availability.0[id].original),
             );
         }
         #[cfg(test)]
@@ -2209,11 +2291,11 @@ impl RequestCompilerInputs {
         &self,
         original: ArtifactId,
     ) -> Option<Arc<NativeTransportAvailability>> {
-        self.native_selection.availability.get(&original).cloned()
+        self.native_selection.availability.0.get(&original).cloned()
     }
 
     pub(crate) fn private_native_availability(&self) -> RequestNativeAvailability {
-        RequestNativeAvailability(Arc::clone(&self.native_selection.availability))
+        self.native_selection.availability.clone()
     }
 
     pub(crate) fn advertised_native_originals(&self) -> AdvertisedNativeOriginals {
@@ -10471,7 +10553,8 @@ impl ExactDeclarationContext {
                             .filter(|group| independent && group.owner() == owner)
                             .map(PendingCertifiedGroup::group)
                             .collect::<Vec<_>>();
-                        let availability = inputs.native_selection.availability[&selected].as_ref();
+                        let availability =
+                            inputs.native_selection.availability.0[&selected].as_ref();
                         let mode = match &availability.mode {
                             NativeTransportMode::Full => Value::Array(vec![text("full-carrier")]),
                             NativeTransportMode::IssuedGroups => Value::Array(vec![
@@ -16052,7 +16135,7 @@ mod tests {
         );
         match (expected, actual) {
             (Ok(expected), Ok(actual)) => {
-                assert_eq!(actual.availability, expected.availability);
+                assert_eq!(actual.availability.0, expected.availability);
                 assert_eq!(actual.advertised.0, expected.advertised.0);
                 Some(expected)
             }
@@ -16138,7 +16221,7 @@ mod tests {
                 &expected.metadata.retained
             ));
             assert_eq!(
-                physical.inputs.native_selection.availability,
+                physical.inputs.native_selection.availability.0,
                 expected.availability
             );
             assert_eq!(
@@ -16166,7 +16249,7 @@ mod tests {
             let row = Arc::make_mut(invalid.values_mut().next().expect("native row"));
             row.mode = NativeTransportMode::Full;
             row.contributions = Arc::from([]);
-            let invalid = RequestNativeAvailability(Arc::new(invalid));
+            let invalid = RequestNativeAvailability::from_rows(Arc::new(invalid)).unwrap();
             let expected = reference_native_transport(
                 source.projection(),
                 &physical.inputs.metadata,
@@ -16217,7 +16300,7 @@ mod tests {
                     row.canonical = row.original.descriptor.id;
                 }
             }
-            check_native_selection_reference(&inputs, &RequestNativeAvailability(Arc::new(rows)));
+            check_native_selection_reference(&inputs, &RequestNativeAvailability::from_rows(Arc::new(rows)).unwrap());
         }
     }
 
@@ -19045,6 +19128,7 @@ mod tests {
                     .compiler_inputs()
                     .native_selection
                     .availability
+                    .0
                     .get(&original)
                     .unwrap();
                 assert!(
@@ -19099,6 +19183,7 @@ mod tests {
                 .compiler_inputs()
                 .native_selection
                 .availability
+                .0
                 .values()
             {
                 assert!(
