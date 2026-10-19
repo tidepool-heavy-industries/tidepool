@@ -821,18 +821,23 @@ readExactIfaceArtifactsUsing readInterface env artifacts
 -- is valid only for the actual NameCache that issued those Names; a fresh cache
 -- decodes independently even when every input digest is identical.
 newtype RequestIfaceDecoder = RequestIfaceDecoder
-  (MVar [((Char,MVar OrigNameCache),Map.Map (String,String,String) ModIface)])
+  (MVar (IfaceRetention,[((Char,MVar OrigNameCache),Map.Map (String,String,String) ModIface)]))
+
+data IfaceRetention = UnrestrictedIfaceRetention | RetainedIfaceSeals (Set.Set String)
 
 instance Show RequestIfaceDecoder where show _ = "RequestIfaceDecoder"
 
 newRequestIfaceDecoder :: IO RequestIfaceDecoder
-newRequestIfaceDecoder = RequestIfaceDecoder <$> newMVar []
+newRequestIfaceDecoder = RequestIfaceDecoder <$> newMVar (UnrestrictedIfaceRetention,[])
 
 pruneRequestIfaceDecoder :: Set.Set String -> RequestIfaceDecoder -> IO Int
-pruneRequestIfaceDecoder selected (RequestIfaceDecoder state) = modifyMVar state $ \universes -> do
-  let retained = [(cache,Map.filterWithKey (\(_,_,sha) _ -> sha `Set.member` selected) facts)
-        | (cache,facts) <- universes]
-  pure (retained,sum [Map.size facts | (_,facts) <- retained])
+pruneRequestIfaceDecoder selected (RequestIfaceDecoder state) = modifyMVar state $ \(_,universes) -> do
+  let retained = [(cache,chosen) | (cache,facts) <- universes
+        , let chosen = Map.filterWithKey (\(_,_,sha) _ -> sha `Set.member` selected) facts
+        , not (Map.null chosen)]
+  -- Decoding follows scope acquisition. Later readers may use live captured
+  -- inputs without reintroducing facts already excluded from inactive retention.
+  pure ((RetainedIfaceSeals selected,retained),sum [Map.size facts | (_,facts) <- retained])
 
 readCapturedExactIfaceArtifacts :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO ArtifactBytes)
   -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact,ModIface)])
@@ -852,7 +857,7 @@ readCapturedOne (RequestIfaceDecoder state) readInput env artifact = do
   let names = hsc_NC env
       cache = (nsUniqChar names, nsNames names)
   let key = (exactUnit artifact,exactModule artifact,exactSha256 artifact)
-  modifyMVar state $ \universes -> do
+  modifyMVar state $ \(retention,universes) -> do
     let known = maybe Map.empty id (lookup cache universes)
     case Map.lookup key known of
       Just iface -> do
@@ -862,15 +867,19 @@ readCapturedOne (RequestIfaceDecoder state) readInput env artifact = do
         unless (artifactSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
         timing <- readTimingEnabled
         emitCount timing ("exact_iface_decode_reuse." ++ exactModule artifact) 1
-        pure (universes,Right (artifact,iface))
+        pure ((retention,universes),Right (artifact,iface))
       Nothing -> do
         token <- readInput artifact
         unless (artifactSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
         result <- readOneWith (const (pure (artifactBytes token))) env artifact
         let retained = case result of
-              Right (_,iface) -> [(cache,Map.insert key iface known)]
+              Right (_,iface) | retains retention -> [(cache,Map.insert key iface known)]
+              Right _ -> universes
               Left _ -> universes
-        pure (retained,result)
+        pure ((retention,retained),result)
+  where
+    retains UnrestrictedIfaceRetention = True
+    retains (RetainedIfaceSeals selected) = exactSha256 artifact `Set.member` selected
 
 readOneWith :: (ExactIfaceArtifact -> IO BS.ByteString) -> HscEnv -> ExactIfaceArtifact
   -> IO (Either String (ExactIfaceArtifact, ModIface))

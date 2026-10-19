@@ -54,7 +54,7 @@ import Tidepool.ExactScope
   , writeCheckedExactCompilation, writeRetainedExactCompilation
   , ExactCompilationPublication(..), writeRetainedExactCompilationWithOutputsAndPublication
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
-  , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes )
+  , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
@@ -396,7 +396,15 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
       (fail "fresh physical owner inherited a prior worker's decoder")
     withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" "0" $ do
       bounded <- newExactInputOwner
-      _ <- readExactScopeWithOwner bounded thirdPath >>= either fail pure
+      live <- readExactScopeWithOwner bounded thirdPath >>= either fail pure
+      let interfaces = [iface | (iface,_,_) <- scopeInterfaces live]
+          decode = readScopedInterfaces (prHscEnv (pprPipelineResult original)) live interfaces >>= either fail pure
+      _ <- decode
+      (_,decodedAgain) <- captureDiagnostics decode
+      unless (sum [total ("exact_iface_read_calls." ++ exactModule iface) decodedAgain | iface <- interfaces]
+              == toInteger (length interfaces)
+          && sum [total ("exact_iface_decode_reuse." ++ exactModule iface) decodedAgain | iface <- interfaces] == 0)
+        (fail "late live-scope decoding repopulated zero-budget inactive interface retention")
       (_,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
       unless (counterValues "original_inputs.retained_encoded_bytes" evicted == [0]
           && total "original_inputs.certificate.misses" evicted == 2)
@@ -427,6 +435,13 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
     withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" (show positiveLimit) $ do
       bounded <- newExactInputOwner
       (live,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
+      let interfaces = [iface | (iface,_,_) <- scopeInterfaces live]
+          decode = readScopedInterfaces (prHscEnv (pprPipelineResult original)) live interfaces >>= either fail pure
+      _ <- decode
+      (_,decodedAgain) <- captureDiagnostics decode
+      unless (sum [total ("exact_iface_decode_reuse." ++ exactModule iface) decodedAgain | iface <- interfaces] > 0
+          && sum [total ("exact_iface_read_calls." ++ exactModule iface) decodedAgain | iface <- interfaces] > 0)
+        (fail "positive inactive allowance did not separate retained and live-only interface decoding")
       unless (total "original_inputs.retained_encoded_bytes" evicted > 0
           && total "original_inputs.evicted_encoded_bytes" evicted > 0)
         (fail "positive allowance did not retain and evict genuine images")
