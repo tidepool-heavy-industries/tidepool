@@ -553,6 +553,11 @@ pub struct CompilerPreparationClient {
 }
 
 impl CompilerPreparationClient {
+    #[cfg(test)]
+    pub(crate) fn with_live_source_settlement<R>(&self, settle: impl FnOnce() -> R) -> Option<R> {
+        self.retained.with_live_source_settlement(settle)
+    }
+
     pub(crate) fn claim<T>(
         &self,
         claim: impl FnOnce() -> T,
@@ -1383,6 +1388,23 @@ impl RetainedActorExit {
         }
     }
 
+    /// Source settlement enters after canonical issuer/gate locks. Keep this
+    /// incarnation's intent, terminal and cleanup eligibility stable through the
+    /// final publication compare. The callback borrows all cleanup custody.
+    pub(crate) fn with_live_source_settlement<R>(&self, settle: impl FnOnce() -> R) -> Option<R> {
+        let shutdown = self.state.requested_shutdown.lock();
+        let lifecycle = self.state.lifecycle.lock();
+        let cleanup = self.state.cleanup.lock();
+        if shutdown.is_some()
+            || matches!(lifecycle.current, ActorLifecycle::Exited(_))
+            || cleanup.outcome.is_some()
+            || cleanup.compiler_admission != CompilerAdmission::Active
+        {
+            return None;
+        }
+        Some(settle())
+    }
+
     pub(crate) async fn wait_requested_shutdown(&self) -> ActorTerminal {
         let mut changed = self.state.changed.subscribe();
         loop {
@@ -1579,6 +1601,48 @@ mod tests {
                 tidepool_runtime::CompilerTransactionClose::NotStarted
             )]
         );
+    }
+
+    #[test]
+    fn source_settlement_holds_actual_terminal_and_cleanup_eligibility() {
+        let owner = super::RetainedActorExit::new();
+        assert_eq!(
+            owner.with_live_source_settlement(|| {
+                assert!(owner.state.requested_shutdown.try_lock().is_none());
+                assert!(owner.state.lifecycle.try_lock().is_none());
+                assert!(owner.state.cleanup.try_lock().is_none());
+                7
+            }),
+            Some(7)
+        );
+        let requested =
+            super::ActorTerminal::new(super::ActorExitKind::Cancelled, "actual retirement intent");
+        owner.request_shutdown(requested.clone());
+        assert!(owner
+            .with_live_source_settlement(|| panic!("retiring owner cannot settle source"))
+            .is_none());
+        assert_eq!(owner.requested_shutdown(), Some(requested));
+        assert!(
+            owner.get().is_none(),
+            "intent is not a fabricated terminal result"
+        );
+
+        let exited = super::RetainedActorExit::new();
+        exited
+            .publish(super::ActorTerminal::new(
+                super::ActorExitKind::Completed,
+                "actual completed owner",
+            ))
+            .unwrap();
+        assert!(exited
+            .with_live_source_settlement(|| panic!("exited owner cannot settle source"))
+            .is_none());
+        let mut preparation = super::CompilerPreparationOwner::new();
+        let client = preparation.client();
+        preparation.run(|_| ()).action.unwrap();
+        assert!(client
+            .with_live_source_settlement(|| panic!("closed preparation cannot settle source"))
+            .is_none());
     }
 
     fn uncertain_close() -> tidepool_runtime::CompilerTransactionClose {

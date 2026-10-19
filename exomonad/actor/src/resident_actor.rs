@@ -8834,7 +8834,15 @@ where
             .session_context(context.actor)
             .with_issued_source(tools.source())?;
         let workbench = self.environment.runner.application_workbench();
-        let publisher = workbench.generation_publisher(self.installed_tools.clone());
+        let lifecycle = self.lifecycle.clone().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "generation publication has no actor lifecycle owner".into(),
+            )
+        })?;
+        let publisher = workbench.generation_publisher(
+            self.installed_tools.clone(),
+            crate::resident_workbench::ActorPublicationOwner::Actor(lifecycle),
+        );
         let prepared = workbench
             .prepare_initial_generation(
                 self.installed_tools.clone(),
