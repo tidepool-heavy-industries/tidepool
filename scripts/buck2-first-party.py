@@ -1697,6 +1697,7 @@ tidepool_buildscript_run(
             if package_name == "tidepool-runtime":
                 env["TIDEPOOL_CELL_TEST_EXTRACT"] = "$(exe //tidepool/extract-cmd:tidepool-extract)"
             rules.append("\n".join(["tidepool_rust_test_cases(", f"    name = {json.dumps(unit_target['name'] + '_all')},", f"    binary = {json.dumps(':' + unit_target['name'])},", "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 14400000,", runtime_arguments(env, resources, worker),
+                *(['    case_compiler_modes = {"session::turn::tests::cell_program_primary_failure_keeps_its_outer_close_observation": "owned-resident"},'] if package_name == "tidepool-runtime" else []),
                 *(['    case_compiler_modes = {' + ", ".join(
                     json.dumps(name) + ": \"owned-resident\""
                     for name in [
