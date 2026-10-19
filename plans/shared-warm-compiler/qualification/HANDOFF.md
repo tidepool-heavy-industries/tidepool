@@ -121,9 +121,8 @@ The independent read-only review and exact artifact/edge/reference indices are a
 `baseline-oracle-review/FROZEN-NATIVE-LOOKUP-{REVIEW.md,FACTS.json,EDGES.json,REFERENCES.json}`.
 Latest review SHA-256 `4dddf61490820a3176367597099fea7098c797e82ad1e6e9a6e9687a2d522f96`.
 Effective B Original and a genuine required A descendant are established.
-The failed current root operands and first joint contradictory constructor remain
-unobserved. Stage-local roles before/after checked-value extension, authored
-fallback promotion and catalog composition are the narrow next discriminator.
+The later exact `428b` full-profile run below observes current role-policy roots
+and first B promotion. The earlier e6 trace alone did not establish those facts.
 Root/campaign own repair routing; strict validator, genuine conflict refusal and
 the exact frozen regression remain required. Historical direct 70a is a different
 compiler/catalog contract, not a matched passing frozen baseline.
@@ -197,12 +196,57 @@ and binary bytes. Process cleanup confirmed; hosted/compiler not observed for
 these compiler-free unit controls; diagnostics complete. Source review and these
 controls do not observe first promotion. Own build-scope peak5712482304 B,
 output growth1995157504 B; retained idle daemon remains globally accounted.
-All small-lane commands settled. Full bundle and
-exact frozen rerun require a separate fresh 24 GiB admission. The released small
-lane has priority reassigned to the host source/digest producer; no full-bundle
-work starts until campaign's concrete heavy-lane release event. The concrete plan
-is `native-constructor-discriminator/FROZEN-REPRO-PLAN.json`. Missing/truncated
-stage facts remain unknown. No first-promotion claim precedes actual execution.
+All small-lane commands settled. The area joined this accepted source at
+`428b1b6fb10a20db993d3a1b7bd81ce856a5f0d9`. Its production/test tree matches
+accepted e00; documentation and plan changes have separate ownership.
+
+After a separate fresh admission, source-retention, native bundle, freeze and
+bundled verify passed for exact `428b`, fast-dev, workspace ce60 and Harness1893773e.
+Bundle compilation took 852.603 s, 953 local actions; own scope peak 10707906560 B
+and terminal output 9930018816 allocated B. Initial output and transient scratch
+peak were not measured, so terminal bytes are not exact growth or a peak bound.
+The descriptor SHA-256 is
+`0df0d478672886b1b289dc0fd02244f203d3547e9aeea3487ff0a1418081e24d`.
+
+The frozen stronger shared-source Persona selected/executed 1, passed 0, failed 1:
+runner 1 / libtest 101, cohort 158.235 s. Startup and Files/Memory succeeded; all five
+native lookup answers failed the strict exact A/B dependency check before physical
+submission. Notebook and pure continuation were not reached. Process, hosted and
+compiler cleanup are confirmed. Diagnostics remain incomplete: the complete
+48,425,868-byte compiler trace contains 29,357 physical timing records but the
+runner retains 178 detail records. Request counts/aggregates are complete; that
+does not make the detail sample complete. Raw host trace 728745362 B, SHA-256
+`5c6712f9da0ebe1d510ebf95cbe260540cca773743c1792a5f7176e1e44d3046`, is retained.
+`native-constructor-discriminator/FROZEN-TERMINAL-428b.json` binds exact commands,
+build/freeze/verify/case reports, hashes, resource limits and cleanup. All commands
+settled; the 10 GiB hosted allowance is released. The owned idle Buck daemon remains
+accounted globally. This cohort has no timing measurement scope or speedup claim.
+
+The actual same-lookup trace distinguishes the first role promotion. Tidepool is
+InterfaceOnly before/after checked-value extension, authored fallback/reuse and
+native-issuance baseline. First B
+`b066e6ae5e384a107c168a4cb734d4f6644a13bab165a0790273b91267028061`
+Original appears in Candidate issuance fragment 47131 / effective 47174. The same
+invocation is bracketed by candidate reuse 46716 and fresh fragment 47287, whose
+production emitter follows the explicit Candidate call. A Request-only temporary
+promotion is a separate concern, not this observed cause. B survives private
+composition and closure; strict refusal requires A
+`2f5bc68307fd56079c70f4b946ac2bb1aeb9260c8c29e3f4c16753eb6b38bbcc`.
+
+Current composed availability closure 48462 includes direct Operators 137/146 with
+exact issued edges to A7/A2. Operators is nevertheless Full/InterfaceOnly with
+no selected Original: the existing canonical role policy makes it direct. This
+proves a constructed closure obligation, not that the lookup explicitly demanded
+executable Operators. Optional availability-root pollution therefore remains a
+caller-demand question; the validator correctly refuses the constructed facts.
+The existing candidate producer explicitly labels protected native closure rows
+AvailabilityOnly; from_candidates instead sends them through fresh Original
+issuance. The narrow proposed repair separates contextual availability custody
+from selected fresh outputs at the production owner. It must preserve explicit
+fresh B selection through certified physical outputs and genuine A/B refusal;
+no interface-equality substitution or conflict-specific suppression is authorized.
+The reserved leaf owns the exact issuer packet and typed repair proposal, then
+independent review and separately admitted checks. No frozen retry precedes repair.
 
 The next demand-service event is campaign/host/warm source owners producing the concrete joined
 query/check/execute consumer and root/campaign resolves the exact frozen native
