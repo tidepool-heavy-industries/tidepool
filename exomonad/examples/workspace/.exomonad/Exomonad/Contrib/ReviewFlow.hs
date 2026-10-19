@@ -44,7 +44,7 @@ import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Record as R
 import qualified Tidepool.Command as Cmd
 import Tidepool.Actors.Exomonad
-import Tidepool.Effects.Core (GitRef (..), Jev, WorktreeHandle (..), WorktreeIntegration, ActorLocal, Commands, Lookup)
+import Tidepool.Effects.Core (GitRef (..), Jev, WorktreeHandle (..), WorktreeIntegration, ActorLocal, Commands)
 import Tidepool.Actors.Worktree (boundWorktree, observeSubmission)
 import Tidepool.Worktree (WorktreeReceipt (..), WorktreeError, SubmissionObservation (..), HeadState (..), MergeOutcome, renderGitOid, renderWorktreeError, renderWorktreeId, workspaceFor)
 import qualified Exomonad.Contrib.Merge as Merge
@@ -240,7 +240,7 @@ data ReviewFlow mode = ReviewFlow
 
 type ReviewFlowEffects = R.LocalEffects ReviewFlow
   '[Replies, Watches, ActorContext, AgentLaunch, AgentControl, BoundWorktree
-   , WorktreeIntegration, Notifications, Jev, Commands, Actor, Reflect, Lookup]
+   , WorktreeIntegration, Notifications, Jev, Commands, Actor, Reflect]
 type CheckedReviewEffects = ReviewFlowEffects
 
 data ReviewRun = ReviewRun

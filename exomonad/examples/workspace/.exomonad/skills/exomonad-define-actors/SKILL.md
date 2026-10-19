@@ -25,7 +25,8 @@ Availability of the names below:
   (`Exomonad.Contrib.Types`). The last section shows the lower-level shipped API when contrib imports
   are absent.
 
-Confirm a name with `lookup` before depending on it. A skill's example is
+Confirm a name with qualified `Tidepool.Introspection.info` when the notebook
+admits it before depending on it. A skill's example is
 evidence of a pattern, not proof that the name is installed for you.
 
 This executable example joins two differently typed inputs. No mailbox GADT or

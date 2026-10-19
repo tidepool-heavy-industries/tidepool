@@ -33,7 +33,6 @@ import Tidepool.Effects.Core (FsWrite)
 import Tidepool.Effects.Core (Green)
 import Tidepool.Effects.Core (Jev)
 import Tidepool.Effects.Core (Journal)
-import Tidepool.Effects.Core (Lookup)
 import Tidepool.Effects.Core (ModelCall)
 import Tidepool.Effects.Core (Notifications)
 import Tidepool.Effects.Core (Reflect)
@@ -100,7 +99,6 @@ instance KnownEffect (Notifications) where effectWitness = EffectWitness EffectN
 instance KnownEffect (Jev) where effectWitness = EffectWitness EffectJev
 instance KnownEffect (Actor) where effectWitness = EffectWitness EffectActor
 instance KnownEffect (Reflect) where effectWitness = EffectWitness EffectReflect
-instance KnownEffect (Lookup) where effectWitness = EffectWitness EffectLookup
 instance KnownEffect (RepoEvent) where effectWitness = EffectWitness EffectRepoEvent
 instance KnownEffect (Source) where effectWitness = EffectWitness EffectSource
 instance KnownEffect (Journal) where effectWitness = EffectWitness EffectJournal

@@ -1,10 +1,10 @@
 These are editable examples; they do not install a selection or memory policy.
 `Examples.JevComposedWorkflow` is their shared compiled module. Its header lists
 extensions and its signatures list effects. The selected workspace source path
-must contain that module, `Project.EvidencePattern`, `Project.Lookup`,
+must contain that module, `Project.EvidencePattern`,
 `Project.ConversationContext`, `Jev.Operators`, and `Jev.Recording`, together with
 the workspace's pinned `Jev.Core` source root and the matched runtime library.
-Installed lookup bundles include the authored source prerequisites.
+Installed example bundles include the authored source prerequisites.
 
 Run each line or marked stage in an ordinary resident Haskell notebook cell.
 The notebook preamble supplies `Text`, `J`, `display`, overloaded labels, strings
@@ -41,15 +41,6 @@ Serialize this ordinary envelope with the normal JSON/filesystem operations when
 needed; never serialize functions or treat a selected action as executed. The
 caller owns the destination and publication guarantee, just as for the archive
 recipe below.
-
-`jev-lookup-example.hs` additionally needs `Lookup` and `Reflect`. Capture retains
-the original candidate pool, packing omissions, complete ranking Evaluation and
-bounded exact view-fenced expansion. Reassessment is a dependent request over
-bounded declaration text and structural capture evidence, with explicit
-truncation flags and primary/expansion receipts. The returned capture remains
-complete even if deciding evidence is truncated. Refusal, selection failure,
-successful empty selection, confident insufficiency and policy doubt remain
-inspectable separately. A confidence policy cannot supply omitted evidence.
 
 For persistence, run `jev-recording-save-example.hs` with `Jev`, `FsWrite` and
 `Console`. It writes only ordinary recording data to the named scratch file;

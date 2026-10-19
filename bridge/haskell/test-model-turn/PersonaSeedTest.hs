@@ -151,7 +151,7 @@ personaSeedTests = testGroup "persona seed"
         Right prepared -> case field "tools" (Contract.preparedAgentSpecMetadata prepared) of
           Array tools -> do
             assertEqual "explicit ordinary tool order"
-              (map String ["read_file", "write_file", "edit_file", "preview_edit", "bash", "write_stdin", "read_output", "cancel_command", "lookup", "read_lookup", "haskell", "reload"])
+              (map String ["read_file", "write_file", "edit_file", "preview_edit", "bash", "write_stdin", "read_output", "cancel_command", "haskell", "reload"])
               (map (field "name") tools)
             mapM_ (\tool -> assertEqual "hosted function input root" (String "object")
               (field "type" (field "inputSchema" tool)))

@@ -28,7 +28,6 @@ fn exomonad_include_paths() -> Vec<PathBuf> {
         tidepool_mcp::worktree_registry_decl(),
         tidepool_mcp::worktree_allocation_decl(),
         tidepool_mcp::worktree_integration_decl(),
-        tidepool_mcp::lookup_decl(),
     ];
     let effects =
         tidepool_mcp::ensure_effects_module(&declarations).expect("materialize Exomonad effects");

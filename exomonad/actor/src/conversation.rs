@@ -185,7 +185,7 @@ mod tests {
                 },
                 TurnItem::ToolCall {
                     call: "c1".into(),
-                    tool: "lookup".into(),
+                    tool: "inspect".into(),
                     arguments: "{}".into(),
                 },
                 TurnItem::ToolResult {
@@ -214,7 +214,7 @@ mod tests {
                 completed_at: None,
                 items: vec![
                     RfTurnItem::TurnMessage(RfRole::RoleUser, "do the thing".into()),
-                    RfTurnItem::TurnToolCall("c1".into(), "lookup".into(), "{}".into()),
+                    RfTurnItem::TurnToolCall("c1".into(), "inspect".into(), "{}".into()),
                     RfTurnItem::TurnToolResult("c1".into(), "found".into()),
                 ],
             }]

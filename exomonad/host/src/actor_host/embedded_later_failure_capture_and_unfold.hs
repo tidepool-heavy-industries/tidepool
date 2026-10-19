@@ -2,12 +2,12 @@
 {-# LANGUAGE TypeApplications #-}
 
 import qualified Tidepool.Agent.Contract as A
-import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Effects.Core (Commands)
 import Tidepool.Actors.Exomonad
 
 do
   Right seed <- checkpoint currentModel "embedded parent checkpoint before later failure"
-  let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]
+  let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, BoundWorktree]
   Right alpha <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
     ((defaultSpawnOptions currentModel workerSpec) { spawnLabel = Just "checkpoint-alpha", spawnLifetime = ActorOwned })
   Right beta <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)

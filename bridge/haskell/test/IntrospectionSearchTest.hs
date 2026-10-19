@@ -26,7 +26,7 @@ scenario :: IO ()
 scenario = do
   root <- (</> "tidepool-introspection-search-test") <$> getTemporaryDirectory
   createDirectoryIfMissing True root
-  let source = root </> "LookupFixture.hs"
+  let source = root </> "InspectionSearchFixture.hs"
   writeFile (root </> "QualifiedSource.hs") qualifiedFixture
   writeFile (root </> "AmbigA.hs") ambiguousAFixture
   writeFile (root </> "AmbigB.hs") ambiguousBFixture
@@ -44,8 +44,8 @@ scenario = do
       target <- guessTarget source Nothing Nothing
       setTargets [target]
       _ <- load LoadAllTargets
-      summary <- getModSummary (mkModuleName "LookupFixture")
-      parsed <- normalizeLookupWildcards <$> parseModule summary
+      summary <- getModSummary (mkModuleName "InspectionSearchFixture")
+      parsed <- normalizeInspectionWildcards <$> parseModule summary
       typed <- typecheckModule parsed
       let (tcEnv, _) = tm_internals_ typed
           rdrEnv = tcg_rdr_env tcEnv
@@ -174,7 +174,7 @@ fixture =
   unlines
     [ "{-# LANGUAGE PartialTypeSignatures #-}",
       "{-# LANGUAGE RankNTypes, DataKinds #-}",
-      "module LookupFixture where",
+      "module InspectionSearchFixture where",
       "import qualified QualifiedSource as Q",
       "import Data.Proxy (Proxy)",
       "import AmbigA",
@@ -193,7 +193,7 @@ fixture =
       "wildUseful = undefined",
       "queryAny :: _ -> _",
       "queryAny = undefined",
-      "queryCollision :: forall __lookup_w0. __lookup_w0 -> _",
+      "queryCollision :: forall __inspection_w0. __inspection_w0 -> _",
       "queryCollision = undefined",
       "candidateCollision :: Int -> Bool",
       "candidateCollision = undefined",

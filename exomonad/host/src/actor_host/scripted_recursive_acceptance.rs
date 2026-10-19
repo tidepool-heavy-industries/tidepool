@@ -767,7 +767,7 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
             .contains("visible-provider-history-gpt-6.1-sol"), "FreshCtx excludes parent history");
         let installation = host.context.observer.installation(child_actor).await;
         assert!(!installation.checkpoint);
-        for name in ["bash", "haskell_sync", "haskell", "lookup", "submit_review"] {
+        for name in ["bash", "haskell_sync", "haskell", "submit_review"] {
             assert!(installation.tools.iter().any(|tool| tool.name() == name),
                 "the actual default workspace installs {name}");
         }

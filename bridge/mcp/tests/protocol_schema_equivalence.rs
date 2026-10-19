@@ -342,14 +342,6 @@ fn worktree_integration_decl_matches_the_schema_exactly() {
 }
 
 #[test]
-fn lookup_decl_matches_the_schema_exactly() {
-    assert_decl_matches_schema(
-        &tidepool_mcp::lookup_decl(),
-        &tidepool_protocol::effects::lookup::lookup(),
-    );
-}
-
-#[test]
 fn model_call_decl_matches_the_schema_exactly() {
     assert_decl_matches_schema(
         &tidepool_mcp::model_call_decl(),

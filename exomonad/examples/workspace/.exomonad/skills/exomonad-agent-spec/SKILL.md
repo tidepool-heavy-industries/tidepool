@@ -61,8 +61,6 @@ seam:
 
 - [`Project.Shell`](../../Project/Shell.hs) selects and presents typed command
   observations and retained output.
-- [`Project.Lookup`](../../Project/Lookup.hs) uses typed lookup results and
-  candidates for Jev-based selection.
 
 These modules are workspace-specific examples, not functions exported by the
 shared agent-spec API. Read their source before adapting them; a tool's effect

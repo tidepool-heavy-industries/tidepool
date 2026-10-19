@@ -26,7 +26,7 @@ The seed supplies both `prompts/base.md` and `prompts/agent.md`. The workspace
 base override carries composition and lifecycle guidance for an open-ended
 companion; the host appends the profile guide through its generation-owned prompt composition.
 The seed selects a compact profile API guide. The full shared guide remains
-available with lookup query `doc api-guide`. Existing TypeSafe excerpts and
+available with `doc api-guide`. Existing TypeSafe excerpts and
 ancestor suggestions remain optional ordinary files under
 `.exomonad/prompts/references/`; they are not preloaded as direction.
 Keep the shared workspace at `.exomonad/workspace`; it supplies the pinned Jev facade.
@@ -59,9 +59,9 @@ its existing environment owner; it is never passed as a Haskell argument.
 Jev uses the existing `TYPESAFE_API_KEY` configuration. Missing credentials are
 explicit tool failures. No credentials are needed for the focused mock tests.
 
-The agent spec exposes direct `lookup`/`readLookup` discovery and file tools,
-and one synchronous Haskell notebook with forms, console,
-ordinary workspace files, Jev, lookup, reflection, active source inspection, and Web.
+The agent spec exposes direct file tools and one synchronous Haskell notebook
+with forms, console, ordinary workspace files, Jev, reflection, active source
+inspection, and Web.
 Its synchronous notebook includes commands, context editing, record actors, hosted agents,
 typed requests, watches, inspection and scoped cleanup. The standard shell tools
 (`bash`, `write_stdin`, `read_output`, `cancel_command`) expose bounded output

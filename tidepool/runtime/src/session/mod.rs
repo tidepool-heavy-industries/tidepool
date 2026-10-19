@@ -83,11 +83,10 @@ pub use dialect::{
 pub use inspection::{
     finish_admitted_world_inspection, run_admitted_inspections, run_admitted_world_inspection,
     run_inspections, AdmittedInspectionInputs, AdmittedInspectionWorld, ClassMethodInfo,
-    CompletedInspectionWorld, ConstructorInfo, DeclarationInfo, ExactNameQuery, FieldInfo,
-    IdentifierInfo, IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability,
-    InspectionQuery, InspectionRequest, InspectionResult, LookupAnswer, LookupNameMode,
-    NameNamespace, NameQuery, NameScope, QueryError, ScopeProvenance, TypeExpression, TypeInfo,
-    TypeMatch, TypeMatchQuality, WorldInspectionError,
+    CompletedInspectionWorld, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,
+    IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery,
+    InspectionRequest, InspectionResult, NameNamespace, NameQuery, NameScope, QueryError,
+    ScopeProvenance, TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality, WorldInspectionError,
 };
 
 pub use persistent::{

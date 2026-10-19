@@ -212,8 +212,7 @@ fresh-context children select the published source. Captured-only children remai
 pinned. Source-backed actors edit inside declared roots; missing required imports
 fail rather than falling back to an old source tree. Package pins, source roots,
 external service configuration and capability grants remain launch inputs.
-`Project.Shell`,
-`Project.Lookup` and `Exomonad.Contrib.Routing` are the worked examples of presenters,
+`Project.Shell` and `Exomonad.Contrib.Routing` are the worked examples of presenters,
 selectors and event routing. Each installed function tool explicitly selects
 its model-facing text with `presentWith`; see the API guide for `Text`, JSON and
 `Display` choices.

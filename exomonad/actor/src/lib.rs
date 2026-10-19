@@ -52,8 +52,6 @@ pub use jev::{
 mod kernel;
 mod lineage;
 mod local_actor;
-mod lookup;
-pub(crate) mod lookup_tool;
 mod mailbox;
 mod mount;
 mod notification;
@@ -85,8 +83,6 @@ pub use hosted_lifecycle::{
     ResidentShutdown,
 };
 mod typed_request;
-mod usage_pointer;
-pub use usage_pointer::UsagePointerTable;
 mod wait;
 mod workbench_display;
 pub use workbench_display::bounded_output as bound_workbench_display;

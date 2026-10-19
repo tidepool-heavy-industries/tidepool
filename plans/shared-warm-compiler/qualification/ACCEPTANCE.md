@@ -31,7 +31,7 @@ Required early commands after pinned preparation and observed disk admission:
 swarm-build just check exomonad-host tidepool-toolchain
 swarm-build just test-lib tidepool-toolchain --exact declaration_context::native_availability_tests::direct_native_advertisement_follows_canonical_binding_and_keeps_historical_permissions --expected-count 1
 swarm-build just test-lib tidepool-toolchain --exact declaration_context::native_availability_tests::private_transport_refuses_selected_dependency_product_and_interface_conflicts --expected-count 1
-swarm-build just test-lib exomonad-host --exact actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_lookup_and_later_cells_usable --expected-count 1
+swarm-build just test-lib exomonad-host --exact actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_effects_and_later_cells_usable --expected-count 1
 ```
 
 On initial inspection `/srv/build` had `108974096384` bytes available, leaving

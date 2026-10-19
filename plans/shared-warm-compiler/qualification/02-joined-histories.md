@@ -17,7 +17,7 @@ real compiler/host execution until all implementation work is complete.
 
 | Joined fold | Early executable history and observation |
 | --- | --- |
-| Baseline/detection repair | Run both explicit Original winners and the required-child conflict through real input issuance/selection. Run startup → memory/files → native lookup → notebook lookup → later pure cell using the real shared workspace |
+| Baseline/detection repair | Run both explicit Original winners and the required-child conflict through real input issuance/selection. Run startup → memory/files → later pure cell using the real shared workspace |
 | Selected host roots/indexes | Publish A; capture child; append/shadow in parent and child in both orders; next requests observe their exact roots. Full recomputation agrees; unrelated siblings neither invalidate nor gain visibility |
 | Reference/delta transport | Register exact input; hit it; expire/evict registration; cold bootstrap that same input. Distinguish known preacceptance miss from accepted response loss, without retrying uncertain source work |
 | Worker realizations | A→A→B→A worlds on bounded workers; same actor changes world and different actors share a world. Evict/replace worker; exact cold reconstruction agrees with the hot result |
@@ -35,7 +35,7 @@ until its behavior has crossed the joined consumer.
 Use the normal `prepare_workspace`, scaffolded/shared-source package, selected
 prepared toolset and runtime launch owners already used by host acceptance and
 frozen cohorts. The stronger test at the planning base is
-`actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_lookup_and_later_cells_usable`
+`actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_effects_and_later_cells_usable`
 (package `exomonad-host`, expected count 1); its terminal result is pending at
 `70a92c65a02a591f76590daf4e5bfa3e6fcbf723`. Record actual completion, not an
 intermediate display or successful compilation.
@@ -49,7 +49,7 @@ bytes in a local module do not cover the shared-root path. Keep synthetic memory
 and prompts; no private Persona tree or conversation is needed.
 
 The history must observe startup and required marker, first memory/files effects,
-both lookup paths and a later pure display, with typed results and renderer
+the memory/files cells and a later pure display, with typed results and renderer
 expectations checked at their actual boundaries. It must also drive the
 frontdoor negative control: a genuinely selected dependency conflicting with
 explicit Original selection refuses, with no cell effects or publication. The

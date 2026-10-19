@@ -23,9 +23,7 @@ change newly installed workspaces.
 [`AgentSpec.hs`](.exomonad/AgentSpec.hs) composes the records in
 [`Project/Tools.hs`](.exomonad/Project/Tools.hs). The shell record uses
 [`Project/Shell.hs`](.exomonad/Project/Shell.hs) to present typed command
-observations and retained output. The lookup record uses
-[`Project/Lookup.hs`](.exomonad/Project/Lookup.hs) to select among typed lookup
-candidates with Jev. These presenters and selectors are part of their tools.
+observations and retained output. These presenters are part of their tools.
 Every installed function tool chooses its model-facing text explicitly:
 `presentWith id` for `Text`, `presentWith presentJson` for JSON, or
 `presentWith presentDisplay` for an existing `Display` rendering.

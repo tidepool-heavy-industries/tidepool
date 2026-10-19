@@ -1,6 +1,6 @@
 use super::command_test_support::TestCommands;
 use super::test_campaign::{original_tool_call, TestCampaign, COLD_DEBUG_CELL_SETTLEMENT_BUDGET};
-use super::tests::{dispatch_haskell_script, dispatch_lookup};
+use super::tests::dispatch_haskell_script;
 use super::*;
 use exomonad_actor::command_jobs::{CommandBackendPurpose, CommandControl};
 use exomonad_tool::{
@@ -1138,7 +1138,7 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
 
     let replied = dispatch_haskell_script(
         producer.policy.as_ref(),
-        "respond ((\\() -> Cmd.start (Cmd.argv [\"pwd\"])) :: () -> Eff '[Replies, Commands, Lookup, BoundWorktree] Cmd.Job)",
+        "respond ((\\() -> Cmd.start (Cmd.argv [\"pwd\"])) :: () -> Eff '[Replies, Commands, BoundWorktree] Cmd.Job)",
     )
     .await;
     assert_eq!(replied["status"], "replied", "{replied}");
@@ -1209,12 +1209,6 @@ async fn command_output_ux_preserves_large_values_and_decodes_complete_stdout() 
                 ] {
                     assert!(text.contains(marker), "missing {marker}: {text}");
                 }
-                let info = dispatch_lookup(
-                    campaign.root_installation.policy.as_ref(),
-                    &["Cmd.RunResult"],
-                )
-                .await;
-                assert!(info.to_string().contains("data RunResult"), "{info}");
                 assert!(!text.contains("Display failed"), "{text}");
             })
         })

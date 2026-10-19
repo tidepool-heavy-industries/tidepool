@@ -364,7 +364,7 @@ nominal publication join, checkpoint release and
 each have 900 seconds. This case scaffolds the shipped workspace and passes a
 `Project.Work` Task from the root to a spawned child through compiler admission
 with the explicitly supplied `defaultWorkbenchSpec` effect row
-`[Replies, Commands, Lookup, BoundWorktree]`; it verifies that exact row, rejects
+`[Replies, Commands, BoundWorktree]`; it verifies that exact row, rejects
 a Journal-using notebook call at compile time, and checks that the typed
 candidate reply preserves the task's original source and obligation.
 Checkpoint release retains the issuer settlement, observer creation,
@@ -372,7 +372,7 @@ original-scope read/reply and final cleanup in one watchdog; the measured issuer
 portion already took 538 seconds before those later phases. These outer process
 limits preserve the tests' internal phase and cancellation assertions.
 The M2 roster also checks host shutdown and coordinator failure after child
-failure. The `unified-regressions` cohort runs the published lookup/form examples
+failure. The `unified-regressions` cohort runs the published form examples
 and all three operation-settlement controls through the same frozen libtest.
 
 Every new release also requires `result-delivery` from the same descriptor.
@@ -455,8 +455,8 @@ compiler. It refuses a different compiler mode or parallel test execution. One
 case proves that twenty sequentially admitted children completed
 their actual native replies and the parent verified twenty typed answers; it is
 not a claim of twenty concurrent children. The other case prepares the shipped
-default workspace, resolves native lookup signatures, imports its actual
-`AgentSpec`, and verifies a captured-context child's reply from a retained parent
+default workspace, resolves its native probe, imports its actual `AgentSpec`,
+and verifies a captured-context child's reply from a retained parent
 binding. Both cases must execute and pass. The twenty-child scenario requires
 twenty unique actors and installation scopes. The root's typed `DeploymentOriginal` acquisition
 must match the frozen workspace's completed inventory. Children reuse one actual
@@ -565,7 +565,7 @@ initializer replay. It requires the bundle's browser assets, fixtures, catalog
 and root entry, retains artifacts, and runs serially with an owned compiler.
 The shared-workspace history uses scaffolded shared Jev sources, required derived
 JSON startup support and a wrapper preserving the Persona runtime spec. It checks
-memory/files effects, native lookup, notebook lookup and a later pure display.
+memory/files effects and a later pure display.
 Its focused direct-compiler result is separate from this frozen resident gate;
 changing the roster requires rebuilding and freezing the bundle.
 The coherent reload history checks new source and type behavior, fresh notebook

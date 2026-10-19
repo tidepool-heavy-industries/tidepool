@@ -4,7 +4,7 @@
 import qualified Exomonad.Contrib.Types as Types
 import qualified Project.Work as Work
 import qualified Tidepool.Agent.Contract as A
-import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Effects.Core (Commands)
 import qualified Tidepool.Effects as Effects
 import Tidepool.Prelude (tshow)
 import Tidepool.Actors.Exomonad
@@ -14,7 +14,7 @@ Right selectedState <- observeSubmission (worktreeId selectedTree)
 let selectedTask = Work.task "typed-source" "keep the original task" ["README.md"] "return the same source and obligation" (headOid (submittedHead selectedState))
 selectedSpawn <- spawnSubagent (FreshCtx (Work.taskContext selectedTask))
   (ForkWorktree currentCheckout)
-  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, BoundWorktree]))
     { spawnLabel = Just "worker"
     , spawnInstructions = Just (Work.projectPrompt "task"), spawnLifetime = ActorOwned })
 selectedAgent <- case selectedSpawn of

@@ -258,32 +258,6 @@ pub(super) fn configure_shell_workspace(config: &mut ActorHostConfig) {
     );
 }
 
-/// Install the real notebook and lookup surfaces with Jev in the notebook row.
-pub(super) fn configure_notebook_lookup_workspace(config: &mut ActorHostConfig) {
-    let authored = config.workspace.join(".exomonad");
-    std::fs::create_dir_all(&authored).unwrap();
-    std::fs::write(
-        authored.join("AgentSpec.hs"),
-        tidepool_testing::fixture_source(
-            "exomonad/host/src/actor_host/fixtures/notebook_lookup_agent_spec.hs",
-        ),
-    )
-    .unwrap();
-    crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.haskell.source_roots = vec![".".into()];
-        project.haskell.modules = vec!["AgentSpec".into()];
-        project.haskell.spec = Some("AgentSpec.agentSpec".into());
-    });
-    commit_workspace(&config.workspace);
-    config.workspace_inputs = Some(
-        crate::exomonad::workspace::FrozenWorkspace::load(
-            &config.workspace,
-            &config.run_directory.path(),
-        )
-        .unwrap(),
-    );
-}
-
 /// Install a Jev-capable notebook row with a deterministic in-process backend.
 pub(super) fn configure_notebook_jev_workspace(config: &mut ActorHostConfig) {
     config.jev = Some(Arc::new(FixtureJev) as exomonad_actor::JevBackendHandle);
@@ -1675,18 +1649,6 @@ pub(super) async fn dispatch_structured_tool(
         .await
         .expect("recorded tool completion");
     result
-}
-
-pub(super) async fn dispatch_lookup(
-    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
-    queries: &[&str],
-) -> serde_json::Value {
-    dispatch_structured_tool(
-        endpoint,
-        "lookup",
-        serde_json::json!({ "queries": queries }),
-    )
-    .await
 }
 
 pub(super) async fn dispatch_status(

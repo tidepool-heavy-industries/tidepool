@@ -5,16 +5,16 @@ Right compilerScout <- spawnSubagent
     { spawnInstructions = Just (projectPrompt "task")
     , spawnLabel = Just "compiler-scout"
     })
-Right lookupScout <- spawnSubagent
-  (FreshCtx "Inspect the lookup API and return one concise finding.")
+Right introspectionScout <- spawnSubagent
+  (FreshCtx "Inspect the introspection API and return one concise finding.")
   SameDir
   ((defaultSpawnOptions workspaceAgentSpec)
     { spawnInstructions = Just (projectPrompt "task")
-    , spawnLabel = Just "lookup-scout"
+    , spawnLabel = Just "introspection-scout"
     })
 Right compilerRequestHandle <- request @Text compilerScout
   "Summarize the named compiler boundary in one sentence."
   defaultRequestOptions
-Right lookupRequestHandle <- request @Text lookupScout
-  "Summarize the public lookup contract in one sentence."
+Right introspectionRequestHandle <- request @Text introspectionScout
+  "Summarize the public introspection contract in one sentence."
   defaultRequestOptions

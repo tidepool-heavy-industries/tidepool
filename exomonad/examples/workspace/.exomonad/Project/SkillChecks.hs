@@ -43,21 +43,21 @@ applicativeAwait = do
   void $ turn owner start
   first <- activation
   second <- activation
-  let (compiler, lookupWorker) =
+  let (compiler, introspectionWorker) =
         if checkLabel first == "compiler-scout" then (first, second) else (second, first)
   check "the two requests activate their named workers"
-    (checkLabel compiler == "compiler-scout" && checkLabel lookupWorker == "lookup-scout")
+    (checkLabel compiler == "compiler-scout" && checkLabel introspectionWorker == "introspection-scout")
   assertCell (checkActor compiler) "the compiler scout receives its typed request"
     "(sessionInput :: Text) == \"Summarize the named compiler boundary in one sentence.\""
-  assertCell (checkActor lookupWorker) "the lookup scout receives its typed request"
-    "(sessionInput :: Text) == \"Summarize the public lookup contract in one sentence.\""
+  assertCell (checkActor introspectionWorker) "the introspection scout receives its typed request"
+    "(sessionInput :: Text) == \"Summarize the public introspection contract in one sentence.\""
   void $ turn (checkActor compiler)
     "respond (\"compiler note: \" <> (sessionInput :: Text))"
-  void $ turn (checkActor lookupWorker)
-    "respond (\"lookup note: \" <> (sessionInput :: Text))"
+  void $ turn (checkActor introspectionWorker)
+    "respond (\"introspection note: \" <> (sessionInput :: Text))"
   void $ turn owner finish
   assertCell owner "one applicative await retains both typed settlements"
-    "joinedScoutSettlements == Right (Right \"compiler note: Summarize the named compiler boundary in one sentence.\", Right \"lookup note: Summarize the public lookup contract in one sentence.\")"
+    "joinedScoutSettlements == Right (Right \"compiler note: Summarize the named compiler boundary in one sentence.\", Right \"introspection note: Summarize the public introspection contract in one sentence.\")"
 
 skills :: Member RecipeCheck effects => Eff effects ()
 skills = do

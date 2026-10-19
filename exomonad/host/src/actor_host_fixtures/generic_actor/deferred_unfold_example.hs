@@ -1,5 +1,5 @@
 import qualified Tidepool.Agent.Contract as A
-import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Effects.Core (Commands)
 import qualified Tidepool.Model.Selection as Selection
 import qualified Tidepool.Internal.ModelControl as Control
 
@@ -15,7 +15,7 @@ Right capturedContext <- checkpoint currentModel "unfold-example-context"
 Right domainAgent <- spawnSubagent
   (ForkCtx capturedContext)
   (ForkWorktree projectHead)
-  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, BoundWorktree]))
     { spawnLabel = Just domainLabel
     , spawnLifetime = ActorOwned
     , spawnInstructions = Just domainTask
@@ -23,7 +23,7 @@ Right domainAgent <- spawnSubagent
 Right consumerAgent <- spawnSubagent
   (ForkCtx capturedContext)
   (ForkWorktree projectHead)
-  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions currentModel (A.defaultWorkbenchSpec @'[Replies, Commands, BoundWorktree]))
     { spawnLabel = Just consumerLabel
     , spawnLifetime = ActorOwned
     , spawnModel = fixtureOpenAIEffort (Selection.OpenAIOptions Selection.OpenAIMedium)

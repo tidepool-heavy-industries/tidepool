@@ -120,10 +120,10 @@ import Tidepool.ExtractRequest
   ( RequestOperation(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag, admitRequestOperation
   , WorldPublicModuleRequest(..), WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..) )
 import Tidepool.Introspection
-  ( encodeInspectionResults, encodeHostedLookupOutput, runInspectionGhc, withInspectionWork
-  , inspectionCompilationWork, finishHostedKnown, needsHostedFallback, runHostedLookupDiscoveryGhc )
+  ( encodeInspectionResults, runInspectionGhc, withInspectionWork
+  , inspectionCompilationWork )
 import Tidepool.InspectionRunner
-  ( runInspectionRequests, runHostedLookupRequests, HostedMetadataEnvironment(..), isInspectionTypeQuery )
+  ( runInspectionRequests, isInspectionTypeQuery )
 import Tidepool.ExactScope
   ( ExactScope, scopeRequestSha256, scopeSemanticSha256, ExactProduct(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
@@ -417,15 +417,7 @@ runInspectionMode bound _path = do
           (crTargetTcGblEnv successful)
           (crTargetRdrEnv successful)
           (crInspectionProbes successful) requests
-    bytes <- case requestHostedLookup args of
-      Nothing -> encodeInspectionResults <$> runInspectionRequests args compile inspect
-      Just batch -> encodeHostedLookupOutput <$> runHostedLookupRequests args compile inspect (\metadata answers ->
-        case metadata of
-          HostedMetadataReady successful | needsHostedFallback batch answers -> runBoundGhc bound $
-            runHostedLookupDiscoveryGhc work (crHscEnv successful) (crTargetTcGblEnv successful)
-              (crTargetRdrEnv successful) batch answers
-          HostedMetadataRejected diagnostic -> pure (finishHostedKnown batch answers (Just diagnostic))
-          _ -> pure (finishHostedKnown batch answers Nothing))
+    bytes <- encodeInspectionResults <$> runInspectionRequests args compile inspect
     BS.writeFile out bytes
   either throwIO (const (pure [])) res
 

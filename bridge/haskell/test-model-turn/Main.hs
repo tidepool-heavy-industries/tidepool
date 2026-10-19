@@ -20,7 +20,6 @@ import JevPreparedTest (jevPreparedTests)
 import JevRecordingTest (jevRecordingTests)
 import qualified Examples.ModelCallWorkflow as ModelExample
 import qualified Persona.Spec as Persona
-import LookupEvidenceTest (lookupEvidenceTests)
 
 import Prelude
 import Control.Monad (unless)
@@ -88,7 +87,7 @@ tests = testGroup "test-model-turn"
       , testCase "cleanup failure preserves the primary resume failure" (cleanupExample CloseFailure)
       , testCase "malformed continuation returns typed failure and closes once" (cleanupExample MalformedResume)
       ]
-  , testCase "source status and write outcomes expose useful details" sourceInspection, jevPreparedTests, jevRecordingTests, lookupEvidenceTests, personaSeedTests, personaMemoryTests, personaFileTests, researcherSpecTests, replyToolTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
+  , testCase "source status and write outcomes expose useful details" sourceInspection, jevPreparedTests, jevRecordingTests, personaSeedTests, personaMemoryTests, personaFileTests, researcherSpecTests, replyToolTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
 
 permissionExample :: IO ()
 permissionExample = do

@@ -2,7 +2,7 @@
 
 use super::test_campaign::TestCampaign;
 use super::test_campaign::{
-    dispatch_haskell_script, dispatch_haskell_script_result, dispatch_lookup, dispatch_status,
+    dispatch_haskell_script, dispatch_haskell_script_result, dispatch_status,
 };
 use super::*;
 use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
@@ -13,9 +13,7 @@ enum PublishedExample {
     HumanForms,
     Request,
     Command,
-    Lookup,
     Reflect,
-    PersonaLookupDisplay,
     PersonaMemoryEdit,
 }
 
@@ -25,9 +23,7 @@ impl PublishedExample {
             Self::HumanForms => "human-forms",
             Self::Request => "request",
             Self::Command => "command",
-            Self::Lookup => "lookup",
             Self::Reflect => "reflect",
-            Self::PersonaLookupDisplay => "persona-lookup-display",
             Self::PersonaMemoryEdit => "persona-memory-edit",
         }
     }
@@ -37,11 +33,7 @@ impl PublishedExample {
             Self::HumanForms => include_str!("fixtures/api-guide/human-forms.hs"),
             Self::Request => include_str!("fixtures/api-guide/request.hs"),
             Self::Command => include_str!("fixtures/api-guide/command.hs"),
-            Self::Lookup => include_str!("fixtures/api-guide/lookup.hs"),
             Self::Reflect => include_str!("fixtures/api-guide/reflect.hs"),
-            Self::PersonaLookupDisplay => {
-                include_str!("fixtures/api-guide/persona-lookup-display.hs")
-            }
             Self::PersonaMemoryEdit => include_str!("fixtures/api-guide/persona-memory-edit.hs"),
         }
     }
@@ -86,7 +78,6 @@ fn published_notebook_sources_match_authored_fixtures() {
             PublishedExample::HumanForms,
             PublishedExample::Request,
             PublishedExample::Command,
-            PublishedExample::Lookup,
         ],
     );
     assert_published_sources(
@@ -95,10 +86,7 @@ fn published_notebook_sources_match_authored_fixtures() {
     );
     assert_published_sources(
         include_str!("../../../../exomonad/examples/persona/.exomonad/prompts/api-guide.md"),
-        &[
-            PublishedExample::PersonaLookupDisplay,
-            PublishedExample::PersonaMemoryEdit,
-        ],
+        &[PublishedExample::PersonaMemoryEdit],
     );
 }
 
@@ -1425,7 +1413,7 @@ async fn published_command_example_preserves_failed_output_without_replay() {
 }
 
 #[tokio::test]
-async fn published_lookup_and_reflect_examples_preserve_boundary_results() {
+async fn published_reflect_example_preserves_boundary_results() {
     let campaign = TestCampaign::start_with_conversation(
         |admission| admission,
         |_| {},
@@ -1438,22 +1426,6 @@ async fn published_lookup_and_reflect_examples_preserve_boundary_results() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                let lookup =
-                    displayed(campaign, root.as_ref(), PublishedExample::Lookup.source()).await;
-                let rendered_lookup = explicit_display_output(&lookup)["text"].as_str().unwrap();
-                assert!(
-                    rendered_lookup.contains("doc topics") && !rendered_lookup.contains("<opaque>"),
-                    "the documented lookup presenter must show query results: {lookup}"
-                );
-                let found = displayed(
-                    campaign,
-                    root.as_ref(),
-                    &tidepool_testing::fixture_source(
-                        "exomonad/host/src/actor_host/lookup_topics_found.hs",
-                    ),
-                )
-                .await;
-                assert_eq!(explicit_display_output(&found)["text"], "True", "{found}");
                 let reflected =
                     displayed(campaign, root.as_ref(), PublishedExample::Reflect.source()).await;
                 assert_eq!(
@@ -1475,137 +1447,6 @@ async fn published_lookup_and_reflect_examples_preserve_boundary_results() {
             })
         })
         .await;
-}
-
-struct NoPersonaDocJudgment;
-
-impl exomonad_actor::JevBackend for NoPersonaDocJudgment {
-    fn ask(
-        &self,
-        _packet: String,
-    ) -> futures_util::future::BoxFuture<'_, Result<String, exomonad_actor::JevCallFailure>> {
-        panic!("documentation lookup must not call Jev")
-    }
-}
-
-fn configure_persona_skill_workspace(config: &mut ActorHostConfig, helper: bool) {
-    config.jev = Some(Arc::new(NoPersonaDocJudgment));
-    super::startup_persona_acceptance_tests::configure_persona(
-        config,
-        if helper {
-            "Persona.Spec.helperSpec"
-        } else {
-            "Persona.Spec.agentSpec"
-        },
-        |_, _| {},
-    );
-    let outside = config.workspace.join(".agents/skills/exomonad-jev");
-    std::fs::create_dir_all(&outside).unwrap();
-    std::fs::write(outside.join("SKILL.md"), "workspace marker").unwrap();
-    std::fs::write(
-        config.workspace.join(".exomonad/state/probe.md"),
-        "state marker",
-    )
-    .unwrap();
-}
-
-#[tokio::test]
-async fn persona_and_helper_lookup_deliver_pinned_skills_with_workspace_files_confined() {
-    let expected = [
-        include_str!("../../../../.exomonad/workspace/skills/exomonad-jev/SKILL.md"),
-        include_str!("../../../../.exomonad/workspace/skills/exomonad-agent-work/SKILL.md"),
-        include_str!("../../../../.exomonad/workspace/skills/exomonad-workbench/SKILL.md"),
-        include_str!("../../../../.exomonad/workspace/skills/exomonad-cleanup/SKILL.md"),
-        include_str!("../../../../.exomonad/workspace/skills/exomonad-project-work/SKILL.md"),
-        include_str!("../../../../.exomonad/workspace/skills/exomonad-review/SKILL.md"),
-        include_str!("../../../../.exomonad/workspace/skills/exomonad-command/SKILL.md"),
-        include_str!("../../../../.exomonad/workspace/skills/exomonad-define-actors/SKILL.md"),
-        include_str!("../../../../.exomonad/workspace/skills/exomonad-agent-spec/SKILL.md"),
-        include_str!("../../../../.exomonad/workspace/skills/exomonad-jev/SKILL.md"),
-        include_str!(
-            "../../../../.exomonad/workspace/skills/exomonad-jev/references/recent-changes.md"
-        ),
-    ];
-    for helper in [false, true] {
-        let campaign = TestCampaign::start_with_conversation(
-            |admission| admission,
-            |config| configure_persona_skill_workspace(config, helper),
-            Some(Arc::new(|_, _| {
-                Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
-            })),
-        )
-        .await;
-        campaign
-            .run_scenario(|campaign| {
-                Box::pin(async move {
-                    let policy = campaign.root_installation.policy.clone();
-                    let shown = displayed(
-                        campaign,
-                        policy.as_ref(),
-                        &tidepool_testing::fixture_source(
-                            "exomonad/host/src/actor_host/persona_skill_lookup.hs",
-                        ),
-                    )
-                    .await;
-                    let received: serde_json::Value = serde_json::from_str(
-                        explicit_display_output(&shown)["text"].as_str().unwrap(),
-                    )
-                    .unwrap();
-                    if !helper {
-                        let saved = displayed(campaign, policy.as_ref(),
-                            "import qualified Persona.Memory as Memory\nRight () <- Memory.note \"workspace-check\" \"retained note\"\ndisplay (\"saved\" :: Text)").await;
-                        assert_eq!(explicit_display_output(&saved)["text"], "saved");
-                        assert_eq!(std::fs::read_to_string(campaign._repository.path().join(
-                            ".exomonad/state/notes/workspace-check.md")).unwrap(), "retained note");
-                    }
-
-                    let docs = received["documents"].as_array().unwrap();
-                    assert_eq!(docs.len(), expected.len() + 2, "helper={helper}");
-                    for (actual, canonical) in docs.iter().zip(expected) {
-                        assert_eq!(
-                            actual[0].as_u64(),
-                            Some(canonical.chars().count() as u64),
-                            "helper={helper}"
-                        );
-                        assert_eq!(
-                            actual[1].as_str(),
-                            Some(canonical.chars().take(32).collect::<String>().as_str()),
-                            "helper={helper}"
-                        );
-                        let suffix: String = canonical
-                            .chars()
-                            .rev()
-                            .take(32)
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .rev()
-                            .collect();
-                        assert_eq!(actual[2].as_str(), Some(suffix.as_str()), "helper={helper}");
-                    }
-                    assert!(docs[expected.len()..]
-                        .iter()
-                        .all(serde_json::Value::is_null));
-                    assert_eq!(
-                        received["docs_refused"], true,
-                        "helper={helper}: {received}"
-                    );
-                    assert_eq!(
-                        received["writer_status"],
-                        serde_json::json!([!helper, helper]),
-                        "the installed notebook must use the selected persona/helper row"
-                    );
-                    assert_eq!(
-                        received["workspace_accessible"], true,
-                        "helper={helper}: {received}"
-                    );
-                    assert_eq!(
-                        received["files_confined"], true,
-                        "helper={helper}: {received}"
-                    );
-                })
-            })
-            .await;
-    }
 }
 
 #[tokio::test]
@@ -2443,25 +2284,6 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
                     "{candidate}"
                 );
                 assert!(!candidate.contains("GitOid"), "{candidate}");
-                let store =
-                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
-                let lookup = campaign
-                    .drive_actor_output(
-                        &store,
-                        dispatch_lookup(
-                            policy.as_ref(),
-                            &[
-                                "implement",
-                                "reviewCandidate",
-                                "requestReview",
-                                "repair",
-                                "withDecision",
-                                "workspaceAgentSpec",
-                            ],
-                        ),
-                    )
-                    .await;
-                assert_eq!(lookup["status"], "committed", "{lookup}");
             })
         })
         .await;
@@ -3096,8 +2918,8 @@ async fn workspace_check_accepts_a_spec_requiring_journal() {
     let original = std::fs::read_to_string(&spec).unwrap();
     let widened = original
         .replacen(
-            "import Tidepool.Effects.Core (BoundWorktree, Commands, Jev, Lookup, Reflect)",
-            "import Tidepool.Effects.Core (BoundWorktree, Commands, Jev, Lookup, Reflect)\nimport Tidepool.Effects (Journal)",
+            "import Tidepool.Effects.Core (BoundWorktree, Commands, Console, Jev, Reflect)",
+            "import Tidepool.Effects.Core (BoundWorktree, Commands, Console, Jev, Reflect)\nimport Tidepool.Effects (Journal)",
             1,
         )
         .replacen(

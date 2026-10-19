@@ -31,7 +31,7 @@ executor = { backend = "deepseek", model = "deepseek-flash" }
 source_roots = [".", "workspace"]
 modules = [
   "Exomonad.Contrib.Types", "Exomonad.Contrib.Actors", "Project.Work", "Exomonad.Contrib.Routing", "Project.DecisionAnswers", "Project.Observe",
-  "Project.Shell", "Project.Sift", "Project.Lookup", "Project.Reflex", "Project.Evidence",
+  "Project.Shell", "Project.Sift", "Project.Reflex", "Project.Evidence",
   "Project.Investigate", "Exomonad.Contrib.Merge", "Project.ReviewPolicy", "Project.Search", "Project.History",
   "Project.FieldNotes", "Project.RebaseRouter", "Project.SupervisionProfiles",
   "Project.Service", "Project.Repository", "Exomonad.Contrib.CheckResults",

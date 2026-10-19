@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 import qualified Tidepool.Agent.Contract as A
-import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Effects.Core (Commands)
 import Tidepool.Actors.Exomonad
 import qualified Exomonad.Models as Models
 import qualified Tidepool.Model.Selection as Selection
@@ -12,7 +12,7 @@ let fixtureOpenAI key options = Selection.openAI Models.catalogIdentity key opti
 capturedValue <- retainedAction
 let capturedGetter = capturedValue + 1
 Right seed <- checkpoint currentModel "same-cell three-actor capture"
-let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]
+let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, BoundWorktree]
 let workerOptions = (defaultSpawnOptions currentModel workerSpec)
       { spawnModel = fixtureOpenAI "luna" (Selection.OpenAIOptions Selection.OpenAILow), spawnLifetime = ActorOwned }
 Right alpha <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)

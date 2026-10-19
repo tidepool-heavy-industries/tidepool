@@ -140,7 +140,7 @@ installed package revision, starting with Jev. Evaluate existing Hoogle and
 Haddock outputs before designing a custom index. Names, signatures and authored
 documentation could then be searched without a compiler request; live notebook
 bindings and exact source availability would remain with their current owners.
-Measure lookup latency, compiler requests avoided, index size and useful result
+Measure discovery latency, compiler requests avoided, index size and useful result
 coverage. Index identity must include its package inputs, and indexed matches
 must not imply runtime authorization or replace exact-reference admission.
 This is a substrate experiment, not a task assigned to the companion.

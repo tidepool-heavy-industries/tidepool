@@ -24,7 +24,7 @@ import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExactHydration (CheckedTemplateImports(..))
 import Tidepool.ExactScope
 import Tidepool.Test.CandidateCodec (writeEmptyScopeCodecFixture)
-import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), InspectionRequest(..), HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), LookupNameInspection(..), LookupNameMode(..), workerArgv, workerRequestFromArgv)
+import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), InspectionRequest(..), workerArgv, workerRequestFromArgv)
 import Tidepool.ExtractUtil (shaHex)
 
 checkedAdmissionChecks :: IO ()
@@ -79,10 +79,8 @@ checkedAdmissionChecks = withScratch $ \root -> do
   rendered <- checkedRecipeSource emptyCompilerDefaultRecipe [] item template authored
   unless ("\"{{BINDERS}}\"" `T.isInfixOf` T.pack rendered) (fail "authored placeholder was rescanned")
   let inspect = args { requestInspections = [InspectNameInfo "visible"], requestInspectOut = Just "inspection.cbor", requestBindGen = Nothing }
-  let hosted = inspect { requestInspections = [], requestFiles = [first], requestHostedLookup = Just
-        (HostedLookupBatch [HostedLookupPrimary 4 "visible" (HostedLookupName (LookupNameInspection "visible" Nothing LookupNameOnly))] Nothing) }
-  forM_ [inspect, hosted] $ \admitted -> do
-    unless (matchesInspectionAdmission admitted ["Val7"]) (fail "inspection cap rejected matching complete/hosted inputs")
+  forM_ [inspect] $ \admitted -> do
+    unless (matchesInspectionAdmission admitted ["Val7"]) (fail "inspection cap rejected matching complete inputs")
     forM_ [ admitted { requestTurn = True }, admitted { requestCell = True }
           , admitted { requestCheckSource = True }, admitted { requestCellPlan = True }
           , admitted { requestClassify = True }, admitted { requestCertifyHomeProducts = True }

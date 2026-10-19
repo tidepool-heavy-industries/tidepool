@@ -354,7 +354,7 @@ before promotion.
 
 ## Checked inspection inputs
 
-Resident lookup captures reachable checked value interfaces with its immutable
+Resident introspection captures reachable checked value interfaces with its immutable
 actor view while owning the session checkout. The `inspection1` exact-scope
 purpose seals their module inventory, original bytes and ordered include roots.
 It authorizes inspection only; cell checking, prepared execution, certification,

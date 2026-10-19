@@ -84,7 +84,7 @@ through its admitted root policy. The first bind would send an observable
 notification and return `41`; its final statement is the real type error
 `pure (True :: Int)`. Rejection must retain receipts with no committed item,
 installed binding or completed operation. The notification inbox stays empty,
-and a fresh Haskell lookup reports that `neverPublished` is not in scope.
+and a fresh Haskell cell reports that `neverPublished` is not in scope.
 Retrying the identical original operation returns the same retained rejection
 without another compiler submission. A valid control changes only the final
 statement, executes exactly one notification through the production durable

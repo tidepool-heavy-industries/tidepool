@@ -105,7 +105,6 @@ pub fn actor_generated_files() -> Vec<GeneratedFile> {
         effects::resource_scope::resource_scopes(),
         effects::actor_context::actor_context(),
         effects::introspection::introspection(),
-        effects::lookup::lookup(),
         effects::source::source(),
         effects::runtime_info::runtime_info(),
         effects::reload::reload(),

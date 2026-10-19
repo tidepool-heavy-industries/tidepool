@@ -231,7 +231,7 @@ import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironm
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, boundedUtf8, trySynchronous)
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
-import Tidepool.Introspection (normalizeLookupWildcards, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..))
+import Tidepool.Introspection (normalizeInspectionWildcards, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..))
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
   , WorldPublicModuleRequest(..), WorldQueryMode(..), StructuredInspection(..), StructuredNameScope(..)
@@ -2161,7 +2161,7 @@ data CycleState
       (Map.Map Module CompletedModuleVersion -> IO CompilerRecoveryCaches)
       (IORef CompilerInterpreterState) PackageFinderFacts (IORef InterpreterAttemptState)
 
-data CompilePurpose = GeneralCompile | LookupTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
+data CompilePurpose = GeneralCompile | InspectionTypeCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | CheckedItemCompile [(String,CheckedSignature)] (Maybe ((String,String),String)) [CompletedValueImport]
   | HostActivationPreviewCompile CheckedSignature
   | ProgramItemCompile Bool [(String,CheckedSignature)] [((String,String),String)] [CompletedValueImport]
@@ -2243,8 +2243,8 @@ transformFor OriginalDeclarationCompile target env summary
   | ms_mod_name summary == target = fmap unannotatedModule . refineParsedDeclarationImports env
   | otherwise = pure . unannotatedModule
 transformFor CertifyHomeProductsCompile _ _ _ = pure . unannotatedModule
-transformFor LookupTypeCompile target _ summary
-  | ms_mod_name summary == target = pure . unannotatedModule . normalizeLookupWildcards
+transformFor InspectionTypeCompile target _ summary
+  | ms_mod_name summary == target = pure . unannotatedModule . normalizeInspectionWildcards
   | otherwise = pure . unannotatedModule
 transformFor (CheckedItemCompile annotations original _) target env summary
   | ms_mod_name summary == target = \parsed -> do
@@ -5047,7 +5047,7 @@ compilePurposeLabel :: CompilePurpose -> String
 compilePurposeLabel purpose = case purpose of
   TypedSegmentCompile _ _ _ -> "typed_segment"
   GeneralCompile -> "general"
-  LookupTypeCompile -> "lookup_type"
+  InspectionTypeCompile -> "inspection_type"
   CertifyHomeProductsCompile -> "certify_home_products"
   OriginalDeclarationCompile -> "original_declaration"
   CheckedItemCompile{} -> "checked_item"
@@ -7665,7 +7665,7 @@ capturedBindingDisplay occurrence tcg =
 -- interface registration, even though it accepted their typed syntax. The
 -- typechecked source is the exact owner of those local generated binders;
 -- retain only their Ids for the immediate inspection request. This includes
--- the effect-row sentinel, @:type@ probes, and the lookup type-search binder:
+-- the effect-row sentinel, @:type@ probes, and the type-search binder:
 -- all are target-local and must not be resolved back through an intentionally
 -- elided target interface.
 capturedInspectionProbes :: TcGblEnv -> Map.Map String Id
@@ -7674,8 +7674,8 @@ capturedInspectionProbes tcg = Map.fromList
   | identifier <- typeEnvIds (tcg_type_env tcg)
       ++ collectDataIds (tcg_binds tcg)
   , let occurrence = occNameString (nameOccName (idName identifier))
-  , occurrence == "__tidepool_lookup_row"
-      || occurrence == "__tidepool_lookup_query"
+  , occurrence == "__tidepool_inspection_row"
+      || occurrence == "__tidepool_type_search_query"
       || "__tidepool_inspect_" `isPrefixOf` occurrence
   ]
 

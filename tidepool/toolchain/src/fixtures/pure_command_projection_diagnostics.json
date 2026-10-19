@@ -16,7 +16,7 @@
         "file": "<cell>"
       },
       "severity": "error",
-      "message": "Couldn't match expected type: Eff\n                                [Replies, Watches, ResourceScopes, ActorContext, AgentLaunch,\n                                 AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry,\n                                 WorktreeAllocation, WorktreeIntegration, Sleep, Notifications, Jev,\n                                 ModelCall, Commands, Console, AskUser, Green, Actor, Reflect,\n                                 Lookup, Source, Journal, RepoEvent]\n                                value0\n            with actual type: Either Cmd.OutputIssue Text"
+      "message": "Couldn't match expected type: Eff\n                                [Replies, Watches, ResourceScopes, ActorContext, AgentLaunch,\n                                 AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry,\n                                 WorktreeAllocation, WorktreeIntegration, Sleep, Notifications, Jev,\n                                 ModelCall, Commands, Console, AskUser, Green, Actor, Reflect,\n                                 Source, Journal, RepoEvent]\n                                value0\n            with actual type: Either Cmd.OutputIssue Text"
     }
   ]
 }

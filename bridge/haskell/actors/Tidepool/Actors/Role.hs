@@ -20,7 +20,6 @@ module Tidepool.Actors.Role
   , ModelCall
   , ForkAgent
   , SpawnAgent
-  , Lookup
   , Reflect
   , Source
   , Journal
@@ -48,7 +47,6 @@ import Tidepool.Effects.Core
   , ModelCall
   , ForkAgent
   , SpawnAgent
-  , Lookup
   , Reflect
   , RepoEvent
   , Source

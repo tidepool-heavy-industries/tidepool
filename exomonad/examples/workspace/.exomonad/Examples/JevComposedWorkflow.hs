@@ -19,16 +19,11 @@ import qualified Data.Text as Text
 import qualified Jev.Core as C
 import qualified Jev.Operators as J
 import Tidepool.Aeson.Value (Value)
-import Tidepool.Effects.Core (Jev, FsRead, FsWrite, Lookup, Reflect)
+import Tidepool.Effects.Core (Jev, FsRead, FsWrite, Reflect)
 import qualified Tidepool.Effects.Authored as Files
 import Tidepool.Records (FsError)
 import qualified Jev.Recording as Recording
 import Project.EvidencePattern
-import qualified Project.Lookup as Lookup
-import qualified Tidepool.Lookup.Tools as LookupTools
-import Tidepool.Inspection.Tree (renderTreeWithNotice)
-import Tidepool.Inspection.Display (Display (displayTree))
-import qualified Tidepool.Lookup as RawLookup
 import Tidepool.Aeson.Value (object, (.=))
 
 -- The original evidence row carries its continuation. Rendering, recording,
@@ -160,96 +155,6 @@ replayBatch :: J.Model -> Text -> [Continuation effects] -> Recording.RecordingA
 -- runQuery does. SkipUnused adds frontier scopes, changing its request paths.
 replayBatch model intent rows archive = J.replayProgram J.BatchKnown model
   (J.liftQuery (batchQuestions intent rows)) (Recording.archiveRecords archive)
-
--- Capture owns ranking and bounded, exact view-fenced expansion. Reassessment
--- is a dependent second request over that retained capture, including failures.
--- A confident False means insufficient evidence; transport failure and policy
--- doubt remain distinct in the retained Evaluation and subsequent judge result.
-captureThenAssess
-  :: (Member Lookup effects, Member Jev effects, Member Reflect effects)
-  => Text -> LookupTools.LookupArguments
-  -> Eff effects (LookupTools.LookupCapture Lookup.SelectionEvidence, J.Evaluation J.Yes)
-captureThenAssess intent arguments = do
-  captured <- Lookup.capture arguments
-  let (report, _, truncated) = renderTreeWithNotice 65536 (Lookup.report captured)
-      contents = LookupTools.renderCapture captured
-      primary = LookupTools.capturePrimary captured
-      selectionStatus = case LookupTools.captureSelection captured of
-        LookupTools.SelectionSkipped LookupTools.EnrichmentDisabled -> "enrichment disabled" :: Text
-        LookupTools.SelectionSkipped LookupTools.PrimaryUnavailable -> "primary unavailable"
-        LookupTools.SelectionSkipped LookupTools.NoCandidates -> "no candidates"
-        LookupTools.SelectionFailed _ -> "selection failed"
-        LookupTools.SelectionSucceeded _ _ -> "selection succeeded"
-      expansionReceipt = case LookupTools.captureExpansion captured of
-        LookupTools.ExpansionNotRequested -> Nothing
-        LookupTools.ExpansionRequested _ batch -> Just (receiptStatus (RawLookup.lookupSearchReceipt batch))
-      expansionIssue = case LookupTools.captureExpansion captured of
-        LookupTools.ExpansionNotRequested -> Nothing
-        LookupTools.ExpansionRequested _ batch -> RawLookup.lookupIssue batch
-      selectionFailure = case LookupTools.captureSelection captured of
-        LookupTools.SelectionFailed evidence -> case J.result (Lookup.selectionEvaluation evidence) of
-          Left failure -> let (text, _, _) = renderTreeWithNotice 8192 (displayTree failure) in Just text
-          Right _ -> Nothing
-        _ -> Nothing
-      world = J.rawState (object
-        [ "intent" .= intent, "lookup_capture" .= report
-        , "capture_report_truncated" .= truncated
-        , "primary_receipt_status" .= receiptStatus (RawLookup.lookupSearchReceipt primary)
-        , "primary_issue" .= RawLookup.lookupIssue primary
-        , "selection_status" .= selectionStatus
-        , "selection_failure" .= selectionFailure
-        , "expansion_receipt_status" .= expansionReceipt
-        , "expansion_issue" .= expansionIssue
-        , "declarations" .= Text.take 65536 contents
-        , "declarations_truncated" .= (Text.length contents > 65536)
-        ])
-  assessed <- J.runQuery (J.question world #sufficient
-    (J.noul "Does this retained lookup capture contain sufficient evidence to answer the stated intent? An unavailable, refused or incomplete section is not evidence of absence. Judge only this capture."))
-  pure (captured, assessed)
-
-captureSummary :: LookupTools.LookupCapture Lookup.SelectionEvidence -> Text
-captureSummary captured = let (text, _, _) = renderTreeWithNotice 65536 (Lookup.report captured) in text
-
--- These compact known statuses precede any bounded report body. Unknown counts
--- remain null; a missing count never becomes evidence of zero omitted matches.
-receiptStatus :: RawLookup.LookupSearchReceipt -> Value
-receiptStatus receipt = object
-  [ "view" .= RawLookup.searchView receipt
-  , "disposition" .= (case RawLookup.searchDisposition receipt of
-      RawLookup.LookupSearchNotExecuted -> "not executed" :: Text
-      RawLookup.LookupSearchCaptured -> "captured"
-      RawLookup.LookupSearchInvalidated _ _ -> "invalidated")
-  , "matches" .= [object
-      [ "query" .= RawLookup.matchQuery row
-      , "observed" .= knownCount (RawLookup.matchObservedOccurrences row)
-      , "retained" .= knownCount (RawLookup.matchRetainedOccurrences row)
-      , "limit" .= RawLookup.matchLimit row
-      ] | row <- RawLookup.searchMatches receipt]
-  , "discovery" .= (case RawLookup.searchDiscovery receipt of
-      RawLookup.LookupDiscoveryObserved row -> object
-        [ "status" .= ("observed" :: Text)
-        , "eligible_modules" .= knownCount (RawLookup.discoveryEligibleModules row)
-        , "submitted_modules" .= knownCount (RawLookup.discoverySubmittedModules row)
-        , "enumerated" .= knownCount (RawLookup.discoveryEnumeratedOccurrences row)
-        , "retained" .= knownCount (RawLookup.discoveryRetainedCandidates row)
-        , "discarded" .= knownCount (RawLookup.discoveryDiscardedOccurrences row)
-        , "distinct_discarded" .= knownCount (RawLookup.discoveryDistinctDiscarded row)
-        , "unenumerated" .= knownCount (RawLookup.discoveryUnenumeratedCandidates row)
-        , "broader_modules" .= knownCount (RawLookup.discoveryBroaderModuleCount row)
-        , "issue" .= RawLookup.discoveryIssue row
-        ]
-      RawLookup.LookupDiscoveryNotRequested -> object ["status" .= ("not requested" :: Text)]
-      RawLookup.LookupDiscoveryInvalidated -> object ["status" .= ("invalidated" :: Text)]
-      RawLookup.LookupDiscoveryNotRun reason -> object ["status" .= (case reason of
-        RawLookup.LookupSearchStaleView -> "stale view" :: Text
-        RawLookup.LookupSearchInvalidRequest -> "invalid request"
-        RawLookup.LookupSearchUnavailable -> "unavailable"
-        RawLookup.LookupSearchZeroBudget -> "zero budget"
-        RawLookup.LookupSearchNoEligibleQuery -> "no eligible query")])
-  ]
-  where
-    knownCount (RawLookup.LookupKnownCount count) = Just count
-    knownCount RawLookup.LookupUnknownCount = Nothing
 
 data Report = Report { claim :: Text, evidence :: Text }
 data Helper = Helper { report :: Report }

@@ -76,5 +76,6 @@ through bounded repair.
 Use [RECURSIVE-WORK.md](RECURSIVE-WORK.md) for optional project delivery,
 independent implementation, exact-candidate review, and checked integration.
 Load the boundary skill for commands, agent requests, routing, review, or cleanup;
-use targeted `lookup` for missing signatures. Registering an example proves
+use qualified `Tidepool.Introspection.info` and `typeOf` for missing signatures
+when the workspace admits them. Registering an example proves
 neither that the current workspace compiled nor that live acceptance passed.

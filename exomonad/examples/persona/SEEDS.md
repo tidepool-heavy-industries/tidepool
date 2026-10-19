@@ -45,5 +45,5 @@ declared roots, with no older source fallback. Package pins, external services,
 capabilities and root launch configuration remain launch inputs.
 
 See the [quickstart lifecycle map](.exomonad/prompts/api-guide.md#lifecycle-map)
-and the exact lookup locators there for deeper notebook, actor and Jev contracts.
+and the exact introspection locators there for deeper notebook, actor and Jev contracts.
 Optional predecessor ideas remain under `.exomonad/prompts/references/`.

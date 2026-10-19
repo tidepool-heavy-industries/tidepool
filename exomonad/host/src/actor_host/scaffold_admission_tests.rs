@@ -72,7 +72,7 @@ pub(super) fn prepared_scaffold(config: &mut super::ActorHostConfig) {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the matched native prepared root entry and workspace bundle"]
-async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_originals() {
+async fn prepared_scaffolded_agent_spec_and_context_fork_execute_originals() {
     assert!(std::env::var_os("TIDEPOOL_PREPARED_ROOT_ENTRY").is_some());
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 2);
@@ -108,27 +108,6 @@ async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_original
                 "prepared-default-binding",
                 "41",
             );
-            round.function(
-                "prepared-default-lookup",
-                "lookup",
-                serde_json::json!({"queries": ["checkpoint", "spawnSubagent"]}),
-            );
-            let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            let lookup = round.settled_output("prepared-default-lookup");
-            assert_eq!(lookup["status"], "committed", "{lookup}");
-            let output = lookup["items"][0]["output"].as_str().unwrap();
-            for name in ["checkpoint", "spawnSubagent"] {
-                let block = output
-                    .split("\n\n")
-                    .find(|block| block.starts_with(&format!("{name}\n")))
-                    .unwrap_or_else(|| panic!("missing lookup result for {name}: {lookup}"));
-                assert!(
-                    block
-                        .split_once("::")
-                        .is_some_and(|(_, signature)| !signature.trim().is_empty()),
-                    "{lookup}"
-                );
-            }
             round.call(
                 "prepared-default-child",
                 &tidepool_testing::fixture_source(
@@ -294,7 +273,6 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
         assert_eq!(tool.scheduling(), schedule);
         for effect in [
             ActorEffectKey::Commands,
-            ActorEffectKey::Lookup,
             ActorEffectKey::Replies,
             ActorEffectKey::AgentLaunch,
             ActorEffectKey::Watches,
@@ -308,7 +286,7 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
     }
     // These authored record members distinguish the shipped workspace from
     // the built-in notebook fallback; descriptions and schema layout may evolve.
-    for name in ["bash", "lookup", "submit_review", "reload"] {
+    for name in ["bash", "submit_review", "reload"] {
         let matching: Vec<_> = tools.iter().filter(|tool| tool.name() == name).collect();
         assert_eq!(matching.len(), 1, "expected one {name}: {tools:?}");
         assert_eq!(

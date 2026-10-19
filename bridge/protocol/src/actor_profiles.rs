@@ -466,22 +466,21 @@ pub const EFFECTS: &[NominalEffect] = &[
     },
     nominal!(Actor, EffectActor, 18, 20, 19, "Tidepool.Effects.Core"),
     nominal!(Reflect, EffectReflect, 19, 21, 20, "Tidepool.Effects.Core"),
-    nominal!(Lookup, EffectLookup, 20, 22, 21, "Tidepool.Effects.Core"),
     nominal!(
         RepoEvent,
         EffectRepoEvent,
-        26,
+        25,
         23,
         22,
         "Tidepool.Effects.Core"
     ),
-    nominal!(Source, EffectSource, 21, 28, 23, "Tidepool.Effects.Core"),
-    nominal!(Journal, EffectJournal, 22, 24, 24, "Tidepool.Effects.Core"),
-    nominal!(Web, EffectWeb, 23, 25, 25, "Tidepool.Effects.Core"),
+    nominal!(Source, EffectSource, 20, 28, 23, "Tidepool.Effects.Core"),
+    nominal!(Journal, EffectJournal, 21, 24, 24, "Tidepool.Effects.Core"),
+    nominal!(Web, EffectWeb, 22, 25, 25, "Tidepool.Effects.Core"),
     nominal!(
         FsRead,
         EffectFsRead,
-        24,
+        23,
         26,
         26,
         "Tidepool.Effects.Core",
@@ -490,7 +489,7 @@ pub const EFFECTS: &[NominalEffect] = &[
     nominal!(
         FsWrite,
         EffectFsWrite,
-        25,
+        24,
         27,
         27,
         "Tidepool.Effects.Core",
@@ -531,7 +530,7 @@ pub const EFFECTS: &[NominalEffect] = &[
     nominal!(
         RuntimeInfo,
         EffectRuntimeInfo,
-        27,
+        26,
         40,
         39,
         "Tidepool.Effects.Core"
@@ -1182,7 +1181,6 @@ mod tests {
             "EffectSpawnAgentDeepSeek",
             "EffectActor",
             "EffectReflect",
-            "EffectLookup",
             "EffectRepoEvent",
             "EffectSource",
             "EffectJournal",

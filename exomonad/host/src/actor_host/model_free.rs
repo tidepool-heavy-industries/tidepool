@@ -167,9 +167,6 @@ impl ModelFreeSession {
         .await?;
         let returned_child_session_factory = Arc::clone(&child_session_factory);
         let mut forest = forest
-            .with_usage_pointers(exomonad_actor::UsagePointerTable::discover(
-                &config.workspace,
-            )?)
             .with_child_session_factory(child_session_factory)
             .with_handler_effect_support(
                 exomonad_tool::InstalledEffectSupport::installed_effect_support,
