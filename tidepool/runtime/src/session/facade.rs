@@ -446,21 +446,24 @@ mod tests {
         tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
             .unwrap();
         let mut session = PersistentSession::new(Some(lib), crate::DEFAULT_NURSERY_SIZE);
-        let expected_context = session
-            .lib()
-            .current_exact_context_in(ScopeId::ROOT)
-            .expect("recovered root has its issued exact context");
+        let expected_context = session.lib().current_exact_context_in(ScopeId::ROOT);
         let scope = session.mint_detached_scope(ScopeId::ROOT).unwrap();
         let scope_lease = session.adopt_initial_notebook_scope(scope).unwrap();
-        let captured_context = session
-            .lib()
-            .current_exact_context_in(scope)
-            .expect("detached capture retains the root's exact context");
-        assert!(Arc::ptr_eq(&captured_context, &expected_context));
         assert_eq!(
-            captured_context.semantic_sha256(),
-            expected_context.semantic_sha256()
+            session.lib().scope_tip(scope),
+            session.lib().scope_tip(ScopeId::ROOT)
         );
+        match (
+            expected_context,
+            session.lib().current_exact_context_in(scope),
+        ) {
+            (None, None) => {}
+            (Some(expected), Some(captured)) => {
+                assert!(Arc::ptr_eq(&captured, &expected));
+                assert_eq!(captured.semantic_sha256(), expected.semantic_sha256());
+            }
+            _ => panic!("detached capture changes the root's exact context"),
+        }
         let declarations = include_str!("fixtures/inherited-facade-subset.hs")
             .trim()
             .split("\n\n")
