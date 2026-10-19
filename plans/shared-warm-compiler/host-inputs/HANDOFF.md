@@ -197,9 +197,24 @@ group through its existing generator. Finite group loader inputs and the strict
 service guard remain. Focused generator execution passed1; its stale expected
 mode roster was corrected to the existing five literal cases. Independent source
 review accepted all three changed files. Rust/Haskell source is identical575, so
-no repeated compiler gate is needed. selected_root owns the admitted14GiB total/
-8GiB growth serial same-group retry, fresh LIVE accounting, and actual terminal
-observation. The actual query/frontend milestone remains unqualified. The service command is:
+no repeated compiler gate was needed. Its actual retry executed both test bodies
+after real Rooted Ready and failed2/2 on the first cold acquisition:
+NeedsAcquisition followed by Complete AcquisitionRejected. No answer, hot-query,
+frontend continuation, re-export or world-installation assertion was reached.
+Process and compiler cleanup are confirmed for this retry; old575 cleanup stays
+unconfirmed. WORLD-QUERY-EEA-TERMINAL.json binds exact commands, complete streams,
+binary/resource hashes and remaining diagnostic limits. All clients settled and
+HOST14GiB total/8GiB growth was released.
+
+The area merge402e88dbcd has exactly the eea production tree and preserves full
+histories. The actual query/frontend milestone remains unqualified. Warm owns the
+next old-profile acquisition diagnostic repair: existing Haskell validation drops
+WorldInputsFailure detail and combines producer/profile mismatches, while normal
+Rust RAII drops the failed cold carrier before it can be examined. Retain authentic
+issued bodies/slices under existing bounded failure custody before owner release;
+do not reconstruct missing bytes or weaken a validator. Reserved oracle reviews
+that concrete patch. selected_root remains reserved to join, compile and retry the
+actual group after review and fresh admission. No active HOST job remains. The service command is:
 `swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --trace-profile full --output-dir EVIDENCE`.
 No ordinary-cell/new-hash/profile API is imported into this query candidate.
 
