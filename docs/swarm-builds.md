@@ -480,8 +480,39 @@ swarm-build bash scripts/buck2-run.sh targets -c remote.enabled=false \
 Inspect the scope cgroup and daemon PID before builds. Run build and test
 clients in the same admitted slice so they can reuse the daemon. Do not restart
 a daemon with active work; coordinate any restart of an idle daemon owned by
-this checkout. Local execution remains required while the NativeLink project
-closure, isolation and cache gates are pending.
+this checkout. Remote execution remains gated on the recorded platform identity;
+the shared action cache below never executes work remotely.
+
+### Shared action cache
+
+`TIDEPOOL_BUCK_CACHE=true` configures a local-execution platform that reads and
+populates the host's NativeLink action cache:
+
+```sh
+swarm-build bash -lc 'TIDEPOOL_BUCK_CACHE=true bash scripts/buck2-configure.sh --tests'
+swarm-build bash scripts/buck2-run.sh build -j8 //tidepool/repr:tidepool_repr
+```
+
+Every action still runs on this host. The execution platform enables
+`remote_cache_enabled` and `allow_cache_uploads`, and the same configure run
+emits the root `[buck2] default_allow_cache_upload = true` knob that the action
+planner consults before uploading a locally executed result. Both are required;
+either alone leaves uploads disabled. `TIDEPOOL_BUCK_REMOTE=true` is the
+unrelated remote-execution mode, and the two are mutually exclusive.
+
+Do not pass `--local-only` or `-c remote.enabled=false` in cache mode: both
+select the local-only platform and bypass the cache. Configuration stays per
+checkout, but the cache is shared, so a checkout of the same source and
+toolchain resolves its graph from CAS. Measured on 2026-10-19 at `7b4d4111a0`:
+
+| Case | Executed | Cache hits | Wall |
+|---|---|---|---|
+| Cold `//tidepool/repr:tidepool_repr` | 152 local | 0% | 28 s |
+| Second checkout, same inputs | 0 | 100% | 0.8 s |
+
+The cold run uploaded 144 MiB into `/srv/build/nativelink/{ac,cas}`; inspect
+`sudo du -sh` growth there and `buck2 log what-ran` when a hit rate is
+unexpected.
 
 ### Resource closeout
 

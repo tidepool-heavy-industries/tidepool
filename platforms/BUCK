@@ -1,10 +1,14 @@
 load("@prelude//:rules.bzl", "filegroup")
 load(":defs.bzl", "tidepool_execution_platforms")
 
+_remote = read_root_config("remote", "enabled", "false") == "true"
+
 tidepool_execution_platforms(
     name = "platforms",
     host_platform = "prelude//platforms:default",
-    remote = read_root_config("remote", "enabled", "false") == "true",
+    cache = read_root_config("remote", "cache", "false") == "true",
+    local = read_root_config("remote", "local", "false" if _remote else "true") == "true",
+    remote = _remote,
     toolchain = read_root_config("remote", "toolchain", ""),
 )
 

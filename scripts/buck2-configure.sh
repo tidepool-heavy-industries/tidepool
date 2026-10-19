@@ -24,16 +24,32 @@ if ! mountpoint -q "$PWD/buck-out"; then
   exit 1
 fi
 
+# Three execution modes share one configuration owner. `local` is the default
+# and disables the remote cache entirely. `cache` keeps every action on this
+# host and only shares results. `remote` executes actions on the RE worker and
+# requires the recorded platform identity.
 remote_enabled=false
+remote_local=true
+remote_cache=false
 remote_toolchain=""
+remote_address=${TIDEPOOL_BUCK_REMOTE_ADDRESS:-grpc://127.0.0.1:50051}
+if [ "${TIDEPOOL_BUCK_REMOTE:-false}" = true ] && [ "${TIDEPOOL_BUCK_CACHE:-false}" = true ]; then
+  echo 'TIDEPOOL_BUCK_REMOTE and TIDEPOOL_BUCK_CACHE are mutually exclusive' >&2
+  exit 2
+fi
+if [ "${TIDEPOOL_BUCK_REMOTE:-false}" = true ] || [ "${TIDEPOOL_BUCK_CACHE:-false}" = true ]; then
+  [[ $remote_address =~ ^grpc://(localhost|127\.0\.0\.1):[0-9]+$ ]] || { echo 'Cache or remote endpoint must use an SSH tunnel on loopback' >&2; exit 1; }
+fi
 if [ "${TIDEPOOL_BUCK_REMOTE:-false}" = true ]; then
   platform_file=${TIDEPOOL_BUCK_PLATFORM_FILE:-/etc/swarm-build/platform}
   test -r "$platform_file" || { echo "Missing remote platform identity: $platform_file" >&2; exit 1; }
   remote_toolchain="$(cat "$platform_file")"
   [[ $remote_toolchain =~ ^[0-9a-f]{64}$ ]] || { echo 'Invalid remote platform identity' >&2; exit 1; }
-  remote_address=${TIDEPOOL_BUCK_REMOTE_ADDRESS:-grpc://127.0.0.1:50051}
-  [[ $remote_address =~ ^grpc://(localhost|127\.0\.0\.1):[0-9]+$ ]] || { echo 'Remote endpoint must use an SSH tunnel on loopback' >&2; exit 1; }
   remote_enabled=true
+  remote_local=false
+fi
+if [ "${TIDEPOOL_BUCK_CACHE:-false}" = true ]; then
+  remote_cache=true
 fi
 
 if [[ -z ${TIDEPOOL_DEV_SHELL:-} ]]; then
@@ -231,9 +247,11 @@ action_path = $rust/bin:$cc/bin:$lld/bin:$binutils/bin:$cmake/bin:$perl/bin:$pkg
 
 [remote]
 enabled = $remote_enabled
+local = $remote_local
+cache = $remote_cache
 toolchain = $remote_toolchain
 EOF
-if [ "$remote_enabled" = true ]; then
+if [ "$remote_enabled" = true ] || [ "$remote_cache" = true ]; then
   cat >> "$tmp_config" <<EOF
 
 [buck2_re_client]
@@ -242,6 +260,16 @@ engine_address = $remote_address
 cas_address = $remote_address
 tls = false
 instance_name = swarm
+EOF
+fi
+if [ "$remote_cache" = true ]; then
+  # The execution platform enables uploads for its actions; this root knob is
+  # the second, action-level gate that the planner consults before uploading a
+  # locally executed result.
+  cat >> "$tmp_config" <<EOF
+
+[buck2]
+default_allow_cache_upload = true
 EOF
 fi
 # Validate the entire retained generation again before switching configuration.
