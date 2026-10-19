@@ -17087,6 +17087,22 @@ mod tests {
         }
         let private_owner = original.materialization.as_ref().unwrap();
         let private_root = private_owner.directory().path().to_path_buf();
+        let retained_interface = original
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.interface.module == "HiddenNative")
+            .unwrap()
+            .interface
+            .path
+            .clone();
+        let expected_interface = context
+            .compiler_original_products()
+            .unwrap()
+            .into_iter()
+            .find(|product| product.owner().module == "HiddenNative")
+            .unwrap()
+            .interface_bytes()
+            .to_vec();
         let weak = Arc::downgrade(private_owner);
         let directory = Arc::downgrade(private_owner._directory.as_ref().unwrap());
         let value_entry = context
@@ -17123,14 +17139,6 @@ mod tests {
                     .keys()
                     .all(|digest| graph_digests.contains(digest)));
             });
-            let mut fixed = Vec::new();
-            retained
-                .collect_materializations(&mut fixed, &mut BTreeSet::new())
-                .unwrap();
-            assert!(
-                fixed.iter().any(|owner| Arc::ptr_eq(owner, private_owner)),
-                "complete exact physical custody may reuse its whole materialization owner"
-            );
         }
         let lexical = context
             .retain_value_source_surface(&value, &[])
@@ -17302,11 +17310,11 @@ mod tests {
         drop(blocked);
         drop(request);
         drop(next);
-        assert!(
-            weak.upgrade().is_some(),
-            "the last view still owns the complete exact physical footprint"
-        );
         assert!(directory.upgrade().is_some());
+        assert_eq!(
+            std::fs::read(&retained_interface).unwrap(),
+            expected_interface
+        );
         assert!(private_root.is_dir());
         drop(retained);
         assert!(weak.upgrade().is_none());
