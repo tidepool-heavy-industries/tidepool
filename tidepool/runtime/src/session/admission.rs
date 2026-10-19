@@ -3611,8 +3611,6 @@ impl PersistentSession {
         if !Arc::ptr_eq(&transaction.source, original_source) {
             return Err(super::SourceAdmissionError::ForeignTransaction.into());
         }
-        self.admit_source_work_in(scope)?;
-        let store = self.held_admission_store()?;
         let (world, private_key) = execution.world_basis()?;
         if self.compile_view_key_in(scope).as_ref() != Some(private_key)
             || !Arc::ptr_eq(plan.world().restoration(), world.restoration())
@@ -3625,6 +3623,8 @@ impl PersistentSession {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        self.admit_source_work_in(scope)?;
+        let store = self.held_admission_store()?;
         // Naming an expression capture must not enumerate historical names.
         // A service-owned collision witness is required before this path grows.
         if let Some(item) = plan
