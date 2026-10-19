@@ -3755,10 +3755,11 @@ mod tests {
             for _ in 0..4 {
                 let request = source.close_request(None, &Default::default()).unwrap();
                 assert_eq!(request.input_decisions, source.input_decisions);
-                assert!(Arc::ptr_eq(request.native_fact_owner(), &before));
                 let captured = PublicationNativeAuthority::capture(&request).unwrap();
+                let unchanged_work=take_native_fact_work();
+                assert_eq!(unchanged_work,NativeFactWork::default(),"actual unchanged close/capture work: {unchanged_work:?}");
+                assert!(Arc::ptr_eq(request.native_fact_owner(), &before));
                 assert!(Arc::ptr_eq(captured.facts(), &before));
-                assert_eq!(take_native_fact_work(), NativeFactWork::default());
             }
             // Independent actual new interface ingress, created outside measurement.
             let addition = Arc::new(ArtifactEntry::canonical(
