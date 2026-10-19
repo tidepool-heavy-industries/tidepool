@@ -16,7 +16,9 @@ use tidepool_runtime::session::{
     SessionLib, SourceImports,
 };
 use tidepool_testing::effect_surface::TestEffectSurface;
+use tidepool_toolchain::artifact_inventory::{ArtifactDependency, ArtifactInventoryFailure};
 use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+use tidepool_toolchain::CompileError;
 
 #[test]
 #[serial_test::serial]
@@ -134,8 +136,12 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         assert_eq!(reservation.observation_name(), Some(observation.as_str()));
         // Authored expressions execute through their compiler-issued singleton
         // capture; the sealed execution receipt is a Bind observation.
-        let TurnResult::Bind { binders, bound, .. } =
-            consume_cell_program_item(reservation).unwrap()
+        let TurnResult::Bind {
+            compiled,
+            binders,
+            bound,
+            ..
+        } = consume_cell_program_item(reservation).unwrap()
         else {
             panic!("the authored expression must retain its issued Bind observation");
         };
@@ -187,13 +193,13 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             products,
         )
         .unwrap();
-        // Recover only the canonical companions issued for these retained
-        // originals, rather than materializing the execution inventory.
+        // A native original's canonical companion is not its interface closure:
+        // imported type-only modules can have no retained native product.
         let expected_owners = products
             .iter()
             .map(|product| (product.owner().unit.clone(), product.owner().module.clone()))
             .collect::<BTreeSet<_>>();
-        let module_interfaces = references
+        let companions = references
             .iter()
             .map(|reference| {
                 reference
@@ -202,7 +208,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
                     .expect("retained original owns its canonical companion")
             })
             .collect::<Vec<_>>();
-        let actual_owners = module_interfaces
+        let actual_owners = companions
             .iter()
             .map(|reference| {
                 (
@@ -213,10 +219,51 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             .collect::<BTreeSet<_>>();
         assert_eq!(actual_owners, expected_owners);
         assert_eq!(
-            module_interfaces.len(),
+            companions.len(),
             expected_owners.len(),
             "one canonical companion per fixture owner"
         );
+        let original_context = compiled.original_execution_context().unwrap();
+        let module_interfaces = original_context
+            .materialize_module_interfaces(durable.path())
+            .unwrap();
+        let interface_owners = module_interfaces
+            .iter()
+            .map(|reference| {
+                (
+                    reference.interface.unit.clone(),
+                    reference.interface.module.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(expected_owners.is_subset(&interface_owners));
+        let type_only_owners = interface_owners
+            .difference(&expected_owners)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !type_only_owners.is_empty(),
+            "this fixture must exercise canonical dependencies without native products"
+        );
+        let incomplete =
+            tidepool_toolchain::declaration_join::ExactDeclarationContext::capture_recovery(
+                durable.path(),
+                &references,
+                &companions,
+                &[],
+                Vec::new(),
+            );
+        match incomplete {
+            Err(CompileError::ArtifactInventory(error)) => match error.failure {
+                ArtifactInventoryFailure::MissingDependency {
+                    required,
+                    dependency: ArtifactDependency::Interface,
+                    ..
+                } => assert!(type_only_owners.contains(&(required.unit, required.module))),
+                other => panic!("expected omitted type-only interface refusal, got {other:?}"),
+            },
+            other => panic!("expected incomplete recovery closure refusal, got {other:?}"),
+        }
         assert_original_durability(
             durable.path(),
             program.parsed_plan().producer_sha256(),
