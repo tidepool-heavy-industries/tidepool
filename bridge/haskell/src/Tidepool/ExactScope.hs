@@ -496,9 +496,10 @@ commitWorldInputRetention (ExactInputOwner limit state) worldBytes worldCount pu
       + Map.size packageFacts + Map.size nativeFacts + Map.size graphFacts)
     _ <- evaluate (capturedOriginalContentBytes content)
     _ <- evaluate next
+    ready <- evaluate (next,())
     _ <- pruneRequestIfaceDecoder seals decoder
     publish
-    pure (next,())
+    pure ready
 
 data DecodedOriginalFacts = DecodedOriginalFacts
   (Map.Map String CanonicalModuleCertificate)
