@@ -829,6 +829,8 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
             assert!(docs_at_arrival.contains("currentEffectDocs ::"), "{docs_at_arrival}");
             assert!(!docs_at_arrival.contains("EffectModelCall"), "{docs_at_arrival}");
             assert!(!docs_at_arrival.contains("EffectSpawnAgent"), "{docs_at_arrival}");
+            assert!(!docs_at_arrival.contains("InvocationContextReadWrite"), "{docs_at_arrival}");
+            assert!(!docs_at_arrival.contains("InvocationReload"), "{docs_at_arrival}");
             assert!(docs_at_arrival.contains("Catalogue documentation unavailable."), "{docs_at_arrival}");
             assert_eq!(seed.sections[1].label, "runtime at arrival");
             let at_arrival = &seed.sections[1].body;

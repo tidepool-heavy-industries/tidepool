@@ -86,12 +86,17 @@ separators and traversal names refuse; filesystem authority remains with File.
 For an optional runtime-aware arrival, set `[haskell].spec` in
 `.exomonad/config.toml` to `"Persona.Spec.runtimeSpec"` before the next fresh
 launch. That spec selects `Persona.Orientation.startupWithRuntime`, which composes
-memory chosen by the authored policy with a separate `runtime at arrival` section.
+memory chosen by the authored policy with separate `runtime at arrival` and
+`effects at arrival` sections.
 It reports the executing spec/source generation, declared tools, configured
 provider/model/effort, and startup evidence as observed during initialization.
 At that point startup is preparing; the completed publication receipt can be
 queried afterward with `getRuntimeInfo`. Configured inference is distinct from
-the effective selection of a later model request. No memory is selected by the
+the effective selection of a later model request. `currentEffectDocs` returns structured catalogue facts for the exact admitted
+endpoint or startup slot, including callable signatures, imports, contracts and
+known examples. Effect membership does not establish resource grants or provider
+credentials. The pure `Persona.Orientation.renderEffectDocs` is one authored
+presentation; callers can choose their own selection. No memory is selected by the
 runtime observer. This optional policy is not selected by the default config.
 
 The runtime section has an explicit arrival-only lifetime. Sections are published

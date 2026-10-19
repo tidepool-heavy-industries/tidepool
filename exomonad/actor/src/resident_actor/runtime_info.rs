@@ -20,6 +20,7 @@ where
     pub(super) fn current_effect_docs(
         &self,
         issued: Option<&ActorRequestSnapshot>,
+        effect_keys: Option<&[exomonad_tool::ToolEffectKey]>,
     ) -> Result<tidepool_bridge_effects::EffectDocsSnapshot, RuntimeInfoError> {
         use tidepool_bridge_effects::{
             EffectDocumentation, EffectDocumentationBody, EffectDocumentationFacts,
@@ -29,7 +30,9 @@ where
         let installation = issued.installation();
         let tools = installation.tools()
             .ok_or_else(|| unavailable("execution has no installed interpreter row"))?;
-        let effects = tools.interpreter_effects().iter().map(|key| {
+        let effect_keys = effect_keys
+            .ok_or_else(|| unavailable("execution has no issued endpoint or slot effect row"))?;
+        let effects = effect_keys.iter().map(|key| {
             let body = match tidepool_mcp::effect_documentation_for(*key) {
                 None => EffectDocumentationBody::EffectDocumentationMissing,
                 Some(facts) => EffectDocumentationBody::EffectDocumentationAvailable(

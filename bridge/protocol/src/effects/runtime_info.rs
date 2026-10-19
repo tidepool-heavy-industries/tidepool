@@ -30,7 +30,7 @@ pub fn runtime_info() -> Effect {
         prompt_card: None,
         type_params: &[], default_row_args: &[], extra_imports: &[],
         external_types: &[
-            ExternalType { haskell_name: "ActorEffectKey", rust_wire: "ActorEffectKeyWire", core_module: None },
+            ExternalType { haskell_name: "ToolEffectKey", rust_wire: "ToolEffectKeyWire", core_module: None },
             ExternalType { haskell_name: "Model", rust_wire: "Model", core_module: None },
             ExternalType { haskell_name: "Reasoning", rust_wire: "Reasoning", core_module: None },
             ExternalType { haskell_name: "InitialContextObservation", rust_wire: "InitialContextObservation", core_module: None },
@@ -41,9 +41,9 @@ pub fn runtime_info() -> Effect {
                 field("effectDocsSource", "source", HsType::Text),
                 field("effectDocsGeneration", "generation", HsType::maybe(HsType::Int)),
                 field("effectDocsEffects", "effects", HsType::list(HsType::Named("EffectDocumentation"))),
-            ], &["The exact executing interpreter row. Documentation observes membership, not resource grants, provider credentials or successful execution."]),
+            ], &["The exact semantic effect row issued by this endpoint or slot admission. Documentation observes membership, not resource grants, provider credentials or successful execution."]),
             record("EffectDocumentation", vec![
-                field("effectDocumentationIdentity", "identity", HsType::Named("ActorEffectKey")),
+                field("effectDocumentationIdentity", "identity", HsType::Named("ToolEffectKey")),
                 field("effectDocumentationBody", "body", HsType::Named("EffectDocumentationBody")),
             ], &[]),
             sum("EffectDocumentationBody", vec![

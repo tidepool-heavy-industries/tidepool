@@ -13,7 +13,7 @@ mod spec_preflight_tests;
 /// Both products of one source installation are published together.
 pub(crate) struct SpecInstallation {
     pub(crate) tools: Vec<ToolDeclaration>,
-    pub(crate) slots: Vec<String>,
+    slot_effect_keys: BTreeMap<String, Vec<ToolEffectKey>>,
     pub(crate) slot_effect_keys: BTreeMap<String, Vec<ToolEffectKey>>,
 }
 
@@ -61,6 +61,7 @@ pub(crate) struct AdmittedEndpoint {
 
 #[derive(Debug, Clone)]
 pub(crate) struct AfterToolEntry {
+    pub(crate) effect_keys: Vec<ToolEffectKey>,
     execution_effects: tidepool_runtime::session::HaskellTypeSource,
 }
 
@@ -81,6 +82,7 @@ impl AfterToolEntry {
 
 #[derive(Debug, Clone)]
 pub(crate) struct InitialContextEntry {
+    pub(crate) effect_keys: Vec<ToolEffectKey>,
     pub(crate) execution_effects: tidepool_runtime::session::HaskellTypeSource,
 }
 
@@ -319,7 +321,7 @@ fn admit_spec_metadata_for(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(ValidatedSpecMetadata { plans, slots })
+    Ok(ValidatedSpecMetadata { plans, slot_effect_keys })
 }
 
 pub(crate) fn admit_installation(
@@ -358,7 +360,7 @@ fn admit_installation_for(
     dispatcher_effects: &tidepool_runtime::session::HaskellTypeSource,
     reply: bool,
 ) -> Result<AdmittedInstallation, crate::ResidentActorWorkbenchError> {
-    let ValidatedSpecMetadata { plans, slots } =
+    let ValidatedSpecMetadata { plans, slot_effect_keys } =
         admit_spec_metadata_for(installation, admitted_base, installed_support, reply).map_err(
             |failure| crate::ResidentActorWorkbenchError::ActorProtocol(failure.to_string()),
         )?;
@@ -397,19 +399,14 @@ fn admit_installation_for(
             }
         })
         .collect();
-    let after_tool = slots
-        .iter()
-        .any(|slot| slot == "afterTool")
-        .then(|| AfterToolEntry {
-            execution_effects: dispatcher_effects.clone(),
-        });
-    let initial_context =
-        slots
-            .iter()
-            .any(|slot| slot == "initialContext")
-            .then(|| InitialContextEntry {
-                execution_effects: dispatcher_effects.clone(),
-            });
+    let after_tool = slot_effect_keys.get("afterTool").map(|keys| AfterToolEntry {
+        effect_keys: keys.clone(),
+        execution_effects: dispatcher_effects.clone(),
+    });
+    let initial_context = slot_effect_keys.get("initialContext").map(|keys| InitialContextEntry {
+        effect_keys: keys.clone(),
+        execution_effects: dispatcher_effects.clone(),
+    });
     Ok(AdmittedInstallation {
         endpoints,
         after_tool,
@@ -714,6 +711,10 @@ mod tests {
             );
             if let Some(initial) = installed.initial_context {
                 assert_eq!(initial.execution_effects, dispatcher);
+                assert_eq!(initial.effect_keys, vec![jev.into()]);
+            }
+            if let Some(after) = installed.after_tool {
+                assert_eq!(after.effect_keys, vec![jev.into()]);
             }
         }
 

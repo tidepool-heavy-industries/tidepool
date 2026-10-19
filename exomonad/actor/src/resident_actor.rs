@@ -3664,6 +3664,27 @@ impl CurrentEffectOwner<'_> {
         }
     }
 
+    /// The semantic row issued by this exact endpoint or slot admission.
+    /// The dispatcher's compiler union is broader and cannot issue this fact.
+    fn effect_keys(&self) -> Option<&[exomonad_tool::ToolEffectKey]> {
+        match self {
+            Self::Scoped { base, .. } => base.effect_keys(),
+            Self::Workbench(execution) => {
+                if execution.initial_context {
+                    Some(&execution.issued_snapshot.as_ref()?.installation().tools()?
+                        .initial_context.as_ref()?.effect_keys)
+                } else if execution.after_tool_active {
+                    Some(&execution.issued_snapshot.as_ref()?.installation().tools()?
+                        .after_tool.as_ref()?.effect_keys)
+                } else {
+                    Some(execution.operation.selected()?.selected().endpoint().plan().effect_keys())
+                }
+            }
+            // These continuations retain source custody but no endpoint/slot row.
+            Self::Tool { .. } | Self::Actor { .. } => None,
+        }
+    }
+
     fn reply_activation(&self) -> Option<Arc<crate::RequestReplyActivation>> {
         match self {
             Self::Scoped { base, .. } => base.reply_activation(),
@@ -6216,7 +6237,7 @@ where
                         resume_observation!(self.runtime_info(effect_owner.issued_snapshot()))
                     }
                     crate::generated::runtime_info::RuntimeInfoReq::CurrentEffectDocsWith => {
-                        resume_observation!(self.current_effect_docs(effect_owner.issued_snapshot()))
+                        resume_observation!(self.current_effect_docs(effect_owner.issued_snapshot(), effect_owner.effect_keys()))
                     }
                 };
                 return Box::pin(std::future::ready(Ok(operation)));

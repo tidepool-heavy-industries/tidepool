@@ -1130,8 +1130,6 @@ pub(crate) struct ResidentWorkbenchTools {
     pub(crate) after_tool: Option<crate::tool_contract::AfterToolEntry>,
     pub(crate) initial_context: Option<crate::tool_contract::InitialContextEntry>,
     dispatcher_effects: tidepool_runtime::session::HaskellTypeSource,
-    /// Exact row admitted at this installation, independent of endpoint use.
-    interpreter_effects: Vec<crate::ActorEffectKey>,
     /// Which install this record is, counting from one within this actor
     /// incarnation. A completed call names it, so a receipt says which record
     /// served the call and not merely which record is active now.
@@ -2443,10 +2441,6 @@ use crate::tool_contract::decode_installation;
 use crate::tool_contract::SpecInstallation;
 
 impl ResidentWorkbenchTools {
-    pub(crate) fn interpreter_effects(&self) -> &[crate::ActorEffectKey] {
-        &self.interpreter_effects
-    }
-
     fn slots(&self) -> Vec<String> {
         self.after_tool
             .iter()
@@ -6802,7 +6796,6 @@ where
                             after_tool: admitted.after_tool,
                             initial_context: admitted.initial_context,
                             dispatcher_effects: dispatcher_effects.clone(),
-                            interpreter_effects: admitted_base.clone(),
                             install,
                         },
                         receiver,
