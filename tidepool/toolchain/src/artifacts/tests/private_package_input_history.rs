@@ -291,7 +291,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let public = Arc::new(
         ExactDeclarationContext::from_authenticated_interfaces(
             producer,
-            crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+            &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
             crate::artifact_inventory::CompilerInputProjection::default(),
         )
         .unwrap(),
