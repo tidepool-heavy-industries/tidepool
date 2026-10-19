@@ -7138,7 +7138,7 @@ mod tests {
         let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = state.mint_scope(ScopeId::ROOT).unwrap();
         let execution = Arc::new(state.begin_private_execution(public).unwrap());
-        let view = execution.view();
+        let view = execution.view().unwrap();
         let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
             "qualified RootChoice",
         ]));
@@ -7256,7 +7256,7 @@ mod tests {
         let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = state.mint_scope(ScopeId::ROOT).unwrap();
         let execution = Arc::new(state.begin_private_execution(public).unwrap());
-        let view = execution.view();
+        let view = execution.view().unwrap();
         let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
             "qualified RootChoice",
         ]));
@@ -8051,7 +8051,7 @@ mod tests {
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let execution = Arc::new(session.begin_private_execution(public).unwrap());
-        let view = execution.view();
+        let view = execution.view().unwrap();
         let imports = view.turn_imports(&SourceImports::from_specs(["qualified CheckedTiny"]));
         let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
@@ -8137,7 +8137,7 @@ mod tests {
                 std::fs::write(&support, support_source.replace("41", "42")).unwrap();
             }
             let execution = Arc::new(session.begin_private_execution(public).unwrap());
-            let view = execution.view();
+            let view = execution.view().unwrap();
             let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
                 "qualified CheckedTiny",
             ]));
@@ -8434,7 +8434,7 @@ mod tests {
         let inherited_surface = session.exact_exports_in(public, &["PriorNominal"]).unwrap();
         let inherited_exports = inherited_surface.declarations().unwrap().to_vec();
         let execution = Arc::new(session.begin_private_execution(public).unwrap());
-        let view = execution.view();
+        let view = execution.view().unwrap();
         let imports = view.turn_imports(&crate::session::SourceImports::new());
         let expected_prologue = session.next_lib_module().unwrap();
         let expected_declaration =

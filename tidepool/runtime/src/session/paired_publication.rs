@@ -489,7 +489,7 @@ impl PersistentSession {
         if !Arc::ptr_eq(&admission.owner, self.admission_owner())
             || admission.owner_epoch != self.admission_owner().epoch()
             || !self.has_lib()
-            || admission.view().session() != self.lib().session_id()
+            || admission.session() != self.lib().session_id()
             || admission.library != self.lib().compile_view_identity
             || self.binding_tip_id(admission.private_scope()) != Some(admission.binding_tip())
         {
@@ -541,7 +541,7 @@ impl PersistentSession {
         }
         let intent = self.freeze_execution_intent_from_snapshot(
             admission.admitted_public(),
-            admission.view().exact_declaration_context().cloned(),
+            admission.view()?.exact_declaration_context().cloned(),
             admission.private_scope(),
             write_ids,
             source_keys,
