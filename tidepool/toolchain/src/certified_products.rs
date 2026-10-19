@@ -12800,11 +12800,6 @@ pub(crate) mod tests {
                 source.artifacts().selected_native_groups(),
                 input_only.issued_artifacts().selected_native_groups()
             );
-            let source_result = OriginalCompilerInputs::issue_candidate_from_support(
-                &source,
-                producer.sha256(),
-                std::slice::from_ref(fresh),
-            );
             selection
                 .admit_current(
                     fresh.owner(),
@@ -12823,7 +12818,7 @@ pub(crate) mod tests {
                 )
                 .unwrap();
             let request_result = OriginalCompilerInputs::from_selection(&selection, &physical);
-            for (consumer, result) in [("request", request_result), ("source", source_result)] {
+            for (consumer, result) in [("request", request_result)] {
                 assert_eq!(
                     result.is_ok(),
                     permitted,

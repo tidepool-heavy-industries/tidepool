@@ -4729,21 +4729,26 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         producer.sha256(),
     );
     let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1)).module_name();
-    let authored = crate::certified_products::fixture_native_declaration_product(
-        crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
-            "main",
-            &module,
-            vec![(7, vec![source_import(&helper, 7)]), (9001, vec![])],
-            74,
-            &BTreeMap::new(),
-            b"issued authored interface".to_vec(),
-            &BTreeMap::new(),
-            &[],
-        ),
-        producer.sha256(),
-        1,
-    );
-    let recovered = recovered_witness_fixtures(&[authored, helper]);
+    let authored = |version| {
+        crate::certified_products::fixture_native_declaration_product(
+            crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+                "main",
+                &module,
+                vec![(7, vec![source_import(&helper, 7)]), (9001, vec![])],
+                version,
+                &BTreeMap::new(),
+                b"issued authored interface".to_vec(),
+                &BTreeMap::new(),
+                &[],
+            ),
+            producer.sha256(),
+            1,
+        )
+    };
+    let available_authored = recovered_witness_fixtures(&[authored(75)])
+        .remove(0)
+        .product;
+    let recovered = recovered_witness_fixtures(&[authored(74), helper]);
     let entries = recovered
         .iter()
         .map(|row| {
@@ -4843,6 +4848,21 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
     let input = OriginalCompilerInputs::reuse_selected_authored(&context)
         .expect("private offer preserves its already-issued exact dependency closure")
         .expect("authored body is privately reusable");
+    let available_authored_id =
+        ArtifactEntry::original(producer.sha256(), available_authored.clone())
+            .unwrap()
+            .descriptor
+            .id;
+    assert_ne!(available_authored_id, authored_id);
+    assert_eq!(
+        available_authored.module_interface(),
+        recovered
+            .iter()
+            .find(|row| row.product.owner().module == module)
+            .unwrap()
+            .product
+            .module_interface()
+    );
     let unrelated = product("UnrelatedAuthoredAvailability", 184);
     let unrelated_id = ArtifactEntry::original(producer.sha256(), unrelated.clone())
         .unwrap()
@@ -4881,6 +4901,63 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             .is_none());
         assert_eq!(wire_groups(&request)[&module], Vec::<u32>::new());
         assert_eq!(wire_groups(&request)["TypeOnlyHelper"], Vec::<u32>::new());
+    }
+    let mut history = context.as_ref().clone();
+    for products in [
+        vec![available_authored.clone()],
+        Vec::new(),
+        vec![available_authored],
+        Vec::new(),
+    ] {
+        let candidates = crate::module_candidates::CandidateSet {
+            manifest_path: PathBuf::from("retained-authored-availability-history"),
+            by_owner: BTreeMap::new(),
+            contextual_native_availability: products,
+            catalog_owner: None,
+            input_transport: Vec::new(),
+        };
+        let received = OriginalCompilerInputs::from_candidates(&history, producer, &candidates)
+            .unwrap()
+            .expect("the issued authored fallback remains available");
+        assert_eq!(received.role_projection(), input.role_projection());
+        assert_eq!(received.native_availability(), input.native_availability());
+        assert_eq!(received.issued_offers(), input.issued_offers());
+        assert_eq!(
+            received.issued_input_decisions(),
+            input.issued_input_decisions()
+        );
+        assert!(received
+            .issued_artifacts()
+            .artifact_ids()
+            .contains(&available_authored_id));
+        let directory = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(history.clone()))
+            .prepare_compilation_with_private_input(
+                directory.path(),
+                PRODUCER,
+                None,
+                Some(received),
+            )
+            .unwrap();
+        assert!(request
+            .compiler_inputs()
+            .native_availability(available_authored_id)
+            .is_none());
+        assert_eq!(wire_groups(&request)[&module], Vec::<u32>::new());
+        let retained = history
+            .compiler_source_support()
+            .retain_custody(request.compiler_inputs().artifacts())
+            .unwrap();
+        assert!(retained
+            .artifacts()
+            .artifact_ids()
+            .contains(&available_authored_id));
+        assert_eq!(retained.projection(), context.compiler_input_projection());
+        assert_eq!(
+            retained.native_offers(),
+            context.compiler_source_support().native_offers()
+        );
+        history = history.rebuild(|facts| facts.compiler_support = retained);
     }
     let root = tempfile::tempdir().unwrap();
     let request = ExactCompileContext::new(context.clone())
