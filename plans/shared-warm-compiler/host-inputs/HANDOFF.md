@@ -57,10 +57,15 @@ selected_root owns query implementation and terminal command observation. Exact
 unchanged frontend-block reorder before history. The area fold7a759353 preserves
 full histories; production matches db1, independently reviewed but not yet tested.
 Receipt: `oracle/query-frontend-reorder-joined-review-db1b26f4.txt`.
-selection_oracle now implements the required zero-budget lifecycle source fixture
-in isolated checkout `tidepool-shared-warm-retention-fixture-20261019`, branch
-`feature/shared-warm/retention-fixture`, exact base db1. No additional agent or
-native grant was allocated. Preserve independent-world original/target leases, genuine
+selection_oracle checkpointed the zero-budget lifecycle source fixture in isolated
+checkout `tidepool-shared-warm-retention-fixture-20261019`, branch
+`feature/shared-warm/retention-fixture`, exact base db1. Four-file dirty patch
+SHA256 `2f6098291512a833c7505b12d8656f1a15dc043d63a5b5f3aa2125b0f0a5aa53`
+is retained under `host-inputs/retention-fixture/`. B expansion is PAUSED by root/
+campaign priority; no metadata, generation, formatting or native execution ran.
+This reserved reviewer now prioritizes actual ordinary-cell consuming API review
+and per-item publication/second-cell reuse. No additional agent or native grant
+was allocated. Preserve independent-world original/target leases, genuine
 unrelated-history production publication, all aliases and every existing oracle.
 A context repair must use the fixture's actual effect contract, not rewrite GHC
 errors or bypass source admission. The independent frontend block now precedes
@@ -77,17 +82,30 @@ case passed again unchanged. Both process/compiler cleanup and complete retireme
 are confirmed. First diagnostic summary is complete; second retains the172-record
 summary limit. `WORLD-QUERY-DB1-TERMINAL.json` records all exact outcomes.
 
-All HOST native clients are terminal and allowance is0/0. Last idle query scope
-current is2,711,740,416 bytes, cumulative peak11,383,582,720 bytes. Fresh admission
-is required before another retry. selected_root traces the actual production
-source admission path: retain the SAME source issuer in the existing fixture
-owner, validate its capsule through ActorSourceLayerResolver, then perform actual
-public-owner/private-scope/WorkbenchCompilationAuthority::admit setup. Do not
-drop the Complete layer, weaken the generic helper, or mint authority directly.
-Complete source excludes mutable base includes: the first case must capture its
-actual declared effects/orchestration/prelude/actor support under the same strict
-source owner before the first world open. No ambient fallback or new scanner.
-Exact constructor/caller packet and independent review precede the next compile.
+The source-owner repair is exact945d58c2323561f0f4679aa9b3f67ef90aef4c6e, folded
+with full history at area e676c7d83522fc516d60ed0510048f799f7b465b. It retains the
+SAME actual SourceLayerIssuer and validates exact borrowed generation evidence,
+reference, ordered paths and identities through the real resolver. The caller
+uses production public-owner/private-scope/WorkbenchCompilationAuthority::admit,
+with no change to the generic empty-source helper or guard. The first case copies
+its already-declared effects/core/orchestration/prelude/actor support into the same
+strict owner before capsule issuance/open. Existing manifest discovery performs
+full-file reads: this is an explicit fixed-declared-fixture limitation, not a
+bounded full-constructor claim. Subsequent retained-byte reads share the existing
+allowance, and final factory framing remains checked. Source-domain root4/10
+selection and bytes are unchanged. Foreign issuer and different selection negatives
+exercise actual admission; the latter is not an isolated reference-only mutant.
+
+Independent receipt `oracle/query-source-owner-admission-review-945d58c2.txt`
+accepted exact diff SHA7870853ab5bd52f30323a4e8ef2615f7b9362ee6cc6678f7fa32f9516a5da90e.
+Root and campaign direct review also accepted. Minimal actor cfg-test compilation
+is ACTIVE64153, observed by selected_root (launcher498721), followed serially by
+the same actualRooted2 only after compilation passes. Source945 is frozen, and
+HOST14GiB TOTAL/8GiB growth is active. Fresh projection52,057,079,808 bytes includes
+current global22,765,387,776 bytes, actual own-scope remaining allowance, Warm8 ADD
+and known qualification8 ADD. Campaign and Reload were explicitly settled0;
+their idle daemons remain global. No source/profile/API extension or baseline reset
+is authorized inside this gate. No native pass for945 has been claimed.
 The unchanged service command is:
 `swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --trace-profile full --output-dir EVIDENCE`.
 Campaign's separate exact6f9 joined12699 also completed: ten labels compiled,
