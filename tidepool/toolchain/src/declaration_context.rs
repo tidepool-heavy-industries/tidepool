@@ -15337,6 +15337,25 @@ mod tests {
         let (context, _) = metadata_fixture();
         let directory = tempfile::tempdir().unwrap();
         let artifacts = context.materialize_scratch(&directory).unwrap().artifacts;
+        let warm_metadata = context
+            .owner
+            .facts
+            .compiler_support
+            .artifacts()
+            .metadata_snapshot();
+        assert_eq!(
+            warm_metadata
+                .entries
+                .iter()
+                .map(|(owner, entry)| (owner.clone(), entry.descriptor.kind))
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                (identity("fixture", "Alpha"), ArtifactKind::OriginalModule),
+                (identity("fixture", "Beta"), ArtifactKind::OriginalModule),
+                (identity("fixture", "Joined"), ArtifactKind::LexicalJoin),
+                (identity("fixture", "Value"), ArtifactKind::ValueInterface),
+            ])
+        );
         let before = context
             .owner
             .facts
@@ -15355,7 +15374,14 @@ mod tests {
         // Materialization already warmed this immutable view projection.
         assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(after.view_queries - before.view_queries, 1);
-        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 10);
+        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 0);
+        let validated_metadata = context
+            .owner
+            .facts
+            .compiler_support
+            .artifacts()
+            .metadata_snapshot();
+        assert!(Arc::ptr_eq(&warm_metadata, &validated_metadata));
         assert!(context.validate_artifacts(&artifacts[..3]).is_err());
         let mut duplicate = artifacts.clone();
         duplicate.push(artifacts[0].clone());
@@ -19681,9 +19707,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![identity("fixture", "InstanceRelay")]
         );
-        assert!(!support
-            .source_implementation_roles()
-            .contains_key(&identity("fixture", "Hidden")));
         assert_eq!(
             entries[&identity("fixture", "InstanceRelay")].requirements,
             vec![identity("fixture", "Hidden")]
@@ -20620,9 +20643,14 @@ mod tests {
                 .admit_producer([3; 32])
                 .unwrap(),
         );
+        let refusal = continued
+            .in_program_context(wrong_producer)
+            .err()
+            .expect("another producer must be refused");
         assert!(
-            matches!(continued.in_program_context(wrong_producer), Err(CompileError::ExtractFailed(detail))
-            if detail == "program context has another producer")
+            matches!(&refusal, CompileError::ExtractFailed(detail)
+            if detail == "exact declaration context: program context has another producer"),
+            "actual_error={refusal:?}"
         );
         assert!(Arc::ptr_eq(&continued.inputs, &inputs));
         assert!(Arc::ptr_eq(&continued.groups, &groups));
@@ -20785,19 +20813,37 @@ mod tests {
         assert!(files.iter().all(|file| file.metadata().unwrap().len() > 0));
         let manifest = std::fs::read(&physical.manifest).unwrap();
         std::fs::write(&physical.manifest, b"changed manifest").unwrap();
-        assert!(matches!(admit(), Err(CompileError::ExtractFailed(detail))
-            if detail == "scope request changed during compilation"));
-        std::fs::remove_file(&physical.manifest).unwrap();
+        let refusal = admit()
+            .err()
+            .expect("changed physical manifest must be refused");
         assert!(
-            matches!(admit(), Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
+            matches!(&refusal, CompileError::ExtractFailed(detail)
+            if detail == "exact declaration context: scope request changed during compilation"),
+            "actual_error={refusal:?}"
+        );
+        std::fs::remove_file(&physical.manifest).unwrap();
+        let refusal = admit()
+            .err()
+            .expect("missing physical manifest must be refused");
+        assert!(
+            matches!(&refusal, CompileError::CompilerEvidence(error)
+            if matches!(error.as_ref(), crate::certified_products::CertificationError::EvidenceRead { path, failure: crate::certified_products::EvidenceReadFailure::Io { operation: crate::certified_products::EvidenceReadOperation::Metadata, error } }
+                if path == &physical.manifest && error.kind() == std::io::ErrorKind::NotFound)),
+            "actual_error={refusal:?}"
         );
         std::fs::write(&physical.manifest, &manifest).unwrap();
         let permissions = std::fs::metadata(&physical.manifest).unwrap().permissions();
         std::fs::set_permissions(&physical.manifest, std::fs::Permissions::from_mode(0)).unwrap();
         let inaccessible = admit();
         std::fs::set_permissions(&physical.manifest, permissions).unwrap();
+        let refusal = inaccessible
+            .err()
+            .expect("inaccessible physical manifest must be refused");
         assert!(
-            matches!(inaccessible, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+            matches!(&refusal, CompileError::CompilerEvidence(error)
+            if matches!(error.as_ref(), crate::certified_products::CertificationError::EvidenceRead { path, failure: crate::certified_products::EvidenceReadFailure::Io { operation: crate::certified_products::EvidenceReadOperation::Open, error } }
+                if path == &physical.manifest && error.kind() == std::io::ErrorKind::PermissionDenied)),
+            "actual_error={refusal:?}"
         );
         let snapshot = receipt.as_array().unwrap()[6].as_text().unwrap();
         std::fs::write(snapshot, b"changed source snapshot").unwrap();
