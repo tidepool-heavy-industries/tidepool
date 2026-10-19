@@ -101,3 +101,30 @@ not qualification of this implementation.
    and test consumers, run counted controls and joined history when admitted.
 4. Fold entire reviewed candidates into area branch and send exact OIDs to
    parent; no implementation candidate is currently folded.
+
+## Waiting continuation
+
+The latest user continuation rule supersedes periodic waits: perform useful
+dependency-ready work, then yield with the dependency recorded. No periodic
+polling or timed wake loop is authorized. The two descendant grants remain
+reserved until explicit settlement/reassignment.
+
+Current producer: `/root/warm_compiler_campaign/owned_inputs/rows`, implementing
+the source repair and committing the exact candidate in its isolated checkout.
+Next event: candidate OID, complete touched paths, formatting result and exact
+pending compile/test commands. It must inspect recipient state and use
+`followup_task` to reactivate a completed/idle area supervisor and independent
+reviewer; `send_message` is sufficient only while they are running.
+
+Independent reviewer: `/root/warm_compiler_campaign/owned_inputs/source_lifetime`.
+Next assignment is the complete `5b74c2f1..candidate` review, including ownership,
+exact acquisition/absence controls, output-owner promotion, additive cache
+precedence, actual backing lifetime and surviving production consumers. Review
+findings return to rows, then the repaired candidate receives another exact
+review. Native compile/execution remains deferred on the measured disk blocker;
+source review cannot convert this into qualified implementation acceptance.
+
+Area supervisor resumes for critical diff inspection, repair coordination and
+whole-candidate fold, then informs campaign with OID/evidence/status. The parent
+alone owns campaign integration. No area process, build command, Buck daemon or
+uncertain external action is currently awaiting observation.
