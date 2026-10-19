@@ -19,8 +19,8 @@
 mod admission;
 mod source_admission;
 pub use source_admission::{
-    RuntimeSourceAdmission, RuntimeSourceClaim, RuntimeSourceCompilerTransaction,
-    RuntimeSourceFence, SourceAdmissionError, SourceAdmissionHook, SourceAdmissionPhase,
+    RuntimeSourceAdmission, RuntimeSourceCompilerTransaction, RuntimeSourceFence,
+    RuntimeSourceLeaseClaim, SourceAdmissionError, SourceAdmissionHook, SourceAdmissionPhase,
 };
 mod binding_table;
 mod dialect;

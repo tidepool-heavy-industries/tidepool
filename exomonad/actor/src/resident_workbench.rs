@@ -2433,7 +2433,7 @@ where
                         .mint_notebook_scope_with_lease(
                             prerequisite
                                 .as_ref()
-                                .map(|dependency| dependency.runtime_admission().clone()),
+                                .map(|dependency| dependency.runtime_lease().clone()),
                         )
                         .map_err(ResidentError::Session)?;
                     next_context.placement.lexical_scope = retained.scope();
@@ -2446,7 +2446,7 @@ where
                             context.placement.lexical_scope,
                             prerequisite
                                 .as_ref()
-                                .map(|dependency| dependency.runtime_admission().clone()),
+                                .map(|dependency| dependency.runtime_lease().clone()),
                         )
                         .map_err(ResidentError::Session)?
                 };
@@ -22701,9 +22701,7 @@ pub(crate) mod request_tests {
                 None,
             );
             let scope = session
-                .mint_notebook_scope_with_lease(
-                    (kind == 2).then(|| parent.runtime_admission().clone()),
-                )
+                .mint_notebook_scope_with_lease((kind == 2).then(|| parent.runtime_lease().clone()))
                 .unwrap();
             let target = GenerationDependency::new(
                 crate::ActorRef::first(crate::ActorId(871)),
@@ -22787,7 +22785,7 @@ pub(crate) mod request_tests {
                 .any(|name| name == "lazySourceBinding"));
             match &dependency {
                 SourceDependency::Generation(generation) => assert!(matches!(
-                    generation.runtime_admission().admit(),
+                    generation.runtime_lease().admit_source(),
                     Err(GenerationAdmissionError::Unconfirmed { .. })
                 )),
                 SourceDependency::World(world) => assert!(

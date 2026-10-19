@@ -1,6 +1,6 @@
 //! One run owns actor membership, identity claims and preparation admission.
 use super::*;
-use crate::resident_workbench::generation_admission::GenerationDependency;
+use crate::resident_workbench::generation_admission::{GenerationDependency, SourceDependency};
 use ractor::ActorStatus;
 use std::collections::HashSet;
 use tokio::sync::oneshot;
@@ -200,7 +200,7 @@ struct OwnedResource {
     resource: ResourceChild,
     issued_to: ActorRef,
     owner: ResourceOwner,
-    dependency: Option<GenerationDependency>,
+    dependency: Option<SourceDependency>,
 }
 
 #[derive(Clone)]
@@ -327,7 +327,7 @@ struct ReservationRecord {
     lifecycle: Option<crate::kernel::LifecycleHandle>,
     executor: Option<ractor::ActorCell>,
     reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
-    dependency: Option<GenerationDependency>,
+    dependency: Option<SourceDependency>,
     preparation: Option<u64>,
 }
 
@@ -362,7 +362,7 @@ struct RootPreparationRecord {
     phase: PreparationPhase,
     compiler: RetainedActorExit,
     placement: Option<crate::ActorPlacement>,
-    dependency: Option<GenerationDependency>,
+    dependency: Option<SourceDependency>,
 }
 impl RunState {
     fn start_pending_actor_resources(&mut self) {
@@ -617,18 +617,18 @@ pub(super) enum RunControlMessage {
     ReserveWorker {
         parent: ActorRef,
         incarnation: crate::Incarnation,
-        dependency: Option<GenerationDependency>,
+        dependency: Option<SourceDependency>,
         reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
     },
-    ReserveGenerationActor {
-        dependency: GenerationDependency,
+    ReserveSourceActor {
+        dependency: SourceDependency,
         incarnation: crate::Incarnation,
         reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
     },
     ReserveSuccessor {
         predecessor: ActorRef,
         incarnation: crate::Incarnation,
-        dependency: Option<GenerationDependency>,
+        dependency: Option<SourceDependency>,
         reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
     },
     ReplacementIngressGrant {
@@ -807,7 +807,7 @@ fn reserve_actor(
     parent: Option<ActorRef>,
     incarnation: crate::Incarnation,
     purpose: ReservationPurpose,
-    dependency: Option<GenerationDependency>,
+    dependency: Option<SourceDependency>,
     reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
 ) {
     if state.phase != RunPhase::Running {
@@ -843,7 +843,7 @@ fn begin_reservation_after(
     actor: ActorRef,
     purpose: ReservationPurpose,
     predecessor: Option<crate::kernel::LifecycleHandle>,
-    dependency: Option<GenerationDependency>,
+    dependency: Option<SourceDependency>,
     reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
 ) {
     let terminal = RetainedActorExit::new();
@@ -1206,7 +1206,7 @@ impl Actor for RunControl {
                     reply,
                 );
             }
-            RunControlMessage::ReserveGenerationActor {
+            RunControlMessage::ReserveSourceActor {
                 dependency,
                 incarnation,
                 reply,
