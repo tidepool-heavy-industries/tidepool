@@ -19710,11 +19710,9 @@ mod tests {
             owners.sort();
             owners
         };
+        // Hidden belongs only to the baseline, while the selected value's
+        // source and dependency owners are InstanceRelay and InstanceOwner.
         let expected_owners = vec![
-            (
-                identity("fixture", "Hidden"),
-                ArtifactKind::CanonicalModuleInterface,
-            ),
             (
                 identity("fixture", "InstanceOwner"),
                 ArtifactKind::OriginalModule,

@@ -14036,8 +14036,8 @@ mod tests {
             assert!(!joined.selection_snapshot().roots.is_empty());
             assert!(joined.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact() == originals[0].descriptor.id)));
             assert!(!joined.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact() == helper.descriptor.id)));
-            // Reproduce the old retention rule as a control: exact descendants
-            // become roots and private compiler input recapture must refuse.
+            // Promoting every inherited child to an executable root creates
+            // competing exact bindings that the context issuer must refuse.
             let legacy_roots = joined
                 .capture_graph_selection()
                 .native_groups
@@ -14054,20 +14054,18 @@ mod tests {
                 ))
                 .unwrap();
             legacy.replace_namespace(&joined.namespace());
-            let legacy_context = ExactDeclarationContext::from_authenticated_execution(
-                producer.sha256(),
-                &legacy,
-                projection.clone(),
-                vec![],
-                originals[0].descriptor.owner.clone(),
-                &[],
-            )
-            .unwrap();
-            assert!(
-                matches!(OriginalCompilerInputs::from_native_availability(&legacy_context, producer, products),
+            assert!(matches!(
+                ExactDeclarationContext::from_authenticated_execution(
+                    producer.sha256(),
+                    &legacy,
+                    projection.clone(),
+                    vec![],
+                    originals[0].descriptor.owner.clone(),
+                    &[],
+                ),
                 Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
-                    ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == helper.descriptor.id))
-            );
+                    ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == helper.descriptor.id)
+            ));
 
             let retained = joined.retain_custody(&joined).unwrap();
             expected
@@ -15100,19 +15098,15 @@ mod tests {
                 published.compiler_input_projection(),
             )
             .unwrap();
-        let current = published
-            .artifact_view()
+        let support = published
+            .compiler_source_support()
             .retain_custody(&available)
             .unwrap();
-        let current = ExactDeclarationContext::from_authenticated_execution(
-            [2; 32],
-            &current,
-            publication.context().compiler_input_projection().clone(),
-            context.lexical_graph().to_vec(),
-            new.descriptor.owner.clone(),
-            &[new.descriptor.owner.clone()],
-        )
-        .unwrap();
+        let current = published
+            .as_ref()
+            .clone()
+            .extend_issued_compiler_support(&support)
+            .unwrap();
         let historical_imports = [issued_source(&old, 7)];
         let historical_groups = current
             .artifact_view()
