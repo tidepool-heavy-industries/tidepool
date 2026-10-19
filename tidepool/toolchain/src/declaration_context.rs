@@ -2804,8 +2804,10 @@ struct AcquiredRecoveryPayload {
     entry: Arc<ArtifactEntry>,
 }
 
-#[derive(Clone, Eq, PartialEq)]
-enum RecoveryPayloadReference {
+/// Durable payload references, not authenticated compiler authority. Acquisition
+/// checks these against bytes; compiler roles remain in the exact snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecoveryPayloadReference {
     Original(RecoveryArtifactRef),
     Canonical(recovery_artifacts::RecoveryModuleInterfaceRef),
     Join(RecoveryJoinRef),
@@ -8213,50 +8215,55 @@ impl ExactDeclarationContext {
         ),
         CompileError,
     > {
-        self.materialize_recovery_entries(
-            root,
-            &self.owner.facts.compiler_support.artifacts().entries(),
-        )
+        let entries = self.owner.facts.compiler_support.artifacts().entries();
+        let entries = entries
+            .into_iter()
+            .filter(|entry| {
+                matches!(
+                    entry.payload,
+                    ArtifactPayload::Original(_) | ArtifactPayload::Canonical(_)
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut products = Vec::new();
+        let mut interfaces = Vec::new();
+        for reference in self.materialize_recovery_entries(root, &entries)? {
+            match reference {
+                RecoveryPayloadReference::Original(reference) => products.push(reference),
+                RecoveryPayloadReference::Canonical(reference) => interfaces.push(reference),
+                RecoveryPayloadReference::Join(_) | RecoveryPayloadReference::Value(_) => {
+                    unreachable!()
+                }
+            }
+        }
+        Ok((products, interfaces))
     }
 
-    /// Materialize only newly referenced immutable payloads from this exact view.
-    /// Retained references are owned by the run and need no repeated file reads.
-    pub fn materialize_recovery_products_and_interfaces_for_artifacts(
+    /// Materialize exactly the requested payloads from this view. The run retains
+    /// previously published references; this batch does not issue compiler roles.
+    pub fn materialize_recovery_artifacts(
         &self,
         root: &Path,
         artifacts: &BTreeSet<ArtifactId>,
-    ) -> Result<
-        (
-            Vec<RecoveryArtifactRef>,
-            Vec<recovery_artifacts::RecoveryModuleInterfaceRef>,
-        ),
-        CompileError,
-    > {
+    ) -> Result<Vec<RecoveryPayloadReference>, CompileError> {
         if artifacts.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(Vec::new());
         }
-        self.materialize_recovery_entries(
-            root,
-            &self
-                .owner
-                .facts
-                .compiler_support
-                .artifacts()
-                .entries_for_artifacts(artifacts)?,
-        )
+        let entries = self
+            .owner
+            .facts
+            .compiler_support
+            .artifacts()
+            .entries_for_artifacts(artifacts)?;
+        self.materialize_recovery_entries(root, &entries)
     }
 
     fn materialize_recovery_entries(
         &self,
         root: &Path,
         entries: &[Arc<ArtifactEntry>],
-    ) -> Result<
-        (
-            Vec<RecoveryArtifactRef>,
-            Vec<recovery_artifacts::RecoveryModuleInterfaceRef>,
-        ),
-        CompileError,
-    > {
+    ) -> Result<Vec<RecoveryPayloadReference>, CompileError> {
+        let mut validation = PackageInterfaceValidation::default();
         let originals = entries
             .iter()
             .filter_map(|entry| match &entry.payload {
@@ -8264,7 +8271,6 @@ impl ExactDeclarationContext {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut validation = PackageInterfaceValidation::default();
         let products = if originals.is_empty() {
             Vec::new()
         } else {
@@ -8308,51 +8314,46 @@ impl ExactDeclarationContext {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok((products, interfaces))
-    }
-
-    /// Seal requested joined and value interfaces from the issuing exact view.
-    /// Native and canonical payloads use the product materializer above.
-    pub fn materialize_joined_and_value_interfaces_for_artifacts(
-        &self,
-        root: &Path,
-        artifacts: &BTreeSet<ArtifactId>,
-    ) -> Result<(Vec<RecoveryJoinRef>, Vec<RecoveryValueInterfaceRef>), CompileError> {
-        if artifacts.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
-        }
-        let entries = self
-            .owner
-            .facts
-            .compiler_support
-            .artifacts()
-            .entries_for_artifacts(artifacts)?;
-        let mut work = recovery_artifacts::RecoveryArtifactWork::default();
-        let mut joined = Vec::new();
-        let mut values = Vec::new();
+        let mut references = products
+            .into_iter()
+            .map(RecoveryPayloadReference::Original)
+            .chain(
+                interfaces
+                    .into_iter()
+                    .map(RecoveryPayloadReference::Canonical),
+            )
+            .collect::<Vec<_>>();
         for entry in entries {
             match &entry.payload {
                 ArtifactPayload::Interface(interface, JoinedInterfaceRole::LexicalJoin) => {
-                    joined.push(
+                    references.push(RecoveryPayloadReference::Join(
                         interface
-                            .materialize_with_work(root, &mut work)
+                            .materialize_with_validation(
+                                root,
+                                &mut validation,
+                                MaterializationMode::Durable,
+                            )
                             .map_err(materialization_failure)?,
-                    );
+                    ));
                 }
                 ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface) => {
-                    values.push(
+                    references.push(RecoveryPayloadReference::Value(
                         CertifiedValueInterface::from_admitted_interface(
                             interface.clone(),
                             entry.requirements.clone(),
                         )
-                        .materialize_with_work(root, &mut work)
+                        .materialize_with_validation(
+                            root,
+                            &mut validation,
+                            MaterializationMode::Durable,
+                        )
                         .map_err(materialization_failure)?,
-                    );
+                    ));
                 }
                 ArtifactPayload::Canonical(_) | ArtifactPayload::Original(_) => {}
             }
         }
-        Ok((joined, values))
+        Ok(references)
     }
 
     /// Select the original native owner from its compiler-issued origin. A
@@ -13665,37 +13666,37 @@ mod tests {
         let absent = scratch.path().join("absent");
         assert_eq!(
             source
-                .materialize_recovery_products_and_interfaces_for_artifacts(
-                    &absent,
-                    &BTreeSet::new()
-                )
+                .materialize_recovery_artifacts(&absent, &BTreeSet::new())
                 .unwrap(),
-            (vec![], vec![])
+            Vec::<RecoveryPayloadReference>::new()
         );
         assert!(
             !absent.exists(),
             "empty materialization does not create directories"
         );
-        let (retained, _) = source
-            .materialize_recovery_products_and_interfaces_for_artifacts(
-                scratch.path(),
-                &BTreeSet::from([original("Beta")]),
-            )
+        let retained = source
+            .materialize_recovery_artifacts(scratch.path(), &BTreeSet::from([original("Beta")]))
             .unwrap();
         assert_eq!(retained.len(), 1);
-        let retained_path = scratch.path().join(&retained[0].product_path);
+        let RecoveryPayloadReference::Original(retained) = &retained[0] else {
+            panic!("original payload")
+        };
+        let retained_path = scratch.path().join(&retained.product_path);
         std::fs::write(&retained_path, b"damaged retained product").unwrap();
-        let (new_products, new_interfaces) = source
-            .materialize_recovery_products_and_interfaces_for_artifacts(
+        let new_payloads = source
+            .materialize_recovery_artifacts(
                 scratch.path(),
                 &BTreeSet::from([original("Alpha"), canonical("Alpha")]),
             )
             .unwrap();
-        assert_eq!(new_products.len(), 1);
-        assert_eq!(new_products[0].module, "Alpha");
+        assert_eq!(new_payloads.len(), 2);
+        let RecoveryPayloadReference::Original(product) = &new_payloads[0] else {
+            panic!("original payload")
+        };
+        assert_eq!(product.module, "Alpha");
         assert_eq!(
-            new_interfaces,
-            vec![new_products[0].module_interface.clone().unwrap()]
+            new_payloads[1],
+            RecoveryPayloadReference::Canonical(product.module_interface.clone().unwrap())
         );
         assert_eq!(
             std::fs::read(&retained_path).unwrap(),
@@ -13703,10 +13704,7 @@ mod tests {
         );
         assert!(
             source
-                .materialize_recovery_products_and_interfaces_for_artifacts(
-                    scratch.path(),
-                    &BTreeSet::from([original("Beta")])
-                )
+                .materialize_recovery_artifacts(scratch.path(), &BTreeSet::from([original("Beta")]))
                 .is_err(),
             "fresh materialization verifies its requested existing destination"
         );
@@ -13716,15 +13714,12 @@ mod tests {
         assert!(
             selected
                 .context()
-                .materialize_recovery_products_and_interfaces_for_artifacts(
-                    scratch.path(),
-                    &BTreeSet::from([original("Beta")])
-                )
+                .materialize_recovery_artifacts(scratch.path(), &BTreeSet::from([original("Beta")]))
                 .is_err(),
             "ambient inventory payload cannot supply a selected durable reference"
         );
         assert!(source
-            .materialize_recovery_products_and_interfaces_for_artifacts(
+            .materialize_recovery_artifacts(
                 scratch.path(),
                 &BTreeSet::from([ArtifactId([0xee; 32])])
             )
@@ -13753,54 +13748,49 @@ mod tests {
         let absent = scratch.path().join("absent");
         assert_eq!(
             source
-                .materialize_joined_and_value_interfaces_for_artifacts(&absent, &BTreeSet::new())
+                .materialize_recovery_artifacts(&absent, &BTreeSet::new())
                 .unwrap(),
-            (vec![], vec![])
+            Vec::<RecoveryPayloadReference>::new()
         );
         assert!(!absent.exists());
-        let (joins, values) = source
-            .materialize_joined_and_value_interfaces_for_artifacts(
-                scratch.path(),
-                &BTreeSet::from([joined.descriptor.id]),
-            )
+        let references = source
+            .materialize_recovery_artifacts(scratch.path(), &BTreeSet::from([joined.descriptor.id]))
             .unwrap();
-        assert_eq!(joins.len(), 1);
-        assert!(values.is_empty());
+        assert_eq!(references.len(), 1);
+        let RecoveryPayloadReference::Join(join) = &references[0] else {
+            panic!("join payload")
+        };
         assert_eq!(
-            crate::artifact_inventory::ArtifactDescriptor::from_recovery_join(&joins[0]).id,
+            crate::artifact_inventory::ArtifactDescriptor::from_recovery_join(join).id,
             joined.descriptor.id
         );
-        let retained_path = scratch.path().join(&joins[0].interface_path);
+        let retained_path = scratch.path().join(&join.interface_path);
         std::fs::write(&retained_path, b"damaged retained join").unwrap();
-        let (joins, values) = source
-            .materialize_joined_and_value_interfaces_for_artifacts(
-                scratch.path(),
-                &BTreeSet::from([value.descriptor.id]),
-            )
+        let references = source
+            .materialize_recovery_artifacts(scratch.path(), &BTreeSet::from([value.descriptor.id]))
             .unwrap();
-        assert!(joins.is_empty());
-        assert_eq!(values.len(), 1);
-        assert_eq!(values[0].artifact_id, value.descriptor.id);
+        assert_eq!(references.len(), 1);
+        let RecoveryPayloadReference::Value(value_reference) = &references[0] else {
+            panic!("value payload")
+        };
+        assert_eq!(value_reference.artifact_id, value.descriptor.id);
         assert_eq!(
             crate::artifact_inventory::ArtifactDescriptor::from_recovery_value_interface(
-                &values[0]
+                value_reference
             )
             .id,
             value.descriptor.id
         );
-        assert_eq!(values[0].requirements, value.requirements);
+        assert_eq!(value_reference.requirements, value.requirements);
         assert_eq!(
             std::fs::read(&retained_path).unwrap(),
             b"damaged retained join"
         );
         assert!(source
-            .materialize_joined_and_value_interfaces_for_artifacts(
-                scratch.path(),
-                &BTreeSet::from([joined.descriptor.id])
-            )
+            .materialize_recovery_artifacts(scratch.path(), &BTreeSet::from([joined.descriptor.id]))
             .is_err());
         assert!(source
-            .materialize_joined_and_value_interfaces_for_artifacts(
+            .materialize_recovery_artifacts(
                 scratch.path(),
                 &BTreeSet::from([ArtifactId([0xee; 32])])
             )
@@ -15379,15 +15369,24 @@ mod tests {
         assert!(context.validate_artifacts(&foreign).is_err());
         let recovery_root = directory.path().join("recovery");
         std::fs::create_dir_all(&recovery_root).unwrap();
-        let (products, interfaces) = context
-            .materialize_recovery_products_and_interfaces(&recovery_root)
-            .unwrap();
-        let (joins, values) = context
-            .materialize_joined_and_value_interfaces_for_artifacts(
+        let references = context
+            .materialize_recovery_artifacts(
                 &recovery_root,
                 &context.artifact_view().artifact_ids().into_iter().collect(),
             )
             .unwrap();
+        let mut products = Vec::new();
+        let mut interfaces = Vec::new();
+        let mut joins = Vec::new();
+        let mut values = Vec::new();
+        for reference in references {
+            match reference {
+                RecoveryPayloadReference::Original(reference) => products.push(reference),
+                RecoveryPayloadReference::Canonical(reference) => interfaces.push(reference),
+                RecoveryPayloadReference::Join(reference) => joins.push(reference),
+                RecoveryPayloadReference::Value(reference) => values.push(reference),
+            }
+        }
         let mut descriptors = context.artifact_view().descriptors();
         descriptors
             .iter_mut()

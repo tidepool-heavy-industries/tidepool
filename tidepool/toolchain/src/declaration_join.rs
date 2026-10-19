@@ -20,7 +20,7 @@ pub(crate) use planned::certify_same_offer_planned_declaration;
 pub use crate::declaration_context::{
     ExactCompileContext, ExactDeclarationContext, ExactSourceWitness,
     MaterializedExactDeclarationContext, RecoveredArtifactAcquisition, RecoveredArtifactInventory,
-    RecoveryInventoryError, RequestAnnotations, RequestHelperRecipe,
+    RecoveryInventoryError, RecoveryPayloadReference, RequestAnnotations, RequestHelperRecipe,
 };
 
 mod recovery;
