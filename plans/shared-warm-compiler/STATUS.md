@@ -67,6 +67,15 @@ campaign/CORE-JOINED-TERMINAL.json and core-joined-{native-build,tests}.json/log
 Runtime compiler/host cleanup remains not_observed and diagnostics incomplete;
 this is component/joined execution evidence, not frozen release acceptance.
 
+The later fact-key/counter merge e1cfc49e68 compiled production/cfgtest at the
+joined campaign source:1243local/0remote actions, exit0, followed by four exact
+selected/executed/passed controls. All report/stream hashes, counts, exits and
+captured binaries were reconciled. Evidence campaign/fact-key-counter-join/
+TERMINAL.json. Process cleanup confirmed; host/compiler not_observed. These
+controls submit no service query. Host found a digest-only observer coverage gap;
+its isolated producer/control repair remains required before whole-query zero-work
+claims. No timing, Ready or frozen acceptance follows.
+
 ## Active frontier and event owners
 
 Grant ceiling14 including campaign: five supervisors and eight reserved leaves.
@@ -75,10 +84,10 @@ direct children per area; reserved grants persist through event-bound yields.
 
 | Area | Leaves | Current exact state and next owner action |
 | --- | ---: | --- |
-| host_inputs | 2 | Reviewed key70120 and producer counters8424 are area-folded9f and campaign-foldede1cfc49. Area production/cfgtest and four exact controls passed. Campaign joined toolchain/runtime compilation is observed in session49150; actual source capture0aa and actor world consumer remain pending real shared factory/compile. Old02A patch preserved. |
+| host_inputs | 2 | Reviewed key70120 and producer counters8424 are area-folded9f and campaign-foldede1cfc49. Area production/cfgtest and four exact controls passed. Campaign joined toolchain/runtime compilation passed1243local/0remote and exact four controls passed4/4; source8d69 runtime/actor production+cfgtest compilation also passed803local/0remote; source body budget repair and actual actor query remain unfinished. Old02A patch preserved. |
 | owned_inputs | 2 | Prior f330 rows integrated and joined verified. New83ad early14-label compile failed E0061 at two production_entry archive consumers, tests0; terminal and source retained. Approved successor separates finite archive provenance from live service authority, repairs root-route/provider trust and explicitly refuses old authority formats. Same rows/reviewer grants implement/review; native retry requires fresh accounting. |
 | warm_workers | 1 | Prior protocol9/9 integrated. Shared association8acf production/unitbinary compile passed, tests0. Real profile boot24b worker-only GHC compilation passed8actions/0tests; actual declared profile capture passed1 invocation (81,938B). That6GiB lane is terminal/released. Revised cold carrier keeps current selection separate from unmerged historical binding-row custody; real query/Ready is unqualified. |
-| reload | 2 | Prior345 four-target compilation and corrected Sleep d9 execution passed; three unchanged6d3 actor prerequisites independently fail. Canonical owner core519/a82 is in complete independent review before earlycompile. Review found missing target-B custody on uncertain A→B and a metadata hold cycle; these require bounded lifecycle repair, no C6 acceptance yet. Force=true refuses; remaining R1/R2/R3 pending. |
+| reload | 2 | Prior345 four-target compilation and corrected Sleep d9 execution passed; three unchanged6d3 actor prerequisites independently fail. Canonical owner core519/a82 received CHANGES REQUESTED; early four-target compile failed actor conversion/runtime test fixture errors, tests0. Narrow fixes5970 retry is observed in session97697. Review found missing target-B custody on uncertain A→B and a metadata hold cycle; these require bounded lifecycle repair, no C6 acceptance yet. Force=true refuses; remaining R1/R2/R3 pending. |
 | qualification | 1 | Immutable6d3 AABA/Persona13 passed; e6 fixture2/2/freeze passed but stronger Persona fails real exact native conflict. All3 baseline actor discriminators executed/failed before target controls, no assertion waiver. Authentic frozen constructor fixture unavailable; reserved leaf implements bounded opt-in production stage tracing, independent review before12GiB/32GiB native lane and separate frozen rerun. |
 
 All leaves use isolated real checkouts. Only the responsible area parent folds
@@ -184,13 +193,14 @@ Campaign/Persona outputs and live hosts/workers were untouched.
 Installed swarm-build remains the older launcher; staged reservation switches are
 unsupported. Use the established pinned local-only workflow, verified bind mounts,
 fresh disk/RAM/cgroup observations and prospective growth; preserve100GiB free.
-Current native lanes: campaign joined fact-key/counter toolchain/runtime10GiB
-memory/32GiB growth, session49150 observed by campaign; host source capture14/32
-configure session39619 observed by host. Reload14/32 is authorized after exact
-source review; qualification bounded toolchain12/32 after trace review can now fit
-with warm6 fully terminal/released. Owned83ad8, hostkey14,
-hostcounter6 and qualification baseline actor14 are terminal/released; idle daemon
-usage remains in global current. No owned retry is currently running. Fresh sample
+Current native lanes: reload14GiB memory/32GiB growth narrow compile retry97697,
+qualification bounded toolchain12/32 trace gate owned by capture_sensitivity.
+Campaign joined10 and host source14 are now terminal/released; warm6 is terminal.
+Campaign is admitting the still-pending joined host production/cfgtest fixture
+consumer gate14/32, with itself retaining the terminal observer. Owned83ad8,
+hostkey14/counter6 and qualification baseline actor14 are terminal/released; idle
+daemon usage remains in global current. No owned native retry is running.
+Fresh sample
 before campaign launch: build.slice36,067,119,104B, MemAvailable98,861,940,736B,
 /srv/build452,975,124,480B available. Admission accounts actual global usage plus
 remaining expected increments below80GiB; each new lane refreshes the samples.
@@ -208,11 +218,11 @@ terminal results; no orphan commands. Area parents reconcile review/fold disposi
 
 Published checkpoint278cd12c95 includes the accepted demand-service and C6 contracts;
 its compiler production foundation is exact tested f088 (36/36). The reviewed
-e6 fixture repair is now merged at466d715ae9; campaign joined host cfgtest compile
-is pending the first service slice/resource admission. Area e6 compile2/2 does
-not qualify the later joined production tree. All campaign-owned commands settled.
+e6 fixture repair is merged at466d715ae9; campaign joined host cfgtest compile
+is the next admitted gate. Area e6 compile2/2 does
+not qualify the later joined production tree. Fact-key/counter commands have settled; next host fixture gate has a named campaign observer.
 
-Campaign next actions: collect joined key/counter compile and exact four controls; review paired inspect/prepareCell contracts and revised raw world constructors; join the first actual PublicModule question under fresh
+Campaign next actions: collect joined host fixture compile and two exact controls; review paired inspect/prepareCell contracts and revised raw world constructors; join the first actual PublicModule question under fresh
 source authority; derive/repair exact frozen native conflict without weakening
 issued edges; integrate repaired reload owner and production consumers; run
 joined histories and frozen candidate qualification. No hard strategy stop is
@@ -221,7 +231,7 @@ drain every other approved independent successor, review, repair, fold and
 running check before MORNING handoff.
 
 Event owners: host, warm and owned produce actual code plus exact independent
-reviews/native receipts under SERVICE-API.md; campaign reviews and folds. Campaign observes joined49150; warm observes worker GHC43382. Host owns actual
+reviews/native receipts under SERVICE-API.md; campaign reviews and folds. Campaign observes the next joined host fixture gate; prior49150/46271 and warm43382 are terminal. Host owns actual
 capture/actor integration successors; qualification owns the native issuer trace
 and exact frozen counterexample; reload owns canonical core review, first compile
 and lifecycle repairs. Owned rows owns repaired source/provider/archive migration
