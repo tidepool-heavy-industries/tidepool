@@ -2572,16 +2572,45 @@ async fn composition_root_child_session_factory_runs_a_cell() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let child_session_id = tidepool_runtime::session::fresh_session_id();
-                let mut child_machine = tidepool_testing::with_settlement(|settlement| {
-                    (campaign.child_session_factory)(child_session_id, &[], settlement)
-                })
-                .expect("the composition root's factory builds a fresh session");
+                let mut factory_close = None;
+                let prepared =
+                    tidepool_runtime::settle_compiler_transaction_cancellable_for_workload(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        tidepool_runtime::CompilerTransactionCancellation::new(),
+                        |close| factory_close = Some(close),
+                        |settlement| {
+                            (campaign.child_session_factory)(child_session_id, &[], settlement)
+                        },
+                    );
+                assert_eq!(factory_close.as_ref(), Some(prepared.close()));
+                assert!(
+                    matches!(
+                        prepared.close(),
+                        tidepool_runtime::CompilerTransactionClose::Clean
+                            | tidepool_runtime::CompilerTransactionClose::NotStarted
+                    ),
+                    "child factory preparation must settle before canonical source adoption: {:?}",
+                    prepared.close()
+                );
+                prepared
+                    .host_admission_cancellation()
+                    .expect("factory preparation retains its cancellation owner")
+                    .checkpoint()
+                    .expect("cancelled factory preparation cannot advance");
+                let mut child_machine = prepared
+                    .into_outcome()
+                    .action
+                    .expect("the composition root's factory builds a fresh session");
 
                 child_machine.set_effect_execution(
                     EffectRunPolicy::HandleOrSuspend,
                     LivePayloadPolicy::HASKELL_EFFECT_VALUE,
                 );
                 let lexical_scope = child_machine.mint_isolated_scope();
+                let source = child_machine
+                    .adopt_initial_notebook_scope(lexical_scope)
+                    .expect("the resolved child scope issues its original canonical source lease");
+                assert_eq!(source.scope(), lexical_scope);
                 child_machine
                     .set_actor_execution(
                         tidepool_runtime::session::SessionRunContext {
@@ -2593,14 +2622,40 @@ async fn composition_root_child_session_factory_runs_a_cell() {
                         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
                     )
                     .expect("a freshly bootstrapped machine accepts actor execution context");
-                let outcome = tidepool_testing::with_settlement(|settlement| {
-                    child_machine.run_with_sites(
-                        "exomonad_root_driver",
-                        campaign.program.code(),
-                        settlement,
+                let mut runtime_close = None;
+                let installed = child_machine
+                    .with_source_compiler_transaction(
+                        source.clone(),
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        tidepool_runtime::CompilerTransactionCancellation::new(),
+                        None,
+                        |close| runtime_close = Some(close),
+                        |machine, settlement| {
+                            machine.run_with_sites(
+                                "exomonad_root_driver",
+                                campaign.program.code(),
+                                settlement,
+                            )
+                        },
                     )
-                })
-                .expect(
+                    .expect("the child driver enters its actual runtime source owner");
+                assert_eq!(runtime_close.as_ref(), Some(installed.close()));
+                assert!(
+                    matches!(
+                        installed.close(),
+                        tidepool_runtime::CompilerTransactionClose::Clean
+                            | tidepool_runtime::CompilerTransactionClose::NotStarted
+                    ),
+                    "child driver installation retains its actual close: {:?}",
+                    installed.close()
+                );
+                installed
+                    .host_admission_cancellation()
+                    .expect("the runtime phase retains its cancellation owner")
+                    .checkpoint()
+                    .expect("cancelled child driver installation cannot advance");
+                source.validate_source_issuer().unwrap();
+                let outcome = installed.into_outcome().action.expect(
                     "the driver cell the root itself bootstraps with also runs on a child machine",
                 );
                 assert!(
