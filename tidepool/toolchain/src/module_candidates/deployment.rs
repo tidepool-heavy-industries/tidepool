@@ -894,14 +894,12 @@ impl DeploymentModulePackage {
             return Err(ModulePackageError::Format("catalog schema"));
         }
         catalog.source_selection.validate_under(policy)?;
-        if catalog.producer_identity != authority.producer_identity
-            || catalog.consumed_worker_identity != authority.consumed_worker_identity
-            || authority.schema != 1
-            || authority.producer_identity == [0; 32]
-            || authority.consumed_worker_identity == [0; 32]
-        {
-            return Err(ModulePackageError::CompilerMismatch);
-        }
+        crate::toolchain::CompilerDeploymentConfiguration::Configured(authority.clone())
+            .validate_product_provenance(
+                catalog.producer_identity,
+                catalog.consumed_worker_identity,
+            )
+            .map_err(|_| ModulePackageError::CompilerMismatch)?;
         let artifact_root = path
             .parent()
             .ok_or(ModulePackageError::RootMoved)?
