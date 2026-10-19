@@ -362,13 +362,18 @@ fn type_defs() -> Vec<TypeDef> {
                 field("nameEntryKind", HsType::Text),
                 field("nameEntryDisplay", HsType::Text),
                 field("nameEntryAvailability", HsType::Named("FitAvailability")),
-                field(
+                documented_field(
                     "nameEntryReferences",
                     HsType::list(HsType::Named("IdentifierRef")),
+                    &["Identifiers this name's declaration mentions or resolves. These are dependencies, not the entry's own identity."],
                 ),
-                field("nameEntryReference", HsType::Named("IdentifierRef")),
+                documented_field(
+                    "nameEntryReference",
+                    HsType::Named("IdentifierRef"),
+                    &["The entry's canonical resolved identity. Pass this to `info`, `typeOf`, or `rowFit` to ask about the same binding."],
+                ),
             ],
-            &["One enumerated name with its declaration identity, presentation, row availability, and the references it names or resolves."],
+            &["One enumerated name: its canonical resolved identity, presentation, row availability, and the identifiers its declaration mentions or resolves. `nameEntryReference` is the identity to chain into `info`/`typeOf`/`rowFit`; `nameEntryReferences` are dependencies, not the entry's own identity."],
         ),
         record(
             "NameList",
@@ -417,13 +422,18 @@ fn type_defs() -> Vec<TypeDef> {
                 field("typeMatchSignature", HsType::Text),
                 field("typeMatchQuality", HsType::Named("TypeMatchQuality")),
                 field("typeMatchAvailability", HsType::Named("FitAvailability")),
-                field(
+                documented_field(
                     "typeMatchReferences",
                     HsType::list(HsType::Named("IdentifierRef")),
+                    &["Identifiers the matched declaration mentions or resolves. These are dependencies, not the match's own identity."],
                 ),
-                field("typeMatchReference", HsType::Named("IdentifierRef")),
+                documented_field(
+                    "typeMatchReference",
+                    HsType::Named("IdentifierRef"),
+                    &["The match's canonical resolved identity. Pass this to `info`, `typeOf`, or `rowFit` to ask about the same binding."],
+                ),
             ],
-            &["One value whose type matches a probe pattern, with its rendered signature, match quality, row availability, and the references it names or resolves."],
+            &["One value whose type matches a probe pattern: its canonical resolved identity, rendered signature, match quality, row availability, and the identifiers its declaration mentions or resolves. `typeMatchReference` is the identity to chain into `info`/`typeOf`/`rowFit`; `typeMatchReferences` are dependencies, not the match's own identity."],
         ),
         record(
             "TypeMatches",
@@ -499,6 +509,19 @@ fn field(hs_name: &'static str, ty: HsType) -> RecordField {
         rust_name: hs_name,
         ty,
         doc: &[],
+    }
+}
+
+fn documented_field(
+    hs_name: &'static str,
+    ty: HsType,
+    doc: &'static [&'static str],
+) -> RecordField {
+    RecordField {
+        hs_name,
+        rust_name: hs_name,
+        ty,
+        doc,
     }
 }
 
