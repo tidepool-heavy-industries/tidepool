@@ -806,6 +806,7 @@ tidepool_rust_test_cases(
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
     },
     haskell_worker = True,
+    case_compiler_modes = {"session::turn::tests::cell_program_primary_failure_keeps_its_outer_close_observation": "owned-resident"},
     visibility = ["PUBLIC"],
 )
 

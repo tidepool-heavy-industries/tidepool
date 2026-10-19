@@ -7711,6 +7711,21 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn cell_program_primary_failure_keeps_its_outer_close_observation() {
+        assert!(
+            std::env::var_os("TIDEPOOL_EXTRACT_DAEMON_SOCKET").is_some(),
+            "confirmed cancellation retirement requires the declared owned resident compiler"
+        );
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_env_filter("tidepool_extract_cmd=debug,exomonad_harness::timing=debug")
+            .with_span_events(
+                tracing_subscriber::fmt::format::FmtSpan::NEW
+                    | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
+            )
+            .with_writer(std::io::stderr)
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
         #[derive(Clone, Copy, Debug)]
         enum Closure {
             Clean,
@@ -7763,16 +7778,17 @@ mod tests {
             ).unwrap();
             let actual = outcome.close().clone();
             assert_eq!(Some(&actual), observed.borrow().as_ref());
+            eprintln!("primary-close owner observation {closure:?}: {actual:?}");
             match closure {
                 Closure::Clean => assert!(matches!(actual, crate::CompilerTransactionClose::Clean)),
                 Closure::SyntheticUnknown => assert!(matches!(
                     actual,
                     crate::CompilerTransactionClose::Unconfirmed(_)
                 )),
-                Closure::ActualRetired => assert!(matches!(
-                    actual,
-                    crate::CompilerTransactionClose::Retired(_)
-                )),
+                Closure::ActualRetired => assert!(
+                    matches!(actual, crate::CompilerTransactionClose::Retired(_)),
+                    "actual accepted cancellation must retain confirmed retirement: {actual:?}"
+                ),
             }
             assert_eq!(tidepool_extract_cmd::extract_spawn_count() - before, 1);
             let before_finish = outcome
