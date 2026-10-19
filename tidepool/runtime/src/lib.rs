@@ -340,13 +340,29 @@ pub fn compile_runtime_targets(
     on_stage: impl FnMut(&str, std::time::Duration, u64),
     settlement: &mut dyn FnMut(CompilerTransactionClose),
 ) -> Result<RuntimePreparedTargets, RuntimeError> {
+    compile_runtime_targets_cancellable(
+        invocation,
+        CompilerTransactionCancellation::new(),
+        on_stage,
+        settlement,
+    )
+}
+
+/// The standalone producer with its operation owner's cancellation and close sink.
+/// It creates the same canonical source owner and never borrows a raw outer scope.
+pub fn compile_runtime_targets_cancellable(
+    invocation: &artifacts::CompileInvocation<'_>,
+    cancellation: CompilerTransactionCancellation,
+    on_stage: impl FnMut(&str, std::time::Duration, u64),
+    close_sink: impl FnOnce(CompilerTransactionClose),
+) -> Result<RuntimePreparedTargets, RuntimeError> {
     let mut state = session::PersistentSession::new(None, DEFAULT_NURSERY_SIZE);
     let source = state.mint_isolated_scope_with_lease()?;
     let settled = source.with_source_compiler_transaction(
         artifacts::CompileWorkload::Foreground,
-        CompilerTransactionCancellation::new(),
+        cancellation,
         None,
-        settlement,
+        close_sink,
         |owner, report| prepare_runtime_targets(owner, invocation, None, on_stage, report),
     )?;
     let mut prepared = finish_runtime_targets(settled)?;

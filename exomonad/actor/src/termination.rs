@@ -682,6 +682,44 @@ impl CompilerPreparationOwner {
         CompilerPreparationOutcome { action, cleanup }
     }
 
+    /// The runtime owns this source transaction; this preparation owner retains
+    /// the existing lifecycle ticket, cancellation, and physical close evidence.
+    pub fn compile_runtime_targets(
+        &mut self,
+        invocation: &tidepool_toolchain::artifacts::CompileInvocation<'_>,
+        on_stage: impl FnMut(&str, std::time::Duration, u64),
+    ) -> CompilerPreparationOutcome<
+        Result<
+            Result<tidepool_runtime::RuntimePreparedTargets, tidepool_runtime::RuntimeError>,
+            crate::ResidentActorWorkbenchError,
+        >,
+    > {
+        let mut admission = PreparationAdmissionGuard {
+            owner: self.retained.clone(),
+            completed: false,
+        };
+        let cleanup = self.cleanup();
+        let owner =
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained.clone());
+        let action = self
+            .services
+            .with_compiler_owner(owner)
+            .for_preparation()
+            .admit_work()
+            .map(|ticket| {
+                let cancellation = ticket.control.cancellation.clone();
+                tidepool_runtime::compile_runtime_targets_cancellable(
+                    invocation,
+                    cancellation,
+                    on_stage,
+                    move |close| ticket.consume_close(close),
+                )
+            });
+        admission.completed = true;
+        drop(admission);
+        CompilerPreparationOutcome { action, cleanup }
+    }
+
     pub fn cleanup(&self) -> CompilerPreparationCleanup {
         CompilerPreparationCleanup {
             retained: self.retained.clone(),
