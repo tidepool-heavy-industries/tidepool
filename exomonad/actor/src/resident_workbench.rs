@@ -17090,7 +17090,7 @@ pub(crate) mod request_tests {
             assert!(checked.snapshot().get(HostWorkCounter::ReachableValueVisit) > 0);
 
             let (frontend, frontend_context) = workbench.admit_private_cell_for_test(context).await.unwrap();
-            let cell = r#"frontendAnswer <- do { answer <- info (NameQuery (PublicModule "WorldQuestion") ValueName "known"); pure (case answer of { Right details -> (identifierName (inspectedIdentifier details), provenanceFingerprint (identifierProvenance details)); Left _ -> ("query-refused", "query-refused") }) }"#.to_owned();
+            let cell = include_str!("fixtures/compiler-world-info.hs").to_owned();
             let (checked, prepared) = frontend.prepare_cell(frontend_context.clone(), cell.clone()).await.unwrap();
             let PreparedCell { mut items, dependencies } = prepared;
             assert_eq!(checked.items.len(), 1);
@@ -17203,8 +17203,8 @@ pub(crate) mod request_tests {
             assert!(unsupported_work.snapshot().get(HostWorkCounter::ScopeEncodedByte) > 0,
                 "cold runtime namespace was captured before the source-domain refusal");
             let facade_body = "{-# LANGUAGE PackageImports #-}\nmodule Facade (module M) where\nimport \"base\" Data.Maybe as M\n";
-            let home_body = "module Data.Maybe (HomeMaybe(..)) where\ndata HomeMaybe = Just Bool\n";
-            let (reexports, _reexport_owner) = world_query_test_source_files(&[vec![("Facade.hs", facade_body), ("Data/Maybe.hs", home_body)]]);
+            let home_body = "module GHC.Internal.Maybe (HomeMaybe(..)) where\ndata HomeMaybe = Just Bool\n";
+            let (reexports, _reexport_owner) = world_query_test_source_files(&[vec![("Facade.hs", facade_body), ("GHC/Internal/Maybe.hs", home_body)]]);
             let reexport_layer = reexports.clone();
             let reexport_context = workbench.access.with_machine(context.clone(), move |session, context, _| {
                 let placement = crate::ActorPlacement { lexical_scope: session.mint_isolated_scope(), ..context.placement };
@@ -17224,17 +17224,17 @@ pub(crate) mod request_tests {
             assert!(matches!(&facade_module.origin, WorldModuleOrigin::Home { root: 0, path, source_sha256 }
                 if path == "Facade.hs" && source_sha256 == expected_facade.sha256()));
             let defining = facade.defining_module().expect("verified defining module receipt");
-            assert_eq!(defining.module, "Data.Maybe");
+            assert_eq!(defining.module, "GHC.Internal.Maybe");
             assert_ne!(defining.unit, facade_module.unit);
             assert!(matches!(&defining.origin, WorldModuleOrigin::Package { .. }));
             assert!(matches!(facade.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info)))
-                if info.identifier.module == "Data.Maybe" && info.identifier.name == "Just"));
-            let direct = installed_named_world_query(&workbench, reexport_context, reexports, constructor_query("Data.Maybe"), StructuredInspectionKind::Info, HostWorkObservation::new()).await;
+                if info.identifier.module == "GHC.Internal.Maybe" && info.identifier.name == "Just"));
+            let direct = installed_named_world_query(&workbench, reexport_context, reexports, constructor_query("GHC.Internal.Maybe"), StructuredInspectionKind::Info, HostWorkObservation::new()).await;
             let expected_home = tidepool_runtime::session::GenerationArtifactReference::capture(home_body.as_bytes().to_vec());
-            let WorldModuleResolution::Resolved(home_module) = direct.resolution() else { panic!("direct Data.Maybe must choose captured home"); };
-            assert_eq!(home_module.module, "Data.Maybe");
+            let WorldModuleResolution::Resolved(home_module) = direct.resolution() else { panic!("direct GHC.Internal.Maybe must choose captured home"); };
+            assert_eq!(home_module.module, "GHC.Internal.Maybe");
             assert!(matches!(&home_module.origin, WorldModuleOrigin::Home { root: 0, path, source_sha256 }
-                if path == "Data/Maybe.hs" && source_sha256 == expected_home.sha256()));
+                if path == "GHC/Internal/Maybe.hs" && source_sha256 == expected_home.sha256()));
             assert_eq!(direct.defining_module(), Some(home_module));
             assert_ne!(defining.unit, home_module.unit);
             assert!(matches!(direct.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info)))
