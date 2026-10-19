@@ -2,8 +2,8 @@
 
 Contract/base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
 Area: `/srv/swarm/checkouts/tidepool-shared-warm-reload-20261019`,
-branch `feature/shared-warm/reload`, source checkpoint
-`8dca6d6a89ec430b9841b7f3f44a9c202121019c`.
+branch `feature/shared-warm/reload`, integrated source checkpoint
+`59d801946394aee98fb7bfc30a9cf181b494df48`.
 Campaign owner: `/root/warm_compiler_campaign`; area owner:
 `/root/warm_compiler_campaign/reload`.
 
@@ -12,7 +12,8 @@ Campaign owner: `/root/warm_compiler_campaign`; area owner:
 This is uncompiled source work, not a usable or qualified reload feature.
 The campaign explicitly holds broad dependent R2/R3 force publication and hosted
 migration until issuing production/test consumers compile and the focused gate
-executes. Disk admission blocks those checks. No force publication, selective
+executes. The admitted early compile gate waits campaign memory-lane release.
+No force publication, selective
 drain or complete changed-reload fence is wired at this checkpoint.
 
 The area source contains:
@@ -40,16 +41,18 @@ all mean NotStarted. The complete repaired candidate is `96563ebbb95438e13faba7a
 its exact independent source review found no new blocking defect. The narrow
 `804a4d3e2f` successor carries reservation provenance into the producer compiler
 scope; its independent source review also found no new blocking defect. The joined
-R1 review remains pending. `6978429d8f` is the
+R1 foundation source review passed; behavioral acceptance remains pending.
+`6978429d8f` is the
 narrow force-input source parcel.
 The directory/R1 consumers have no passing compilation or test evidence; the
 std-only generator and snapshot check do not establish those claims. See
 [the independent review](REVIEW-BASE.md) for findings and untested boundaries.
 
 The complete frozen R1 source candidate is
-`fc92605eb78c52284f90249f6e5dd1200ba060de`. It is not folded or accepted.
-Cumulative exact independent review is active; native production and test
-compilation remain zero.
+`fc92605eb78c52284f90249f6e5dd1200ba060de`. Exact cumulative independent source
+review found no new confirmed defect in the foundation. It is folded at
+`59d801946394aee98fb7bfc30a9cf181b494df48`; full R1 acceptance is withheld.
+Native production and test compilation remain zero.
 
 The source repairs the earlier review findings: invalid SpawnOwnership variant,
 premature test-fixture lease release, and source-claim loss before uncertain
@@ -62,7 +65,7 @@ methods are private behind owning session wrappers; affected callers migrated.
 
 Joined legacy-Sleep binding, source-refusal and real facade local/narrow controls
 are authored but unexecuted. Pinned formatting, source-map and whitespace checks
-passed in the leaf checkout. Exact independent review must assess hook timing,
+passed in the leaf checkout. Exact independent review assessed hook timing,
 scoped restoration, original dependency, physical claim lifetime and actual
 consumer controls before fold. Leaf evidence and exact deferred selectors:
 `/srv/swarm/evidence/inanna/persona-1895-launch-20261019/compiler-failure/reload-admission-20261019/HANDOFF.md`
@@ -86,13 +89,14 @@ an informed worker yields.
   `feature/shared-warm/reload-admission`. Its terminal source checkpoint is
   `fc92605eb78c52284f90249f6e5dd1200ba060de`, incorporating area `a0d293d2a0`
   through the `fe3ef791` merge. It is dormant, reserved for concrete review or
-  compiler repairs. The area owner integrates the reviewed checkpoint,
-  regenerates source maps and owns the first admitted compile/repair stage.
+  compiler repairs. The area owner folded the reviewed checkpoint, checked source
+  maps, configured pinned test tools and owns the early compile/repair stage.
 - `/root/warm_compiler_campaign/reload/authority_review` owns only
-  `REVIEW-BASE.md` and is active on exact cumulative `5b74..fc92605e` review.
+  `REVIEW-BASE.md` and completed exact cumulative `5b74..fc92605e` source review.
   Its prior `9bb4c1eb` review blocked on bootstrap/facade END custody. The area
   owner handles findings, activates the leaf for bounded repairs, requests exact
-  rereview and owns the fold. Native evidence and compile repairs also require
+  rereview and owns the fold. Reviewer is dormant awaiting native results or
+  concrete repairs. Native evidence and compile repairs also require
   cumulative review before acceptance.
 
 Before yielding, retain the exact awaited event, producer/observer, recipient
@@ -211,10 +215,15 @@ below 80 GiB and at least 100 GiB unreserved disk. Observed build.slice current
 29,587,906,560 bytes plus conservative remaining 24+8+8+12 GiB was 79.56 GiB;
 no current-lane subtraction was needed. RAM available was 98,148,052,992 bytes,
 disk available 471,212,376,064 bytes. Refresh before launch. The receipt is
-`early-native-gate-preflight.json` in the area evidence directory. Exact review
-is the remaining launch dependency, produced by authority_review. No reload
-command is running or awaiting terminal collection. Host/browser and broader
-R2/R3 remain separate subsequent gates.
+`early-native-gate-preflight.json` in the area evidence directory. Campaign then
+admitted an additional owned-input baseline lane, invalidating that initial
+snapshot for launch. Native compilation now waits campaign's resource-preparation
+session 32587 terminal/release, or fresh per-scope remaining accounting proving
+both 12 GiB lanes fit. Campaign owns that release event and must reactivate reload.
+No reload command is running or awaiting terminal collection. Pinned `--tests`
+configuration exited 0, generation `generation.fl1CACQc`, recorded in
+`early-native-configure-tests.log`; runtime/actor source maps `--check` exited 0.
+Host/browser and broader R2/R3 remain separate subsequent gates.
 
 After the coherent R1 candidate is joined and source maps are regenerated, the
 smallest first compilation stage is the runtime and actor production libraries
