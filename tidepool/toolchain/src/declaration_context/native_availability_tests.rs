@@ -3461,10 +3461,63 @@ fn native_availability_snapshot_facts_follow_changed_rows_without_hot_census() {
         recompute_native_availability_facts(&promoted)
     );
 
+    // A one-row change beside an unchanged row updates one persistent path,
+    // rather than rebuilding facts for every row in the receiving domain.
+    let extra = native_context(&product("PersistentOtherNativeFacts", 52));
+    let extra_support = extra.compiler_source_support();
+    let extra_id = extra_support
+        .native_availability()
+        .rows()
+        .next()
+        .unwrap()
+        .original
+        .descriptor
+        .id;
+    let joined = rows
+        .merge(extra_support.native_availability())
+        .unwrap()
+        .into_rows();
+    let canonical = Arc::new(ArtifactEntry::canonical(
+        native.module_interface().unwrap().clone(),
+    ));
+    let mixed_roles = CompilerInputProjection::from_issued_entries(&[canonical.clone()])
+        .unwrap()
+        .merge(extra_support.projection())
+        .unwrap();
+    let mixed_view = extra_support
+        .artifacts()
+        .inventory()
+        .admit_shared_with_demand(
+            extra_support.artifacts(),
+            vec![canonical],
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap()
+        .retain_custody(support.artifacts())
+        .unwrap();
+    let before = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+    let mixed = joined
+        .for_compiler_roles(&mixed_roles, &mixed_view)
+        .unwrap();
+    assert_eq!(
+        NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get),
+        (before.0, before.1 + 1)
+    );
+    assert_eq!(mixed.rows().count(), 2);
+    assert!(Arc::ptr_eq(&joined.0[&extra_id], &mixed.0[&extra_id]));
+    assert!(joined.1[&extra_id]
+        .contributions
+        .ptr_eq(&mixed.1[&extra_id].contributions));
+    assert_eq!(
+        mixed.snapshot_facts().unwrap(),
+        recompute_native_availability_facts(&mixed)
+    );
+
     // Acquisition authenticates the same facts against each actual input owner;
     // sharing immutable facts cannot share the acquired rows or opaque offers.
     let acquired_again = native_context(&native);
     let mut restored = Vec::new();
+    let before = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
     for acquired in [support, acquired_again.compiler_source_support()] {
         let offers = acquired
             .native_offers()
@@ -3485,6 +3538,10 @@ fn native_availability_snapshot_facts_follow_changed_rows_without_hot_census() {
         ));
         restored.push(rows);
     }
+    assert_eq!(
+        NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get),
+        (before.0 + 2, before.1)
+    );
     assert!(!Arc::ptr_eq(&restored[0].0, &restored[1].0));
     assert!(!Arc::ptr_eq(
         restored[0].rows().next().unwrap(),
