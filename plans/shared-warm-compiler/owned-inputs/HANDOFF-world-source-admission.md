@@ -1,6 +1,10 @@
 # World source admission adapter
 
-Base `e608274ca8d0493eb9b1114e2f7e21f9e8b702e0`; branch `feature/shared-warm/world-source-admission`, isolated real checkout `tidepool-shared-warm-world-source-admission-20261019`. Accepted package checkout/history is unchanged.
+Base `e608274ca8d0493eb9b1114e2f7e21f9e8b702e0`; production/source prefix `ad094ae043059ed31c3a4958361fd895f53fe321`. Use account `inanna`, existing checkout `/srv/swarm/checkouts/tidepool-shared-warm-world-source-admission-20261019`, branch `feature/shared-warm/world-source-admission`. The checkout was clean at that prefix before this documentation-only backend handoff. The handoff commit changes no production or test source.
+
+The independent source receipt is `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/owned-inputs/source-lifetime/WORLD-SOURCE-PREFIX-REVIEW-e91d.md`, SHA256 `de5b125150762249dde03462a4a237eb0d6f7063641e4cce21574e7a0f6d2364`: accepted repaired prefix/receiving boundary for component compilation, not full adapter acceptance. No compilation has executed here: zero build commands and zero executed tests, not a successful build exit.
+
+The prior accepted package checkout remains clean at `/srv/swarm/checkouts/tidepool-shared-warm-owned-rows-20261019`, branch `feature/shared-warm/service-source`, HEAD `c819558fe37d46228fc9eaa34371c6603f497912`. Preserve it and the unmerged source-adapter history; do not switch either checkout or dispose its outputs.
 
 ## Joined source
 
@@ -20,7 +24,7 @@ The full world source constructor and matched product admission remain pending t
 
 ## Verification and continuation
 
-No native commands or Buck metadata queries have run in this checkout (native grant zero). Its buck-out is a provisioned real bind mount. Diff checks pass; pinned formatting, production and cfg(test) compilation and execution remain pending the paired admitted lane. Compile/link is not test execution.
+No native commands or Buck metadata queries have run in this checkout. Native memory/growth allowance is zero; no native job, Buck daemon or external process was started by this assignment, and all read/write commands are settled. There is no live process needing a new terminal observer. Other area processes and the old package checkout are separate owners; no global cleanup is authorized. The existing buck-out is a provisioned XFS bind mount on `/srv/build`, verified at this handoff. Diff checks pass; pinned formatting, production and cfg(test) compilation and execution remain pending the paired admitted lane. Compile/link is not test execution.
 
 Source controls added:
 
@@ -29,3 +33,21 @@ Source controls added:
 - `declaration_context::tests::world_primary_capture_preserves_selected_roles_and_native_issuers`: existing nonempty metadata fixture preserves selected roles and native original Arc identity. This is representation evidence, not actual GHC/runtime evidence.
 
 Pending: owning pinned local `-j1` production and cfg(test) toolchain graph; then `swarm-build just test-lib tidepool-toolchain --exact NAME --expected-count 1` for each full name above and existing `declaration_context::tests::exact_product_binding_preserves_lexical_evidence_and_request_identity`. Discover actual labels/counts through admitted recipes. Positive same-output binding/name mutation controls require the real Prepare owner, with wrong base/plan/admission/segment and Exact↔World refusal controls. Warm owns actual output/input issuer events; rows continues the private world source/product constructor on that concrete basis.
+
+## Backend continuation
+
+This is a dependency-bound natural boundary, not a stop/cancel instruction or completed adapter. Warm (`/root/warm_compiler_campaign/warm_workers`) must land the actual cold WorldOpen call site and the hot demanded input issuer. The cold call follows primary producer admission, stores this issued basis once, shares it across value-only successors, and changes it for actual primary declaration changes. The hot issuer must supply the actual selected support/metadata/native continuation, keyed source/lexical membership, exact demanded checked-value import authority and protected scaffold proof. Full source admission and the same matched product certifier remain rows' continuation once that concrete owner exists. Do not satisfy the gap with a full request, default empty authority, all-values fold or full cold basis passed to a scanning hot certifier.
+
+The producer of the awaited event is Warm; rows is its observer and implementer under the existing reserved grant `/root/warm_compiler_campaign/owned_inputs/rows`. A new backend should use `followup_task` on that exact existing agent with the concrete issuer/checkpoint, rather than spawning an actor or relying on a message to restart a completed turn. Parent `/root/warm_compiler_campaign/owned_inputs` owns contract/receiving review; reserved `/root/warm_compiler_campaign/owned_inputs/source_lifetime` owns exact independent review. No polling loop is needed.
+
+Before native work, coordinate fresh resources and source freeze with the campaign; no prior native allowance transfers. Prepare the checkout's pinned configuration only within that admission. Resolve the exact production/cfg(test) labels with `swarm-build just check-plan tidepool-toolchain`, then build that same label set via the pinned `scripts/buck2-run.sh build -j1 --local-only -c remote.enabled=false -c tidepool.profile=fast-dev ...`. The counted test commands above remain pending. Retain source OID, artifact/hash, exact argv, selected/executed counts, exit and log. Source acceptance does not qualify actual GHC, runtime, END, cleanup or ordinary-cell publication. Every terminal event must status-check parent/Warm/campaign: `send_message` if running, `followup_task` if dormant, with exact source/evidence/status/next action.
+
+## Closed product binding accessors
+
+Warm’s actual cold call site is source `147b46cc3bf0f36efd733feb065a50aef72b90fb`: it admits the canonical producer before cold capture and stores the returned Arc in restoration. This source has been inspected but is not imported by this accessor parcel. Hot demanded support/native/checked/scaffold issuance is still owned by Warm; no authority constructor is added here.
+
+`ExactProductAdmission` now carries a closed Exact-or-World borrowed binding. `product_context_digest()` preserves the exact path’s existing semantic SHA byte-for-byte. A world binding precomputes the version/source-graph input SHA of domain `Tidepool world source compilation context v1\0`, followed by fixed32 base logical ID, SHA(raw actual plan receipt), runtime admission, parsed canonical typed-segment digest and canonical producer. It is not a legacy request hash, primary ContextCID, source-selection proof or execution permission. Those actual owners remain required. The same output inventory operation accounts the plan hashing input and two retained fixed digests.
+
+The old context consumer at certified_products8515 feeds the framed native module version hash over producer/context/module/source/interface/product/packages. The consumer at9269 feeds the execution-source graph’s context commitment, authenticated alongside producer/source/include/dependency evidence and compared on replay. These are product-version/source-observation bindings; original native dependencies, instance scope and prototype custody remain separate. Warm owns these external accessor migrations.
+
+`exact_request_identity()` exposes a closed borrowed exact-request SHA view and explicitly refuses a World binding. The test-only physical_request accessor now also returns Result and refuses World. Old Receipt/Segment physical_request methods are unchanged. No old request digest, ordinary-version fallback or None-context substitute is synthesized. Existing exact identity/refusal control now also checks unchanged product-context bytes, request identity and the same physical request reference. External test fixture calls need explicit unwrap of the Product-only test accessor. Compilation remains unqualified until that paired migration is joined.
