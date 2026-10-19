@@ -8569,11 +8569,8 @@ pub(crate) fn decode_world_source_receipt<'a>(
     output: &'a crate::compiler_world::WorldCellOutputAdmission,
     segment_index: usize,
     receipt_relative: &Path,
-    operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<DecodedWorldSourceReceipt<'a>, CompileError> {
-    if !std::ptr::eq(operation, output.validation.inventory.as_ref()) {
-        return Err(failure("world source receipt has another inventory operation"));
-    }
+    let operation = output.validation.inventory.as_ref();
     let binding = WorldSourceCompilationBinding::from_output(output, segment_index)?;
     let output_root = output.directory.path();
     let common_files = &output.common_files;
