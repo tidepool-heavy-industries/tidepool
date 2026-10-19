@@ -61,7 +61,6 @@ rust_filegroup(
         "//bridge/protocol:generated[exomonad_actor_src_generated_green_rs]": "exomonad/actor/src/generated/green.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_introspection_rs]": "exomonad/actor/src/generated/introspection.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_jev_rs]": "exomonad/actor/src/generated/jev.rs",
-        "//bridge/protocol:generated[exomonad_actor_src_generated_lookup_rs]": "exomonad/actor/src/generated/lookup.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_mod_rs]": "exomonad/actor/src/generated/mod.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_model_call_rs]": "exomonad/actor/src/generated/model_call.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_nominal_keys_rs]": "exomonad/actor/src/generated/nominal_keys.rs",
@@ -99,10 +98,6 @@ rust_filegroup(
         "src/local_actor/terminal_transfer_tests.rs": "exomonad/actor/src/local_actor/terminal_transfer_tests.rs",
         "src/local_actor/tests/execution_identity_history.rs": "exomonad/actor/src/local_actor/tests/execution_identity_history.rs",
         "src/local_actor/workbench_step.rs": "exomonad/actor/src/local_actor/workbench_step.rs",
-        "src/lookup.rs": "exomonad/actor/src/lookup.rs",
-        "src/lookup/inspection_failure_tests.rs": "exomonad/actor/src/lookup/inspection_failure_tests.rs",
-        "src/lookup_tool.rs": "exomonad/actor/src/lookup_tool.rs",
-        "src/lookup_tool/qualified_name.rs": "exomonad/actor/src/lookup_tool/qualified_name.rs",
         "src/mailbox.rs": "exomonad/actor/src/mailbox.rs",
         "src/model_permissions.rs": "exomonad/actor/src/model_permissions.rs",
         "src/mount.rs": "exomonad/actor/src/mount.rs",
@@ -182,7 +177,6 @@ rust_filegroup(
         "src/tool_contract.rs": "exomonad/actor/src/tool_contract.rs",
         "src/tool_contract/spec_preflight_tests.rs": "exomonad/actor/src/tool_contract/spec_preflight_tests.rs",
         "src/typed_request.rs": "exomonad/actor/src/typed_request.rs",
-        "src/usage_pointer.rs": "exomonad/actor/src/usage_pointer.rs",
         "src/wait.rs": "exomonad/actor/src/wait.rs",
         "src/workbench_display.rs": "exomonad/actor/src/workbench_display.rs",
         "src/workbench_display_tests.rs": "exomonad/actor/src/workbench_display_tests.rs",
@@ -302,7 +296,6 @@ rust_filegroup(
         "//bridge/protocol:generated[exomonad_actor_src_generated_green_rs]": "exomonad/actor/src/generated/green.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_introspection_rs]": "exomonad/actor/src/generated/introspection.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_jev_rs]": "exomonad/actor/src/generated/jev.rs",
-        "//bridge/protocol:generated[exomonad_actor_src_generated_lookup_rs]": "exomonad/actor/src/generated/lookup.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_mod_rs]": "exomonad/actor/src/generated/mod.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_model_call_rs]": "exomonad/actor/src/generated/model_call.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_nominal_keys_rs]": "exomonad/actor/src/generated/nominal_keys.rs",
@@ -342,10 +335,6 @@ rust_filegroup(
         "src/local_actor/terminal_transfer_tests.rs": "exomonad/actor/src/local_actor/terminal_transfer_tests.rs",
         "src/local_actor/tests/execution_identity_history.rs": "exomonad/actor/src/local_actor/tests/execution_identity_history.rs",
         "src/local_actor/workbench_step.rs": "exomonad/actor/src/local_actor/workbench_step.rs",
-        "src/lookup.rs": "exomonad/actor/src/lookup.rs",
-        "src/lookup/inspection_failure_tests.rs": "exomonad/actor/src/lookup/inspection_failure_tests.rs",
-        "src/lookup_tool.rs": "exomonad/actor/src/lookup_tool.rs",
-        "src/lookup_tool/qualified_name.rs": "exomonad/actor/src/lookup_tool/qualified_name.rs",
         "src/mailbox.rs": "exomonad/actor/src/mailbox.rs",
         "src/model_permissions.rs": "exomonad/actor/src/model_permissions.rs",
         "src/mount.rs": "exomonad/actor/src/mount.rs",
@@ -481,7 +470,6 @@ rust_filegroup(
         "src/tool_contract.rs": "exomonad/actor/src/tool_contract.rs",
         "src/tool_contract/spec_preflight_tests.rs": "exomonad/actor/src/tool_contract/spec_preflight_tests.rs",
         "src/typed_request.rs": "exomonad/actor/src/typed_request.rs",
-        "src/usage_pointer.rs": "exomonad/actor/src/usage_pointer.rs",
         "src/wait.rs": "exomonad/actor/src/wait.rs",
         "src/workbench_display.rs": "exomonad/actor/src/workbench_display.rs",
         "src/workbench_display_tests.rs": "exomonad/actor/src/workbench_display_tests.rs",
@@ -590,7 +578,6 @@ tidepool_rust_binary(
         "exomonad/actor/src/request/fixtures/watch-route.hs",
         "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
         "exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed.hs",
-        "exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed_lookup.hs",
         "exomonad/actor/src/resident_actor/jev_recording_semantics.hs",
         "exomonad/actor/src/resident_actor/replacement_staging_inputs.hs",
         "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
@@ -636,7 +623,7 @@ tidepool_rust_test_cases(
         "TIDEPOOL_WORKSPACE_TEST_GIT": "$(location toolchains//:exomonad_runtime_tools)/bin/git",
     },
     haskell_worker = True,
-    case_compiler_modes = {"resident_workbench::request_tests::cancelled_lookup_interrupts_its_started_compiler_request_and_recovers": "owned-resident", "resident_workbench::request_tests::lookup_batches_qualified_export_facts_in_one_compiler_request": "owned-resident", "resident_workbench::request_tests::lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc": "owned-resident", "resident_actor::child_launch::tests::child_factory_requires_clean_uncancelled_preparation_before_runtime_adoption": "owned-resident", "resident_workbench::request_tests::durable_sleep_binding_observes_real_retraction_request_and_clean_end": "owned-resident"},
+    case_compiler_modes = {"resident_actor::child_launch::tests::child_factory_requires_clean_uncancelled_preparation_before_runtime_adoption": "owned-resident", "resident_workbench::request_tests::durable_sleep_binding_observes_real_retraction_request_and_clean_end": "owned-resident"},
     visibility = ["PUBLIC"],
 )
 
@@ -801,7 +788,6 @@ rust_filegroup(
         "//bridge/protocol:generated[exomonad_actor_src_generated_green_rs]": "exomonad/actor/src/generated/green.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_introspection_rs]": "exomonad/actor/src/generated/introspection.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_jev_rs]": "exomonad/actor/src/generated/jev.rs",
-        "//bridge/protocol:generated[exomonad_actor_src_generated_lookup_rs]": "exomonad/actor/src/generated/lookup.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_mod_rs]": "exomonad/actor/src/generated/mod.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_model_call_rs]": "exomonad/actor/src/generated/model_call.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_nominal_keys_rs]": "exomonad/actor/src/generated/nominal_keys.rs",
@@ -1036,10 +1022,6 @@ filegroup(
         "exomonad/actor/src/local_actor/terminal_transfer_tests.rs": "src/local_actor/terminal_transfer_tests.rs",
         "exomonad/actor/src/local_actor/tests/execution_identity_history.rs": "src/local_actor/tests/execution_identity_history.rs",
         "exomonad/actor/src/local_actor/workbench_step.rs": "src/local_actor/workbench_step.rs",
-        "exomonad/actor/src/lookup.rs": "src/lookup.rs",
-        "exomonad/actor/src/lookup/inspection_failure_tests.rs": "src/lookup/inspection_failure_tests.rs",
-        "exomonad/actor/src/lookup_tool.rs": "src/lookup_tool.rs",
-        "exomonad/actor/src/lookup_tool/qualified_name.rs": "src/lookup_tool/qualified_name.rs",
         "exomonad/actor/src/mailbox.rs": "src/mailbox.rs",
         "exomonad/actor/src/model_permissions.rs": "src/model_permissions.rs",
         "exomonad/actor/src/mount.rs": "src/mount.rs",
@@ -1175,7 +1157,6 @@ filegroup(
         "exomonad/actor/src/tool_contract.rs": "src/tool_contract.rs",
         "exomonad/actor/src/tool_contract/spec_preflight_tests.rs": "src/tool_contract/spec_preflight_tests.rs",
         "exomonad/actor/src/typed_request.rs": "src/typed_request.rs",
-        "exomonad/actor/src/usage_pointer.rs": "src/usage_pointer.rs",
         "exomonad/actor/src/wait.rs": "src/wait.rs",
         "exomonad/actor/src/workbench_display.rs": "src/workbench_display.rs",
         "exomonad/actor/src/workbench_display_tests.rs": "src/workbench_display_tests.rs",
@@ -1218,27 +1199,6 @@ export_file(
     name = "haskell_test_fixture_7372632f66697874757265732f417761697452756e74696d652e6873",
     src = "src/fixtures/AwaitRuntime.hs",
     out = "AwaitRuntime.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f66697874757265732f4c6f6f6b7570506c616e43686f6963652e6873",
-    src = "src/fixtures/LookupPlanChoice.hs",
-    out = "LookupPlanChoice.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f66697874757265732f4c6f6f6b7570506c616e4d6f64756c654f6e6c792e6873",
-    src = "src/fixtures/LookupPlanModuleOnly.hs",
-    out = "LookupPlanModuleOnly.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f66697874757265732f4c6f6f6b7570506c616e506172656e742e6873",
-    src = "src/fixtures/LookupPlanParent.hs",
-    out = "LookupPlanParent.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -1523,13 +1483,6 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f666f726d5f72756e74696d655f74657374732f636f6d706f7365645f6c6f6f6b75702e6873",
-    src = "src/resident_actor/jev_form_runtime_tests/composed_lookup.hs",
-    out = "composed_lookup.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
     name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f7265636f7264696e675f73656d616e746963732e6873",
     src = "src/resident_actor/jev_recording_semantics.hs",
     out = "jev_recording_semantics.hs",
@@ -1631,20 +1584,6 @@ export_file(
     name = "haskell_test_fixture_7372632f7265736964656e745f776f726b62656e63682f646973706c61795f66696c6573797374656d5f6572726f72732e6873",
     src = "src/resident_workbench/display_filesystem_errors.hs",
     out = "display_filesystem_errors.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f7265736964656e745f776f726b62656e63682f646973706c61795f6c6f6f6b75705f6572726f72732e6873",
-    src = "src/resident_workbench/display_lookup_errors.hs",
-    out = "display_lookup_errors.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f7265736964656e745f776f726b62656e63682f646973706c61795f6c6f6f6b75705f6e617669676174696f6e2e6873",
-    src = "src/resident_workbench/display_lookup_navigation.hs",
-    out = "display_lookup_navigation.hs",
     visibility = ["PUBLIC"],
 )
 

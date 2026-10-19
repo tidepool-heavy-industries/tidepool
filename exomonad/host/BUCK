@@ -728,16 +728,6 @@ tidepool_rust_isolated_test(
 rust_filegroup(
     name = "exomonad_host_unit_tests_sources",
     mapped_srcs = {
-        "//:actor_skill_exomonad_agent_spec": ".exomonad/workspace/skills/exomonad-agent-spec/SKILL.md",
-        "//:facade_doc__exomonad_workspace_skills_exomonad_agent_work_SKILL_md": ".exomonad/workspace/skills/exomonad-agent-work/SKILL.md",
-        "//:actor_skill_exomonad_cleanup": ".exomonad/workspace/skills/exomonad-cleanup/SKILL.md",
-        "//:actor_skill_exomonad_command": ".exomonad/workspace/skills/exomonad-command/SKILL.md",
-        "//:actor_skill_exomonad_define_actors": ".exomonad/workspace/skills/exomonad-define-actors/SKILL.md",
-        "//:facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md": ".exomonad/workspace/skills/exomonad-jev/SKILL.md",
-        "//:facade_doc__exomonad_workspace_skills_exomonad_jev_references_recent_changes_md": ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md",
-        "//:actor_skill_exomonad_project_work": ".exomonad/workspace/skills/exomonad-project-work/SKILL.md",
-        "//:actor_skill_exomonad_review": ".exomonad/workspace/skills/exomonad-review/SKILL.md",
-        "//:facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md": ".exomonad/workspace/skills/exomonad-workbench/SKILL.md",
         "//exomonad/examples/persona:argon_config": "exomonad/examples/persona/.exomonad/config.argon.toml",
         "//exomonad/examples/persona:authored_prompt_agent_md": "exomonad/examples/persona/.exomonad/prompts/agent.md",
         "//exomonad/examples/persona:authored_prompt_api_guide_md": "exomonad/examples/persona/.exomonad/prompts/api-guide.md",
@@ -796,8 +786,7 @@ rust_filegroup(
         "src/actor_host/fixtures/agent_spec_coding_child.hs": "exomonad/host/src/actor_host/fixtures/agent_spec_coding_child.hs",
         "src/actor_host/fixtures/api-guide/command.hs": "exomonad/host/src/actor_host/fixtures/api-guide/command.hs",
         "src/actor_host/fixtures/api-guide/human-forms.hs": "exomonad/host/src/actor_host/fixtures/api-guide/human-forms.hs",
-        "src/actor_host/fixtures/api-guide/lookup.hs": "exomonad/host/src/actor_host/fixtures/api-guide/lookup.hs",
-        "src/actor_host/fixtures/api-guide/persona-lookup-display.hs": "exomonad/host/src/actor_host/fixtures/api-guide/persona-lookup-display.hs",
+        "src/actor_host/fixtures/api-guide/introspection.hs": "exomonad/host/src/actor_host/fixtures/api-guide/introspection.hs",
         "src/actor_host/fixtures/api-guide/persona-memory-edit.hs": "exomonad/host/src/actor_host/fixtures/api-guide/persona-memory-edit.hs",
         "src/actor_host/fixtures/api-guide/reflect.hs": "exomonad/host/src/actor_host/fixtures/api-guide/reflect.hs",
         "src/actor_host/fixtures/api-guide/request-setup.hs": "exomonad/host/src/actor_host/fixtures/api-guide/request-setup.hs",
@@ -929,7 +918,6 @@ rust_filegroup(
         "src/actor_host/invocation_lifetime_tests.rs": "exomonad/host/src/actor_host/invocation_lifetime_tests.rs",
         "src/actor_host/jev_recording_reload_tests.rs": "exomonad/host/src/actor_host/jev_recording_reload_tests.rs",
         "src/actor_host/jev_tests.rs": "exomonad/host/src/actor_host/jev_tests.rs",
-        "src/actor_host/lookup_availability_tests.rs": "exomonad/host/src/actor_host/lookup_availability_tests.rs",
         "src/actor_host/m1_browser_process.rs": "exomonad/host/src/actor_host/m1_browser_process.rs",
         "src/actor_host/m1_browser_process_tests.rs": "exomonad/host/src/actor_host/m1_browser_process_tests.rs",
         "src/actor_host/m1_browser_runner.rs": "exomonad/host/src/actor_host/m1_browser_runner.rs",
@@ -2784,8 +2772,7 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/agent_spec_coding_child.hs": "src/actor_host/fixtures/agent_spec_coding_child.hs",
         "exomonad/host/src/actor_host/fixtures/api-guide/command.hs": "src/actor_host/fixtures/api-guide/command.hs",
         "exomonad/host/src/actor_host/fixtures/api-guide/human-forms.hs": "src/actor_host/fixtures/api-guide/human-forms.hs",
-        "exomonad/host/src/actor_host/fixtures/api-guide/lookup.hs": "src/actor_host/fixtures/api-guide/lookup.hs",
-        "exomonad/host/src/actor_host/fixtures/api-guide/persona-lookup-display.hs": "src/actor_host/fixtures/api-guide/persona-lookup-display.hs",
+        "exomonad/host/src/actor_host/fixtures/api-guide/introspection.hs": "src/actor_host/fixtures/api-guide/introspection.hs",
         "exomonad/host/src/actor_host/fixtures/api-guide/persona-memory-edit.hs": "src/actor_host/fixtures/api-guide/persona-memory-edit.hs",
         "exomonad/host/src/actor_host/fixtures/api-guide/reflect.hs": "src/actor_host/fixtures/api-guide/reflect.hs",
         "exomonad/host/src/actor_host/fixtures/api-guide/request-setup.hs": "src/actor_host/fixtures/api-guide/request-setup.hs",
@@ -2917,7 +2904,6 @@ filegroup(
         "exomonad/host/src/actor_host/invocation_lifetime_tests.rs": "src/actor_host/invocation_lifetime_tests.rs",
         "exomonad/host/src/actor_host/jev_recording_reload_tests.rs": "src/actor_host/jev_recording_reload_tests.rs",
         "exomonad/host/src/actor_host/jev_tests.rs": "src/actor_host/jev_tests.rs",
-        "exomonad/host/src/actor_host/lookup_availability_tests.rs": "src/actor_host/lookup_availability_tests.rs",
         "exomonad/host/src/actor_host/m1_browser_process.rs": "src/actor_host/m1_browser_process.rs",
         "exomonad/host/src/actor_host/m1_browser_process_tests.rs": "src/actor_host/m1_browser_process_tests.rs",
         "exomonad/host/src/actor_host/m1_browser_runner.rs": "src/actor_host/m1_browser_runner.rs",
@@ -3441,16 +3427,9 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f6c6f6f6b75702e6873",
-    src = "src/actor_host/fixtures/api-guide/lookup.hs",
-    out = "lookup.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f706572736f6e612d6c6f6f6b75702d646973706c61792e6873",
-    src = "src/actor_host/fixtures/api-guide/persona-lookup-display.hs",
-    out = "persona-lookup-display.hs",
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f696e74726f7370656374696f6e2e6873",
+    src = "src/actor_host/fixtures/api-guide/introspection.hs",
+    out = "introspection.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -4032,13 +4011,6 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6e6f7465626f6f6b5f6a65765f6167656e745f737065632e6873",
     src = "src/actor_host/fixtures/notebook_jev_agent_spec.hs",
     out = "notebook_jev_agent_spec.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6e6f7465626f6f6b5f6c6f6f6b75705f6167656e745f737065632e6873",
-    src = "src/actor_host/fixtures/notebook_lookup_agent_spec.hs",
-    out = "notebook_lookup_agent_spec.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -4792,41 +4764,6 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f6c6f6f6b75705f6167656e745f737065632e6873",
-    src = "src/actor_host/lookup_agent_spec.hs",
-    out = "lookup_agent_spec.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f6c6f6f6b75705f617661696c6162696c6974795f73657475702e6873",
-    src = "src/actor_host/lookup_availability_setup.hs",
-    out = "lookup_availability_setup.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f6c6f6f6b75705f656e726963686d656e745f666978747572652e6873",
-    src = "src/actor_host/lookup_enrichment_fixture.hs",
-    out = "lookup_enrichment_fixture.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f6c6f6f6b75705f706f6c6963795f6f7261636c652e6873",
-    src = "src/actor_host/lookup_policy_oracle.hs",
-    out = "lookup_policy_oracle.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f6c6f6f6b75705f746f706963735f666f756e642e6873",
-    src = "src/actor_host/lookup_topics_found.hs",
-    out = "lookup_topics_found.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f6d315f63616e63656c5f63656c6c2e6873",
     src = "src/actor_host/m1_cancel_cell.hs",
     out = "m1_cancel_cell.hs",
@@ -5012,13 +4949,6 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f6f70657261746f725f726571756573742e6873",
     src = "src/actor_host/operator_request.hs",
     out = "operator_request.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f706572736f6e615f736b696c6c5f6c6f6f6b75702e6873",
-    src = "src/actor_host/persona_skill_lookup.hs",
-    out = "persona_skill_lookup.hs",
     visibility = ["PUBLIC"],
 )
 
