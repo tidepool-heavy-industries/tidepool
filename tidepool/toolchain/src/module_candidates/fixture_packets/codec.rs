@@ -160,6 +160,8 @@ enum CodecOperation {
     CandidateCompact,
     CandidateExpandedWithinBound,
     ScopeEmpty,
+    #[serde(rename = "world-blocks")]
+    WorldBlocks,
     CellPurpose,
     ReceiptFacts,
     CertificateFacts,
@@ -208,6 +210,7 @@ struct ValueInterfaceInput(String, String, PathBuf, String);
 enum CodecRequest {
     Candidate(CandidateCase),
     ScopeEmpty,
+    WorldBlocks,
     CellPurpose(Vec<PathBuf>, Vec<ValueInterfaceInput>),
     ReceiptFacts(PathBuf),
     CertificateFacts(PathBuf),
@@ -258,6 +261,10 @@ fn packet_request(bytes: &[u8]) -> CodecRequest {
         CodecOperation::ScopeEmpty => {
             let _: [String; 0] = decode_arguments(&arguments, 0);
             CodecRequest::ScopeEmpty
+        }
+        CodecOperation::WorldBlocks => {
+            let _: [String; 0] = decode_arguments(&arguments, 0);
+            CodecRequest::WorldBlocks
         }
         CodecOperation::CellPurpose => {
             let (includes, values) = decode_arguments(&arguments, 2);
@@ -319,6 +326,38 @@ fn source_boot_codec_packet_producer() {
                 .prepare_fixture_compilation(&root.join("scope"), producer)
                 .expect("owning empty scope serializer")
                 .manifest
+        }
+        CodecRequest::WorldBlocks => {
+            let store = fvm_ipld_blockstore::MemoryBlockstore::new();
+            // More than 32 buckets * three inline entries guarantees a real
+            // child block for the missing-child integrity control.
+            let facts = (0..128)
+                .map(|n| (format!("fact-{n}"), format!("value-{n}")))
+                .collect::<imbl::OrdMap<String, String>>();
+            let mut materializer = crate::exact_context::Materializer::new(&store);
+            let map = materializer.materialize_map(None, &facts).unwrap();
+            let staged = materializer.finish().unwrap();
+            let parcel = Value::Array(vec![
+                Value::Bytes(map.root().cid().to_bytes()),
+                Value::Array(
+                    staged
+                        .blocks()
+                        .iter()
+                        .map(|(cid, bytes)| {
+                            Value::Array(vec![
+                                Value::Bytes(cid.to_bytes()),
+                                Value::Bytes(bytes.to_vec()),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ]);
+            let mut encoded = Vec::new();
+            ciborium::ser::into_writer(&parcel, &mut encoded).unwrap();
+            assert!(encoded.len() <= MANIFEST_LIMIT, "world block parcel bound");
+            let output = root.join("world-blocks.cbor");
+            tidepool_atomic_write::write_best_effort(&output, &encoded).unwrap();
+            output
         }
         CodecRequest::CellPurpose(includes, values) => {
             cell_purpose(&root, &includes, values);

@@ -12,7 +12,7 @@ use tidepool_extract_cmd::{InspectionNamespace, InspectionScope, StructuredInspe
 use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
 use crate::declaration_context::ExactDeclarationContext;
-use crate::exact_context::{ContextRoot, Materializer, StagedBlocks};
+use crate::exact_context::{ContextRoot, Materializer, ReachableBlocks};
 use crate::CompileError;
 
 /// One closed captured source namespace. The capture owner decides its supported
@@ -311,7 +311,7 @@ impl PublicModuleQuestion {
 pub struct CompilerWorldOpenInputs {
     primary_context: Arc<ExactDeclarationContext>,
     primary_root: ContextRoot,
-    primary_blocks: StagedBlocks,
+    primary_blocks: ReachableBlocks,
     visible_rows: Vec<Arc<CheckedValueArtifact>>,
     sources: Arc<CapturedCompilerSources>,
     visibility: Arc<[u8]>,
@@ -333,9 +333,21 @@ impl CompilerWorldOpenInputs {
             .materialize_context(None, &snapshot)
             .map_err(|error| source_failure(error.to_string()))?;
         let primary_root = context.root().clone();
-        let primary_blocks = materializer
+        let staged = materializer
             .finish()
             .map_err(|error| source_failure(error.to_string()))?;
+        let primary_blocks = ReachableBlocks::default()
+            .replace_roots(&staged, vec![*primary_root.cid()])
+            .map_err(|error| source_failure(error.to_string()))?;
+        let work = primary_blocks.work();
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::SemanticDigestInputByte,
+            work.verified_bytes,
+        );
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::MaterializationGraphVisit,
+            work.link_visits.saturating_add(work.unlink_visits),
+        );
         Ok(Self {
             primary_context,
             primary_root,
@@ -850,16 +862,15 @@ impl CompilerWorldOpenInputs {
             rows: BTreeMap::new(),
             arenas: Default::default(),
         };
-        let block_bytes =
-            self.primary_blocks
-                .blocks()
-                .iter()
-                .try_fold(0u64, |total, (cid, body)| {
-                    total
-                        .checked_add(body.len() as u64)
-                        .and_then(|n| n.checked_add(cid.to_bytes().len() as u64 + 32))
-                        .ok_or_else(source_size_failure)
-                })?;
+        let block_bytes = self
+            .primary_blocks
+            .blocks()
+            .try_fold(0u64, |total, (cid, body)| {
+                total
+                    .checked_add(body.len() as u64)
+                    .and_then(|n| n.checked_add(cid.to_bytes().len() as u64 + 32))
+                    .ok_or_else(source_size_failure)
+            })?;
         let envelope_bytes = block_bytes
             .checked_add(self.sources.encoded().len() as u64)
             .and_then(|n| n.checked_add(self.visibility.len() as u64))
@@ -934,13 +945,11 @@ impl CompilerWorldOpenInputs {
         let blocks = self
             .primary_blocks
             .blocks()
-            .iter()
             .map(|(cid, body)| world_array(vec![world_blob(cid.to_bytes()), world_blob(body)]))
             .collect();
         let seals = self
             .primary_blocks
             .blocks()
-            .iter()
             .map(|(cid, body)| {
                 world_array(vec![
                     world_blob(cid.to_bytes()),
@@ -1066,11 +1075,25 @@ fn ensure_world(
         root: root.clone(),
         acquisition: A::Resident(hint),
     });
+    crate::host_work::record_host_work(
+        crate::host_work::HostWorkCounter::WorldEnsureResidentProbe,
+        1,
+    );
     let run = world_execute(&cmd, endpoint, Vec::new())?;
     let response = O::decode(&run.output.stdout).map_err(|_| world_response_error(false))?;
     let realized = match response {
-        O::Ready { world, realization } if world == root => realization,
+        O::Ready { world, realization } if world == root => {
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::WorldEnsureResidentHit,
+                1,
+            );
+            realization
+        }
         O::NeedsAcquisition(world) if world == root => {
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::WorldEnsureNeedsAcquisition,
+                1,
+            );
             if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(
                 &restoration.inputs.directory,
             )) {
@@ -1087,9 +1110,19 @@ fn ensure_world(
                 crate::host_work::HostWorkCounter::InputFdExport,
                 restoration.input_files.len() as u64,
             );
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::WorldEnsureComplete,
+                1,
+            );
             let run = world_execute(&cmd, endpoint, restoration.input_files.clone())?;
             match O::decode(&run.output.stdout).map_err(|_| world_response_error(false))? {
-                O::Ready { world, realization } if world == root => realization,
+                O::Ready { world, realization } if world == root => {
+                    crate::host_work::record_host_work(
+                        crate::host_work::HostWorkCounter::WorldEnsureCompleteReady,
+                        1,
+                    );
+                    realization
+                }
                 O::Rejected(reason) => {
                     return Err(source_failure(format!(
                         "compiler refused world acquisition: {reason:?}"

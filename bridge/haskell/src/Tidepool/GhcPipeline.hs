@@ -243,6 +243,7 @@ import Tidepool.Timing
   , newTimingRequestIdentity
   , ReuseContext(..), ReuseModule(..), ReuseStage(..), ReuseDecision(..), ReuseReason(..)
   , ReuseVersionKind(..), emitReuse, emitReuseComplete, emitCheckOnlyReuseApplicability
+  , WorldRetentionEvent(..), emitWorldRetention
   , readMemoTraceEnabled, MemoSelectionState(..), MemoSelectionTrace(..), MemoExecutableTrace(..)
   , emitMemoCycleGraph, emitMemoMissTrace )
 import Tidepool.PreparedStg (PreparedModule, preparedUsesSiteAuthority, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent, acquirePreparedModuleWithSiteEnvironment, runPreparedModuleTask
@@ -1373,10 +1374,27 @@ admitCompilerWorld (byteLimit,countLimit) root world cache@(CompilerWorldCache w
 -- Called only after the optional index and active scope no longer hold this
 -- realization, and the private query Session has been restored. World queries
 -- retain in-memory home interfaces and cannot generate backing interface files.
-retireCompilerWorldBacking :: HeldCompilerWorld -> IO ()
-retireCompilerWorldBacking (HeldCompilerWorld _ _ (WorldMaterialization directory _ _ _ _ _ _ _) prepared) = do
-  writeIORef prepared (WorldPreparedModules emptyHomePackageTable Map.empty)
-  removeDirectoryRecursive directory
+retireCompilerWorldBacking :: Bool -> CompilerUniverse -> HeldCompilerWorld -> IO ()
+retireCompilerWorldBacking timing universe world@(HeldCompilerWorld facts reference (WorldMaterialization directory _ _ _ _ _ _ _) prepared) = do
+  completed <- captureCompletion $ do
+    writeIORef prepared (WorldPreparedModules emptyHomePackageTable Map.empty)
+    removeDirectoryRecursive directory
+  let event = case completionResult completed of
+        BodySucceeded _ -> WorldBackingRemoved
+        _ -> WorldBackingRemoveFailed
+  observed <- attemptReleases [(CompilerScopeRestore,
+    observeCompilerWorld timing universe event (worldInputsIdentity facts) reference (Just world))]
+  finishCompletion (appendCleanupFailures completed observed)
+
+observeCompilerWorld :: Bool -> CompilerUniverse -> WorldRetentionEvent -> String -> String
+  -> Maybe HeldCompilerWorld -> IO ()
+observeCompilerWorld timing universe event root reference world =
+  forM_ (universePackageAssociation universe) $ \association -> do
+    let backing = (\(HeldCompilerWorld _ _ materialized _) -> worldMaterializationCharge materialized) <$> world
+        directory = (\(HeldCompilerWorld _ _ (WorldMaterialization path _ _ _ _ _ _ _) _) -> path) <$> world
+    emitWorldRetention timing event root (hexBytes (servicePackageWorkerInstance association)) reference
+      (compilerWorldCharge <$> world) backing (compilerWorldCacheCharge (universeWorlds universe))
+      (exactInputRetentionLimits (universeOriginalInputs universe)) directory
 
 data WorldQueryFailure = WorldQueryUnsupported | WorldQueryUnavailable | WorldQueryCorrupt deriving Show
 instance Exception WorldQueryFailure
@@ -5411,8 +5429,9 @@ withResidentCompilerScopes baseIncludes useRequests = do
                 ensureWorld (ExactInputsRequest root acquisition) = runGuarded $ do
                   selected <- readIORef universe
                   held <- readIORef heldWorld
-                  let install world@(HeldCompilerWorld facts reference _ _) = do
+                  let install event world@(HeldCompilerWorld facts reference _ _) = do
                         writeIORef heldWorld (Just world)
+                        observeCompilerWorld timing selected event root reference (Just world)
                         pure (ExactInputsReady (worldInputsIdentity facts) reference)
                       conflicting = case held of
                         Just (HeldCompilerWorld facts _ _ _) -> worldInputsIdentity facts /= root
@@ -5423,10 +5442,12 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     Just association -> case acquisition of
                       ResidentExactInputs reference ->
                         case held of
-                          Just world@(HeldCompilerWorld _ issued _ _) | issued == reference -> install world
+                          Just world@(HeldCompilerWorld _ issued _ _) | issued == reference -> install WorldResidentHeldHit world
                           _ -> case lookupCompilerWorld root (universeWorlds selected) of
-                            Just world@(HeldCompilerWorld _ issued _ _) | issued == reference -> install world
-                            _ -> pure (ExactInputsNeedsAcquisition root)
+                            Just world@(HeldCompilerWorld _ issued _ _) | issued == reference -> install WorldResidentRetainedHit world
+                            _ -> do
+                              observeCompilerWorld timing selected WorldNeedsAcquisition root reference Nothing
+                              pure (ExactInputsNeedsAcquisition root)
                       CompleteExactInputs manifest -> do
                         acquired <- try (readWorldInputsWithOwner (universeOriginalInputs selected) manifest)
                         case acquired of
@@ -5437,11 +5458,11 @@ withResidentCompilerScopes baseIncludes useRequests = do
                               || Just (CompilerProducerIdentity (hexBytes (worldInputsProducer facts))) /= producer ->
                                 pure (ExactInputsRejected AcquisitionRejected)
                             | otherwise -> case held <|> lookupCompilerWorld root (universeWorlds selected) of
-                                Just world -> install world
+                                Just world -> install WorldCompleteReused world
                                 Nothing -> do
                                     unique <- RequestUnique.hashUnique <$> RequestUnique.newUnique
                                     directory <- maybe (throwIO WorldQueryUnavailable) pure (universeWorldDirectory selected)
-                                    materializeWorldSources directory (worldInputsSources facts)
+                                    (ready,world,committed) <- materializeWorldSources directory (worldInputsSources facts)
                                       (worldInputsSourceModuleHints facts) $ \materialized -> do
                                         table <- newIORef (WorldPreparedModules emptyHomePackageTable Map.empty)
                                         let reference = hexBytes (servicePackageWorkerInstance association) ++ "." ++ show unique
@@ -5456,19 +5477,32 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                         next <- evaluate (selected {universeWorlds=nextWorlds})
                                         held <- evaluate (Just world)
                                         ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) reference)
+                                        result <- evaluate (ready,world,next)
                                         -- Retire old private owners before unlinking their backing.
                                         -- The shared reservation remains conservative until cleanup
                                         -- succeeds; failure retains it and retires this worker.
                                         writeIORef universe retired
                                         failures <- attemptReleases
-                                          [(CompilerScopeRestore,retireCompilerWorldBacking old) | old <- evicted]
+                                          [(CompilerScopeRestore, do
+                                              observeCompilerWorld timing retired WorldEvicted
+                                                (worldInputsIdentity oldFacts) oldReference (Just old)
+                                              retireCompilerWorldBacking timing retired old)
+                                          | old@(HeldCompilerWorld oldFacts oldReference _ _) <- evicted]
                                         released <- captureCompletion (pure ())
                                         finishCompletion (appendCleanupFailures released failures)
                                         -- No fallible or interruptible work follows decoder commit.
                                         commitWorldInputRetention (universeOriginalInputs selected) worldBytes worldCount $ do
                                           writeIORef universe next
                                           writeIORef heldWorld held
-                                        pure ready
+                                        pure result
+                                    -- The unpublished-directory owner has transferred custody.
+                                    -- Observation cannot make that owner unlink this world.
+                                    let event = case lookupCompilerWorld root (universeWorlds committed) of
+                                          Just _ -> WorldAdmittedRetained
+                                          Nothing -> WorldAdmittedActiveOnly
+                                        HeldCompilerWorld _ reference _ _ = world
+                                    observeCompilerWorld timing committed event root reference (Just world)
+                                    pure ready
                 queryWorld expected grant executor question = runGuarded $ do
                   requireCompilerExecutorOpen executor
                   held <- readIORef heldWorld
@@ -5531,13 +5565,21 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     [(CompilerScopeRestore, writeIORef heldWorld Nothing)
                     ,(CompilerScopeRestore, writeIORef active Nothing)
                     ,(CompilerScopeRestore, restoreBase)]
+                  endObservations <- attemptReleases
+                    [(CompilerScopeRestore, do
+                        let event
+                              | not (null initialFailures) = WorldHeldEndQuarantined
+                              | null uncached = WorldHeldEndRetained
+                              | otherwise = WorldHeldEndRetiring
+                        observeCompilerWorld timing selected event (worldInputsIdentity facts) reference (Just world))
+                    | world@(HeldCompilerWorld facts reference _ _) <- maybe [] pure retained]
                   -- Oversize/nonresident worlds remain active through actual
                   -- scope release. A failed restore keeps backing with the
                   -- worker namespace for confirmed-reap cleanup instead.
-                  backingFailures <- if null initialFailures then attemptReleases
-                    [(CompilerScopeRestore,retireCompilerWorldBacking world) | world <- uncached]
+                  backingFailures <- if null initialFailures && null endObservations then attemptReleases
+                    [(CompilerScopeRestore,retireCompilerWorldBacking timing selected world) | world <- uncached]
                     else pure []
-                  let failures = initialFailures ++ backingFailures
+                  let failures = initialFailures ++ endObservations ++ backingFailures
                   if null failures
                     then when cancelled (writeIORef availability ResidentBusy)
                     else writeIORef availability ResidentPoisoned

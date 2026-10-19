@@ -31,6 +31,7 @@ module Tidepool.Timing
   , elapsedMs
   , ReuseStage(..), ReuseDecision(..), ReuseReason(..), ReuseVersionKind(..)
   , ReuseModule(..), ReuseContext(..), emitReuse, emitReuseComplete, emitCheckOnlyReuseApplicability
+  , WorldRetentionEvent(..), emitWorldRetention
   , ProjectionObservation, newProjectionObservation, OriginalGroupWork(..), emitOriginalGroupWork
     -- * Opt-in memo trace (TIDEPOOL_MEMO_TRACE=1)
   , readMemoTraceEnabled
@@ -120,6 +121,51 @@ emitReuse True (ReuseContext cycleId purpose) stage decision reason owner items 
         ,("bytes",maybe "null" show bytes),("observed_ns",show observed)] ++ moduleFields
   hPutStrLn stderr ("tidepool-reuse {" ++ intercalate ","
     [jsonString key ++ ":" ++ value | (key,value) <- fields] ++ "}")
+
+-- Private observations of existing owners, never a world capability or END
+-- acknowledgement. Missing records are incomplete evidence, not zero work.
+data WorldRetentionEvent
+  = WorldResidentHeldHit | WorldResidentRetainedHit | WorldNeedsAcquisition
+  | WorldCompleteReused | WorldAdmittedRetained | WorldAdmittedActiveOnly
+  | WorldEvicted | WorldHeldEndRetained | WorldHeldEndRetiring | WorldHeldEndQuarantined
+  | WorldBackingRemoved | WorldBackingRemoveFailed
+
+emitWorldRetention :: Bool -> WorldRetentionEvent -> String -> String -> String
+  -> Maybe (Integer,Int) -> Maybe (Integer,Int) -> (Integer,Int) -> (Integer,Int)
+  -> Maybe FilePath -> IO ()
+emitWorldRetention False _ _ _ _ _ _ _ _ _ = pure ()
+emitWorldRetention True event world worker reference charge backing cached limits directory = do
+  -- Diagnostic I/O cannot roll back published ownership. Preserve cancellation
+  -- so enclosing completion/release owners can still retire the actual worker.
+  _ <- trySynchronous $ do
+    observed <- getMonotonicTimeNSec
+    let name = case event of
+          WorldResidentHeldHit -> "resident_hit_held"
+          WorldResidentRetainedHit -> "resident_hit_retained"
+          WorldNeedsAcquisition -> "needs_acquisition"
+          WorldCompleteReused -> "complete_reused"
+          WorldAdmittedRetained -> "admitted_retained"
+          WorldAdmittedActiveOnly -> "admitted_active_only"
+          WorldEvicted -> "evicted"
+          WorldHeldEndRetained -> "held_end_retained"
+          WorldHeldEndRetiring -> "held_end_retiring"
+          WorldHeldEndQuarantined -> "held_end_quarantined"
+          WorldBackingRemoved -> "backing_removed"
+          WorldBackingRemoveFailed -> "backing_remove_failed"
+        (referencePrefix,remaining) = splitAt 256 reference
+        fields = [("schema","1"),("event",jsonString name),("world",jsonString world)
+          ,("worker_instance",jsonString worker),("realization",jsonString referencePrefix)
+          ,("realization_truncated",if null remaining then "false" else "true")
+          ,("charged_bytes",maybe "null" (show . fst) charge)
+          ,("charged_entries",maybe "null" (show . snd) charge)
+          ,("source_copy_bytes",maybe "null" (show . fst) backing)
+          ,("backing_nodes",maybe "null" (show . snd) backing)
+          ,("cache_bytes",show (fst cached)),("cache_entries",show (snd cached))
+          ,("limit_bytes",show (fst limits)),("limit_entries",show (snd limits))
+          ,("directory",maybe "null" jsonString directory),("observed_ns",show observed)]
+    hPutStrLn stderr ("tidepool-world-retention {" ++ intercalate ","
+      [jsonString key ++ ":" ++ value | (key,value) <- fields] ++ "}")
+  pure ()
 
 -- Diagnostic identity of one exact cached projection result. It is not a
 -- semantic owner, cache key or wire field; a cache entry created with timing
