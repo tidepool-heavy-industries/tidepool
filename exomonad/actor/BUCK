@@ -357,6 +357,7 @@ rust_filegroup(
         "src/request/fixtures/request-signature-progress.hs": "exomonad/actor/src/request/fixtures/request-signature-progress.hs",
         "src/request/fixtures/result-receiver.hs": "exomonad/actor/src/request/fixtures/result-receiver.hs",
         "src/request/fixtures/result-request.hs": "exomonad/actor/src/request/fixtures/result-request.hs",
+        "src/request/fixtures/watch-route.hs": "exomonad/actor/src/request/fixtures/watch-route.hs",
         "src/request/invocation.rs": "exomonad/actor/src/request/invocation.rs",
         "src/request/readiness.rs": "exomonad/actor/src/request/readiness.rs",
         "src/request/readiness/tests.rs": "exomonad/actor/src/request/readiness/tests.rs",
@@ -582,6 +583,7 @@ tidepool_rust_binary(
         "exomonad/actor/src/request/fixtures/request-signature-progress.hs",
         "exomonad/actor/src/request/fixtures/result-receiver.hs",
         "exomonad/actor/src/request/fixtures/result-request.hs",
+        "exomonad/actor/src/request/fixtures/watch-route.hs",
         "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
         "exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed.hs",
         "exomonad/actor/src/resident_actor/jev_form_runtime_tests/composed_lookup.hs",
@@ -1003,6 +1005,7 @@ filegroup(
         "exomonad/actor/src/request/fixtures/request-signature-progress.hs": "src/request/fixtures/request-signature-progress.hs",
         "exomonad/actor/src/request/fixtures/result-receiver.hs": "src/request/fixtures/result-receiver.hs",
         "exomonad/actor/src/request/fixtures/result-request.hs": "src/request/fixtures/result-request.hs",
+        "exomonad/actor/src/request/fixtures/watch-route.hs": "src/request/fixtures/watch-route.hs",
         "exomonad/actor/src/request/invocation.rs": "src/request/invocation.rs",
         "exomonad/actor/src/request/readiness.rs": "src/request/readiness.rs",
         "exomonad/actor/src/request/readiness/tests.rs": "src/request/readiness/tests.rs",
@@ -1340,6 +1343,13 @@ export_file(
     name = "haskell_test_fixture_7372632f726571756573742f66697874757265732f726573756c742d726571756573742e6873",
     src = "src/request/fixtures/result-request.hs",
     out = "result-request.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f726571756573742f66697874757265732f77617463682d726f7574652e6873",
+    src = "src/request/fixtures/watch-route.hs",
+    out = "watch-route.hs",
     visibility = ["PUBLIC"],
 )
 

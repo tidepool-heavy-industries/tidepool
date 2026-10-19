@@ -1187,6 +1187,79 @@ async fn invocation_cleanup_releases_transient_watch_without_cancelling_target()
 }
 
 #[tokio::test]
+async fn callback_without_snapshot_never_borrows_recipient_program_authority() {
+    use crate::request::sources::CallbackExecution;
+    use crate::resident_workbench::generation_admission::{BootstrapWorld, SourceDependency};
+    use crate::resident_workbench::{ActorRequestSnapshot, InstalledToolLease};
+    use tidepool_runtime::session::{PersistentSession, SourceAdmissionError};
+    let fixture = Fixture::start().await;
+    let actor = fixture.actor.identity();
+    let mut original = PersistentSession::new(None, 1024);
+    let original_scope = original.mint_notebook_scope_with_lease(None).unwrap();
+    let original_world = BootstrapWorld::new(None);
+    original_world.adopt_scope(original_scope.clone()).unwrap();
+    let placement = crate::ActorPlacement {
+        session: tidepool_repr::SessionId(711),
+        resource_scope: RealmId::ROOT,
+        lexical_scope: original_scope.scope(),
+    };
+    let original_context = ActorDescriptor::new("captured source", placement)
+        .with_source_dependency(SourceDependency::World(original_world))
+        .session_context(actor);
+    let mut recipient = PersistentSession::new(None, 1024);
+    let recipient_scope = recipient.mint_notebook_scope_with_lease(None).unwrap();
+    let recipient_world = BootstrapWorld::new(None);
+    recipient_world.adopt_scope(recipient_scope).unwrap();
+    let recipient_descriptor = ActorDescriptor::new("recipient", placement)
+        .with_source_dependency(SourceDependency::World(recipient_world));
+    let recipient_context = recipient_descriptor.session_context(actor);
+    let mut behavior = ResidentKernelBehavior::with_boot(
+        recipient_descriptor,
+        fixture.environment.clone(),
+        ResidentBoot::Workbench,
+        Vec::new(),
+    );
+    behavior.actor_program_snapshot = Some(ActorRequestSnapshot::SourceCallback(
+        InstalledToolLease::source_callback_custody(
+            actor,
+            crate::CheckpointSourceLayer::default(),
+            recipient_context.source_dependency().clone(),
+        ),
+    ));
+    assert!(behavior
+        .actor_effect_owner(actor)
+        .issued_snapshot()
+        .is_some());
+    let callback = CallbackExecution::from_context(original_context);
+    behavior.actor_callback_execution = Some(callback.relocated(recipient_context));
+    let fence = original_scope.source_admission().fence().unwrap();
+    let owner = behavior.actor_effect_owner(actor);
+    assert!(
+        owner.issued_snapshot().is_none(),
+        "metadata absence cannot select recipient source"
+    );
+    let nested = CallbackExecution {
+        context: behavior.context(actor),
+        snapshot: owner.issued_snapshot().cloned(),
+        scope: owner.callback_scope(),
+    };
+    assert!(matches!(
+        nested.admit_activation(),
+        Err(SourceAdmissionError::Closed { .. })
+    ));
+    assert_eq!(fence.pending_claims(), 0);
+    behavior.actor_callback_execution = None;
+    assert!(behavior
+        .actor_effect_owner(actor)
+        .issued_snapshot()
+        .unwrap()
+        .source_dependency()
+        .with_open_admission(|| ())
+        .is_ok());
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn failed_actor_route_releases_transient_leases_before_next_callback() {
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();

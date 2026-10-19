@@ -39,7 +39,47 @@ impl CallbackExecution {
     pub(crate) fn admit_activation(
         &self,
     ) -> Result<(), crate::resident_workbench::generation_admission::GenerationAdmissionError> {
-        self.source_dependency().with_open_admission(|| ())
+        self.with_activation_admission(|| ())
+    }
+
+    /// The synchronous callback may only reserve the actual activation. It must
+    /// not reenter the source owner or retain its guards across an await.
+    pub(crate) fn with_activation_admission<T>(
+        &self,
+        activate: impl FnOnce() -> T,
+    ) -> Result<T, crate::resident_workbench::generation_admission::GenerationAdmissionError> {
+        // Captured code requires its final canonical source lease. The
+        // pre-placement bootstrap path used by child reservation cannot grant
+        // callback execution authority.
+        let _source = self.source_dependency().source_lease()?;
+        self.source_dependency().with_open_admission(activate)
+    }
+
+    /// Move recipient identity and placement while preserving captured source.
+    /// Physical custody must be moved separately before executing the callback.
+    pub(crate) fn relocated(&self, recipient: crate::ActorSessionContext) -> Self {
+        let mut context = self.activation_context();
+        context.actor = recipient.actor;
+        context.placement = recipient.placement;
+        let snapshot = self.snapshot.as_ref().map(|snapshot| {
+            crate::resident_workbench::ActorRequestSnapshot::SourceCallback(
+                crate::resident_workbench::InstalledToolLease::source_callback_custody(
+                    context.actor,
+                    snapshot.installation().source().clone(),
+                    self.source_dependency().clone(),
+                ),
+            )
+        });
+        Self {
+            context,
+            snapshot,
+            scope: self.scope.clone().or_else(|| {
+                self.snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.generation())
+                    .map(|generation| generation.scope().clone())
+            }),
+        }
     }
 
     pub(crate) fn activation_context(&self) -> crate::ActorSessionContext {
@@ -546,6 +586,322 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn route_registration_and_transfer_keep_original_activation_authority() {
+        crate::resident_workbench::with_test_compiler_owner(|preparation| async move {
+            use crate::request::routes::{RouteRegistrationError, RouteState, WatchRoute};
+            use crate::resident_workbench::{ActorRequestSnapshot, InstalledToolLease};
+            use tidepool_codegen::{scope::ScopeId, suspension::RealmId};
+            use tidepool_runtime::session::SourceAdmissionError;
+
+            let fixture = DirectoryFixture::start().await;
+            let (events, _) = mpsc::unbounded_channel();
+            let (old, old_address, old_task) = fixture.spawn(events, None).await;
+            let (events, _) = mpsc::unbounded_channel();
+            let (successor, new_address, new_task) =
+                fixture.spawn(events, Some(old.identity())).await;
+            let (runner, context, _root, mut callbacks) =
+                captured_routes(preparation, old.identity(), 3).await;
+            let original = context.source_dependency().source_lease().unwrap();
+            let provisional = crate::ActorDescriptor::new("not placed", context.placement)
+                .admit_independent_world()
+                .session_context(old.identity());
+            assert!(matches!(
+                CallbackExecution::from_context(provisional).admit_activation(),
+                Err(SourceAdmissionError::Unqualified)
+            ));
+            let registry = RequestRegistry::default();
+            let mut register = || {
+                let (registration, entry, mut execution) = callbacks.pop().unwrap();
+                // This is the same source-only snapshot emitted by callback
+                // transfer: no selected generation metadata can recover A.
+                execution.snapshot = Some(ActorRequestSnapshot::SourceCallback(
+                    InstalledToolLease::source_callback_custody(
+                        context.actor,
+                        crate::CheckpointSourceLayer::default(),
+                        context.source_dependency().clone(),
+                    ),
+                ));
+                execution.scope = Some(original.clone());
+                assert!(execution.snapshot.as_ref().unwrap().generation().is_none());
+                let plan = registration
+                    .dependencies
+                    .try_map(|_| Err(ReplyError::Stale))
+                    .unwrap();
+                (
+                    registration.label,
+                    plan,
+                    WatchRoute::new(old.clone(), entry, execution),
+                )
+            };
+            let (label, plan, route) = register();
+            let (running, _) = registry
+                .register_watch_route(old.identity(), label, plan, route)
+                .unwrap();
+            let (label, plan, route) = register();
+            let (queued, _) = registry
+                .register_watch_route(old.identity(), label, plan, route)
+                .unwrap();
+            let (label, plan, late) = register();
+            drop(register);
+            assert_eq!(
+                registry.observe_route(old.identity(), queued),
+                Ok(RouteState::Running)
+            );
+
+            // One callback was admitted before fencing. Its duplicate notice
+            // and final settlement must remain neutral afterwards.
+            let started = registry
+                .take_route(old.identity(), running)
+                .unwrap()
+                .unwrap();
+            assert!(registry
+                .take_route(old.identity(), running)
+                .unwrap()
+                .is_none());
+            registry.transfer_owner(old.identity(), &successor);
+            assert!(registry
+                .take_route(old.identity(), queued)
+                .unwrap()
+                .is_none());
+            let fence = original.source_admission().fence().unwrap();
+            assert!(matches!(
+                registry.register_watch_route(old.identity(), label, plan, late),
+                Err(RouteRegistrationError::Source(
+                    SourceAdmissionError::Closed { .. }
+                ))
+            ));
+            assert_eq!(
+                registry.list_routes(successor.identity()),
+                vec![running, queued]
+            );
+            assert!(matches!(
+                registry.take_route(successor.identity(), queued),
+                Err(SourceAdmissionError::Closed { .. })
+            ));
+            assert!(registry
+                .take_route(successor.identity(), queued)
+                .unwrap()
+                .is_none());
+            let _ =
+                registry.finish_route(successor.identity(), queued, Err("source closed".into()));
+            assert!(matches!(
+                registry.observe_route(successor.identity(), queued),
+                Ok(RouteState::Failed(_))
+            ));
+            assert!(registry
+                .take_route(successor.identity(), running)
+                .unwrap()
+                .is_none());
+            {
+                let state = registry.state.lock();
+                for watch in [running, queued] {
+                    let execution = state.watches[&watch].route.as_ref().unwrap().execution();
+                    assert!(Arc::ptr_eq(
+                        &execution.source_dependency().source_lease().unwrap(),
+                        &original
+                    ));
+                }
+            }
+            // Placement is recipient-owned; the original source/scope survives.
+            let recipient = crate::ActorDescriptor::new(
+                "recipient",
+                crate::ActorPlacement {
+                    session: tidepool_repr::SessionId(0xCA08),
+                    resource_scope: RealmId::fresh(),
+                    lexical_scope: ScopeId::ROOT,
+                },
+            )
+            .admit_independent_world()
+            .session_context(successor.identity());
+            let relocated = started.execution().relocated(recipient.clone());
+            assert_eq!(relocated.context.actor, successor.identity());
+            assert_eq!(relocated.context.placement, recipient.placement);
+            assert_eq!(relocated.context.source_imports, context.source_imports);
+            assert_eq!(relocated.context.source_layer, context.source_layer);
+            assert!(relocated.snapshot.as_ref().unwrap().generation().is_none());
+            assert!(Arc::ptr_eq(
+                &relocated.source_dependency().source_lease().unwrap(),
+                &original
+            ));
+            assert!(Arc::ptr_eq(relocated.scope.as_ref().unwrap(), &original));
+            assert!(relocated.admit_activation().is_err());
+            assert_eq!(fence.pending_claims(), 0);
+            let mut execution_recipient = context.clone();
+            execution_recipient.actor = successor.identity();
+            let admitted_context = started
+                .execution()
+                .relocated(execution_recipient)
+                .activation_context();
+            let outcome = runner
+                .run_route_entry(admitted_context.clone(), started, running)
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    runner
+                        .capture_boundary(admitted_context, outcome, RealmId::ROOT)
+                        .await
+                        .unwrap(),
+                    crate::resident_workbench::ResidentActorBoundary::WatchPoll(_)
+                ),
+                "already admitted route reaches its pure watch read after the source fence"
+            );
+            assert!(registry
+                .finish_route(successor.identity(), running, Ok(()))
+                .is_none());
+            assert_eq!(
+                registry.observe_route(successor.identity(), running),
+                Ok(RouteState::Completed)
+            );
+            assert_eq!(fence.pending_claims(), 0);
+            drop(runner);
+            old_address.stop(None);
+            new_address.stop(None);
+            old_task.await.unwrap();
+            new_task.await.unwrap();
+        })
+        .await;
+    }
+
+    async fn captured_routes(
+        preparation: crate::CompilerPreparationClient,
+        actor: ActorRef,
+        count: usize,
+    ) -> (
+        crate::resident_workbench::ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        crate::ActorSessionContext,
+        tempfile::TempDir,
+        Vec<(
+            crate::request_effect::WatchRegistration,
+            tidepool_runtime::session::RootCustody,
+            CallbackExecution,
+        )>,
+    ) {
+        use crate::resident_workbench::{
+            ActorWorkbenchSource, ResidentActorBoundary, ResidentActorRunner,
+        };
+        use tidepool_codegen::{scope::ScopeId, suspension::RealmId};
+        use tidepool_runtime::session::turn::{run_turn, TurnRequest, TurnResult};
+        use tidepool_runtime::session::{
+            insert_preamble_imports, resident_workbench_templates, ModuleEnv, ResidentSession,
+            SessionLib,
+        };
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let preamble = insert_preamble_imports(
+            surface.preamble(),
+            "qualified Tidepool.Agent.Watch as RouteW",
+        );
+        let templates = resident_workbench_templates(
+            &preamble,
+            "'[RouteW.Watches]",
+            "qualified Tidepool.Agent.Watch as RouteW",
+        );
+        let mut include = surface.include_paths().to_vec();
+        include.push(std::path::PathBuf::from(
+            std::env::var_os("TIDEPOOL_HASKELL_ACTORS_DIR")
+                .expect("declared actor sources are required"),
+        ));
+        let compiled = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: include_str!("fixtures/watch-route.hs"),
+                    templates: &templates,
+                    include: &include
+                        .iter()
+                        .map(|path| path.as_path())
+                        .collect::<Vec<_>>(),
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    gen: 1,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
+        })
+        .unwrap();
+        let compiled = match compiled {
+            TurnResult::Bind { compiled, .. } => compiled,
+            _ => panic!("route fixture must compile a binding"),
+        };
+        let session_id = tidepool_repr::SessionId(0xCA07);
+        let library = SessionLib::open(session_id, root.path(), ModuleEnv::standalone_default())
+            .unwrap()
+            .with_validation_include(include.clone());
+        let mut session = ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(library),
+        );
+        let mut context = crate::ActorDescriptor::new(
+            "route-source",
+            crate::ActorPlacement {
+                session: session_id,
+                resource_scope: RealmId::ROOT,
+                lexical_scope: ScopeId::ROOT,
+            },
+        )
+        .admit_independent_world()
+        .session_context(actor);
+        context.effect_policy = tidepool_effect::EffectRunPolicy::SuspendAll;
+        context.haskell_effects_alias = "'[RouteW.Watches]".into();
+        context
+            .source_dependency()
+            .adopt_final_scope(&mut session, ScopeId::ROOT)
+            .unwrap();
+        session
+            .set_actor_execution(
+                context.run_context(),
+                context.effect_policy,
+                context.live_payload,
+            )
+            .unwrap();
+        let owner = crate::capabilities::CompilerOwnerScope::current().unwrap();
+        let mut outcomes = Vec::new();
+        for _ in 0..count {
+            let outcome = crate::termination::CompilerWorkTicket::run_source_transaction(
+                &mut session,
+                owner.admit_continuation().unwrap(),
+                context.source_dependency(),
+                |session, settlement| {
+                    session.run_with_sites("route-capture", compiled.code(), settlement)
+                },
+            )
+            .unwrap()
+            .unwrap();
+            outcomes.push(outcome);
+        }
+        let machines = Arc::new(crate::ActorMachineRegistry::new());
+        machines.insert_idle(session_id, Box::new(session));
+        let runner = ResidentActorRunner::new(
+            machines,
+            ActorWorkbenchSource::new(preamble, include).bind_preparation(preparation),
+        );
+        let mut callbacks = Vec::new();
+        for outcome in outcomes {
+            let ResidentActorBoundary::RouteRegistration {
+                registration,
+                entry,
+                execution,
+            } = runner
+                .capture_boundary(context.clone(), outcome, RealmId::ROOT)
+                .await
+                .unwrap()
+            else {
+                panic!("actual route effect must capture its root and execution together");
+            };
+            callbacks.push((registration, entry, execution));
+        }
+        (runner, context, root, callbacks)
     }
 
     #[tokio::test]

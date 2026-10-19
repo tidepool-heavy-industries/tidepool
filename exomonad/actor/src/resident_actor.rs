@@ -4514,11 +4514,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .actor_callback_execution
                 .as_ref()
                 .and_then(|callback| callback.scope.clone()),
-            issued_snapshot: self
-                .actor_callback_execution
-                .as_ref()
-                .and_then(|callback| callback.snapshot.clone())
-                .or_else(|| self.actor_program_snapshot.clone()),
+            issued_snapshot: self.actor_callback_execution.as_ref().map_or_else(
+                || self.actor_program_snapshot.clone(),
+                |callback| callback.snapshot.clone(),
+            ),
             ephemeral_work,
             publication: self.checkpoint_publication.clone(),
             reservation_owner,
@@ -7973,7 +7972,21 @@ where
             ResidentActorBoundary::RouteRegistration {
                 registration,
                 entry,
+                mut execution,
             } => Box::pin(async move {
+                let dependency = execution.source_dependency().clone();
+                execution.snapshot = effect_owner.issued_snapshot().map(|snapshot| {
+                    crate::resident_workbench::ActorRequestSnapshot::SourceCallback(
+                        crate::resident_workbench::InstalledToolLease::source_callback_custody(
+                            context.actor,
+                            snapshot.installation().source().clone(),
+                            dependency.clone(),
+                        ),
+                    )
+                });
+                execution.scope = effect_owner
+                    .callback_scope()
+                    .or(Some(dependency.source_lease()?));
                 let owner = kernel
                     .resolve(context.actor)
                     .await
@@ -7995,17 +8008,24 @@ where
                 let (watch, notifications) = self
                     .environment
                     .requests
-                    .register_watch_plan_with_route(
+                    .register_watch_route(
                         context.actor,
                         registration.label,
                         dependencies.clone(),
-                        Some(crate::request::routes::WatchRoute::new(owner, entry)),
+                        crate::request::routes::WatchRoute::new(owner, entry, execution),
                     )
                     .map_err(|error| {
                         settlements.release(&dependencies);
-                        ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "route registration rejected: {error:?}"
-                        ))
+                        match error {
+                            crate::request::routes::RouteRegistrationError::Source(error) => {
+                                error.into()
+                            }
+                            crate::request::routes::RouteRegistrationError::Watch(error) => {
+                                ResidentActorWorkbenchError::ActorProtocol(format!(
+                                    "route registration rejected: {error:?}"
+                                ))
+                            }
+                        }
                     })?;
                 self.publish_watch_notifications(notifications).await;
                 self.environment
@@ -13208,9 +13228,22 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async move {
             let context = self.context(kernel.identity());
-            let Some(entry) = self.environment.requests.take_route(context.actor, watch) else {
-                return Ok(KernelStep::Continue(()));
+            let entry = match self.environment.requests.take_route(context.actor, watch) {
+                Ok(Some(entry)) => entry,
+                Ok(None) => return Ok(KernelStep::Continue(())),
+                Err(error) => {
+                    let notification = self.environment.requests.finish_route(
+                        context.actor,
+                        watch,
+                        Err(error.to_string()),
+                    );
+                    self.publish_watch_notifications(notification).await;
+                    return Ok(KernelStep::Continue(()));
+                }
             };
+            let execution = entry.execution().relocated(context);
+            let context = execution.activation_context();
+            let previous_callback = self.actor_callback_execution.replace(execution);
             let reservation_owner = RequestReservationOwner::Route(watch);
             let route_work = self
                 .workbench_executions
@@ -13329,6 +13362,7 @@ where
                         .finish_callback_resources(kernel, &route_work, result)
                         .await;
                     self.active_route_reservation_owner = previous_reservation_owner;
+                    self.actor_callback_execution = previous_callback;
                     self.checkpoint_publication = CheckpointPublication::Resident;
                     let notification =
                         self.environment
