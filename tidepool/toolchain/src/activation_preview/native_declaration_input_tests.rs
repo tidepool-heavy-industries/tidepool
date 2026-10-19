@@ -814,7 +814,6 @@ fn preview_reuses_selected_original_with_issued_group_custody() {
     let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         issued_request.compiler_inputs(),
-        &issued_request.compiler_inputs().metadata,
         &validation.inventory,
     )
     .unwrap();

@@ -1695,7 +1695,6 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let validation = PackageInterfaceValidation::default();
     let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         &inputs,
-        &inputs.metadata,
         &validation.inventory,
     )
     .unwrap();
@@ -1985,7 +1984,6 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     let request_selection =
         crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             &request,
-            &request.metadata,
             &validation.inventory,
         )
         .unwrap();
@@ -2917,7 +2915,6 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
         let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             inputs,
-            &inputs.metadata,
             &validation.inventory,
         )
         .unwrap();
@@ -3112,7 +3109,6 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     let validation = PackageInterfaceValidation::default();
     let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         inputs,
-        &inputs.metadata,
         &validation.inventory,
     )
     .unwrap();
@@ -3215,7 +3211,6 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     assert!(wire_groups(&next)["PrivateFullInterface"].is_empty());
     let next_selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         next.compiler_inputs(),
-        &next.compiler_inputs().metadata,
         &validation.inventory,
     )
     .unwrap();
@@ -3421,7 +3416,6 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
         let validation = PackageInterfaceValidation::default();
         let receipt = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             inputs,
-            &inputs.metadata,
             &validation.inventory,
         )
         .unwrap();
@@ -4133,7 +4127,6 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     inputs,
-                    &inputs.metadata,
                     &validation.inventory,
                 )
                 .unwrap();
@@ -6521,7 +6514,6 @@ fn replay_native_transport_history(
     let validation = PackageInterfaceValidation::default();
     let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         inputs,
-        &inputs.metadata,
         &validation.inventory,
     )
     .unwrap();
@@ -6774,7 +6766,6 @@ fn replay_native_transport_history(
     let continued_selection =
         crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             continued_inputs,
-            &continued_inputs.metadata,
             &validation.inventory,
         )
         .unwrap();
@@ -7053,7 +7044,6 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         let validation = PackageInterfaceValidation::default();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             inputs,
-            &inputs.metadata,
             &validation.inventory,
         )
         .unwrap();
@@ -7363,7 +7353,6 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                 let selection =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                         inputs,
-                        &inputs.metadata,
                         &validation.inventory,
                     )
                     .unwrap();
@@ -8568,7 +8557,6 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
     let validation = PackageInterfaceValidation::default();
     let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         inputs,
-        &inputs.metadata,
         &validation.inventory,
     )
     .unwrap();
@@ -8580,7 +8568,6 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
     let clean = issue(baseline.clone(), "clean");
     let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         clean.compiler_inputs(),
-        &clean.compiler_inputs().metadata,
         &validation.inventory,
     )
     .unwrap();
@@ -9718,7 +9705,6 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         let validation = PackageInterfaceValidation::default();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             &request,
-            &request.metadata,
             &validation.inventory,
         )
         .map_err(compiler_evidence_failure)?;

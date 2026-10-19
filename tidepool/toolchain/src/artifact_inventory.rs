@@ -8889,7 +8889,6 @@ mod tests {
         let inputs = request.compiler_inputs();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             inputs,
-            &inputs.metadata,
             &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
         )
         .unwrap();
@@ -9244,7 +9243,6 @@ mod tests {
             let source_selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     chosen_request.compiler_inputs(),
-                    &chosen_request.compiler_inputs().metadata,
                     &validation.inventory,
                 )
                 .unwrap();
@@ -16083,7 +16081,6 @@ mod tests {
         let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let certified = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             request.compiler_inputs(),
-            &request.compiler_inputs().metadata,
             &validation.inventory,
         )
         .unwrap();

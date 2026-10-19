@@ -2923,7 +2923,6 @@ mod authored_tests {
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     inputs,
-                    &inputs.metadata,
                     &validation.inventory,
                 )
                 .unwrap();

@@ -407,7 +407,6 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     assert_eq!(offered_carrier.artifact, expected_original);
     let public_selection = CertifiedSourceSelection::from_compiler_inputs(
         public_inputs,
-        &public_inputs.metadata,
         &InventoryOperation::new(Default::default()),
     )
     .unwrap();

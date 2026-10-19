@@ -652,7 +652,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 let request = ProtectedScaffoldRequirements::default().compiler_inputs(&context, None).unwrap();
                 let validation = PackageInterfaceValidation::default();
                 let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                    &request, &request.metadata, &validation.inventory,
+                    &request, &validation.inventory,
                 ).unwrap();
                 let entries = outputs.values().map(|(entry, _, _)| entry.clone()).collect();
                 let imports = outputs.values().map(|(_, import, _)| import.clone()).collect::<Vec<_>>();

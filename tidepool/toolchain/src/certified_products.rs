@@ -2809,9 +2809,9 @@ impl CertifiedSourceSelection {
 
     pub(crate) fn from_compiler_inputs(
         inputs: &crate::declaration_context::RequestCompilerInputs,
-        metadata: &crate::artifact_inventory::CompilerArtifactMetadata,
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
+        let metadata = &inputs.metadata;
         let mut selected =
             Self::from_compiler_projection(inputs.projection(), &metadata.retained, operation)?;
         selected.input_origin =
@@ -8940,10 +8940,7 @@ pub(crate) fn certify_products_with_validation(
             let inputs = compiler_inputs
                 .as_ref()
                 .ok_or(CertificationError::Mismatch("compiler original projection"))?;
-            let metadata = projected_metadata
-                .as_ref()
-                .ok_or(CertificationError::Mismatch("compiler original projection"))?;
-            CertifiedSourceSelection::from_compiler_inputs(inputs, metadata, &validation.inventory)?
+            CertifiedSourceSelection::from_compiler_inputs(inputs, &validation.inventory)?
         }
         None => CertifiedSourceSelection::new_product_ingress(),
     };
@@ -12581,12 +12578,8 @@ pub(crate) mod tests {
                     .selected_native_groups()
                     .is_empty());
                 let inputs = request.compiler_inputs();
-                carried = CertifiedSourceSelection::from_compiler_inputs(
-                    inputs,
-                    &inputs.metadata,
-                    &operation,
-                )
-                .unwrap();
+                carried =
+                    CertifiedSourceSelection::from_compiler_inputs(inputs, &operation).unwrap();
                 assert_eq!(
                     carried.compiler_namespace_originals().count(),
                     usize::from(namespace_original)
@@ -12789,12 +12782,8 @@ pub(crate) mod tests {
             );
             assert_eq!(row.permits(9001), ordinals.contains(&9001));
             let operation = InventoryOperation::new(Default::default());
-            let mut selection = CertifiedSourceSelection::from_compiler_inputs(
-                &request,
-                &request.metadata,
-                &operation,
-            )
-            .unwrap();
+            let mut selection =
+                CertifiedSourceSelection::from_compiler_inputs(&request, &operation).unwrap();
             let input_only =
                 OriginalCompilerInputs::from_selection(&selection, request.artifacts()).unwrap();
             let source = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
@@ -13815,7 +13804,6 @@ pub(crate) mod tests {
                 full_selection = Some(
                     CertifiedSourceSelection::from_compiler_inputs(
                         seed_request.compiler_inputs(),
-                        &seed_request.compiler_inputs().metadata,
                         &InventoryOperation::new(Default::default()),
                     )
                     .unwrap(),
@@ -13933,7 +13921,6 @@ pub(crate) mod tests {
             let mut validation = PackageInterfaceValidation::default();
             let selection = CertifiedSourceSelection::from_compiler_inputs(
                 request.compiler_inputs(),
-                &request.compiler_inputs().metadata,
                 &validation.inventory,
             )
             .unwrap();
@@ -14248,7 +14235,6 @@ pub(crate) mod tests {
             let mut validation = PackageInterfaceValidation::default();
             let mut selection = CertifiedSourceSelection::from_compiler_inputs(
                 request.compiler_inputs(),
-                &request.compiler_inputs().metadata,
                 &validation.inventory,
             )
             .unwrap();
@@ -14331,7 +14317,6 @@ pub(crate) mod tests {
                 eprintln!("native_availability_handoff mode={mode} broaden={broaden} actual={actual_mode:?}");
                 let next_selection = CertifiedSourceSelection::from_compiler_inputs(
                     next.compiler_inputs(),
-                    &next.compiler_inputs().metadata,
                     &validation.inventory,
                 )
                 .unwrap();
@@ -14814,7 +14799,6 @@ pub(crate) mod tests {
             let mut validation = PackageInterfaceValidation::default();
             let mut selection = CertifiedSourceSelection::from_compiler_inputs(
                 request.compiler_inputs(),
-                &request.compiler_inputs().metadata,
                 &validation.inventory,
             )
             .unwrap();

@@ -2666,7 +2666,6 @@ mod normalized_dependency_tests {
             .unwrap();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             certified_request.compiler_inputs(),
-            &certified_request.compiler_inputs().metadata,
             &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
         )
         .unwrap();

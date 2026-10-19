@@ -12840,9 +12840,7 @@ mod tests {
             match self {
                 Self::Complete(inputs) => {
                     crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                        inputs,
-                        &inputs.metadata,
-                        &operation,
+                        inputs, &operation,
                     )
                 }
                 Self::RecordedRoles {
@@ -14793,7 +14791,6 @@ mod tests {
         let validation = PackageInterfaceValidation::default();
         let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             &inputs,
-            &inputs.metadata,
             &validation.inventory,
         )
         .unwrap();
@@ -16509,7 +16506,6 @@ mod tests {
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     inputs,
-                    &inputs.metadata,
                     &validation.inventory,
                 )
                 .unwrap();
@@ -17080,7 +17076,6 @@ mod tests {
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     inputs,
-                    &inputs.metadata,
                     &validation.inventory,
                 )
                 .unwrap();
@@ -20728,7 +20723,6 @@ mod tests {
         let validation = PackageInterfaceValidation::default();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             inputs,
-            &inputs.metadata,
             &validation.inventory,
         )
         .unwrap();
@@ -22596,7 +22590,6 @@ mod tests {
         let inputs = request.compiler_inputs();
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             inputs,
-            &inputs.metadata,
             &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
         )
         .unwrap();
@@ -22672,7 +22665,6 @@ mod tests {
         let private_receipt =
             crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                 private_request.compiler_inputs(),
-                &private_request.compiler_inputs().metadata,
                 &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
             )
             .unwrap();
