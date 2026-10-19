@@ -538,6 +538,123 @@ async fn persona_quickstart_displays_lookup_and_rejects_native_io() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn persona_with_shared_workspace_keeps_lookup_and_later_cells_usable() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        super::test_campaign::scaffold_workspace(&config.workspace);
+        configure_persona(config, "AgentSpec.agentSpec", |_workspace, project| {
+            project.haskell.source_roots = vec![".".into(), "workspace".into()];
+        });
+        std::fs::create_dir_all(config.workspace.join(".exomonad/state/notes")).unwrap();
+    })
+    .await
+    .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            host.input("Inspect the workspace and its callable tools")
+                .await
+                .unwrap();
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = VecDeque::new();
+            let mut round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            let origin = harness::store::actor_output::ActorOutputOrigin {
+                run: host.runtime.run_identity().to_owned(),
+                native_actor: host.context.actor.identity().id.0,
+                incarnation: host.context.actor.identity().incarnation.0,
+            };
+
+            let first = round.operation("persona-memory-and-notes");
+            round.sync_call_named(
+                "persona-memory-and-notes",
+                "haskell",
+                "import qualified Tidepool.Effects.Authored as Files\n\
+             import qualified Persona.Memory as Memory\n\
+             notes <- Files.listDirectory \".exomonad/state/notes\"\n\
+             display notes\n\
+             curiosities <- Memory.recall Memory.Curiosities\n\
+             display curiosities",
+            );
+            round = host
+                .while_operation_succeeds(
+                    &first,
+                    next_hosted_script_round(&mut requests, &mut pending, &root),
+                )
+                .await
+                .unwrap();
+            let pages = super::test_campaign::retained_committed_display_texts(
+                &host.runtime.store(),
+                &origin,
+                &round.settled_output("persona-memory-and-notes"),
+            );
+            assert_eq!(
+                pages.len(),
+                2,
+                "first cell must publish both effects: {pages:?}"
+            );
+            assert!(pages[1].contains("curiosity-memory-original"), "{pages:?}");
+
+            let lookup = round.operation("persona-native-lookup-after-memory");
+            round.function(
+                "persona-native-lookup-after-memory",
+                "lookup",
+                json!({"queries": [
+                    "getRuntimeInfo", "Cmd.run", ":: Text -> Eff effs _", "forkAgent", "spawnAgent"
+                ]}),
+            );
+            round = host
+                .while_operation_succeeds(
+                    &lookup,
+                    next_hosted_script_round(&mut requests, &mut pending, &root),
+                )
+                .await
+                .unwrap();
+            let lookup_result = round.settled_output("persona-native-lookup-after-memory");
+            assert_eq!(lookup_result["status"], "committed", "{lookup_result:?}");
+            let [item] = lookup_result["items"].as_array().unwrap().as_slice() else {
+                panic!("one structured lookup item: {lookup_result:?}");
+            };
+            assert_eq!(item["status"], "committed", "{item:?}");
+            assert!(item["value"]["lookupCaptureSlot"]
+                .as_i64()
+                .is_some_and(|slot| slot > 0));
+            let output = item["output"].as_str().unwrap();
+            assert!(
+                output.lines().any(|line| {
+                    line.contains("getRuntimeInfo — getRuntimeInfo (Tidepool.Effects.Core) [found]")
+                }) && !output.contains("Lookup issue:"),
+                "known symbol must resolve without a batch issue: {output}"
+            );
+
+            let pure = round.operation("persona-pure-after-lookup");
+            round.sync_call_named(
+                "persona-pure-after-lookup",
+                "haskell",
+                "display (1 + 1 :: Int)",
+            );
+            round = host
+                .while_operation_succeeds(
+                    &pure,
+                    next_hosted_script_round(&mut requests, &mut pending, &root),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                retained_committed_display_text(
+                    &host.runtime.store(),
+                    &origin,
+                    &round.settled_output("persona-pure-after-lookup"),
+                ),
+                "2"
+            );
+            round.finish();
+        })
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn authored_persona_directory_reads_leave_later_cells_and_lookup_usable() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);
