@@ -38,7 +38,7 @@ module Tidepool.ExactScope
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
   , worldInputsSourceModuleHints, worldInputsRetainedCharge
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
-  , readWorldInputsWithOwner, decodeWorldSources
+  , readWorldInputsWithOwner, decodeWorldSources, readWorldStringMap
   , WorldInputsFailure(..), WorldInputsFailureCause(..)
   ) where
 
@@ -60,7 +60,7 @@ import Data.List (isPrefixOf)
 import Data.Maybe (isJust, isNothing)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Bits (shiftL)
+import Data.Bits (shiftL, testBit, popCount)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC.Driver.Env (HscEnv, hsc_home_unit)
@@ -70,7 +70,7 @@ import GHC.Unit.Home (homeUnitAsUnit)
 import GHC.Unit.Module (Module, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Module.Location (ml_hs_file)
 import GHC.Unit.Types (unitString)
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 import Numeric (showHex)
 import System.Directory (createDirectory, createDirectoryIfMissing, makeAbsolute, doesFileExist)
 import System.FilePath (isAbsolute, normalise, hasTrailingPathSeparator, takeDirectory, splitDirectories, (</>))
@@ -2282,7 +2282,8 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
         sourceBytes <- readInput sourcePath bound
         pure (offered,sourceBytes)
       let OfferedWorldInputs restoration _sourcePath producer profile baseRows visibleRows acquisition visibility primary blocks = offered
-      verifyWorldBlocks primary blocks
+      frontier <- verifyWorldBlocks primary blocks
+      validateWorldContext frontier primary producer
       WorldRestoration expectedPrimary domainSeal expectedProducer expectedProfile expectedVisibility baseSeal visibleSeal blockSeal <-
         decodeWorldBytes decodeWorldRestoration restoration
       sources <- either worldCorrupt pure (decodeWorldSources sourceBytes)
@@ -2358,8 +2359,10 @@ verifyWorldBlock (cid,body)
 supportedWorldCID :: BS.ByteString -> Bool
 supportedWorldCID cid = BS.length cid == 38 && BS.take 6 cid == BS.pack [1,0x71,0xa0,0xe4,2,32]
 
-verifyWorldBlocks :: BS.ByteString -> [(BS.ByteString,BS.ByteString)] -> IO ()
+verifyWorldBlocks :: BS.ByteString -> [(BS.ByteString,BS.ByteString)] -> IO (Map.Map BS.ByteString BS.ByteString)
 verifyWorldBlocks primary blocks = do
+  unless (Set.size (Set.fromList (map fst blocks)) == length blocks)
+    (worldCorrupt "duplicate compiler world block CID")
   mapM_ verifyWorldBlock blocks
   linked <- forM blocks $ \(cid,body) -> do
     links <- decodeWorldBytes (worldBlockLinks (BS.length body)) body
@@ -2372,6 +2375,222 @@ verifyWorldBlocks primary blocks = do
           Nothing -> worldCorrupt "compiler world block child is absent"
           Just children -> visit (Set.insert cid seen) (Set.union children remaining)
   visit Set.empty (Set.singleton primary)
+  pure (Map.fromList blocks)
+
+-- This data reader uses the same fixed HAMT fold as the owning context maps.
+-- It cannot issue a compiler world, scope hold, runtime grant or Ready result.
+readWorldStringMap :: BS.ByteString -> [(BS.ByteString,BS.ByteString)] -> IO (Map.Map String String)
+readWorldStringMap root blocks = do
+  frontier <- verifyWorldBlocks root blocks
+  worldHamtMap frontier root (T.unpack <$> decodeStringCanonical) (E.encodeString . T.pack)
+    (T.unpack <$> decodeStringCanonical)
+
+data WorldHamtPointer value = WorldHamtLink BS.ByteString | WorldHamtBucket [(BS.ByteString,value)]
+
+-- Fixed fvm_ipld_hamt 0.10.6 V3: bit width five, minimum data depth zero,
+-- maximum inline bucket three. Keys hash their exact canonical SnapshotKey
+-- bytes with SHA256; key/value codecs belong to the selected map's owner.
+worldHamtMap :: forall key value. Ord key
+  => Map.Map BS.ByteString BS.ByteString -> BS.ByteString
+  -> (forall s. Decoder s key) -> (key -> E.Encoding)
+  -> (forall s. Decoder s value) -> IO (Map.Map key value)
+worldHamtMap frontier root keyDecoder keyEncoder valueDecoder = walk Set.empty Map.empty [(root,[])]
+  where
+    walk _ facts [] = pure facts
+    walk seen facts ((cid,route):rest) = do
+      when (cid `Set.member` seen) (worldCorrupt "repeated compiler world HAMT node")
+      let depth = length route
+      when (depth >= 52) (worldCorrupt "compiler world HAMT exceeds SHA256 routing depth")
+      body <- maybe (worldCorrupt "compiler world HAMT child is absent") pure (Map.lookup cid frontier)
+      pointers <- decodeWorldBytes (node depth) body
+      (next,children) <- foldM (pointer route) (facts,[]) pointers
+      walk (Set.insert cid seen) next (children ++ rest)
+    pointer route (facts,children) (slot,WorldHamtLink cid) =
+      pure (facts,(cid,route ++ [slot]):children)
+    pointer route (facts,children) (slot,WorldHamtBucket entries) = do
+      next <- foldM (insert (route ++ [slot])) facts entries
+      pure (next,children)
+    insert route facts (encoded,value) = do
+      key <- decodeWorldBytes (worldArray 1 >> keyDecoder) encoded
+      unless (toStrictByteString (E.encodeListLen 1 <> keyEncoder key) == encoded)
+        (worldCorrupt "noncanonical typed compiler world HAMT key")
+      let hashed = SHA.hash encoded
+          bucket level = foldl (\n bit -> n * 2 + if testBit (BS.index hashed (bit `div` 8)) (7 - bit `mod` 8) then 1 else 0)
+            0 [level*5 .. min 255 (level*5+4)]
+      unless (and [bucket level == slot | (level,slot) <- zip [0..] route])
+        (worldCorrupt "compiler world HAMT key has another hash route")
+      when (Map.member key facts) (worldCorrupt "duplicate typed compiler world HAMT key")
+      pure (Map.insert key value facts)
+    node :: forall s. Int -> Decoder s [(Int,WorldHamtPointer value)]
+    node depth = do
+      worldArray 2
+      bits <- decodeBytesCanonical
+      unless (BS.length bits <= 4 && (BS.null bits || BS.head bits /= 0))
+        (fail "invalid compiler world HAMT bitmap")
+      let bitmap = BS.foldl' (\n byte -> n * 256 + fromIntegral byte) (0 :: Word32) bits
+          slots = [slot | slot <- [0..31], testBit bitmap slot]
+          width = min 5 (256-depth*5)
+      unless (all (< (1 `shiftL` width)) slots) (fail "compiler world HAMT bitmap exceeds routing width")
+      count <- decodeListLenCanonical
+      unless (count <= 32 && count == popCount bitmap && (depth == 0 || count /= 0))
+        (fail "compiler world HAMT pointers differ from bitmap")
+      forM slots $ \slot -> do
+        token <- peekTokenType
+        selected <- case token of
+          TypeTag -> WorldHamtLink <$> worldCID
+          TypeListLen -> do
+            count <- decodeListLenCanonical
+            unless (count > 0 && count <= 3) (fail "invalid compiler world HAMT bucket width")
+            entries <- replicateM count $ do
+              worldArray 2
+              (,) <$> decodeBytesCanonical <*> valueDecoder
+            unless (and (zipWith (<) (map fst entries) (drop 1 (map fst entries))))
+              (fail "duplicate or unsorted compiler world HAMT bucket keys")
+            pure (WorldHamtBucket entries)
+          _ -> fail "unsupported compiler world HAMT pointer"
+        pure (slot,selected)
+
+worldArray :: Int -> Decoder s ()
+worldArray expected = decodeListLenCanonical >>= \count -> unless (count == expected) (fail "invalid compiler world tuple")
+
+worldCID :: Decoder s BS.ByteString
+worldCID = do
+  tag <- decodeTagCanonical
+  unless (tag == 42) (fail "invalid compiler world link tag")
+  encoded <- decodeBytesCanonical
+  unless (not (BS.null encoded) && BS.head encoded == 0 && supportedWorldCID (BS.tail encoded))
+    (fail "unsupported compiler world child CID")
+  pure (BS.tail encoded)
+
+worldArrayDigest :: Decoder s BS.ByteString
+worldArrayDigest = worldArray 32 >> BS.pack <$> replicateM 32 decodeWord8Canonical
+
+encodeWorldArrayDigest :: BS.ByteString -> E.Encoding
+encodeWorldArrayDigest bytes = E.encodeListLen 32 <> foldMap E.encodeWord8 (BS.unpack bytes)
+
+decodeWorldModuleKey :: Decoder s (String,String)
+decodeWorldModuleKey = do
+  count <- decodeMapLenCanonical
+  unless (count == 2) (fail "invalid compiler world module key")
+  unitField <- decodeStringCanonical
+  unit <- decodeStringCanonical
+  moduleField <- decodeStringCanonical
+  name <- decodeStringCanonical
+  unless (unitField == "unit" && moduleField == "module")
+    (fail "invalid compiler world module key fields")
+  pure (T.unpack unit,T.unpack name)
+
+encodeWorldModuleKey :: (String,String) -> E.Encoding
+encodeWorldModuleKey (unit,name) = E.encodeMapLen 2
+  <> E.encodeString "unit" <> E.encodeString (T.pack unit)
+  <> E.encodeString "module" <> E.encodeString (T.pack name)
+
+decodeWorldBinding :: Decoder s (BS.ByteString,BS.ByteString)
+decodeWorldBinding = do
+  count <- decodeMapLenCanonical
+  unless (count == 2) (fail "invalid compiler world artifact binding")
+  artifactField <- decodeStringCanonical
+  artifact <- worldArrayDigest
+  selectionField <- decodeStringCanonical
+  selection <- worldArrayDigest
+  unless (artifactField == "artifact" && selectionField == "selection")
+    (fail "invalid compiler world artifact binding fields")
+  pure (artifact,selection)
+
+encodeWorldBinding :: (BS.ByteString,BS.ByteString) -> E.Encoding
+encodeWorldBinding (artifact,selection) = E.encodeMapLen 2
+  <> E.encodeString "artifact" <> encodeWorldArrayDigest artifact
+  <> E.encodeString "selection" <> encodeWorldArrayDigest selection
+
+data WorldBindingNodeKey = WorldArtifactBinding (BS.ByteString,BS.ByteString)
+  | WorldGroupBinding (BS.ByteString,BS.ByteString) Word32 deriving (Eq,Ord)
+
+decodeWorldBindingNode :: Decoder s WorldBindingNodeKey
+decodeWorldBindingNode = do
+  count <- decodeMapLenCanonical
+  unless (count == 1) (fail "invalid compiler world binding node")
+  kind <- decodeStringCanonical
+  case kind of
+    "artifact" -> WorldArtifactBinding <$> decodeWorldBinding
+    "group" -> do
+      fields <- decodeMapLenCanonical
+      unless (fields == 2) (fail "invalid compiler world group binding")
+      bindingField <- decodeStringCanonical
+      binding <- decodeWorldBinding
+      ordinalField <- decodeStringCanonical
+      ordinal <- decodeWord32Canonical
+      unless (bindingField == "binding" && ordinalField == "original_ordinal")
+        (fail "invalid compiler world group binding fields")
+      pure (WorldGroupBinding binding ordinal)
+    _ -> fail "unsupported compiler world binding node"
+
+encodeWorldBindingNode :: WorldBindingNodeKey -> E.Encoding
+encodeWorldBindingNode node = E.encodeMapLen 1 <> case node of
+  WorldArtifactBinding binding -> E.encodeString "artifact" <> encodeWorldBinding binding
+  WorldGroupBinding binding ordinal -> E.encodeString "group" <> E.encodeMapLen 2
+    <> E.encodeString "binding" <> encodeWorldBinding binding
+    <> E.encodeString "original_ordinal" <> E.encodeWord32 ordinal
+
+data WorldDescriptorField = WorldDescriptorVersion Word64 | WorldDescriptorProducer BS.ByteString
+  | WorldDescriptorLink BS.ByteString
+
+worldDescriptor :: [String] -> Bool -> Decoder s (Map.Map String WorldDescriptorField)
+worldDescriptor roots producer = do
+  count <- decodeMapLenCanonical
+  let expected = Set.fromList ("version" : roots ++ ["producer" | producer])
+  unless (count == Set.size expected) (fail "invalid compiler world descriptor fields")
+  fields <- replicateM count $ do
+    name <- T.unpack <$> decodeStringCanonical
+    value <- case name of
+      "version" -> WorldDescriptorVersion <$> decodeWord64Canonical
+      "producer" | producer -> WorldDescriptorProducer <$> worldArrayDigest
+      _ | name `elem` roots -> WorldDescriptorLink <$> worldCID
+      _ -> fail "unsupported compiler world descriptor field"
+    pure (name,value)
+  let order name = let bytes = TE.encodeUtf8 (T.pack name) in (BS.length bytes,bytes)
+  unless (Set.fromList (map fst fields) == expected
+      && and (zipWith (<) (map (order . fst) fields) (drop 1 (map (order . fst) fields))))
+    (fail "noncanonical compiler world descriptor fields")
+  pure (Map.fromList fields)
+
+-- These are the exact current Materializer ContextDescriptorV5 and
+-- SelectionDescriptorV2 wire families. Fact links remain passive references;
+-- validating their storage shape does not activate Original/native inventory.
+validateWorldContext :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString -> BS.ByteString -> IO ()
+validateWorldContext frontier root producer = do
+  context <- readDescriptor root (worldDescriptor
+    ["selection","roles","lexical","offers","native_availability","input_decisions"] True)
+  requireVersion 5 context
+  case Map.lookup "producer" context of
+    Just (WorldDescriptorProducer actual) | actual == producer -> pure ()
+    _ -> worldCorrupt "compiler world context producer differs"
+  forM_ ["roles","lexical","input_decisions"] $ \name -> do
+    cid <- link name context
+    void (worldHamtMap frontier cid decodeWorldModuleKey encodeWorldModuleKey worldCID)
+  forM_ ["offers","native_availability"] $ \name -> do
+    cid <- link name context
+    void (worldHamtMap frontier cid worldArrayDigest encodeWorldArrayDigest worldCID)
+  selection <- link "selection" context
+  selected <- readDescriptor selection (worldDescriptor ["scopes","roots","namespace","custody_roots"] False)
+  requireVersion 2 selected
+  scopes <- link "scopes" selected
+  void (worldHamtMap frontier scopes worldArrayDigest encodeWorldArrayDigest worldCID)
+  namespace <- link "namespace" selected
+  void (worldHamtMap frontier namespace worldArrayDigest encodeWorldArrayDigest decodeWorldBinding)
+  forM_ ["roots","custody_roots"] $ \name -> do
+    cid <- link name selected
+    void (worldHamtMap frontier cid decodeWorldBindingNode encodeWorldBindingNode decodeNull)
+  where
+    readDescriptor :: BS.ByteString -> (forall s. Decoder s (Map.Map String WorldDescriptorField))
+      -> IO (Map.Map String WorldDescriptorField)
+    readDescriptor cid parser = maybe (worldCorrupt "compiler world descriptor block is absent")
+      (decodeWorldBytes parser) (Map.lookup cid frontier)
+    link name fields = case Map.lookup name fields of
+      Just (WorldDescriptorLink cid) -> pure cid
+      _ -> worldCorrupt "compiler world descriptor link is absent"
+    requireVersion expected fields = case Map.lookup "version" fields of
+      Just (WorldDescriptorVersion actual) | actual == expected -> pure ()
+      _ -> worldCorrupt "unsupported compiler world descriptor version"
 
 -- Scan the fixed DAG-CBOR block envelope for CID links before schema-specific
 -- decoding. Counting pending values avoids an unbounded recursive term tree;
@@ -2469,7 +2688,6 @@ decodeWorldInputs payloadBytes = do
   visibility <- decodeBytes
   primary <- decodeBytes
   blocks <- bounded payloadBytes (array 2 >> ((,) <$> decodeBytes <*> decodeBytes))
-  unique "primary context block CIDs" (map fst blocks)
   unless (not (BS.null primary) && any ((== primary) . fst) blocks)
     (fail "primary context root block is absent")
   pure (OfferedWorldInputs restoration source producer profile base visible acquisition visibility primary blocks)

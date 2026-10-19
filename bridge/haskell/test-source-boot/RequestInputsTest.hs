@@ -12,6 +12,7 @@ import Control.Monad ((>=>), foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA
+import qualified Crypto.Hash as Crypto
 import Numeric (readHex)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Internal as BSI
@@ -70,7 +71,7 @@ import Tidepool.ExactScope
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
   , exactInputRetentionLimits, commitWorldInputRetention
-  , readWorldInputsWithOwner, WorldInputFacts, worldInputsIdentityBytes, WorldInputsFailure(..), WorldInputsFailureCause(..) )
+  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentityBytes, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
@@ -389,16 +390,20 @@ semanticWorldBindingControls work scopePath = do
       [seal] -> TList . (row:) . pure . TBytes <$> rawHex (T.unpack seal)
       _ -> fail "genuine row does not have one exact image"
     _ -> fail "genuine world row shape changed"
-  blockPath <- issueCodecFixturePacket work "world-blocks.cbor" (toStrictByteString (encodeTerm
-    (TList [TString "TPCODECFIXTURE1",TString "world-blocks",TList []])))
-  (primary,blockPairs) <- readCodecTerm blockPath >>= \term -> case term of
-    TList [TBytes root,TList encoded] | not (null encoded) -> do
-      pairs <- forM encoded $ \entry -> case entry of
-        TList [TBytes cid,TBytes body] -> pure (cid,body)
-        _ -> fail "Materializer block fixture needs exact CID/body pairs"
-      unless (any ((== root) . fst) pairs) (fail "Materializer fixture omitted its root block")
-      pure (root,pairs)
-    _ -> fail "Materializer fixture needs its root and owned blocks"
+  let blockFixture operation arguments = do
+        path <- issueCodecFixturePacket work (operation ++ ".cbor") (toStrictByteString (encodeTerm
+          (TList [TString "TPCODECFIXTURE1",TString (T.pack operation),TList arguments])))
+        readCodecTerm path >>= \term -> case term of
+          TList [TBytes root,TList encoded] | not (null encoded) -> do
+            pairs <- forM encoded $ \entry -> case entry of
+              TList [TBytes cid,TBytes body] -> pure (cid,body)
+              _ -> fail "Materializer block fixture needs exact CID/body pairs"
+            unless (any ((== root) . fst) pairs) (fail "Materializer fixture omitted its root block")
+            pure (root,pairs)
+          _ -> fail "Materializer fixture needs its root and owned blocks"
+  (primary,blockPairs) <- blockFixture "world-context-blocks" [TBytes producer]
+  (hamtRoot,hamtBlocks) <- blockFixture "world-blocks" []
+  worldHamtControls hamtRoot hamtBlocks
   let sources = "TPCSRC01" <> BS.replicate 8 0
       sourcePath = work </> "world-seal-sources.bin"
       profile = BS.replicate 32 97
@@ -472,6 +477,28 @@ semanticWorldBindingControls work scopePath = do
   rootTerm <- case deserialiseFromBytes decodeTerm (BL.fromStrict rootBody) of
     Right (remaining,value) | BL.null remaining -> pure value
     _ -> fail "genuine Materializer root is not one complete CBOR value"
+  fields <- case rootTerm of
+    TMap values -> pure values
+    _ -> fail "genuine context root is not the Materializer descriptor map"
+  let replaceField name value = TMap [(key,if key == TString name then value else old) | (key,old) <- fields]
+      changedProducer = BS.unpack (BS.cons (if BS.head producer == 0 then 1 else 0) (BS.tail producer))
+      descriptorMutations =
+        [("version",replaceField "version" (TInt 4),"unsupported compiler world descriptor version")
+        ,("producer",replaceField "producer" (TList (map (TInt . fromIntegral) changedProducer)),"compiler world context producer differs")
+        ,("missing-field",TMap (filter ((/= TString "roles") . fst) fields),"invalid compiler world descriptor fields")
+        ,("unknown-field",TMap [(if key == TString "roles" then TString "wrong" else key,value) | (key,value) <- fields],"unsupported compiler world descriptor field")]
+  forM_ descriptorMutations $ \(label,value,reason) -> do
+    let body = encode value
+    cid <- worldFixtureCID body
+    let changedBlocks = replaceRoot cid body
+    result <- try (readPacket ("context-" ++ label)
+      (packetFor 2 (restorationFor 2 cid changedBlocks base visible) cid changedBlocks base visible acquisition))
+      :: IO (Either WorldInputsFailure WorldInputFacts)
+    case result of
+      Left (WorldInputsFailure WorldInputsCorrupt actualReason)
+        | actualReason == reason || show reason `isInfixOf` actualReason -> pure ()
+      Left failure -> throwIO failure
+      Right _ -> fail ("cold reader accepted another context descriptor: " ++ label)
   let links (TTagged 42 (TBytes encoded)) | not (BS.null encoded) && BS.head encoded == 0 = [BS.tail encoded]
       links (TList values) = concatMap links values
       links (TMap entries) = concatMap (\(key,value) -> links key ++ links value) entries
@@ -523,6 +550,84 @@ semanticWorldBindingControls work scopePath = do
       [(byte,"")] -> BS.cons byte <$> rawHex rest
       _ -> fail "genuine producer/image has a malformed SHA"
     rawHex _ = fail "genuine producer/image has an odd SHA length"
+
+-- The positive parcel comes from the actual Rust Materializer, and each
+-- negative changes those owned node bytes before issuing a new content address.
+-- These are DATA controls for the production HAMT fold, never rooted worlds.
+worldHamtControls :: BS.ByteString -> [(BS.ByteString,BS.ByteString)] -> IO ()
+worldHamtControls root blocks = do
+  actual <- readWorldStringMap root blocks
+  let expected = Map.fromList [("fact-" ++ show n,"value-" ++ show n) | n <- [0 :: Int ..127]]
+  unless (actual == expected) (fail "HAMT reader lost independently materialized String facts")
+  let rootBody = case lookup root blocks of Just bytes -> bytes; _ -> error "genuine HAMT root missing"
+      encode = toStrictByteString . encodeTerm
+      term bytes = case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
+        Right (remaining,value) | BL.null remaining -> pure value
+        _ -> fail "genuine HAMT node is not one CBOR value"
+      replace old cid body = [(if key == old then cid else key,if key == old then body else bytes)
+        | (key,bytes) <- blocks]
+      refused label expectedReason cid pairs = do
+        result <- try (readWorldStringMap cid pairs) :: IO (Either WorldInputsFailure (Map.Map String String))
+        case result of
+          Left (WorldInputsFailure WorldInputsCorrupt reason)
+            | reason == expectedReason || (show expectedReason `isInfixOf` reason) -> pure ()
+          Left failure -> fail (label ++ " refused for another reason: " ++ show failure)
+          Right _ -> fail (label ++ " accepted a malformed HAMT")
+      mutate label reason value = do
+        let body = encode value
+        cid <- worldFixtureCID body
+        refused label reason cid (replace root cid body)
+  original <- term rootBody
+  (bitmap,pointers) <- case original of
+    TList [TBytes bits,TList values] | not (null values) -> pure (bits,values)
+    _ -> fail "actual Materializer root is not a nonempty V3 HAMT node"
+  let leafIndexes = [i | (i,TList (_:_)) <- zip [0 :: Int ..] pointers]
+  leafIndex <- case leafIndexes of i:_ -> pure i; _ -> fail "HAMT fixture needs an actual inline bucket"
+  bucket <- case pointers !! leafIndex of TList values -> pure values; _ -> error "checked HAMT bucket disappeared"
+  entry <- case bucket of value:_ -> pure value; _ -> error "checked HAMT entry disappeared"
+  (key,value) <- case entry of TList [TBytes key,initial] -> pure (key,initial); _ -> fail "actual HAMT leaf is not a byte-key pair"
+  let node values = TList [TBytes bitmap,TList values]
+      changeBucket entries = node (take leafIndex pointers ++ TList entries : drop (leafIndex+1) pointers)
+  mutate "node arity" "invalid compiler world tuple" (TList [TBytes bitmap,TList pointers,TNull])
+  mutate "bitmap leading zero" "invalid compiler world HAMT bitmap" (TList [TBytes (BS.cons 0 bitmap),TList pointers])
+  mutate "bitmap width" "invalid compiler world HAMT bitmap" (TList [TBytes (BS.pack [1,0,0,0,0]),TList pointers])
+  mutate "bitmap count" "compiler world HAMT pointers differ from bitmap" (TList [TBytes BS.empty,TList pointers])
+  mutate "empty bucket" "invalid compiler world HAMT bucket width" (changeBucket [])
+  mutate "large bucket" "invalid compiler world HAMT bucket width" (changeBucket (replicate 4 entry))
+  mutate "duplicate bucket key" "duplicate or unsorted compiler world HAMT bucket keys" (changeBucket [entry,entry])
+  mutate "entry arity" "invalid compiler world tuple" (changeBucket [TList [TBytes key]])
+  mutate "key type" "expected string" (changeBucket [TList [TBytes (encode (TList [TInt 7])),value]])
+  mutate "value type" "expected string" (changeBucket [TList [TBytes key,TInt 7]])
+  let rootSlot encoded = fromIntegral (BS.head (SHA.hash encoded)) `div` 8 :: Int
+      alternate = head [encode (TList [TString (T.pack ("changed-key-" ++ show n))])
+        | n <- [0 :: Int ..], rootSlot (encode (TList [TString (T.pack ("changed-key-" ++ show n))])) /= rootSlot key]
+  mutate "key route" "compiler world HAMT key has another hash route" (changeBucket [TList [TBytes alternate,value]])
+  child <- case [BS.tail encoded | TTagged 42 (TBytes encoded) <- pointers
+        , not (BS.null encoded),BS.head encoded == 0] of
+    cid:_ | any ((== cid) . fst) blocks -> pure cid
+    _ -> fail "HAMT fixture needs a genuine provided child"
+  refused "missing HAMT child" "compiler world block child is absent" root (filter ((/= child) . fst) blocks)
+  let emptyChildBody = encode (TList [TBytes BS.empty,TList []])
+  emptyChild <- worldFixtureCID emptyChildBody
+  let replaceLink (TTagged 42 (TBytes encoded)) | encoded == BS.cons 0 child = TTagged 42 (TBytes (BS.cons 0 emptyChild))
+      replaceLink other = other
+      changedRootBody = encode (node (map replaceLink pointers))
+  changedRoot <- worldFixtureCID changedRootBody
+  let childChanged = [(if key == child then emptyChild else key,if key == child then emptyChildBody else body)
+        | (key,body) <- replace root changedRoot changedRootBody]
+  refused "empty child" "compiler world HAMT pointers differ from bitmap" changedRoot childChanged
+
+-- Mutation data only: positive content addresses always come from Materializer.
+worldFixtureCID :: BS.ByteString -> IO BS.ByteString
+worldFixtureCID body = do
+  digestBytes <- hexBytes (show (Crypto.hash body :: Crypto.Digest Crypto.Blake2b_256))
+  pure (BS.pack [1,0x71,0xa0,0xe4,2,32] <> digestBytes)
+  where
+    hexBytes [] = pure BS.empty
+    hexBytes (a:b:rest) = case readHex [a,b] of
+      [(byte,"")] -> BS.cons byte <$> hexBytes rest
+      _ -> fail "invalid test digest"
+    hexBytes _ = fail "invalid test digest length"
 
 ownedScopeInputReuse :: IO ()
 ownedScopeInputReuse = withTiming $ withScratch $ \work ->
