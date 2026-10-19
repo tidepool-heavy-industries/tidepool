@@ -499,8 +499,14 @@ enum Field {
     InspectInfo(String),
     InspectBrowse(String),
     InspectBrowseExpanded(String),
+    /// `--inspect-browse`/`--inspect-browse-expanded` with an enumeration cap.
+    InspectBrowseBounded(String, bool, u32),
     InspectScopeBrowse,
+    /// `--inspect-scope-browse` carrying a compiler-side enumeration cap.
+    InspectScopeBrowseBounded(u32),
     InspectSearch(String),
+    /// `--inspect-search` carrying a compiler-side match cap.
+    InspectSearchBounded(String, u32),
     InspectStructuredInfo(StructuredInspection),
     InspectStructuredType(StructuredInspection),
     InspectOut(OsString),
@@ -715,7 +721,10 @@ impl ExtractRequest {
                             | Field::InspectBrowse(_)
                             | Field::InspectBrowseExpanded(_)
                             | Field::InspectScopeBrowse
+                            | Field::InspectScopeBrowseBounded(_)
+                            | Field::InspectBrowseBounded(..)
                             | Field::InspectSearch(_)
+                            | Field::InspectSearchBounded(..)
                             | Field::InspectStructuredInfo(_)
                             | Field::InspectStructuredType(_)
                     )
@@ -868,6 +877,30 @@ impl ExtractRequest {
                 Some("--inspect-search") => request.fields.push(Field::InspectSearch(
                     text_value(&mut args, "--inspect-search")?.into(),
                 )),
+                Some("--inspect-scope-browse-bounded") => request.fields.push(
+                    Field::InspectScopeBrowseBounded(bounded_budget(
+                        &text_value(&mut args, "--inspect-scope-browse-bounded")?,
+                        "--inspect-scope-browse-bounded",
+                    )?),
+                ),
+                Some(option @ ("--inspect-browse-bounded" | "--inspect-browse-expanded-bounded")) => {
+                    let raw = text_value(&mut args, option)?;
+                    let (module, budget) = bounded_value(&raw, option)?;
+                    request
+                        .fields
+                        .push(Field::InspectBrowseBounded(
+                            module,
+                            option == "--inspect-browse-expanded-bounded",
+                            budget,
+                        ));
+                }
+                Some("--inspect-search-bounded") => {
+                    let raw = text_value(&mut args, "--inspect-search-bounded")?;
+                    let (query, budget) = bounded_value(&raw, "--inspect-search-bounded")?;
+                    request
+                        .fields
+                        .push(Field::InspectSearchBounded(query, budget));
+                }
                 Some("--inspect-out") => request.inspect_out(value(&mut args, "--inspect-out")?),
                 Some(option) if option.starts_with('-') => {
                     return Err(CliError::new(format!("unknown option: {option}")));
@@ -951,6 +984,22 @@ impl ExtractRequest {
                 29 => Field::InspectBrowse(decoder.string()?),
                 30 => Field::InspectBrowseExpanded(decoder.string()?),
                 43 => Field::InspectScopeBrowse,
+                61 => Field::InspectScopeBrowseBounded(nonzero_budget(decoder.u32()?)?),
+                62 => {
+                    let module = decoder.string()?;
+                    let expanded = match decoder.byte()? {
+                        0 => false,
+                        1 => true,
+                        other => {
+                            return Err(ProtocolError::InvalidBrowseExpansion(other))
+                        }
+                    };
+                    Field::InspectBrowseBounded(module, expanded, nonzero_budget(decoder.u32()?)?)
+                }
+                63 => {
+                    let query = decoder.string()?;
+                    Field::InspectSearchBounded(query, nonzero_budget(decoder.u32()?)?)
+                }
                 31 => Field::Cell,
                 51 => Field::CellPlan,
                 52 => Field::CheckSource,
@@ -1364,6 +1413,10 @@ impl ExtractRequest {
         self.fields.push(Field::InspectScopeBrowse);
     }
 
+    pub(crate) fn inspect_scope_browse_bounded(&mut self, budget: u32) {
+        self.fields.push(Field::InspectScopeBrowseBounded(budget));
+    }
+
     pub(crate) fn inspect_browse(&mut self, module: &str, expanded: bool) {
         self.fields.push(if expanded {
             Field::InspectBrowseExpanded(module.to_owned())
@@ -1372,8 +1425,18 @@ impl ExtractRequest {
         });
     }
 
+    pub(crate) fn inspect_browse_bounded(&mut self, module: &str, expanded: bool, budget: u32) {
+        self.fields
+            .push(Field::InspectBrowseBounded(module.to_owned(), expanded, budget));
+    }
+
     pub(crate) fn inspect_search(&mut self, query: &str) {
         self.fields.push(Field::InspectSearch(query.to_owned()));
+    }
+
+    pub(crate) fn inspect_search_bounded(&mut self, query: &str, budget: u32) {
+        self.fields
+            .push(Field::InspectSearchBounded(query.to_owned(), budget));
     }
 
     pub fn ensure_exact_inputs(&mut self, request: ExactInputsRequest) -> &mut Self {
@@ -1497,9 +1560,28 @@ impl ExtractRequest {
                     flag(&mut flags, "--inspect-browse-expanded", OsStr::new(value))
                 }
                 Field::InspectScopeBrowse => flags.push("--inspect-scope-browse".into()),
+                Field::InspectScopeBrowseBounded(budget) => flag(
+                    &mut flags,
+                    "--inspect-scope-browse-bounded",
+                    OsStr::new(&budget.to_string()),
+                ),
+                Field::InspectBrowseBounded(value, expanded, budget) => flag(
+                    &mut flags,
+                    if *expanded {
+                        "--inspect-browse-expanded-bounded"
+                    } else {
+                        "--inspect-browse-bounded"
+                    },
+                    OsStr::new(&format!("{value}={budget}")),
+                ),
                 Field::InspectSearch(value) => {
                     flag(&mut flags, "--inspect-search", OsStr::new(value))
                 }
+                Field::InspectSearchBounded(value, budget) => flag(
+                    &mut flags,
+                    "--inspect-search-bounded",
+                    OsStr::new(&format!("{value}={budget}")),
+                ),
                 Field::InspectStructuredInfo(query) => {
                     structured_flag(&mut flags, "--inspect-structured-info", query)
                 }
@@ -1741,6 +1823,8 @@ pub enum ProtocolError {
     InvalidWorldCell,
     RequestBudgetExceeded { declared: u64, limit: u32 },
     UnknownInspectionNamespace(u8),
+    InvalidBrowseExpansion(u8),
+    InvalidInspectionBudget,
     UnknownOptionalTextTag(u8),
 }
 
@@ -1777,6 +1861,12 @@ impl std::fmt::Display for ProtocolError {
             Self::UnknownInspectionNamespace(tag) => {
                 write!(f, "unknown structured inspection namespace tag {tag}")
             }
+            Self::InvalidBrowseExpansion(tag) => {
+                write!(f, "invalid bounded-browse expansion flag {tag}")
+            }
+            Self::InvalidInspectionBudget => {
+                f.write_str("inspection budget must be positive")
+            }
             Self::UnknownOptionalTextTag(tag) => {
                 write!(f, "unknown optional-text tag {tag}")
             }
@@ -1798,6 +1888,33 @@ fn push_u32(out: &mut Vec<u8>, value: usize) {
     );
     let value = value as u32;
     out.extend_from_slice(&value.to_le_bytes());
+}
+
+/// Zero would be indistinguishable from an omitted budget; a bounded request
+/// always states a positive cap.
+fn bounded_value(raw: &str, flag: &str) -> Result<(String, u32), CliError> {
+    let (value, budget) = raw
+        .rsplit_once('=')
+        .ok_or_else(|| CliError::new(format!("{flag} requires VALUE=BUDGET")))?;
+    Ok((value.to_owned(), bounded_budget(budget, flag)?))
+}
+
+fn bounded_budget(raw: &str, flag: &str) -> Result<u32, CliError> {
+    match raw.parse::<u32>() {
+        Ok(budget) if budget > 0 => Ok(budget),
+        Ok(_) => Err(CliError::new(format!("{flag} requires a positive budget"))),
+        Err(_) => Err(CliError::new(format!(
+            "{flag} requires an unsigned integer budget"
+        ))),
+    }
+}
+
+fn nonzero_budget(budget: u32) -> Result<u32, ProtocolError> {
+    if budget == 0 {
+        Err(ProtocolError::InvalidInspectionBudget)
+    } else {
+        Ok(budget)
+    }
 }
 
 fn push_frame(out: &mut Vec<u8>, value: &OsStr) {
@@ -1856,7 +1973,22 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::InspectBrowse(value) => tagged_frame(out, 29, OsStr::new(value)),
         Field::InspectBrowseExpanded(value) => tagged_frame(out, 30, OsStr::new(value)),
         Field::InspectScopeBrowse => out.push(43),
+        Field::InspectScopeBrowseBounded(budget) => {
+            out.push(61);
+            out.extend_from_slice(&budget.to_le_bytes());
+        }
+        Field::InspectBrowseBounded(module, expanded, budget) => {
+            out.push(62);
+            push_frame(out, OsStr::new(module));
+            out.push(u8::from(*expanded));
+            out.extend_from_slice(&budget.to_le_bytes());
+        }
         Field::InspectSearch(value) => tagged_frame(out, 35, OsStr::new(value)),
+        Field::InspectSearchBounded(value, budget) => {
+            out.push(63);
+            push_frame(out, OsStr::new(value));
+            out.extend_from_slice(&budget.to_le_bytes());
+        }
         Field::InspectStructuredInfo(query) => encode_structured(out, 36, query),
         Field::InspectStructuredType(query) => encode_structured(out, 37, query),
         Field::RetainedGeneration(identity, generation) => {
@@ -2190,6 +2322,35 @@ mod tests {
             decoded.fields.as_slice(),
             [Field::TargetModuleOnly, Field::Turn]
         ));
+    }
+
+    #[test]
+    fn bounded_inspection_fields_round_trip_their_budget() {
+        let mut request = ExtractRequest::default();
+        request.inspect_scope_browse_bounded(256);
+        request.inspect_browse_bounded("Data.Thing", true, 256);
+        request.inspect_search_bounded("a -> a", 64);
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert!(matches!(
+            decoded.fields.as_slice(),
+            [
+                Field::InspectScopeBrowseBounded(256),
+                Field::InspectBrowseBounded(module, true, 256),
+                Field::InspectSearchBounded(query, 64),
+            ] if module == "Data.Thing" && query == "a -> a"
+        ));
+    }
+
+    #[test]
+    fn a_zero_inspection_budget_is_rejected_not_treated_as_unbounded() {
+        let mut request = ExtractRequest::default().encode()[..17].to_vec();
+        request.extend_from_slice(&1u32.to_le_bytes());
+        request.push(61);
+        request.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            ExtractRequest::decode(&request).unwrap_err(),
+            ProtocolError::InvalidInspectionBudget
+        );
     }
 
     #[test]
