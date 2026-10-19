@@ -83,6 +83,26 @@ checkedPublicModuleHistories = do
       writeTarget work
       prependDependency work pragma
       refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldUntrackedOptions
+  forM_ ["-fbyte-code","-fobject-code"] $ \backendFlag ->
+    withRequestFixture $ \_ request work -> do
+      writeTarget work
+      let compiler = work </> "foreign-compiler.sh"
+          marker = work </> "foreign-compiler-ran"
+      writeFile compiler ("#!/bin/sh\necho ran > " ++ show marker ++ "\nexit 1\n")
+      permissions <- getPermissions compiler
+      setPermissions compiler (permissions {executable=True})
+      writeFile (work </> "BoundPreparedB.hs") (unlines
+        [ "{-# LANGUAGE CApiFFI #-}"
+        , "{-# OPTIONS_GHC " ++ backendFlag ++ " -pgmc " ++ show compiler ++ " #-}"
+        , "module BoundPreparedB where"
+        , "import Foreign.C.Types (CInt(..))"
+        , "foreign import capi unsafe \"uncaptured_world_header.h world_probe\" probe :: IO CInt"
+        , "__result :: Int"
+        , "__result = 97"
+        ])
+      refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldCodeGeneration
+      ran <- doesFileExist marker
+      unless (not ran) (fail "world module admission executed a transitive foreign compiler")
   withRequestFixture $ \_ request work -> do
     writeTarget work
     let preprocessor = work </> "preprocessor.sh"

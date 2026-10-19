@@ -123,6 +123,8 @@ the active `CompilerScope` holds that realization through END. Home queries
 check only captured source roots with the world-only preprocessing guard;
 prepared queries use their exact completed HPT. They never manufacture an
 expression checking target or fall back to ambient source after refusal.
+The guard admits effective per-file flags only with GHC's checking backend:
+bytecode generation can compile foreign stubs even when CPP and TH are disabled.
 
 Exact-scope manifests use strict `TPEXACTSCOPE` version 16 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization

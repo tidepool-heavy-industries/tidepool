@@ -674,7 +674,7 @@ checkedPublicModuleEvidence :: CheckedPublicModuleResult -> DependencyEvidence
 checkedPublicModuleEvidence (CheckedPublicModuleResult _ _ evidence _) = evidence
 
 data WorldModulePolicy = WorldLiterateSource | WorldPreprocessing
-  | WorldUntrackedOptions | WorldSearchInputsChanged | WorldUncapturedDependency | WorldPrivateModule
+  | WorldUntrackedOptions | WorldCodeGeneration | WorldSearchInputsChanged | WorldUncapturedDependency | WorldPrivateModule
   deriving (Eq, Show)
 
 data WorldModulePolicyFailure = WorldModulePolicyFailure FilePath WorldModulePolicy
@@ -6012,9 +6012,14 @@ withWorldModulePreprocessing selection path action
       pure original
 
 requireWorldModuleFlags :: FilePath -> DynFlags -> IO ()
-requireWorldModuleFlags path flags =
+requireWorldModuleFlags path flags = do
   when (hasUntrackedCompileTimeExecution flags)
     (throwIO (WorldModulePolicyFailure path WorldUntrackedOptions))
+  -- A module-local -fbyte-code also generates foreign stubs through GHC's
+  -- interpreter backend. Keep every demanded source in the checking backend
+  -- before make can invoke a compiler or read uncaptured foreign headers.
+  when (backendGeneratesCode (backend flags))
+    (throwIO (WorldModulePolicyFailure path WorldCodeGeneration))
 
 -- Make owns temporary interface cleanup. Every candidate view is staged in
 -- this private request directory, retained through deferred target checking,
