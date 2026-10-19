@@ -60,6 +60,7 @@ workerChild oneFreeFd scratch = do
         ["source-free-capture-overflow"] -> BS.hPut stdout (BS.replicate (limit + 1) 111)
         ["source-free-response-overflow"] -> pure ()
         ["source-free-capture-failure"] -> removeCaptureFiles scratch
+        ["source-free-rejected-capture-failure"] -> removeCaptureFiles scratch
         ["stdout-overflow"] -> BS.hPut stdout (BS.replicate (limit + 1) 111)
         ["exact-aggregate"] -> do
           BS.hPut stdout (BS.replicate (limit `div` 2) 111)
@@ -79,6 +80,7 @@ workerChild oneFreeFd scratch = do
         ["source-free-capture-overflow"] -> ExactInputsResponse (ExactInputsReady "realization")
         ["source-free-response-overflow"] -> ExactInputsResponse (ExactInputsReady (repeat 'x'))
         ["source-free-capture-failure"] -> ExactInputsResponse (ExactInputsReady "realization")
+        ["source-free-rejected-capture-failure"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
         _ -> DiagnosticResponse []
 
 check :: FilePath -> IO ()
@@ -200,7 +202,16 @@ checkPartialAcquisition scratch = do
       unless (null leftovers) (fail ("partial acquisition retained tempfiles: " ++ show leftovers))
 
 checkSourceFreeCleanup :: FilePath -> IO ()
-checkSourceFreeCleanup scratch = do
+checkSourceFreeCleanup root = mapM_ one
+  ["source-free-capture-failure", "source-free-rejected-capture-failure"]
+  where
+    one mode = do
+      let scratch = root ++ "/" ++ mode
+      createDirectory scratch
+      checkSourceFreeCleanupAt mode scratch
+
+checkSourceFreeCleanupAt :: String -> FilePath -> IO ()
+checkSourceFreeCleanupAt mode scratch = do
   executable <- lookupEnv "TIDEPOOL_TEST_WORKER_RESPONSE_CHILD" >>= maybe
     (fail "missing declared worker-response child executable") pure
   bracket (createProcess (proc executable ["--worker", scratch])
@@ -213,10 +224,14 @@ checkSourceFreeCleanup scratch = do
       hFlush input
       ack <- exact output 1
       unless (ack == BS.singleton 1) (fail "missing source-free transaction acknowledgement")
-      forRequest input output "source-free-capture-failure" $ \code out _ ->
+      forRequest input output mode $ \code out _ -> do
         unless (code == 1 && BSC.isInfixOf "worker-failure" out
             && not (BSC.isInfixOf "TPEXO" out))
           (fail "capture cleanup failure exposed an unconfirmed Ready result")
+        if mode == "source-free-rejected-capture-failure"
+          then unless (BSC.isInfixOf "AcquisitionRejected" out)
+            (fail "unsafe capture discarded the typed acquisition refusal")
+          else pure ()
       hClose input
       terminal <- timeout 10000000 (waitForProcess child)
       case terminal of

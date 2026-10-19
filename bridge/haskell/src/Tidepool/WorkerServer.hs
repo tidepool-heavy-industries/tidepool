@@ -22,7 +22,7 @@ import System.IO
   ( Handle, IOMode(ReadMode), hClose, hFileSize, hFlush, openTempFile
   , openBinaryFile, stderr, stdin, stdout )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), ReportOutcome(..), renderDiagsJson)
-import Tidepool.ExtractRequest (EnsureExactInputsOutcome, encodeEnsureExactInputsOutcomeWithin)
+import Tidepool.ExtractRequest (EnsureExactInputsOutcome(..), encodeEnsureExactInputsOutcomeWithin)
 import Tidepool.RequestCompletion
 import Tidepool.WorkerDiagnostics (CaptureAssessment(..), renderCompletion)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
@@ -239,6 +239,8 @@ renderCaptured channels completed captured = do
 
 responseDiagnostics :: WorkerResponse -> [Diag]
 responseDiagnostics (DiagnosticResponse diagnostics) = diagnostics
+responseDiagnostics (ExactInputsResponse (ExactInputsRejected cause)) =
+  [Diag Nothing DiagError ("exact input acquisition rejected: " ++ show cause)]
 responseDiagnostics (ExactInputsResponse _) = []
 
 -- Force only the remaining response budget and one growth sentinel while
