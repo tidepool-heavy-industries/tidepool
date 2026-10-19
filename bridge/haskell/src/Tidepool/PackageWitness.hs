@@ -502,12 +502,12 @@ compilerPackageBootFields =
 
 supportedPackageProfileIdentity :: BS.ByteString -> String
 supportedPackageProfileIdentity bytes =
-  shaHex ("Tidepool GHC supported package profile v1\0" <> bytes)
+  shaHex ("Tidepool GHC supported package profile v2\0" <> bytes)
 
 captureSupportedPackageProfileWith :: FilePath -> HscEnv -> IO BS.ByteString
 captureSupportedPackageProfileWith libdir env = do
   canonicalLibdir <- canonicalAbsolute libdir
-  globalDB <- canonicalAbsolute (globalPackageDatabasePath flags)
+  globalDB <- rawAbsolute (globalPackageDatabasePath flags)
   -- UnitState can index an instantiated unit under more than one key. Emit
   -- each actual UnitId once, refusing inconsistent aliases rather than picking.
   units <- forM (groupBy sameUnit (sortOn unitKey (listUnitInfo (hsc_units env)))) $ \aliases ->
@@ -523,7 +523,7 @@ captureSupportedPackageProfileWith libdir env = do
        canonicalLibdir, globalDB]
     count <- counted (length units)
     rows <- traverse unitRow units
-    pure (byteString "TPGHC001" <> mconcat header <> count <> mconcat rows)
+    pure (byteString "TPGHC002" <> mconcat header <> count <> mconcat rows)
   pure (BL.toStrict (toLazyByteString builder))
   where
     flags = hsc_dflags env
@@ -543,17 +543,25 @@ unitRow info = do
   abi <- framedText (ST.unpack (unitAbiHash info))
   directories <- forM
     [unitImportDirs info, unitLibraryDirs info, unitLibraryDynDirs info, unitIncludeDirs info] $ \paths -> do
-      canonical <- liftIO (traverse (canonicalAbsolute . ST.unpack) paths)
-      count <- counted (length canonical)
-      values <- traverse framedText canonical
+      -- GHC consumes these expanded paths as written. The source qualifier
+      -- must see their kernel-order alias traversal before rooting the profile;
+      -- canonicalizing here would erase mutable intermediate hops.
+      raw <- liftIO (traverse (rawAbsolute . ST.unpack) paths)
+      count <- counted (length raw)
+      values <- traverse framedText raw
       pure (count <> mconcat values)
   pure (identity <> abi <> mconcat directories)
 
 canonicalAbsolute :: FilePath -> IO FilePath
 canonicalAbsolute path = do
+  _ <- rawAbsolute path
+  canonicalizePath path
+
+rawAbsolute :: FilePath -> IO FilePath
+rawAbsolute path = do
   unless (isAbsolute path && '\0' `notElem` path)
     (fail "supported package profile requires absolute paths")
-  canonicalizePath path
+  pure path
 
 framedText :: String -> ProfileEncoding Builder
 framedText value = do
@@ -641,7 +649,7 @@ readCompilerPackageBoot = do
       -- immutable input must be inside the actual preheld service closure.
       forM_ (path:libdir:settings:interpreter:globalDB:paths) $ \input -> do
         canonical <- canonicalAbsolute input
-        unless (canonical == input && coveredBy objects canonical)
+        unless (coveredBy objects input && coveredBy objects canonical)
           (fail "compiler service profile input is outside its retained closure")
       let association = ServicePackageAssociation workerBytes epochBytes sourceBytes profileBytes (SHA.hash expected)
       pure (RootedPackageBoot expected objects libdir globalDB association)
@@ -654,8 +662,9 @@ validateCompilerPackageBootConfiguration ObservationPackageBoot _ = pure ()
 validateCompilerPackageBootConfiguration (RootedPackageBoot _ objects _ expectedDB _) flags = do
   unless (coveredBy objects (globalPackageDatabasePath flags))
     (fail "configured GHC package database source is not retained")
-  actualDB <- canonicalAbsolute (globalPackageDatabasePath flags)
-  unless (actualDB == expectedDB && coveredBy objects actualDB)
+  actualDB <- rawAbsolute (globalPackageDatabasePath flags)
+  targetDB <- canonicalAbsolute actualDB
+  unless (actualDB == expectedDB && coveredBy objects targetDB)
     (fail "configured GHC package database differs from retained profile")
 
 validateCompilerPackageBoot :: CompilerPackageBoot -> FilePath -> HscEnv
@@ -775,7 +784,7 @@ decodePackageProfileWrapper = evalStateT $ do
 decodeSupportedPackageFacts :: BS.ByteString -> Either String SupportedPackageFacts
 decodeSupportedPackageFacts = evalStateT $ do
   magic <- profileTake 8
-  unless (magic == "TPGHC001") (profileReject "unsupported compiler package facts version")
+  unless (magic == "TPGHC002") (profileReject "unsupported compiler package facts version")
   _version <- profileString
   _target <- profileString
   libdir <- profileString
