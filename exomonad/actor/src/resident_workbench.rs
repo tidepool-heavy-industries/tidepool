@@ -5054,12 +5054,22 @@ impl<H, O> ResidentActorRunner<H, O> {
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
         let (machine, lexical_scope) = spawn_blocking_in_span(move || {
             let prepared = compiler_work
-                .run_with_close(|settlement| factory(session_id, &source_layer, settlement))
-                .into_outcome();
-            if !prepared.close.resources_retired() {
+                .run_with_close(|settlement| factory(session_id, &source_layer, settlement));
+            let advancement = prepared
+                .host_admission_cancellation()
+                .ok_or_else(|| std::io::Error::other("child factory lost its cancellation owner"))
+                .and_then(|cancellation| cancellation.checkpoint());
+            let prepared = prepared.into_outcome();
+            if !matches!(
+                &prepared.close,
+                tidepool_runtime::CompilerTransactionClose::Clean
+                    | tidepool_runtime::CompilerTransactionClose::NotStarted
+            ) || advancement.is_err()
+            {
                 return Err(format!(
-                    "child factory preparation did not close: {:?}; action: {:?}",
+                    "child factory preparation cannot advance: close {:?}; cancellation {:?}; action {:?}",
                     prepared.close,
+                    advancement.err(),
                     prepared.action.as_ref().err()
                 ));
             }
