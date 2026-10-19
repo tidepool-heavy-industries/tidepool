@@ -193,6 +193,15 @@ impl StagedBlocks {
 pub(crate) struct ReachableBlocks {
     roots: Vec<Cid>,
     blocks: OrdMap<Cid, ReachableBlock>,
+    work: FrontierWork,
+}
+
+#[derive(Clone, Copy, Default, Debug, Eq, PartialEq)]
+pub(crate) struct FrontierWork {
+    pub(crate) link_visits: u64,
+    pub(crate) unlink_visits: u64,
+    pub(crate) verified_bytes: u64,
+    pub(crate) decoded_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -203,6 +212,10 @@ struct ReachableBlock {
 }
 
 impl ReachableBlocks {
+    pub(crate) fn work(&self) -> FrontierWork {
+        self.work
+    }
+
     pub(crate) fn blocks(&self) -> impl Iterator<Item = (&Cid, &Arc<[u8]>)> {
         self.blocks.iter().map(|(cid, block)| (cid, &block.bytes))
     }
@@ -215,7 +228,9 @@ impl ReachableBlocks {
         roots: Vec<Cid>,
     ) -> Result<Self, SnapshotError> {
         if roots == self.roots {
-            return Ok(self.clone());
+            let mut unchanged = self.clone();
+            unchanged.work = FrontierWork::default();
+            return Ok(unchanged);
         }
         let pending = staged
             .blocks
@@ -223,6 +238,7 @@ impl ReachableBlocks {
             .map(|(cid, bytes)| (*cid, bytes))
             .collect::<std::collections::BTreeMap<_, _>>();
         let mut next = self.clone();
+        next.work = FrontierWork::default();
         for root in &roots {
             next.retain(*root, &pending)?;
         }
@@ -238,6 +254,7 @@ impl ReachableBlocks {
         cid: Cid,
         staged: &std::collections::BTreeMap<Cid, &Arc<[u8]>>,
     ) -> Result<(), SnapshotError> {
+        self.work.link_visits = self.work.link_visits.saturating_add(1);
         if let Some(block) = self.blocks.get_mut(&cid) {
             block.incoming = block
                 .incoming
@@ -246,7 +263,9 @@ impl ReachableBlocks {
             return Ok(());
         }
         let bytes = staged.get(&cid).ok_or(SnapshotError::MissingBlock(cid))?;
+        self.work.verified_bytes = self.work.verified_bytes.saturating_add(bytes.len() as u64);
         verify_block(&cid, bytes)?;
+        self.work.decoded_bytes = self.work.decoded_bytes.saturating_add(bytes.len() as u64);
         let value: ciborium::value::Value =
             ciborium::de::from_reader(&bytes[..]).map_err(malformed)?;
         let mut children = Vec::new();
@@ -267,6 +286,7 @@ impl ReachableBlocks {
     }
 
     fn release(&mut self, cid: Cid) -> Result<(), SnapshotError> {
+        self.work.unlink_visits = self.work.unlink_visits.saturating_add(1);
         let block = self
             .blocks
             .get_mut(&cid)

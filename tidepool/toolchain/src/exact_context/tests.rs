@@ -1337,6 +1337,12 @@ fn current_block_frontier_materializes_only_changed_hamt_paths() {
     let successor = frontier
         .replace_roots(&delta, vec![*next.root().cid()])
         .unwrap();
+    let cold_work = frontier.work();
+    let changed_work = successor.work();
+    assert!(changed_work.verified_bytes > 0);
+    assert!(changed_work.verified_bytes < cold_work.verified_bytes / 4);
+    assert!(changed_work.decoded_bytes < cold_work.decoded_bytes / 4);
+    assert!(changed_work.link_visits + changed_work.unlink_visits < cold_work.link_visits / 2);
     let restored = hydrate_map::<u64, String, _>(&successor, next.root()).unwrap();
     assert_eq!(restored.facts(), &next_facts);
     let mut unchanged = Materializer::new(&successor);
@@ -1351,6 +1357,56 @@ fn current_block_frontier_materializes_only_changed_hamt_paths() {
         .replace_roots(&none, vec![*same.root().cid()])
         .unwrap();
     assert_eq!(frontier_counts(&same_frontier), frontier_counts(&successor));
+    assert_eq!(same_frontier.work(), FrontierWork::default());
+}
+
+#[test]
+fn reachable_frontier_missing_child_does_not_change_existing_or_fork() {
+    let (staged, nodes, edges) = reachable_fixture();
+    let initial = ReachableBlocks::default()
+        .replace_roots(&staged, vec![nodes[0]])
+        .unwrap();
+    let fork = initial.clone();
+    // The top first retains A successfully, then encounters the omitted B.
+    let incomplete = StagedBlocks {
+        blocks: staged
+            .blocks
+            .iter()
+            .filter(|(cid, _)| *cid != nodes[2])
+            .cloned()
+            .collect(),
+        metrics: Default::default(),
+    };
+    assert!(matches!(initial.replace_roots(&incomplete, vec![nodes[3]]),
+        Err(SnapshotError::MissingBlock(cid)) if cid == nodes[2]));
+    assert_eq!(
+        frontier_counts(&initial),
+        full_incoming(&[nodes[0]], &edges)
+    );
+    assert_eq!(frontier_counts(&fork), frontier_counts(&initial));
+    assert!(initial.get(&nodes[0]).unwrap().is_some());
+}
+
+#[test]
+fn reachable_frontier_refuses_malformed_cid_link_shapes() {
+    use ciborium::value::Value;
+    for value in [
+        Value::Tag(7, Box::new(Value::Null)),
+        Value::Tag(42, Box::new(Value::Null)),
+        Value::Tag(42, Box::new(Value::Bytes(vec![1, 2, 3]))),
+        Value::Tag(42, Box::new(Value::Bytes(vec![0, 1, 2, 3]))),
+    ] {
+        let mut body = Vec::new();
+        ciborium::ser::into_writer(&value, &mut body).unwrap();
+        let cid = Cid::new_v1(DAG_CBOR, Code::Blake2b256.digest(&body));
+        let staged = StagedBlocks {
+            blocks: vec![(cid, body.into())],
+            metrics: Default::default(),
+        };
+        assert!(ReachableBlocks::default()
+            .replace_roots(&staged, vec![cid])
+            .is_err());
+    }
 }
 
 proptest! {

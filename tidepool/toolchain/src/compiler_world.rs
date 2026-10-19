@@ -339,6 +339,15 @@ impl CompilerWorldOpenInputs {
         let primary_blocks = ReachableBlocks::default()
             .replace_roots(&staged, vec![*primary_root.cid()])
             .map_err(|error| source_failure(error.to_string()))?;
+        let work = primary_blocks.work();
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::SemanticDigestInputByte,
+            work.verified_bytes,
+        );
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::MaterializationGraphVisit,
+            work.link_visits.saturating_add(work.unlink_visits),
+        );
         Ok(Self {
             primary_context,
             primary_root,
