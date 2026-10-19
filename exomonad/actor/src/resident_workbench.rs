@@ -17118,9 +17118,11 @@ pub(crate) mod request_tests {
             assert!(matches!(refused, Err(ResidentActorWorkbenchError::WorldInspection(tidepool_runtime::session::WorldInspectionError::UnsupportedSource))));
             for counter in [HostWorkCounter::ActorCompileViewCapture, HostWorkCounter::StructuredProvenance,
                 HostWorkCounter::InspectionInputCapture, HostWorkCounter::ColdWorldBuilderRowVisit,
-                HostWorkCounter::InputFdEnumeration, HostWorkCounter::CompileViewDigestInputByte, HostWorkCounter::SemanticDigestInputByte, HostWorkCounter::SemanticEncoding, HostWorkCounter::ScopeEncodedByte] {
+                HostWorkCounter::InputFdEnumeration, HostWorkCounter::CompileViewDigestInputByte, HostWorkCounter::SemanticDigestInputByte, HostWorkCounter::SemanticEncoding] {
                 assert_eq!(unsupported_work.snapshot().get(counter), 0, "unsupported source performed {counter:?}");
             }
+            assert!(unsupported_work.snapshot().get(HostWorkCounter::ScopeEncodedByte) > 0,
+                "cold runtime namespace was captured before the source-domain refusal");
             let (mismatched, _mismatched_owner) = world_query_test_source(&[Some("module Different where\nknown :: Int\nknown = 7\n")]);
             let mismatch_layer = mismatched.clone();
             let mismatch_context = workbench.access.with_machine(context, move |session, context, _| {
