@@ -178,16 +178,22 @@ owner may be erased merely to make a lifetime assertion pass.
 An ordinary `exact.value_source_support.prepare` constructor trace span supports
 future zero-construction declaration-only / first-value mixed-cell checks; those
 are not executed yet. On concrete root/transition proposal arrival the area
-arbitrates with campaign/warm/physical owners, assigns the minimal accepted
-production bridge, obtains independent exact review, repairs and folds full
-history. No periodic polling or wake loop: when dependency-bound, retain this
+retains the exact design and counterexample for campaign/warm/physical owners.
+The current exact-context input-reuse parcel is the last independent constructor
+implementation before the native issuer gate: finish its exact review, repairs
+and full-history fold, then hold the source-support bridge and dependent
+02/P4/03/publication implementation until owning production **and** test consumers
+compile and focused controls execute. Do not accumulate an uncompiled dependent
+regression stack. Parent reports the active warm Haskell lane leaves less than
+1 GiB reserve margin; the host native graph is not admitted.
+No periodic polling or wake loop: when dependency-bound, retain this
 waiting state and yield. The result
 producer checks recipient state and uses `followup_task` for a completed/idle
 non-root parent, with exact candidate, evidence and next action; `send_message`
 suffices only while the recipient is running.
 
 Broad 02/03 P1/P4/publication migration still needs the compiled issuing contract,
-complete negative dependency controls and joined production evidence. Independent
-source design/constructor implementation for 01 remains authorized despite the
-native disk gate. Preserve remaining warm folds and resource blockers explicitly;
+complete negative dependency controls and joined production evidence. Source
+design review may finish; further constructor implementation is held after the
+current input-reuse parcel. Preserve remaining warm folds and resource blockers explicitly;
 source review does not make this area integration-ready or qualified.
