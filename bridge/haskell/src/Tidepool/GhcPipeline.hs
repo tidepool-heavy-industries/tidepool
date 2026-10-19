@@ -1463,7 +1463,7 @@ commitHeldWorldDependencies (PendingWorldDependencies identity reference policy 
 -- The same world owner accounts optional residency separately from all live
 -- physical backing, including active-only and quarantined extents.
 data WorldBackingState
-  = WorldBackingLive !Int | WorldBackingRemoving | WorldBackingRemoved
+  = WorldBackingLive !Int | WorldBackingRemoving | WorldBackingDeleted
   | WorldBackingQuarantined
 newtype WorldBackingLease = WorldBackingLease (IORef WorldBackingState)
 data WorldBackingAccounting = WorldBackingAccounting !Int !Int !Integer !Int
@@ -1597,7 +1597,7 @@ worldMaterializationOwners (WorldMaterialization _ _ _ _ _ _ _ _ (WorldBackingLe
   state <- readIORef lease
   pure $ case state of
     WorldBackingLive count -> Just count
-    WorldBackingRemoved -> Just 0
+    WorldBackingDeleted -> Just 0
     _ -> Nothing
 
 releaseWorldMaterialization :: WorldMaterialization -> IO Bool
@@ -1609,7 +1609,7 @@ releaseWorldMaterialization (WorldMaterialization directory _ _ _ _ _ _ _ (World
       writeIORef lease WorldBackingRemoving
       completed <- captureCompletion (restore (removeDirectoryRecursive directory))
       case completionResult completed of
-        BodySucceeded () -> writeIORef lease WorldBackingRemoved >> pure True
+        BodySucceeded () -> writeIORef lease WorldBackingDeleted >> pure True
         _ -> do
           writeIORef lease WorldBackingQuarantined
           finishCompletion completed
