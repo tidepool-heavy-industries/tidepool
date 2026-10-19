@@ -46,17 +46,21 @@ The directory/R1 consumers have no passing compilation or test evidence; the
 std-only generator and snapshot check do not establish those claims. See
 [the independent review](REVIEW-BASE.md) for findings and untested boundaries.
 
-The cumulative `fe3ef791` review is in progress and has required repair before
-fold: a continuation-only compiler ticket has no eager source claim, while
+The cumulative `fe3ef791` source review completed with three repair findings:
+a continuation-only compiler ticket has no eager source claim, while
 hidden binding completion can compile and obtain a lazy runtime claim. Checkout
-restoration currently drops that claim even when compiler END is uncertain.
-The leaf must connect the lazy obligation to its actual compiler-close owner;
-pure continuation must stay usable without fresh source permission. Separately,
-the new generation-history fixture drops its lexical lease before subsequent
-minting, causing real lease reaping to close gates prematurely. Repair that
-fixture's custody, not production lifetime rules. A pre-initial retained lexical
-lease potentially reusing an inherited parent gate at own-world adoption is
-under exact production-reachability review, not yet a confirmed product finding.
+restoration dropped that claim even when compiler END was uncertain. An unrelated
+SpawnOwnership check also named a nonexistent enum variant, and the new
+generation-history fixture dropped its lexical lease before subsequent minting.
+The frozen repair candidate is `9bb4c1eb4bf5a0775dae68beb119446bb34d06b9`,
+including `47f9442b`, `f2ab98b0` and `9bb4c1eb`. It transfers lazy runtime claims
+into the actual compiler ticket before END/unwind, restores the enum variant,
+and retains fixture scope leases. Pure continuation has no eager source claim.
+The supervisor inspected the claim-transfer wiring directly; cumulative exact
+rereview is in progress. No R1 source has yet been folded into the area branch.
+The suspected pre-initial retained-lease/parent-gate alias has no demonstrated
+production path: retention mints a separate detached scope, and actual child
+target leasing first occurs at adoption. Keep this distinction in the review.
 
 ## Owners and exact continuation
 
@@ -72,16 +76,17 @@ an informed worker yields.
   compile/install consumers and typed child reservation callers. Its committed
   R1 source is `3d56ffcc344a12606f095d1f0bac2ff0abf69959`, joined with area
   `a0d293d2a0` at `fe3ef791f96788d9d71ac1d2333b6d6436bac35d` in the leaf
-  checkout. Awaited event: bounded final RunOwned/ticket/SourceCallback control
-  checkpoint plus exact pending checks. The area owner then integrates it,
+  checkout. The final source checkpoint is `9bb4c1eb4bf5a0775dae68beb119446bb34d06b9`;
+  the leaf is preparing its terminal receipt with exact focused selectors and
+  held successor map. The area owner then integrates the reviewed checkpoint,
   regenerates source maps and owns the first admitted compile/repair stage.
 - `/root/warm_compiler_campaign/reload/authority_review` is read-only except
   `REVIEW-BASE.md`. It reviewed the complete source delta through `804a4d3e2f`
   and completed the bootstrap-world/typed-child strategy review with the settled
   reopen-only recovery contract. It was reactivated for exact cumulative
-  `5b74..fe3ef791` review while the leaf finishes its bounded delta. Actual
-  compile/focused-gate evidence is still pending. The area owner supplies that
-  final delta and native evidence for cumulative review, then
+  `5b74..9bb4c1eb` repair review after the blocked `fe3ef791` report. Actual
+  compile/focused-gate evidence is still pending. The area owner supplies native
+  evidence and any compile repairs for cumulative review, then
   repairs findings, requests exact rereview and owns the fold.
 
 Before yielding, retain the exact awaited event, producer/observer, recipient
