@@ -711,7 +711,13 @@ impl SessionCompileView {
     pub fn injected_module_names(&self) -> Vec<String> {
         self.injected_values
             .iter()
-            .map(SessionModule::module_name)
+            .map(|module| {
+                tidepool_toolchain::timing::record_host_work(
+                    tidepool_toolchain::timing::HostWorkCounter::PreparedInjectedNameVisit,
+                    1,
+                );
+                module.module_name()
+            })
             .collect()
     }
 

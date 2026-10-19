@@ -1622,10 +1622,20 @@ impl PersistentSession {
     /// `None` for a dead scope, a session without a declaration/include
     /// persistent binding store, or an exhausted value namespace.
     pub fn compile_view_in(&self, scope: ScopeId) -> Option<SessionCompileView> {
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::CompileViewCapture,
+            1,
+        );
         let cached = self.scoped_compile_view_in(scope)?;
         let injected_values = self
             .bindings
             .live_modules()
+            .inspect(|_| {
+                tidepool_toolchain::timing::record_host_work(
+                    tidepool_toolchain::timing::HostWorkCounter::InjectedValueVisit,
+                    1,
+                );
+            })
             .filter(|module| !self.is_stub_module(*module))
             .collect();
         Some(
@@ -1642,6 +1652,10 @@ impl PersistentSession {
     /// Read mutation-owner facts without constructing a view or its digest.
     /// A missing stable witness requires a checked cold observation.
     pub(super) fn compile_view_key_in(&self, scope: ScopeId) -> Option<CompileViewKey> {
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::WorldKeyFactRead,
+            1,
+        );
         if !self.scopes.is_live(scope) || self.compiler_input_revision == 0 {
             return None;
         }
@@ -4332,17 +4346,53 @@ mod checkpoint_scope_tests {
                 session.bind_in(scope, entry).unwrap();
             }
             assert!(session.compile_views.lock().is_empty());
-            let key = session.compile_view_key_in(scope).unwrap();
-            for _ in 0..100 {
-                assert!(session.compile_view_key_in(scope).as_ref() == Some(&key));
-            }
+            let observation = tidepool_toolchain::timing::HostWorkObservation::new();
+            let key = observation.scope(|| {
+                let key = session.compile_view_key_in(scope).unwrap();
+                for _ in 0..100 {
+                    assert!(session.compile_view_key_in(scope).as_ref() == Some(&key));
+                }
+                key
+            });
+            use tidepool_toolchain::timing::HostWorkCounter;
+            assert_eq!(
+                observation
+                    .snapshot()
+                    .get(HostWorkCounter::WorldKeyFactRead),
+                101
+            );
+            assert_eq!(
+                observation
+                    .snapshot()
+                    .get(HostWorkCounter::CompileViewCapture),
+                0
+            );
+            assert_eq!(
+                observation
+                    .snapshot()
+                    .get(HostWorkCounter::InjectedValueVisit),
+                0
+            );
             assert!(
                 session.compile_views.lock().is_empty(),
                 "key reads must not prepare a view"
             );
             assert_eq!(session.compile_view_bytes_hashed.load(Ordering::Relaxed), 0);
-            let prepared = session.scoped_compile_view_in(scope).unwrap();
-            assert!(prepared.key.as_ref() == Some(&key));
+            let prepared = observation.scope(|| session.compile_view_in(scope).unwrap());
+            assert_eq!(prepared.lexical_scope(), scope);
+            assert!(session.compile_view_key_in(scope).as_ref() == Some(&key));
+            assert_eq!(
+                observation
+                    .snapshot()
+                    .get(HostWorkCounter::CompileViewCapture),
+                1
+            );
+            assert!(
+                observation
+                    .snapshot()
+                    .get(HostWorkCounter::InjectedValueVisit)
+                    > 0
+            );
             assert!(
                 session.compile_view_bytes_hashed.load(Ordering::Relaxed) > 0,
                 "the ordinary view path must calibrate the work observation"
