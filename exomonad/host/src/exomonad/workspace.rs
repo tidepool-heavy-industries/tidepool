@@ -847,8 +847,8 @@ impl FrozenWorkspace {
 
     fn validate_toolset_coverage(&self, coverage: &[PreparedToolsetCoverage]) -> Result<()> {
         coverage_entries(coverage)?;
-        let capabilities = crate::actor_host::admitted_capabilities(Some(self))
-            .map_err(std::io::Error::other)?;
+        let capabilities =
+            crate::actor_host::admitted_capabilities(Some(self)).map_err(std::io::Error::other)?;
         let expected = capabilities.effect_keys();
         if coverage[0].requested_effects != expected {
             return Err(
@@ -1518,8 +1518,29 @@ fn verify_deployment_sources(selection: &DeploymentSources) -> Result<()> {
 /// without publishing or writing any source bytes.
 pub(super) fn inspect_sources(source: &Path) -> Result<BTreeMap<PathBuf, String>> {
     let mut files = BTreeMap::new();
-    inspect_source_tree(source, Path::new(""), None, &mut files, false)?;
+    inspect_source_tree(source, Path::new(""), None, &mut files, false, &mut None)?;
     Ok(files)
+}
+
+/// Read the same captured namespace and bodies in one traversal. The caller
+/// retains the source root owner; these bytes do not select a compiler world.
+pub(super) fn read_captured_source_files(
+    source: &Path,
+) -> Result<(
+    BTreeMap<PathBuf, String>,
+    BTreeMap<PathBuf, std::sync::Arc<[u8]>>,
+)> {
+    let mut files = BTreeMap::new();
+    let mut bodies = BTreeMap::new();
+    inspect_source_tree(
+        source,
+        Path::new(""),
+        None,
+        &mut files,
+        false,
+        &mut Some(&mut bodies),
+    )?;
+    Ok((files, bodies))
 }
 
 pub(super) fn is_haskell_source(path: &Path) -> bool {
@@ -1566,7 +1587,14 @@ fn capture_tree(
     files: &mut BTreeMap<PathBuf, String>,
     all_authored: bool,
 ) -> Result<()> {
-    inspect_source_tree(source, relative, Some(destination), files, all_authored)
+    inspect_source_tree(
+        source,
+        relative,
+        Some(destination),
+        files,
+        all_authored,
+        &mut None,
+    )
 }
 
 /// Durable memory is not authored source, even when `.exomonad` is a source root.
@@ -1588,7 +1616,11 @@ fn inspect_source_tree(
     destination: Option<&Path>,
     files: &mut BTreeMap<PathBuf, String>,
     all_authored: bool,
+    bodies: &mut Option<&mut BTreeMap<PathBuf, std::sync::Arc<[u8]>>>,
 ) -> Result<()> {
+    if bodies.is_some() {
+        tidepool_extract_cmd::compiler_host_checkpoint()?;
+    }
     if let Some(destination) = destination {
         std::fs::create_dir_all(destination.join(relative))?;
     }
@@ -1618,11 +1650,42 @@ fn inspect_source_tree(
         }
         let path = relative.join(&name);
         if kind.is_dir() {
-            inspect_source_tree(&entry.path(), &path, destination, files, all_authored)?;
+            inspect_source_tree(
+                &entry.path(),
+                &path,
+                destination,
+                files,
+                all_authored,
+                bodies,
+            )?;
         } else if all_authored || is_haskell_source(&entry.path()) {
+            if bodies.is_some() && !kind.is_file() {
+                return Err(format!(
+                    "captured compiler source is not a regular file: {}",
+                    entry.path().display()
+                )
+                .into());
+            }
+            if bodies.is_some() {
+                tidepool_extract_cmd::compiler_host_checkpoint()?;
+            }
             let bytes = std::fs::read(entry.path())?;
+            if bodies.is_some() {
+                tidepool_toolchain::timing::record_host_work(
+                    tidepool_toolchain::timing::HostWorkCounter::ColdSourceFile,
+                    1,
+                );
+                tidepool_toolchain::timing::record_host_work(
+                    tidepool_toolchain::timing::HostWorkCounter::ColdSourceByte,
+                    bytes.len() as u64,
+                );
+                tidepool_extract_cmd::compiler_host_checkpoint()?;
+            }
             if let Some(destination) = destination {
                 tidepool_atomic_write::write_durable(&destination.join(&path), &bytes)?;
+            }
+            if let Some(bodies) = bodies.as_mut() {
+                bodies.insert(path.clone(), std::sync::Arc::from(bytes.as_slice()));
             }
             files.insert(path, blake3::hash(&bytes).to_hex().to_string());
         }
@@ -2605,12 +2668,9 @@ mod tests {
         let project = catalog_project();
         let (_libraries, selection) = deployment_fixture();
         let run = tempfile::tempdir().unwrap();
-        let frozen = FrozenWorkspace::load_with_deployment(
-            project.path(),
-            run.path(),
-            Some(selection),
-        )
-        .unwrap();
+        let frozen =
+            FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
+                .unwrap();
         let requested = crate::actor_host::admitted_capabilities(Some(&frozen))
             .unwrap()
             .effect_keys()
