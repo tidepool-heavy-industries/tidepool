@@ -13913,33 +13913,73 @@ mod tests {
             "distinct group issuers retain the same exact carrier"
         );
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let issue_context = |index: usize, view: &ArtifactView| {
+            ExactDeclarationContext::from_authenticated_execution(
+                producer.sha256(),
+                view,
+                projection.clone(),
+                vec![
+                    crate::declaration_join::ExactLexicalNode {
+                        owner: originals[index].descriptor.owner.clone(),
+                        imports: vec![helper.descriptor.owner.clone()],
+                    },
+                    crate::declaration_join::ExactLexicalNode {
+                        owner: helper.descriptor.owner.clone(),
+                        imports: vec![],
+                    },
+                ],
+                originals[index].descriptor.owner.clone(),
+                &[
+                    originals[index].descriptor.owner.clone(),
+                    helper.descriptor.owner.clone(),
+                ],
+            )
+        };
+        // Target demand owns group selection; the original source view owns
+        // the broader canonical namespace needed to issue a source context.
+        let source_namespace = available.capture_graph_selection().namespace;
+        let role_ids = projection
+            .roles()
+            .iter()
+            .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+            .collect::<BTreeSet<_>>();
+        let issuers = issuers.into_iter().enumerate().map(|(index, issuer)| {
+            if helper.catalog_input_custody().is_some() {
+                assert!(matches!(issue_context(index, &issuer),
+                    Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                        ArtifactInventoryFailure::MissingDependency { dependent, required, dependency: ArtifactDependency::Interface, .. }
+                        if dependent == helper.descriptor.owner
+                            && required == ExactModuleIdentity {
+                                unit: helper.descriptor.owner.unit.clone(),
+                                module: "Tidepool.Inspection.Tree".into(),
+                            })));
+            }
+            let before = issuer.capture_graph_selection();
+            let exact = ExactNativeClosureModel {
+                groups: before.native_groups.iter().copied().collect(),
+                rows: issuer.binding_dependencies().into_iter().collect(),
+            };
+            let group_roots = |view: &ArtifactView| view.roots().iter().filter_map(|node| {
+                if let InventoryNodeKey::Group(group) = node { Some(*group) } else { None }
+            }).collect::<BTreeSet<_>>();
+            let closed = issuer.merge_selected(&available, &projection).unwrap();
+            exact.check(&closed).expect("namespace closure preserves the original native issuer");
+            assert_eq!(group_roots(&closed), group_roots(&issuer));
+            for binding in closed.capture_graph_selection().namespace.iter()
+                .filter(|binding| !before.namespace.contains(binding)) {
+                assert!(source_namespace.contains(binding));
+                assert!(role_ids.contains(&binding.artifact));
+            }
+            closed
+        }).collect::<Vec<_>>();
         let publications = issuers
             .iter()
             .enumerate()
             .map(|(index, issuer)| {
-                ExactDeclarationContext::from_authenticated_execution(
-                    producer.sha256(),
-                    issuer,
-                    projection.clone(),
-                    vec![
-                        crate::declaration_join::ExactLexicalNode {
-                            owner: originals[index].descriptor.owner.clone(),
-                            imports: vec![helper.descriptor.owner.clone()],
-                        },
-                        crate::declaration_join::ExactLexicalNode {
-                            owner: helper.descriptor.owner.clone(),
-                            imports: vec![],
-                        },
-                    ],
-                    originals[index].descriptor.owner.clone(),
-                    &[
-                        originals[index].descriptor.owner.clone(),
-                        helper.descriptor.owner.clone(),
-                    ],
-                )
-                .unwrap()
-                .issue_published_source_original("issuer", "input", &helper.descriptor.owner)
-                .unwrap()
+                issue_context(index, issuer)
+                    .unwrap()
+                    .issue_published_source_original("issuer", "input", &helper.descriptor.owner)
+                    .unwrap()
             })
             .collect::<Vec<_>>();
         for publication in &publications {
