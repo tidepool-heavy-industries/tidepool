@@ -19224,27 +19224,28 @@ None,
                 None,
             )
             .unwrap();
-            if nonempty {
-                // Production certification issues a complete current product even
-                // when the target has not demanded every body. The private-input
-                // handoff must preserve that issuance for a later notebook cell.
-                let output_view =
-                    crate::declaration_context::certified_product_artifact_view_with_validation(
-                        canonical_producer,
-                        &certified.recovery_products,
-                        &certified.module_interfaces,
-                        &certified.value_interfaces,
-                        Some(request.compiler_inputs().artifacts()),
-                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                        &mut PackageInterfaceValidation::default(),
-                    )
-                    .unwrap();
-                assert!(output_view.selected_native_groups().is_empty());
-                let private = OriginalCompilerInputs::from_selection(
-                    &certified.source_selection,
-                    &output_view,
+            // Production certification issues a complete current product even
+            // when the target has not demanded every body. The private-input
+            // handoff must preserve that issuance for a later notebook cell.
+            let output_view =
+                crate::declaration_context::certified_product_artifact_view_with_validation(
+                    canonical_producer,
+                    &certified.recovery_products,
+                    &certified.module_interfaces,
+                    &certified.value_interfaces,
+                    Some(request.compiler_inputs().artifacts()),
+                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                    &mut PackageInterfaceValidation::default(),
                 )
                 .unwrap();
+            assert!(output_view.selected_native_groups().is_empty());
+            let private =
+                OriginalCompilerInputs::from_selection(&certified.source_selection, &output_view)
+                    .unwrap();
+            let current_support =
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&private)
+                    .unwrap();
+            if nonempty {
                 let next =
                     crate::declaration_context::ExactCompileContext::new(public_context.clone())
                         .prepare_compilation_with_private_input(
@@ -19442,7 +19443,7 @@ None,
             context = context
                 .recover_fixture_projection(projection)
                 .unwrap()
-                .extend_checked_original_products(canonical_producer, std::slice::from_ref(current))
+                .extend_issued_compiler_support(&current_support)
                 .unwrap();
             prior.push(current.clone());
             if nonempty {

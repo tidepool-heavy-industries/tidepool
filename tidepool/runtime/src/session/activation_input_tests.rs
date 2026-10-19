@@ -3597,8 +3597,10 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     edited_table
         .insert_checked(tidepool_repr::DataCon {
             identity: {
-                let mut symbol =
-                    tidepool_repr::execution_schema::testing::identity("PreviewEdited", "Value");
+                let mut symbol = tidepool_repr::execution_schema::testing::identity(
+                    "PreviewEdited",
+                    "PreviewEdited",
+                );
                 symbol.namespace = "constructor".into();
                 let mut family = symbol.clone();
                 family.namespace = "type".into();
