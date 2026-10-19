@@ -16162,8 +16162,6 @@ mod tests {
         let birth_basis = base
             .compiler_source_support()
             .select_support_roots(source_roots)
-            .unwrap()
-            .for_source_owners(&BTreeSet::from([root.clone()]))
             .unwrap();
         let birth_graph = birth_basis.artifacts().capture_graph_selection();
         assert!(
@@ -16182,9 +16180,21 @@ mod tests {
             "Empty Beta contributes no executable root: {:?}",
             birth_graph.roots
         );
+        let selected_groups = birth_basis.artifacts().selected_native_groups();
+        assert!(selected_groups.contains(&NativeGroupKey {
+            artifact: alpha_original,
+            original_ordinal: 7,
+        }));
+        assert!(
+            selected_groups
+                .iter()
+                .all(|group| group.artifact != beta_original),
+            "Empty Beta is absent from the full selected native closure: {selected_groups:?}"
+        );
         assert_eq!(
             birth_basis.projection().snapshot_roles()[&beta].original(),
-            None
+            Some(beta_original),
+            "the already-issued Beta original remains selected without executable Beta groups"
         );
         assert!(birth_basis.projection().snapshot_roles()[&root]
             .original()
@@ -16207,6 +16217,10 @@ mod tests {
             offers,
         )
         .unwrap();
+        assert_eq!(
+            support.artifacts().selected_native_groups(),
+            selected_groups
+        );
         let rows = RequestNativeAvailability::issue_checked(
             &projection,
             support.artifacts(),
