@@ -300,7 +300,7 @@ pub struct CompilerInputProjection {
 
 /// Matched compiler roles and exact custody selected by their existing issuer.
 /// Required type interfaces do not grant lexical imports or native body demand.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct CompilerSourceSupport {
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
@@ -311,6 +311,22 @@ pub(crate) struct CompilerSourceSupport {
     selected: Arc<AdmittedCompilerRoles>,
     input_decisions: IssuedInputNativeDecisions,
 }
+
+impl PartialEq for CompilerSourceSupport {
+    fn eq(&self, other: &Self) -> bool {
+        // Offers are the exact identity/mode/proof/custody set persisted by the
+        // existing typed map. Live insertion order is not part of that contract.
+        // Borrow its maintained root; comparison never sorts or re-encodes it.
+        self.projection == other.projection
+            && self.artifacts == other.artifacts
+            && self.native_fact_owner == other.native_fact_owner
+            && self.native_offer_facts == other.native_offer_facts
+            && self.native_availability == other.native_availability
+            && self.selected == other.selected
+            && self.input_decisions == other.input_decisions
+    }
+}
+impl Eq for CompilerSourceSupport {}
 
 /// A recorded choice is not authority until its role and exact Group references
 /// have been authenticated with the source acquisition owner.
