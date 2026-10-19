@@ -66,6 +66,7 @@ import Tidepool.GhcPipeline
   , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope
   , withResidentCompilerScopes, checkCellInstances
   , captureSupportedPackageProfile
+  , scopedEnsureWorld
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
 import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes)
@@ -113,8 +114,8 @@ import Tidepool.RequestCompletion
 import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics )
 import Tidepool.ExtractRequest
-  ( RequestOperation(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag
-  , EnsureExactInputsOutcome(..), ExactInputsRejection(..) )
+  ( RequestOperation(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag, admitRequestOperation
+  , WorldPublicModuleRequest(..) )
 import Tidepool.Introspection
   ( encodeInspectionResults, encodeHostedLookupOutput, runInspectionGhc, withInspectionWork
   , inspectionCompilationWork, finishHostedKnown, needsHostedFallback, runHostedLookupDiscoveryGhc )
@@ -222,8 +223,10 @@ runWorkerInvocation sink compilerScope raw = case workerRequestFromArgv raw of
   Right (Just request) -> runParsedInvocation sink compilerScope request
 
 runParsedInvocation :: PhaseSink -> CompilerScope -> WorkerRequest -> IO (Completion WorkerServer.WorkerResponse)
-runParsedInvocation _ _ parsed | isJust (requestEnsureExactInputs parsed) =
-  captureCompletion (pure (WorkerServer.ExactInputsResponse (ExactInputsRejected UnsupportedOperation)))
+runParsedInvocation _ compilerScope parsed | isJust (requestEnsureExactInputs parsed) =
+  captureCompletion $ case admitRequestOperation parsed of
+    Right (EnsureExactInputsOperation request) -> WorkerServer.ExactInputsResponse <$> scopedEnsureWorld compilerScope request
+    _ -> throwIO (InvalidWorkerRequest "invalid source-free world acquisition")
 runParsedInvocation sink compilerScope parsed = fmap WorkerServer.DiagnosticResponse <$>
   (flattenCompletion <$> captureCompletion (do
     timing <- readTimingEnabled
@@ -235,6 +238,10 @@ dispatch timing bound =
   let args = boundWorkerRequest bound
   in case boundRequestOperation bound of
     DeclarationOperation manifest output -> runDeclarationOperation bound manifest output
+    WorldPublicModuleOperation question -> do
+      bytes <- runBoundWorldQuery bound
+      BS.writeFile (worldQueryOutput question) bytes
+      pure []
     _ -> case requestFiles args of
       [] -> fail "worker request contains no input"
       (file : _)
@@ -243,6 +250,7 @@ dispatch timing bound =
           -> fail "inspection type batch requires at least two type queries and no other query kinds"
         | otherwise -> case boundRequestOperation bound of
             EnsureExactInputsOperation _ -> fail "source-free exact input acquisition entered source dispatch"
+            WorldPublicModuleOperation _ -> fail "held world query entered source dispatch"
             ActivationPreviewOperation -> runActivationPreviewMode bound file
             SourceCheckOperation -> runSourceCheckMode bound file
             CellPlanOperation -> runCellPlanMode (boundParserFlags bound) args file

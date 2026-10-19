@@ -23,6 +23,7 @@ tempfile = "3"
 tidepool-atomic-write.workspace = true
 libc.workspace = true
 blake3 = "=1.8.6"
+sha2 = "0.10"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

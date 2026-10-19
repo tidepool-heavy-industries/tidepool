@@ -113,6 +113,22 @@ qualification.
 
 ## Exact-scope transport
 
+Worker requests use `TPREQ023`. Field 57 acquires one world without source
+request fields; field 58 queries public module metadata through the same
+`CompilerRequest` executor admission. `TPCWORLD` custody keeps base and unmerged
+value rows separate and names each owned image explicitly. Custody does not
+select compiler Originals or native groups. The logical world retains raw
+immutable facts; its universe realization owns NameCache-bound interfaces, and
+the active `CompilerScope` holds that realization through END. Home queries
+check only captured source roots with the world-only preprocessing guard;
+prepared queries use their exact completed HPT. They never manufacture an
+expression checking target or fall back to ambient source after refusal.
+The guard admits effective per-file flags only with GHC's checking backend:
+bytecode generation can compile foreign stubs even when CPP and TH are disabled.
+Authenticated source-row names without captured finder-representable paths
+produce Unavailable; passive custody can prevent an absence claim but cannot
+select an interface or authorize an ambient/package replacement.
+
 Exact-scope manifests use strict `TPEXACTSCOPE` version 16 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization
 or null, the exact published source selection roots with their issued dependency originals, and an input acquisition.
