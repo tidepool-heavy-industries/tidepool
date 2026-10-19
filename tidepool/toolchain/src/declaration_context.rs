@@ -15711,13 +15711,7 @@ mod tests {
         let (context, producer) = metadata_fixture();
         let directory = tempfile::tempdir().unwrap();
         let expected = context.semantic_sha256();
-        let before = context
-            .owner
-            .facts
-            .compiler_support
-            .artifacts()
-            .inventory()
-            .metrics();
+        let expected_selection = context.artifact_view().capture_graph_selection();
         let lowering_before = NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get);
         let request = context
             .prepare_compilation_authorizing(directory.path(), &producer, |semantic_sha256| {
@@ -15728,23 +15722,38 @@ mod tests {
                 ]))
             })
             .unwrap();
-        let after = context
-            .owner
-            .facts
-            .compiler_support
-            .artifacts()
-            .inventory()
-            .metrics();
-        // The expected identity query already warmed this immutable view projection.
-        assert_eq!(after.graph_visits - before.graph_visits, 0);
+        // Request closure can issue a new view; validate its exact graph before
+        // measuring repeated observations of that issued owner.
+        let inputs = request.compiler_inputs();
+        let support = inputs.compiler_source_support();
+        let view = support.artifacts();
+        assert_eq!(view.capture_graph_selection(), expected_selection);
+        let reference = check_native_selection_reference(inputs, support.native_availability())
+            .expect("issued request matches the pre-split transport constructor");
+        assert_eq!(
+            request.transport_metadata.entries,
+            reference.metadata.entries
+        );
+        assert!(Arc::ptr_eq(
+            &request.transport_metadata.retained,
+            &reference.metadata.retained
+        ));
         assert_eq!(request.semantic_sha256, expected);
         assert_eq!(
             NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get),
             lowering_before + 1
         );
         let transport = Arc::clone(&request.transport_metadata);
+        // Repeated observations share this issued request view's read cache.
+        let before = view.inventory().metrics();
+        let metadata = view.metadata_snapshot();
+        let repeated_metadata = view.metadata_snapshot();
         let files = request.input_transport_files();
         let repeated_files = request.input_transport_files();
+        let after = view.inventory().metrics();
+        assert_eq!(after.graph_visits - before.graph_visits, 0);
+        assert!(Arc::ptr_eq(&metadata, &repeated_metadata));
+        assert!(Arc::ptr_eq(&metadata, &inputs.metadata.retained));
         assert!(!files.is_empty());
         assert_eq!(files.len(), repeated_files.len());
         assert!(files
