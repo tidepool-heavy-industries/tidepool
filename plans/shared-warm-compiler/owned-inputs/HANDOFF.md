@@ -199,3 +199,25 @@ the original base is insufficient if that base owns the replaced broad V row.
 No semantic selection change, extra publication snapshot or new registry is
 authorized. This remains a bounded implementation repair; candidate 6d42 is
 unaccepted and unmerged. Reviewer is reserved pending the next exact event.
+
+Further construction of the V-only control exposed a separate live owner:
+`ArtifactView`'s immutable fixed/source materialization references can retain
+old broad V backing even after a new complete overlay detaches predecessors.
+Traversal suppression does not release that actual lease. The supervisor,
+independent reviewer and row producer accepted an owner-first repair: the
+original `materialize_retained_artifacts` entry point must issue every new
+ValueInterface through the same dedicated value-row factory used by P6,
+excluding those values from the broad shared writer/arena. The factory consumes
+the exact admitted acquired entry and existing validation operation. P6 may
+borrow an existing dedicated row only after exact entry/facts, selected binding
+and acquisition checks; a payload ID or dedicated marker is insufficient.
+
+This makes unrelated sibling retention impossible at value-row issuance rather
+than mutating/rebasing a live immutable selected view. Existing canonical/native
+dependency backing remains explicit. Tests must cover original materializer
+issuance, generic-complete-before-P6 reuse, same/next views, immutable in-flight
+request survival and final row/FD release, with cumulative work counts across
+both materialization and P6. No extra publication snapshot or compiler-support
+refresh is approved. The row producer owns this bounded repair; next event
+remains the committed exact candidate and source-only review. Native checks are
+still deferred on the measured resource blocker.
