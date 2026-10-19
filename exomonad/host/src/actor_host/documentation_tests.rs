@@ -13,6 +13,7 @@ enum PublishedExample {
     HumanForms,
     Request,
     Command,
+    Introspection,
     Reflect,
     PersonaMemoryEdit,
 }
@@ -23,6 +24,7 @@ impl PublishedExample {
             Self::HumanForms => "human-forms",
             Self::Request => "request",
             Self::Command => "command",
+            Self::Introspection => "introspection",
             Self::Reflect => "reflect",
             Self::PersonaMemoryEdit => "persona-memory-edit",
         }
@@ -33,6 +35,7 @@ impl PublishedExample {
             Self::HumanForms => include_str!("fixtures/api-guide/human-forms.hs"),
             Self::Request => include_str!("fixtures/api-guide/request.hs"),
             Self::Command => include_str!("fixtures/api-guide/command.hs"),
+            Self::Introspection => include_str!("fixtures/api-guide/introspection.hs"),
             Self::Reflect => include_str!("fixtures/api-guide/reflect.hs"),
             Self::PersonaMemoryEdit => include_str!("fixtures/api-guide/persona-memory-edit.hs"),
         }
@@ -78,6 +81,7 @@ fn published_notebook_sources_match_authored_fixtures() {
             PublishedExample::HumanForms,
             PublishedExample::Request,
             PublishedExample::Command,
+            PublishedExample::Introspection,
         ],
     );
     assert_published_sources(
@@ -1444,6 +1448,28 @@ async fn published_reflect_example_preserves_boundary_results() {
                     "True",
                     "{unbound}"
                 );
+            })
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn published_introspection_example_returns_structured_declaration() {
+    let campaign = TestCampaign::start().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let retained = displayed(
+                    campaign,
+                    root.as_ref(),
+                    PublishedExample::Introspection.source(),
+                )
+                .await;
+                let text = explicit_display_output(&retained)["text"]
+                    .as_str()
+                    .unwrap_or_default();
+                assert!(text.contains("readFile"), "{retained}");
             })
         })
         .await;
