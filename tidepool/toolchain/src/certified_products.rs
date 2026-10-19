@@ -13223,6 +13223,7 @@ pub(crate) mod tests {
                                 .unwrap(),
                         );
                         let before = context.artifact_view().capture_graph_selection();
+                        let before_context = context.as_ref().clone();
                         let root = tempfile::tempdir().unwrap();
                         let request = ExactCompileContext::new(context.clone())
                             .prepare_compilation(&root.path().join("input"), producer_bytes)
@@ -13410,6 +13411,8 @@ pub(crate) mod tests {
                             assert_eq!(facts.contains_key(&entries[4].descriptor.id), extra_output);
                         }
                         assert_eq!(context.artifact_view().capture_graph_selection(), before);
+                        assert_eq!(context.as_ref(), &before_context);
+                        assert_eq!(request.context().as_ref(), &before_context);
                     }
                 }
             }
@@ -13640,27 +13643,37 @@ pub(crate) mod tests {
                 issue_fixture_compiler_support(projection.clone(), right.clone()).unwrap();
             let original_graph = support.artifacts().capture_graph_selection();
             let assert_retained_offer =
-                |support: &crate::artifact_inventory::CompilerSourceSupport,
+                |stage: &str,
+                 case: usize,
+                 support: &crate::artifact_inventory::CompilerSourceSupport,
                  expected: &IssuedNativeOffer| {
                     let retained = support
                         .native_offers()
                         .iter()
                         .find(|retained| retained.same_issuance(expected))
-                        .expect("the same opaque issuance retains its exact historical custody");
+                        .unwrap_or_else(|| {
+                            let actual = support.native_offers().iter()
+                                .map(|offer| (offer.original(), offer.is_full()))
+                                .collect::<Vec<_>>();
+                            panic!("same opaque issuance missing: stage={stage} case={case} shared_carrier={shared_carrier} expected_original={:?} expected_full={} actual={actual:?}", expected.original(), expected.is_full());
+                        });
                     assert_eq!(
                         retained.custody_snapshot().binding_dependencies().unwrap(),
                         expected.custody_snapshot().binding_dependencies().unwrap()
                     );
                 };
             let fresh = product("FreshAlongsideSelectedIssuer", 135);
-            for (extra, mixed_fresh) in [
+            for (case, (extra, mixed_fresh)) in [
                 (vec![b.clone()], false),
                 (vec![a.clone(), b.clone()], false),
                 (vec![b.clone(), a.clone()], false),
                 (vec![a.clone(), b.clone(), parent_offer.clone()], false),
                 (vec![a.clone(), b.clone(), parent_offer.clone()], true),
                 (vec![b.clone(), a.clone()], true),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let includes_a = extra.iter().any(|offer| offer == &a);
                 let includes_parent = extra.iter().any(|offer| offer == &parent_offer);
                 let carried = support.retain_offers(extra).unwrap();
@@ -13675,7 +13688,7 @@ pub(crate) mod tests {
                 );
                 assert_eq!(exact_groups(carried.artifacts()), b_groups);
                 if includes_parent {
-                    assert_retained_offer(&carried, &parent_offer);
+                    assert_retained_offer("carried-parent", case, &carried, &parent_offer);
                     assert!(parent_offer
                         .custody_snapshot()
                         .binding_dependencies()
@@ -13683,7 +13696,7 @@ pub(crate) mod tests {
                         .contains(&historical_edge));
                 }
                 if includes_a {
-                    assert_retained_offer(&carried, &a);
+                    assert_retained_offer("carried-historical", case, &carried, &a);
                 }
                 assert_eq!(
                     NativeOriginalRequirement::from_selected_view(
@@ -13755,7 +13768,12 @@ pub(crate) mod tests {
                     "fresh availability cannot add executable demand beside selected B"
                 );
                 if includes_a {
-                    assert_retained_offer(request.compiler_inputs().compiler_source_support(), &a);
+                    assert_retained_offer(
+                        "request-historical",
+                        case,
+                        request.compiler_inputs().compiler_source_support(),
+                        &a,
+                    );
                 }
                 if includes_parent {
                     assert!(
@@ -13775,6 +13793,8 @@ pub(crate) mod tests {
                         "historical parent availability cannot become a current root"
                     );
                     assert_retained_offer(
+                        "request-parent",
+                        case,
                         request.compiler_inputs().compiler_source_support(),
                         &parent_offer,
                     );
@@ -13804,7 +13824,7 @@ pub(crate) mod tests {
                     joined.artifacts().capture_graph_selection().namespace,
                     left_support.artifacts().capture_graph_selection().namespace
                 );
-                assert_retained_offer(&joined, &b);
+                assert_retained_offer("joined-current", 6, &joined, &b);
             }
             assert_eq!(
                 right
@@ -14071,7 +14091,13 @@ pub(crate) mod tests {
             let row = availability
                 .rows()
                 .find(|row| row.original_owner() == product.owner())
-                .unwrap();
+                .unwrap_or_else(|| {
+                    let observed = availability.rows().map(|row| (
+                        row.target_original(row.original_owner()).unwrap().descriptor.id,
+                        row.original_owner().clone(), row.permits(7), row.permits(9001),
+                    )).collect::<Vec<_>>();
+                    panic!("retained generation native row missing: label={label} owner={:?} original={:?} roles={:?} observed={observed:?}", product.owner(), original.descriptor.id, closed.projection().snapshot_roles());
+                });
             assert_eq!(row.permits(7), expected_two.is_some(), "{label}");
             assert_eq!(row.permits(9001), expected_one.is_some(), "{label}");
             let mut graph = view.capture_graph_selection();
@@ -14375,12 +14401,38 @@ pub(crate) mod tests {
                     .unwrap();
                 let completed = OriginalCompilerInputs::from_selection(&selection, &physical);
                 if !expected {
+                    let outcome = match &completed {
+                        Ok(completed) => {
+                            let rows = completed
+                                .native_availability()
+                                .rows()
+                                .map(|row| {
+                                    (
+                                        row.target_original(row.original_owner())
+                                            .unwrap()
+                                            .descriptor
+                                            .id,
+                                        row.original_owner().clone(),
+                                        row.permits(required_ordinal),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            format!(
+                                "success roles={:?} rows={rows:?} offers={} selected_groups={}",
+                                completed.role_projection().snapshot_roles(),
+                                completed.native_offers().len(),
+                                completed.issued_artifacts().selected_native_groups().len()
+                            )
+                        }
+                        Err(error) => format!("typed_error={error:?}"),
+                    };
                     assert!(
                         matches!(completed, Err(CompileError::ArtifactInventory(error))
                         if error.failure == ArtifactInventoryFailure::NativeGroupUnavailable {
                             artifact: support_entry.descriptor.id, original_ordinal: required_ordinal,
                         }),
-                        "actual NEW C must consult the receiving Request's absent A permission"
+                        "actual NEW C must consult the receiving Request's absent A permission; label={label} inputA={:?} newC={:?} required_ordinal={required_ordinal} required_edges={required_edges:?} outcome={outcome}",
+                        support_entry.descriptor.id, output_entry.descriptor.id,
                     );
                 } else {
                     let completed = completed.unwrap();
@@ -21758,13 +21810,20 @@ None,
                             && selected_canonical.is_some()))),
             "raw rebound must refuse the exact prior input group despite raw body custody; expected={expected_missing:?}; outcome={rebound_outcome}"
         );
-        let view = crate::declaration_context::certified_product_artifact_view(
-            canonical_producer,
-            &custody,
-            &[],
-            Some(planned.request.context().as_ref()),
-        )
-        .unwrap();
+        let issued = planned.completed_output().artifacts();
+        let issued_graph = issued.capture_graph_selection();
+        let view = issued.retain_custody(&rebound).unwrap();
+        let retained_graph = view.capture_graph_selection();
+        assert_eq!(retained_graph.namespace, issued_graph.namespace);
+        assert_eq!(retained_graph.roots, issued_graph.roots);
+        assert_eq!(
+            view.artifact_ids().into_iter().collect::<BTreeSet<_>>(),
+            issued
+                .artifact_ids()
+                .into_iter()
+                .chain(rebound.artifact_ids())
+                .collect::<BTreeSet<_>>()
+        );
         let incompatible_source =
             planned_original_history_tests::issue_planned_original_with_source_value(
                 root.path(),

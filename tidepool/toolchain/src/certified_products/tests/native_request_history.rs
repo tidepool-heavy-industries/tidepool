@@ -5,9 +5,8 @@ use crate::artifact_inventory::{
     CanonicalProducerIdentity, CompilerInputProjection, NativeGroupKey,
 };
 use crate::declaration_context::{
-    generated_source_admission_fixture, issue_fixture_compiler_support,
-    recover_fixture_compiler_support, ExactCompilationRequest, ExactCompileContext,
-    ExactDeclarationContext, OriginalCompilerInputs, RequestNativeAvailability,
+    generated_source_admission_fixture, issue_fixture_compiler_support, ExactCompilationRequest,
+    ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
 };
 use crate::recovery_artifacts::CertifiedRecoveryProduct;
 use crate::CompileError;
@@ -547,54 +546,97 @@ fn replay_native_transport_history(
         )
     };
     let private = std::array::from_fn::<_, 2, _>(|index| {
-        let context = context(&sources[index]);
-        let offer = crate::artifact_inventory::IssuedNativeOffer::issue(
-            proofs[index].original,
-            &sources[index],
-            Some(proofs[index].clone()),
-        )
-        .unwrap();
-        let availability = RequestNativeAvailability::issue_checked(
-            context.compiler_input_projection(),
-            context.artifact_view(),
-            std::slice::from_ref(&offer),
-        )
-        .unwrap();
-        let support = recover_fixture_compiler_support(
-            context.compiler_input_projection().clone(),
-            context.artifact_view().clone(),
-            [offer],
-        )
-        .unwrap()
-        .retain_normalized_availability(&availability)
-        .unwrap();
+        // This is a selected existing Input root, independently of its empty
+        // executable demand. Dependency bodies remain private type support.
+        let root_projection = interfaces
+            .merge(
+                &CompilerInputProjection::from_issued_entries(&[entries[index + 1].clone()])
+                    .unwrap(),
+            )
+            .unwrap();
+        let selected = inventory
+            .empty_view()
+            .merge_fixture_compiler_inputs(
+                &CompilerInputProjection::default(),
+                &sources[index],
+                &root_projection,
+            )
+            .unwrap()
+            .0;
+        let binding = |view: &ArtifactView, id| {
+            view.capture_graph_selection()
+                .namespace
+                .into_iter()
+                .find(|binding| binding.artifact == id)
+                .unwrap()
+        };
+        let canonical =
+            ArtifactEntry::canonical(products[index + 1].module_interface().unwrap().clone());
+        for id in [canonical.descriptor.id, entries[index + 1].descriptor.id] {
+            assert_eq!(binding(&selected, id), binding(&sources[index], id));
+        }
+        let complete_input =
+            issue_fixture_compiler_support(root_projection.clone(), selected).unwrap();
+        let issued = complete_input.artifacts();
+        let mut graph = issued.capture_graph_selection();
+        let namespace = graph.namespace.clone();
+        let execution = graph
+            .roots
+            .iter()
+            .filter(|root| matches!(root, ArtifactBindingNode::Group(_)))
+            .copied()
+            .collect::<Vec<_>>();
+        graph.roots.retain(|root| !execution.contains(root));
+        graph.custody_roots.extend(execution);
+        graph.custody_roots.sort();
+        graph.custody_roots.dedup();
+        let chosen = issued
+            .select_issued(
+                namespace.iter().map(|binding| binding.artifact).collect(),
+                &crate::artifact_inventory::ExactArtifactSelection::from_recovered_graph_selection(
+                    graph,
+                ),
+            )
+            .unwrap();
+        for id in [canonical.descriptor.id, entries[index + 1].descriptor.id] {
+            assert_eq!(binding(&chosen, id), binding(&sources[index], id));
+        }
+        let support = issue_fixture_compiler_support(root_projection, chosen)
+            .unwrap()
+            .retain_offers(complete_input.native_offers().iter().cloned())
+            .unwrap()
+            .retain_normalized_availability(complete_input.native_availability())
+            .unwrap();
+        let roles = support.projection().snapshot_roles();
+        assert_eq!(
+            roles[&entries[index + 1].descriptor.owner].original(),
+            Some(entries[index + 1].descriptor.id)
+        );
+        assert!(roles[&entries[0].descriptor.owner].original().is_none());
+        let root_row = support
+            .native_availability()
+            .rows()
+            .find(|row| row.original_owner() == products[index + 1].owner())
+            .unwrap();
+        assert!(root_row.permits(7));
+        assert_eq!(
+            support.native_availability().snapshot_facts().unwrap()
+                [&entries[index + 1].descriptor.id]
+                .mode,
+            crate::declaration_context::NativeTransportMode::Full
+        );
         let dependency_row = support
             .native_availability()
             .rows()
-            .find(|row| {
-                row.target_original(row.original_owner())
-                    .unwrap()
-                    .descriptor
-                    .id
-                    == entries[0].descriptor.id
-            })
-            .expect("the checked consumer offer issues its exact dependency permission");
+            .find(|row| row.original_owner() == products[0].owner())
+            .unwrap();
         assert!(dependency_row.permits(if index == 0 || overlap { 7 } else { 9001 }));
         assert!(!dependency_row.permits(if index == 0 || overlap { 9001 } else { 7 }));
-        let context = ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .extend_issued_compiler_support(&support)
-            .unwrap();
-        let input = OriginalCompilerInputs::from_issued_support(context.compiler_source_support());
-        assert_eq!(input.role_projection(), context.compiler_input_projection());
-        assert_eq!(
-            input.native_availability(),
-            context.compiler_source_support().native_availability()
-        );
-        assert_eq!(
-            input.issued_offers(),
-            context.compiler_source_support().native_offers()
-        );
+        assert!(support.artifacts().selected_native_groups().is_empty());
+        let input = OriginalCompilerInputs::from_issued_support(&support);
+        assert_eq!(input.role_projection(), support.projection());
+        assert_eq!(input.native_availability(), support.native_availability());
+        assert_eq!(input.issued_offers(), support.native_offers());
         input
     });
     let base_context = context(&base);
@@ -647,6 +689,22 @@ fn replay_native_transport_history(
     coverage.joined_preparations += 1;
     let inputs = request.compiler_inputs();
     assert!(inputs.metadata.retained.selected_native_groups.is_empty());
+    assert_eq!(
+        inputs.projection().snapshot_roles()[&entries[1].descriptor.owner].original(),
+        Some(entries[1].descriptor.id)
+    );
+    let root_binding = |view: &ArtifactView| {
+        view.capture_graph_selection()
+            .namespace
+            .into_iter()
+            .find(|binding| binding.artifact == entries[1].descriptor.id)
+            .unwrap()
+    };
+    assert_eq!(
+        root_binding(inputs.artifacts()),
+        root_binding(&sources[0]),
+        "the exact selected Root0 carrier disambiguates distinct-carrier historical offers"
+    );
     let roles = inputs.projection().snapshot_roles();
     let role = &roles[&entries[0].descriptor.owner];
     assert!(

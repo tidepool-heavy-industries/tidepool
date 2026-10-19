@@ -584,10 +584,15 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
             .issued_artifacts()
             .selected_native_groups()
             .is_empty());
-        assert_eq!(
-            output.native_availability().snapshot_facts().unwrap()[&b.descriptor.id].mode,
-            NativeTransportMode::Full
-        );
+        let facts = output.native_availability().snapshot_facts().unwrap();
+        let row = &facts[&b.descriptor.id];
+        assert_eq!(row.original, b.descriptor.id);
+        assert!(row.contributions.values().all(|contribution| contribution
+            .reachable
+            .iter()
+            .all(|node| !matches!(node, ArtifactBindingNode::Group(_)))));
+        // The authenticated group census is empty; source-graph custody does
+        // not require a particular native transport mode for that empty set.
         let support =
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
                 .unwrap();
@@ -695,10 +700,15 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
             .issued_artifacts()
             .selected_native_groups()
             .is_empty());
-        assert_eq!(
-            output.native_availability().snapshot_facts().unwrap()[&a.descriptor.id].mode,
-            NativeTransportMode::Full
-        );
+        let facts = output.native_availability().snapshot_facts().unwrap();
+        let row = &facts[&a.descriptor.id];
+        assert_eq!(row.original, a.descriptor.id);
+        assert!(row.contributions.values().all(|contribution| contribution
+            .reachable
+            .iter()
+            .all(|node| !matches!(node, ArtifactBindingNode::Group(_)))));
+        // The authenticated group census is empty; source-graph custody does
+        // not require a particular native transport mode for that empty set.
         let support =
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
                 .unwrap();
