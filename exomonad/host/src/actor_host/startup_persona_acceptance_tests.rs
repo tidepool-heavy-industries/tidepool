@@ -544,10 +544,32 @@ async fn persona_with_shared_workspace_keeps_lookup_and_later_cells_usable() {
     let (provider, mut requests) = hosted_script_provider();
     let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
         super::test_campaign::scaffold_workspace(&config.workspace);
-        configure_persona(config, "AgentSpec.agentSpec", |_workspace, project| {
+        configure_persona(config, "AgentSpec.agentSpec", |workspace, project| {
             project.haskell.source_roots = vec![".".into(), "workspace".into()];
+            project
+                .haskell
+                .modules
+                .retain(|module| module != "Jev.Operators");
+            std::fs::remove_file(workspace.join(".exomonad/Jev/Operators.hs")).unwrap();
+            std::fs::write(
+                workspace.join(".exomonad/AgentSpec.hs"),
+                include_str!("fixtures/persona_shared_jev_agent_spec.hs"),
+            )
+            .unwrap();
+            std::fs::write(
+                workspace.join(".exomonad/Persona/ReentryProbe.hs"),
+                include_str!("fixtures/persona_shared_jev_reentry_probe.hs"),
+            )
+            .unwrap();
         });
         std::fs::create_dir_all(config.workspace.join(".exomonad/state/notes")).unwrap();
+        std::fs::write(
+            config
+                .workspace
+                .join(".exomonad/state/notes/reentry-probe.json"),
+            r#"{"observation":"ready"}"#,
+        )
+        .unwrap();
     })
     .await
     .unwrap();

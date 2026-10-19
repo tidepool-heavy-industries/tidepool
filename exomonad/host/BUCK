@@ -858,6 +858,8 @@ rust_filegroup(
         "src/actor_host/fixtures/m3_recursive_setup.hs": "exomonad/host/src/actor_host/fixtures/m3_recursive_setup.hs",
         "src/actor_host/fixtures/narrow_parent_forwarding.hs": "exomonad/host/src/actor_host/fixtures/narrow_parent_forwarding.hs",
         "src/actor_host/fixtures/ordinary_demand_probe.hs": "exomonad/host/src/actor_host/fixtures/ordinary_demand_probe.hs",
+        "src/actor_host/fixtures/persona_shared_jev_agent_spec.hs": "exomonad/host/src/actor_host/fixtures/persona_shared_jev_agent_spec.hs",
+        "src/actor_host/fixtures/persona_shared_jev_reentry_probe.hs": "exomonad/host/src/actor_host/fixtures/persona_shared_jev_reentry_probe.hs",
         "src/actor_host/fixtures/persona_snapshot_refusals.hs": "exomonad/host/src/actor_host/fixtures/persona_snapshot_refusals.hs",
         "src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "exomonad/host/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
         "src/actor_host/fixtures/recipe_fresh_original_epoch.hs": "exomonad/host/src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
@@ -2844,6 +2846,8 @@ filegroup(
         "exomonad/host/src/actor_host/fixtures/m3_recursive_setup.hs": "src/actor_host/fixtures/m3_recursive_setup.hs",
         "exomonad/host/src/actor_host/fixtures/narrow_parent_forwarding.hs": "src/actor_host/fixtures/narrow_parent_forwarding.hs",
         "exomonad/host/src/actor_host/fixtures/ordinary_demand_probe.hs": "src/actor_host/fixtures/ordinary_demand_probe.hs",
+        "exomonad/host/src/actor_host/fixtures/persona_shared_jev_agent_spec.hs": "src/actor_host/fixtures/persona_shared_jev_agent_spec.hs",
+        "exomonad/host/src/actor_host/fixtures/persona_shared_jev_reentry_probe.hs": "src/actor_host/fixtures/persona_shared_jev_reentry_probe.hs",
         "exomonad/host/src/actor_host/fixtures/persona_snapshot_refusals.hs": "src/actor_host/fixtures/persona_snapshot_refusals.hs",
         "exomonad/host/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
         "exomonad/host/src/actor_host/fixtures/recipe_fresh_original_epoch.hs": "src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
@@ -4070,6 +4074,20 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f706572736f6e615f66696c655f746f6f6c735f737061776e2e6873",
     src = "src/actor_host/fixtures/persona_file_tools_spawn.hs",
     out = "persona_file_tools_spawn.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f706572736f6e615f7368617265645f6a65765f6167656e745f737065632e6873",
+    src = "src/actor_host/fixtures/persona_shared_jev_agent_spec.hs",
+    out = "persona_shared_jev_agent_spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f706572736f6e615f7368617265645f6a65765f7265656e7472795f70726f62652e6873",
+    src = "src/actor_host/fixtures/persona_shared_jev_reentry_probe.hs",
+    out = "persona_shared_jev_reentry_probe.hs",
     visibility = ["PUBLIC"],
 )
 
