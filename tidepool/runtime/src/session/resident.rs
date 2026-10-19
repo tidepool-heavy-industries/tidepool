@@ -102,40 +102,11 @@ impl CompiledProvenancePlan {
             ..Self::default()
         };
         let certification = code.certification.as_ref().as_ref();
-        if let Some(certification) = certification {
-            if let TurnPurpose::Execution { execution, .. }
-            | TurnPurpose::HostPrototype(execution) = certification.purpose()
-            {
-                provenance.source_originals = execution.selected_source_originals().to_vec();
-            }
-        }
-        let original_source = if let Some(certification) = certification {
-            let original = match certification.purpose() {
-                TurnPurpose::Execution { execution, .. }
-                | TurnPurpose::HostPrototype(execution) => {
-                    Some(execution.original_source(code.prepared(), code.table(), &code.sites))
-                }
-                TurnPurpose::ActivationPreview(proof) => {
-                    Some(proof.original_source(code.prepared(), code.table(), &code.sites))
-                }
-                TurnPurpose::Ordinary => {
-                    certification.original_compile_input.as_ref().map(|proof| {
-                        proof.validated_original_source(
-                            code.prepared(),
-                            &certification.groups,
-                            &certification.target_owners,
-                            &certification.package_interfaces,
-                            code.table(),
-                            &code.sites,
-                        )
-                    })
-                }
-            };
-            original.transpose().map_err(SessionError::Compile)?
-        } else {
-            None
-        };
-        if let Some(original_source) = original_source {
+        if let Some((original_source, issued_sites, source_originals)) = code
+            .original_source_observations()
+            .map_err(SessionError::Compile)?
+        {
+            provenance.source_originals = source_originals.to_vec();
             provenance.fresh_completion_sites.extend(
                 code.prepared()
                     .sites()
@@ -155,16 +126,6 @@ impl CompiledProvenancePlan {
             provenance.original_execution = Some((original_execution, execution_identity));
             // Site observations and installed native custody can include
             // earlier entries. A typed target retains its exact issued closure.
-            let issued_sites =
-                certification.and_then(|certification| match certification.purpose() {
-                    TurnPurpose::Execution { execution, .. }
-                    | TurnPurpose::HostPrototype(execution) => execution.selected_native_sites(),
-                    TurnPurpose::Ordinary => certification
-                        .original_compile_input
-                        .as_ref()
-                        .map(|proof| proof.selected_native_sites()),
-                    _ => None,
-                });
             let mut selected_sites = code
                 .prepared()
                 .sites()
@@ -2658,7 +2619,9 @@ fn is_checked_turn(code: &TurnCode<'_>) -> bool {
     code.certification
         .as_ref()
         .as_ref()
-        .is_some_and(|certification| !matches!(certification.purpose(), TurnPurpose::Ordinary))
+        .is_some_and(|certification| {
+            !matches!(certification.purpose(), TurnPurpose::Ordinary { .. })
+        })
 }
 
 fn refuse_checked_turn(code: &TurnCode<'_>) -> Result<(), ResidentError> {
@@ -7146,8 +7109,7 @@ where
             .as_ref()
             .ok_or(ResidentError::UnsealedStartupEntry)?;
         let proof = certification
-            .original_compile_input
-            .as_ref()
+            .ordinary_original()
             .ok_or(ResidentError::UnsealedStartupEntry)?;
         if !proof.matches_bundle(
             code.prepared(),

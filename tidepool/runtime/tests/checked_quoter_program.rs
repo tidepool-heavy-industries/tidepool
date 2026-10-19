@@ -223,11 +223,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             expected_owners.len(),
             "one canonical companion per fixture owner"
         );
-        let original_context = first
-            .native()
-            .unwrap()
-            .original_execution_context(compiled.prepared(), compiled.table(), compiled.sites())
-            .unwrap();
+        let original_context = compiled.original_execution_context().unwrap();
         let module_interfaces = original_context
             .materialize_module_interfaces(durable.path())
             .unwrap();

@@ -381,7 +381,7 @@ fn assert_startup_origin(label: &str, compiled: &CompiledTurn, requires_input: b
     let proof = compiled
         .certification
         .as_ref()
-        .and_then(|certification| certification.original_compile_input.as_ref());
+        .and_then(|certification| certification.ordinary_original());
     let matches = compiled
         .certification
         .as_ref()
@@ -1244,6 +1244,21 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
     else {
         panic!("real checked bind must carry its original site map");
     };
+    let source_code = compiled.code();
+    let source = source_code.original_source().unwrap().unwrap();
+    assert!(Arc::ptr_eq(
+        &source.execution_context(),
+        &compiled.original_execution_context().unwrap(),
+    ));
+    let raw = turn::CompiledTurn::from_prepared(
+        compiled.prepared().clone(),
+        compiled.table().clone(),
+        Default::default(),
+        compiled.sites().to_vec(),
+    )
+    .unwrap();
+    assert!(raw.code().original_source().unwrap().is_none());
+    assert!(raw.original_execution_context().is_err());
     let before = resident.public_visibility_snapshot_in(scope).unwrap();
     let before_prefix = prefix.snapshot();
     let residency = resident.residency();
@@ -1259,6 +1274,7 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
             .clone(),
     );
     changed.sites = Cow::Owned(sites);
+    assert!(changed.original_source().is_err());
     let error = tidepool_testing::with_settlement(|settlement| {
         resident.run_bind_with_sites(
             "changedCheckedSiteMap",
@@ -1575,8 +1591,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     let retained_context = &original.authenticated_inputs[&site].types;
     let certification = fixture.producer.certification.as_ref().unwrap();
     let compiler_source = certification
-        .original_compile_input
-        .as_ref()
+        .ordinary_original()
         .unwrap()
         .validated_original_source(
             &fixture.producer.prepared(),
@@ -2844,25 +2859,8 @@ fn original_input_type_consumers_select_canonical_roles_over_native_custody() {
         true,
         SessionId(1793),
     );
-    let certification = fixture
-        .producer
-        .certification
-        .as_ref()
-        .expect("original compiler bundle");
-    let original = certification
-        .original_compile_input
-        .as_ref()
-        .expect("real original input proof");
-    let context = original
-        .original_execution_context(
-            &fixture.producer.prepared(),
-            &certification.groups,
-            &certification.target_owners,
-            &certification.package_interfaces,
-            &fixture.producer.table(),
-            &fixture.producer.asks,
-        )
-        .expect("authenticate the original producer's exact interface context");
+    let code = fixture.producer.code();
+    let context = code.original_source().unwrap().unwrap().execution_context();
     let (site, witness) = fixture
         .producer
         .asks
@@ -3573,10 +3571,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     );
     let code = compiled.renderer.compiled.code();
     assert!(code.sites().is_empty(), "the genuine renderer is pure");
-    let source = compiled
-        .proof()
-        .original_source(code.prepared(), code.table(), code.sites())
-        .unwrap();
+    let source = code.original_source().unwrap().unwrap();
     assert!(Arc::ptr_eq(&source.execution_context(), &original_context));
     assert!(
         source.project_type_interfaces(&[], &[]).is_err(),
@@ -3593,6 +3588,16 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         .proof()
         .original_source(&other_target, code.table(), code.sites())
         .is_err());
+    let changed_target = turn::CompiledTurn::from_prepared(
+        Arc::new(other_target),
+        code.table().clone(),
+        Default::default(),
+        code.sites().to_vec(),
+    )
+    .unwrap();
+    let mut changed_target = changed_target.into_code();
+    changed_target.certification = std::borrow::Cow::Owned(code.certification().cloned());
+    assert!(changed_target.original_source().is_err());
     let mut edited_table = code.table().clone();
     edited_table
         .insert_checked(tidepool_repr::DataCon {
@@ -3619,6 +3624,16 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         .proof()
         .original_source(code.prepared(), &edited_table, code.sites())
         .is_err());
+    let changed_table = turn::CompiledTurn::from_prepared(
+        Arc::new(code.prepared().clone()),
+        edited_table,
+        Default::default(),
+        code.sites().to_vec(),
+    )
+    .unwrap();
+    let mut changed_table = changed_table.into_code();
+    changed_table.certification = std::borrow::Cow::Owned(code.certification().cloned());
+    assert!(changed_table.original_source().is_err());
     let mut edited_code = code.clone();
     edited_code.sites.to_mut().push(YieldSite {
         site: 99999,
@@ -3632,6 +3647,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         reply_declaration: None,
         request_type_signatures: None,
     });
+    assert!(edited_code.original_source().is_err());
     assert!(
         CompiledProvenancePlan::build(&edited_code).is_err(),
         "zero authenticated inputs cannot skip exact output-site validation"
