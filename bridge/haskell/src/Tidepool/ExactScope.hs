@@ -2273,6 +2273,13 @@ worldBindingInterfaceArtifact binding = case worldBindingRowInterface (worldBind
   ScopeInterfaceInput (artifact,_,_) CheckedValueEvidence -> artifact
   _ -> error "admitted world binding lost its checked value evidence"
 
+-- Package authentication reads both the sidecar and its owning interface.
+-- Its callback may borrow only those sealed parts of the demanded rows.
+worldPackageInputSeals :: [(ExactIfaceArtifact,FilePath,String)] -> Map.Map FilePath String
+worldPackageInputSeals rows = Map.fromList
+  [(path,sha) | (artifact,packages,packageSha) <- rows
+    , (path,sha) <- [(exactPath artifact,exactSha256 artifact),(packages,packageSha)]]
+
 -- Select by submitted occurrences in the already admitted namespace. Only
 -- their exact captured rows enter the operation-local type-input owner; no pathname
 -- reacquisition or enumeration of the world's passive rows is involved.
@@ -2283,10 +2290,10 @@ readWorldBindingInputs env facts occurrences = do
       rows = [worldBindingRowInterface (worldBindingRow value) | (_,value) <- selected]
       key (ScopeInterfaceInput (artifact,_,_) _) = (exactUnit artifact,exactModule artifact)
       distinct = Map.fromList [(key row,row) | row <- rows]
-      sidecars = Map.fromList [(path,sha) | ScopeInterfaceInput (_,path,sha) CheckedValueEvidence <- Map.elems distinct]
+      seals = worldPackageInputSeals [row | ScopeInterfaceInput row CheckedValueEvidence <- Map.elems distinct]
       tokens = worldInputsCustody facts
       readInput path cap = do
-        sha <- maybe (fail "world value package proof is outside its selected rows") pure (Map.lookup path sidecars)
+        sha <- maybe (fail "world value package proof is outside its selected rows") pure (Map.lookup path seals)
         bytes <- artifactBytes <$> capturedRequestInputToken tokens path sha
         unless (BS.length bytes <= cap) (fail "world value package proof exceeds its input bound")
         pure bytes
@@ -2331,9 +2338,9 @@ readWorldSourceInputs env facts roots = case walk Map.empty roots >>= validate o
   Right rows -> do
     let custody = worldInputsCustody facts
         artifacts = [artifact | ScopeInterfaceInput (artifact,_,_) _ <- Map.elems rows]
-        packages = Map.fromList [(path,sha) | ScopeInterfaceInput (_,path,sha) _ <- Map.elems rows]
+        seals = worldPackageInputSeals [row | ScopeInterfaceInput row _ <- Map.elems rows]
         packageInput path cap = do
-          sha <- maybe (fail "world source package proof is outside demanded Context rows") pure (Map.lookup path packages)
+          sha <- maybe (fail "world source package proof is outside demanded Context rows") pure (Map.lookup path seals)
           bytes <- artifactBytes <$> capturedRequestInputToken custody path sha
           unless (BS.length bytes <= cap) (fail "world source package proof exceeds its input bound")
           pure bytes
