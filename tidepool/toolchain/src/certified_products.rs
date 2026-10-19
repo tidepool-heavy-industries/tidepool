@@ -20287,10 +20287,13 @@ None,
                     })
                     .collect::<Vec<_>>()
             ),
-            Err(CertificationError::OriginalClosure(inner)) => format!(
-                "OriginalClosure({:?})",
-                std::mem::discriminant(inner.as_ref())
-            ),
+            Err(CertificationError::OriginalClosure(inner)) => match inner.as_ref() {
+                crate::CompileError::ArtifactInventory(error) => format!(
+                    "OriginalClosure(ArtifactInventory failure={:?} native_refusal={:?})",
+                    error.failure, error.native_refusal,
+                ),
+                other => format!("OriginalClosure({:?})", std::mem::discriminant(other)),
+            },
             Err(CertificationError::Mismatch(reason)) => format!("Mismatch({reason})"),
             Err(other) => format!("other typed error {:?}", std::mem::discriminant(other)),
         };
