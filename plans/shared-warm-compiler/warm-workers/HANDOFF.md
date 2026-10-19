@@ -40,8 +40,8 @@ accepted realization wave or qualified area fold.
 Private protocol candidates `1e84fd4323`, `1ca6b9697b`, `992a6d0458` are
 incorporated as `fd0cd43237`, `fcb39fd9bd`, `55a26d8d85`; area `6469ed1b85`
 owns the joined typed completion/response tests. `c402df90fe` applies the pinned
-formatter. These are source checkpoints pending cumulative independent review
-and native compilation. The source-free production dispatch currently returns
+formatter. These await cumulative independent review and matched Haskell
+compilation; partial Rust validation is recorded below. The source-free production dispatch currently returns
 typed UnsupportedOperation. It issues no Ready/reference and is not a completed
 realization consumer.
 
@@ -52,7 +52,7 @@ retirement control could close stdin and induce the exit it was meant to observe
 `d779105e05` keeps stdin open until bounded nonzero process termination is
 observed; the reviewer source-accepted that exact repair with no further findings.
 `cc6486c743` states the reusable detection rule in the owning process guide.
-All of these controls remain uncompiled/unexecuted. The child reviewed only
+The Haskell response controls remain uncompiled/unexecuted. The child reviewed only
 the independently authored response route, not its own protocol implementation;
 full cumulative independent review remains with the campaign supervisor.
 
@@ -67,7 +67,7 @@ full cumulative independent review remains with the campaign supervisor.
   portable exact-scope manifest. There is no acquisition-reference registry.
   Checked delta is omitted until the real authenticated base exists.
 - `WorkerServer` currently renders diagnostic JSON on its machine channel and
-  forwards captured stdout to its human channel. The pending typed completion
+  forwards captured stdout to its human channel. The implemented typed completion
   change carries source-free outcomes as typed body results; printing a Ready
   result would not implement the protocol. Capture/cleanup failure must override
   a typed successful outcome and preserve existing END ownership.
@@ -88,10 +88,14 @@ full cumulative independent review remains with the campaign supervisor.
 ## Evidence and pending commands
 
 The area buck-out bind mount is provisioned and observed with `findmnt`.
-No Buck daemon, project build, compiler worker or live host was started here.
+No compiler worker or live host was started here. Native Rust validation used
+the area's owned Buck daemon, PID 3810824, forkserver 3810865, isolation `v2`,
+inside `/build.slice/inanna-build-1792397236-3810751.scope`. Sanitized terminal
+status has zero active commands. It is retained for pending review repairs and
+the exact-root consumer's next compile; no command observer is outstanding.
 Observed `/srv/build` available bytes at 2026-10-19T07:54:42Z:
 `108974125056`, about 1.49 GiB above the required 100 GiB reserve.
-There is no defensible cold-build growth bound within that headroom. The
+There was initially no defensible cold-build growth bound within that headroom. The
 installed launcher does not support the staged storage-status/growth options;
 no admission bypass, output deletion or shared-service restart is authorized.
 
@@ -103,7 +107,31 @@ The exact ce60 workspace submodule was initialized from the verified local
 repository with a one-command file-protocol override. `swarm-build bash
 scripts/dev-shell.sh rustfmt --edition 2021` on request/endpoint/fake-worker
 sources passed, and `git diff --check` passed. These do not establish native
-compilation or executed tests. Exact pending commands, after admissible storage:
+compilation or executed tests.
+
+After qualification's retained-dependency census, the campaign admitted one
+serialized extract-cmd lane with prospective 1 GiB total new output, explicitly
+an expected-growth estimate rather than a proven peak bound. On exact
+`f3a386310bf8be9f93720e165d5e33c80d39bd64`:
+
+- `swarm-build just build -j1 //tidepool/extract-cmd:tidepool_extract_cmd`
+  passed, exit 0, 216 local actions, about 54.5 s including daemon startup.
+- `swarm-build just build -j1 //tidepool/extract-cmd:tidepool_extract_cmd_unit_tests_binary`
+  passed, exit 0, 151 local actions, about 49.4 s. The linked libtest is
+  19,130,328 bytes, SHA-256 `6e58cbee2bf8b02538c6334349117f58ed3e907992ebd98c50a93f84d8977bb5`.
+- The counted `just test-lib tidepool-extract-cmd` selection passed 4/4, exit 0:
+  request exclusivity, outcome framing, transport correlation, and malformed
+  accepted-response poisoning with exact END/input retention. Each selected
+  isolated process executed one case and confirmed process cleanup.
+
+The full exact argv, source, logs/hashes, four case reports and resource
+observations are retained in
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/RUST-VALIDATION.json`.
+Scope memory peak was 1,946,890,240 bytes. Final own Buck outputs allocated
+663,511,040 bytes; observed host free space changed from 108,780,310,528 to
+108,342,386,688 bytes. This is partial Rust validation; it does not compile or
+run Haskell, issue a production Ready result, establish a cache hit, or qualify
+the joined actor workflow. Exact pending commands after storage admission:
 
 ```sh
 swarm-build just build //bridge/haskell:tidepool_extract_bin //bridge/haskell:worker_response_child //bridge/haskell:worker_response_test_bin //bridge/haskell:cell_splitter_test_bin //bridge/haskell:source_boot_product_reuse_test_bin
@@ -115,8 +143,8 @@ swarm-build just fixtures-check
 ```
 
 Discover exact native cases and Rust case names before recording execution
-counts. The source-free request/typed-response candidate remains uncompiled
-and unqualified until both matched owners and their real test consumers run.
+counts. The matched source-free worker/typed-response candidate remains
+unqualified until both owners and their real test consumers compile and run.
 Qualification owns the joined packaged Persona/cell/lookup history; prior exact
 70a Persona evidence is 1 passed/1 executed, exit 0, with host cleanup confirmed,
 compiler cleanup not observed and incomplete compiler diagnostics.
@@ -129,11 +157,11 @@ whose result unblocks this area checks native task status: use send_message for
 a running recipient and followup_task for an idle/completed recipient. Pending
 producers are host-inputs for the exact portable selected root, owned-inputs
 for admitted row/byte owner and consumed-package-source coverage, qualification
-for a measured focused compile growth bound, and the campaign supervisor for
+for a Haskell compile growth bound, and the campaign supervisor for
 the cumulative independent review. There are no orphaned command observers.
-Qualification's retained dependency census measures about 559 MiB of terminal
-extract-cmd outputs, excluding transient scratch/cache-upload growth; this is
-not yet a safe upper bound for admission. The currently awaited event is an
+Qualification's retained dependency census measured about 559 MiB of terminal
+extract-cmd outputs, excluding transient scratch/cache-upload growth. It informed
+the bounded Rust admission above and is not a general Haskell/host bound. The currently awaited event is an
 exact root/byte-owner API, an independent cumulative review result, or a bounded
 native-build admission decision. Its producer must send the concrete candidate,
 evidence and next action with followup_task if this area has yielded. No periodic
