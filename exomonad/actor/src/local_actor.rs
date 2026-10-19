@@ -2281,15 +2281,29 @@ where
                 })?;
             }
             Ok(KernelStep::Stop { terminal, .. }) => {
+                // Successful startup can finish immediately. Establish its
+                // actual birth before cleanup records intent and closes the
+                // lifecycle; an earlier external cutoff still refuses birth.
+                let readiness = state.lifecycle.executor_started().await;
+                let terminal = match &readiness {
+                    Ok(()) => terminal,
+                    Err(error) => state.context.requested_shutdown().unwrap_or_else(|| {
+                        ActorTerminal::new(ActorExitKind::Cancelled, error.to_string())
+                    }),
+                };
                 finish_actor(
                     &state.context.myself.clone(),
                     &mut state,
                     Disposition::Stop(terminal),
                 )
                 .await;
-                if state.context.requested_shutdown().is_none() {
-                    return Ok(state);
+                if let Err(error) = readiness {
+                    return Err(Box::new(StartupRefusal {
+                        cause: StartupFailureCause::Lifecycle(error),
+                        cleanup: state.terminal.cleanup(),
+                    }));
                 }
+                return Ok(state);
             }
             Err(error) => {
                 let terminal = ActorTerminal::failed(
@@ -7894,90 +7908,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retained_shutdown_during_startup_refuses_readiness_before_lifecycle_close() {
+        for startup_terminal in [
+            None,
+            Some(ActorTerminal::new(
+                ActorExitKind::Completed,
+                "completed during startup",
+            )),
+        ] {
+            let observations = Arc::new(Mutex::new(Vec::new()));
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let mut probe = observed_probe(&observations);
+            probe.startup_terminal = startup_terminal;
+            probe.startup_gate = Some((entered.clone(), release.clone()));
+            let spawning = tokio::spawn(async move { spawn_local_actor(None, probe).await });
+            entered.notified().await;
+            let context = observations.lock()[0].0.clone();
+            let requested = ActorTerminal::new(ActorExitKind::Cancelled, "owner cancelled startup");
+            assert_eq!(
+                context.terminal.request_shutdown(requested.clone()),
+                requested
+            );
+            assert_eq!(
+                context.lifecycle.observation().phase,
+                crate::kernel::lifecycle::LifecyclePhase::Starting,
+                "retained intent precedes the asynchronous lifecycle cutoff"
+            );
+            release.notify_one();
+            let error = match spawning.await.unwrap() {
+                Ok(_) => panic!("retained cancellation published caller readiness"),
+                Err(error) => error,
+            };
+            let ractor::SpawnErr::StartupFailed(ref error) = error else {
+                panic!("unexpected startup refusal: {error:?}");
+            };
+            let refusal = error.downcast_ref::<StartupRefusal>().unwrap();
+            assert!(matches!(
+                refusal.cause,
+                StartupFailureCause::Lifecycle(KernelCallFailure::MailboxClosed(actor))
+                    if actor == context.identity()
+            ));
+            assert!(refusal.cleanup.is_some());
+            assert_eq!(
+                context.terminal.requested_shutdown(),
+                Some(requested.clone())
+            );
+            assert_eq!(context.terminal.get(), Some(requested));
+            context.myself.get_cell().wait(None).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn lifecycle_close_during_startup_settles_prepared_behavior() {
-        let observations = Arc::new(Mutex::new(Vec::new()));
-        let entered = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        let mut probe = observed_probe(&observations);
-        probe.startup_gate = Some((entered.clone(), release.clone()));
-        let spawning = tokio::spawn(async move { spawn_local_actor(None, probe).await });
-        entered.notified().await;
-        let context = observations.lock()[0].0.clone();
-        context.lifecycle.close().await.unwrap();
-        assert!(context.requested_shutdown().is_none());
-        release.notify_one();
-        let error = match spawning.await.unwrap() {
-            Ok(_) => panic!("closed lifecycle published caller readiness"),
-            Err(error) => error,
-        };
-        let cleanup = startup_cleanup(&error).expect("late startup refusal retains cleanup");
-        assert_eq!(cleanup.actor(), context.identity());
-        assert_eq!(
-            context.terminal.get().unwrap().kind,
-            ActorExitKind::Cancelled
-        );
-        context.myself.get_cell().wait(None).await.unwrap();
+        for startup_terminal in [
+            None,
+            Some(ActorTerminal::new(
+                ActorExitKind::Completed,
+                "completed during startup",
+            )),
+        ] {
+            let observations = Arc::new(Mutex::new(Vec::new()));
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let mut probe = observed_probe(&observations);
+            probe.startup_terminal = startup_terminal;
+            probe.startup_gate = Some((entered.clone(), release.clone()));
+            let spawning = tokio::spawn(async move { spawn_local_actor(None, probe).await });
+            entered.notified().await;
+            let context = observations.lock()[0].0.clone();
+            context.lifecycle.close().await.unwrap();
+            assert!(context.requested_shutdown().is_none());
+            release.notify_one();
+            let error = match spawning.await.unwrap() {
+                Ok(_) => panic!("closed lifecycle published caller readiness"),
+                Err(error) => error,
+            };
+            let cleanup = startup_cleanup(&error).expect("late startup refusal retains cleanup");
+            assert_eq!(cleanup.actor(), context.identity());
+            assert_eq!(
+                context.terminal.get().unwrap().kind,
+                ActorExitKind::Cancelled
+            );
+            context.myself.get_cell().wait(None).await.unwrap();
+        }
     }
 
     #[tokio::test]
     async fn admitted_pre_start_is_included_in_sealed_retirement_snapshot() {
-        let observations = Arc::new(Mutex::new(Vec::new()));
-        let (directory, _directory_task) = LocalActorDirectory::start().await.unwrap();
-        let entered = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        let mut probe = observed_probe(&observations);
-        probe.startup_gate = Some((entered.clone(), release.clone()));
-        let spawning = {
-            let directory = directory.clone();
-            tokio::spawn(async move {
-                spawn_local_actor_in_directory(None, probe, crate::Incarnation(1), directory).await
-            })
-        };
-        entered.notified().await;
-        let batch = directory
-            .seal()
-            .await
-            .unwrap()
-            .cancel_all(ActorTerminal::new(
-                ActorExitKind::Cancelled,
-                "closed while starting",
-            ))
-            .await;
-        let roots = batch.into_roots();
-        assert_eq!(roots.len(), 1);
-        assert!(roots[0].terminal().get().is_none());
-        assert!(roots[0].terminal().requested_shutdown().is_some());
-        release.notify_one();
-        match spawning.await.unwrap() {
-            Err(ractor::SpawnErr::StartupFailed(error)) => {
-                let refusal = error
-                    .downcast_ref::<StartupRefusal>()
-                    .expect("typed startup refusal");
-                assert!(
-                    matches!(
-                        refusal.cause,
-                        StartupFailureCause::Lifecycle(KernelCallFailure::MailboxClosed(actor))
-                            if actor == roots[0].identity()
-                    ),
-                    "closed startup must refuse publishing caller readiness"
-                );
-                assert!(
-                    refusal.cleanup.is_some(),
-                    "closed startup retains cleanup evidence"
-                );
+        for startup_terminal in [
+            None,
+            Some(ActorTerminal::new(
+                ActorExitKind::Completed,
+                "completed during startup",
+            )),
+        ] {
+            let observations = Arc::new(Mutex::new(Vec::new()));
+            let (directory, _directory_task) = LocalActorDirectory::start().await.unwrap();
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let mut probe = observed_probe(&observations);
+            probe.startup_terminal = startup_terminal;
+            probe.startup_gate = Some((entered.clone(), release.clone()));
+            let spawning = {
+                let directory = directory.clone();
+                tokio::spawn(async move {
+                    spawn_local_actor_in_directory(None, probe, crate::Incarnation(1), directory)
+                        .await
+                })
+            };
+            entered.notified().await;
+            let batch = directory
+                .seal()
+                .await
+                .unwrap()
+                .cancel_all(ActorTerminal::new(
+                    ActorExitKind::Cancelled,
+                    "closed while starting",
+                ))
+                .await;
+            let roots = batch.into_roots();
+            assert_eq!(roots.len(), 1);
+            assert!(roots[0].terminal().get().is_none());
+            assert!(roots[0].terminal().requested_shutdown().is_some());
+            release.notify_one();
+            match spawning.await.unwrap() {
+                Err(ractor::SpawnErr::StartupFailed(error)) => {
+                    let refusal = error
+                        .downcast_ref::<StartupRefusal>()
+                        .expect("typed startup refusal");
+                    assert!(
+                        matches!(
+                            refusal.cause,
+                            StartupFailureCause::Lifecycle(KernelCallFailure::MailboxClosed(actor))
+                                if actor == roots[0].identity()
+                        ),
+                        "closed startup must refuse publishing caller readiness"
+                    );
+                    assert!(
+                        refusal.cleanup.is_some(),
+                        "closed startup retains cleanup evidence"
+                    );
+                }
+                Err(error) => panic!("unexpected startup refusal: {error:?}"),
+                Ok(_) => panic!("sealed startup published caller readiness"),
             }
-            Err(error) => panic!("unexpected startup refusal: {error:?}"),
-            Ok(_) => panic!("sealed startup published caller readiness"),
+            let actor = &roots[0];
+            assert_eq!(
+                actor.terminal().get().unwrap().kind,
+                ActorExitKind::Cancelled
+            );
+            assert!(matches!(
+                actor.terminal().cleanup().unwrap().realm,
+                crate::CleanupComponentOutcome::Unsupported
+            ));
         }
-        let actor = &roots[0];
-        assert_eq!(
-            actor.terminal().get().unwrap().kind,
-            ActorExitKind::Cancelled
-        );
-        assert!(matches!(
-            actor.terminal().cleanup().unwrap().realm,
-            crate::CleanupComponentOutcome::Unsupported
-        ));
     }
 
     struct FenceResource;
