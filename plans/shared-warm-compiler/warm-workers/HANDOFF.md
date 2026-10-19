@@ -13,8 +13,10 @@ four-argument query factory and old profile. It excludes typed bindings,
 TPCWBIND3, new CID parsing and crypton. The merge keeps current-root block
 custody/counters, admits the actual endpoint's canonical producer before the
 first snapshot/root seal, and retains authentic cold FD bytes and geometry in
-existing opt-in diagnostics. Joined source review/compilation must be recorded
-separately from these component passes.
+existing opt-in diagnostics. Joined source3d1cc4c79eb passed independent source
+review, Rust production/cfgtest compilation (three local actions), and the
+actual admitted-endpoint producer/root-hydration control (one executed/pass).
+The final handoff update changes documentation only.
 
 Private evidence root:
 `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/`.
@@ -30,6 +32,11 @@ Private evidence root:
   verifies all29 references. Diagnostic slice copies are evidence, not replayable
   authority. Directory-resource hashes remain unknown; Rust compiler/hosted
   cleanup is not_observed.
+- `frontier-join-3d1/TERMINAL.json`, SHA256
+  `afb72f523862bad87bea8e7b5964c7fd6a517942bc9f6fdb6e4a30140b4354d0`:
+  joined production/cfgtest and one counted producer/root-hydration control.
+  The fast control process cgroup was not sampled before exit; runner counts,
+  stream hashes and cleanup limits are retained. This is component evidence.
 - `cell/RUST-FRONTIER-NATIVE-acb.json`, SHA256
   `4cfb90a00ca47246938114b123bf2fdaa49fdcb76f7863c3d8623c346dc5b1b1`:
   production/cfgtest compilation and five counted frontier controls passed,
