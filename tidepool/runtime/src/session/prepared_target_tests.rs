@@ -1,6 +1,6 @@
 //! Prepared-target ownership controls through the real scoped compiler entry.
 
-use super as session;
+use crate::session;
 use crate::{
     finish_runtime_targets, prepare_runtime_targets_in_context, CompileError,
     CompilerTransactionCancellation, CompilerTransactionClose, CompilerTransactionPublicationError,
