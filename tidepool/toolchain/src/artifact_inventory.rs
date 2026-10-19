@@ -18,8 +18,8 @@ mod compiler_projection;
 mod native_availability;
 pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
 pub(crate) use compiler_projection::{
-    CompilerSourceSupport, InputNativeDecision, IssuedInputNativeDecisions,
-    RecordedInputNativeDecision,
+    CompilerSourceSupport, DemandCompilerProjection, DemandCompilerProjectionWork, InputNativeDecision,
+    IssuedInputNativeDecisions, RecordedInputNativeDecision,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -9234,12 +9234,7 @@ mod tests {
             )
             .unwrap();
             let output =
-                crate::declaration_context::OriginalCompilerInputs::issue_candidate_from_support(
-                    &source,
-                    native.descriptor.producer_sha256,
-                    std::slice::from_ref(product),
-                )
-                .unwrap();
+                crate::declaration_context::OriginalCompilerInputs::from_issued_support(&source);
             let complete = CompilerSourceSupport::close_complete_output(&output).unwrap();
             let types = complete
                 .selected_interfaces()
@@ -10540,25 +10535,39 @@ mod tests {
                 .remove(0)
                 .product
         };
-        let ancestor = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_checked_original_products(
-                    producer_identity.sha256(),
-                    &[product("Ancestor", 1)],
+        let mut context = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
+        let mut versions = Vec::new();
+        for output in [product("Ancestor", 1), product("Descendant", 2)] {
+            let entry =
+                Arc::new(ArtifactEntry::original(producer_identity.sha256(), output).unwrap());
+            assert!(entry.requirements.is_empty());
+            assert!(entry.native_requirements.is_empty());
+            let inventory = ArtifactInventory::default();
+            let physical = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    vec![entry.clone()],
+                    NativeArtifactDemand::ScopeInterfaces,
                 )
-                .unwrap(),
-        );
-        let descendant = Arc::new(
-            ancestor
-                .as_ref()
-                .clone()
-                .extend_checked_original_products(
-                    producer_identity.sha256(),
-                    &[product("Descendant", 2)],
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &physical.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
                 )
-                .unwrap(),
-        );
+                .unwrap();
+            let inputs = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &selection, &physical,
+            )
+            .unwrap();
+            let support = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
+            context = context.extend_issued_compiler_support(&support).unwrap();
+            versions.push(Arc::new(context.clone()));
+        }
+        let ancestor = versions.remove(0);
+        let descendant = versions.remove(0);
         let scratch = tempfile::tempdir().unwrap();
         let completed = descendant
             .prepare_compilation(scratch.path(), producer)
@@ -14446,7 +14455,6 @@ mod tests {
         interfaces: Vec<Arc<ArtifactEntry>>,
         helper_import: crate::certified_products::PendingImportOwner,
         producer_bytes: &[u8],
-        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     ) {
         use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
         let crate::certified_products::PendingImportOwner::Source {
@@ -14834,10 +14842,8 @@ mod tests {
                     &[],
                 )
                 .unwrap();
-                let inputs = OriginalCompilerInputs::issue_candidate_from_context(
-                    &context, producer, products,
-                )
-                .unwrap();
+                let inputs =
+                    OriginalCompilerInputs::from_issued_support(context.compiler_source_support());
                 let scratch = tempfile::tempdir().unwrap();
                 let request =
                     crate::declaration_context::ExactCompileContext::new(Arc::new(context))
@@ -15068,7 +15074,6 @@ mod tests {
             vec![],
             issued_source(&helper, 7),
             b"native recapture fixture",
-            &[product],
         );
     }
 
@@ -15113,7 +15118,7 @@ mod tests {
         let producer =
             CanonicalProducerIdentity::from_producer_bytes(endpoint.identity().producer_bytes());
         let product = private
-            .native_availability
+            .contextual_native_availability
             .iter()
             .find(|product| product.owner().module == "Tidepool.View.Types")
             .expect("borrowed View.Types original")
@@ -15155,7 +15160,6 @@ mod tests {
             interfaces,
             helper_import,
             endpoint.identity().producer_bytes(),
-            &private.native_availability,
         );
     }
     #[test]

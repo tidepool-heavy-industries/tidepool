@@ -688,10 +688,34 @@ fn decode_typed_segment_plans(
     value: &Value,
     program: &CheckedPlannedCellSpecification,
 ) -> Result<Vec<CheckedTypedSegmentPlan>, CompileError> {
+    decode_typed_segment_plan_facts(
+        value,
+        program.parsed_plan.items(),
+        &program.slots,
+        program.reservation_digest,
+    )
+}
+
+pub(crate) fn decode_world_typed_segment_plans(
+    value: &Value,
+    reservation: &crate::cell_plan::CompilerWorldCellReservation,
+) -> Result<Vec<CheckedTypedSegmentPlan>, CompileError> {
+    decode_typed_segment_plan_facts(
+        value,
+        reservation.plan().items(),
+        reservation.slots(),
+        *reservation.admission_digest(),
+    )
+}
+
+fn decode_typed_segment_plan_facts(
+    value: &Value,
+    parsed_items: &[crate::cell_plan::ParsedCellPlanItem],
+    slots: &[CheckedPlannedCellSlot],
+    reservation_digest: [u8; 32],
+) -> Result<Vec<CheckedTypedSegmentPlan>, CompileError> {
     use crate::cell_plan::ParsedCellPlanKind as Kind;
-    let expected = program
-        .parsed_plan
-        .items()
+    let expected = parsed_items
         .iter()
         .filter(|item| matches!(item.kind(), Kind::Bind | Kind::Expression))
         .map(|item| item.index())
@@ -703,8 +727,7 @@ fn decode_typed_segment_plans(
         let digest = string(&fields[0])?;
         let reservation = string(&fields[1])?;
         let root = string(&fields[2])?;
-        if reservation != hex(&program.reservation_digest) || root.is_empty() || root.len() > 65536
-        {
+        if reservation != hex(&reservation_digest) || root.is_empty() || root.len() > 65536 {
             return Err(failure("typed segment root or reservation differs"));
         }
         let mut hash = Sha256::new();
@@ -736,9 +759,7 @@ fn decode_typed_segment_plans(
                 .iter()
                 .map(|value| string(value).map(str::to_owned))
                 .collect::<Result<Vec<_>, _>>()?;
-            let parsed = program
-                .parsed_plan
-                .items()
+            let parsed = parsed_items
                 .get(ordinal)
                 .ok_or_else(|| failure("typed segment item is outside parser plan"))?;
             if consumed.len() >= expected.len()
@@ -762,7 +783,7 @@ fn decode_typed_segment_plans(
             frame(entry);
             frame(&generation.to_string());
             frame(kind);
-            let body = match (kind, parsed.kind(), program.slots.get(ordinal)) {
+            let body = match (kind, parsed.kind(), slots.get(ordinal)) {
                 ("action", Kind::Bind, Some(CheckedPlannedCellSlot::Bind { value }))
                     if *value == generation
                         && captures == parsed.binders()
@@ -5336,10 +5357,36 @@ mod tests {
             authenticated
         };
         let context = |version| {
+            use crate::artifact_inventory::{
+                ArtifactEntry, ArtifactInventory, CompilerInputProjection, CompilerSourceSupport,
+                NativeArtifactDemand,
+            };
+            let entry = Arc::new(ArtifactEntry::original(producer, epoch(version)).unwrap());
+            let inventory = ArtifactInventory::default();
+            let artifacts = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    vec![entry.clone()],
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )
+                .unwrap();
+            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &selection, &artifacts,
+            )
+            .unwrap();
+            let support = CompilerSourceSupport::close_complete_output(&output).unwrap();
             Arc::new(
                 crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
-                    .extend_checked_original_products(producer, &[epoch(version)])
+                    .extend_issued_compiler_support(&support)
                     .unwrap(),
             )
         };

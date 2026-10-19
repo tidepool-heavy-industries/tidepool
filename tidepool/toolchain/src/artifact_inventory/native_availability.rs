@@ -1030,16 +1030,6 @@ impl CheckedNativeAvailability {
         })
     }
 
-    pub(crate) fn validate(
-        self,
-        baseline_groups: &BTreeSet<NativeGroupKey>,
-        preferred: &[QualifiedNativeAvailability],
-        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
-        let advertised = self.advertised_groups(baseline_groups)?;
-        self.validate_advertised(advertised, preferred, validation)
-    }
-
     pub(crate) fn validate_request(
         self,
         baseline_groups: &BTreeSet<NativeGroupKey>,
@@ -2101,12 +2091,29 @@ mod normalized_dependency_tests {
             .into_iter()
             .map(|witness| witness.product)
             .collect::<Vec<_>>();
-        let inputs = OriginalCompilerInputs::issue_candidate_from_support(
-            &CompilerSourceSupport::empty(),
-            producer.sha256(),
-            &products,
-        )
-        .unwrap();
+        let entries = products
+            .iter()
+            .map(|product| {
+                Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let inventory = ArtifactInventory::default();
+        let artifacts = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &artifacts.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        let inputs = OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap();
         let original = ArtifactEntry::original(producer.sha256(), products[0].clone())
             .unwrap()
             .descriptor
@@ -2311,12 +2318,29 @@ mod normalized_dependency_tests {
             .into_iter()
             .map(|witness| witness.product)
             .collect::<Vec<_>>();
-        let inputs = OriginalCompilerInputs::issue_candidate_from_support(
-            &CompilerSourceSupport::empty(),
-            producer.sha256(),
-            &products,
-        )
-        .unwrap();
+        let entries = products
+            .iter()
+            .map(|product| {
+                Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let inventory = ArtifactInventory::default();
+        let artifacts = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &artifacts.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        let inputs = OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap();
         let complete = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
         let root_owner = ExactModuleIdentity {
             unit: products[1].owner().unit.clone(),

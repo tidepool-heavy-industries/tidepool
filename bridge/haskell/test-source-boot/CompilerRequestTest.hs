@@ -5,10 +5,14 @@ import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
   , BodyOutcome(..), CleanupStage(..), cleanupStage, cleanupException, withCompletionRelease )
 
-import Control.Exception (AsyncException(ThreadKilled), SomeException, SomeAsyncException, IOException, fromException, throwIO, try)
+import Control.Exception (AsyncException(ThreadKilled), SomeException, SomeAsyncException, IOException, fromException, throw, throwIO, try)
 import Control.Concurrent (forkFinally, killThread, newEmptyMVar, putMVar, readMVar)
 import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.List (isInfixOf)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import System.Timeout (timeout)
+import System.IO (stderr)
 import Control.Monad ((>=>), forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
@@ -22,7 +26,7 @@ import GHC.Types.Name (getOccString)
 import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module (moduleName, moduleNameString)
-import SourceBootFixtureSupport (hasIntResultLiteral, withScratch)
+import SourceBootFixtureSupport (hasIntResultLiteral, withScratch, captureDiagnostics)
 import System.Directory (copyFile, createDirectory, doesDirectoryExist, doesFileExist, getFileSize, getPermissions, setPermissions, listDirectory, Permissions(..))
 import System.FilePath ((</>), takeFileName)
 import Test.QuickCheck
@@ -39,6 +43,7 @@ import Tidepool.DiagJson (InputRejection(..))
 
 worldRequestBoundaries :: IO ()
 worldRequestBoundaries = do
+  worldAcquisitionDiagnostics
   requireObservationPackageEnvironment
   let root = replicate 64 'a'
       resident = ExactInputsRequest root (ResidentExactInputs "foreign-worker-realization")
@@ -76,6 +81,16 @@ worldRequestBoundaries = do
       decode fields = case workerRequestFromArgv (workerArgv fields) of
         Right (Just request) -> pure request
         other -> fail ("invalid held cell fixture: " ++ show other)
+  let decodeSlots slots = workerRequestFromArgv (workerArgv
+        [WorldCellPrepare cellPrepare {worldCellPrepareSlots=slots}])
+  case decodeSlots [(0,PlannedDeclaration 1),(1,PlannedBind 1)] of
+    Right (Just _) -> pure ()
+    other -> fail ("held request conflated Lib1 and Val1 reservations: " ++ show other)
+  forM_ [[(0,PlannedBind 1),(1,PlannedExpression 1 "observation")]
+    ,[(0,PlannedPrologue 1),(1,PlannedDeclaration 1)]] $ \slots ->
+      case decodeSlots slots of
+        Left _ -> pure ()
+        other -> fail ("held request admitted duplicate module reservations: " ++ show other)
   planArgs <- decode [WorldCellPlan cellPlan]
   prepareArgs <- decode [WorldCellPrepare cellPrepare]
   (latePlan,latePrepare) <- withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \scope -> do
@@ -97,10 +112,125 @@ worldRequestBoundaries = do
   try latePlan >>= requireCancellation
   try latePrepare >>= requireCancellation
 
+-- Exercise the production human diagnostic emitter without manufacturing a
+-- rooted package/world. Actual Complete dispatch still requires the HOST probe.
+worldAcquisitionDiagnostics :: IO ()
+worldAcquisitionDiagnostics = do
+  let reason = "read/decode WorldInputsCorrupt"
+      manifest = "/captured/\x03bb/world.cbor"
+      detail = "fixture decode failure: \x03bb"
+      emittedBytes = BS.length . TextEncoding.encodeUtf8 . Text.pack
+  (_,ordinary) <- captureDiagnostics (emitWorldAcquisitionRejection reason manifest detail)
+  unless (all (`isInfixOf` ordinary) [reason,manifest,detail])
+    (fail "world acquisition diagnostic lost its typed read cause/path/detail")
+  -- A valid UTF-8 stream may cross the existing capture byte boundary.
+  -- Decode its complete prefix, without treating a split final code point as
+  -- malformed data or replacing it with a different character.
+  let captureLimit = 4 * 1024 * 1024
+      truncatedMarker = "\n[compiler diagnostics truncated at 4 MiB]\n"
+  (_,truncated) <- captureDiagnostics $ BS.hPut stderr
+    (BS.replicate (captureLimit - 1) 97 <> TextEncoding.encodeUtf8 (Text.pack "\x03bb"))
+  unless (truncated == replicate (captureLimit - 1) 'a' ++ truncatedMarker)
+    (fail "bounded compiler diagnostics rejected or changed a valid UTF-8 prefix")
+  limited <- timeout 5000000 $ captureDiagnostics $
+    emitWorldAcquisitionRejection reason (repeat '\x1f30a') (repeat '\n')
+  case limited of
+    Just (_,output) | reason `isInfixOf` output
+      , "diagnostic field exceeds 4096 UTF-8 bytes" `isInfixOf` output
+      , emittedBytes output < 74 * 1024 -> pure ()
+    _ -> fail "world acquisition diagnostic did not bound lazy UTF-8 fields"
+  (_,escaped) <- captureDiagnostics $
+    emitWorldAcquisitionRejection reason (replicate 4096 '\0') (replicate 4096 '\n')
+  unless (emittedBytes escaped < 74 * 1024 && "\\u0000" `isInfixOf` escaped)
+    (fail "world acquisition diagnostic JSON expansion exceeded its bounded allowance")
+  -- A lazy formatting IOException reaches the actual emitter's exception
+  -- boundary. This is not a physical stderr/capture failure simulation.
+  (refusal,_) <- captureDiagnostics $ do
+    emitWorldAcquisitionRejection reason manifest
+      (throw (userError "injected world diagnostic formatting failure"))
+    pure (ExactInputsRejected AcquisitionRejected)
+  unless (refusal == ExactInputsRejected AcquisitionRejected)
+    (fail "diagnostic failure replaced the original acquisition rejection")
+  cancelled <- try (captureDiagnostics (emitWorldAcquisitionRejection reason manifest
+    (throw ThreadKilled))) :: IO (Either SomeException ((),String))
+  case cancelled of
+    Left failure | fromException failure == Just ThreadKilled -> pure ()
+    Left failure -> throwIO failure
+    Right _ -> fail "world acquisition diagnostic swallowed cancellation"
+
 -- These are raw closed-source data/I/O controls, not rooted world issuers.
 -- They enter the same materialization owner used before world publication.
 worldMaterializationBoundaries :: IO ()
 worldMaterializationBoundaries = do
+  withScratch $ \parent -> do
+    sources <- sourceFixture [("A.hs","module A where\nanswer = 1\n")]
+    materialized <- materializeWorldSources parent sources Set.empty pure
+    child <- onlyChild parent
+    let directory = parent </> child
+    -- Three direct realized owners share exactly one physical source tree.
+    retainWorldMaterialization materialized
+    retainWorldMaterialization materialized
+    owners <- worldMaterializationOwners materialized
+    unless (owners == Just 3) (fail "world fork did not retain three direct backing owners")
+    forM_ [2,1] $ \remaining -> do
+      removed <- releaseWorldMaterialization materialized
+      alive <- doesDirectoryExist directory
+      owners <- worldMaterializationOwners materialized
+      unless (not removed && alive && owners == Just remaining)
+        (fail "dropping a predecessor removed surviving successor backing")
+      measured <- measureBacking directory
+      unless (measured == worldMaterializationCharge materialized)
+        (fail "shared source backing changed its once-issued physical charge")
+    removed <- releaseWorldMaterialization materialized
+    alive <- doesDirectoryExist directory
+    owners <- worldMaterializationOwners materialized
+    unless (removed && not alive && owners == Just 0)
+      (fail "last realized world failed to release its physical backing")
+    repeated <- try (releaseWorldMaterialization materialized) :: IO (Either SomeException Bool)
+    unless (either (const True) (const False) repeated)
+      (fail "released backing accepted a duplicate release")
+  withScratch $ \parent -> do
+    sources <- sourceFixture [("A.hs","module A where\n")]
+    first <- materializeWorldSources parent sources Set.empty pure
+    firstChild <- onlyChild parent
+    second <- materializeWorldSources parent sources Set.empty pure
+    children <- listDirectory parent
+    secondChild <- case filter (/= firstChild) children of
+      [child] -> pure child
+      _ -> fail "independent cold acquisitions did not keep distinct physical backing"
+    firstOwners <- worldMaterializationOwners first
+    secondOwners <- worldMaterializationOwners second
+    firstCharge <- measureBacking (parent </> firstChild)
+    secondCharge <- measureBacking (parent </> secondChild)
+    unless (firstOwners == Just 1 && secondOwners == Just 1
+        && firstCharge == worldMaterializationCharge first
+        && secondCharge == worldMaterializationCharge second)
+      (fail "equal source bytes substituted sharing for actual physical acquisitions")
+    _ <- releaseWorldMaterialization first
+    remaining <- doesDirectoryExist (parent </> secondChild)
+    unless remaining (fail "independent acquisition lost backing when its equal peer retired")
+    _ <- releaseWorldMaterialization second
+    requireEmpty parent
+  withScratch $ \parent -> do
+    sources <- sourceFixture [("A.hs","module A where\n")]
+    materialized <- materializeWorldSources parent sources Set.empty pure
+    child <- onlyChild parent
+    let directory = parent </> child
+        root = directory </> "root-0"
+    permissions <- getPermissions root
+    setPermissions root (permissions {readable=False,writable=False,searchable=False})
+    failed <- try (releaseWorldMaterialization materialized) :: IO (Either SomeException Bool)
+    setPermissions root permissions
+    unless (either (const True) (const False) failed)
+      (fail "unreadable backing unexpectedly reported successful cleanup")
+    owners <- worldMaterializationOwners materialized
+    unless (owners == Nothing) (fail "cleanup failure reported settled backing ownership")
+    retained <- try (retainWorldMaterialization materialized) :: IO (Either SomeException ())
+    unless (either (const True) (const False) retained)
+      (fail "quarantined backing accepted a new successor")
+    retried <- try (releaseWorldMaterialization materialized) :: IO (Either SomeException Bool)
+    unless (either (const True) (const False) retried)
+      (fail "quarantined backing manufactured a successful release")
   withScratch $ \parent -> do
     sources <- sourceFixture [("A.hs","module A where\nanswer = 1\n")
       ,("Nested/B.hs","module Nested.B where\n")]
@@ -410,6 +540,11 @@ completedRequestRelease = withScratch $ \work -> do
     refused <- try (void (prepareArtifacts originals work first [] [] Map.empty []))
       :: IO (Either SomeException ())
     requireCancellation refused
+    -- A later live allowance on this same GHC scope cannot substitute for the
+    -- completed result's closed issuing allowance, even before pending lookup.
+    (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \later -> do
+      stolen <- try (commitPreparedWorldDependencies later first) :: IO (Either SomeException ())
+      requireCancellation stolen
 
 requireCancellation :: Either SomeException () -> IO ()
 requireCancellation result = case result of

@@ -534,6 +534,7 @@ pub struct CompilerWorldRestoration {
     primary_root: ContextRoot,
     primary_blocks: ReachableBlocks,
     primary_associations: MaterializedMap<ArtifactBinding, cid::Cid>,
+    primary_compiler_inputs: Arc<crate::declaration_context::RequestCompilerInputs>,
     bindings: MaterializedMap<String, WorldBindingSnapshotFact>,
     producer: [u8; 32],
     profile: [u8; 32],
@@ -927,6 +928,7 @@ struct WorldColdRows {
     images: BTreeMap<(String, String, String), ciborium::value::Value>,
     rows: BTreeMap<(String, String, String), ciborium::value::Value>,
     arenas: crate::declaration_context::original_inputs::OriginalInputArenaTable,
+    diagnostics: Option<crate::artifacts::InputArtifactDiagnostics>,
 }
 impl WorldColdRows {
     fn row(
@@ -953,6 +955,16 @@ impl WorldColdRows {
             return Err(source_failure(
                 "world row has a different compiler producer",
             ));
+        }
+        if let Some(capture) = &mut self.diagnostics {
+            if let Err(error) = capture.original_parts(
+                &self.producer,
+                &entry.descriptor.owner.unit,
+                &entry.descriptor.owner.module,
+                &parts,
+            ) {
+                tracing::warn!(%error,"compiler world input diagnostics are incomplete");
+            }
         }
         let find = |kind| {
             parts
@@ -1277,6 +1289,7 @@ pub(crate) fn world_context_fixture(
         images: BTreeMap::new(),
         rows: BTreeMap::new(),
         arenas: Default::default(),
+        diagnostics: None,
     };
     let mut remaining = capture_allowance()?;
     let (base, associations) = materialize_primary_associations(
@@ -1393,6 +1406,16 @@ impl CompilerWorldOpenInputs {
         let (primary_context, primary_root, mut primary_blocks) =
             self.materialize_primary(endpoint)?;
         self.primary_context = primary_context;
+        // This cold issuer preserves the actual primary selection and native
+        // lineage. Visible checked rows keep their independent issuing support;
+        // ordinary operations select demanded closures from these owners.
+        let primary_compiler_inputs = self
+            .primary_context
+            .capture_world_primary_compiler_inputs(producer)?;
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::ColdWorldCompilerBasisCapture,
+            1,
+        );
         crate::host_work::record_host_work(
             crate::host_work::HostWorkCounter::InputFdEnumeration,
             1,
@@ -1403,6 +1426,9 @@ impl CompilerWorldOpenInputs {
             images: BTreeMap::new(),
             rows: BTreeMap::new(),
             arenas: Default::default(),
+            diagnostics: crate::artifacts::CompilerDiagnosticCapture::input_artifacts(
+                self.directory.path(),
+            ),
         };
         let block_bytes = primary_blocks
             .blocks()
@@ -1458,6 +1484,11 @@ impl CompilerWorldOpenInputs {
                 .map_err(|error| source_failure(error.to_string()))?;
             binding_rows.insert(artifact.owner().module_name(), row_root);
             visible.push(row);
+        }
+        if let Some(capture) = &rows.diagnostics {
+            if let Err(error) = capture.finish_original_parts() {
+                tracing::warn!(%error,"compiler world input diagnostic manifest is incomplete");
+            }
         }
         let binding_facts = self.bindings.cold_snapshot(&binding_rows)?;
         let bindings = binding_materializer
@@ -1536,6 +1567,7 @@ impl CompilerWorldOpenInputs {
             primary_root,
             primary_blocks,
             primary_associations,
+            primary_compiler_inputs,
             bindings,
             producer,
             profile,
@@ -1654,7 +1686,18 @@ fn ensure_world(
                 crate::host_work::HostWorkCounter::WorldEnsureComplete,
                 1,
             );
+            let diagnostics = crate::artifacts::CompilerDiagnosticCapture::start(
+                restoration.inputs.directory.path(),
+                &cmd,
+            );
             let run = world_execute(&cmd, endpoint, restoration.input_files.clone())?;
+            diagnostics.completed(
+                restoration.inputs.directory.path(),
+                &cmd,
+                run.success(),
+                &run.output.stderr,
+            );
+
             match O::decode(&run.output.stdout).map_err(|_| world_response_error(false))? {
                 O::Ready { world, realization } if world == root => {
                     crate::host_work::record_host_work(
@@ -1779,6 +1822,16 @@ pub(crate) struct WorldCellOutputAdmission {
     pub(crate) demanded_rows: Vec<Arc<CheckedValueArtifact>>,
     pub(crate) captured_files: BTreeMap<PathBuf, WorldOutputFile>,
     pub(crate) validation: crate::recovery_artifacts::PackageInterfaceValidation,
+    segments: Vec<Arc<crate::checked_cell::CheckedTypedSegmentPlan>>,
+}
+
+impl WorldCellOutputAdmission {
+    pub(crate) fn reservation(&self) -> &Arc<crate::cell_plan::CompilerWorldCellReservation> {
+        &self.reservation
+    }
+    pub(crate) fn segments(&self) -> &[Arc<crate::checked_cell::CheckedTypedSegmentPlan>] {
+        &self.segments
+    }
 }
 
 /// Bytes and their observed seal from the one named output acquisition. This
@@ -1989,11 +2042,11 @@ fn admit_world_preparation_response(
         .inventory
         .decode_value(bytes, 8 << 20)
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-    let fields = answer_array(&packet, 8)?;
+    let fields = answer_array(&packet, 9)?;
     let plan = reservation.plan();
     let base = plan.world().logical_id();
     let plan_digest = world_digest(plan.receipt());
-    if answer_text(&fields[0])? != "TPCWPREP2"
+    if answer_text(&fields[0])? != "TPCWPREP3"
         || answer_hash(&fields[1])? != *base
         || answer_hash(&fields[2])? != plan_digest
         || answer_hash(&fields[3])? != *reservation.admission_digest()
@@ -2005,6 +2058,7 @@ fn admit_world_preparation_response(
         if !answer_blob(&fields[5])?.is_empty()
             || !answer_array(&fields[6], 0)?.is_empty()
             || !answer_array(&fields[7], 0)?.is_empty()
+            || !answer_array(&fields[8], 0)?.is_empty()
         {
             return Err(world_response_error(false));
         }
@@ -2018,6 +2072,31 @@ fn admit_world_preparation_response(
     if answer_text(&outcome[0])? != "prepared" {
         return Err(world_response_error(false));
     }
+    validation
+        .inventory
+        .charge_value_copies(&fields[8], 1)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let segments = crate::checked_cell::decode_world_typed_segment_plans(&fields[8], &reservation)?;
+    validation
+        .inventory
+        .reserve::<Arc<crate::checked_cell::CheckedTypedSegmentPlan>>(segments.len())
+        .and_then(|_| {
+            validation
+                .inventory
+                .reserve::<(usize, (usize, usize))>(reservation.slots().len())
+        })
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let segments: Vec<_> = segments.into_iter().map(Arc::new).collect();
+    let by_ordinal: BTreeMap<_, _> = segments
+        .iter()
+        .enumerate()
+        .flat_map(|(segment, plan)| {
+            plan.items()
+                .iter()
+                .enumerate()
+                .map(move |(item, planned)| (planned.ordinal(), (segment, item)))
+        })
+        .collect();
     let completed = answer_array(&outcome[1], reservation.slots().len())?;
     validation
         .inventory
@@ -2052,6 +2131,11 @@ fn admit_world_preparation_response(
             .decode_value(&item_bytes, 4 << 20)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         let observed = answer_array(&item, 13)?;
+        let &(segment_index, item_index) = by_ordinal
+            .get(&index)
+            .ok_or_else(|| world_response_error(true))?;
+        let segment = &segments[segment_index];
+        let typed_item = &segment.items()[item_index];
         if answer_text(&observed[0])? != "TPCWITEM1"
             || answer_hash(&observed[1])? != *base
             || answer_hash(&observed[2])? != plan_digest
@@ -2059,6 +2143,8 @@ fn admit_world_preparation_response(
             || answer_u64(&observed[4])? != index as u64
             || answer_u64(&observed[5])? != world_cell_generation(slot)
             || answer_hash(&observed[7])? != world_digest(plan.items()[index].source().as_bytes())
+            || answer_text(&observed[6])? != segment.digest()
+            || answer_text(&observed[8])? != typed_item.entry()
         {
             return Err(world_response_error(true));
         }
@@ -2066,7 +2152,9 @@ fn admit_world_preparation_response(
             .inventory
             .charge_value_copies(&observed[9], 1)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        world_output_symbol(&observed[9])?;
+        if world_output_symbol(&observed[9])?.occurrence != typed_item.entry() {
+            return Err(world_response_error(true));
+        }
         let manifest = world_output_manifest(&observed[12], &validation.inventory)?;
         for (path, digest) in manifest {
             validation
@@ -2194,6 +2282,7 @@ fn admit_world_preparation_response(
         common_files,
         captured_files,
         validation,
+        segments,
         demanded_rows: demanded.into_values().collect(),
     }))
 }
@@ -2797,6 +2886,7 @@ mod answer_tests {
             images: BTreeMap::new(),
             rows: BTreeMap::new(),
             arenas: Default::default(),
+            diagnostics: None,
         };
         let key = ("main".into(), "Module".into(), "image".into());
         let first = rows

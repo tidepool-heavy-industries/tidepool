@@ -7,11 +7,15 @@ module Tidepool.ExtractUtil
   , shaHex
   , capitalize
   , trySynchronous
+  , boundedUtf8
   ) where
 
 import Control.Exception (SomeAsyncException, SomeException, fromException, throwIO, try)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Text.Lazy as LT
+import qualified Data.Text.Lazy.Encoding as LTE
 import Numeric (showHex)
 import Data.Char (toUpper)
 import System.Environment (lookupEnv)
@@ -47,3 +51,13 @@ trySynchronous action = do
       Just async -> throwIO async
       Nothing -> pure (Left exception)
     Right value -> pure (Right value)
+
+-- Force only the remaining byte budget and one growth sentinel while encoding.
+-- Both worker response framing and bounded failure diagnostics use this owner.
+boundedUtf8 :: Integer -> String -> Maybe BS.ByteString
+boundedUtf8 remaining value
+  | remaining < 0 = Nothing
+  | otherwise =
+      let bytes = LBS.toStrict (LBS.take (fromInteger remaining + 1)
+            (LTE.encodeUtf8 (LT.pack value)))
+      in if toInteger (BS.length bytes) > remaining then Nothing else Just bytes

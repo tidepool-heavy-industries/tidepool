@@ -9,7 +9,7 @@ module Tidepool.CompilerRequest
   , boundRequestOperation, boundRequestExactScope, boundParserFlags
   , compileBoundRequest, compilePreparedRequest, compilePreparedSegmentRequest
   , runBoundGhc, withBoundExactInterfaceTransaction, cellSegmentRequest
-  , runBoundWorldQuery, runBoundWorldCellPlan, validateBoundWorldCell
+  , runBoundWorldQuery, runBoundWorldCellPlan, validateBoundWorldCell, commitPreparedWorldDependencies
   , PreparedCompilation, preparedCompilationResult, preparedCompilationWorldInputs, prepareCompilationOriginals
   , PreparedArtifact(..), PreparedArtifactOutput(..), PreparedOutputIntent(..), preparedOutputIntent, prepareArtifacts, prepareArtifactsWithIntent
   , prepareArtifactsWithProjection, PreviewOriginalDependenciesUnavailable, requirePreviewProjection
@@ -17,7 +17,7 @@ module Tidepool.CompilerRequest
 
 import Control.Exception (Exception, evaluate, throw, throwIO)
 import Control.Monad (forM, forM_, unless, when)
-import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef, modifyIORef')
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Maybe (isJust, isNothing, mapMaybe)
@@ -37,7 +37,7 @@ import Tidepool.CheckedPrefixImports (CompletedValueImport)
 import Tidepool.CheckedAdmission (matchesInspectionAdmission)
 import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, CompilerExecutor, compilerExecutionGrant
-  , withCompilerExecutor, requireCompilerExecutorOpen )
+  , withCompilerExecutor, sameCompilerExecutor, requireCompilerExecutorOpen )
 import Tidepool.CompilerProducts
   ( OriginalProductWorklist, observeOriginalProjectionWithRecovery, PreparedProductContext
   , prepareOriginalProductsWithCacheAndReuse, prepareOriginalProductsWithWorklist
@@ -213,18 +213,18 @@ compileBoundRequest request selection retained purpose session path =
 -- bracket closes; projection checks operation entry, while submissions fence a
 -- concurrent close. GHC's retained mutable package cells keep their existing owner.
 data PreparedCompilation = PreparedCompilation PreparedPipelineResult CompilerRecoveryCaches
-  CompilerExecutor (IO ()) (Maybe OriginalProductWorklist) (Maybe WorldCellInputs)
+  CompilerExecutor (IO ()) (Maybe OriginalProductWorklist) (Maybe WorldCellInputs) (IORef (Maybe PendingWorldDependencies))
 
 preparedCompilationResult :: PreparedCompilation -> PreparedPipelineResult
-preparedCompilationResult (PreparedCompilation result _ _ _ _ _) = result
+preparedCompilationResult (PreparedCompilation result _ _ _ _ _ _) = result
 
 preparedCompilationWorldInputs :: PreparedCompilation -> Maybe WorldCellInputs
-preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ inputs) = inputs
+preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ inputs _) = inputs
 
 withPreparedCompilation :: PreparedCompilation
   -> (PreparedPipelineResult -> CompilerRecoveryCaches -> CompilerExecutor -> Maybe OriginalProductWorklist -> IO a)
   -> IO a
-withPreparedCompilation (PreparedCompilation result recovery executor guard worklist _) use = do
+withPreparedCompilation (PreparedCompilation result recovery executor guard worklist _ _) use = do
   guard
   requireCompilerExecutorOpen executor
   use result recovery executor worklist
@@ -278,8 +278,9 @@ compilePreparedRequest request@(BoundCompilerRequest _ args _ _ _ executor _) se
     PortableExecutable -> do
       completed <- compileBoundCompleted request selection retained purpose session path
       pure (completed,Nothing)
+  pending <- newIORef (completedCompilerWorldDependencies completed)
   pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) worklist
-    (completedCompilerWorldInputs completed))
+    (completedCompilerWorldInputs completed) pending)
 
 compilePreparedSegmentRequest :: BoundCompilerRequest -> PipelineSelection PreparedSegmentProductsResult
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO (PreparedCompilation,TypedSegment)
@@ -289,8 +290,9 @@ compilePreparedSegmentRequest request@(BoundCompilerRequest _ _ _ _ _ executor _
   -- captured recovery context and the existing fallback path.
   completed <- compileBoundCompleted request selection retained purpose session path
   let result = completedCompilerResult completed
+  pending <- newIORef (completedCompilerWorldDependencies completed)
   pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) Nothing
-      (completedCompilerWorldInputs completed),
+      (completedCompilerWorldInputs completed) pending,
     preparedSegmentCaptures result)
 
 runBoundGhc :: BoundCompilerRequest -> Ghc a -> IO a
@@ -304,6 +306,24 @@ validateBoundWorldCell (BoundCompilerRequest scope _ operation basis grant execu
   requireCompilerExecutorOpen executor
   case (operation,basis) of
     (WorldCellPrepareOperation question,HeldWorldBasis held) -> scopedValidateWorldCell scope held grant executor question
+    _ -> throwIO CheckedPurposeMismatch
+
+-- Terminal output success reborrows the actual held owner. Pending completion
+-- facts carry no source tree or usable compiler capability beyond scope END.
+commitPreparedWorldDependencies :: BoundCompilerRequest -> PreparedCompilation -> IO ()
+commitPreparedWorldDependencies (BoundCompilerRequest scope _ operation basis _ executor _)
+    (PreparedCompilation _ _ issuing guard _ _ pendingRef) = do
+  guard
+  requireCompilerExecutorOpen issuing
+  requireCompilerExecutorOpen executor
+  unless (sameCompilerExecutor issuing executor) (throwIO CheckedPurposeMismatch)
+  case (operation,basis) of
+    (WorldCellPrepareOperation question,HeldWorldBasis held) -> do
+      -- Consume before the guarded commit; cancellation cannot replay a pending
+      -- publication through another invocation or replacement request owner.
+      pending <- atomicModifyIORef' pendingRef (\value -> (Nothing,value))
+      selected <- maybe (throwIO CheckedPurposeMismatch) pure pending
+      scopedCommitWorldDependencies scope held issuing question selected
     _ -> throwIO CheckedPurposeMismatch
 
 runBoundWorldCellPlan :: BoundCompilerRequest -> IO BS.ByteString
