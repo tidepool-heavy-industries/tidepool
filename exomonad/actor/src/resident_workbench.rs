@@ -17037,7 +17037,7 @@ pub(crate) mod request_tests {
     async fn public_module_world_retains_source_domain_and_invalidates_runtime_base() {
         with_test_compiler_owner(|preparation_client| async move {
             use tidepool_toolchain::compiler_world::{WorldModuleOrigin, WorldModuleResolution};
-            use tidepool_toolchain::timing::HostWorkObservation;
+            use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
             let (machines, mut context, source, _root) = actor_registry_fixture();
             let first_body = "module WorldQuestion where\nknown :: Int\nknown = 7\n";
             let second_body = "module WorldQuestion where\nknown :: Bool\nknown = True\n";
