@@ -932,7 +932,7 @@ impl OriginalCompilerInputs {
             RequestNativeAvailability::issue_checked_fragment(&effective, &artifacts, validated)?;
         timing.finish(true);
         Ok(Self {
-            native_fact_base:Some(Arc::clone(completed.continuation.native_fact_owner())),
+            native_fact_base:completed.continuation.selection.native_fact_base().cloned(),
             native_availability,
             demand: OriginalInputDemand::RolePolicy,
             projection,
