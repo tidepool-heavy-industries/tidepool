@@ -374,8 +374,12 @@ It traces runtime `capture_value_interfaces` and the actual
 `checked_value_context`/`extend_retained_value_artifacts` folds, distinguishes mixed
 runtime/provenance consumers of metadata/native selection from compiler-only
 preparation, and proposes actual resident inspection first, then one checked
-binding with atomic world/binding publication. The independent oracle was
-reactivated for source-inventory review only; no source/API/build authorization.
+binding with atomic world/binding publication. The independent oracle settled
+source-inventory review with proof-marker and actual digest/prototype/fence
+consumer corrections incorporated, no remaining confirmed finding. Receipts are
+`oracle/provider-inventory-independent-review-b5.txt` and
+`oracle/architecture-source-inventory-b5.txt` in the host evidence root. Both
+leaves are dormant with grants reserved; no source/API/build authorization.
 The campaign folded reviewed host b5, owned f330 and worker 0bd at `f088e3e7` and
 owns its running joined production/cfg-test build. This is not new-architecture
 qualification.
