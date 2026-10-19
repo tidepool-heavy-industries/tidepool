@@ -6,7 +6,7 @@ Owner `/root/warm_compiler_campaign/host_inputs`; area checkout
 
 ## Current source and actual query result
 
-Area production is exact `345827c749e0ec04f40da0f9401b839fdab824e1`: full reviewed
+Actual tested production is exact `345827c749e0ec04f40da0f9401b839fdab824e1`: full reviewed
 HOST query history plus qualified old-profile Warm `d7cd1bbb`. No typed-binding,
 new-CID or new-profile API is mixed into this query candidate. The full-history
 merge was clean; all eight incoming Warm blobs and seven critical HOST blobs
@@ -42,8 +42,8 @@ summary completeness is false because retained timing records truncate at172;
 request-count and aggregate completeness are true, and full compiler logs remain.
 Do not turn that summary limit into missing raw evidence or complete diagnostics.
 
-HOST native allowance is now0/0 and all clients are terminal. Query checkout
-retains only Buck407847/forkserver407888 in
+The preceding actual345 clients are terminal. At that terminal, query checkout
+retained Buck407847/forkserver407888 in
 `/build.slice/inanna-build-1792421479-407771.scope`, last idle3,313,496,064 bytes,
 phase peak11,383,582,720 bytes. Typed checkout's separate idle daemon remains in
 global accounting. Campaign LIVE.json is the current phase authority; fresh actual
@@ -51,18 +51,28 @@ scope/headroom accounting is required before any next native lane.
 
 ## Active repair and exact continuation
 
-Two reserved Sol-high descendants only, no grandchildren or additional agents:
-selected_root owns query implementation and terminal command observation;
-selection_oracle independently classifies the actual fixture failure and reviews
-its bounded repair. Preserve independent-world original/target leases, genuine
+Two reserved Sol-high descendants only, no grandchildren or additional agents.
+selected_root owns query implementation and terminal command observation. Exact
+345→db1b26f4 cumulative source review accepted the mounted-alias repair and
+unchanged frontend-block reorder before history. The area fold7a759353 preserves
+full histories; production matches db1, independently reviewed but not yet tested.
+Receipt: `oracle/query-frontend-reorder-joined-review-db1b26f4.txt`.
+selection_oracle now implements the required zero-budget lifecycle source fixture
+in isolated checkout `tidepool-shared-warm-retention-fixture-20261019`, branch
+`feature/shared-warm/retention-fixture`, exact base db1. No additional agent or
+native grant was allocated. Preserve independent-world original/target leases, genuine
 unrelated-history production publication, all aliases and every existing oracle.
 A context repair must use the fixture's actual effect contract, not rewrite GHC
-errors or bypass source admission. Consider moving the independent frontend block
-before history growth so its result is not hidden by a later fixture failure;
-retain all assertions and distinguish direct-client counters from frontend work.
+errors or bypass source admission. The independent frontend block now precedes
+history growth so its result is not hidden by a later fixture failure. All
+assertions remain; direct-client counters stay distinct from frontend work.
 
-After source review: smallest affected compile and actual Rooted retry with fresh
-admission. Command:
+Actor cfg-test-only incremental compile is ACTIVE at frozen db1, session2046;
+selected_root owns its terminal result and the serial Rooted2 retry if compilation
+passes. HOST14GiB TOTAL/8GiB growth is active, with fresh full-grant projection
+80,085,237,760 bytes below85,899,345,920 pressure. Campaign12699, new Reload14,
+Warm8 ADD and known qualification8 ADD were included; idle scopes remain global.
+Only HOST LIVE entry was changed. The subsequent service command is:
 `swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --trace-profile full --output-dir EVIDENCE`.
 Campaign's separate frozen joined12699 observer continues unchanged. Emit exact
 terminal/source/count/hash/resource events to campaign and affected Warm owner.
