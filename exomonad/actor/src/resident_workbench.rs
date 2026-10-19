@@ -4379,6 +4379,34 @@ macro_rules! resident_request_roster {
     ($($variant:ident($request:ty) => $key:expr,)*) => {
         enum ResidentRequest { $($variant($request),)* }
 
+        impl ResidentRequest {
+    fn decode(
+        request: &HaskellValue,
+        table: &DataConTable,
+    ) -> Result<Self, ResidentActorWorkbenchError> {
+        tracing::trace!(constructor = %request_constructor(request, table), "decoding resident request");
+        $(match <$request as FromHaskell>::from_value(request, table) {
+            Ok(decoded) => return Ok(Self::$variant(decoded)),
+            Err(BridgeError::UnknownDataCon(_)) => {}
+            Err(source) => return Err(ResidentActorWorkbenchError::RequestDecode {
+                constructor: request_constructor(request, table), source,
+            }),
+        })*
+        Err(ResidentActorWorkbenchError::UnsupportedRequest {
+            constructor: request_constructor(request, table),
+        })
+    }
+
+    #[cfg(test)]
+    fn recognizing_members(request: &HaskellValue, table: &DataConTable) -> Vec<&'static str> {
+        let mut members = Vec::new();
+        $(if !matches!(<$request as FromHaskell>::from_value(request, table), Err(BridgeError::UnknownDataCon(_))) {
+            members.push(stringify!($variant));
+        })*
+        members
+    }
+        }
+
         pub(crate) fn intrinsic_effect_families() -> Vec<exomonad_tool::ToolEffectKey> {
             let mut keys: Vec<_> = [$($key,)*].into_iter().flatten().collect();
             keys.extend(exomonad_tool::ActorEffectKey::ALL.iter().copied()
@@ -4441,103 +4469,6 @@ fn command_operation(request: &crate::generated::commands::CommandsReq) -> &'sta
 }
 
 impl ResidentRequest {
-    fn decode(
-        request: &HaskellValue,
-        table: &DataConTable,
-    ) -> Result<Self, ResidentActorWorkbenchError> {
-        tracing::trace!(
-            constructor = %request_constructor(request, table),
-            "decoding resident request"
-        );
-        macro_rules! try_member {
-            ($variant:path, $request:ty) => {
-                match <$request as FromHaskell>::from_value(request, table) {
-                    Ok(decoded) => return Ok($variant(decoded)),
-                    Err(BridgeError::UnknownDataCon(_)) => {}
-                    Err(source) => {
-                        return Err(ResidentActorWorkbenchError::RequestDecode {
-                            constructor: request_constructor(request, table),
-                            source,
-                        });
-                    }
-                }
-            };
-        }
-
-        try_member!(
-            Self::Notifications,
-            crate::generated::notifications::NotificationsReq
-        );
-        try_member!(Self::Sleep, crate::generated::sleep::SleepReq);
-        try_member!(Self::Jev, crate::generated::jev::JevReq);
-        try_member!(Self::Model, crate::generated::model_call::ModelReq);
-        try_member!(Self::ForkAgent, crate::generated::fork_agent::ForkAgentReq);
-        try_member!(
-            Self::SpawnAgent,
-            crate::generated::spawn_agent::SpawnAgentReq
-        );
-        try_member!(Self::Context, crate::ContextReq);
-        try_member!(
-            Self::RuntimeInfo,
-            crate::generated::runtime_info::RuntimeInfoReq
-        );
-        try_member!(Self::Source, crate::generated::source::SourceReq);
-        try_member!(Self::Reload, crate::generated::reload::ReloadReq);
-        try_member!(Self::Commands, crate::generated::commands::CommandsReq);
-        try_member!(Self::Console, crate::generated::console::ConsoleReq);
-        try_member!(Self::AskUser, crate::generated::ask_user::AskUserReq);
-        try_member!(Self::Green, crate::generated::green::GreenReq);
-        try_member!(Self::Actor, crate::generated::actor::ActorReq);
-        try_member!(
-            Self::ActorContext,
-            crate::generated::actor_context::ActorContextReq
-        );
-        try_member!(
-            Self::AgentControl,
-            crate::generated::agent_control::AgentControlReq
-        );
-        try_member!(
-            Self::AgentInspection,
-            crate::generated::agent_inspection::AgentInspectionReq
-        );
-        try_member!(Self::Lookup, crate::generated::lookup::LookupReq);
-        try_member!(
-            Self::Introspection,
-            crate::generated::introspection::IntrospectionReq
-        );
-        try_member!(
-            Self::AgentLaunch,
-            crate::generated::agent_launch::AgentLaunchReq
-        );
-        try_member!(
-            Self::ActorKernel,
-            crate::generated::actor_kernel::ActorKernelReq
-        );
-        try_member!(
-            Self::ActorLocal,
-            crate::generated::actor_local::ActorLocalReq
-        );
-        try_member!(
-            Self::AgentTools,
-            crate::generated::agent_tools::AgentToolsReq
-        );
-        try_member!(
-            Self::AgentSession,
-            crate::generated::agent_session::AgentSessionReq
-        );
-        try_member!(
-            Self::ResourceScopes,
-            crate::generated::resource_scopes::ResourceScopesReq
-        );
-        try_member!(Self::Reflect, crate::generated::reflect::ReflectReq);
-        try_member!(Self::Replies, RepliesReq);
-        try_member!(Self::Watches, WatchesReq);
-
-        Err(ResidentActorWorkbenchError::UnsupportedRequest {
-            constructor: request_constructor(request, table),
-        })
-    }
-
     fn operation(&self) -> &'static str {
         match self {
             Self::Sleep(crate::generated::sleep::SleepReq::SleepWith(..)) => "sleep",
@@ -16265,6 +16196,97 @@ pub(crate) mod request_tests {
                 && matches!(fields.as_slice(), [HaskellValue::Con(error, changed)] if Some(*error) == tidepool_bridge::get_qualified(&table, "Tidepool.Effects.Core.ScopeChanged", 2) && changed.len() == 2)
         ));
     }
+    #[test]
+    fn resident_request_constructor_domains_are_disjoint() {
+        use tidepool_repr::{DataCon, DataConId};
+        let mut recognized = std::collections::BTreeSet::new();
+        let mut constructors = Vec::new();
+        for effect in tidepool_protocol::effects::all() {
+            for verb in effect.verbs {
+                constructors.push(("Tidepool.Effects.Core", verb.ctor, verb.args.len()));
+            }
+        }
+        // These requests are authored outside the protocol schema owner.
+        constructors.extend([
+            ("Tidepool.Agent.Reply.Internal", "CurrentRequestWith", 1),
+            ("Tidepool.Agent.Watch.Internal", "ListRoutesWith", 0),
+        ]);
+        for (module, name, arity) in constructors {
+            let mut table = tidepool_test_data::standard_datacon_table();
+            let id = DataConId(1000);
+            table
+                .insert_checked(DataCon {
+                    identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                        tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: "fixture".into(),
+                            module: module.into(),
+                            namespace: "constructor".into(),
+                            occurrence: name.into(),
+                            record_parent: None,
+                        },
+                        "Request",
+                    ),
+                    id,
+                    name: name.into(),
+                    tag: 1,
+                    rep_arity: arity as u32,
+                    field_bangs: Vec::new(),
+                    qualified_name: Some(format!("{module}.{name}")),
+                    type_name: "Request".into(),
+                })
+                .unwrap();
+            // Recognition must precede field decoding. Wrong arity exercises
+            // every matching decoder without manufacturing typed payloads.
+            let value = HaskellValue::Con(id, vec![HaskellValue::Con(id, vec![]); arity + 1]);
+            let members = ResidentRequest::recognizing_members(&value, &table);
+            assert!(
+                members.len() <= 1,
+                "overlapping request constructor {module}.{name}: {members:?}"
+            );
+            if let Some(member) = members.first() {
+                recognized.insert(*member);
+                if name == "GetRuntimeInfoWith" {
+                    assert!(matches!(
+                        ResidentRequest::decode(&HaskellValue::Con(id, vec![]), &table),
+                        Ok(ResidentRequest::RuntimeInfo(
+                            crate::generated::runtime_info::RuntimeInfoReq::GetRuntimeInfoWith
+                        ))
+                    ));
+                }
+                if name == "ListRoutesWith" {
+                    assert!(matches!(
+                        ResidentRequest::decode(&HaskellValue::Con(id, vec![]), &table),
+                        Ok(ResidentRequest::Watches(WatchesReq::ListRoutesWith))
+                    ));
+                }
+                assert!(matches!(
+                    ResidentRequest::decode(&value, &table),
+                    Err(ResidentActorWorkbenchError::RequestDecode {
+                        source: BridgeError::ArityMismatch { .. },
+                        ..
+                    })
+                ));
+            }
+        }
+        assert_eq!(
+            recognized.len(),
+            29,
+            "every resident request family must be exercised: {recognized:?}"
+        );
+    }
+
+    #[test]
+    fn resident_request_unknown_constructor_is_unsupported() {
+        let table =
+            schema_constructor_table(tidepool_protocol::effects::runtime_info::runtime_info());
+        // The schema helper installs data records, not effect constructors.
+        let unknown = HaskellValue::Con(tidepool_repr::DataConId(9999), vec![]);
+        assert!(matches!(
+            ResidentRequest::decode(&unknown, &table),
+            Err(ResidentActorWorkbenchError::UnsupportedRequest { .. })
+        ));
+    }
+
     #[test]
     fn matched_request_with_invalid_deadline_is_not_skipped_by_dispatch() {
         use tidepool_repr::{DataCon, DataConId};
