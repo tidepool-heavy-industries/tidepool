@@ -1,6 +1,6 @@
 # Shared warm compiler: delivery plan
 
-Status: active, incomplete implementation campaign; see [current status](STATUS.md).
+Status: active, incomplete implementation campaign; see [current status](STATUS.md) and [resumable handoff](HANDOFF.md).
 Integrated aa59 passed both actual service-backed public-module query histories,
 including strict frontend resumption and growing-history controls. Joined f88 compiled
 nine production/test consumers and passed154 workflow plus27 counted Rust checks.
