@@ -718,7 +718,7 @@ impl KernelContext {
             )
         })?;
         let context = self.clone();
-        let result = self.directory.prepare_root(Box::new(move |_ticket| Box::pin(async move {
+        let result = self.directory.prepare_worker_root(reservation.identity(), Box::new(move |_ticket| Box::pin(async move {
             let produced: run_control::RootOperationResult = async {
                 let mut custody = StartupCustody { directory: context.directory.clone(), parent: context.identity, accounted: false };
                 let identity = reservation.identity();

@@ -49,6 +49,13 @@ impl RunState {
             if matches!(record.phase, ReservationPhase::NotStarted) {
                 continue;
             }
+            if let ReservationPhase::StartUnconfirmed(detail) = &record.phase {
+                resources.push(GenerationResourceObservation {
+                    identity: GenerationResourceIdentity::Actor(*actor),
+                    state: GenerationResourceState::CleanupUnconfirmed(detail.clone()),
+                });
+                continue;
+            }
             if let Some(entry) = self.entries.get(actor) {
                 if entry.actor.terminal().get().is_none() {
                     resources.push(GenerationResourceObservation {
@@ -143,15 +150,28 @@ impl RunControlClient {
         Ok(receiver.await.map_err(|_| DirectoryError::Unavailable)??)
     }
 
-    pub(crate) async fn prepare_generation_root(
+    pub(crate) async fn reserve_generation_actor(
         &self,
         dependency: &GenerationDependency,
-        operation: RootOperation,
-    ) -> Result<RootOperationResult, GenerationDirectoryError> {
-        let receiver = self.generation_enqueue(dependency, |reply| RunControlMessage::BeginPreparation {
-            dependency: Some(dependency.clone()), intent: PreparationIntent::Creation, operation, reply,
+        incarnation: crate::Incarnation,
+    ) -> Result<ActorReservation, GenerationDirectoryError> {
+        let receiver = self.generation_enqueue(dependency, |reply| RunControlMessage::ReserveGenerationActor {
+            dependency: dependency.clone(), incarnation, reply,
         })?;
-        let delivery = receiver.await.map_err(|_| DirectoryError::Unavailable)??
+        Ok(receiver.await.map_err(|_| DirectoryError::Unavailable)??)
+    }
+
+    /// The reservation owner supplies provenance; callers cannot substitute a
+    /// generation or omit it when preparing an already reserved worker.
+    pub(crate) async fn prepare_worker_root(
+        &self,
+        reservation: ActorRef,
+        operation: RootOperation,
+    ) -> Result<RootOperationResult, DirectoryError> {
+        let receiver = self.ask(|reply| RunControlMessage::BeginPreparation {
+            reservation: Some(reservation), intent: PreparationIntent::Creation, operation, reply,
+        }).await??;
+        let delivery = receiver
             .await.map_err(|_| DirectoryError::Unavailable)?;
         if delivery.is_error() {
             return Ok(delivery.accept());
