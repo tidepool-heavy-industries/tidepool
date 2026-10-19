@@ -1154,6 +1154,10 @@ impl NativeTransportAvailability {
         Ok(())
     }
 
+    pub(crate) fn original_artifact_id(&self) -> ArtifactId {
+        self.original.descriptor.id
+    }
+
     pub(crate) fn original_owner(&self) -> &tidepool_repr::execution_schema::CachedHomeOwner {
         let ArtifactPayload::Original(product) = &self.original.payload else {
             unreachable!("native selection issuer checked original payload")
