@@ -85,3 +85,49 @@ async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
     );
 })).await;
 }
+
+#[tokio::test]
+async fn hosted_lookup_binding_keeps_a_pure_second_cell_compilable() {
+    let campaign =
+        TestCampaign::start_with_config(|admission| admission, configure_notebook_lookup_workspace)
+            .await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let store = super::display_output::open_run_store(campaign.session_root.path())
+                    .expect("hosted output store");
+                let first = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(
+                            policy.as_ref(),
+                            "import qualified Tidepool.Effects.Authored as Files\n\
+                             import qualified Tidepool.Lookup as LookupApi\n\
+                             import qualified Tidepool.Lookup.Tools as LookupTools\n\
+                             topics <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"doc workbench\"])\n\
+                             display (LookupTools.renderBatch topics)",
+                        ),
+                    )
+                    .await;
+                assert_eq!(first["status"], "committed", "{first:?}");
+                assert!(
+                    !super::test_campaign::committed_display_text(&first).is_empty(),
+                    "the first cell must execute lookup and publish its result: {first:?}"
+                );
+
+                let second = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(policy.as_ref(), "display (1 + 1 :: Int)"),
+                    )
+                    .await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&second),
+                    "2",
+                    "the independent pure cell must compile after lookup: {second:?}"
+                );
+            })
+        })
+        .await;
+}
