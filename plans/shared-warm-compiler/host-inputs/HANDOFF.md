@@ -181,11 +181,25 @@ All clients settled; HOST14GiB total/8GiB growth was released, with the idle dae
 retained in its existing scope. The area full-history merge40741919d4 has exactly
 the tested864 production tree; its only difference is this handoff.
 
-Actual frontend2 follows the explicit full-history join of reviewed Reload
-`ce554a87d11c9a3f51834882e09d884fc5743c0b`, which fixes publication cleanup purpose.
-Its nine owning targets compiled and its first maintained notebook passed; the
-remaining notebook/control cohort is still pending. selected_root owns this
-source-only join, followed by independent review and fresh native admission. The service command is:
+The explicit full-history Reload ce554 publication-purpose join is
+`5752304b59fa8baf5c0c6e172dac0735d57516a9`. Independent joined review accepted it;
+its runtime/actor production and cfg-test consumers compiled17 local actions.
+Reload separately completed its four maintained notebook controls. The actual
+Rooted2 attempt at575 failed before Ready: both wrappers exited2, libtest body
+counts are null, and no answer/frontend assertions ran. The generated dedicated
+group inherited generic LD_LIBRARY_PATH; the strict Rooted service correctly
+refused it. Process exit is confirmed but compiler startup cleanup remains
+unconfirmed, with all failed artifacts retained in WORLD-QUERY-575-TERMINAL.json.
+
+Supervisor repair `eea61b3ee2fd0b7d934fec6698d2ca128a1f8558` removes loader inputs
+and their unused finite runtime-libraries resource only from the dedicated Rooted
+group through its existing generator. Finite group loader inputs and the strict
+service guard remain. Focused generator execution passed1; its stale expected
+mode roster was corrected to the existing five literal cases. Independent source
+review accepted all three changed files. Rust/Haskell source is identical575, so
+no repeated compiler gate is needed. selected_root owns the admitted14GiB total/
+8GiB growth serial same-group retry, fresh LIVE accounting, and actual terminal
+observation. The actual query/frontend milestone remains unqualified. The service command is:
 `swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --trace-profile full --output-dir EVIDENCE`.
 No ordinary-cell/new-hash/profile API is imported into this query candidate.
 
