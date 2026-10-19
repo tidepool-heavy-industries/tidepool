@@ -685,7 +685,7 @@ exactScopeBinders = withScratch $ \work -> do
   refused [[answer, answer]]
   refused [take 2 sameSpelling, drop 2 sameSpelling ++ [answer]]
   refused [large, [binder "value" "binder1" Nothing]]
-  putStrLn "exact scope binders: 8 checks passed (identity equality, empty/singleton/distinct/6037 inventory, same-group/cross-group/late duplicate)"
+  putStrLn "exact scope binders: 8 checks passed (typed identity/group conversion; request-supplied outlines refused as non-ordinals)"
 
 checkedValueTypeClosure :: FilePath -> IO ()
 checkedValueTypeClosure effects = withScratch $ \work -> do
