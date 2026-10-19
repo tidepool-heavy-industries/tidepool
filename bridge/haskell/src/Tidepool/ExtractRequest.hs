@@ -4,7 +4,7 @@
 module Tidepool.ExtractRequest
   ( CompileWorkload(..)
   , ExactInputsRequest(..), ExactInputsAcquisition(..)
-  , EnsureExactInputsOutcome(..), ExactInputsRejection(..), encodeEnsureExactInputsOutcome
+  , EnsureExactInputsOutcome(..), ExactInputsRejection(..), encodeEnsureExactInputsOutcomeWithin
   , RequestField(..)
   , HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), HostedLookupDiscovery(..)
   , InspectionRequest(..)
@@ -24,11 +24,14 @@ module Tidepool.ExtractRequest
   ) where
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Lazy as LT
+import qualified Data.Text.Lazy.Encoding as LTE
 import Data.Bits ((.|.), shiftL, shiftR)
 import Data.Char (digitToInt, isHexDigit)
 import Data.Word (Word32, Word64, Word8)
@@ -59,15 +62,29 @@ data ExactInputsRejection
   = UnsupportedOperation | InvalidRealization | InvalidRoot | AcquisitionRejected
   deriving (Eq, Show)
 
-encodeEnsureExactInputsOutcome :: EnsureExactInputsOutcome -> BS.ByteString
-encodeEnsureExactInputsOutcome outcome = "TPEXO001" <> case outcome of
-  ExactInputsReady reference -> BS.singleton 0 <> textFrame reference
-  ExactInputsNeedsAcquisition root -> BS.singleton 1 <> textFrame root
-  ExactInputsRejected cause -> BS.pack [2, case cause of
-    UnsupportedOperation -> 0
-    InvalidRealization -> 1
-    InvalidRoot -> 2
-    AcquisitionRejected -> 3]
+-- Bound UTF-8 expansion before materializing the reference. The envelope and
+-- frame length are charged to the existing aggregate response payload budget.
+encodeEnsureExactInputsOutcomeWithin :: Integer -> EnsureExactInputsOutcome -> Maybe BS.ByteString
+encodeEnsureExactInputsOutcomeWithin budget outcome = case outcome of
+  ExactInputsReady reference -> referenceFrame 0 reference
+  ExactInputsNeedsAcquisition root -> referenceFrame 1 root
+  ExactInputsRejected cause
+    | budget < 10 -> Nothing
+    | otherwise -> Just ("TPEXO001" <> BS.pack [2, rejectionTag cause])
+  where
+    referenceFrame tag reference
+      | budget < 13 -> Nothing
+      | otherwise =
+          let limit = min (budget - 13) (toInteger (maxBound :: Word32))
+              prefix = LBS.take (fromInteger (limit + 1)) (LTE.encodeUtf8 (LT.pack reference))
+          in if toInteger (LBS.length prefix) > limit then Nothing else
+            let bytes = LBS.toStrict prefix
+            in if BS.null bytes || BS.elem 0 bytes then Nothing else
+              Just ("TPEXO001" <> BS.singleton tag <> putU32 (BS.length bytes) <> bytes)
+    rejectionTag UnsupportedOperation = 0
+    rejectionTag InvalidRealization = 1
+    rejectionTag InvalidRoot = 2
+    rejectionTag AcquisitionRejected = 3
 
 data RequestField
   = Input FilePath

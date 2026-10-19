@@ -86,7 +86,7 @@ import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transfor
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
-  , encodeEnsureExactInputsOutcome
+  , encodeEnsureExactInputsOutcomeWithin
   , InspectionRequest(..), RequestField(..), RequestShapeError(..), RequestOperation(..), WorkerRequest(..)
   , HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), HostedLookupDiscovery(..)
   , LookupNameInspection(..), LookupNameMode(..), ExactNameInspection(..), StructuredNameScope(..), StructuredNameNamespace(..)
@@ -1058,8 +1058,22 @@ checkingSourceRequestRoundTrip = do
         , (ExactInputsRejected InvalidRoot, "TPEXO001\2\2")
         , (ExactInputsRejected AcquisitionRejected, "TPEXO001\2\3") ]
   forM_ outcomeCases $ \(outcome, bytes) ->
-    assertEqual "source-free result matches closed independent Rust fixture" bytes
-      (encodeEnsureExactInputsOutcome outcome)
+    assertEqual "source-free result matches closed independent Rust fixture" (Just bytes)
+      (encodeEnsureExactInputsOutcomeWithin (toInteger (BS.length bytes)) outcome)
+  forM_ outcomeCases $ \(outcome, bytes) ->
+    forM_ [0 .. toInteger (BS.length bytes) - 1] $ \budget ->
+      assertEqual "source-free result charges its complete envelope" Nothing
+        (encodeEnsureExactInputsOutcomeWithin budget outcome)
+  assertEqual "UTF-8 framing charges bytes instead of characters" (Just "TPEXO001\0\2\0\0\0\206\187")
+    (encodeEnsureExactInputsOutcomeWithin 15 (ExactInputsReady "λ"))
+  assertEqual "UTF-8 expansion cannot exceed the payload budget" Nothing
+    (encodeEnsureExactInputsOutcomeWithin 14 (ExactInputsReady "λ"))
+  assertEqual "over-budget reference does not force its complete construction" Nothing
+    (encodeEnsureExactInputsOutcomeWithin 16 (ExactInputsReady
+      (replicate 100000 'x' ++ error "source-free encoder forced beyond its budget")))
+  forM_ [ExactInputsReady "", ExactInputsNeedsAcquisition "root\0other"] $ \invalid ->
+    assertEqual "source-free outcomes reject invalid opaque transport text" Nothing
+      (encodeEnsureExactInputsOutcomeWithin 100 invalid)
 
 portableOutputRequestValidation :: IO ()
 portableOutputRequestValidation = do
