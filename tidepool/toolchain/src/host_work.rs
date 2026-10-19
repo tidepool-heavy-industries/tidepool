@@ -6,6 +6,25 @@ pub(crate) fn checkpoint() -> io::Result<()> {
     tidepool_extract_cmd::compiler_host_checkpoint()
 }
 
+/// Wait for an immutable-input owner without losing the compiler stop edge.
+/// The callback observes a blocked acquisition; it cannot alter lock policy.
+pub(crate) fn lock_with_wait<'a, T>(
+    owner: &'a std::sync::Mutex<T>,
+    mut waiting: impl FnMut(),
+) -> io::Result<std::sync::MutexGuard<'a, T>> {
+    loop {
+        checkpoint()?;
+        match owner.try_lock() {
+            Ok(held) => return Ok(held),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                waiting();
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("immutable input owner lock"),
+        }
+    }
+}
+
 /// Check cancellation between bounded reads. An individual filesystem call
 /// still belongs to the OS and cannot be preempted by this cooperative edge.
 pub(crate) fn read_to_end(reader: &mut impl Read, bytes: &mut Vec<u8>) -> io::Result<()> {

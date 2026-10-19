@@ -4013,6 +4013,124 @@ impl MaterializationFacts<'_> {
 }
 
 impl RetainedArtifactMaterialization {
+    /// Issue a value-sized physical leaf on the value's existing support view.
+    /// Descendant requests discover this same cache entry as inherited custody.
+    pub(crate) fn capture_checked_value(
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+        value: &CertifiedValueInterface,
+        issued_row: Option<&std::sync::Mutex<Option<Arc<RetainedArtifactRow>>>>,
+    ) -> Result<Arc<RetainedArtifactRow>, CompileError> {
+        let owner = identity(value.interface().unit(), value.interface().module());
+        let selected = support.selected_interfaces()?;
+        let entry = selected
+            .get(&owner)
+            .ok_or_else(|| failure("checked value has no selected row"))?
+            .clone();
+        if entry.descriptor.id != value.artifact_id()
+            || entry.requirements != value.requirements()
+            || !matches!(&entry.payload, ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface) if interface == value.interface())
+        {
+            return Err(failure(
+                "checked value row differs from its issuing certificate",
+            ));
+        }
+        let materialization =
+            support
+                .artifacts()
+                .retain_checked_value_materialization(value, |entry| {
+                    let mut issued = issued_row.map(|row| crate::host_work::lock_with_wait(row, || {})).transpose()?;
+                    if let Some(row) = issued.as_ref().and_then(|row| row.as_ref()) {
+                        return Ok(Self::checked_value_leaf(value.artifact_id(), row.clone()));
+                    }
+                    let directory = Arc::new(
+                        tempfile::Builder::new()
+                            .prefix("tidepool-checked-value-")
+                            .tempdir()?,
+                    );
+                    let mut validation = PackageInterfaceValidation::default();
+                    let files = recovery_artifacts::materialize_selected_interface(
+                        directory.path(),
+                        &owner,
+                        entry.clone(),
+                        value.interface().toolchain_identity_sha256(),
+                        &mut validation,
+                    )
+                    .map_err(materialization_failure)?;
+                    let payloads = original_inputs::entry_payloads(&entry);
+                    let length = payloads
+                        .iter()
+                        .try_fold(0u64, |total, (_, bytes)| {
+                            total.checked_add(bytes.len() as u64)
+                        })
+                        .ok_or_else(|| failure("checked value row size overflow"))?;
+                    let mut builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(length)
+                        .map_err(failure)?;
+                    let pending = payloads
+                        .into_iter()
+                        .map(|(kind, bytes)| Ok((kind, builder.append(bytes).map_err(failure)?)))
+                        .collect::<Result<Vec<_>, CompileError>>()?;
+                    let arena = builder.finish().map_err(failure)?;
+                    let owned_inputs = pending
+                        .into_iter()
+                        .map(|(kind, pending)| {
+                            Ok((kind, arena.issue_slice(pending).map_err(failure)?))
+                        })
+                        .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+                    let row = RetainedArtifactRow {
+                        owned_inputs,
+                        interface: ExactIfaceArtifact {
+                            unit: owner.unit.clone(),
+                            module: owner.module.clone(),
+                            path: directory.path().join(files.interface_path),
+                            sha256: hex(&files.skinny_iface_sha256),
+                            requirements: entry
+                                .requirements
+                                .iter()
+                                .map(|owner| (owner.unit.clone(), owner.module.clone()))
+                                .collect(),
+                        },
+                        interface_evidence: scope_interface_evidence(
+                            &entry,
+                            directory.path(),
+                            &mut validation,
+                        )?,
+                        _directory: directory,
+                        payload: RetainedArtifactPayload::InterfaceOnly,
+                        canonical_custody: None,
+                    };
+                    let work = validation.work();
+                    tracing::info!(target: "tidepool_toolchain::artifacts", phase = "checked_value_row_issue",
+                        fresh_rows = 1, arena_bytes = arena.len(),
+                        promoted_bytes = work.written_bytes, promotion_read_bytes = work.read_bytes,
+                        promotion_hash_bytes = work.hash_bytes, "issued value-sized immutable input row");
+                    let row = Arc::new(row);
+                    if let Some(issued) = &mut issued { **issued = Some(row.clone()); }
+                    let retained = Self::checked_value_leaf(value.artifact_id(), row);
+                    #[cfg(test)]
+                    let retained = Self { payload_work: work, ..retained };
+                    Ok(retained)
+                })?;
+        let mut rows = BTreeMap::new();
+        materialization.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            rows.extend(owner.rows.iter().map(|(id, row)| (*id, row.clone())));
+        });
+        rows.remove(&value.artifact_id())
+            .ok_or_else(|| failure("issued checked value row is absent"))
+    }
+
+    fn checked_value_leaf(id: ArtifactId, row: Arc<RetainedArtifactRow>) -> Self {
+        Self {
+            _directory: None,
+            _parents: Vec::new(),
+            rows: BTreeMap::from([(id, row)]),
+            groups: Arc::from([]),
+            execution_scope: None,
+            graph_paths: BTreeMap::new(),
+            #[cfg(test)]
+            payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
+        }
+    }
+
     /// Preserve complete physical owners, discarding only exact issued subsets.
     /// A narrowed residual owns fact handles, never a historical parent graph.
     pub(crate) fn select_custody_inputs(
@@ -4300,13 +4418,20 @@ impl RetainedArtifactMaterialization {
             .map(|entry| entry.descriptor.id)
             .collect::<BTreeSet<_>>();
         let mut rows = BTreeMap::new();
+        let mut owner_visits = 0usize;
+        let mut row_visits = 0usize;
         self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
+            owner_visits += 1;
             for (id, row) in &owner.rows {
+                row_visits += 1;
                 if selected.contains(id) {
                     rows.insert(*id, row.as_ref());
                 }
             }
         });
+        tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "exact_selected_rows",
+            owner_visits, row_visits, selected_rows = rows.len(), metadata_entry_visits = metadata.entries.len(),
+            "selected immutable physical rows");
         rows
     }
 
@@ -4381,7 +4506,7 @@ impl RetainedArtifactMaterialization {
     }
 }
 
-struct RetainedArtifactRow {
+pub(crate) struct RetainedArtifactRow {
     owned_inputs:
         BTreeMap<original_inputs::OriginalInputKind, crate::owned_input_arena::OwnedInputSlice>,
     _directory: Arc<tempfile::TempDir>,
@@ -4401,7 +4526,23 @@ enum RetainedArtifactPayload {
     },
 }
 
+impl std::fmt::Debug for RetainedArtifactRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RetainedArtifactRow")
+            .field("interface", &self.interface)
+            .finish_non_exhaustive()
+    }
+}
 impl RetainedArtifactRow {
+    #[cfg(test)]
+    pub(crate) fn checked_value_transport(&self) -> &crate::owned_input_arena::OwnedInputSlice {
+        &self.owned_inputs[&original_inputs::OriginalInputKind::Interface]
+    }
+
+    pub(crate) fn checked_value_interface(&self) -> &ExactIfaceArtifact {
+        &self.interface
+    }
+
     fn original_input_parts(
         &self,
         entry: &ArtifactEntry,
@@ -6097,8 +6238,12 @@ impl ExactCompilationRequest {
         };
         let metadata = &self.transport_metadata;
         let mut files = BTreeMap::new();
-        for row in materialization.selected_rows(metadata).into_values() {
+        let mut slice_visits = 0usize;
+        let selected_rows = materialization.selected_rows(metadata);
+        let selected_row_visits = selected_rows.len();
+        for row in selected_rows.into_values() {
             for slice in row.owned_inputs.values() {
+                slice_visits += 1;
                 let file = slice.compiler_file_lease();
                 files.insert(Arc::as_ptr(&file) as usize, file);
             }
@@ -6114,6 +6259,10 @@ impl ExactCompilationRequest {
                 }
             }
         }
+        tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "exact_input_transport_files",
+            selected_row_visits, slice_visits, graph_path_visits = graph_paths.len(),
+            metadata_entry_visits = metadata.entries.len(), exported_files = files.len(),
+            "enumerated exact immutable input file leases");
         files.into_values().collect()
     }
 
