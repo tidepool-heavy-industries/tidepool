@@ -1768,6 +1768,11 @@ impl RequestNativeAvailability {
                 contributions: contributions.into(),
             };
             row.validate_full_evidence()?;
+            #[cfg(test)]
+            NATIVE_AVAILABILITY_FACT_WORK.with(|work| {
+                let (cold, changed) = work.get();
+                work.set((cold + 1, changed));
+            });
             rows.insert(*id, Arc::new(row));
         }
         Ok(Self(Arc::new(rows), facts.clone()))
