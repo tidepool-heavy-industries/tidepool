@@ -23714,12 +23714,21 @@ mod tests {
         );
         // Opaque availability survives type-only roles independently of
         // executable group demand. A redundant private support offer is optional.
-        OriginalCompilerInputs::issue_candidate_from_context(
-            &dependent_context,
-            producer,
-            &configured_support,
-        )
-        .unwrap();
+        let available = crate::module_candidates::CandidateSet {
+            manifest_path: root.join("unused-candidate-manifest"),
+            by_owner: BTreeMap::new(),
+            contextual_native_availability: configured_support.clone(),
+            catalog_owner: None,
+            input_transport: Vec::new(),
+        };
+        let availability =
+            OriginalCompilerInputs::from_candidates(&dependent_context, producer, &available)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            availability.projection,
+            *dependent_context.compiler_input_projection()
+        );
         let selected_private = OriginalCompilerInputs::reuse_selected_authored(&dependent_context)
             .unwrap()
             .expect("complete selected authored original can reuse exact selected support");
@@ -23829,12 +23838,16 @@ mod tests {
             "changed fixture must require one exact selected support group"
         );
         let required_support_ordinal = *required_support_ordinals.first().unwrap();
-        let missing_support = OriginalCompilerInputs::issue_candidate_from_context(
-            &type_only,
-            producer,
-            std::slice::from_ref(changed.product()),
-        )
-        .unwrap_err();
+        let selected_output =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                changed.compiler_source_support().projection(),
+                &type_only.artifact_view().metadata_snapshot(),
+                &PackageInterfaceValidation::default().inventory,
+            )
+            .unwrap();
+        let missing_support =
+            OriginalCompilerInputs::from_selection(&selected_output, type_only.artifact_view())
+                .unwrap_err();
         assert!(
             matches!(&missing_support, CompileError::ArtifactInventory(error)
             if matches!(&error.failure, crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
