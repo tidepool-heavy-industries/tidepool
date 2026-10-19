@@ -1184,6 +1184,10 @@ impl PartialEq for ExactLexicalSnapshot {
 }
 impl Eq for ExactLexicalSnapshot {}
 impl ExactLexicalSnapshot {
+    pub(crate) fn get(&self, owner: &ExactModuleIdentity) -> Option<&ExactLexicalNode> {
+        self.facts.get(owner).map(|fact| fact.node.as_ref())
+    }
+
     pub(crate) fn replace(
         &self,
         nodes: Vec<ExactLexicalNode>,
