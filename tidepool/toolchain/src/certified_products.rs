@@ -21919,8 +21919,8 @@ None,
             7,
             expected_binder
         ));
-        let expected_missing = raw_prior.descriptor.id;
-        let expected_canonical = crate::artifact_inventory::ArtifactEntry::canonical(
+        let raw_prior_id = raw_prior.descriptor.id;
+        let raw_prior_canonical = crate::artifact_inventory::ArtifactEntry::canonical(
             raw_prior_product.module_interface().unwrap().clone(),
         )
         .descriptor
@@ -21942,7 +21942,7 @@ None,
                 crate::artifact_inventory::ArtifactDependency::NativeGroup { dependent_ordinal: 7, required_ordinal: 7 }
             ) if source.binding.artifact() == raw_current[0].descriptor.id
                 && source.original_ordinal == 7
-                && target.binding.artifact() == expected_missing
+                && target.binding.artifact() == raw_prior_id
                 && target.original_ordinal == 7)).collect::<Vec<_>>();
         assert_eq!(
             required_edges.len(),
@@ -21960,11 +21960,11 @@ None,
         };
         assert_eq!(
             raw_projection.snapshot_roles()[&prior_identity].original(),
-            Some(expected_missing)
+            Some(raw_prior_id)
         );
         assert_eq!(
             raw_projection.snapshot_roles()[&prior_identity].interface(),
-            expected_canonical
+            raw_prior_canonical
         );
         let earlier = crate::artifact_inventory::ArtifactEntry::original(
             canonical_producer,
@@ -21977,7 +21977,103 @@ None,
             .contains(&earlier.descriptor.id));
         eprintln!("raw prior certificate: earlier_id={:?} earlier_cert={:?} raw_id={:?} raw_cert={:?} exact_required_edges={required_edges:?}",
             earlier.descriptor.id, earlier.descriptor.certification_sha256,
-            expected_missing, raw_prior.descriptor.certification_sha256);
+            raw_prior_id, raw_prior.descriptor.certification_sha256);
+        let raw_roots = BTreeMap::from([
+            (raw_prior_id, raw_prior),
+            (raw_current[0].descriptor.id, raw_current[0]),
+        ]);
+        assert_eq!(raw_roots.len(), 2);
+        assert_eq!(
+            raw_projection
+                .snapshot_roles()
+                .values()
+                .filter_map(crate::artifact_inventory::CompilerInputRole::original)
+                .collect::<BTreeSet<_>>(),
+            raw_roots.keys().copied().collect()
+        );
+        let raw_graph = rebound.capture_graph_selection();
+        let mut unsupported = BTreeSet::new();
+        for (id, entry) in &raw_roots {
+            assert_eq!(
+                entry
+                    .native_group_ordinals
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([7, 11])
+            );
+            let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload
+            else {
+                unreachable!()
+            };
+            let canonical = crate::artifact_inventory::ArtifactEntry::canonical(
+                product.module_interface().unwrap().clone(),
+            )
+            .descriptor
+            .id;
+            assert_eq!(
+                raw_projection.snapshot_roles()[&entry.descriptor.owner].interface(),
+                canonical
+            );
+            assert!(raw_graph
+                .namespace
+                .iter()
+                .any(|binding| binding.artifact == *id));
+            assert!(raw_graph
+                .namespace
+                .iter()
+                .any(|binding| binding.artifact == canonical));
+            let key = crate::artifact_inventory::NativeGroupKey {
+                artifact: *id,
+                original_ordinal: 7,
+            };
+            assert!(planned.certified.source_selection.permits_native_group(
+                *id,
+                product.owner(),
+                7
+            ));
+            let NativeGroupCandidates::IssuedAvailability(candidates) = planned
+                .certified
+                .source_selection
+                .native_group_candidates(key, product.owner())
+                .unwrap()
+            else {
+                panic!("the completed output carries earned opaque input proof");
+            };
+            assert_eq!(candidates.len(), 1);
+            let candidate = *candidates.first().unwrap();
+            let Some(CertifiedNativeGroupSupport::Issued(offer)) = planned
+                .certified
+                .source_selection
+                .native_group_support(key, product.owner(), candidate)
+            else {
+                panic!("the exact root candidate retains its opaque issuer");
+            };
+            assert!(offer
+                .issued_group_carriers()
+                .unwrap()
+                .contains_key(&candidate));
+            assert!(
+                !rebound.contains_issued_native_group(candidate),
+                "raw payload and raw graph reconstruction do not recreate this earned group scope"
+            );
+            unsupported.insert(key);
+        }
+        // AllGroups demands these literal certified ordinals in ArtifactId/key
+        // order. Either body can sort first; neither has its earned scope here.
+        let first_unsupported = *unsupported.first().unwrap();
+        let expected_missing = first_unsupported.artifact;
+        assert_eq!(first_unsupported.original_ordinal, 7);
+        let crate::artifact_inventory::ArtifactPayload::Original(expected_product) =
+            &raw_roots[&expected_missing].payload
+        else {
+            unreachable!()
+        };
+        let expected_canonical = crate::artifact_inventory::ArtifactEntry::canonical(
+            expected_product.module_interface().unwrap().clone(),
+        )
+        .descriptor
+        .id;
         let rebound_result = planned
             .certified
             .source_selection
@@ -22008,7 +22104,7 @@ None,
             Err(CertificationError::Mismatch(reason)) => format!("Mismatch({reason})"),
             Err(other) => format!("other typed error {:?}", std::mem::discriminant(other)),
         };
-        let raw_namespace = rebound.capture_graph_selection().namespace;
+        let raw_namespace = raw_graph.namespace;
         let raw_binding = |id| {
             raw_namespace
                 .iter()
@@ -22031,7 +22127,7 @@ None,
                             && *canonical == expected_canonical
                             && *selected_canonical == raw_binding(expected_canonical)
                             && selected_canonical.is_some()))),
-            "raw rebound must refuse the exact prior input group despite raw body custody; expected={expected_missing:?}; outcome={rebound_outcome}"
+            "raw rebound must refuse the first exact unsupported input group despite raw body custody; expected={expected_missing:?}; outcome={rebound_outcome}"
         );
         let issued = planned.completed_output().artifacts();
         let issued_graph = issued.capture_graph_selection();
