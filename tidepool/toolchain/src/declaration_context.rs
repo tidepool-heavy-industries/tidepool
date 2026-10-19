@@ -2067,7 +2067,7 @@ impl RequestCompilerInputs {
         native_roots: &BTreeSet<ExactModuleIdentity>,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<DemandNativeInputs, DemandNativeInputsError> {
-        crate::host_work::checkpoint()?;
+        crate::host_work::checkpoint().map_err(CompileError::from)?;
         if !Arc::ptr_eq(&self.source_support, demand.source_support())
             || !Arc::ptr_eq(&self.metadata.retained, &demand.metadata().retained)
         {
@@ -18133,11 +18133,7 @@ mod tests {
             .admit_shared_with_demand(&inventory.empty_view(), entries.clone(), demand)
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let support = crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
-            projection.clone(),
-            artifacts,
-        )
-        .unwrap();
+        let support = issue_fixture_compiler_support(projection.clone(), artifacts).unwrap();
         let support = if partial {
             let offers = support
                 .native_offers()
@@ -21417,6 +21413,8 @@ mod tests {
 
     #[test]
     fn world_source_v2_refuses_old_envelopes_and_bounds_ordered_alias_copies() {
+        use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+
         let mut header = vec![Value::Null; 11];
         header[0] = text("TPCWSOURCE2");
         assert!(world_source_header(&Value::Array(header.clone())).is_ok());

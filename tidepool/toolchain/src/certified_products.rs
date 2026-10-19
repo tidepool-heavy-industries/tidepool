@@ -3676,7 +3676,7 @@ impl CertifiedSourceSelection {
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
         omitted_generated: &BTreeSet<crate::declaration_join::ExactModuleIdentity>,
     ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
-        use crate::artifact_inventory::{ArtifactPayload, CompilerInputProjection};
+        use crate::artifact_inventory::CompilerInputProjection;
         let mut entries = Vec::new();
         for ((unit, module), selected) in self.compiler_namespace_rows() {
             if omitted_generated
@@ -12400,7 +12400,7 @@ pub(crate) mod tests {
     #[test]
     fn receipt_original_identity_selects_exact_issued_artifact_among_equal_owners() {
         use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, CompilerInputProjection, CompilerSourceSupport,
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
         };
         let product = full_native_fixture("ExactReceiptIdentity", vec![(7, vec![])], 1);
         let producer = product.module_interface().unwrap().producer_sha256();
@@ -12423,9 +12423,11 @@ pub(crate) mod tests {
             .admit_shared(&inventory.empty_view(), vec![other.clone()])
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
-        let support =
-            CompilerSourceSupport::from_selected_issuance(projection.clone(), left.clone())
-                .unwrap();
+        let support = crate::declaration_context::issue_fixture_compiler_support(
+            projection.clone(),
+            left.clone(),
+        )
+        .unwrap();
         let both = left.retain_custody(&right).unwrap();
         let metadata = both.metadata_snapshot();
         assert!(metadata.artifacts.contains_key(&entry.descriptor.id));
@@ -12471,7 +12473,7 @@ pub(crate) mod tests {
     #[test]
     fn receipt_new_product_identity_binds_only_actual_producing_cohort() {
         use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, CompilerInputProjection, CompilerSourceSupport,
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
         };
         let product = full_native_fixture("ProducedReceiptIdentity", vec![(7, vec![])], 1);
         let canonical = product.module_interface().unwrap();
@@ -12483,9 +12485,11 @@ pub(crate) mod tests {
             .admit_shared(&inventory.empty_view(), vec![entry.clone()])
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
-        let support =
-            CompilerSourceSupport::from_selected_issuance(projection.clone(), view.clone())
-                .unwrap();
+        let support = crate::declaration_context::issue_fixture_compiler_support(
+            projection.clone(),
+            view.clone(),
+        )
+        .unwrap();
         let operation = InventoryOperation::new(Default::default());
         let mut selected = CertifiedSourceSelection::new_product_ingress();
         selected
