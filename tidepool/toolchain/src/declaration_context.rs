@@ -4757,6 +4757,29 @@ impl RetainedArtifactRow {
         Ok(row)
     }
 
+    pub(crate) fn world_type_parts(
+        &self,
+    ) -> Result<(Arc<ArtifactEntry>, Vec<original_inputs::OriginalInputPart>), CompileError> {
+        let ValueRowCustody::Private(entry) = &self.value_custody else {
+            return Err(failure(
+                "world binding requires its actual private issued row",
+            ));
+        };
+        let parts = self
+            .original_input_parts(entry)?
+            .into_iter()
+            .filter(|part| {
+                !matches!(
+                    part.kind,
+                    original_inputs::OriginalInputKind::Native
+                        | original_inputs::OriginalInputKind::Census
+                        | original_inputs::OriginalInputKind::Graph
+                )
+            })
+            .collect();
+        Ok((Arc::clone(entry), parts))
+    }
+
     pub(crate) fn checked_value_transport(&self) -> &crate::owned_input_arena::OwnedInputSlice {
         &self.owned_inputs[&original_inputs::OriginalInputKind::Interface]
     }

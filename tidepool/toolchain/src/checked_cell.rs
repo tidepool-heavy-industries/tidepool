@@ -2188,6 +2188,18 @@ impl CheckedValueInputs {
 }
 
 impl CheckedValueArtifact {
+    pub(crate) fn world_type_parts(
+        &self,
+    ) -> Result<
+        (
+            Arc<crate::artifact_inventory::ArtifactEntry>,
+            Vec<crate::declaration_context::original_inputs::OriginalInputPart>,
+        ),
+        CompileError,
+    > {
+        self.row.world_type_parts()
+    }
+
     pub(crate) fn world_issuer(&self) -> ([u8; 32], [u8; 32]) {
         self.authority
     }

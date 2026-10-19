@@ -15,8 +15,8 @@ use crate::declaration_context::ExactDeclarationContext;
 use crate::exact_context::{ContextRoot, Materializer, StagedBlocks};
 use crate::CompileError;
 
-/// One complete captured root. Bodies include support files; the established
-/// manifest authenticates the Haskell sources without inventing old header seals.
+/// One closed captured source namespace. The capture owner decides its supported
+/// file cohort; this type does not imply that foreign headers were captured.
 #[derive(Clone, Debug)]
 pub struct CapturedCompilerSourceRoot {
     pub manifest: SourceRootManifest,
@@ -32,6 +32,7 @@ pub struct CapturedCompilerSources {
     _owner: Arc<dyn Any + Send + Sync>,
     encoded: Arc<[u8]>,
     seal: [u8; 32],
+    source_seals: Arc<[BTreeMap<PathBuf, [u8; 32]>]>,
 }
 
 impl fmt::Debug for CapturedCompilerSources {
@@ -122,12 +123,23 @@ impl CapturedCompilerSources {
             }
         }
         let seal = Sha256::digest(&encoded).into();
+        let source_seals = roots
+            .iter()
+            .map(|root| {
+                root.bodies
+                    .iter()
+                    .map(|(path, body)| (path.clone(), Sha256::digest(body).into()))
+                    .collect()
+            })
+            .collect::<Vec<_>>()
+            .into();
         Ok(Self {
             roots: roots.into(),
             origin,
             _owner: owner,
             encoded: encoded.into(),
             seal,
+            source_seals,
         })
     }
 
@@ -318,6 +330,10 @@ pub struct CompilerWorldRestoration {
     logical_id: [u8; 32],
     inputs: CompilerWorldOpenInputs,
     product: Arc<[u8]>,
+    producer: [u8; 32],
+    profile: [u8; 32],
+    descriptor: PathBuf,
+    input_files: Vec<Arc<std::fs::File>>,
 }
 
 impl fmt::Debug for CompilerWorldRestoration {
@@ -380,6 +396,14 @@ pub struct ClosedModuleAbsence {
 pub enum WorldModuleResolution {
     Resolved(WorldModuleReceipt),
     Absent(ClosedModuleAbsence),
+    Rejected(WorldQueryRejection),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldQueryRejection {
+    Unsupported,
+    Unavailable,
+    Corrupt,
 }
 
 #[derive(Clone, Debug)]
@@ -489,4 +513,863 @@ mod tests {
             make(vec![captured("Module.hs", b"module Module where\nx = 1\n")]).seal()
         );
     }
+}
+
+fn world_bytes(value: &ciborium::value::Value) -> Result<Vec<u8>, CompileError> {
+    struct Bounded {
+        bytes: Vec<u8>,
+        remaining: u64,
+    }
+    impl std::io::Write for Bounded {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() as u64 > self.remaining {
+                return Err(std::io::Error::other(
+                    "compiler world encoding exceeds capture allowance",
+                ));
+            }
+            self.bytes.extend_from_slice(bytes);
+            self.remaining -= bytes.len() as u64;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Bounded {
+        bytes: Vec::new(),
+        remaining: capture_allowance()?,
+    };
+    ciborium::ser::into_writer(value, &mut writer).map_err(|e| source_failure(e.to_string()))?;
+    Ok(writer.bytes)
+}
+
+fn world_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            write!(out, "{b:02x}").expect("String formatting");
+            out
+        })
+}
+fn world_digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+fn world_text(value: impl Into<String>) -> ciborium::value::Value {
+    ciborium::value::Value::Text(value.into())
+}
+fn world_blob(bytes: impl AsRef<[u8]>) -> ciborium::value::Value {
+    ciborium::value::Value::Bytes(bytes.as_ref().to_vec())
+}
+fn world_array(values: Vec<ciborium::value::Value>) -> ciborium::value::Value {
+    ciborium::value::Value::Array(values)
+}
+fn world_path(path: &Path) -> Result<ciborium::value::Value, CompileError> {
+    path.to_str()
+        .filter(|v| path.is_absolute() && !v.contains('\0'))
+        .map(world_text)
+        .ok_or_else(|| source_failure("world input path must be absolute UTF-8"))
+}
+
+struct WorldColdRows {
+    producer: [u8; 32],
+    files: BTreeMap<PathBuf, Arc<std::fs::File>>,
+    images: BTreeMap<(String, String, String), ciborium::value::Value>,
+    rows: BTreeMap<(String, String, String), ciborium::value::Value>,
+    arenas: crate::declaration_context::original_inputs::OriginalInputArenaTable,
+}
+impl WorldColdRows {
+    fn row(
+        &mut self,
+        entry: &crate::artifact_inventory::ArtifactEntry,
+        parts: Vec<crate::declaration_context::original_inputs::OriginalInputPart>,
+    ) -> Result<(ciborium::value::Value, [u8; 32]), CompileError> {
+        use crate::artifact_inventory::{ArtifactPayload, JoinedInterfaceRole};
+        use crate::declaration_context::original_inputs::{encode_image, OriginalInputKind as K};
+        use ciborium::value::Value;
+        if entry.descriptor.producer_sha256 != self.producer {
+            return Err(source_failure(
+                "world row has a different compiler producer",
+            ));
+        }
+        let find = |kind| {
+            parts
+                .iter()
+                .find(|p| p.kind == kind)
+                .ok_or_else(|| source_failure("world row lacks required type bytes"))
+        };
+        let iface = find(K::Interface)?;
+        let packages = find(K::Packages)?;
+        let canonical = match &entry.payload {
+            ArtifactPayload::Original(product) => product.module_interface(),
+            ArtifactPayload::Canonical(interface) => Some(interface),
+            ArtifactPayload::Interface(..) => None,
+        };
+        let evidence = if let Some(interface) = canonical {
+            let certificate = find(K::Certificate)?;
+            let core = parts.iter().find(|p| p.kind == K::Core);
+            world_array(vec![
+                world_text(match interface.origin() {
+                    crate::certified_products::CanonicalOrigin::SourceOriginal { .. } => "module",
+                    crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration {
+                        ..
+                    } => "native-declaration",
+                }),
+                world_path(&certificate.path)?,
+                world_text(certificate.sha256.clone()),
+                core.map(|p| world_path(&p.path))
+                    .transpose()?
+                    .unwrap_or(Value::Null),
+                core.map(|p| world_text(p.sha256.clone()))
+                    .unwrap_or(Value::Null),
+            ])
+        } else {
+            world_array(vec![world_text(match &entry.payload {
+                ArtifactPayload::Interface(_, JoinedInterfaceRole::LexicalJoin) => "join",
+                ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface) => "value",
+                _ => {
+                    return Err(source_failure(
+                        "world original lacks its canonical type proof",
+                    ))
+                }
+            })])
+        };
+        let owner = &entry.descriptor.owner;
+        let interface_row = world_array(vec![
+            world_text(owner.unit.clone()),
+            world_text(owner.module.clone()),
+            world_path(&iface.path)?,
+            world_text(iface.sha256.clone()),
+            world_array(
+                entry
+                    .requirements
+                    .iter()
+                    .map(|key| {
+                        world_array(vec![
+                            world_text(key.unit.clone()),
+                            world_text(key.module.clone()),
+                        ])
+                    })
+                    .collect(),
+            ),
+            world_path(&packages.path)?,
+            world_text(packages.sha256.clone()),
+            evidence,
+        ]);
+        for part in &parts {
+            self.files
+                .entry(part.transport.endpoint().to_owned())
+                .or_insert_with(|| part.transport.compiler_file_lease());
+        }
+        let image = encode_image(
+            &world_hex(&self.producer),
+            &owner.unit,
+            &owner.module,
+            parts,
+            None,
+            &mut self.arenas,
+        )?;
+        let Value::Array(fields) = &image else {
+            unreachable!()
+        };
+        let Value::Text(image_id) = &fields[3] else {
+            unreachable!()
+        };
+        let image_id = image_id.clone();
+        let key = (owner.unit.clone(), owner.module.clone(), image_id.clone());
+        let mut digest = [0; 32];
+        for (slot, pair) in digest.iter_mut().zip(image_id.as_bytes().chunks_exact(2)) {
+            *slot = u8::from_str_radix(
+                std::str::from_utf8(pair).map_err(|e| source_failure(e.to_string()))?,
+                16,
+            )
+            .map_err(|e| source_failure(e.to_string()))?;
+        }
+        // Equal immutable type content shares the original receiving aliases.
+        // Its independently issued historical runtime receipt remains in visibility.
+        let row = self
+            .rows
+            .entry(key.clone())
+            .or_insert(interface_row)
+            .clone();
+        self.images.entry(key).or_insert(image);
+        Ok((world_array(vec![row, world_blob(digest)]), digest))
+    }
+}
+
+impl CompilerWorldOpenInputs {
+    fn prepare(
+        self,
+        identity: &tidepool_extract_cmd::CompilerIdentity,
+    ) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
+        use crate::declaration_context::original_inputs::{
+            OriginalInputKind as K, OriginalInputPart,
+        };
+        let producer = *identity.producer_bytes();
+        let profile = *identity
+            .package_source_association()
+            .ok_or_else(|| {
+                source_failure("compiler world requires a retained service package source")
+            })?
+            .profile_id();
+        let mut rows = WorldColdRows {
+            producer,
+            files: BTreeMap::new(),
+            images: BTreeMap::new(),
+            rows: BTreeMap::new(),
+            arenas: Default::default(),
+        };
+        let metadata = self.primary_context.compiler_metadata_snapshot()?;
+        let mut base = Vec::with_capacity(metadata.entries.len());
+        for (ordinal, entry) in metadata.entries.values().enumerate() {
+            crate::host_work::checkpoint()?;
+            let root = self.directory.path().join(format!("primary-{ordinal}"));
+            let mut builder =
+                crate::owned_input_arena::OwnedInputArenaBuilder::new(capture_allowance()?)
+                    .map_err(|e| source_failure(e.to_string()))?;
+            let mut pending = Vec::new();
+            for (kind, bytes) in crate::declaration_context::original_inputs::entry_payloads(entry)
+            {
+                if matches!(kind, K::Native | K::Census | K::Graph) {
+                    continue;
+                }
+                if bytes.is_empty() || bytes.len() as u64 > kind.byte_limit() {
+                    return Err(source_failure("world type input exceeds its format bound"));
+                }
+                pending.push((
+                    kind,
+                    builder
+                        .append(bytes)
+                        .map_err(|e| source_failure(e.to_string()))?,
+                ));
+            }
+            let arena = builder
+                .finish()
+                .map_err(|e| source_failure(e.to_string()))?;
+            let parts = pending
+                .into_iter()
+                .map(|(kind, pending)| {
+                    let transport = arena
+                        .issue_slice(pending)
+                        .map_err(|e| source_failure(e.to_string()))?;
+                    Ok(OriginalInputPart {
+                        kind,
+                        path: root.join(kind.wire_tag()),
+                        sha256: world_hex(transport.sha256()),
+                        bytes: transport.len(),
+                        transport,
+                    })
+                })
+                .collect::<Result<Vec<_>, CompileError>>()?;
+            base.push(rows.row(entry, parts)?.0);
+        }
+        let mut visible = Vec::with_capacity(self.visible_rows.len());
+        let mut references = Vec::with_capacity(self.visible_rows.len());
+        for artifact in &self.visible_rows {
+            crate::host_work::checkpoint()?;
+            let (entry, parts) = artifact.world_type_parts()?;
+            let (row, image) = rows.row(&entry, parts)?;
+            references.push(world_array(vec![
+                world_text(entry.descriptor.owner.unit.clone()),
+                world_text(entry.descriptor.owner.module.clone()),
+                world_blob(producer),
+                world_blob(image),
+            ]));
+            visible.push(row);
+        }
+        let blocks = self
+            .primary_blocks
+            .blocks()
+            .iter()
+            .map(|(cid, body)| world_array(vec![world_blob(cid.to_bytes()), world_blob(body)]))
+            .collect();
+        let seals = self
+            .primary_blocks
+            .blocks()
+            .iter()
+            .map(|(cid, body)| {
+                world_array(vec![
+                    world_blob(cid.to_bytes()),
+                    world_blob(world_digest(body)),
+                ])
+            })
+            .collect();
+        // The closed Materializer issued the CID basis. This SHA envelope binds
+        // transfer and restoration; it does not independently verify CID content.
+        let product = world_bytes(&world_array(vec![
+            world_text("TPCWREST"),
+            1u64.into(),
+            world_blob(self.primary_root.cid().to_bytes()),
+            world_blob(self.sources.seal()),
+            world_blob(producer),
+            world_blob(profile),
+            world_blob(&self.visibility),
+            world_blob(world_digest(&world_bytes(&world_array(references))?)),
+            world_blob(world_digest(&world_bytes(&world_array(seals))?)),
+        ]))?;
+        let logical_id = world_digest(&product);
+        let source_path = self.directory.path().join("sources.bin");
+        std::fs::write(&source_path, self.sources.encoded())?;
+        let files = rows.files.into_values().collect();
+        let acquisition = rows
+            .arenas
+            .acquisition(rows.images.into_values().collect())?;
+        let descriptor = self.directory.path().join("world.cbor");
+        let encoded = world_bytes(&world_array(vec![
+            world_text("TPCWORLD"),
+            1u64.into(),
+            world_blob(&product),
+            world_path(&source_path)?,
+            world_blob(producer),
+            world_blob(profile),
+            world_array(vec![world_array(base), world_array(visible)]),
+            acquisition,
+            world_blob(&self.visibility),
+            world_blob(self.primary_root.cid().to_bytes()),
+            world_array(blocks),
+        ]))?;
+        std::fs::write(&descriptor, encoded)?;
+        Ok(Arc::new(CompilerWorldRestoration {
+            logical_id,
+            inputs: self,
+            product: product.into(),
+            producer,
+            profile,
+            descriptor,
+            input_files: files,
+        }))
+    }
+}
+
+fn scoped_world_action<T>(
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
+    action: impl FnOnce() -> Result<T, CompileError>,
+) -> Result<T, CompileError> {
+    use tidepool_extract_cmd::{CompilerTransactionClose as C, CompilerTransactionOrigin};
+    if CompilerTransactionOrigin::current().is_some() {
+        return action();
+    }
+    let result = tidepool_extract_cmd::with_compiler_transaction(settlement, action);
+    match result.close {
+        C::Clean | C::NotStarted => result.action,
+        C::Retired(evidence) => Err(CompileError::CompilerPreparationRetired(Box::new(evidence))),
+        C::Unconfirmed(evidence) => Err(CompileError::CompilerPreparationCloseUnconfirmed(
+            Box::new(evidence),
+        )),
+    }
+}
+
+fn world_command(
+    identity: &tidepool_extract_cmd::CompilerIdentity,
+) -> Result<
+    (
+        tidepool_extract_cmd::ExtractCmd,
+        tidepool_extract_cmd::CompilerEndpoint,
+    ),
+    CompileError,
+> {
+    crate::host_work::checkpoint()?;
+    let cmd = tidepool_extract_cmd::ExtractCmd::new().map_err(|e| source_failure(e.to_string()))?;
+    let endpoint = cmd.bind().map_err(CompileError::CompilerEndpoint)?;
+    if endpoint.identity() != identity {
+        return Err(source_failure(
+            "compiler world endpoint changed before submission",
+        ));
+    }
+    Ok((cmd, endpoint))
+}
+
+fn world_execute(
+    cmd: &tidepool_extract_cmd::ExtractCmd,
+    endpoint: tidepool_extract_cmd::CompilerEndpoint,
+    files: Vec<Arc<std::fs::File>>,
+) -> Result<tidepool_extract_cmd::ExtractRun, CompileError> {
+    CompileError::compiler_invocation_result(endpoint.execute_with_input_files(cmd, files, |_| {}))
+}
+
+fn ensure_world(
+    world: &CompilerWorld,
+    identity: &tidepool_extract_cmd::CompilerIdentity,
+) -> Result<String, CompileError> {
+    use tidepool_extract_cmd::{
+        EnsureExactInputsOutcome as O, ExactInputsAcquisition as A, ExactInputsRequest,
+    };
+    let restoration = &world.restoration;
+    if identity.producer_bytes() != &restoration.producer
+        || identity
+            .package_source_association()
+            .map(|s| s.profile_id())
+            != Some(&restoration.profile)
+    {
+        return Err(source_failure(
+            "compiler world producer/package profile differs",
+        ));
+    }
+    let root = world_hex(world.logical_id());
+    let hint = world
+        .realization
+        .lock()
+        .map_err(|_| source_failure("world realization lock poisoned"))?
+        .clone()
+        .unwrap_or_else(|| "not-resident".into());
+    // This source-free probe precedes baseline descriptor exports or FD visits.
+    let (mut cmd, endpoint) = world_command(identity)?;
+    cmd.ensure_exact_inputs(ExactInputsRequest {
+        root: root.clone(),
+        acquisition: A::Resident(hint),
+    });
+    let run = world_execute(&cmd, endpoint, Vec::new())?;
+    let response = O::decode(&run.output.stdout).map_err(|_| world_response_error(false))?;
+    let realized = match response {
+        O::Ready { world, realization } if world == root => realization,
+        O::NeedsAcquisition(world) if world == root => {
+            if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(
+                &restoration.inputs.directory,
+            )) {
+                return Err(source_failure(
+                    "world acquisition requires its compiler scope",
+                ));
+            }
+            let (mut cmd, endpoint) = world_command(identity)?;
+            cmd.ensure_exact_inputs(ExactInputsRequest {
+                root: root.clone(),
+                acquisition: A::Complete(restoration.descriptor.clone()),
+            });
+            let run = world_execute(&cmd, endpoint, restoration.input_files.clone())?;
+            match O::decode(&run.output.stdout).map_err(|_| world_response_error(false))? {
+                O::Ready { world, realization } if world == root => realization,
+                O::Rejected(reason) => {
+                    return Err(source_failure(format!(
+                        "compiler refused world acquisition: {reason:?}"
+                    )))
+                }
+                _ => return Err(world_response_error(true)),
+            }
+        }
+        O::Rejected(reason) => {
+            return Err(source_failure(format!(
+                "compiler refused world realization: {reason:?}"
+            )))
+        }
+        _ => return Err(world_response_error(true)),
+    };
+    *world
+        .realization
+        .lock()
+        .map_err(|_| source_failure("world realization lock poisoned"))? = Some(realized.clone());
+    Ok(realized)
+}
+
+/// Open exact published primary/source facts, then ask the actual service. The
+/// public handle is returned only after the service has accepted those facts.
+pub fn open_world(
+    cold: CompilerWorldOpenInputs,
+    endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+    question: PublicModuleQuestion,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
+) -> Result<WorldQueryResult, CompileError> {
+    scoped_world_action(settlement, || {
+        let restoration = cold.prepare(endpoint.identity())?;
+        let world = Arc::new(CompilerWorld {
+            restoration,
+            realization: Arc::new(Mutex::new(None)),
+        });
+        query_world_inner(endpoint.identity(), world, question)
+    })
+}
+
+/// Observe the held logical world with a fresh operation authority. Residency
+/// loss restores its retained product; accepted/uncertain queries are not replayed.
+pub fn query_public_module(
+    endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+    world: &CompilerWorld,
+    question: PublicModuleQuestion,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
+) -> Result<WorldQueryResult, CompileError> {
+    scoped_world_action(settlement, || {
+        query_world_inner(endpoint.identity(), Arc::new(world.clone()), question)
+    })
+}
+
+fn query_world_inner(
+    identity: &tidepool_extract_cmd::CompilerIdentity,
+    world: Arc<CompilerWorld>,
+    question: PublicModuleQuestion,
+) -> Result<WorldQueryResult, CompileError> {
+    let realization = ensure_world(&world, identity)?;
+    let output_owner = Arc::new(
+        tempfile::Builder::new()
+            .prefix("tidepool-world-answer-")
+            .tempdir()?,
+    );
+    let output = output_owner.path().join("answer.cbor");
+    if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(&output_owner)) {
+        return Err(source_failure("world question requires its compiler scope"));
+    }
+    let (mut cmd, endpoint) = world_command(identity)?;
+    cmd.world_public_module(tidepool_extract_cmd::WorldPublicModuleRequest {
+        world: world_hex(world.logical_id()),
+        realization,
+        mode: match question.kind {
+            PublicModuleQuestionKind::StructuredInfo => tidepool_extract_cmd::WorldQueryMode::Info,
+            PublicModuleQuestionKind::StructuredType => tidepool_extract_cmd::WorldQueryMode::Type,
+        },
+        query: question.query.clone(),
+        output: output.clone(),
+    });
+    let run = world_execute(&cmd, endpoint, Vec::new())?;
+    crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
+    let file = std::fs::File::open(&output).map_err(|_| world_response_error(false))?;
+    let allowance = capture_allowance()?;
+    if file.metadata()?.len() > allowance {
+        return Err(world_response_error(false));
+    }
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.take(allowance.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > allowance {
+        return Err(world_response_error(false));
+    }
+    decode_world_answer(world, question, &bytes)
+}
+
+fn world_response_error(provenance: bool) -> CompileError {
+    use tidepool_extract_cmd::CompilerResponseRejection as R;
+    CompileError::CompilerEndpoint(tidepool_extract_cmd::reject_compiler_response(
+        if provenance {
+            R::ProvenanceMismatch
+        } else {
+            R::Malformed
+        },
+    ))
+}
+
+fn answer_array(
+    value: &ciborium::value::Value,
+    count: usize,
+) -> Result<&[ciborium::value::Value], CompileError> {
+    match value {
+        ciborium::value::Value::Array(v) if v.len() == count => Ok(v),
+        _ => Err(world_response_error(false)),
+    }
+}
+fn answer_text(value: &ciborium::value::Value) -> Result<&str, CompileError> {
+    match value {
+        ciborium::value::Value::Text(v) => Ok(v),
+        _ => Err(world_response_error(false)),
+    }
+}
+fn answer_u64(value: &ciborium::value::Value) -> Result<u64, CompileError> {
+    match value {
+        ciborium::value::Value::Integer(v) => {
+            u64::try_from(*v).map_err(|_| world_response_error(false))
+        }
+        _ => Err(world_response_error(false)),
+    }
+}
+fn answer_blob(value: &ciborium::value::Value) -> Result<&[u8], CompileError> {
+    match value {
+        ciborium::value::Value::Bytes(v) => Ok(v),
+        _ => Err(world_response_error(false)),
+    }
+}
+fn answer_hash(value: &ciborium::value::Value) -> Result<[u8; 32], CompileError> {
+    answer_blob(value)?
+        .try_into()
+        .map_err(|_| world_response_error(false))
+}
+fn answer_cbor(bytes: &[u8]) -> Result<ciborium::value::Value, CompileError> {
+    let mut input = std::io::Cursor::new(bytes);
+    let value = ciborium::de::from_reader(&mut input).map_err(|_| world_response_error(false))?;
+    if input.position() != bytes.len() as u64 {
+        return Err(world_response_error(false));
+    }
+    Ok(value)
+}
+fn namespace_tag(namespace: InspectionNamespace) -> u64 {
+    match namespace {
+        InspectionNamespace::Any => 0,
+        InspectionNamespace::Value => 1,
+        InspectionNamespace::Type => 2,
+        InspectionNamespace::Constructor => 3,
+        InspectionNamespace::Field => 4,
+    }
+}
+fn namespace_text(namespace: InspectionNamespace) -> &'static str {
+    match namespace {
+        InspectionNamespace::Any => "Any",
+        InspectionNamespace::Value => "Value",
+        InspectionNamespace::Type => "Type",
+        InspectionNamespace::Constructor => "Constructor",
+        InspectionNamespace::Field => "Field",
+    }
+}
+fn module_receipt(
+    value: &ciborium::value::Value,
+    world: &CompilerWorld,
+) -> Result<WorldModuleReceipt, CompileError> {
+    let v = answer_array(value, 4)?;
+    if answer_text(&v[0])? != "resolved" {
+        return Err(world_response_error(false));
+    }
+    let unit = answer_text(&v[1])?.to_owned();
+    let module = answer_text(&v[2])?.to_owned();
+    if unit.is_empty() || module.is_empty() || unit.contains('\0') || module.contains('\0') {
+        return Err(world_response_error(true));
+    }
+    let origin = match &v[3] {
+        ciborium::value::Value::Array(o) if o.len() == 2 && answer_text(&o[0])? == "package" => {
+            let profile = answer_hash(&o[1])?;
+            if profile != world.restoration.profile {
+                return Err(world_response_error(true));
+            }
+            WorldModuleOrigin::Package { profile }
+        }
+        ciborium::value::Value::Array(o) if o.len() == 4 && answer_text(&o[0])? == "home" => {
+            let root =
+                u32::try_from(answer_u64(&o[1])?).map_err(|_| world_response_error(false))?;
+            let path = answer_text(&o[2])?.to_owned();
+            if relative_source_path(Path::new(&path)).is_err() {
+                return Err(world_response_error(true));
+            }
+            let source_sha256 = answer_hash(&o[3])?;
+            if world
+                .restoration
+                .inputs
+                .sources
+                .source_seals
+                .get(root as usize)
+                .and_then(|s| s.get(Path::new(&path)))
+                != Some(&source_sha256)
+            {
+                return Err(world_response_error(true));
+            }
+            WorldModuleOrigin::Home {
+                root,
+                path,
+                source_sha256,
+            }
+        }
+        _ => return Err(world_response_error(false)),
+    };
+    Ok(WorldModuleReceipt {
+        unit,
+        module,
+        origin,
+    })
+}
+
+fn validate_inspection(
+    payload: &[u8],
+    question: &PublicModuleQuestion,
+    resolution: &WorldModuleResolution,
+    defining: Option<&WorldModuleReceipt>,
+) -> Result<(), CompileError> {
+    let value = answer_cbor(payload)?;
+    let top = answer_array(&value, 2)?;
+    if answer_text(&top[0])? != "TPINSP008" {
+        return Err(world_response_error(false));
+    }
+    let complete = answer_array(&top[1], 2)?;
+    if answer_text(&complete[0])? != "Complete" {
+        return Err(world_response_error(false));
+    }
+    let only = answer_array(&complete[1], 1)?;
+    let answer = answer_array(&only[0], 2)?;
+    match answer_text(&answer[0])? {
+        "StructuredInfoOk" | "StructuredTypeOk" => {
+            let expected = match question.kind {
+                PublicModuleQuestionKind::StructuredInfo => "StructuredInfoOk",
+                PublicModuleQuestionKind::StructuredType => "StructuredTypeOk",
+            };
+            if answer_text(&answer[0])? != expected
+                || !matches!(resolution, WorldModuleResolution::Resolved(_))
+            {
+                return Err(world_response_error(true));
+            }
+            let details = answer_array(
+                &answer[1],
+                if expected == "StructuredInfoOk" { 4 } else { 3 },
+            )?;
+            let identifier = answer_array(&details[0], 3)?;
+            let definition = defining.ok_or_else(|| world_response_error(true))?;
+            let name = answer_text(&identifier[1])?;
+            if answer_text(&identifier[0])? != definition.module
+                || !(question.name() == name
+                    || question.name() == format!("{}.{}", definition.module, name))
+            {
+                return Err(world_response_error(true));
+            }
+            let provenance = answer_array(
+                details.last().ok_or_else(|| world_response_error(false))?,
+                3,
+            )?;
+            let scope = answer_array(&provenance[0], 2)?;
+            if answer_text(&scope[0])? != "PublicModule"
+                || answer_text(&scope[1])? != question.module()
+                || answer_u64(&provenance[1])? != question.generation()
+                || answer_text(&provenance[2])? != question.fingerprint()
+            {
+                return Err(world_response_error(true));
+            }
+        }
+        "StructuredError" => {
+            if defining.is_some() {
+                return Err(world_response_error(true));
+            }
+            let ciborium::value::Value::Array(error) = &answer[1] else {
+                return Err(world_response_error(false));
+            };
+            let tag = answer_text(error.first().ok_or_else(|| world_response_error(false))?)?;
+            match tag {
+                "UnknownModule" if error.len() == 2 => {
+                    if !matches!(resolution, WorldModuleResolution::Absent(_))
+                        || answer_text(&error[1])? != question.module()
+                    {
+                        return Err(world_response_error(true));
+                    }
+                }
+                "Unknown" | "Ambiguous" if error.len() == if tag == "Unknown" { 2 } else { 3 } => {
+                    if !matches!(resolution, WorldModuleResolution::Resolved(_)) {
+                        return Err(world_response_error(true));
+                    }
+                    let query = answer_array(&error[1], 3)?;
+                    let scope = answer_array(&query[0], 2)?;
+                    if answer_text(&scope[0])? != "PublicModule"
+                        || answer_text(&scope[1])? != question.module()
+                        || answer_text(&query[1])? != namespace_text(question.namespace())
+                        || answer_text(&query[2])? != question.name()
+                    {
+                        return Err(world_response_error(true));
+                    }
+                }
+                "Unsupported" if error.len() == 2 => {
+                    let _ = answer_text(&error[1])?;
+                }
+                _ => return Err(world_response_error(false)),
+            }
+        }
+        _ => return Err(world_response_error(false)),
+    }
+    Ok(())
+}
+
+fn decode_world_answer(
+    world: Arc<CompilerWorld>,
+    question: PublicModuleQuestion,
+    bytes: &[u8],
+) -> Result<WorldQueryResult, CompileError> {
+    if bytes.get(..8) != Some(b"TPWQ0002") || bytes.len() < 12 {
+        return Err(world_response_error(false));
+    }
+    let size = u32::from_le_bytes(
+        bytes[8..12]
+            .try_into()
+            .map_err(|_| world_response_error(false))?,
+    ) as usize;
+    if size != bytes.len() - 12 {
+        return Err(world_response_error(false));
+    }
+    let value = answer_cbor(&bytes[12..])?;
+    let v = answer_array(&value, 8)?;
+    let expected_mode = if question.kind == PublicModuleQuestionKind::StructuredInfo {
+        0
+    } else {
+        1
+    };
+    let echoed = answer_array(&v[4], 4)?;
+    if answer_u64(&v[0])? != 1
+        || answer_hash(&v[1])? != *world.logical_id()
+        || answer_u64(&v[2])? != expected_mode
+        || answer_text(&v[3])? != question.module()
+        || answer_u64(&echoed[0])? != namespace_tag(question.namespace())
+        || answer_text(&echoed[1])? != question.name()
+        || answer_u64(&echoed[2])? != question.generation()
+        || answer_text(&echoed[3])? != question.fingerprint()
+    {
+        return Err(world_response_error(true));
+    }
+    let ciborium::value::Value::Array(resolution) = &v[5] else {
+        return Err(world_response_error(false));
+    };
+    let tag = answer_text(
+        resolution
+            .first()
+            .ok_or_else(|| world_response_error(false))?,
+    )?;
+    let resolution = match tag {
+        "resolved" => {
+            let receipt = module_receipt(&v[5], &world)?;
+            if receipt.module != question.module() {
+                return Err(world_response_error(true));
+            }
+            WorldModuleResolution::Resolved(receipt)
+        }
+        "absent" if resolution.len() == 4 => {
+            let module = answer_text(&resolution[1])?.to_owned();
+            let source_domain = answer_hash(&resolution[2])?;
+            let package_profile = answer_hash(&resolution[3])?;
+            if module != question.module()
+                || source_domain != *world.restoration.inputs.sources.seal()
+                || package_profile != world.restoration.profile
+            {
+                return Err(world_response_error(true));
+            }
+            WorldModuleResolution::Absent(ClosedModuleAbsence {
+                module,
+                source_domain,
+                package_profile,
+            })
+        }
+        "rejected" if resolution.len() == 2 => {
+            WorldModuleResolution::Rejected(match answer_u64(&resolution[1])? {
+                0 => WorldQueryRejection::Unsupported,
+                1 => WorldQueryRejection::Unavailable,
+                2 => WorldQueryRejection::Corrupt,
+                _ => return Err(world_response_error(false)),
+            })
+        }
+        _ => return Err(world_response_error(false)),
+    };
+    let defining = if matches!(v[6], ciborium::value::Value::Null) {
+        None
+    } else {
+        Some(module_receipt(&v[6], &world)?)
+    };
+    let inspection_payload = answer_blob(&v[7])?.to_vec();
+    if matches!(resolution, WorldModuleResolution::Rejected(_)) {
+        if defining.is_some() || !inspection_payload.is_empty() {
+            return Err(world_response_error(false));
+        }
+    } else {
+        validate_inspection(
+            &inspection_payload,
+            &question,
+            &resolution,
+            defining.as_ref(),
+        )?;
+    }
+    Ok(WorldQueryResult {
+        world,
+        question,
+        resolution,
+        defining,
+        inspection_payload,
+    })
+}
+
+/// Re-establish an issued logical world from its retained restoration owner.
+/// This rehydrates compiler facts; it never runs notebook cells or effects.
+pub fn restore_world(
+    restoration: &Arc<CompilerWorldRestoration>,
+    endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+    question: PublicModuleQuestion,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
+) -> Result<WorldQueryResult, CompileError> {
+    let world = CompilerWorld {
+        restoration: Arc::clone(restoration),
+        realization: Arc::new(Mutex::new(None)),
+    };
+    query_public_module(endpoint, &world, question, settlement)
 }
