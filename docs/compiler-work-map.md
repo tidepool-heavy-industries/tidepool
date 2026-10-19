@@ -118,8 +118,16 @@ Current source has the implementations above; historical observations cannot
 establish their benefit.
 
 The observer baseline `20d7ccdcf6ed13a5e0db7ffa89527224a95606ec` compiled and its
-single timing control executed PASS. Exact joined `233f988d` has source review;
-joined native qualification and matched timing are pending at this map update.
+single timing control executed PASS. Its exact frozen packaged workload also
+passed: one selected/executed case, all 13 ordered phases, **404.511 s** whole-case
+wall time. The workload uses a scripted provider and generic prepared/custom
+history, not the authored Persona spec. The descriptor SHA-256 is
+`48dc946cd245445b890aa95b64372c6ce41641f19a19e11a75887a8953c2515d`;
+the [terminal receipt](/srv/swarm/evidence/inanna/admission-analysis-review-20261018/overnight-20d7-baseline/BASELINE13-TERMINAL.json)
+links the counted report, phase coverage and timing evidence.
+Exact joined `233f988d` has source review; joined native qualification and
+matched timing remain pending. This baseline result does not measure the four
+changes' savings.
 Compilation, test execution, source acceptance and a measured workload are
 separate claims. This map introduces no new release gate or performance claim.
 
