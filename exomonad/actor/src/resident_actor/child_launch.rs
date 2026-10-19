@@ -1329,7 +1329,7 @@ mod tests {
                 let id = SessionId(4510 + history as u64);
                 let dependency = crate::ActorDescriptor::new("child phase control", crate::ActorPlacement {
                     session: id, resource_scope: RealmId::ROOT, lexical_scope: ScopeId::ROOT,
-                }).admit_independent_world().source_dependency();
+                }).admit_independent_world().source_dependency().clone();
                 assert!(dependency.source_lease().is_err());
                 let runner = Runner::new(machines.clone(), source)
                     .with_child_session_factory(Arc::new(move |id, _, settlement| {
