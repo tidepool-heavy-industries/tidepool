@@ -17003,15 +17003,20 @@ pub(crate) mod request_tests {
             let original = context.source_dependency().source_lease().unwrap();
             let target = history_context.source_dependency().source_lease().unwrap();
             assert!(!Arc::ptr_eq(&original, &target));
-            for gate in [original.source_admission(), target.source_admission()] {
+            for (original_gate, gate) in [(true, original.source_admission()), (false, target.source_admission())] {
                 let fence = gate.fence().unwrap();
                 let refusal = HostWorkObservation::new();
                 let rejected = workbench.query_public_module_world(transferred.clone(), tidepool_runtime::session::NameQuery {
                     scope: tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()),
                     namespace: tidepool_runtime::session::NameNamespace::Value, name: "known".into(),
                 }, StructuredInspectionKind::Info, Some(refusal.clone())).await;
-                assert!(matches!(rejected, Err(ResidentActorWorkbenchError::Resident(ResidentError::Run(
-                    tidepool_runtime::RuntimeError::SourceAdmission(tidepool_runtime::session::SourceAdmissionError::Closed { .. }))))));
+                if original_gate {
+                    assert!(matches!(rejected, Err(ResidentActorWorkbenchError::SourceAdmission(
+                        generation_admission::GenerationAdmissionError::Closed { .. }))));
+                } else {
+                    assert!(matches!(rejected, Err(ResidentActorWorkbenchError::Resident(ResidentError::Run(
+                        tidepool_runtime::RuntimeError::SourceAdmission(tidepool_runtime::session::SourceAdmissionError::Closed { .. }))))));
+                }
                 assert_world_hot_work(&refusal.snapshot());
                 fence.reopen().unwrap();
             }

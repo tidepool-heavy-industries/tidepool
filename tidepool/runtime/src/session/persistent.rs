@@ -5,7 +5,7 @@
 //! Suspension is threadless: a continuation is rooted as data and a later
 //! entry may resume it from a fresh evaluation thread.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -1766,6 +1766,10 @@ impl PersistentSession {
         let mut encoded = Vec::new();
         ciborium::ser::into_writer(&("TPCWV001", scope.0, visibility), &mut encoded)
             .map_err(|error| SessionError::Io(std::io::Error::other(error.to_string())))?;
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::ScopeEncodedByte,
+            encoded.len() as u64,
+        );
         let mut modules = HashSet::new();
         let mut rows = Vec::new();
         tidepool_toolchain::timing::record_host_work(
