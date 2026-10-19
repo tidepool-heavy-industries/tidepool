@@ -296,7 +296,8 @@ def declare_haskell_components():
         "-XGHC2024",
         "-XOverloadedStrings",
         "-Wall",
-        "-Werror=missing-fields"
+        "-Werror=missing-fields",
+        "-dynamic-too"
     ]),
         linker_flags = haskell_component_link_flags([
         "bytestring",
@@ -305,7 +306,8 @@ def declare_haskell_components():
         "text"
     ], [
         "-Wall",
-        "-Werror=missing-fields"
+        "-Werror=missing-fields",
+        "-dynamic-too"
     ], dynamic = False),
         visibility = ["PUBLIC"],
     )
