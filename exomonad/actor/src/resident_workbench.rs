@@ -19039,7 +19039,7 @@ pub(crate) mod request_tests {
             .prepared
             .entry
             .compiled()
-            .original_compile_input()
+            .ordinary_original_compile_input()
             .unwrap()
             .replay_eligible_identity()
             .is_none());
@@ -19912,7 +19912,7 @@ pub(crate) mod request_tests {
             .expect("source-prepared installation")
             .entry
             .compiled()
-            .original_compile_input()
+            .ordinary_original_compile_input()
             .unwrap();
         assert!(
             proof.replay_eligible_identity().is_none(),
@@ -20990,7 +20990,7 @@ pub(crate) mod request_tests {
             panic!("ordinary quotation request must complete its actual discarded bind")
         };
         let compiled = Arc::new(compiled);
-        let successor = compiled.original_compile_input().unwrap();
+        let successor = compiled.ordinary_original_compile_input().unwrap();
         assert_eq!(successor.original_source(), wrapped_source);
         // The independent scratch scope belongs to a different generated
         // scaffold. Exact input continuity includes that owner and its source;
@@ -21006,7 +21006,7 @@ pub(crate) mod request_tests {
             .expect("source-prepared installation")
             .entry
             .compiled()
-            .original_compile_input()
+            .ordinary_original_compile_input()
             .unwrap();
         assert!(Arc::ptr_eq(proof, retained));
         assert_eq!(retained.original_source(), original_source);
@@ -25594,7 +25594,7 @@ pub(crate) mod request_tests {
             let original = compiled
                 .published_source_original_selection(
                     compiled
-                        .original_compile_input()
+                        .ordinary_original_compile_input()
                         .unwrap()
                         .original_input_identity(),
                     &tidepool_toolchain::declaration_join::ExactModuleIdentity {

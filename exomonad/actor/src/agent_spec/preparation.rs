@@ -572,7 +572,7 @@ pub(crate) mod tests {
         ] {
             let program = builtin_program(policy).unwrap().unwrap();
             let loaded = load_builtin_installer(&program).unwrap();
-            assert!(loaded.original_compile_input().is_some());
+            assert!(loaded.ordinary_original_compile_input().is_some());
             let mut wrong_selection = program.clone();
             wrong_selection.manifest_blake3 = "0".repeat(64);
             assert!(load_builtin_installer(&wrong_selection).is_err());
@@ -706,7 +706,11 @@ pub(crate) mod tests {
             retained.upgrade().is_some(),
             "installed tool leases retain the original entry after cache retirement"
         );
-        assert!(ready.entry.compiled().original_compile_input().is_some());
+        assert!(ready
+            .entry
+            .compiled()
+            .ordinary_original_compile_input()
+            .is_some());
         run_cache_history(ready).await;
     }
 

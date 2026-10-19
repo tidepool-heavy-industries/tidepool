@@ -1629,8 +1629,6 @@ pub struct CompiledTurn {
 #[derive(Clone, Debug)]
 pub struct TurnCertification {
     pub(crate) artifact_view: tidepool_toolchain::artifact_inventory::ArtifactView,
-    pub(crate) original_compile_input:
-        Option<Arc<tidepool_toolchain::artifacts::SealedOriginalCompileInput>>,
     pub groups: Arc<[PendingCertifiedGroup]>,
     pub target_owners: Vec<PendingImportOwner>,
     pub package_interfaces:
@@ -1644,7 +1642,9 @@ pub struct TurnCertification {
 /// Compiler bundle identity remains independent of this execution purpose.
 #[derive(Clone, Debug)]
 pub(super) enum TurnPurpose {
-    Ordinary,
+    Ordinary {
+        original: Option<Arc<tidepool_toolchain::artifacts::SealedOriginalCompileInput>>,
+    },
     Execution {
         execution: Arc<ExactCompiledItem>,
         prefix: Arc<super::RuntimeCheckedPrefix>,
@@ -1658,12 +1658,21 @@ pub(super) enum TurnPurpose {
 impl TurnPurpose {
     fn from_sealed(
         proof: Option<&tidepool_toolchain::artifacts::CheckedNativeProof>,
+        original: Option<Arc<tidepool_toolchain::artifacts::SealedOriginalCompileInput>>,
         admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
     ) -> Result<Self, CompileError> {
         use tidepool_toolchain::artifacts::CheckedNativeProof;
+        // The toolchain seals ordinary input only without an exact request;
+        // checked output is issued from that request instead. Both proofs in
+        // one product would claim incompatible compiler-output purposes.
+        if proof.is_some() && original.is_some() {
+            return Err(CompileError::ExtractFailed(
+                "checked output also carries ordinary compiler input authority".into(),
+            ));
+        }
         let Some(admission) = admission else {
             return match proof {
-                None => Ok(Self::Ordinary),
+                None => Ok(Self::Ordinary { original }),
                 Some(CheckedNativeProof::Execution(_)) => Err(CompileError::ExtractFailed(
                     "checked execution lacks its runtime prefix owner".into(),
                 )),
@@ -1707,12 +1716,11 @@ impl Default for TurnCertification {
         Self {
             artifact_view: tidepool_toolchain::artifact_inventory::ArtifactInventory::default()
                 .empty_view(),
-            original_compile_input: None,
             groups: Arc::from([]),
             target_owners: Vec::new(),
             package_interfaces: Default::default(),
             recovery_products: Arc::from([]),
-            purpose: TurnPurpose::Ordinary,
+            purpose: TurnPurpose::Ordinary { original: None },
         }
     }
 }
@@ -1751,6 +1759,14 @@ impl TurnCertification {
     pub(super) fn purpose(&self) -> &TurnPurpose {
         &self.purpose
     }
+    pub(super) fn ordinary_original(
+        &self,
+    ) -> Option<&Arc<tidepool_toolchain::artifacts::SealedOriginalCompileInput>> {
+        match &self.purpose {
+            TurnPurpose::Ordinary { original } => original.as_ref(),
+            _ => None,
+        }
+    }
     pub fn checked_item(&self) -> Option<&ExactCheckedItem> {
         match &self.purpose {
             TurnPurpose::Execution { execution, .. } => Some(execution.item()),
@@ -1780,7 +1796,7 @@ impl TurnCertification {
 
     pub(crate) fn validate_checked_table(&self, table: &DataConTable) -> Result<(), CompileError> {
         match &self.purpose {
-            TurnPurpose::Ordinary => Ok(()),
+            TurnPurpose::Ordinary { .. } => Ok(()),
             TurnPurpose::Execution { execution, .. } | TurnPurpose::HostPrototype(execution) => {
                 execution.validate_table(table)
             }
@@ -1795,7 +1811,7 @@ impl TurnCertification {
         bound: &[BoundBinder],
     ) -> Result<(), CompileError> {
         let execution = match &self.purpose {
-            TurnPurpose::Ordinary => return Ok(()),
+            TurnPurpose::Ordinary { .. } => return Ok(()),
             TurnPurpose::ActivationPreview(_) | TurnPurpose::HostPrototype(_) => {
                 return Err(CompileError::ExtractFailed(
                     "protected host output requires its owning runtime consumer".into(),
@@ -1859,7 +1875,6 @@ impl CompiledTurn {
         let execution = item.native().ok_or_else(missing)?;
         let certification = TurnCertification {
             artifact_view: products.artifact_view().clone(),
-            original_compile_input: None,
             groups: products.certified_groups.clone(),
             target_owners: products.pending_imports().to_vec(),
             package_interfaces: products.package_interfaces.clone(),
@@ -1920,11 +1935,12 @@ impl CompiledTurn {
         )
     }
 
-    /// Completed-original custody, independent of new source replay eligibility.
-    pub fn original_compile_input(
+    /// Ordinary source-compilation identity, independent of source replay eligibility.
+    /// Use `code().original_source()` for producer-independent execution custody.
+    pub fn ordinary_original_compile_input(
         &self,
     ) -> Option<&Arc<tidepool_toolchain::artifacts::SealedOriginalCompileInput>> {
-        self.certification.as_ref()?.original_compile_input.as_ref()
+        self.certification.as_ref()?.ordinary_original()
     }
 
     /// Select compiler roles from this exact completed output, independently
@@ -1933,23 +1949,12 @@ impl CompiledTurn {
         &self,
     ) -> Result<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, CompileError>
     {
-        let certification = self.certification.as_ref().ok_or_else(|| {
-            CompileError::ExtractFailed("turn has no original compiler certification".into())
-        })?;
-        let input = certification
-            .original_compile_input
-            .as_ref()
+        self.code()
+            .original_source()?
+            .map(|source| source.execution_context())
             .ok_or_else(|| {
-                CompileError::ExtractFailed("turn has no original compiler input".into())
-            })?;
-        input.original_execution_context(
-            &self.prepared,
-            &certification.groups,
-            &certification.target_owners,
-            &certification.package_interfaces,
-            &self.table,
-            &self.asks,
-        )
+                CompileError::ExtractFailed("turn has no original compiler authority".into())
+            })
     }
 
     /// Issue a published source selection only from this exact original bundle.
@@ -1962,14 +1967,11 @@ impl CompiledTurn {
         let certification = self.certification.as_ref().ok_or_else(|| {
             CompileError::ExtractFailed("published source original lacks compiler custody".into())
         })?;
-        let proof = certification
-            .original_compile_input
-            .as_ref()
-            .ok_or_else(|| {
-                CompileError::ExtractFailed(
-                    "published source original lacks original input authority".into(),
-                )
-            })?;
+        let proof = certification.ordinary_original().ok_or_else(|| {
+            CompileError::ExtractFailed(
+                "published source original lacks original input authority".into(),
+            )
+        })?;
         proof.published_source_original_selection(
             &self.prepared,
             &certification.groups,
@@ -2049,6 +2051,64 @@ impl<'a> TurnCode<'a> {
     }
     pub fn certification(&self) -> Option<&TurnCertification> {
         self.certification.as_ref().as_ref()
+    }
+
+    /// Validate this complete output before borrowing its original execution or
+    /// requested input-type authority. Raw prepared code has neither authority.
+    pub fn original_source(
+        &self,
+    ) -> Result<
+        Option<tidepool_toolchain::declaration_join::ValidatedOriginalSource<'_>>,
+        CompileError,
+    > {
+        Ok(self
+            .original_source_observations()?
+            .map(|(source, _, _)| source))
+    }
+
+    pub(super) fn original_source_observations(
+        &self,
+    ) -> Result<
+        Option<(
+            tidepool_toolchain::declaration_join::ValidatedOriginalSource<'_>,
+            Option<&tidepool_toolchain::checked_cell::SelectedNativeSites>,
+            &[Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>],
+        )>,
+        CompileError,
+    > {
+        let Some(certification) = self.certification() else {
+            return Ok(None);
+        };
+        let (source, sites, originals) = match certification.purpose() {
+            TurnPurpose::Execution { execution, .. } | TurnPurpose::HostPrototype(execution) => (
+                execution.original_source(self.prepared(), self.table(), self.sites())?,
+                execution.selected_native_sites(),
+                execution.selected_source_originals(),
+            ),
+            TurnPurpose::ActivationPreview(proof) => (
+                proof.original_source(self.prepared(), self.table(), self.sites())?,
+                None,
+                &[][..],
+            ),
+            TurnPurpose::Ordinary { original } => {
+                let Some(proof) = original else {
+                    return Ok(None);
+                };
+                (
+                    proof.validated_original_source(
+                        self.prepared(),
+                        &certification.groups,
+                        &certification.target_owners,
+                        &certification.package_interfaces,
+                        self.table(),
+                        self.sites(),
+                    )?,
+                    Some(proof.selected_native_sites()),
+                    &[][..],
+                )
+            }
+        };
+        Ok(Some((source, sites, originals)))
     }
 
     /// Borrow the same admitted pair without reconstructing its ownership.
@@ -4526,7 +4586,13 @@ fn compile_turn(
             )
             .into());
         }
-        certification.original_compile_input = Some(Arc::clone(identity));
+        let TurnPurpose::Ordinary { original } = &mut certification.purpose else {
+            return Err(CompileError::ExtractFailed(
+                "ordinary compiler input cannot certify protected output".into(),
+            )
+            .into());
+        };
+        *original = Some(Arc::clone(identity));
     }
 
     Ok(result)
@@ -4641,12 +4707,15 @@ fn compiled_native_output(
         .map(|products| -> Result<_, CompileError> {
             Ok(TurnCertification {
                 artifact_view: products.artifact_view().clone(),
-                original_compile_input: products.original_compile_input.clone(),
                 groups: products.certified_groups.clone(),
                 target_owners: products.pending_imports().to_vec(),
                 package_interfaces: products.package_interfaces.clone(),
                 recovery_products: products.recovery_products.clone(),
-                purpose: TurnPurpose::from_sealed(products.checked.as_ref(), admission)?,
+                purpose: TurnPurpose::from_sealed(
+                    products.checked.as_ref(),
+                    products.original_compile_input.clone(),
+                    admission,
+                )?,
             })
         })
         .transpose()?;

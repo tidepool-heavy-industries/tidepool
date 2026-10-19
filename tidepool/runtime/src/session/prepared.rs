@@ -1102,19 +1102,16 @@ impl PreparedSourceEntry {
             .as_ref()
             .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
         let proof = certification
-            .original_compile_input
-            .as_ref()
+            .ordinary_original()
             .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
-        if !matches!(certification.purpose(), super::turn::TurnPurpose::Ordinary)
-            || !proof.matches_bundle(
-                &compiled.prepared(),
-                &certification.groups,
-                &certification.target_owners,
-                &certification.package_interfaces,
-                &compiled.table(),
-                &compiled.asks,
-            )
-        {
+        if !proof.matches_bundle(
+            &compiled.prepared(),
+            &certification.groups,
+            &certification.target_owners,
+            &certification.package_interfaces,
+            &compiled.table(),
+            &compiled.asks,
+        ) {
             return Err(super::resident::ResidentError::UnsealedStartupEntry);
         }
         // Resolution uses the existing source-group owner with an empty lexical
