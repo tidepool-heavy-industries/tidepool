@@ -911,15 +911,16 @@ impl CompilerSourceSupport {
                     "demanded compiler role differs from its admitted row",
                 ));
             }
-            // One set key and three map keys, plus conservative node/link
+            // One set key and four map keys, plus conservative node/link
             // storage. All String and role copies are charged before cloning.
             charge(operation.reserve::<(ExactModuleIdentity, [usize; 4])>(1))?;
             charge(
                 operation.reserve::<(ExactModuleIdentity, ResolvedCompilerRole, [usize; 8])>(1),
             )?;
             charge(operation.reserve::<(ExactModuleIdentity, CompilerInputRole, [usize; 8])>(1))?;
+            charge(operation.reserve::<(ExactModuleIdentity, RecordedCompilerRole, [usize; 8])>(1))?;
             charge(operation.reserve::<(ExactModuleIdentity, Arc<ArtifactEntry>, [usize; 4])>(1))?;
-            for _ in 0..4 {
+            for _ in 0..5 {
                 charge(operation.charge(owner.unit.len()))?;
                 charge(operation.charge(owner.module.len()))?;
             }
@@ -929,8 +930,11 @@ impl CompilerSourceSupport {
                 ..
             } = role
             {
-                charge(operation.charge(source_revision.len()))?;
-                charge(operation.charge(original_input_identity.len()))?;
+                // Admission retains the live role and its closed recorded fact.
+                for _ in 0..2 {
+                    charge(operation.charge(source_revision.len()))?;
+                    charge(operation.charge(original_input_identity.len()))?;
+                }
             }
             for (original, (binding, entry)) in std::iter::once((false, &row.interface))
                 .chain(row.original.iter().map(|entry| (true, entry)))
