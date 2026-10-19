@@ -633,6 +633,7 @@ struct WorldColdRows {
     images: BTreeMap<(String, String, String), ciborium::value::Value>,
     rows: BTreeMap<(String, String, String), ciborium::value::Value>,
     arenas: crate::declaration_context::original_inputs::OriginalInputArenaTable,
+    diagnostics: Option<crate::artifacts::InputArtifactDiagnostics>,
 }
 impl WorldColdRows {
     fn row(
@@ -659,6 +660,16 @@ impl WorldColdRows {
             return Err(source_failure(
                 "world row has a different compiler producer",
             ));
+        }
+        if let Some(capture) = &mut self.diagnostics {
+            if let Err(error) = capture.original_parts(
+                &self.producer,
+                &entry.descriptor.owner.unit,
+                &entry.descriptor.owner.module,
+                &parts,
+            ) {
+                tracing::warn!(%error,"compiler world input diagnostics are incomplete");
+            }
         }
         let find = |kind| {
             parts
@@ -849,6 +860,9 @@ impl CompilerWorldOpenInputs {
             images: BTreeMap::new(),
             rows: BTreeMap::new(),
             arenas: Default::default(),
+            diagnostics: crate::artifacts::CompilerDiagnosticCapture::input_artifacts(
+                self.directory.path(),
+            ),
         };
         let block_bytes =
             self.primary_blocks
@@ -930,6 +944,11 @@ impl CompilerWorldOpenInputs {
             let (row, _) = rows.row(&entry, parts)?;
             references.push(world_semantic_row(&row, &producer)?);
             visible.push(row);
+        }
+        if let Some(capture) = &rows.diagnostics {
+            if let Err(error) = capture.finish_original_parts() {
+                tracing::warn!(%error,"compiler world input diagnostic manifest is incomplete");
+            }
         }
         let blocks = self
             .primary_blocks
@@ -1105,7 +1124,18 @@ fn ensure_world(
                 crate::host_work::HostWorkCounter::WorldEnsureComplete,
                 1,
             );
+            let diagnostics = crate::artifacts::CompilerDiagnosticCapture::start(
+                restoration.inputs.directory.path(),
+                &cmd,
+            );
             let run = world_execute(&cmd, endpoint, restoration.input_files.clone())?;
+            diagnostics.completed(
+                restoration.inputs.directory.path(),
+                &cmd,
+                run.success(),
+                &run.output.stderr,
+            );
+
             match O::decode(&run.output.stdout).map_err(|_| world_response_error(false))? {
                 O::Ready { world, realization } if world == root => {
                     crate::host_work::record_host_work(
