@@ -70,7 +70,11 @@ Campaign-approved owned API/provider history through a56ad6f71e is merged in
 90d9a65; its earlier API compile and producer controls remain owner receipts,
 not a Rooted service claim. The two CLI preflight callers are now committed in
 e4f7b31c3a, consuming actual issued CompilerIdentity through the shared admission
-checker. These host callers still require their owning production/cfg-test gate.
+checker. Independent source receipt cli-service-preflight-review-e4f7b31c.txt
+accepts the exact two-call migration. These host callers still require their
+owning production/cfg-test gate. The current merged daemon preflight still
+issues no source association, so Rooted correctly refuses until the actual warm
+association probe arrives.
 
 ## Required service boundary and successors
 
@@ -94,9 +98,16 @@ Source-only cbdda49142 checks actual acquired catalog records against the first
 conventional source in the same ordered captured manifest namespace. Duplicate
 roots, reordered catalog roles, ambiguous suffixes, nonconventional targets and
 partial owners refuse before query acceptance; cached capture skips this cold
-check. Independent review and owning toolchain/host gates remain pending. Exact
-planned command is retained in catalog-lookup-9487/commands.json under the host
-evidence root; no test execution is claimed.
+check. Independent source review ACCEPTED in
+oracle/catalog-source-eligibility-review-cbdda491.txt (diff SHA256
+6d3967fde231df1ab9cda66a94906394a28013c65212b96569888268475045b1).
+Owning toolchain/host gates remain pending. The six-GiB/eight-GiB-growth native
+gate is queued for the campaign's next admitted lane; no command has started.
+Exact planned command is retained in catalog-lookup-9487/commands.json under the
+host evidence root. Qualification/capture_sensitivity owns the required actual
+frozen Persona/shared-workspace ordered-graph/catalog eligibility observation.
+Conventional Jev or a fixture positive cannot establish that no unrelated
+workspace shadow makes this conservative whole-catalog profile unsupported.
 
 Accepted CELL-SUCCESSOR contract is retained at
 `/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/CELL-SUCCESSOR-CONTRACT-8d69.md`,
@@ -117,8 +128,9 @@ It is uncompiled and not accepted. Older WORLD-ROUTE-HANDOFF native-pending note
 are superseded only for the committed independent c482 controls by the receipts
 above, not for the dirty world route.
 
-Warm owns actual service client/cold builder/protocol; owned owns rooted
-package/API/producer; reload owns accepted original-A and target-B source leases
+Warm owns actual service client/cold builder/protocol and source association;
+owned owns rooted package/provider settlement; reload owns accepted original-A
+and target-B source leases
 through actual END. Their exact reviewed candidates reactivate selected_root to
 finish the actual actor/runtime cold/hot query and then the required cell wave.
 Oracle reviews each exact cumulative candidate. Parent owns fresh native resource
