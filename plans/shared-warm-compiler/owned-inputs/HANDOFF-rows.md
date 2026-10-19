@@ -20,7 +20,7 @@ Strong checked artifact equality retains exact interface/path, row owner identit
 
 ## Counters
 
-Actual row issuance traces fresh row count, arena bytes and measured promotion read/write/hash work. Checked baseline capture traces selected references and zero baseline copying/reauthentication. Existing `CheckedInputWork` now reports zero baseline files/bytes for certified borrowing, preserving raw fixture work. `selected_rows` traces actual owner/row/metadata visits; `input_transport_files` traces selected rows, slices, metadata entries, graph references and exported files. These expose remaining enumeration; this parcel does not claim Resident hit enumeration or encoding has been removed.
+Actual row issuance traces fresh row count, arena bytes and measured promotion read/write/hash work. Checked baseline capture traces selected references and zero baseline copying/transport reauthentication. Identical issuer-owned Arc buffers bypass byte comparison; separately supplied byte vectors retain explicit byte mismatch authentication and trace unshared comparison work. Existing `CheckedInputWork` now reports zero baseline files/bytes for certified borrowing, preserving raw fixture work. `selected_rows` traces actual owner/row/metadata visits; `input_transport_files` traces selected rows, slices, metadata entries, graph references and exported files. These expose remaining enumeration; this parcel does not claim Resident hit enumeration or encoding has been removed.
 
 ## Checks and deferred commands
 

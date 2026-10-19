@@ -1882,14 +1882,18 @@ impl CheckedValueInputs {
         ));
         let mut baseline = Vec::with_capacity(values.len());
         let initial_bytes = 0;
+        let mut unshared_comparison_bytes = 0u64;
         for (owner, bytes) in values {
             let original = originals
                 .remove(&owner.module_name())
                 .ok_or_else(|| failure("checked input lacks its original value certificate"))?;
-            if bytes.as_ref() != original.bytes_owned().as_ref() {
-                return Err(failure(
-                    "retained value certificate differs from selected interface bytes",
-                ));
+            if !Arc::ptr_eq(&bytes, original.bytes_owned()) {
+                unshared_comparison_bytes += bytes.len() as u64;
+                if bytes.as_ref() != original.bytes_owned().as_ref() {
+                    return Err(failure(
+                        "retained value certificate differs from selected interface bytes",
+                    ));
+                }
             }
             let input = original.interface.clone();
             baseline.push(CapturedValueInterface::Certified { input, original });
@@ -1900,7 +1904,7 @@ impl CheckedValueInputs {
             ));
         }
         tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_baseline_capture",
-            selected_references = baseline.len(), baseline_files_written = 0,
+            selected_references = baseline.len(), unshared_comparison_bytes, baseline_files_written = 0,
             baseline_bytes_written = 0, baseline_reauthentication_bytes = 0,
             "borrowed exact checked-value row owners");
         Ok(Arc::new(Self {
