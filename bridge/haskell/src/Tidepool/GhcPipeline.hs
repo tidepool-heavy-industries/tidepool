@@ -1746,8 +1746,10 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   when (any (not . null . exactRequirements . worldBindingInterfaceArtifact) selected)
     (liftIO (throwIO WorldCellUnsupported))
   current <- getSession
+  let rejectValueImport reason = emitWorldAcquisitionRejection "world value import" path reason
+        >> throwIO WorldCellCorrupt
   readback <- liftIO (readWorldBindingInputs current facts occurrences)
-  (inputs,bodies) <- either (const (liftIO (throwIO WorldCellCorrupt))) pure readback
+  (inputs,bodies) <- either (liftIO . rejectValueImport) pure readback
   (injected,reversedCaptures,reversedInterfaces) <- liftIO $ foldM (\(environment,captures,interfaces) (artifact,body,packages) -> do
     owner <- maybe (throwIO WorldCellCorrupt) pure (parseSessionModule (exactModule artifact))
     (ready,_,captured) <- injectCapturedSessionIfaceWithBindings owner body packages (exactRequirements artifact) environment
@@ -1762,7 +1764,7 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
       references = [(name,worldBindingSymbol binding,worldBindingSessionVar binding,worldBindingScope binding
           ,worldBindingGeneration binding,worldBindingRowFactCID (worldBindingRow binding)) | (name,binding) <- inputs]
       hydrate environment = hydrateCompletedValueAliases requested interfaces environment
-        >>= either (const (throwIO WorldCellCorrupt)) pure
+        >>= either rejectValueImport pure
   unless (all (\(_,binding) -> Map.lookup (worldBindingSymbol binding) generations == Just (worldBindingGeneration binding)) inputs)
     (liftIO (throwIO WorldCellCorrupt))
   (hydrated,aliases) <- liftIO (hydrate injected)

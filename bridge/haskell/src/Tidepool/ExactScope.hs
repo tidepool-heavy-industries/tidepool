@@ -2259,7 +2259,7 @@ worldBindingInterfaceArtifact binding = case worldBindingRowInterface (worldBind
   _ -> error "admitted world binding lost its checked value evidence"
 
 -- Select by submitted occurrences in the already admitted namespace. Only
--- their exact captured rows enter this operation-local decoder; no pathname
+-- their exact captured rows enter the operation-local type-input owner; no pathname
 -- reacquisition or enumeration of the world's passive rows is involved.
 readWorldBindingInputs :: HscEnv -> WorldInputFacts -> [String]
   -> IO (Either String ([(String,WorldBinding)],[(ExactIfaceArtifact,ArtifactBytes,ArtifactBytes)]))
