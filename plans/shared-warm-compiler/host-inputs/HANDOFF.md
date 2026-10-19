@@ -95,7 +95,7 @@ Reserved implementation leaf selected_root owns the actual query checkpoint in
 `tidepool-shared-warm-host-world-20261019`. Full area da584, Warm's actual service
 client/profile fix and Reload80ad source-lease consumers are integrated. Earlier
 world WIP and paused02A are preserved independently. Candidate
-`e5a32b1ac1f5dac7eb0be6b5c1b1855c4ae784fc` contains the actual PublicModule
+`bd2bb236d34a26ed008e1ad846549c0cd31aca13` contains the actual PublicModule
 StructuredInfo/Type branch before the legacy compile view, provenance, value Vec,
 support merge, source preparation and FD export. Cold raw primary and visible
 checked rows remain separate. Original source A and existing canonical target B
@@ -115,26 +115,40 @@ functional test executed/passed one case. Source packet:
 The existing resource adapter reads the fixed sibling CF digest as launch DATA;
 actual endpoint association and independently configured deployment own admission.
 
-Independent oracle is reviewing the complete query and group histories. Its
-first compile finding, a nonexistent test counter name, was repaired using the
-existing digest/encoding counters. No production semantic blocker has been
-reported so far; final review remains pending. Actual service cases call the
-production actor query method and real runtime CAS, not frontend hole resumption.
-They grow unrelated sibling-scope history; a separate transferred-world cold
-control observes at least three visible raw rows without support merging. These
-are component limits, not full frontend or frozen Persona acceptance.
+Independent oracle accepted the complete production query and resource group
+source, including exact repairs. Receipts under the host evidence root's oracle
+directory: `world-route-review-e5a32b1a.txt`,
+`world-query-resource-group-review-d32ea95f.txt`,
+`world-route-repair-review-3a948490.txt`, and
+`world-source-none-counter-review-bd2bb236.txt`. Test-only repairs use existing
+counter names and distinguish original-A's early actor refusal from target-B's
+lower runtime refusal. Cold TPCWV001 encoding is counted before unsupported
+source acquisition; the hot path returns before that work.
 
-A frozen four-target runtime/actor production and cfg-test compile is admitted
-under a fourteen-GiB total memory/thirty-two-GiB growth lane. Host-world leaf owns
-its command and terminal observation. At launch, actual global memory was
-45,193,015,296 B; conservative projection including all prospective campaign14,
-remaining reload14 and host14 was 79,745,966,080 B, below 85,899,345,920 B pressure.
-Free disk was 437,607,788,544 B. No idle qualification daemon was subtracted as
-campaign active work. The supervisor updates only the host entry in campaign
-LIVE.json. Compilation/execution is not yet qualified at this checkpoint.
+Actual service cases call the production actor query method and real runtime
+CAS, not frontend hole resumption. They grow unrelated sibling-scope history; a
+separate transferred-world cold control observes at least three visible raw rows
+without support merging. These are component limits. A real Info/Type effect,
+frontend dispatch, hole resumption and settled answer must extend the existing
+case after the separately reviewed Reload mutation-owner composition repair.
+The known80ad MissingTransaction failure must not be bypassed with a test scope.
 
-Actual two-case execution waits for compilation, source review and the coherent
-matched Format2/re-export consumer join. Pending supported counted command:
+The first frozen four-target compile at e5a failed exit3 after602.74s on the new
+cold dedup loop's missing HashSet import. Complete stderr and terminal result are
+retained in `host-inputs/host-world/early-query-e5a.{log,json}` under the campaign
+evidence root; no tests executed. The production import defect and companion
+counter/assertion controls are source-repaired at bd2. The incremental four-target
+retry is running with a leaf terminal observer, session21320, BuildID
+`7e0c9bba-4c24-4db5-8bd1-f9102d581718`. It uses fourteen-GiB TOTAL memory across
+retained daemon scope1792412537 and client scope1792413364, with eight-GiB
+prospective growth. The fresh conservative projection was70,335,270,912 B below
+85,899,345,920 B pressure; free disk435,090,063,360 B. Exact retry log and JSON are
+`host-inputs/host-world/early-query-bd2-retry.{log,json}`. Source remains frozen.
+Compilation and actual query execution remain unqualified until terminal evidence.
+
+Actual two-case execution waits for compilation and the coherent matched
+Format2/re-export consumer join. The actual frontend extension also requires
+Reload's reviewed mutation-owner composition repair. Pending supported counted command:
 `swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --output-dir EVIDENCE`.
 No service execution, speedup, final retention or ordinary-cell migration claim
 follows from the declared group or early compile. Warm owns service protocol and
@@ -151,9 +165,15 @@ on later refusal. Share current owned nodes, without predecessor replay chains,
 per-item snapshot/native-offer folds or full-world encoding hidden at commit.
 
 Two Sol-high descendants only: selected_root active implementation,
-selection_oracle active on complete actual query/group review. No grandchildren/additional descendants. Paused old 02A is
+selection_oracle settled after exact query/group repair review and reserved for
+subsequent joined candidates. No grandchildren/additional descendants. Paused old 02A is
 unchanged and not a dependency (patch SHA256
 `264bee547c2f497e44e69f29bd1bd76e66bf957c02a0650d562b439c972d5f1d`).
+Required retention controls remain actual A/B eviction and exact restore, zero
+optional budget retaining two questions through END, and physical cleanup failure
+causing worker exit without Ready. HOST owns fixtures in the existing group; Warm
+owns the actual branch/backing observations and startup budget policy. They follow
+the first query and do not replace frontend or cell migration evidence.
 No periodic polling. Every terminal producer checks recipient state and sends
 exact source/evidence/next action to a running owner, or followup_task to a dormant
 owner. Every external command retains an observer through terminal settlement.
