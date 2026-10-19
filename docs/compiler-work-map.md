@@ -1,6 +1,6 @@
 # Compiler work and authority map
 
-Source checked at `233f988d654db20cc260eb6a7d4f5d22d7295e79` (admission-tail join).
+Source checked at `8245fa800aec17fd7fd37fbe64cd4a35aa3efcde` (reviewed release checkpoint).
 This is the current production workflow, not a list of proposed optimizations.
 Stage names identify ownership boundaries; their timings are not additive.
 Use [compiler profiling](compiler-profiling.md) for measurement and
@@ -51,7 +51,7 @@ Dependency consumption and Full qualification are separate decisions. Native
 binding consults the effective compiler role from its request owner, both when
 acquiring catalogue dependencies and when admitting a certified target. A
 canonical-only role can consume an already-issued historical closure with
-matching canonical bytes while preserving its exact group/carrier edges. It
+the same canonical `ArtifactId` while preserving its exact group/carrier edges. It
 cannot mint Full availability, substitute an explicit Original selection, or
 resolve competing group candidates by payload equality. Looking only at the
 parent namespace misses incoming Original roles. Unfinished product dependency
@@ -69,7 +69,7 @@ Paths below name the owning modules; symbols are searchable anchors.
 
 | Stage | Current producer → result → consumer | Work and guards that remain |
 | --- | --- | --- |
-| **P1 Input offer** | [`artifacts.rs`](../tidepool/toolchain/src/artifacts.rs) `select_cell_program_with_catalog` / `checked_value_context` → exact offer; [`declaration_context.rs`](../tidepool/toolchain/src/declaration_context.rs) `extend_retained_value_artifacts` composes retained support → true compiler request | Retained-value loop, support merges, lexical/template composition, exact roles, native availability qualification, candidate selection and physical lowering. One main value support owner replaces the old parallel broad artifact owner; carried roles avoid repeated resolution, not receiving validation. |
+| **P1 Input offer** | [`artifacts.rs`](../tidepool/toolchain/src/artifacts.rs) `select_cell_program_with_catalog` / `checked_value_context` → exact offer; [`declaration_context.rs`](../tidepool/toolchain/src/declaration_context.rs) `extend_retained_value_artifacts` composes retained support → updated context → candidate/private-input selection → `ExactCompileContext::prepare_compilation_with_private_input` | Retained-value loop, support merges and lexical/template composition. Request construction closes support, projects metadata and receives native inputs with role coverage, Full qualification and consumed-namespace checks before physical lowering. One main value support owner replaces the old parallel broad artifact owner; carried roles avoid repeated resolution, not receiving validation. |
 | **P2 Physical request** | [`turn.rs`](../tidepool/runtime/src/session/turn.rs) preparation → bound endpoint `execute_with_input_files` → worker response and original physical observation | Current source/evidence, concrete input files/manifest, compiler epoch and response framing; owners survive outer settlement. Accepted indeterminate requests cannot replay. Semantic continuation no longer lowers another physical request per item. |
 | **P3 Output admission** | [`artifacts.rs`](../tidepool/toolchain/src/artifacts.rs) `prepare_cell_program_outputs`, `read_program_output`; [`certified_products.rs`](../tidepool/toolchain/src/certified_products.rs) `CertifiedSegmentOriginals::issue` → checked receipt, typed target, certified segment | Named output existence/access/size, source/producer/receipt/package/native checks. Runtime output reader and ordinary invocation-layout reader remain distinct frontdoors. Segment certification issues completed availability once for its consumer. |
 | **P4 Ordered continuation** | [`declaration_context.rs`](../tidepool/toolchain/src/declaration_context.rs) `ProgramAdmissionContinuation`, `admit_program_support_inner`; planned declaration certifier → updated exact support/lexical/value context | Each item adds genuinely new facts and preserves its prefix, original segment baseline, source adjacency, produced-type exclusions and private native choices. Fresh value-interface append avoids full admission/dependency reconstruction, but still carries persistent rows/parent owners. Planned declarations borrow issued original inputs; redundant baseline reopen/merge and unused generic fingerprint parse are gone. Dummy `__result` compilation remains. |
@@ -79,6 +79,13 @@ Paths below name the owning modules; symbols are searchable anchors.
 | **P8 Activate/render** | Original provenance/site witnesses → demand-specific InterfaceOnly type projection; [`resident.rs`](../tidepool/runtime/src/session/resident.rs) `RuntimeActivationInput` binds parked frame/runtime scope → live payload; original execution → display dictionaries | Empty input demand still validates target/table/sites/bundle and producer. Type evidence, live payload and captured original instance environment are separate. Eager whole original-interface materialization is removed from no-demand sealing; actual witnessed type demand projects through its owner. |
 | **P9 Publish** | [`paired_publication.rs`](../tidepool/runtime/src/session/paired_publication.rs) `FinalExecutionIntent` + exact current views/leases → staged durable publication and installation acknowledgement | Semantic interference requires recertification; metadata-only changes may restage. Do not rerun effects to reconstruct completed intent. Compiler candidate publication in P6 is not this runtime/store commit. |
 | **P10 Persist/recover** | [`exact_context.rs`](../tidepool/toolchain/src/exact_context.rs) `Materializer::materialize_context` / `hydrate_context` plus acquired certified inputs → restored exact context | Conditional on persistence/recovery demand, not every cell. v5 full proof scopes include ancestors required by saved offers even when graph projection omits sibling payloads. Validate unused proofs, expected root/toolchain, roles/availability/decisions and physical acquisition; no live source-instance completion authority is restored from bytes. |
+
+The request also owns the metadata used to certify its compiler selection:
+`CertifiedSourceSelection::from_compiler_inputs` derives it from
+`RequestCompilerInputs`. Callers cannot supply a second metadata owner. This
+transfers roles and issued availability; it does not itself select executable
+groups. `ArtifactView::retained_source_implementations` is a retained-implementation
+census for lexical traversal, not the compiler role map or an execution grant.
 
 ## Admission-tail join: four implemented changes
 
@@ -141,8 +148,9 @@ history, not the authored Persona spec. The descriptor SHA-256 is
 `48dc946cd245445b890aa95b64372c6ce41641f19a19e11a75887a8953c2515d`;
 the [terminal receipt](/srv/swarm/evidence/inanna/admission-analysis-review-20261018/overnight-20d7-baseline/BASELINE13-TERMINAL.json)
 links the counted report, phase coverage and timing evidence.
-Exact joined `233f988d` has source review; joined native qualification and
-matched timing remain pending. This baseline result does not measure the four
+The four-parcel join `233f988d` and later release checkpoint `8245fa800a` have
+source review. The latter adds the correctness repairs described above; its
+joined native qualification and matched timing remain pending. This baseline result does not measure the four
 changes' savings.
 Compilation, test execution, source acceptance and a measured workload are
 separate claims. This map introduces no new release gate or performance claim.
