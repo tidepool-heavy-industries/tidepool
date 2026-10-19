@@ -8166,7 +8166,7 @@ mod module_product_tests {
         )
         .unwrap();
         changed.extend_from_slice(b"\n-- higher-priority source witness\n");
-        std::fs::write(shadow.path().join("Tidepool/FilePath.hs"), changed).unwrap();
+        std::fs::write(shadow.path().join("Tidepool/FilePath.hs"), &changed).unwrap();
         let mut shadow_roots = vec![shadow.path().to_owned()];
         shadow_roots.extend(roots);
         let shadowed = crate::artifacts::test_support::compile_targets(
