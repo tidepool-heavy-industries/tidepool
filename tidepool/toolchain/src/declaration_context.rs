@@ -5742,6 +5742,8 @@ impl<'a> ExactRequestIdentity<'a> {
 pub(crate) struct WorldSourceCompilationBinding {
     reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
     segment: Arc<crate::checked_cell::CheckedTypedSegmentPlan>,
+    plan_receipt_sha256: [u8; 32],
+    product_context_sha256: [u8; 32],
 }
 
 impl WorldSourceCompilationBinding {
@@ -5749,13 +5751,39 @@ impl WorldSourceCompilationBinding {
         output: &crate::compiler_world::WorldCellOutputAdmission,
         segment_index: usize,
     ) -> Result<Self, CompileError> {
+        use sha2::Digest;
         let segment = output
             .segments()
             .get(segment_index)
             .ok_or_else(|| failure("world source binding has no actual prepared segment"))?;
+        let segment_sha256 = crate::execution_source::parse_digest(segment.digest())?;
+        if hex(&segment_sha256) != segment.digest() {
+            return Err(failure("world source segment digest is not canonical"));
+        }
+        let plan = output.reservation().plan();
+        output
+            .validation
+            .inventory
+            .charge(
+                plan.receipt()
+                    .len()
+                    .checked_add(64)
+                    .ok_or_else(|| failure("world source binding accounting overflow"))?,
+            )
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
+        let plan_receipt_sha256: [u8; 32] = sha2::Sha256::digest(plan.receipt()).into();
+        let mut context = sha2::Sha256::new();
+        context.update(b"Tidepool world source compilation context v1\0");
+        context.update(plan.world().logical_id());
+        context.update(plan_receipt_sha256);
+        context.update(output.reservation().admission_digest());
+        context.update(segment_sha256);
+        context.update(plan.producer_sha256());
         Ok(Self {
             reservation: Arc::clone(output.reservation()),
             segment: Arc::clone(segment),
+            plan_receipt_sha256,
+            product_context_sha256: context.finalize().into(),
         })
     }
 }
@@ -6038,8 +6066,25 @@ impl<'a> ProductInputFacts<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ProductCompilationBinding<'a> {
+    Exact(&'a ExactCompilationRequest),
+    World(&'a WorldSourceCompilationBinding),
+}
+
+/// A legacy exact request identity cannot describe a world preparation.
+pub(crate) struct ExactProductRequestIdentity<'a> {
+    request_sha256: &'a str,
+}
+
+impl<'a> ExactProductRequestIdentity<'a> {
+    pub(crate) fn request_sha256(&self) -> &'a str {
+        self.request_sha256
+    }
+}
+
 pub(crate) struct ExactProductAdmission<'a> {
-    request: &'a ExactCompilationRequest,
+    compilation_binding: ProductCompilationBinding<'a>,
     source: &'a ExactSourceAdmission,
     facts: ProductInputFacts<'a>,
 }
@@ -6297,8 +6342,35 @@ impl<'a> ExactProductAdmission<'a> {
         self.facts.source_lexical
     }
 
-    pub(crate) fn physical_request(&self) -> &'a ExactCompilationRequest {
-        self.request
+    /// Context for product versions and source graphs, never request authority.
+    pub(crate) fn product_context_digest(&self) -> [u8; 32] {
+        match self.compilation_binding {
+            ProductCompilationBinding::Exact(request) => request.semantic_sha256,
+            ProductCompilationBinding::World(binding) => binding.product_context_sha256,
+        }
+    }
+
+    pub(crate) fn exact_request_identity(
+        &self,
+    ) -> Result<ExactProductRequestIdentity<'a>, CompileError> {
+        match self.compilation_binding {
+            ProductCompilationBinding::Exact(request) => Ok(ExactProductRequestIdentity {
+                request_sha256: &request.request_sha256,
+            }),
+            ProductCompilationBinding::World(_) => {
+                Err(failure("world source has no exact request identity"))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn physical_request(&self) -> Result<&'a ExactCompilationRequest, CompileError> {
+        match self.compilation_binding {
+            ProductCompilationBinding::Exact(request) => Ok(request),
+            ProductCompilationBinding::World(_) => {
+                Err(failure("world source has no exact physical request"))
+            }
+        }
     }
     pub(crate) fn source(&self) -> &'a ExactSourceAdmission {
         self.source
@@ -6560,7 +6632,7 @@ impl ExactCompilationRequest {
         source: &'a ExactSourceAdmission,
     ) -> ExactProductAdmission<'a> {
         ExactProductAdmission {
-            request: self,
+            compilation_binding: ProductCompilationBinding::Exact(self),
             source,
             facts: ProductInputFacts::from_exact(self, &self.inputs, &self.program, &self.groups),
         }
@@ -7251,7 +7323,7 @@ impl<'a> ExactReceiptAdmission<'a> {
 
     fn product_admission(&self, source: &'a ExactSourceAdmission) -> ExactProductAdmission<'a> {
         ExactProductAdmission {
-            request: self.physical,
+            compilation_binding: ProductCompilationBinding::Exact(self.physical),
             source,
             facts: ProductInputFacts::from_exact(
                 self.physical,
@@ -7685,7 +7757,6 @@ pub(crate) fn decode_world_source_receipt(
     receipt_relative: &Path,
     operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<DecodedWorldSourceReceipt, CompileError> {
-    use sha2::Digest;
     if !std::ptr::eq(operation, output.validation.inventory.as_ref()) {
         return Err(failure("world source receipt has another inventory operation"));
     }
@@ -7718,10 +7789,9 @@ pub(crate) fn decode_world_source_receipt(
         .map_err(|error| compiler_evidence_failure(error.into()))?;
     let header = row(&value, 10)?;
     let plan = binding.reservation.plan();
-    let plan_receipt_sha: [u8; 32] = sha2::Sha256::digest(plan.receipt()).into();
     if string(&header[0])? != "TPCWSOURCE1"
         || world_source_digest(&header[1])? != *plan.world().logical_id()
-        || world_source_digest(&header[2])? != plan_receipt_sha
+        || world_source_digest(&header[2])? != binding.plan_receipt_sha256
         || world_source_digest(&header[3])? != *binding.reservation.admission_digest()
         || string(&header[4])? != binding.segment.digest()
     {
@@ -23310,9 +23380,25 @@ mod tests {
         evidence.selection_complete = false;
         let bytes = serde_json::to_vec(&evidence).unwrap();
         let operation = InventoryOperation::new(Default::default());
-        first
+        let matched = first
             .match_product(&first_request, &input, &source, &bytes, &operation)
             .unwrap();
+        assert_eq!(
+            matched.exact().product_context_digest(),
+            first_request.semantic_sha256,
+        );
+        assert_eq!(
+            matched
+                .exact()
+                .exact_request_identity()
+                .unwrap()
+                .request_sha256(),
+            first_request.request_sha256,
+        );
+        assert!(std::ptr::eq(
+            matched.exact().physical_request().unwrap(),
+            &first_request,
+        ));
         assert_eq!(operation.work_usage().unwrap().0, bytes.len() * 64);
         let mut second_evidence: crate::cache::DependencyEvidence =
             serde_json::from_slice(second.evidence_bytes()).unwrap();
@@ -23460,7 +23546,8 @@ mod tests {
             .unwrap();
         assert!(admission
             .exact
-            .request
+            .physical_request()
+            .unwrap()
             .context()
             .interface_owners()
             .is_empty());
