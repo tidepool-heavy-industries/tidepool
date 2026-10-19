@@ -553,6 +553,7 @@ pub struct CompilerPreparationClient {
 }
 
 impl CompilerPreparationClient {
+    #[cfg(test)]
     pub(crate) fn with_live_source_settlement<R>(&self, settle: impl FnOnce() -> R) -> Option<R> {
         self.retained.with_live_source_settlement(settle)
     }

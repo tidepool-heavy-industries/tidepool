@@ -1900,12 +1900,14 @@ pub(crate) struct ActorGenerationPublisher<H, O> {
 #[derive(Clone)]
 pub(crate) enum ActorPublicationOwner {
     Actor(crate::LifecycleHandle),
+    #[cfg(test)]
     Preparation(crate::CompilerPreparationClient),
 }
 impl ActorPublicationOwner {
     fn matches_actor(&self, actor: ActorRef) -> bool {
         match self {
             Self::Actor(lifecycle) => lifecycle.identity() == actor,
+            #[cfg(test)]
             Self::Preparation(_) => true,
         }
     }
@@ -1914,6 +1916,7 @@ impl ActorPublicationOwner {
             Self::Actor(lifecycle) => lifecycle
                 .retained_terminal()
                 .with_live_source_settlement(settle),
+            #[cfg(test)]
             Self::Preparation(owner) => owner.with_live_source_settlement(settle),
         }
     }
