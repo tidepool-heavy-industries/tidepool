@@ -15864,10 +15864,25 @@ mod tests {
     #[test]
     fn compiler_support_extension_keeps_native_issuer_roots_and_historical_custody() {
         use crate::declaration_context::ExactDeclarationContext;
+        let producer = b"compiler support extension request";
+        let producer_sha256 = CanonicalProducerIdentity::from_producer_bytes(producer).sha256();
+        let canonical = |name: &str| {
+            Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    producer_sha256,
+                    "fixture",
+                    name,
+                    BTreeMap::new(),
+                ),
+            ))
+        };
         let inventory = ArtifactInventory::default();
-        let child = Arc::new(entry("Child", &[]));
-        let native = Arc::new(issued_native_groups(
+        let child = canonical("Child");
+        let native = Arc::new(issued_native_groups_in_unit(
+            "fixture",
+            producer_sha256,
             "Root",
+            vec![0x42],
             vec![(7, Vec::new())],
             &[&child],
             &BTreeMap::new(),
@@ -15875,13 +15890,13 @@ mod tests {
         let old = inventory
             .admit_shared(
                 &inventory.empty_view(),
-                vec![native.clone(), child.clone(), Arc::new(entry("Left", &[]))],
+                vec![native.clone(), child.clone(), canonical("Left")],
             )
             .unwrap();
         let new = inventory
             .admit_shared(
                 &inventory.empty_view(),
-                vec![native.clone(), child, Arc::new(entry("Right", &[]))],
+                vec![native.clone(), child.clone(), canonical("Right")],
             )
             .unwrap();
         let old_projection = CompilerInputProjection::from_issued_entries(&old.entries()).unwrap();
@@ -15891,7 +15906,7 @@ mod tests {
             .source_support(&new, &BTreeSet::from([owner.clone()]))
             .unwrap();
         let context = ExactDeclarationContext::from_authenticated_execution(
-            [2; 32],
+            producer_sha256,
             &old,
             old_projection,
             vec![],
@@ -15899,7 +15914,23 @@ mod tests {
             &[],
         )
         .unwrap();
-        let grown = context.extend_issued_compiler_support(&support).unwrap();
+        let grown = Arc::new(context.extend_issued_compiler_support(&support).unwrap());
+        let request_directory = tempfile::tempdir().unwrap();
+        let request = grown
+            .prepare_compilation(request_directory.path(), producer)
+            .unwrap();
+        let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let certified = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            request.compiler_inputs(),
+            &request.compiler_inputs().metadata,
+            &validation.inventory,
+        )
+        .unwrap();
+        assert!(certified
+            .continuation_input(&native.descriptor.owner)
+            .unwrap()
+            .is_some());
+        assert!(certified.new_product_native_requirements().next().is_none());
         let view = grown.artifact_view();
         let expected = old.capture_graph_selection().native_groups;
         let recovery = ArtifactInventory::default();
@@ -15932,16 +15963,6 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(observed, expected);
-            let mut certified =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    grown.compiler_input_projection(),
-                    &view.metadata_snapshot(),
-                    &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
-                )
-                .unwrap();
-            certified
-                .with_new_product_dependencies(&view.metadata_snapshot(), &requirements)
-                .unwrap();
             let mut bound = inventory.bind_segment(view, vec![], &certified).unwrap();
             let selected = inventory
                 .admit_bound_target(
