@@ -8544,6 +8544,79 @@ mod tests {
     }
 
     #[test]
+    fn acquired_owner_index_deduplicates_parents_and_replaces_acquisition() {
+        let inventory = ArtifactInventory::default();
+        let acquire = || {
+            inventory
+                .admit_shared(
+                    &inventory.empty_view(),
+                    vec![Arc::new(entry("AcquiredAgain", &[]))],
+                )
+                .unwrap()
+        };
+        let first = acquire();
+        let second = acquire();
+        let id = *first.lease.payloads.keys().next().unwrap();
+        let owner = first.lease.payloads[&id].descriptor.owner.clone();
+        let before = Arc::clone(&first.lease.payloads[&id]);
+        let replacement = Arc::clone(&second.lease.payloads[&id]);
+        assert_eq!(before, replacement);
+        assert!(
+            !Arc::ptr_eq(&before, &replacement),
+            "independent ingress retains its acquired facade owner"
+        );
+        // Exercise the component constructor with two authenticated overlapping
+        // parents and an exact acquisition replacement. Graph authority is unchanged.
+        ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.set(0));
+        let replaced = ArtifactView::new(ViewDraft {
+            roots: first.roots().to_vec(),
+            selection: Arc::clone(&first.lease.selection),
+            inventory: inventory.clone(),
+            parents: vec![Arc::clone(&first.lease), Arc::clone(&second.lease)],
+            issuing_payloads: BTreeMap::from([(id, Arc::clone(&replacement))]),
+            materialization_parents: vec![],
+            materialization: Mutex::new(BTreeMap::new()),
+        });
+        assert!(Arc::ptr_eq(&replaced.lease.payloads[&id], &replacement));
+        assert_eq!(replaced.lease.acquired_owner_counts.get(&owner), Some(&1));
+        assert_eq!(ACQUIRED_OWNER_INDEX_UPDATES.with(|count| count.get()), 0);
+        assert_eq!(
+            replaced
+                .lease
+                .acquired_owner_counts
+                .iter()
+                .map(|(owner, count)| (owner.clone(), *count))
+                .collect::<BTreeMap<_, _>>(),
+            acquired_owner_oracle(&replaced)
+        );
+        let source = CompilerSourceSupport::empty()
+            .retain_custody(&replaced)
+            .unwrap();
+        let value = acquired_owner_value("AcquiredAgain");
+        let entry = Arc::new(ArtifactEntry::interface(
+            value.interface().clone(),
+            JoinedInterfaceRole::ValueInterface,
+            vec![],
+        ));
+        assert!(matches!(
+            source
+                .artifacts()
+                .inventory()
+                .prepare_value_interface_append(&source, vec![entry])
+                .unwrap(),
+            ValueInterfaceAdmission::General {
+                reason: ValueInterfaceGeneralAdmission::RetainedOwner(_),
+                ..
+            }
+        ));
+        let empty = replaced.select_roots(vec![]).unwrap();
+        assert!(!empty.lease.has_acquired_owner(&owner));
+        drop(replaced);
+        assert_eq!(first.lease.acquired_owner_counts.get(&owner), Some(&1));
+        assert_eq!(second.lease.acquired_owner_counts.get(&owner), Some(&1));
+    }
+
+    #[test]
     fn retained_custody_keeps_duplicate_native_bindings_without_namespace_roles() {
         use super::*;
         use crate::artifact_inventory::{
