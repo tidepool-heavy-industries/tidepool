@@ -1232,8 +1232,15 @@ fn complete(
                             ActorPublicOwnerPlane::DurableCommitted(owner);
                         Ok(PublicManifestCommit::Durable)
                     }
-                    DurablePublicOwnerPublication::CommittedContinuing { .. } => {
-                        Err("incarnation transfer received a continuing publication result".into())
+                    DurablePublicOwnerPublication::CommittedContinuing { readiness, .. } => {
+                        let cause = "incarnation transfer received a continuing publication result"
+                            .to_owned();
+                        resident.current.settlement =
+                            ResidentSettlement::CommittedSourceUnavailable {
+                                readiness,
+                                cause: cause.clone(),
+                            };
+                        Err(cause)
                     }
                     DurablePublicOwnerPublication::Refused { error } => {
                         Ok(PublicManifestCommit::Refused { error })
