@@ -2055,6 +2055,200 @@ impl DemandNativeInputs {
     pub(crate) fn work(&self) -> DemandNativeInputsWork {
         self.work
     }
+
+    /// Authenticate only the input groups named by this completion, through
+    /// their existing scoped offers. Receipt names restrict issued permission;
+    /// they do not issue an original or choose a historical carrier by name.
+    pub(crate) fn certify_receipt_groups(
+        &self,
+        receipt: &crate::certified_products::CertifiedReceipt,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
+        use crate::certified_products::{ProductOrigin, ReceiptImportOwner};
+        let operation = validation.inventory.clone();
+        let budget = NativeDemandBudget(Some(&operation));
+        let mut produced = BTreeSet::new();
+        for module in &receipt.modules {
+            budget.checkpoint()?;
+            if module.origin != ProductOrigin::Cached
+                && !produced.contains(&(&module.unit, &module.module))
+            {
+                budget.reserve::<((&String, &String), [usize; 4])>(1)?;
+                produced.insert((&module.unit, &module.module));
+            }
+        }
+        let mut roots = BTreeMap::new();
+        let mut proofs = BTreeMap::new();
+        for global in receipt
+            .modules
+            .iter()
+            .flat_map(|module| &module.groups)
+            .flat_map(|group| &group.globals)
+            .chain(receipt.targets.values().flatten())
+        {
+            budget.checkpoint()?;
+            let ReceiptImportOwner::Source {
+                unit,
+                module,
+                module_version,
+                original_ordinal,
+                ..
+            } = &global.owner
+            else {
+                continue;
+            };
+            // Newly produced modules receive their group authority from the
+            // same complete product certifier, after source admission.
+            if module_version.is_none() && produced.contains(&(unit, module)) {
+                continue;
+            }
+            budget.strings(unit.len().saturating_add(module.len()))?;
+            let owner = identity(unit, module);
+            let role = self
+                .demand
+                .projection()
+                .snapshot_roles()
+                .get(&owner)
+                .ok_or_else(|| failure("receipt native group lacks its demanded compiler role"))?;
+            let id = role
+                .original()
+                .or_else(|| self.native_selection.advertised.0.get(&owner).copied())
+                .ok_or_else(|| failure("receipt native group lacks its issued body choice"))?;
+            let row = self
+                .native_selection
+                .availability
+                .0
+                .get(&id)
+                .ok_or_else(|| failure("receipt native group lacks its issued row"))?;
+            let native_owner = row.original_owner();
+            if native_owner.unit != *unit
+                || native_owner.module != *module
+                || module_version.as_ref() != Some(&native_owner.module_version)
+                || !row.permits(*original_ordinal)
+            {
+                return Err(failure(
+                    "receipt native group differs from its issued owner or permission",
+                ));
+            }
+            let key = NativeGroupKey {
+                artifact: id,
+                original_ordinal: *original_ordinal,
+            };
+            let mut candidates = BTreeSet::new();
+            for contribution in &row.contributions {
+                budget.checkpoint()?;
+                for binding in contribution.groups(key) {
+                    budget.checkpoint()?;
+                    if !candidates.contains(&binding) {
+                        budget
+                            .reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(
+                                1,
+                            )?;
+                        candidates.insert(binding);
+                    }
+                }
+            }
+            // Share the existing input-decision policy with the target issuer.
+            // The exact cold choice is consulted even when availability is empty.
+            let candidates = crate::certified_products::select_input_native_group_candidates(
+                &self.cold.source_support,
+                key,
+                role.interface(),
+                native_owner,
+                &owner,
+                candidates,
+            )
+            .map_err(compiler_evidence_failure)?;
+            let mut candidates = candidates.into_iter();
+            let binding = candidates
+                .next()
+                .ok_or_else(|| failure("receipt native group lacks its scoped contribution"))?;
+            if candidates.next().is_some() {
+                return Err(failure("receipt native group has ambiguous scoped issuers"));
+            }
+            if let Some(previous) = roots.get(&key) {
+                if *previous != binding {
+                    return Err(failure("receipt native group changed its scoped issuer"));
+                }
+            } else {
+                let proof = row
+                    .contributions
+                    .iter()
+                    .find(|proof| proof.contains_group(binding))
+                    .ok_or_else(|| failure("receipt native decision lacks its contribution"))?;
+                budget.reserve::<(
+                    NativeGroupKey,
+                    crate::artifact_inventory::NativeGroupBinding,
+                    [usize; 4],
+                )>(1)?;
+                budget.reserve::<(
+                    NativeGroupKey,
+                    Arc<crate::artifact_inventory::NativeOfferContribution>,
+                    [usize; 4],
+                )>(1)?;
+                roots.insert(key, binding);
+                proofs.insert(key, Arc::clone(proof));
+            }
+        }
+        let mut selected = BTreeSet::new();
+        let mut available = BTreeMap::new();
+        for (key, binding) in roots {
+            budget.checkpoint()?;
+            budget.reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(1)?;
+            let root = BTreeSet::from([binding]);
+            let (closure, _) = proofs[&key].for_groups_with_operation(&root, &operation)?;
+            for id in closure.originals() {
+                budget.checkpoint()?;
+                let row = self
+                    .native_selection
+                    .availability
+                    .0
+                    .get(id)
+                    .ok_or_else(|| {
+                        failure("receipt group closure lacks its issued dependency row")
+                    })?;
+                let ArtifactPayload::Original(product) = &row.original.payload else {
+                    return Err(failure("receipt group closure is not an original"));
+                };
+                if !available.contains_key(id) {
+                    budget.reserve::<(ArtifactId, &CertifiedRecoveryProduct, [usize; 4])>(1)?;
+                    available.insert(*id, product);
+                }
+                for group in closure.original_groups(*id) {
+                    budget.checkpoint()?;
+                    let required = NativeGroupKey {
+                        artifact: *id,
+                        original_ordinal: group.original_ordinal,
+                    };
+                    // A parent's immutable carrier cannot widen the receiving
+                    // request's separately normalized dependency permission.
+                    if !row.permits(group.original_ordinal)
+                        || !row
+                            .contributions
+                            .iter()
+                            .any(|proof| proof.contains_group(group))
+                    {
+                        return Err(failure(
+                            "receipt group closure exceeds its issued dependency permission",
+                        ));
+                    }
+                    if !selected.contains(&required) {
+                        budget.reserve::<(NativeGroupKey, [usize; 4])>(1)?;
+                        selected.insert(required);
+                    }
+                }
+            }
+        }
+        // The empty slice is only an absent reuse memo. This existing issuer
+        // returns every selected authenticated group as the final authority.
+        certify_selected_owned_products_in_context_with_validation(
+            &available,
+            &[],
+            &selected,
+            validation,
+        )
+        .map_err(compiler_evidence_failure)
+    }
 }
 
 impl RequestCompilerInputs {
@@ -2067,7 +2261,7 @@ impl RequestCompilerInputs {
         native_roots: &BTreeSet<ExactModuleIdentity>,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<DemandNativeInputs, DemandNativeInputsError> {
-        crate::host_work::checkpoint()?;
+        crate::host_work::checkpoint().map_err(CompileError::from)?;
         if !Arc::ptr_eq(&self.source_support, demand.source_support())
             || !Arc::ptr_eq(&self.metadata.retained, &demand.metadata().retained)
         {
@@ -18136,11 +18330,7 @@ mod tests {
             .admit_shared_with_demand(&inventory.empty_view(), entries.clone(), demand)
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let support = crate::artifact_inventory::CompilerSourceSupport::from_selected_issuance(
-            projection.clone(),
-            artifacts,
-        )
-        .unwrap();
+        let support = issue_fixture_compiler_support(projection.clone(), artifacts).unwrap();
         let support = if partial {
             let offers = support
                 .native_offers()
@@ -18152,11 +18342,53 @@ mod tests {
                         .unwrap()
                 })
                 .collect::<Vec<_>>();
-            recover_fixture_compiler_support(projection, support.artifacts().clone(), offers)
-                .unwrap()
+            assert!(offers.iter().all(|offer| !offer.is_full()));
+            let support = recover_fixture_compiler_support(
+                projection.clone(),
+                support.artifacts().clone(),
+                offers,
+            )
+            .unwrap();
+            assert!(
+                support
+                    .native_availability()
+                    .validate_role_coverage(&projection)
+                    .is_err(),
+                "recorded roles plus offer custody alone cannot issue normalized permissions"
+            );
+            let rows = RequestNativeAvailability::issue_checked(
+                &projection,
+                support.artifacts(),
+                support.native_offers(),
+            )
+            .unwrap();
+            support.retain_normalized_availability(&rows).unwrap()
         } else {
             support
         };
+        support
+            .native_availability()
+            .validate_role_coverage(&projection)
+            .unwrap();
+        for row in support.native_availability().rows() {
+            assert_eq!(
+                row.mode == NativeTransportMode::Full,
+                matches!(
+                    demand,
+                    crate::artifact_inventory::NativeArtifactDemand::AllGroups
+                ) && !partial,
+                "cold fixture must retain its actual Full/partial/empty permission mode"
+            );
+            if matches!(
+                demand,
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces
+            ) {
+                assert!(
+                    row.issued_ordinals().is_empty(),
+                    "type-only graph issues an explicit empty row"
+                );
+            }
+        }
         let context = ExactDeclarationContext::from_authenticated_execution_support(
             producer,
             support,
@@ -18179,6 +18411,105 @@ mod tests {
                 .compiler_inputs(&context, None)
                 .unwrap(),
         )
+    }
+
+    #[test]
+    fn receipt_group_demand_uses_issued_closure_and_refuses_empty_permission() {
+        use crate::artifact_inventory::NativeArtifactDemand;
+        use crate::certified_products::{
+            AcceptedGlobal, CertifiedReceipt, FinalizationEnvelope, ReceiptImportOwner,
+            WorkerExecutionSource,
+        };
+        use tidepool_repr::execution_schema::RuntimeRep;
+        let root = identity("fixture", "DemandParent");
+        let roots = BTreeSet::from([root.clone()]);
+        for mode in [
+            NativeArtifactDemand::AllGroups,
+            NativeArtifactDemand::ScopeInterfaces,
+        ] {
+            let cold = demanded_native_fixture(32, mode, false);
+            let mut validation = PackageInterfaceValidation::default();
+            let demand = cold
+                .source_support
+                .demanded_compiler_projection(
+                    &cold.metadata.retained,
+                    &roots,
+                    &validation.inventory,
+                )
+                .unwrap();
+            let selected = cold
+                .demanded_native_inputs(demand, &roots, &validation.inventory)
+                .unwrap();
+            let id = cold.projection().snapshot_roles()[&root]
+                .original()
+                .unwrap();
+            let row = &cold.native_selection.availability.0[&id];
+            let ArtifactPayload::Original(product) = &row.original.payload else {
+                unreachable!()
+            };
+            let group = crate::certified_products::original_available_groups(product)
+                .unwrap()
+                .find(|group| group.original_ordinal() == 7)
+                .unwrap();
+            let binder = group.binders().iter().next().unwrap().clone();
+            // This is untrusted group-demand DATA, not a source/product receipt
+            // admission. The actual existing group issuer supplies the proof.
+            let mut receipt = CertifiedReceipt {
+                modules: Vec::new(),
+                targets: BTreeMap::from([(
+                    "target".into(),
+                    vec![AcceptedGlobal {
+                        identity: binder.clone(),
+                        rep: RuntimeRep::LiftedRef,
+                        entry_signature: None,
+                        required_evaluated: false,
+                        owner: ReceiptImportOwner::Source {
+                            unit: product.owner().unit.clone(),
+                            module: product.owner().module.clone(),
+                            module_version: Some(product.owner().module_version.clone()),
+                            original_ordinal: 7,
+                            binder,
+                        },
+                    }],
+                )]),
+                packages: BTreeMap::new(),
+                finalization: FinalizationEnvelope {
+                    profile: "group-demand-data".into(),
+                    home_units: BTreeSet::new(),
+                    modules: BTreeMap::new(),
+                    value_interfaces: BTreeMap::new(),
+                },
+                source_recipe: WorkerExecutionSource::Ordinary,
+            };
+            let result = selected.certify_receipt_groups(&receipt, &mut validation);
+            if matches!(mode, NativeArtifactDemand::ScopeInterfaces) {
+                assert!(
+                    result.is_err(),
+                    "type custody cannot select an executable group"
+                );
+                continue;
+            }
+            let groups = result.unwrap();
+            assert_eq!(
+                groups
+                    .iter()
+                    .map(|group| (
+                        group.owner().module.as_str(),
+                        group.group().original_ordinal()
+                    ))
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([("DemandParent", 7), ("DemandChild", 9)])
+            );
+            let ReceiptImportOwner::Source { module_version, .. } =
+                &mut receipt.targets.get_mut("target").unwrap()[0].owner
+            else {
+                unreachable!()
+            };
+            module_version.as_mut().unwrap().0[0] ^= 1;
+            assert!(selected
+                .certify_receipt_groups(&receipt, &mut validation)
+                .is_err());
+        }
     }
 
     #[test]
@@ -21420,6 +21751,8 @@ mod tests {
 
     #[test]
     fn world_source_v2_refuses_old_envelopes_and_bounds_ordered_alias_copies() {
+        use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+
         let mut header = vec![Value::Null; 11];
         header[0] = text("TPCWSOURCE2");
         assert!(world_source_header(&Value::Array(header.clone())).is_ok());
