@@ -1770,6 +1770,7 @@ pub fn plan_cell(
 /// Physical completion of one world-bound preparation. Only the existing
 /// artifacts certifier can turn these observations into checked item products.
 pub(crate) struct WorldCellOutputAdmission {
+    pub(crate) origin: tidepool_extract_cmd::CompilerTransactionOrigin,
     pub(crate) reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
     pub(crate) directory: Arc<tempfile::TempDir>,
     pub(crate) observations: Arc<[u8]>,
@@ -1787,6 +1788,8 @@ pub(crate) fn prepare_world_cell_outputs(
     reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
 ) -> Result<Result<WorldCellOutputAdmission, WorldQueryRejection>, CompileError> {
     scoped_world_action(|| {
+        let origin = tidepool_extract_cmd::CompilerTransactionOrigin::current()
+            .ok_or_else(|| source_failure("world cell preparation requires its compiler scope"))?;
         let plan = reservation.plan();
         if *plan.producer_sha256()
             != CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256()
@@ -1797,8 +1800,41 @@ pub(crate) fn prepare_world_cell_outputs(
         }
         let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
         let output = directory.path().join("cell-prepared.cbor");
+        let world_id = world_hex(plan.world().logical_id());
+        tidepool_extract_cmd::WorldCellPrepareRequest::validate_borrowed(
+            &world_id,
+            "not-resident",
+            plan.recipe(),
+            plan.receipt(),
+            reservation
+                .slots()
+                .iter()
+                .enumerate()
+                .map(|(ordinal, slot)| {
+                    use crate::checked_cell::CheckedPlannedCellSlot as S;
+                    use tidepool_extract_cmd::PlannedCellSlotRef as P;
+                    (
+                        ordinal as u64,
+                        match slot {
+                            S::Prologue { declaration } => P::Prologue(*declaration),
+                            S::Declaration { declaration } => P::Declaration(*declaration),
+                            S::Bind { value } => P::Bind(*value),
+                            S::Expression {
+                                capture,
+                                observation_name,
+                            } => P::Expression {
+                                generation: *capture,
+                                observation: observation_name,
+                            },
+                        },
+                    )
+                }),
+            directory.path(),
+            &output,
+        )
+        .map_err(|error| source_failure(error.to_string()))?;
         let mut request = tidepool_extract_cmd::WorldCellPrepareRequest {
-            world: world_hex(plan.world().logical_id()),
+            world: world_id,
             realization: "not-resident".into(),
             recipe: plan.recipe_owned(),
             plan: plan.receipt_owned(),
@@ -1839,7 +1875,7 @@ pub(crate) fn prepare_world_cell_outputs(
             &validation.inventory,
         )
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        admit_world_preparation_response(reservation, directory, &bytes, validation)
+        admit_world_preparation_response(origin, reservation, directory, &bytes, validation)
     })
 }
 
@@ -1896,9 +1932,9 @@ fn world_output_manifest(
         crate::host_work::checkpoint()?;
         let entry = answer_array(entry, 2)?;
         let path = PathBuf::from(answer_text(&entry[0])?);
-        relative_source_path(&path)?;
+        relative_source_path(&path).map_err(|_| world_response_error(false))?;
         if files.insert(path, answer_hash(&entry[1])?).is_some() {
-            return Err(source_failure("world output repeats a named product"));
+            return Err(world_response_error(false));
         }
     }
     Ok(files)
@@ -1927,6 +1963,7 @@ fn world_output_symbol(
 }
 
 fn admit_world_preparation_response(
+    origin: tidepool_extract_cmd::CompilerTransactionOrigin,
     reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
     directory: Arc<tempfile::TempDir>,
     bytes: &[u8],
@@ -2012,6 +2049,10 @@ fn admit_world_preparation_response(
         world_output_symbol(&observed[9])?;
         let manifest = world_output_manifest(&observed[12], &validation.inventory)?;
         for (path, digest) in manifest {
+            validation
+                .inventory
+                .charge(path.as_os_str().len() + 32)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
             capture_world_output(
                 &directory,
                 PathBuf::from(format!("item-{index}")).join(path),
@@ -2020,6 +2061,11 @@ fn admit_world_preparation_response(
                 &mut validation,
             )?;
         }
+        validation
+            .inventory
+            .reserve::<(PathBuf, Arc<[u8]>)>(1)
+            .and_then(|_| validation.inventory.charge(item_bytes.len()))
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         captured_files.insert(item_path, item_bytes.into());
         items.push(item);
     }
@@ -2027,6 +2073,16 @@ fn admit_world_preparation_response(
         return Err(world_response_error(false));
     };
     let world = plan.world();
+    validation
+        .inventory
+        .charge_value_copies(&fields[6], 1)
+        .and_then(|_| {
+            validation
+                .inventory
+                .reserve::<(String, Arc<CheckedValueArtifact>)>(input_refs.len())
+        })
+        .and_then(|_| validation.inventory.reserve::<&str>(input_refs.len()))
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     let mut demanded = BTreeMap::<String, Arc<CheckedValueArtifact>>::new();
     let mut occurrences = std::collections::BTreeSet::new();
     for input in input_refs {
@@ -2063,6 +2119,12 @@ fn admit_world_preparation_response(
         if row != expected.4 {
             return Err(world_response_error(true));
         }
+        // The canonical session module renderer uses a fixed prefix and at
+        // most twenty decimal generation digits.
+        validation
+            .inventory
+            .charge(64)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         match demanded.entry(actual.row.owner().module_name()) {
             std::collections::btree_map::Entry::Occupied(old)
                 if !old.get().same_world_type_row(&actual.row) =>
@@ -2077,6 +2139,10 @@ fn admit_world_preparation_response(
     }
     let common_files = world_output_manifest(&fields[7], &validation.inventory)?;
     for (path, digest) in &common_files {
+        validation
+            .inventory
+            .charge(path.as_os_str().len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         capture_world_output(
             &directory,
             path.clone(),
@@ -2085,7 +2151,16 @@ fn admit_world_preparation_response(
             &mut validation,
         )?;
     }
+    validation
+        .inventory
+        .charge_value_copies(&fields[5], 1)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    validation
+        .inventory
+        .reserve::<Arc<CheckedValueArtifact>>(demanded.len())
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     Ok(Ok(WorldCellOutputAdmission {
+        origin,
         reservation,
         directory,
         observations: Arc::from(answer_blob(&fields[5])?),
@@ -2104,13 +2179,17 @@ fn capture_world_output(
     files: &mut BTreeMap<PathBuf, Arc<[u8]>>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<(), CompileError> {
-    relative_source_path(&relative)?;
+    relative_source_path(&relative).map_err(|_| world_response_error(false))?;
     if files.contains_key(&relative) {
-        return Err(source_failure("world output repeats a physical product"));
+        return Err(world_response_error(false));
     }
     validation
         .inventory
         .reserve::<(PathBuf, Arc<[u8]>)>(1)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    validation
+        .inventory
+        .charge(root.path().as_os_str().len() + relative.as_os_str().len() + 1)
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     let path = root.path().join(&relative);
     let bytes = crate::certified_products::read_bounded_with_operation(
@@ -2121,12 +2200,10 @@ fn capture_world_output(
     .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
     validation
         .inventory
-        .charge(bytes.len())
+        .charge(bytes.len().checked_mul(2).ok_or_else(source_size_failure)?)
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     if world_digest(&bytes) != digest {
-        return Err(source_failure(
-            "world output changed after its compiler completion",
-        ));
+        return Err(world_response_error(true));
     }
     validation
         .record_captured_bytes(&path, &bytes)
