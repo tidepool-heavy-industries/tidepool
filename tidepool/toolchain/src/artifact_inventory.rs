@@ -9224,12 +9224,7 @@ mod tests {
             )
             .unwrap();
             let output =
-                crate::declaration_context::OriginalCompilerInputs::issue_candidate_from_support(
-                    &source,
-                    native.descriptor.producer_sha256,
-                    std::slice::from_ref(product),
-                )
-                .unwrap();
+                crate::declaration_context::OriginalCompilerInputs::from_issued_support(&source);
             let complete = CompilerSourceSupport::close_complete_output(&output).unwrap();
             let types = complete
                 .selected_interfaces()
@@ -14824,10 +14819,8 @@ mod tests {
                     &[],
                 )
                 .unwrap();
-                let inputs = OriginalCompilerInputs::issue_candidate_from_context(
-                    &context, producer, products,
-                )
-                .unwrap();
+                let inputs =
+                    OriginalCompilerInputs::from_issued_support(context.compiler_source_support());
                 let scratch = tempfile::tempdir().unwrap();
                 let request =
                     crate::declaration_context::ExactCompileContext::new(Arc::new(context))

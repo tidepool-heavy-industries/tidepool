@@ -16896,11 +16896,31 @@ mod tests {
         let delta =
             scaffold_native_fixture(ancestor.owner.facts.producer, "fixture", "LatePrivate", 1);
         let producer_identity = CanonicalProducerIdentity::from_producer_bytes(&producer);
-        let private = OriginalCompilerInputs::issue_candidate_from_context(
-            &ancestor,
-            producer_identity,
-            std::slice::from_ref(&delta),
-        )
+        let private = (|| -> Result<OriginalCompilerInputs, CompileError> {
+            let products: &[CertifiedRecoveryProduct] = std::slice::from_ref(&delta);
+            let entries = products
+                .iter()
+                .map(|product| {
+                    ArtifactEntry::original(producer_identity.sha256(), product.clone())
+                        .map(Arc::new)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let inventory = ArtifactInventory::default();
+            let artifacts = inventory.admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )?;
+            let projection = CompilerInputProjection::from_issued_entries(&entries)?;
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )
+                .map_err(compiler_evidence_failure)?;
+            OriginalCompilerInputs::from_selection(&selection, &artifacts)
+        })()
         .unwrap();
         let late = ancestor
             .prepare_compilation_with_scaffold(
@@ -16929,11 +16949,31 @@ mod tests {
                 .extend_checked_original_products(descendant.owner.facts.producer, &[epsilon])
                 .unwrap(),
         );
-        let private = OriginalCompilerInputs::issue_candidate_from_context(
-            &next,
-            producer_identity,
-            &[delta],
-        )
+        let private = (|| -> Result<OriginalCompilerInputs, CompileError> {
+            let products: &[CertifiedRecoveryProduct] = &[delta];
+            let entries = products
+                .iter()
+                .map(|product| {
+                    ArtifactEntry::original(producer_identity.sha256(), product.clone())
+                        .map(Arc::new)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let inventory = ArtifactInventory::default();
+            let artifacts = inventory.admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )?;
+            let projection = CompilerInputProjection::from_issued_entries(&entries)?;
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )
+                .map_err(compiler_evidence_failure)?;
+            OriginalCompilerInputs::from_selection(&selection, &artifacts)
+        })()
         .unwrap();
         let private_support =
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&private)
