@@ -229,13 +229,18 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
                 other_control.preparation_client().producer(),
             ),
         )
+        .for_preparation()
         .admit_work()
         .unwrap();
     let client = control.preparation_client();
     let observer = crate::RetainedActorExit::new();
     let owner = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(observer.clone())
         .shared_preparation(client.producer());
-    let ticket = services.with_compiler_owner(owner).admit_work().unwrap();
+    let ticket = services
+        .with_compiler_owner(owner)
+        .for_preparation()
+        .admit_work()
+        .unwrap();
     let observed_cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let physical_cancellation = observed_cancellation.clone();
     let (started, entered) = tokio::sync::oneshot::channel();
@@ -271,6 +276,7 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
         .with_compiler_owner(
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(client.producer())
         )
+        .for_preparation()
         .admit_work()
         .is_err());
     assert!(!control.shared_cleanup.observation().is_confirmed());
@@ -331,5 +337,59 @@ async fn observing_root_preparations_preserves_open_shared_admission() {
         crate::CleanupComponentOutcome::Confirmed
     );
     control.owner.stop(None);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn source_reservation_enqueue_rechecks_the_adopted_bootstrap_scope() {
+    let (control, task) = RunControlClient::start().await.unwrap();
+    let mut session = tidepool_runtime::session::ResidentSession::unbootstrapped(
+        frunk::HNil,
+        tidepool_mcp::CapturedOutput::new(),
+        1024,
+        None,
+    );
+    let scope = session.mint_isolated_scope();
+    let dependency = crate::ActorDescriptor::new(
+        "source enqueue",
+        crate::ActorPlacement {
+            session: tidepool_repr::SessionId(8890),
+            resource_scope: tidepool_codegen::suspension::RealmId::ROOT,
+            lexical_scope: scope,
+        },
+    )
+    .admit_independent_world()
+    .source_dependency()
+    .clone();
+    dependency.adopt_final_scope(&mut session, scope).unwrap();
+    let lease = dependency.source_lease().unwrap();
+    let admitted = control
+        .reserve_source_actor(&dependency, crate::Incarnation(1))
+        .await
+        .unwrap();
+    // Construct the real asynchronous producer while open, then fence before
+    // polling it: an earlier caller precheck cannot authorize the later send.
+    let late = control.reserve_source_actor(&dependency, crate::Incarnation(1));
+    let fence = lease.source_admission().fence().unwrap();
+    assert!(matches!(
+        late.await,
+        Err(generation::GenerationDirectoryError::Admission(
+            crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed { .. }
+        ))
+    ));
+    assert_eq!(fence.pending_claims(), 0);
+    drop(admitted);
+    assert!(control.seal().await.unwrap().actors.is_empty());
+    assert!(matches!(
+        control
+            .settle_root_preparations(Duration::from_secs(2))
+            .await,
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    assert!(matches!(
+        control.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    control.finish_run().await.unwrap();
     task.await.unwrap();
 }

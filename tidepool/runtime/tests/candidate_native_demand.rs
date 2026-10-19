@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use super::compiler_test_support::{selected_lexical_closure, OwnedEnvironment};
 use tidepool_testing::eval_harness::{prelude_path, EvalHarness};
-use tidepool_toolchain::artifacts::{
-    compile_invocation, compile_invocation_in_context, CompileInvocation, CompiledArtifacts,
-};
+use tidepool_toolchain::artifacts::{CompileInvocation, CompiledArtifacts};
 use tidepool_toolchain::cache::ProductAvailability;
 use tidepool_toolchain::certified_products::ProductOrigin;
 use tidepool_toolchain::declaration_join::{ExactDeclarationContext, ExactModuleIdentity};
@@ -91,7 +89,7 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     let include = [work.path().to_path_buf(), prelude_path()];
     let compile = |source, name| {
         tidepool_testing::with_settlement(|settlement| {
-            compile_invocation(
+            tidepool_runtime::compile_runtime_targets(
                 &CompileInvocation {
                     source,
                     targets: &["__prepared"],
@@ -111,22 +109,19 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     assert_eq!(sibling_expected, serde_json::json!(42));
 
     let cold = compile(CONSUMER, "CandidateDemandConsumer");
-    require_validation_only(&cold, "OptionalSupport");
+    require_validation_only(cold.artifacts(), "OptionalSupport");
     assert!(cold
+        .artifacts()
         .certified_groups
         .iter()
         .filter(|group| group.owner().module.starts_with("CandidateDemand"))
         .all(|group| group.origin() == ProductOrigin::Fresh));
     let mut handlers = frunk::HNil;
-    let cancelled = tidepool_runtime::run_compiled_target(
-        &cold,
-        "__prepared",
-        1024 * 1024,
-        &mut handlers,
-        &(),
-        |cancel| cancel.cancel(),
-    )
-    .expect_err("cancellation must reach the installed imported target");
+    let cancelled = cold
+        .run("__prepared", 1024 * 1024, &mut handlers, &(), |cancel| {
+            cancel.cancel()
+        })
+        .expect_err("cancellation must reach the installed imported target");
     assert!(matches!(
         cancelled,
         tidepool_runtime::RuntimeError::Prepared(
@@ -176,7 +171,7 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     // The warmer demands the facade and class anchors as well as the instance.
     // Their production-issued originals form a closed candidate cohort.
     let original = compile(WARMER, "CandidateDemandWarmer");
-    require_validation_only(&original, "OptionalSupport");
+    require_validation_only(original.artifacts(), "OptionalSupport");
     assert_eq!(
         evaluator
             .run_target(&original, "__prepared", frunk::HNil)
@@ -184,7 +179,7 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
         ghc_result(work.path(), &include, "CandidateDemandWarmer", WARMER)
     );
     assert!(
-        original.certified_groups.iter().any(|group| {
+        original.artifacts().certified_groups.iter().any(|group| {
             group.owner().module == "CandidateDemandInstance"
                 && group
                     .group()
@@ -207,6 +202,7 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
         "CandidateDemandFacade",
     ] {
         let groups = warm
+            .artifacts()
             .certified_groups
             .iter()
             .filter(|group| group.owner().module == name)
@@ -216,7 +212,7 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
             .iter()
             .all(|group| group.origin() == ProductOrigin::Cached));
     }
-    require_validation_only(&warm, "OptionalSupport");
+    require_validation_only(warm.artifacts(), "OptionalSupport");
     assert_eq!(
         evaluator
             .run_target(&warm, "__prepared", frunk::HNil)
@@ -230,8 +226,9 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
         unit: "main".into(),
         module: "CandidateDemandInstance".into(),
     };
-    let lexical = selected_lexical_closure(&original, vec![instance]);
+    let lexical = selected_lexical_closure(original.artifacts(), vec![instance]);
     let products = original
+        .artifacts()
         .recovery_products
         .iter()
         .filter(|product| {
@@ -244,6 +241,7 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
         .collect::<Vec<_>>();
     assert_eq!(products.len(), 2, "complete class and instance originals");
     let producer = original
+        .artifacts()
         .artifact_view
         .descriptors()
         .into_iter()
@@ -264,22 +262,37 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     for owner in lexical.keys() {
         std::fs::remove_file(work.path().join(format!("{}.hs", owner.module))).unwrap();
     }
+    let mut recovered_owner = tidepool_runtime::session::PersistentSession::new(None, 1024 * 1024);
+    let recovered_source = recovered_owner.mint_isolated_scope_with_lease().unwrap();
     let later = tidepool_testing::with_settlement(|settlement| {
-        compile_invocation_in_context(
-            &CompileInvocation {
-                source: SIBLING,
-                targets: &["__prepared"],
-                include: &include,
-                fallback_module_name: "CandidateDemandSibling",
-            },
-            Arc::new(context),
-            |_, _, _| {},
-            settlement,
+        tidepool_runtime::finish_runtime_targets(
+            recovered_source
+                .with_source_compiler_transaction(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    tidepool_runtime::CompilerTransactionCancellation::new(),
+                    None,
+                    settlement,
+                    |owner, report| {
+                        tidepool_runtime::prepare_runtime_targets_in_context(
+                            owner,
+                            &CompileInvocation {
+                                source: SIBLING,
+                                targets: &["__prepared"],
+                                include: &include,
+                                fallback_module_name: "CandidateDemandSibling",
+                            },
+                            Arc::new(context),
+                            |_, _, _| {},
+                            report,
+                        )
+                    },
+                )
+                .unwrap(),
         )
     })
     .expect("later sibling consumer uses the source-less original inventory");
     assert!(
-        !later.certified_groups.iter().any(|group| {
+        !later.artifacts().certified_groups.iter().any(|group| {
             group.owner().module == "CandidateDemandInstance"
                 && group.origin() == ProductOrigin::RetainedCore
         }),

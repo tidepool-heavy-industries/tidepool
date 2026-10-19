@@ -1,0 +1,695 @@
+//! Source admission closes independently of lexical/native custody.
+use super::NotebookGenerationId;
+use parking_lot::Mutex;
+use std::sync::Arc;
+use tidepool_codegen::scope::ScopeId;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceAdmissionPhase {
+    Open,
+    Fenced { attempt: u64 },
+    Retired { successor: NotebookGenerationId },
+    ScopeRetired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SourceAdmissionError {
+    #[error("source admission for scope {scope:?} is {phase:?}")]
+    Closed {
+        scope: ScopeId,
+        phase: SourceAdmissionPhase,
+    },
+    #[error("source compiler work requires its owning runtime transaction")]
+    MissingTransaction,
+    #[error("source compiler transactions cannot borrow a foreign or nested transaction")]
+    ForeignTransaction,
+    #[error("source lexical lease belongs to a stale issuing epoch")]
+    StaleSourceLease,
+    #[error("source work has no live canonical target lease for scope {scope:?}")]
+    MissingTargetLease { scope: ScopeId },
+    #[error("source-dependent admission has no issuing world")]
+    Unqualified,
+    #[error("initial source publication is unavailable")]
+    BootstrapUnavailable,
+    #[error(
+        "initial source publication retains {claims} active and {unconfirmed} unconfirmed actions"
+    )]
+    BootstrapBusy { claims: usize, unconfirmed: usize },
+    #[error("source retirement attempt identity is exhausted")]
+    Exhausted,
+    #[error("source retirement attempt no longer owns its fence")]
+    StaleFence,
+    #[error("source admission for scope {scope:?} retains {count} unconfirmed actions")]
+    Unconfirmed { scope: ScopeId, count: usize },
+}
+
+/// An additional issuer-owned admission check for the current compiler action.
+/// The issuer retains any earned custody through its actual native END owner.
+pub type SourceAdmissionHook = Arc<dyn Fn() -> Result<(), SourceAdmissionError> + Send + Sync>;
+
+struct AdmissionState {
+    next_attempt: u64,
+    phase: SourceAdmissionPhase,
+    claims: usize,
+    unconfirmed: usize,
+}
+struct SourceAdmissionOwner {
+    scope: ScopeId,
+    prerequisite: Option<RuntimeSourceAdmission>,
+    state: Mutex<AdmissionState>,
+    settled: tokio::sync::Notify,
+}
+
+/// Issued by the canonical lexical-scope owner. A clone cannot reopen it.
+#[derive(Clone)]
+pub struct RuntimeSourceAdmission(Arc<SourceAdmissionOwner>);
+
+impl RuntimeSourceAdmission {
+    pub(super) fn new(scope: ScopeId, prerequisite: Option<Self>) -> Self {
+        Self(Arc::new(SourceAdmissionOwner {
+            scope,
+            prerequisite,
+            state: Mutex::new(AdmissionState {
+                next_attempt: 0,
+                phase: SourceAdmissionPhase::Open,
+                claims: 0,
+                unconfirmed: 0,
+            }),
+            settled: tokio::sync::Notify::new(),
+        }))
+    }
+    pub fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    pub fn depends_on(&self, other: &Self) -> bool {
+        self.same_owner(other)
+            || self
+                .0
+                .prerequisite
+                .as_ref()
+                .is_some_and(|parent| parent.depends_on(other))
+    }
+    pub fn prerequisite(&self) -> Option<&Self> {
+        self.0.prerequisite.as_ref()
+    }
+
+    /// Gate state alone is not source authority; canonical lease consumers also
+    /// hold the issuing epochs through their synchronous reservation.
+    #[cfg(test)]
+    pub(crate) fn with_open_admission<T>(
+        &self,
+        admit: impl FnOnce() -> T,
+    ) -> Result<T, SourceAdmissionError> {
+        Self::with_open_admissions([self], admit)
+    }
+
+    pub(super) fn with_open_admissions<'a, T>(
+        admissions: impl IntoIterator<Item = &'a Self>,
+        admit: impl FnOnce() -> T,
+    ) -> Result<T, SourceAdmissionError> {
+        fn collect(admission: &RuntimeSourceAdmission, gates: &mut Vec<RuntimeSourceAdmission>) {
+            if gates.iter().any(|gate| gate.same_owner(admission)) {
+                return;
+            }
+            if let Some(parent) = admission.prerequisite() {
+                collect(parent, gates);
+            }
+            gates.push(admission.clone());
+        }
+        let mut gates = Vec::new();
+        for admission in admissions {
+            collect(admission, &mut gates);
+        }
+        // A total order also covers two unrelated source/target chains. A
+        // recursive ancestor-only lock order would invert on overlapping DAGs.
+        gates.sort_unstable_by_key(|gate| Arc::as_ptr(&gate.0) as usize);
+        let mut guards = Vec::new();
+        for gate in &gates {
+            let state = gate.0.state.lock();
+            if state.unconfirmed != 0 {
+                return Err(SourceAdmissionError::Unconfirmed {
+                    scope: gate.0.scope,
+                    count: state.unconfirmed,
+                });
+            }
+            if state.phase != SourceAdmissionPhase::Open {
+                return Err(SourceAdmissionError::Closed {
+                    scope: gate.0.scope,
+                    phase: state.phase,
+                });
+            }
+            guards.push(state);
+        }
+        Ok(admit())
+    }
+
+    /// Records one actual source action before allocation. A retained claim
+    /// permits its admitted action to finish; every new action earns a claim.
+    #[cfg(test)]
+    pub(crate) fn admit(&self) -> Result<RuntimeSourceClaim, SourceAdmissionError> {
+        let prerequisite = self.0.prerequisite.as_ref().map(Self::admit).transpose()?;
+        let mut claim = self.admit_local()?;
+        claim.prerequisite = prerequisite.map(Box::new);
+        Ok(claim)
+    }
+
+    fn admit_local(&self) -> Result<RuntimeSourceClaim, SourceAdmissionError> {
+        let mut state = self.0.state.lock();
+        if state.unconfirmed != 0 {
+            return Err(SourceAdmissionError::Unconfirmed {
+                scope: self.0.scope,
+                count: state.unconfirmed,
+            });
+        }
+        match state.phase {
+            SourceAdmissionPhase::Open => {
+                state.claims += 1;
+                Ok(RuntimeSourceClaim {
+                    owner: self.clone(),
+                    prerequisite: None,
+                    release_on_drop: true,
+                })
+            }
+            phase => Err(SourceAdmissionError::Closed {
+                scope: self.0.scope,
+                phase,
+            }),
+        }
+    }
+    pub fn fence(&self) -> Result<RuntimeSourceFence, SourceAdmissionError> {
+        let mut state = self.0.state.lock();
+        if state.phase != SourceAdmissionPhase::Open {
+            return Err(SourceAdmissionError::Closed {
+                scope: self.0.scope,
+                phase: state.phase,
+            });
+        }
+        let attempt = state.next_attempt;
+        state.next_attempt = attempt
+            .checked_add(1)
+            .ok_or(SourceAdmissionError::Exhausted)?;
+        state.phase = SourceAdmissionPhase::Fenced { attempt };
+        Ok(RuntimeSourceFence {
+            owner: self.clone(),
+            attempt,
+        })
+    }
+
+    pub(super) fn retire_scope(&self, scope: ScopeId) {
+        if self.0.scope == scope {
+            self.0.state.lock().phase = SourceAdmissionPhase::ScopeRetired;
+            self.0.settled.notify_waiters();
+        }
+    }
+}
+impl std::fmt::Debug for RuntimeSourceAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeSourceAdmission")
+            .field("scope", &self.0.scope)
+            .finish_non_exhaustive()
+    }
+}
+impl PartialEq for RuntimeSourceAdmission {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_owner(other)
+    }
+}
+impl Eq for RuntimeSourceAdmission {}
+
+#[must_use]
+pub(crate) struct RuntimeSourceClaim {
+    owner: RuntimeSourceAdmission,
+    prerequisite: Option<Box<RuntimeSourceClaim>>,
+    release_on_drop: bool,
+}
+impl RuntimeSourceClaim {
+    /// The native owner could not prove END. Keep the admitted obligation in
+    /// the same gate; losing the waiter is not confirmed resource release.
+    pub fn retain_unconfirmed(mut self) {
+        self.release_on_drop = false;
+        {
+            let mut state = self.owner.0.state.lock();
+            state.claims -= 1;
+            state.unconfirmed += 1;
+        }
+        self.owner.0.settled.notify_waiters();
+        if let Some(prerequisite) = self.prerequisite.take() {
+            prerequisite.retain_unconfirmed();
+        }
+    }
+}
+impl Drop for RuntimeSourceClaim {
+    fn drop(&mut self) {
+        if self.release_on_drop {
+            self.owner.0.state.lock().claims -= 1;
+            self.owner.0.settled.notify_waiters();
+        }
+    }
+}
+
+/// One actual source action retains every exact ancestor even when scopes
+/// share a gate. Issued only by a validated canonical lexical lease.
+pub struct RuntimeSourceLeaseClaim {
+    claims: Vec<RuntimeSourceClaim>,
+    leases: Vec<Arc<super::RuntimeLexicalScopeLease>>,
+}
+impl RuntimeSourceLeaseClaim {
+    pub(super) fn admit(
+        leases: &[Arc<super::RuntimeLexicalScopeLease>],
+    ) -> Result<Self, SourceAdmissionError> {
+        let mut gates: Vec<RuntimeSourceAdmission> = Vec::new();
+        let mut claims = Vec::new();
+        for lease in leases {
+            let gate = lease.source_admission();
+            if !gates.iter().any(|held| held.same_owner(gate)) {
+                claims.push(gate.admit_local()?);
+                gates.push(gate.clone());
+            }
+        }
+        Ok(Self {
+            claims,
+            leases: leases.to_vec(),
+        })
+    }
+
+    pub fn retain_unconfirmed(self) {
+        for lease in &self.leases {
+            lease.retain_unconfirmed_source_custody();
+        }
+        for claim in self.claims {
+            claim.retain_unconfirmed();
+        }
+    }
+}
+
+/// Affine retirement attempt. Abandonment keeps admission fenced.
+#[must_use]
+pub struct RuntimeSourceFence {
+    owner: RuntimeSourceAdmission,
+    attempt: u64,
+}
+impl RuntimeSourceFence {
+    pub fn unconfirmed_claims(&self) -> usize {
+        self.owner.0.state.lock().unconfirmed
+    }
+    pub fn pending_claims(&self) -> usize {
+        let state = self.owner.0.state.lock();
+        state.claims + state.unconfirmed
+    }
+    pub async fn wait_for_claims(&self) -> Result<(), SourceAdmissionError> {
+        loop {
+            let settled = self.owner.0.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            {
+                let state = self.owner.0.state.lock();
+                if state.unconfirmed != 0 {
+                    return Err(SourceAdmissionError::Unconfirmed {
+                        scope: self.owner.0.scope,
+                        count: state.unconfirmed,
+                    });
+                }
+                if state.claims == 0 {
+                    return Ok(());
+                }
+            }
+            settled.await;
+        }
+    }
+    pub fn reopen(self) -> Result<(), SourceAdmissionError> {
+        self.settle(SourceAdmissionPhase::Open)
+    }
+    pub fn retire(self, successor: NotebookGenerationId) -> Result<(), SourceAdmissionError> {
+        self.settle(SourceAdmissionPhase::Retired { successor })
+    }
+    fn settle(self, phase: SourceAdmissionPhase) -> Result<(), SourceAdmissionError> {
+        let mut state = self.owner.0.state.lock();
+        if state.phase
+            != (SourceAdmissionPhase::Fenced {
+                attempt: self.attempt,
+            })
+        {
+            return Err(SourceAdmissionError::StaleFence);
+        }
+        if state.unconfirmed != 0 {
+            return Err(SourceAdmissionError::Unconfirmed {
+                scope: self.owner.0.scope,
+                count: state.unconfirmed,
+            });
+        }
+        if matches!(phase, SourceAdmissionPhase::Retired { .. }) && state.claims != 0 {
+            return Err(SourceAdmissionError::Closed {
+                scope: self.owner.0.scope,
+                phase: state.phase,
+            });
+        }
+        state.phase = phase;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{PersistentSession, SessionError};
+    use proptest::prelude::*;
+
+    #[test]
+    fn fencing_source_refuses_late_binding_without_retiring_custody() {
+        let mut session = PersistentSession::new(None, 1024 * 1024);
+        let scope = session.mint_isolated_scope_with_lease().unwrap();
+        let mut before = session
+            .with_source_compiler_transaction(
+                scope.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    crate::session::prepared::tests::rooted_publication_fixture(
+                        session, "before", 70,
+                    )
+                },
+            )
+            .unwrap()
+            .into_outcome()
+            .action;
+        before.scope = scope.scope();
+        session
+            .with_source_compiler_transaction(
+                scope.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, report| {
+                    session.bind_replacing_decls_in(scope.scope(), vec![before], report)
+                },
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        let mut late = session
+            .with_source_compiler_transaction(
+                scope.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    crate::session::prepared::tests::rooted_publication_fixture(session, "late", 71)
+                },
+            )
+            .unwrap()
+            .into_outcome()
+            .action;
+        late.scope = scope.scope();
+        let before_handles = session.value_handle_count();
+        let fence = scope.source_admission().fence().unwrap();
+        assert!(matches!(
+            session
+                .with_source_compiler_transaction(
+                    scope.clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, report| session.bind_replacing_decls_in(
+                        scope.scope(),
+                        vec![late],
+                        report
+                    )
+                )
+                .unwrap()
+                .into_outcome()
+                .action,
+            Err(SessionError::SourceAdmission(
+                SourceAdmissionError::Closed { .. }
+            ))
+        ));
+        assert!(session.resolve_in(scope.scope(), "before").is_some());
+        assert!(session.resolve_in(scope.scope(), "late").is_none());
+        assert_eq!(session.value_handle_count() + 1, before_handles);
+        assert!(session.scope_tree().is_live(scope.scope()));
+        fence.reopen().unwrap();
+        scope.source_admission().admit().unwrap();
+    }
+
+    #[tokio::test]
+    async fn admitted_claim_outlives_fence_and_unconfirmed_end_keeps_it_closed() {
+        let mut session = PersistentSession::new(None, 1024);
+        let scope = session.mint_isolated_scope_with_lease().unwrap();
+        let claim = scope.source_admission().admit().unwrap();
+        let fence = scope.source_admission().fence().unwrap();
+        assert_eq!(fence.pending_claims(), 1);
+        assert!(scope.source_admission().admit().is_err());
+        claim.retain_unconfirmed();
+        assert!(matches!(
+            fence.wait_for_claims().await,
+            Err(SourceAdmissionError::Unconfirmed { count: 1, .. })
+        ));
+        assert!(matches!(
+            fence.reopen(),
+            Err(SourceAdmissionError::Unconfirmed { .. })
+        ));
+        assert!(scope.source_admission().with_open_admission(|| ()).is_err());
+    }
+
+    #[test]
+    fn captured_scopes_keep_dependency_but_independent_notebook_issues_its_own() {
+        let mut session = PersistentSession::new(None, 1024);
+        let parent = session.mint_isolated_scope_with_lease().unwrap();
+        let retained = session.retain_lexical_scope(parent.scope()).unwrap();
+        let inherited = session.mint_scope_from_lease(&retained).unwrap();
+        let child = session
+            .adopt_initial_notebook_scope_with_source(inherited, Some(parent.clone()))
+            .unwrap();
+        let independent = session.mint_notebook_scope_with_lease(None).unwrap();
+        assert!(child
+            .source_admission()
+            .depends_on(parent.source_admission()));
+        let fence = parent.source_admission().fence().unwrap();
+        assert!(retained.source_admission().admit().is_err());
+        assert!(child.source_admission().admit().is_err());
+        independent.source_admission().admit().unwrap();
+        drop(fence);
+        assert!(
+            parent.source_admission().admit().is_err(),
+            "abandoned fence cannot reopen"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn generated_admission_histories_match_owner_model(history in prop::collection::vec((0_u8..7, 0_usize..2, 0_usize..8), 1..96)) {
+            let mut session = PersistentSession::new(None, 1024);
+            let parent = session.mint_isolated_scope_with_lease().unwrap();
+            let child = session.mint_notebook_scope_with_lease(Some(parent.clone())).unwrap();
+            let gates = [parent.source_admission(), child.source_admission()];
+            let mut phases = [0_u8; 2]; // independent model: open/fenced/retired
+            let mut fences: [Option<RuntimeSourceFence>; 2] = [None, None];
+            let mut claims: Vec<Option<(usize, RuntimeSourceClaim)>> = (0..8).map(|_| None).collect();
+            let mut uncertainty = [0_usize; 2];
+            let mut admitted = 0;
+            let mut refused = 0;
+            // This prefix reaches inherited refusal and confirmed reopening in
+            // every case, independently of the generated suffix distribution.
+            let prefix = [(0, 1, 0), (1, 0, 0), (0, 1, 1), (4, 0, 0), (2, 0, 0)];
+            for (operation, gate, slot) in prefix.into_iter().chain(history) {
+                let open = phases[gate] == 0 && uncertainty[gate] == 0 && (gate == 0 || (phases[0] == 0 && uncertainty[0] == 0));
+                match operation {
+                    0 if claims[slot].is_none() => {
+                        let result = gates[gate].admit();
+                        prop_assert_eq!(result.is_ok(), open);
+                        if let Ok(claim) = result { claims[slot] = Some((gate, claim)); admitted += 1; }
+                        else { refused += 1; }
+                    }
+                    1 => {
+                        let result = gates[gate].fence();
+                        prop_assert_eq!(result.is_ok(), phases[gate] == 0);
+                        if let Ok(fence) = result { phases[gate] = 1; fences[gate] = Some(fence); }
+                    }
+                    2 => if let Some(fence) = fences[gate].take() {
+                        let result = fence.reopen();
+                        prop_assert_eq!(result.is_ok(), uncertainty[gate] == 0);
+                        if result.is_ok() { phases[gate] = 0; }
+                    },
+                    3 => if let Some(fence) = fences[gate].take() {
+                        let outstanding = claims.iter().flatten().filter(|(owner, _)| gate == 0 || *owner == gate).count() + uncertainty[gate];
+                        let result = fence.retire(NotebookGenerationId::INITIAL.next().unwrap());
+                        prop_assert_eq!(result.is_ok(), outstanding == 0);
+                        if result.is_ok() { phases[gate] = 2; }
+                    },
+                    4 => { claims[slot] = None; },
+                    5 => if let Some((owner, claim)) = claims[slot].take() {
+                        uncertainty[owner] += 1;
+                        if owner == 1 { uncertainty[0] += 1; }
+                        claim.retain_unconfirmed();
+                    },
+                    6 => { fences[gate] = None; },
+                    _ => {},
+                }
+                for checked in 0..2 {
+                    let expected = phases[checked] == 0 && uncertainty[checked] == 0 && (checked == 0 || (phases[0] == 0 && uncertainty[0] == 0));
+                    let mut entered = false;
+                    let result = gates[checked].with_open_admission(|| entered = true);
+                    prop_assert_eq!(entered, expected);
+                    prop_assert_eq!(result.is_ok(), expected);
+                }
+            }
+            prop_assert!(admitted > 0 && refused > 0);
+        }
+    }
+}
+
+/// One physical compiler scope retains every earned lower claim until its END.
+/// The original lease is independent of the recipient's current placement.
+pub struct RuntimeSourceCompilerTransaction {
+    pub(super) source: Arc<super::RuntimeLexicalScopeLease>,
+    origin: crate::CompilerTransactionOrigin,
+    hook: Option<SourceAdmissionHook>,
+    holds: Mutex<SourceCompilerHolds>,
+    closed: std::sync::atomic::AtomicBool,
+}
+#[derive(Default)]
+struct SourceCompilerHolds {
+    hook_admitted: bool,
+    claims: Vec<(RuntimeSourceAdmission, RuntimeSourceClaim)>,
+    leases: Vec<Arc<super::RuntimeLexicalScopeLease>>,
+}
+impl RuntimeSourceCompilerTransaction {
+    pub(super) fn admit(
+        &self,
+        target: Option<Arc<super::RuntimeLexicalScopeLease>>,
+    ) -> Result<(), SourceAdmissionError> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire)
+            || crate::CompilerTransactionOrigin::current().as_ref() != Some(&self.origin)
+        {
+            return Err(SourceAdmissionError::ForeignTransaction);
+        }
+        self.source.validate_source_issuer()?;
+        let mut holds = self.holds.lock();
+        if !holds.hook_admitted {
+            if let Some(hook) = &self.hook {
+                hook()?;
+            }
+            holds.hook_admitted = true;
+        }
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            std::iter::once(self.source.clone()).chain(target),
+            |leases| {
+                for lease in leases {
+                    let admission = lease.source_admission();
+                    if !holds
+                        .claims
+                        .iter()
+                        .any(|(held, _)| held.same_owner(admission))
+                    {
+                        holds
+                            .claims
+                            .push((admission.clone(), admission.admit_local()?));
+                    }
+                    if !holds.leases.iter().any(|held| Arc::ptr_eq(held, lease)) {
+                        holds.leases.push(lease.clone());
+                    }
+                }
+                Ok(())
+            },
+        )
+    }
+    pub(crate) fn admitted_original_source(
+        &self,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SourceAdmissionError> {
+        self.admit(None)?;
+        Ok(self.source.clone())
+    }
+
+    fn settle(&self, confirmed: bool) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        let mut holds = self.holds.lock();
+        if !confirmed {
+            for lease in &holds.leases {
+                lease.retain_unconfirmed_source_custody();
+            }
+        }
+        for (_, claim) in holds.claims.drain(..) {
+            if !confirmed {
+                claim.retain_unconfirmed();
+            }
+        }
+        holds.leases.clear();
+    }
+}
+
+pub(super) fn run_source_compiler_transaction<T>(
+    source: Arc<super::RuntimeLexicalScopeLease>,
+    workload: tidepool_toolchain::artifacts::CompileWorkload,
+    cancellation: crate::CompilerTransactionCancellation,
+    supplemental_hook: Option<SourceAdmissionHook>,
+    close_sink: impl FnOnce(crate::CompilerTransactionClose),
+    action: impl FnOnce(
+        Arc<RuntimeSourceCompilerTransaction>,
+        &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> T,
+) -> Result<crate::CompilerTransactionSettled<T>, SourceAdmissionError> {
+    if let Err(error) = source.validate_source_issuer() {
+        close_sink(crate::CompilerTransactionClose::NotStarted);
+        return Err(error);
+    }
+    if crate::CompilerTransactionOrigin::current().is_some() {
+        close_sink(crate::CompilerTransactionClose::NotStarted);
+        return Err(SourceAdmissionError::ForeignTransaction);
+    }
+    let context = std::cell::RefCell::new(None::<Arc<RuntimeSourceCompilerTransaction>>);
+    let returned = std::cell::Cell::new(false);
+    Ok(crate::settle_compiler_transaction_cancellable_for_workload(
+        workload,
+        cancellation,
+        |close| {
+            if let Some(context) = context.borrow().as_ref() {
+                context.settle(returned.get() && close.resources_retired());
+            }
+            close_sink(close);
+        },
+        |report| {
+            let issued = Arc::new(RuntimeSourceCompilerTransaction {
+                source,
+                origin: crate::CompilerTransactionOrigin::current().expect("actual compiler owner"),
+                hook: supplemental_hook,
+                holds: Mutex::new(SourceCompilerHolds::default()),
+                closed: std::sync::atomic::AtomicBool::new(false),
+            });
+            *context.borrow_mut() = Some(issued.clone());
+            let value = action(issued, report);
+            returned.set(true);
+            value
+        },
+    ))
+}
+
+impl super::RuntimeLexicalScopeLease {
+    /// Run one off-checkout source compiler phase with the original strong lease.
+    /// The borrowed capability can only be used inside this physical owner.
+    pub fn with_source_compiler_transaction<T>(
+        self: &Arc<Self>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        cancellation: crate::CompilerTransactionCancellation,
+        supplemental_hook: Option<SourceAdmissionHook>,
+        close_sink: impl FnOnce(crate::CompilerTransactionClose),
+        action: impl FnOnce(
+            &RuntimeSourceCompilerTransaction,
+            &mut dyn FnMut(crate::CompilerTransactionClose),
+        ) -> T,
+    ) -> Result<crate::CompilerTransactionSettled<T>, SourceAdmissionError> {
+        run_source_compiler_transaction(
+            self.clone(),
+            workload,
+            cancellation,
+            supplemental_hook,
+            close_sink,
+            |owner, report| action(&owner, report),
+        )
+    }
+}

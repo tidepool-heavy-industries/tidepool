@@ -386,13 +386,33 @@ fn encode_checked_expression(plan: &CheckedExpressionPlan) -> CborValue {
 #[derive(Debug, thiserror::Error)]
 #[error("{error}")]
 pub struct CellCheckFailure {
+    /// Actual outer close, after the settled finisher has paired this failure.
+    /// Absence is not evidence of a clean or unstarted compiler transaction.
+    pub compiler_close: Option<crate::CompilerTransactionClose>,
+    pub source_admission: Option<super::SourceAdmissionError>,
     pub error: CompileError,
     pub items: Option<Vec<CellAnalysisItem>>,
 }
 
 impl From<CompileError> for CellCheckFailure {
     fn from(error: CompileError) -> Self {
-        Self { error, items: None }
+        Self {
+            error,
+            items: None,
+            source_admission: None,
+            compiler_close: None,
+        }
+    }
+}
+
+impl From<super::SourceAdmissionError> for CellCheckFailure {
+    fn from(error: super::SourceAdmissionError) -> Self {
+        Self {
+            error: CompileError::ExtractFailed(error.to_string()),
+            items: None,
+            source_admission: Some(error),
+            compiler_close: None,
+        }
     }
 }
 
@@ -2697,6 +2717,7 @@ impl From<std::io::Error> for ActivationRendererFailure {
 /// Specialize immutable pure renderer code against the original compiler context.
 #[tracing::instrument(name = "activation_renderer_specialize", skip_all, fields(original_execution = ?admission.original_execution_digest(), original_display = ?admission.original_context_digest()))]
 pub fn compile_activation_renderer(
+    source: &super::RuntimeSourceCompilerTransaction,
     admission: &super::RuntimeActivationPreviewAdmission,
     template_source: &str,
     budget: u64,
@@ -2708,6 +2729,9 @@ pub fn compile_activation_renderer(
     >,
     ActivationRendererFailure,
 > {
+    source
+        .admit(Some(admission.source_lease()))
+        .map_err(super::PreparedRuntimeError::from)?;
     super::resident::PreparedRenderer::prepare(|| {
         compile_activation_renderer_inner(admission, template_source, budget, includes, settlement)
     })
@@ -3039,9 +3063,11 @@ pub struct PreparedRuntimeCell {
 }
 
 pub fn prepare_cell_program_admitted(
+    source: &super::RuntimeSourceCompilerTransaction,
     admission: Arc<super::RuntimeCellAdmission>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
+    source.admit(Some(admission.source_lease()))?;
     prepare_cell_program_admitted_inner(
         admission,
         #[cfg(test)]
@@ -3061,41 +3087,50 @@ pub fn finish_cell_program_admitted(
     ),
     CellCheckFailure,
 > {
-    let cancellation = outcome.host_admission_cancellation().cloned();
-    let belongs_to_owner = outcome
-        .action()
-        .as_ref()
-        .is_ok_and(|prepared| outcome.belongs_to(&prepared.origin));
-    let outcome = outcome.into_outcome();
-    let prepared = outcome.action?;
-    match &outcome.close {
-        crate::CompilerTransactionClose::Unconfirmed(_)
-        | crate::CompilerTransactionClose::Retired(_) => {
-            tracing::warn!(target: "exomonad_harness::timing", preparation_completed = true, compiler_close = ?outcome.close, "cell program publication refused");
+    let close = outcome.close().clone();
+    let result: Result<_, CellCheckFailure> = (|| {
+        let cancellation = outcome.host_admission_cancellation().cloned();
+        let belongs_to_owner = outcome
+            .action()
+            .as_ref()
+            .is_ok_and(|prepared| outcome.belongs_to(&prepared.origin));
+        let outcome = outcome.into_outcome();
+        let prepared = outcome.action?;
+        match &outcome.close {
+            crate::CompilerTransactionClose::Unconfirmed(_)
+            | crate::CompilerTransactionClose::Retired(_) => {
+                tracing::warn!(target: "exomonad_harness::timing", preparation_completed = true, compiler_close = ?outcome.close, "cell program publication refused");
+            }
+            crate::CompilerTransactionClose::Clean
+            | crate::CompilerTransactionClose::NotStarted => {}
         }
-        crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted => {}
-    }
-    match outcome.close {
-        crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted => {}
-        crate::CompilerTransactionClose::Unconfirmed(evidence) => {
-            return Err(
-                CompileError::CompilerPreparationCloseUnconfirmed(Box::new(evidence)).into(),
-            );
+        match outcome.close {
+            crate::CompilerTransactionClose::Clean
+            | crate::CompilerTransactionClose::NotStarted => {}
+            crate::CompilerTransactionClose::Unconfirmed(evidence) => {
+                return Err(
+                    CompileError::CompilerPreparationCloseUnconfirmed(Box::new(evidence)).into(),
+                );
+            }
+            crate::CompilerTransactionClose::Retired(evidence) => {
+                return Err(CompileError::CompilerPreparationRetired(Box::new(evidence)).into());
+            }
         }
-        crate::CompilerTransactionClose::Retired(evidence) => {
-            return Err(CompileError::CompilerPreparationRetired(Box::new(evidence)).into());
+        if !belongs_to_owner {
+            return Err(CompileError::CompilerPublication(
+                crate::CompilerTransactionPublicationError::DifferentOwner,
+            )
+            .into());
         }
-    }
-    if !belongs_to_owner {
-        return Err(CompileError::CompilerPublication(
-            crate::CompilerTransactionPublicationError::DifferentOwner,
-        )
-        .into());
-    }
-    let cancellation = cancellation.ok_or(CompileError::CompilerPublication(
-        crate::CompilerTransactionPublicationError::MissingOwner,
-    ))?;
-    prepared.seal(&cancellation)
+        let cancellation = cancellation.ok_or(CompileError::CompilerPublication(
+            crate::CompilerTransactionPublicationError::MissingOwner,
+        ))?;
+        prepared.seal(&cancellation)
+    })();
+    result.map_err(|mut failure| {
+        failure.compiler_close = Some(close);
+        failure
+    })
 }
 
 impl PreparedRuntimeCell {
@@ -3143,10 +3178,14 @@ fn compile_cell_program_admitted_inner(
 > {
     let cancellation = crate::CompilerTransactionCancellation::new();
     let settlement = std::cell::RefCell::new(settlement);
-    let outcome = crate::settle_compiler_transaction_cancellable(
+    let source = admission.source_lease();
+    let outcome = source.with_source_compiler_transaction(
+        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
         cancellation,
+        None,
         |close| settlement.borrow_mut()(close),
-        || {
+        |owner, _| {
+            owner.admit(None)?;
             prepare_cell_program_admitted_inner(
                 admission,
                 #[cfg(test)]
@@ -3154,7 +3193,7 @@ fn compile_cell_program_admitted_inner(
                 &mut |close| settlement.borrow_mut()(close),
             )
         },
-    );
+    )?;
     #[cfg(test)]
     let evidence = outcome
         .action()
@@ -3448,6 +3487,8 @@ fn check_cell_impl(
                     Err(error) => return Err(error.into()),
                 };
                 return Err(CellCheckFailure {
+                    source_admission: None,
+                    compiler_close: None,
                     error: offer.retain_failure(temp.path(), &cmd, &output.stderr, error),
                     items,
                 });
@@ -6301,7 +6342,23 @@ mod tests {
             .with_validation_include(effects.include_paths().to_vec());
             let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
             let public = state.mint_scope(ScopeId::ROOT).unwrap();
-            let execution = Arc::new(state.begin_private_execution(public).unwrap());
+            let source = state.adopt_initial_notebook_scope(public).unwrap();
+            let admitted = state
+                .with_source_compiler_transaction(
+                    source,
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |state, _| state.begin_private_execution(public),
+                )
+                .unwrap();
+            assert!(matches!(
+                admitted.close(),
+                crate::CompilerTransactionClose::Clean
+                    | crate::CompilerTransactionClose::NotStarted
+            ));
+            let execution = Arc::new(admitted.into_outcome().action.unwrap());
             let mut resident =
                 ResidentSession::from_persistent_for_test(frunk::HNil, CheckedHomeOutput, state);
             resident
@@ -6368,25 +6425,43 @@ mod tests {
                 roots.insert(0, first.to_owned());
             }
             let include_paths = view.include_paths(&roots);
-            let plan = tidepool_testing::with_settlement(|settlement| {
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(specification.clone()),
-                    &include_paths,
-                    settlement,
-                )
-            })?;
-            let admission = resident
-                .admit_planned_cell_for_execution(
-                    execution.clone(),
-                    plan,
-                    Arc::new(specification.clone()),
-                    specification.specification_digest(),
-                    [1; 32],
-                    include_paths,
+            let admitted = resident
+                .with_source_compiler_transaction(
+                    execution.retained_lexical_scope(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
                     None,
+                    |_| {},
+                    |resident, settlement| {
+                        resident
+                            .admit_source_mutation(execution.private_scope())
+                            .unwrap();
+                        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+                            Arc::new(specification.clone()),
+                            &include_paths,
+                            settlement,
+                        )?;
+                        let admission = resident
+                            .admit_planned_cell_for_execution(
+                                execution.clone(),
+                                plan,
+                                Arc::new(specification.clone()),
+                                specification.specification_digest(),
+                                [1; 32],
+                                include_paths,
+                                None,
+                            )
+                            .unwrap();
+                        Ok(admission)
+                    },
                 )
                 .unwrap();
-            Ok(admission)
+            assert!(matches!(
+                admitted.close(),
+                crate::CompilerTransactionClose::Clean
+                    | crate::CompilerTransactionClose::NotStarted
+            ));
+            admitted.into_outcome().action
         }
 
         fn check_in(
@@ -6439,6 +6514,11 @@ mod tests {
             resident: &mut crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
             cell: CheckedHomeCell,
         ) -> Vec<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
+            let source = cell.admission.source_lease();
+            let executed = resident.with_source_compiler_transaction(
+                source, tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(), None, |_| {},
+                |resident, settlement| {
             let prefix = resident
                 .begin_cell_program(cell.admission.clone(), cell.program)
                 .unwrap()
@@ -6477,7 +6557,7 @@ mod tests {
                         if kind
                             == tidepool_toolchain::checked_cell::CheckedItemKind::Expression =>
                     {
-                        tidepool_testing::with_settlement(|settlement| resident.run_observation_with_sites(
+                        resident.run_observation_with_sites(
                             compiled.code(),
                             binder,
                             reservation.generation(),
@@ -6485,20 +6565,20 @@ mod tests {
                                 == Some(
                                     tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful,
                                 ),
-                         settlement))
+                         settlement)
                     }
-                    [binder] => tidepool_testing::with_settlement(|settlement| resident.run_bind_with_sites(
+                    [binder] => resident.run_bind_with_sites(
                         &binder.name,
                         compiled.code(),
                         binder,
                         reservation.generation(),
-                     settlement)),
-                    binders => tidepool_testing::with_settlement(|settlement| resident.run_projected_bind_with_sites(
+                     settlement),
+                    binders => resident.run_projected_bind_with_sites(
                         "checkedHome",
                         compiled.code(),
                         binders,
                         reservation.generation(),
-                     settlement)),
+                     settlement),
                 }
                 .unwrap();
                 assert!(
@@ -6536,6 +6616,14 @@ mod tests {
                     .count()
             );
             artifacts
+                },
+            ).unwrap();
+            assert!(matches!(
+                executed.close(),
+                crate::CompilerTransactionClose::Clean
+                    | crate::CompilerTransactionClose::NotStarted
+            ));
+            executed.into_outcome().action
         }
 
         fn execute(&mut self, cell: CheckedHomeCell) {
@@ -6585,16 +6673,46 @@ mod tests {
                 .filter(|(name, _)| expected.contains(name))
                 .collect::<Vec<_>>();
             assert_eq!(private_winners.len(), expected.len());
-            let publication = self
+            let source = self.execution.retained_lexical_scope();
+            let restaged = self
                 .resident
-                .restage_ephemeral_execution_publication(intent)
+                .with_source_compiler_transaction(
+                    source.clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |resident, _| resident.restage_ephemeral_execution_publication(intent),
+                )
                 .unwrap();
+            assert!(matches!(
+                restaged.close(),
+                crate::CompilerTransactionClose::Clean
+                    | crate::CompilerTransactionClose::NotStarted
+            ));
+            let publication = restaged.into_outcome().action.unwrap();
             let ticket = match publication {
                 crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
                 crate::session::ExecutionPublication::Declarations(base) => {
+                    let certified = source
+                        .with_source_compiler_transaction(
+                            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                            crate::CompilerTransactionCancellation::new(),
+                            None,
+                            |_| {},
+                            |owner, settlement| {
+                                owner.admitted_original_source().unwrap();
+                                base.certify(settlement)
+                            },
+                        )
+                        .unwrap();
+                    assert!(matches!(
+                        certified.close(),
+                        crate::CompilerTransactionClose::Clean
+                            | crate::CompilerTransactionClose::NotStarted
+                    ));
                     let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
-                        tidepool_testing::with_settlement(|settlement| base.certify(settlement))
-                            .unwrap()
+                        certified.into_outcome().action.unwrap()
                     else {
                         panic!("checked history publication must be accepted");
                     };
@@ -6626,7 +6744,23 @@ mod tests {
 
         fn begin_next_execution(&mut self) {
             let public = self.execution.admitted_public().scope;
-            self.execution = Arc::new(self.resident.begin_private_execution(public).unwrap());
+            let admitted = self
+                .resident
+                .with_source_compiler_transaction(
+                    self.execution.retained_lexical_scope(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |resident, _| resident.begin_private_execution(public),
+                )
+                .unwrap();
+            assert!(matches!(
+                admitted.close(),
+                crate::CompilerTransactionClose::Clean
+                    | crate::CompilerTransactionClose::NotStarted
+            ));
+            self.execution = Arc::new(admitted.into_outcome().action.unwrap());
             let mut context = self.resident.run_context();
             context.lexical_scope = self.execution.private_scope();
             self.resident.set_run_context(context).unwrap();
@@ -7315,11 +7449,18 @@ mod tests {
         .unwrap();
         // Fixture bootstrap has its own real checked compilation; exclude it.
         let baseline = counts();
-        let outcome = crate::settle_compiler_transaction_cancellable(
-            crate::CompilerTransactionCancellation::new(),
-            |_| {},
-            || prepare_cell_program_admitted(admission.clone(), &mut |_| {}),
-        );
+        let outcome = admission
+            .source_lease()
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |source_owner, _| {
+                    prepare_cell_program_admitted(source_owner, admission.clone(), &mut |_| {})
+                },
+            )
+            .unwrap();
         let prepared = outcome.action().as_ref().unwrap();
         let absolute_before = counts();
         let before = (
@@ -7477,6 +7618,220 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn publication_restage_refuses_fenced_original_before_join_reservation() {
+        let mut fixture = CheckedHomeFixture::new();
+        let declaration = fixture
+            .check("freshPublication n = (n :: Int)", &[], None)
+            .unwrap();
+        fixture.execute(declaration);
+        let intent = fixture
+            .resident
+            .freeze_private_execution(&fixture.execution)
+            .unwrap();
+        let source = fixture.execution.retained_lexical_scope();
+        let open = fixture
+            .resident
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |resident, _| resident.restage_ephemeral_execution_publication(intent.clone()),
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                open.action(),
+                Ok(crate::session::ExecutionPublication::Declarations(_))
+            ),
+            "actual authored declaration must reserve a fresh join while open"
+        );
+        assert_eq!(*open.close(), crate::CompilerTransactionClose::NotStarted);
+        drop(open);
+        let public = fixture.execution.admitted_public().scope;
+        let private = fixture.execution.private_scope();
+        let before_public = fixture
+            .resident
+            .public_visibility_snapshot_in(public)
+            .unwrap();
+        let before_private = fixture
+            .resident
+            .public_visibility_snapshot_in(private)
+            .unwrap();
+        let before_allocation = fixture
+            .resident
+            .declaration_generation_high_water()
+            .unwrap();
+        let before_requests = tidepool_extract_cmd::extract_spawn_count();
+        let fence = source.source_admission().fence().unwrap();
+        let closed = fixture
+            .resident
+            .with_source_compiler_transaction(
+                source,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |resident, _| resident.restage_ephemeral_execution_publication(intent),
+            )
+            .unwrap();
+        assert!(matches!(
+            closed.action(),
+            Err(crate::session::SessionError::SourceAdmission(
+                crate::session::SourceAdmissionError::Closed { .. }
+            ))
+        ));
+        assert_eq!(*closed.close(), crate::CompilerTransactionClose::NotStarted);
+        assert_eq!(fence.pending_claims(), 0);
+        assert_eq!(
+            fixture
+                .resident
+                .declaration_generation_high_water()
+                .unwrap(),
+            before_allocation,
+            "fenced source must refuse before burning a join identity"
+        );
+        assert_eq!(
+            fixture
+                .resident
+                .public_visibility_snapshot_in(public)
+                .unwrap(),
+            before_public
+        );
+        assert_eq!(
+            fixture
+                .resident
+                .public_visibility_snapshot_in(private)
+                .unwrap(),
+            before_private
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_requests);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cell_program_primary_failure_keeps_its_outer_close_observation() {
+        assert!(
+            std::env::var_os("TIDEPOOL_EXTRACT_DAEMON_SOCKET").is_some(),
+            "confirmed cancellation retirement requires the declared owned resident compiler"
+        );
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_env_filter("tidepool_extract_cmd=debug,exomonad_harness::timing=debug")
+            .with_span_events(
+                tracing_subscriber::fmt::format::FmtSpan::NEW
+                    | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
+            )
+            .with_writer(std::io::stderr)
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        #[derive(Clone, Copy, Debug)]
+        enum Closure {
+            Clean,
+            SyntheticUnknown,
+            ActualRetired,
+        }
+        for closure in [
+            Closure::Clean,
+            Closure::SyntheticUnknown,
+            Closure::ActualRetired,
+        ] {
+            let mut fixture = CheckedHomeFixture::new();
+            let admission = CheckedHomeFixture::admit_in(
+                &mut fixture.resident,
+                &fixture.execution,
+                &fixture.effects,
+                fixture.root.path(),
+                "let capturedNumber = missingPreparedCellName",
+                &[],
+                None,
+            )
+            .unwrap();
+            let source = admission.source_lease();
+            let cancellation = crate::CompilerTransactionCancellation::new();
+            let observed = std::cell::RefCell::new(None);
+            let before = tidepool_extract_cmd::extract_spawn_count();
+            let outcome = source.with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation.clone(),
+                None,
+                |close| *observed.borrow_mut() = Some(close),
+                |owner, report| {
+                    let result = prepare_cell_program_admitted(owner, admission, report);
+                    assert!(matches!(result.as_ref().err().expect("real invalid source must fail").error, CompileError::Diagnostics(_)));
+                    match closure {
+                        Closure::Clean => {},
+                        Closure::SyntheticUnknown => {
+                            // This tests aggregation and custody, not physical END loss.
+                            report(crate::CompilerTransactionClose::Unconfirmed(
+                                tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                                    tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
+                                    tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None },
+                                ),
+                            ));
+                        },
+                        Closure::ActualRetired => cancellation.cancel(),
+                    }
+                    result
+                },
+            ).unwrap();
+            let actual = outcome.close().clone();
+            assert_eq!(Some(&actual), observed.borrow().as_ref());
+            eprintln!("primary-close owner observation {closure:?}: {actual:?}");
+            match closure {
+                Closure::Clean => assert!(matches!(actual, crate::CompilerTransactionClose::Clean)),
+                Closure::SyntheticUnknown => assert!(matches!(
+                    actual,
+                    crate::CompilerTransactionClose::Unconfirmed(_)
+                )),
+                Closure::ActualRetired => assert!(
+                    matches!(actual, crate::CompilerTransactionClose::Retired(_)),
+                    "actual accepted cancellation must retain confirmed retirement: {actual:?}"
+                ),
+            }
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count() - before, 1);
+            let before_finish = outcome
+                .action()
+                .as_ref()
+                .err()
+                .expect("actual primary failure");
+            assert!(before_finish.compiler_close.is_none());
+            let item_count = before_finish.items.as_ref().map(Vec::len);
+            let expected_diagnostics = match &before_finish.error {
+                CompileError::Diagnostics(diagnostics) => diagnostics.clone(),
+                _ => unreachable!(),
+            };
+            let failure = finish_cell_program_admitted(outcome).unwrap_err();
+            assert_eq!(failure.compiler_close.as_ref(), Some(&actual));
+            assert_eq!(failure.source_admission, None);
+            assert_eq!(failure.items.as_ref().map(Vec::len), item_count);
+            assert!(
+                matches!(&failure.error, CompileError::Diagnostics(diagnostics) if diagnostics == &expected_diagnostics)
+            );
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count() - before,
+                1,
+                "finishing must not replay failed compilation"
+            );
+            match closure {
+                Closure::SyntheticUnknown => assert!(matches!(
+                    source.source_admission().admit(),
+                    Err(super::super::SourceAdmissionError::Unconfirmed { count: 1, .. })
+                )),
+                Closure::Clean | Closure::ActualRetired => {
+                    drop(source.source_admission().admit().unwrap())
+                }
+            }
+        }
+        let early: CellCheckFailure =
+            CompileError::ExtractFailed("pre-settlement refusal".into()).into();
+        assert!(early.compiler_close.is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn cell_program_host_cancellation_after_end_refuses_sealing_without_new_request() {
         let mut fixture = CheckedHomeFixture::new();
         let admission = CheckedHomeFixture::admit_in(
@@ -7491,11 +7846,18 @@ mod tests {
         .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let outcome = crate::settle_compiler_transaction_cancellable(
-            cancellation.clone(),
-            |_| {},
-            || prepare_cell_program_admitted(admission, &mut |_| {}),
-        );
+        let outcome = admission
+            .source_lease()
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation.clone(),
+                None,
+                |_| {},
+                |source_owner, _| {
+                    prepare_cell_program_admitted(source_owner, admission, &mut |_| {})
+                },
+            )
+            .unwrap();
         assert!(outcome.action().is_ok());
         assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
         let after = tidepool_extract_cmd::extract_spawn_count();
@@ -7516,6 +7878,10 @@ mod tests {
             std::io::ErrorKind::Interrupted
         );
         let failure = finish_cell_program_admitted(outcome).unwrap_err();
+        assert!(matches!(
+            failure.compiler_close,
+            Some(crate::CompilerTransactionClose::Clean)
+        ));
         assert!(
             matches!(failure.error, CompileError::Io(ref error) if error.kind() == std::io::ErrorKind::Interrupted)
         );
@@ -7544,19 +7910,25 @@ mod tests {
         let cancellation = crate::CompilerTransactionCancellation::new();
         let observed = std::cell::RefCell::new(None);
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let outcome = crate::settle_compiler_transaction_cancellable(
-            cancellation.clone(),
-            |close| *observed.borrow_mut() = Some(close),
-            || {
-                let prepared = prepare_cell_program_admitted(admission, &mut |_| {});
-                assert!(
-                    prepared.is_ok(),
-                    "physical preparation completes before cancellation"
-                );
-                cancellation.cancel();
-                prepared
-            },
-        );
+        let outcome = admission
+            .source_lease()
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation.clone(),
+                None,
+                |close| *observed.borrow_mut() = Some(close),
+                |source_owner, _| {
+                    let prepared =
+                        prepare_cell_program_admitted(source_owner, admission, &mut |_| {});
+                    assert!(
+                        prepared.is_ok(),
+                        "physical preparation completes before cancellation"
+                    );
+                    cancellation.cancel();
+                    prepared
+                },
+            )
+            .unwrap();
         assert!(matches!(
             outcome.close(),
             crate::CompilerTransactionClose::Retired(_)
@@ -7607,16 +7979,23 @@ mod tests {
         let cancellation = crate::CompilerTransactionCancellation::new();
         let observed = std::cell::RefCell::new(None);
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let original = crate::with_compiler_transaction_cancellable(
-            cancellation.clone(),
-            |close| *observed.borrow_mut() = Some(close),
-            || {
-                let prepared = prepare_cell_program_admitted(admission, &mut |_| {});
-                assert!(prepared.is_ok());
-                cancellation.cancel();
-                prepared
-            },
-        );
+        let original = admission
+            .source_lease()
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation.clone(),
+                None,
+                |close| *observed.borrow_mut() = Some(close),
+                |source_owner, _| {
+                    let prepared =
+                        prepare_cell_program_admitted(source_owner, admission, &mut |_| {});
+                    assert!(prepared.is_ok());
+                    cancellation.cancel();
+                    prepared
+                },
+            )
+            .unwrap()
+            .into_outcome();
         assert!(matches!(
             original.close,
             crate::CompilerTransactionClose::Retired(_)
@@ -7667,11 +8046,18 @@ mod tests {
         .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let outcome = crate::settle_compiler_transaction_cancellable(
-            cancellation,
-            |_| {},
-            || prepare_cell_program_admitted(admission, &mut |_| {}),
-        );
+        let outcome = admission
+            .source_lease()
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation,
+                None,
+                |_| {},
+                |source_owner, _| {
+                    prepare_cell_program_admitted(source_owner, admission, &mut |_| {})
+                },
+            )
+            .unwrap();
         assert!(outcome.action().is_ok());
         assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
         let after = tidepool_extract_cmd::extract_spawn_count();
@@ -8344,9 +8730,10 @@ mod tests {
             .unwrap()
             .contains(&inherited_exports[0]));
         let view = resident.compile_view_in(execution.private_scope()).unwrap();
-        let facade =
-            tidepool_testing::with_settlement(|settlement| selected.materialize(&view, settlement))
-                .unwrap();
+        let facade = tidepool_testing::with_settlement(|settlement| {
+            resident.materialize_facade(&selected, &view, settlement)
+        })
+        .unwrap();
         assert!(facade.source_artifact().is_none());
         let projection = facade.projection().unwrap();
         assert!(projection

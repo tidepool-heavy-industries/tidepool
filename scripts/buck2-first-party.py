@@ -1698,12 +1698,15 @@ tidepool_buildscript_run(
             if package_name == "tidepool-runtime":
                 env["TIDEPOOL_CELL_TEST_EXTRACT"] = "$(exe //tidepool/extract-cmd:tidepool-extract)"
             rules.append("\n".join(["tidepool_rust_test_cases(", f"    name = {json.dumps(unit_target['name'] + '_all')},", f"    binary = {json.dumps(':' + unit_target['name'])},", "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 14400000,", runtime_arguments(env, resources, worker),
+                *(['    case_compiler_modes = {"session::turn::tests::cell_program_primary_failure_keeps_its_outer_close_observation": "owned-resident"},'] if package_name == "tidepool-runtime" else []),
                 *(['    case_compiler_modes = {' + ", ".join(
-                    json.dumps("resident_workbench::request_tests::" + name) + ": \"owned-resident\""
+                    json.dumps(name) + ": \"owned-resident\""
                     for name in [
-                        "cancelled_lookup_interrupts_its_started_compiler_request_and_recovers",
-                        "lookup_batches_qualified_export_facts_in_one_compiler_request",
-                        "lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc",
+                        "resident_workbench::request_tests::cancelled_lookup_interrupts_its_started_compiler_request_and_recovers",
+                        "resident_workbench::request_tests::lookup_batches_qualified_export_facts_in_one_compiler_request",
+                        "resident_workbench::request_tests::lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc",
+                        "resident_actor::child_launch::tests::child_factory_requires_clean_uncancelled_preparation_before_runtime_adoption",
+                        "resident_workbench::request_tests::durable_sleep_binding_observes_real_retraction_request_and_clean_end",
                     ]) + "},"] if package_name == "exomonad-actor" else []),
                 '    visibility = ["PUBLIC"],', ")", ""]))
         NATIVE_TARGETS[package_name]["libraries"][library["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("" if shared else "_binary"), "test": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("_all" if shared else "")})

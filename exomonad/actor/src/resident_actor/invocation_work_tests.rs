@@ -612,10 +612,12 @@ fn compiler_owner(
     services: &crate::capabilities::WorkbenchServices,
     work: &Arc<InvocationWork>,
 ) -> crate::capabilities::CompilerOwnerScope {
-    services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
-        work: work.clone(),
-        control: Some(crate::WorkbenchExecutionControl::untracked()),
-    })
+    services
+        .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
+            work: work.clone(),
+            control: Some(crate::WorkbenchExecutionControl::untracked()),
+        })
+        .for_preparation()
 }
 
 #[test]
@@ -642,6 +644,70 @@ fn publication_phase_admits_two_stage_receipts_and_fences_user_work() {
         let action = ticket.run(|_settlement| generation);
         assert_eq!(action, generation);
     }
+    let mut session = tidepool_runtime::session::ResidentSession::unbootstrapped(
+        frunk::HNil,
+        tidepool_mcp::CapturedOutput::new(),
+        1024,
+        None,
+    );
+    let scope = session.mint_isolated_scope();
+    let dependency = crate::ActorDescriptor::new(
+        "publication continuation",
+        crate::ActorPlacement {
+            session: tidepool_repr::SessionId(8891),
+            resource_scope: tidepool_codegen::suspension::RealmId::ROOT,
+            lexical_scope: scope,
+        },
+    )
+    .admit_independent_world()
+    .source_dependency()
+    .clone();
+    dependency.adopt_final_scope(&mut session, scope).unwrap();
+    let source = dependency.source_lease().unwrap();
+    let fence = source.source_admission().fence().unwrap();
+    let source_owner = owner.clone().with_source_dependency(&dependency);
+    assert!(
+        source_owner.admit_continuation().is_err(),
+        "Publishing never reopens Active work"
+    );
+    assert!(
+        source_owner.admit_publication().is_err(),
+        "the eager compiler publication path still refuses fenced source"
+    );
+    let ticket = source_owner
+        .admit_continuation_for(crate::termination::CompilerWorkAdmission::Publication)
+        .unwrap();
+    crate::termination::CompilerWorkTicket::run_source_transaction(
+        &mut session,
+        ticket,
+        &dependency,
+        |_, _| (),
+    )
+    .unwrap();
+    assert_eq!(
+        fence.pending_claims(),
+        0,
+        "pure publication continuation earns no source claim"
+    );
+    let ticket = source_owner
+        .admit_continuation_for(crate::termination::CompilerWorkAdmission::Publication)
+        .unwrap();
+    let refused = crate::termination::CompilerWorkTicket::run_source_transaction(
+        &mut session,
+        ticket,
+        &dependency,
+        |session, _| session.admit_source_mutation(scope),
+    )
+    .unwrap();
+    assert!(matches!(
+        refused,
+        Err(tidepool_runtime::session::ResidentError::Session(
+            tidepool_runtime::session::SessionError::SourceAdmission(
+                tidepool_runtime::session::SourceAdmissionError::Closed { .. }
+            )
+        ))
+    ));
+    assert_eq!(fence.pending_claims(), 0);
     let state = work.state.lock();
     assert!(state.compilers.iter().all(|receipt| matches!(
         receipt.observation(),
@@ -679,11 +745,12 @@ fn hosted_refusal_settles_the_invocations_partial_compiler_registration() {
         &response,
         true,
     );
-    let owner =
-        services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
+    let owner = services
+        .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
             work: work.clone(),
             control: Some(control.clone()),
-        });
+        })
+        .for_preparation();
     assert!(matches!(
         owner.admit_work(),
         Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
@@ -705,11 +772,12 @@ async fn publication_cleanup_retains_admitted_ticket_until_late_close_after_canc
     let fixture = Fixture::start().await;
     let work = InvocationWork::new(fixture.actor.identity(), reservation());
     let control = crate::WorkbenchExecutionControl::untracked();
-    let owner =
-        services.with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
+    let owner = services
+        .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
             work: work.clone(),
             control: Some(control.clone()),
-        });
+        })
+        .for_preparation();
     assert!(work.begin_publication());
     let ticket = owner.admit_publication().unwrap();
     control.request_cancellation();

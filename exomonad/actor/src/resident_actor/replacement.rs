@@ -78,7 +78,7 @@ where
         definition: crate::ActorReplacementDefinition,
     ) -> Result<LocalActorRef, ResidentActorWorkbenchError> {
         let reservation = kernel
-            .reserve_successor_creation()
+            .reserve_source_successor_creation(definition.child.descriptor.source_dependency())
             .await
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         let staged = self
@@ -417,6 +417,7 @@ where
                     descriptor.placement().resource_scope,
                     seed.as_ref(),
                     descriptor.source_layer(),
+                    descriptor.source_dependency(),
                 )
                 .await
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;

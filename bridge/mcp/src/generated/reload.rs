@@ -13,7 +13,7 @@ pub fn reload_decl() -> crate::EffectDecl {
         ],
         type_defs: &[
             "data ReloadPolicy = CompatibleOnly | AcceptCacheInvalidation deriving (Show, Eq, Generic)",
-            "data ReloadOptions = ReloadOptions { reloadAlsoCheck :: [Text], reloadPolicy :: ReloadPolicy } deriving (Show, Eq, Generic)",
+            "data ReloadOptions = ReloadOptions { reloadAlsoCheck :: [Text], reloadPolicy :: ReloadPolicy, reloadForce :: Bool } deriving (Show, Eq, Generic)",
             "data ReloadSurfaceDiff = ReloadSurfaceDiff { surfaceAdded :: [Text], surfaceRemoved :: [Text], surfaceChanged :: [Text] } deriving (Show, Eq, Generic)",
             "data ReloadRefusalCategory = PreparationFailed | SurfaceIncompatible | UnsupportedSurface | AuthorityDenied deriving (Show, Eq, Generic)",
             "data ReloadRefusal = ReloadRefusal { refusalCategory :: ReloadRefusalCategory, refusalDetail :: Text, refusalSurface :: ReloadSurfaceDiff } deriving (Show, Eq, Generic)",

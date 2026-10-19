@@ -2885,9 +2885,7 @@ pub(crate) fn run_compiler_preparation<T: 'static>(
 }
 
 struct PreparationCleanupUnconfirmed<T> {
-    outcome: exomonad_actor::CompilerPreparationOutcome<
-        Result<Result<T, Box<dyn std::error::Error>>, exomonad_actor::ResidentActorWorkbenchError>,
-    >,
+    outcome: exomonad_actor::CompilerPreparationOutcome<T>,
 }
 impl<T> fmt::Debug for PreparationCleanupUnconfirmed<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -27,6 +27,26 @@ pub(crate) struct CallbackExecution {
 }
 
 impl CallbackExecution {
+    pub(crate) fn source_dependency(
+        &self,
+    ) -> &crate::resident_workbench::generation_admission::SourceDependency {
+        self.snapshot.as_ref().map_or_else(
+            || self.context.source_dependency(),
+            |snapshot| snapshot.source_dependency(),
+        )
+    }
+
+    pub(crate) fn admit_activation(
+        &self,
+    ) -> Result<(), crate::resident_workbench::generation_admission::GenerationAdmissionError> {
+        self.source_dependency().with_open_admission(|| ())
+    }
+
+    pub(crate) fn activation_context(&self) -> crate::ActorSessionContext {
+        let mut context = self.context.clone();
+        context.source_dependency = self.source_dependency().clone();
+        context
+    }
     pub(crate) fn from_context(context: crate::ActorSessionContext) -> Self {
         Self {
             context,
@@ -41,18 +61,21 @@ impl CallbackExecution {
         &self,
         context: crate::ActorSessionContext,
     ) -> Result<Self, crate::mount::ActorCompileViewError> {
+        self.admit_activation()?;
         let snapshot = self.snapshot.as_ref().map(|snapshot| {
             crate::resident_workbench::ActorRequestSnapshot::SourceCallback(
                 crate::resident_workbench::InstalledToolLease::source_callback_custody(
                     context.actor,
                     snapshot.installation().source().clone(),
+                    snapshot.source_dependency().clone(),
                 ),
             )
         });
-        let context = match &snapshot {
+        let mut context = match &snapshot {
             Some(snapshot) => context.with_issued_source(snapshot.installation().source())?,
             None => context,
         };
+        context.source_dependency = self.source_dependency().clone();
         let scope = self.scope.clone().or_else(|| {
             self.snapshot
                 .as_ref()

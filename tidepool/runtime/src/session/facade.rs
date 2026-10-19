@@ -100,9 +100,10 @@ impl ExactExportSurface {
     /// Issue a selected interface through the same compiler join owner used by
     /// cumulative declaration views. The original modules remain dependencies;
     /// only this interface is a new lexical root.
-    pub fn materialize(
+    pub(super) fn materialize(
         &self,
         view: &SessionCompileView,
+        admit: &dyn Fn() -> Result<(), super::SourceAdmissionError>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<MaterializedFacade, ExactFacadeError> {
         if view.session() != self.session {
@@ -117,6 +118,7 @@ impl ExactExportSurface {
             includes,
         } = &self.authority
         {
+            admit().map_err(super::SessionError::SourceAdmission)?;
             let projection = issue_projection(
                 &baseline.context,
                 &baseline.owner,
@@ -140,6 +142,7 @@ impl ExactExportSurface {
         let source = render_legacy_facade(&identity, self);
         let path = view.session_root().join(identity.relative_hs_path());
         if !std::fs::read(&path).is_ok_and(|existing| existing == source.as_bytes()) {
+            admit().map_err(super::SessionError::SourceAdmission)?;
             let parent = path
                 .parent()
                 .ok_or_else(|| ExactFacadeError::InvalidPath(path.clone()))?;
@@ -210,11 +213,12 @@ pub struct MaterializedFacade {
 impl MaterializedFacade {
     /// Narrow this issued interface by original identities. The selected groups
     /// and implementation closure come from this owner, never caller evidence.
-    pub fn select_exact_exports(
+    pub(super) fn select_exact_exports(
         &self,
         selected: &[ExportIdentity],
         includes: &[PathBuf],
         root: &Path,
+        admit: &dyn Fn() -> Result<(), super::SourceAdmissionError>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Option<Self>, ExactFacadeError> {
         let inherited = self
@@ -247,6 +251,7 @@ impl MaterializedFacade {
             roots: vec![owner.clone()],
             lexical: inherited.context().lexical_graph().to_vec(),
         };
+        admit().map_err(super::SessionError::SourceAdmission)?;
         let projection = issue_projection(
             inherited.context(),
             &owner,
@@ -343,12 +348,86 @@ fn render_legacy_facade(identity: &FacadeIdentity, surface: &ExactExportSurface)
     source
 }
 
+impl super::PersistentSession {
+    fn admit_facade_source(
+        &self,
+        scope: tidepool_codegen::scope::ScopeId,
+    ) -> Result<(), super::SourceAdmissionError> {
+        let owner = self
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?;
+        let target = (scope != tidepool_codegen::scope::ScopeId::ROOT)
+            .then(|| self.source_lease_in(scope))
+            .transpose()?;
+        owner.admit(target)?;
+        Ok(())
+    }
+
+    pub fn materialize_facade(
+        &self,
+        surface: &ExactExportSurface,
+        view: &SessionCompileView,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<MaterializedFacade, ExactFacadeError> {
+        if self.lib().session_id() != view.session() {
+            return Err(ExactFacadeError::WrongSession {
+                surface: self.lib().session_id(),
+                view: view.session(),
+            });
+        }
+        surface.materialize(
+            view,
+            &|| self.admit_facade_source(view.lexical_scope()),
+            settlement,
+        )
+    }
+    pub fn select_facade_exact_exports(
+        &self,
+        scope: tidepool_codegen::scope::ScopeId,
+        facade: &MaterializedFacade,
+        selected: &[ExportIdentity],
+        includes: &[PathBuf],
+        root: &Path,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Option<MaterializedFacade>, ExactFacadeError> {
+        facade.select_exact_exports(
+            selected,
+            includes,
+            root,
+            &|| self.admit_facade_source(scope),
+            settlement,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::SourceImports;
     use tidepool_codegen::scope::ScopeId;
     use tidepool_repr::Generation;
+
+    fn source_action<T>(
+        session: &mut super::super::PersistentSession,
+        source: &Arc<super::super::RuntimeLexicalScopeLease>,
+        action: impl FnOnce(
+            &mut super::super::PersistentSession,
+            &mut dyn FnMut(crate::CompilerTransactionClose),
+        ) -> T,
+    ) -> T {
+        session
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                action,
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+    }
 
     #[test]
     fn inherited_certified_facade_subset_preserves_original_owners_and_default_visibility() {
@@ -367,17 +446,35 @@ mod tests {
         tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
             .unwrap();
         let mut session = PersistentSession::new(Some(lib), crate::DEFAULT_NURSERY_SIZE);
+        let expected_context = session.lib().current_exact_context_in(ScopeId::ROOT);
+        let scope = session.mint_detached_scope(ScopeId::ROOT).unwrap();
+        let scope_lease = session.adopt_initial_notebook_scope(scope).unwrap();
+        assert_eq!(
+            session.lib().scope_tip(scope),
+            session.lib().scope_tip(ScopeId::ROOT)
+        );
+        match (
+            expected_context,
+            session.lib().current_exact_context_in(scope),
+        ) {
+            (None, None) => {}
+            (Some(expected), Some(captured)) => {
+                assert!(Arc::ptr_eq(&captured, &expected));
+                assert_eq!(captured.semantic_sha256(), expected.semantic_sha256());
+            }
+            _ => panic!("detached capture changes the root's exact context"),
+        }
         let declarations = include_str!("fixtures/inherited-facade-subset.hs")
             .trim()
             .split("\n\n")
             .collect::<Vec<_>>();
-        let generation = tidepool_testing::with_settlement(|settlement| {
-            session.define_scoped_in(ScopeId::ROOT, &declarations, settlement)
+        let generation = source_action(&mut session, &scope_lease, |session, settlement| {
+            session.define_scoped_in(scope, &declarations, settlement)
         })
         .unwrap();
         let full_surface = session
             .exact_exports_in(
-                ScopeId::ROOT,
+                scope,
                 &[
                     "Kept",
                     "KeptClass",
@@ -388,9 +485,9 @@ mod tests {
                 ],
             )
             .unwrap();
-        let view = session.compile_view_in(ScopeId::ROOT).unwrap();
-        let facade = tidepool_testing::with_settlement(|settlement| {
-            full_surface.materialize(&view, settlement)
+        let view = session.compile_view_in(scope).unwrap();
+        let facade = source_action(&mut session, &scope_lease, |session, settlement| {
+            session.materialize_facade(&full_surface, &view, settlement)
         })
         .unwrap();
         let inherited = facade.projection().unwrap();
@@ -412,8 +509,8 @@ mod tests {
             .iter()
             .map(|export| export.head.clone())
             .collect::<Vec<_>>();
-        let reused = tidepool_testing::with_settlement(|settlement| {
-            facade.select_exact_exports(&all, &[], root.path(), settlement)
+        let reused = source_action(&mut session, &scope_lease, |session, settlement| {
+            session.select_facade_exact_exports(scope, &facade, &all, &[], root.path(), settlement)
         })
         .unwrap()
         .unwrap();
@@ -444,17 +541,26 @@ mod tests {
             .iter()
             .map(|export| export.head.clone())
             .collect::<Vec<_>>();
-        let narrowed_facade = tidepool_testing::with_settlement(|settlement| {
-            facade.select_exact_exports(&wanted, &include, root.path(), settlement)
+        let narrowed_facade = source_action(&mut session, &scope_lease, |session, settlement| {
+            session.select_facade_exact_exports(
+                scope,
+                &facade,
+                &wanted,
+                &include,
+                root.path(),
+                settlement,
+            )
         })
         .unwrap()
         .unwrap();
         let narrowed = narrowed_facade.projection().unwrap();
         let mut wrong = wanted[0].clone();
         wrong.unit = "foreign".into();
-        assert!(matches!(tidepool_testing::with_settlement(|settlement| {
-            facade.select_exact_exports(&[wrong.clone()], &include, root.path(), settlement)
-        }), Err(ExactFacadeError::UnselectedExport(identity)) if identity == wrong));
+        assert!(
+            matches!(source_action(&mut session, &scope_lease, |session, settlement| {
+            session.select_facade_exact_exports(scope, &facade, &[wrong.clone()], &include, root.path(), settlement)
+        }), Err(ExactFacadeError::UnselectedExport(identity)) if identity == wrong)
+        );
         assert_eq!(narrowed.receipt().exports(), selected);
         assert_eq!(
             narrowed.receipt().instances(),
@@ -489,23 +595,36 @@ mod tests {
             fallback_module_name: "InheritedFacadeConsumer",
         };
         let compiled = tidepool_testing::with_settlement(|settlement| {
-            compile_invocation_in_context(
-                &invocation,
-                Arc::clone(narrowed.context()),
-                |_, _, _| {},
-                settlement,
+            crate::finish_runtime_targets(
+                scope_lease
+                    .with_source_compiler_transaction(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        crate::CompilerTransactionCancellation::new(),
+                        None,
+                        settlement,
+                        |owner, report| {
+                            crate::prepare_runtime_targets_in_context(
+                                owner,
+                                &invocation,
+                                Arc::clone(narrowed.context()),
+                                |_, _, _| {},
+                                report,
+                            )
+                        },
+                    )
+                    .unwrap(),
             )
         })
         .unwrap();
-        let value = crate::run_compiled_target(
-            &compiled,
-            crate::session::PREPARED_SCAFFOLD_TARGET,
-            crate::DEFAULT_NURSERY_SIZE,
-            &mut frunk::HNil,
-            &(),
-            |_| {},
-        )
-        .unwrap();
+        let value = compiled
+            .run(
+                crate::session::PREPARED_SCAFFOLD_TARGET,
+                crate::DEFAULT_NURSERY_SIZE,
+                &mut frunk::HNil,
+                &(),
+                |_| {},
+            )
+            .unwrap();
         assert_eq!(value.to_json(), serde_json::json!(42));
 
         let refused_source = source.replace(
@@ -513,18 +632,36 @@ mod tests {
             "hiddenNumber (Hidden (41 :: HiddenPayload Bool))",
         );
         let refused = tidepool_testing::with_settlement(|settlement| {
-            compile_invocation_in_context(
-                &CompileInvocation {
-                    source: &refused_source,
-                    ..invocation
-                },
-                Arc::clone(narrowed.context()),
-                |_, _, _| {},
-                settlement,
+            crate::finish_runtime_targets(
+                scope_lease
+                    .with_source_compiler_transaction(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        crate::CompilerTransactionCancellation::new(),
+                        None,
+                        settlement,
+                        |owner, report| {
+                            crate::prepare_runtime_targets_in_context(
+                                owner,
+                                &CompileInvocation {
+                                    source: &refused_source,
+                                    ..invocation
+                                },
+                                Arc::clone(narrowed.context()),
+                                |_, _, _| {},
+                                report,
+                            )
+                        },
+                    )
+                    .unwrap(),
             )
         });
         assert!(
-            matches!(&refused, Err(crate::CompileError::Diagnostics(_))),
+            matches!(
+                &refused,
+                Err(crate::RuntimeError::Compile(
+                    crate::CompileError::Diagnostics(_)
+                ))
+            ),
             "{:?}",
             refused.err()
         );
@@ -533,26 +670,39 @@ mod tests {
         let explicit_source =
             refused_source.replace(narrowed.module_name(), inherited.module_name());
         let explicit = tidepool_testing::with_settlement(|settlement| {
-            compile_invocation_in_context(
-                &CompileInvocation {
-                    source: &explicit_source,
-                    ..invocation
-                },
-                Arc::clone(narrowed.context()),
-                |_, _, _| {},
-                settlement,
+            crate::finish_runtime_targets(
+                scope_lease
+                    .with_source_compiler_transaction(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        crate::CompilerTransactionCancellation::new(),
+                        None,
+                        settlement,
+                        |owner, report| {
+                            crate::prepare_runtime_targets_in_context(
+                                owner,
+                                &CompileInvocation {
+                                    source: &explicit_source,
+                                    ..invocation
+                                },
+                                Arc::clone(narrowed.context()),
+                                |_, _, _| {},
+                                report,
+                            )
+                        },
+                    )
+                    .unwrap(),
             )
         })
         .unwrap();
-        let value = crate::run_compiled_target(
-            &explicit,
-            crate::session::PREPARED_SCAFFOLD_TARGET,
-            crate::DEFAULT_NURSERY_SIZE,
-            &mut frunk::HNil,
-            &(),
-            |_| {},
-        )
-        .unwrap();
+        let value = explicit
+            .run(
+                crate::session::PREPARED_SCAFFOLD_TARGET,
+                crate::DEFAULT_NURSERY_SIZE,
+                &mut frunk::HNil,
+                &(),
+                |_| {},
+            )
+            .unwrap();
         assert_eq!(value.to_json(), serde_json::json!(141));
 
         let original_source = refused_source.replace(
@@ -575,32 +725,103 @@ mod tests {
             "{:?}",
             refused.err()
         );
+        scope_lease
+            .source_admission()
+            .fence()
+            .unwrap()
+            .retire(
+                crate::session::NotebookGenerationId::INITIAL
+                    .next()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(session.scope_tree().is_live(scope));
+        source_action(&mut session, &scope_lease, |session, _| {
+            let native_ends = std::cell::Cell::new(0);
+            let mut observe = |_| native_ends.set(native_ends.get() + 1);
+            assert!(matches!(
+                session.materialize_facade(&full_surface, &view, &mut observe),
+                Err(ExactFacadeError::Projection(
+                    crate::session::SessionError::SourceAdmission(
+                        crate::session::SourceAdmissionError::Closed {
+                            phase: crate::session::SourceAdmissionPhase::Retired { .. },
+                            ..
+                        }
+                    )
+                ))
+            ));
+            assert!(matches!(
+                session.select_facade_exact_exports(
+                    scope,
+                    &facade,
+                    &wanted,
+                    &include,
+                    root.path(),
+                    &mut observe
+                ),
+                Err(ExactFacadeError::Projection(
+                    crate::session::SessionError::SourceAdmission(
+                        crate::session::SourceAdmissionError::Closed {
+                            phase: crate::session::SourceAdmissionPhase::Retired { .. },
+                            ..
+                        }
+                    )
+                ))
+            ));
+            let unchanged = session
+                .select_facade_exact_exports(
+                    scope,
+                    &facade,
+                    &all,
+                    &include,
+                    root.path(),
+                    &mut observe,
+                )
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(inherited, unchanged.projection().unwrap()));
+            assert!(session
+                .select_facade_exact_exports(
+                    scope,
+                    &facade,
+                    &[],
+                    &include,
+                    root.path(),
+                    &mut observe
+                )
+                .unwrap()
+                .is_none());
+            let mut foreign_view = view.clone();
+            foreign_view.session = SessionId(999_917);
+            assert!(matches!(
+                session.materialize_facade(&full_surface, &foreign_view, &mut observe),
+                Err(ExactFacadeError::WrongSession { .. })
+            ));
+            assert!(
+                matches!(session.select_facade_exact_exports(scope, &facade, &[wrong.clone()], &include, root.path(), &mut observe), Err(ExactFacadeError::UnselectedExport(identity)) if identity == wrong)
+            );
+            assert_eq!(
+                native_ends.get(),
+                0,
+                "retired refusals and pure reads must precede compiler effects"
+            );
+        });
     }
 
     #[test]
     fn materialized_facade_reexports_only_selected_exact_items() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let view = SessionCompileView {
-            session: SessionId(8),
-            lexical_scope: ScopeId::ROOT,
-            injected_values: Vec::new(),
-            next_value_generation: Generation(1),
-            request_context: None,
-            projection: std::sync::Arc::new(crate::session::view::CompileViewProjection {
-                root: dir.path().to_path_buf(),
-                persistent_imports: SourceImports::new(),
-                library: Some(super::super::view::CompileLibrary::Source(
-                    SessionModule::lib(Generation(4)),
-                )),
-                visible_values: Vec::new(),
-                visible_value_names: Vec::new(),
-                reachable_values: Vec::new(),
-                shadowing: Vec::new(),
-                staged_hiding: Vec::new(),
-                exact_context: None,
-            }),
-        }
-        .canonicalize();
+        let lib = crate::session::SessionLib::open(
+            SessionId(8),
+            dir.path(),
+            crate::session::ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        let mut session =
+            crate::session::PersistentSession::new(Some(lib), crate::DEFAULT_NURSERY_SIZE);
+        let scope = session.mint_detached_scope(ScopeId::ROOT).unwrap();
+        let source = session.adopt_initial_notebook_scope(scope).unwrap();
+        let view = session.compile_view_in(scope).unwrap();
         let surface = ExactExportSurface::legacy(
             SessionId(8),
             Some(SessionModule::lib(Generation(4))),
@@ -619,9 +840,10 @@ mod tests {
             surface.declarations(),
             Err(ExactExportError::UncertifiedExports)
         ));
-        let facade =
-            tidepool_testing::with_settlement(|settlement| surface.materialize(&view, settlement))
-                .expect("materialize facade");
+        let facade = source_action(&mut session, &source, |session, settlement| {
+            session.materialize_facade(&surface, &view, settlement)
+        })
+        .expect("materialize facade");
         let (path, source) = facade.source_artifact().unwrap();
         assert!(source.contains("Finding(..)"));
         assert!(source.contains("review"));

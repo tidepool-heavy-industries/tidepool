@@ -13,6 +13,14 @@ pub(crate) enum RootAdmissionOutcome {
     NativeResource(ResourceChild),
 }
 impl RootAdmissionOutcome {
+    fn worker_identity(&self) -> Option<ActorRef> {
+        match self {
+            Self::Actor(actor, _) | Self::Workbench(actor) | Self::Pending(actor, _, _) => {
+                Some(actor.identity())
+            }
+            Self::StartupPermit(_) | Self::NativeResource(_) => None,
+        }
+    }
     fn custody(&self) -> ProducedCustody {
         match self {
             Self::StartupPermit(_) => ProducedCustody::NoResource,
@@ -356,6 +364,8 @@ pub(super) enum PreparationMessage {
     },
     Start {
         id: u64,
+        expected_worker: Option<ActorRef>,
+        dependency: Option<SourceDependency>,
         operation: RootOperation,
         compiler: RetainedActorExit,
         reply: oneshot::Sender<RootDelivery>,
@@ -371,7 +381,7 @@ pub(super) enum PreparationMessage {
     },
     ReservationReady {
         actor: ActorRef,
-        lifecycle: Result<crate::kernel::LifecycleHandle, String>,
+        lifecycle: Result<crate::kernel::LifecycleHandle, ReservationStartFailure>,
     },
     ResourcesSettled {
         owner: ResourceLifetime,
@@ -500,14 +510,20 @@ impl Actor for PreparationSupervisor {
                         state.workers.insert(worker.get_id(), TrackedWorker { cell: worker.get_cell(), kind: WorkerKind::Reserve { identity, terminal }, terminal: false, reported: false });
                         drop(task); let _ = worker.send_message(());
                     }
-                    Err(error) => { let _ = state.control.send_message(RunControlMessage::ReservationReady { actor: identity, lifecycle: Err(error.to_string()) }); }
+                    Err(error) => { let _ = state.control.send_message(RunControlMessage::ReservationReady { actor: identity, lifecycle: Err(ReservationStartFailure::NotStarted(error.to_string())) }); }
                 }
             }
-            PreparationMessage::Start { id, operation, compiler, reply } => {
+            PreparationMessage::Start { id, expected_worker, dependency, operation, compiler, reply } => {
                 let compiler_scope = state.compiler_services.with_compiler_owner(
                     crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(compiler.clone()),
                 );
-                let arguments = RootWorkerArguments { id, operation: Some(operation), compiler: compiler.clone(), compiler_scope, reply: Some(reply), control: state.control.clone(), supervisor: myself.clone() };
+                let compiler_scope = match dependency {
+                    Some(dependency) => compiler_scope.with_source_dependency(
+                        &dependency,
+                    ),
+                    None => compiler_scope.for_preparation(),
+                };
+                let arguments = RootWorkerArguments { id, expected_worker, operation: Some(operation), compiler: compiler.clone(), compiler_scope, reply: Some(reply), control: state.control.clone(), supervisor: myself.clone() };
                 match Actor::spawn_linked(None, RootWorker, arguments, myself.get_cell()).await {
                     Ok((worker, task)) => {
                         state.workers.insert(worker.get_id(), TrackedWorker { cell: worker.get_cell(), kind: WorkerKind::Root { id, compiler, produced: None, native: None }, terminal: false, reported: false });
@@ -577,7 +593,7 @@ impl Actor for PreparationSupervisor {
                     }
                     WorkerKind::Reserve { identity, terminal } => {
                         terminal.request_shutdown(ActorTerminal::new(ActorExitKind::Cancelled, "actor reservation worker lost"));
-                        let _ = state.control.send_message(RunControlMessage::ReservationReady { actor: *identity, lifecycle: Err("actor reservation worker exited without settlement".into()) });
+                        let _ = state.control.send_message(RunControlMessage::ReservationReady { actor: *identity, lifecycle: Err(ReservationStartFailure::Unconfirmed("actor reservation worker exited without settlement".into())) });
                     }
                     WorkerKind::Retire { owner, .. } => { let _ = state.control.send_message(RunControlMessage::RunResourceWorkerFailed { owner: *owner, detail: "resource retirement worker exited without settlement".into() }); }
                     WorkerKind::Abandoned { id, .. } => { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id: *id, outcome: crate::CleanupComponentOutcome::Unconfirmed("abandoned root cleanup worker exited without settlement".into()) }); }
@@ -618,6 +634,7 @@ enum RootWorkerMessage {
 }
 struct RootWorkerArguments {
     id: u64,
+    expected_worker: Option<ActorRef>,
     operation: Option<RootOperation>,
     compiler: RetainedActorExit,
     compiler_scope: crate::capabilities::CompilerOwnerScope,
@@ -697,6 +714,17 @@ impl Actor for RootWorker {
                         return Err("preparation supervisor lost produced custody".into());
                     }
                 }
+                if let Some(expected) = state.expected_worker {
+                    if result
+                        .as_ref()
+                        .is_ok_and(|produced| produced.worker_identity() != Some(expected))
+                    {
+                        return Err(
+                            "worker preparation produced a resource outside its reserved owner"
+                                .into(),
+                        );
+                    }
+                }
                 let (accepted, acceptance) = oneshot::channel();
                 let delivered = reply.send(RootDelivery {
                     id: state.id,
@@ -765,16 +793,24 @@ impl Actor for ReservationStarter {
                 let receipt =
                     tokio::time::timeout(SHUTDOWN_BUDGET, predecessor.retire_for_successor())
                         .await
-                        .map_err(|_| "predecessor retirement remains in flight".to_owned())?
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|_| {
+                            ReservationStartFailure::Unconfirmed(
+                                "predecessor retirement remains in flight".into(),
+                            )
+                        })?
+                        .map_err(|error| ReservationStartFailure::Unconfirmed(error.to_string()))?;
                 if receipt.predecessor() != predecessor.identity()
                     || !receipt.confirms_actor_retirement()
                 {
-                    return Err("predecessor retirement is unconfirmed".to_owned());
+                    return Err(ReservationStartFailure::Unconfirmed(
+                        "predecessor retirement is unconfirmed".into(),
+                    ));
                 }
             }
             if state.terminal.requested_shutdown().is_some() {
-                return Err("actor reservation was closed before lifecycle startup".to_owned());
+                return Err(ReservationStartFailure::NotStarted(
+                    "actor reservation was closed before lifecycle startup".into(),
+                ));
             }
             crate::kernel::LifecycleHandle::start_linked(
                 state.identity,
@@ -782,7 +818,7 @@ impl Actor for ReservationStarter {
                 state.supervisor.get_cell(),
             )
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| ReservationStartFailure::Unconfirmed(error.to_string()))
         }
         .await;
         let _ = state

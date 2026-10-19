@@ -272,6 +272,7 @@ impl PersistentSession {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        self.admit_source_work_in(scope)?;
         let (generation, _) = self.reserve_value_generations(1)?;
         let visibility = self
             .public_visibility_snapshot_in(scope)
@@ -589,9 +590,45 @@ impl RuntimeCellPurpose {
 pub(super) struct RuntimeAdmissionOwner {
     identity: uuid::Uuid,
     epoch: std::sync::atomic::AtomicU64,
+    source_issuance: parking_lot::RwLock<()>,
     retired: parking_lot::Mutex<Vec<ScopeId>>,
-    lexical_leases:
-        parking_lot::Mutex<BTreeMap<ScopeId, std::sync::Weak<RuntimeLexicalScopeLease>>>,
+    lexical_leases: parking_lot::Mutex<BTreeMap<ScopeId, RuntimeLexicalScopeRecord>>,
+    session_live: std::sync::atomic::AtomicBool,
+    uncertain_scopes: std::sync::Weak<parking_lot::Mutex<Vec<Arc<RuntimeLexicalScopeLease>>>>,
+}
+
+struct RuntimeLexicalScopeRecord {
+    lease: Option<std::sync::Weak<RuntimeLexicalScopeLease>>,
+    owns_source_admission: bool,
+    source_admission: super::RuntimeSourceAdmission,
+    // The actual canonical lease owns strong prerequisites. Keeping them
+    // strong in the issuer's own record would form owner→lease→owner cycles.
+    prerequisites: Vec<std::sync::Weak<RuntimeLexicalScopeLease>>,
+}
+
+/// Synchronous exclusion with registrations. Unknown commit or unwinding
+/// invalidates the preflighted epoch before the writer unlocks; only an actual
+/// no-effects refusal preserves old authority. This never issues readiness.
+pub(super) struct RuntimeSourceTransition<'a> {
+    owner: &'a RuntimeAdmissionOwner,
+    unknown_epoch: std::cell::Cell<Option<u64>>,
+}
+impl RuntimeSourceTransition<'_> {
+    pub(super) fn advance_epoch(&self, next: u64) {
+        self.owner
+            .epoch
+            .store(next, std::sync::atomic::Ordering::Release);
+    }
+    pub(super) fn refused(&self) {
+        self.unknown_epoch.set(None);
+    }
+}
+impl Drop for RuntimeSourceTransition<'_> {
+    fn drop(&mut self) {
+        if let Some(next) = self.unknown_epoch.get() {
+            self.advance_epoch(next);
+        }
+    }
 }
 
 impl RuntimeAdmissionOwner {
@@ -601,13 +638,47 @@ impl RuntimeAdmissionOwner {
     pub(super) fn epoch(&self) -> u64 {
         self.epoch.load(std::sync::atomic::Ordering::Acquire)
     }
-    pub(super) fn new() -> Self {
+    pub(super) fn new(
+        uncertain_scopes: &Arc<parking_lot::Mutex<Vec<Arc<RuntimeLexicalScopeLease>>>>,
+    ) -> Self {
         Self {
             identity: uuid::Uuid::new_v4(),
             epoch: std::sync::atomic::AtomicU64::new(0),
+            source_issuance: parking_lot::RwLock::new(()),
             retired: parking_lot::Mutex::new(Vec::new()),
             lexical_leases: parking_lot::Mutex::new(BTreeMap::new()),
+            session_live: std::sync::atomic::AtomicBool::new(true),
+            uncertain_scopes: Arc::downgrade(uncertain_scopes),
         }
+    }
+    pub(super) fn with_source_transition<T>(
+        &self,
+        action: impl FnOnce(&RuntimeSourceTransition<'_>) -> T,
+    ) -> T {
+        let _issuance = self.source_issuance.write();
+        let transition = RuntimeSourceTransition {
+            owner: self,
+            unknown_epoch: std::cell::Cell::new(None),
+        };
+        action(&transition)
+    }
+    pub(super) fn with_source_owner_transfer<T>(
+        &self,
+        next: u64,
+        action: impl FnOnce(&RuntimeSourceTransition<'_>) -> T,
+    ) -> T {
+        let _issuance = self.source_issuance.write();
+        let transition = RuntimeSourceTransition {
+            owner: self,
+            unknown_epoch: std::cell::Cell::new(Some(next)),
+        };
+        action(&transition)
+    }
+    pub(super) fn seal_session(&self) {
+        let _issuance = self.source_issuance.write();
+        self.session_live
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.lexical_leases.lock().clear();
     }
 }
 
@@ -617,8 +688,134 @@ pub struct RuntimeLexicalScopeLease {
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
     scope: ScopeId,
+    source_admission: super::RuntimeSourceAdmission,
+    prerequisites: Vec<Arc<RuntimeLexicalScopeLease>>,
 }
 impl RuntimeLexicalScopeLease {
+    fn validate_local_source_issuer(&self) -> Result<(), super::SourceAdmissionError> {
+        if self.owner_epoch != self.owner.epoch() || !self.has_live_canonical_custody() {
+            return Err(super::SourceAdmissionError::StaleSourceLease);
+        }
+        Ok(())
+    }
+
+    fn has_live_canonical_custody(&self) -> bool {
+        self.owner
+            .session_live
+            .load(std::sync::atomic::Ordering::Acquire)
+            && self
+                .owner
+                .lexical_leases
+                .lock()
+                .get(&self.scope)
+                .is_some_and(|record| {
+                    record.source_admission.same_owner(&self.source_admission)
+                        && record
+                            .lease
+                            .as_ref()
+                            .and_then(std::sync::Weak::upgrade)
+                            .is_some_and(|lease| std::ptr::eq(lease.as_ref(), self))
+                })
+    }
+
+    pub fn validate_source_issuer(&self) -> Result<(), super::SourceAdmissionError> {
+        let _issuance = self.owner.source_issuance.read();
+        self.validate_local_source_issuer()?;
+        drop(_issuance);
+        for prerequisite in &self.prerequisites {
+            prerequisite.validate_source_issuer()?;
+        }
+        Ok(())
+    }
+
+    pub fn prerequisites(&self) -> &[Arc<Self>] {
+        &self.prerequisites
+    }
+
+    /// Exact leases form an immutable DAG. Custody is distinct from gate identity:
+    /// two scopes sharing one gate still retain two native/binding roots.
+    // Order: transaction holds / actor World accounting, then issuer read
+    // guards sorted by UUID, then gate state. No guard crosses END or await.
+    pub(super) fn with_source_leases<T>(
+        roots: impl IntoIterator<Item = Arc<Self>>,
+        action: impl FnOnce(&[Arc<Self>]) -> Result<T, super::SourceAdmissionError>,
+    ) -> Result<T, super::SourceAdmissionError> {
+        fn collect(
+            lease: Arc<RuntimeLexicalScopeLease>,
+            leases: &mut Vec<Arc<RuntimeLexicalScopeLease>>,
+        ) {
+            if leases.iter().any(|held| Arc::ptr_eq(held, &lease)) {
+                return;
+            }
+            for prerequisite in &lease.prerequisites {
+                collect(prerequisite.clone(), leases);
+            }
+            leases.push(lease);
+        }
+        let mut leases = Vec::new();
+        for root in roots {
+            collect(root, &mut leases);
+        }
+        let mut owners = leases
+            .iter()
+            .map(|lease| lease.owner.clone())
+            .collect::<Vec<_>>();
+        owners.sort_unstable_by_key(|owner| owner.identity());
+        owners.dedup_by(|a, b| Arc::ptr_eq(a, b));
+        let _issuance = owners
+            .iter()
+            .map(|owner| owner.source_issuance.read())
+            .collect::<Vec<_>>();
+        for lease in &leases {
+            lease.validate_local_source_issuer()?;
+        }
+        let result = action(&leases)?;
+        for lease in &leases {
+            lease.validate_local_source_issuer()?;
+        }
+        Ok(result)
+    }
+
+    pub fn with_open_source_admission<T>(
+        self: &Arc<Self>,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, super::SourceAdmissionError> {
+        Self::with_source_leases([self.clone()], |leases| {
+            super::RuntimeSourceAdmission::with_open_admissions(
+                leases.iter().map(|lease| lease.source_admission()),
+                action,
+            )
+        })
+    }
+
+    pub fn admit_source(
+        self: &Arc<Self>,
+    ) -> Result<super::RuntimeSourceLeaseClaim, super::SourceAdmissionError> {
+        Self::with_source_leases([self.clone()], |leases| {
+            super::RuntimeSourceLeaseClaim::admit(leases)
+        })
+    }
+
+    /// Retain each admitted exact scope in its own session until explicit scope
+    /// retirement or teardown. A later epoch change removes authority, not an
+    /// already earned uncertain native obligation.
+    pub fn retain_unconfirmed_source_custody(self: &Arc<Self>) {
+        for prerequisite in &self.prerequisites {
+            prerequisite.retain_unconfirmed_source_custody();
+        }
+        let Some(custody) = self.owner.uncertain_scopes.upgrade() else {
+            return;
+        };
+        let _issuance = self.owner.source_issuance.read();
+        let mut held = custody.lock();
+        if self.has_live_canonical_custody() && !held.iter().any(|lease| Arc::ptr_eq(lease, self)) {
+            held.push(self.clone());
+        }
+    }
+
+    pub fn source_admission(&self) -> &super::RuntimeSourceAdmission {
+        &self.source_admission
+    }
     pub fn scope(&self) -> ScopeId {
         self.scope
     }
@@ -1479,6 +1676,10 @@ impl std::fmt::Debug for RuntimeCellAdmission {
 }
 
 impl RuntimeCellAdmission {
+    pub fn source_lease(&self) -> Arc<RuntimeLexicalScopeLease> {
+        self._retained_scope.clone()
+    }
+
     pub fn catalog_selection(&self) -> &tidepool_toolchain::toolchain::CatalogSelection {
         &self.catalog_selection
     }
@@ -1708,10 +1909,10 @@ impl PersistentSession {
     /// Successful durable owner transfer fences every offer and publication
     /// issued before that transfer, while their scopes remain alive for abort.
     /// The next epoch was preflighted under this same exclusive checkout.
+    #[cfg(test)]
     pub(crate) fn invalidate_execution_admissions_after_owner_transfer(&mut self, next: u64) {
         self.admission_owner()
-            .epoch
-            .store(next, std::sync::atomic::Ordering::Release);
+            .with_source_transition(|transition| transition.advance_epoch(next));
     }
 
     pub fn admit_checked_item(
@@ -1972,24 +2173,186 @@ impl PersistentSession {
         &self,
         scope: ScopeId,
     ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
+        self.prepared_lexical_scope_lease_with_source(
+            scope,
+            self.source_transaction
+                .as_ref()
+                .map(|owner| owner.source.clone()),
+        )
+    }
+
+    pub(super) fn prepared_lexical_scope_lease_with_source(
+        &self,
+        scope: ScopeId,
+        prerequisite: Option<Arc<RuntimeLexicalScopeLease>>,
+    ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        if let Some(prerequisite) = &prerequisite {
+            prerequisite.validate_source_issuer()?;
+        }
         let mut leases = self.admission_owner().lexical_leases.lock();
-        if let Some(existing) = leases.get(&scope) {
+        if let Some(existing) = leases.get(&scope).and_then(|record| record.lease.as_ref()) {
             let lease = existing.upgrade().ok_or(SessionError::DeadScope(scope))?;
             if lease.owner_epoch != self.admission_owner().epoch() {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
+            drop(leases);
+            lease.validate_source_issuer()?;
             return Ok(lease);
         }
+        let owns_source_admission = leases
+            .get(&scope)
+            .is_none_or(|record| record.owns_source_admission);
+        let prerequisites = match leases.get(&scope) {
+            Some(record) => record
+                .prerequisites
+                .iter()
+                .map(|lease| {
+                    lease
+                        .upgrade()
+                        .ok_or(super::SourceAdmissionError::StaleSourceLease)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            None => prerequisite.into_iter().collect(),
+        };
+        let source_admission = leases
+            .get(&scope)
+            .map(|record| record.source_admission.clone())
+            .unwrap_or_else(|| {
+                super::RuntimeSourceAdmission::new(
+                    scope,
+                    prerequisites
+                        .first()
+                        .map(|lease| lease.source_admission().clone()),
+                )
+            });
         let lease = Arc::new(RuntimeLexicalScopeLease {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
             scope,
+            source_admission: source_admission.clone(),
+            prerequisites,
         });
-        leases.insert(scope, Arc::downgrade(&lease));
+        leases.insert(
+            scope,
+            RuntimeLexicalScopeRecord {
+                lease: Some(Arc::downgrade(&lease)),
+                owns_source_admission,
+                prerequisites: lease.prerequisites.iter().map(Arc::downgrade).collect(),
+                source_admission,
+            },
+        );
+        drop(leases);
+        lease.validate_source_issuer()?;
         Ok(lease)
+    }
+
+    pub(super) fn source_lease_in(
+        &self,
+        scope: ScopeId,
+    ) -> Result<Arc<RuntimeLexicalScopeLease>, super::SourceAdmissionError> {
+        if !self.scope_tree().is_live(scope) {
+            return Err(super::SourceAdmissionError::MissingTargetLease { scope });
+        }
+        self.admission_owner()
+            .lexical_leases
+            .lock()
+            .get(&scope)
+            .and_then(|record| record.lease.as_ref())
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or(super::SourceAdmissionError::MissingTargetLease { scope })
+    }
+
+    pub(super) fn prepared_notebook_scope_lease(
+        &self,
+        scope: ScopeId,
+        prerequisite: Option<Arc<RuntimeLexicalScopeLease>>,
+    ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
+        if let Some(prerequisite) = &prerequisite {
+            prerequisite.validate_source_issuer()?;
+        }
+        // An unleased captured scope has custody provenance, but has not yet
+        // selected its own executable world. Only initial notebook adoption
+        // replaces that inherited admission with the actual issuer's gate.
+        {
+            let mut scopes = self.admission_owner().lexical_leases.lock();
+            if scopes
+                .get(&scope)
+                .is_some_and(|record| record.lease.is_none())
+            {
+                scopes.remove(&scope);
+            }
+        }
+        let lease = self.prepared_lexical_scope_lease_with_source(scope, prerequisite.clone())?;
+        let expected = prerequisite.into_iter().collect::<Vec<_>>();
+        if lease.prerequisites.len() != expected.len()
+            || !lease
+                .prerequisites
+                .iter()
+                .zip(expected.iter())
+                .all(|(a, b)| Arc::ptr_eq(a, b))
+        {
+            return Err(super::SourceAdmissionError::StaleSourceLease.into());
+        }
+        Ok(lease)
+    }
+
+    pub(super) fn inherit_source_admission(&self, source: ScopeId, target: ScopeId) {
+        let inherited = {
+            let records = self.admission_owner().lexical_leases.lock();
+            records.get(&source).map(|record| {
+                let prerequisites = match &record.lease {
+                    Some(lease) => vec![lease.clone()],
+                    None => record.prerequisites.clone(),
+                };
+                (record.source_admission.clone(), prerequisites)
+            })
+        }
+        .or_else(|| {
+            self.source_transaction.as_ref().map(|owner| {
+                (
+                    owner.source.source_admission().clone(),
+                    vec![Arc::downgrade(&owner.source)],
+                )
+            })
+        });
+        if let Some((source_admission, prerequisites)) = inherited {
+            self.admission_owner().lexical_leases.lock().insert(
+                target,
+                RuntimeLexicalScopeRecord {
+                    lease: None,
+                    owns_source_admission: false,
+                    source_admission,
+                    prerequisites,
+                },
+            );
+        }
+    }
+
+    pub(super) fn retire_source_admission(&self, scope: ScopeId) {
+        let record = self.admission_owner().lexical_leases.lock().remove(&scope);
+        if let Some(record) = record {
+            if record.owns_source_admission {
+                record.source_admission.retire_scope(scope);
+            }
+        }
+        // Drop leases outside the custody lock: lease Drop queues retirement.
+        let released = {
+            let mut held = self.uncertain_source_scopes.lock();
+            let mut released = Vec::new();
+            let mut index = 0;
+            while index < held.len() {
+                if held[index].scope == scope {
+                    released.push(held.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            released
+        };
+        drop(released);
     }
     /// Validate a retained placement without minting another scope or changing
     /// its custody. Owner transfer invalidates an unconsumed placement grant.
@@ -2007,6 +2370,7 @@ impl PersistentSession {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        lease.validate_source_issuer()?;
         Ok(())
     }
     pub fn mint_scope_from_lease(
@@ -2294,6 +2658,8 @@ impl PersistentSession {
         &mut self,
         public_scope: ScopeId,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
+        self.admit_source_work_in(public_scope)?;
+
         let store = self.held_admission_store()?;
         super::generation_lease::requested_end(self.val_gen(), 1)?;
         self.reap_admission_leases();
@@ -2319,11 +2685,7 @@ impl PersistentSession {
             super::complete_native_transition(admission)?;
             private_scope
         };
-        let scope_lease = Arc::new(RuntimeLexicalScopeLease {
-            owner: self.admission_owner().clone(),
-            owner_epoch: self.admission_owner().epoch(),
-            scope: private_scope,
-        });
+        let scope_lease = self.prepared_lexical_scope_lease(private_scope)?;
         let view = self
             .compile_view_in(private_scope)
             .expect("fresh detached scope has a library")
@@ -2496,6 +2858,8 @@ impl PersistentSession {
         purpose: RuntimeCellPurpose,
         compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        self.admit_source_work_in(scope)?;
+
         let store = self.held_admission_store()?;
         super::generation_lease::requested_end(self.val_gen(), 1)?;
         self.reap_admission_leases();
@@ -3066,6 +3430,41 @@ impl PersistentSession {
 mod tests {
     use super::*;
     use crate::session::{ModuleEnv, SessionId, SessionLib};
+
+    #[test]
+    fn owner_transfer_guard_preserves_refusal_and_fences_uncertain_or_unwinding_epochs() {
+        for disposition in 0..3 {
+            let mut session = PersistentSession::new(None, 1024);
+            let scope = session.mint_isolated_scope_with_lease().unwrap();
+            let owner = session.admission_owner().clone();
+            let next = owner.epoch() + 1;
+            // Exercise the actual guard used around durable commit. Unknown
+            // and panic here are disposition injection, not physical IO loss.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                owner.with_source_owner_transfer(next, |transition| match disposition {
+                    0 => transition.refused(),
+                    1 => (),
+                    _ => panic!("injected owner commit unwind"),
+                });
+            }));
+            assert_eq!(result.is_err(), disposition == 2);
+            let mut enqueued = false;
+            let admission = scope.with_open_source_admission(|| enqueued = true);
+            assert_eq!(enqueued, disposition == 0);
+            if disposition == 0 {
+                admission.unwrap();
+            } else {
+                assert!(matches!(
+                    admission,
+                    Err(super::super::SourceAdmissionError::StaleSourceLease)
+                ));
+            }
+            assert!(
+                scope.source_admission().admit().is_ok(),
+                "the raw gate remaining open must not substitute for the exact issuer epoch"
+            );
+        }
+    }
 
     #[test]
     fn live_input_commitment_binds_native_payload_and_semantic_input_identity() {
