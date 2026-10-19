@@ -160,11 +160,11 @@ impl ActorEffectKey {
         Self::Lookup,
         Self::RepoEvent,
         Self::Source,
-        Self::RuntimeInfo,
         Self::Journal,
         Self::Web,
         Self::FsRead,
         Self::FsWrite,
+        Self::RuntimeInfo,
     ];
 
     pub const fn haskell_name(self) -> &'static str {
@@ -244,11 +244,11 @@ impl ActorEffectKey {
             Self::Lookup => "Lookup",
             Self::RepoEvent => "RepoEvent",
             Self::Source => "Source",
-            Self::RuntimeInfo => "RuntimeInfo",
             Self::Journal => "Journal",
             Self::Web => "Web",
             Self::FsRead => "FsRead",
             Self::FsWrite => "FsWrite",
+            Self::RuntimeInfo => "RuntimeInfo",
             Self::Forks => "Forks",
         }
     }
@@ -330,11 +330,11 @@ impl ActorEffectKey {
             Self::Lookup => Some("Tidepool.Effects.Core"),
             Self::RepoEvent => Some("Tidepool.Effects.Core"),
             Self::Source => Some("Tidepool.Effects.Core"),
-            Self::RuntimeInfo => Some("Tidepool.Effects.Core"),
             Self::Journal => Some("Tidepool.Effects.Core"),
             Self::Web => Some("Tidepool.Effects.Core"),
             Self::FsRead => Some("Tidepool.Effects.Core"),
             Self::FsWrite => Some("Tidepool.Effects.Core"),
+            Self::RuntimeInfo => Some("Tidepool.Effects.Core"),
             Self::Forks => None,
         }
     }
@@ -373,11 +373,11 @@ impl ActorEffectKey {
             Self::Lookup => Some("EffectLookup"),
             Self::RepoEvent => Some("EffectRepoEvent"),
             Self::Source => Some("EffectSource"),
-            Self::RuntimeInfo => Some("EffectRuntimeInfo"),
             Self::Journal => Some("EffectJournal"),
             Self::Web => Some("EffectWeb"),
             Self::FsRead => Some("EffectFsRead"),
             Self::FsWrite => Some("EffectFsWrite"),
+            Self::RuntimeInfo => Some("EffectRuntimeInfo"),
             Self::Forks => None,
         }
     }
@@ -443,11 +443,11 @@ impl ActorEffectKey {
             Self::Lookup => &[],
             Self::RepoEvent => &[],
             Self::Source => &[],
-            Self::RuntimeInfo => &[],
             Self::Journal => &[],
             Self::Web => &[],
             Self::FsRead => &[],
             Self::FsWrite => &[],
+            Self::RuntimeInfo => &[],
             Self::Forks => &[],
         }
     }
@@ -547,11 +547,11 @@ impl ToolEffectKey {
         Self::Actor(ActorEffectKey::Lookup),
         Self::Actor(ActorEffectKey::RepoEvent),
         Self::Actor(ActorEffectKey::Source),
-        Self::Actor(ActorEffectKey::RuntimeInfo),
         Self::Actor(ActorEffectKey::Journal),
         Self::Actor(ActorEffectKey::Web),
         Self::Actor(ActorEffectKey::FsRead),
         Self::Actor(ActorEffectKey::FsWrite),
+        Self::Actor(ActorEffectKey::RuntimeInfo),
         Self::ContextReadWrite,
         Self::Reload,
     ];

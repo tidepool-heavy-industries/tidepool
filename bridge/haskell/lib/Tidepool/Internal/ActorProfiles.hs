@@ -61,10 +61,10 @@ type ActorEffects =
   '[Replies, Watches, ResourceScopes, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Notifications, Jev, Commands, Console, AskUser, Green, Actor, Reflect, Lookup, Source, Journal, Web, FsRead, FsWrite, RepoEvent, RuntimeInfo]
 
 type CatalogueEffects =
-  '[ResourceScopes, Replies, Watches, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Commands, Console, AskUser, Green, Notifications, Jev, ModelCall OpenAI, ModelCall Argon, ModelCall DeepSeek, ForkAgent OpenAI, ForkAgent Argon, ForkAgent DeepSeek, SpawnAgent OpenAI, SpawnAgent Argon, SpawnAgent DeepSeek, Actor, Reflect, Lookup, RepoEvent, Source, RuntimeInfo, Journal, Web, FsRead, FsWrite]
+  '[ResourceScopes, Replies, Watches, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Commands, Console, AskUser, Green, Notifications, Jev, ModelCall OpenAI, ModelCall Argon, ModelCall DeepSeek, ForkAgent OpenAI, ForkAgent Argon, ForkAgent DeepSeek, SpawnAgent OpenAI, SpawnAgent Argon, SpawnAgent DeepSeek, Actor, Reflect, Lookup, RepoEvent, Source, Journal, Web, FsRead, FsWrite, RuntimeInfo]
 
 type CatalogueToolEffects =
-  '[ResourceScopes, Replies, Watches, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Commands, Console, AskUser, Green, Notifications, Jev, ModelCall OpenAI, ModelCall Argon, ModelCall DeepSeek, ForkAgent OpenAI, ForkAgent Argon, ForkAgent DeepSeek, SpawnAgent OpenAI, SpawnAgent Argon, SpawnAgent DeepSeek, Actor, Reflect, Lookup, RepoEvent, Source, RuntimeInfo, Journal, Web, FsRead, FsWrite, ContextReadWrite, Reload]
+  '[ResourceScopes, Replies, Watches, ActorContext, AgentLaunch, AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry, WorktreeAllocation, WorktreeIntegration, Sleep, Commands, Console, AskUser, Green, Notifications, Jev, ModelCall OpenAI, ModelCall Argon, ModelCall DeepSeek, ForkAgent OpenAI, ForkAgent Argon, ForkAgent DeepSeek, SpawnAgent OpenAI, SpawnAgent Argon, SpawnAgent DeepSeek, Actor, Reflect, Lookup, RepoEvent, Source, Journal, Web, FsRead, FsWrite, RuntimeInfo, ContextReadWrite, Reload]
 
 data ToolEffectKey = ActorEffect ActorEffectKey | InvocationContextReadWrite | InvocationReload
   deriving (Eq, Show)
@@ -103,11 +103,11 @@ actorEffectName key = case key of
   EffectLookup -> "Lookup"
   EffectRepoEvent -> "RepoEvent"
   EffectSource -> "Source"
-  EffectRuntimeInfo -> "RuntimeInfo"
   EffectJournal -> "Journal"
   EffectWeb -> "Web"
   EffectFsRead -> "FsRead"
   EffectFsWrite -> "FsWrite"
+  EffectRuntimeInfo -> "RuntimeInfo"
 
 toolEffectName :: ToolEffectKey -> Text
 toolEffectName key = case key of

@@ -103,11 +103,11 @@ instance KnownEffect (Reflect) where effectWitness = EffectWitness EffectReflect
 instance KnownEffect (Lookup) where effectWitness = EffectWitness EffectLookup
 instance KnownEffect (RepoEvent) where effectWitness = EffectWitness EffectRepoEvent
 instance KnownEffect (Source) where effectWitness = EffectWitness EffectSource
-instance KnownEffect (RuntimeInfo) where effectWitness = EffectWitness EffectRuntimeInfo
 instance KnownEffect (Journal) where effectWitness = EffectWitness EffectJournal
 instance KnownEffect (Web) where effectWitness = EffectWitness EffectWeb
 instance KnownEffect (FsRead) where effectWitness = EffectWitness EffectFsRead
 instance KnownEffect (FsWrite) where effectWitness = EffectWitness EffectFsWrite
+instance KnownEffect (RuntimeInfo) where effectWitness = EffectWitness EffectRuntimeInfo
 instance forall modelFamily. KnownFamily modelFamily => KnownEffect (ModelCall modelFamily) where
   effectWitness = case familyWitness @modelFamily of
     OpenAIWitness -> EffectWitness EffectModelCallOpenAI

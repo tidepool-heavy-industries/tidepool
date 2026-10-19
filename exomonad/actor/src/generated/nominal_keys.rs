@@ -112,11 +112,11 @@ impl ActorEffectKeyWire {
         Self::EffectLookup,
         Self::EffectRepoEvent,
         Self::EffectSource,
-        Self::EffectRuntimeInfo,
         Self::EffectJournal,
         Self::EffectWeb,
         Self::EffectFsRead,
         Self::EffectFsWrite,
+        Self::EffectRuntimeInfo,
     ];
 
     pub const fn haskell_constructor(self) -> &'static str {
