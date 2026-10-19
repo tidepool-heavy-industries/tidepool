@@ -32,6 +32,37 @@ mod published_source;
 pub(crate) use published_source::PublishedOriginalEndorsement;
 pub use published_source::PublishedSourceOriginalSelection;
 
+// Full-profile diagnostics have an independent output budget. An omitted row
+// or binding makes this observation incomplete, never proof of absence.
+const NATIVE_TRACE_ROWS: usize = 256;
+const NATIVE_TRACE_ROOTS: usize = 512;
+
+pub(crate) fn trace_native_input_roles(
+    stage: &'static str,
+    projection: Option<&CompilerInputProjection>,
+) {
+    if !tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG)
+    {
+        return;
+    }
+    let roles = projection.map(CompilerInputProjection::snapshot_roles);
+    let total = roles.map_or(0, |roles| roles.len());
+    for (owner, role) in roles
+        .into_iter()
+        .flat_map(|roles| roles.iter())
+        .take(NATIVE_TRACE_ROWS)
+    {
+        tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+            stage, ?owner, interface = ?role.interface(), original = ?role.original(),
+            published_source = role.is_published_source_original(),
+            "native input role observation");
+    }
+    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+        stage, present = projection.is_some(), total, emitted = total.min(NATIVE_TRACE_ROWS),
+        omitted = total.saturating_sub(NATIVE_TRACE_ROWS), complete = total <= NATIVE_TRACE_ROWS,
+        "native input role observation coverage");
+}
+
 // Count actual cold semantic encodings on this test thread across owner clones.
 // Per-owner counters alone cannot detect a second independently encoded owner.
 #[cfg(test)]
@@ -633,6 +664,10 @@ impl OriginalCompilerInputs {
     pub(crate) fn reuse_selected_authored(
         context: &ExactDeclarationContext,
     ) -> Result<Option<Self>, CompileError> {
+        trace_native_input_roles(
+            "authored_reuse_input",
+            Some(context.compiler_input_projection()),
+        );
         let interfaces = context.owner.facts.compiler_support.selected_interfaces()?;
         let authored = interfaces
             .values()
@@ -693,6 +728,7 @@ impl OriginalCompilerInputs {
                     },
                 )?;
             }
+            trace_native_input_roles("authored_fallback_projection", Some(&projection));
             let native_offers =
                 preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
@@ -712,6 +748,10 @@ impl OriginalCompilerInputs {
                 .iter()
                 .any(|role| role.original().is_some())
         });
+        trace_native_input_roles(
+            "authored_fallback_result",
+            carried.as_ref().map(|input| &input.projection),
+        );
         if selected.is_empty() {
             return Ok(carried);
         }
@@ -723,10 +763,12 @@ impl OriginalCompilerInputs {
             artifacts: source.artifacts().clone(),
             native_offers: source.native_offers().to_vec(),
         };
-        Ok(Some(match carried {
+        let result = match carried {
             Some(carried) => selected.merge(&carried)?,
             None => selected,
-        }))
+        };
+        trace_native_input_roles("authored_reuse_result", Some(&result.projection));
+        Ok(Some(result))
     }
 
     pub(crate) fn from_candidates(
@@ -743,6 +785,10 @@ impl OriginalCompilerInputs {
         configured: &[CertifiedRecoveryProduct],
     ) -> Result<Option<Self>, CompileError> {
         let mut carried = Self::reuse_selected_authored(context)?;
+        trace_native_input_roles(
+            "candidate_after_authored_reuse",
+            carried.as_ref().map(|input| &input.projection),
+        );
         let metadata = context.compiler_metadata_snapshot()?;
         let mut reused = BTreeSet::new();
         let mut fresh = Vec::new();
@@ -779,6 +825,10 @@ impl OriginalCompilerInputs {
             });
         }
         if fresh.is_empty() {
+            trace_native_input_roles(
+                "candidate_private_composition",
+                carried.as_ref().map(|input| &input.projection),
+            );
             return Ok(carried);
         }
         let configured = Self::issue_complete_native_availability_with_source(
@@ -790,10 +840,13 @@ impl OriginalCompilerInputs {
                 products: &fresh,
             },
         )?;
-        Ok(Some(match carried {
+        trace_native_input_roles("candidate_fresh_fragment", Some(&configured.projection));
+        let result = match carried {
             Some(carried) => carried.merge(&configured)?,
             None => configured,
-        }))
+        };
+        trace_native_input_roles("candidate_private_composition", Some(&result.projection));
+        Ok(Some(result))
     }
 
     #[cfg(test)]
@@ -1017,7 +1070,10 @@ impl OriginalCompilerInputs {
             // offers. Its selected view deliberately need not own their Groups.
             CompleteAvailabilitySource::Request(_) => (Vec::new(), Vec::new()),
         };
+        trace_native_input_roles("native_issuance_baseline", Some(baseline));
+        trace_native_input_roles("native_issuance_fragment", Some(&projection));
         let effective = baseline.merge(&projection)?;
+        trace_native_input_roles("native_issuance_effective_roles", Some(&effective));
         let dependencies = match &source {
             CompleteAvailabilitySource::Candidate { source, .. } => {
                 crate::artifact_inventory::NativeDependencyCatalog::from_source(source)?
@@ -1606,19 +1662,33 @@ impl RequestNativeAvailability {
         if self.0.is_empty() {
             return Ok(self.clone());
         }
+        let trace = tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG);
         let payloads = artifacts.retained_payloads();
         let mut retained = BTreeSet::new();
         let mut roots_by_contribution = BTreeMap::new();
-        for (id, row) in self.0.iter() {
+        for (index, (id, row)) in self.0.iter().enumerate() {
             let owner = identity(&row.original_owner().unit, &row.original_owner().module);
-            let Some(role) = roles.snapshot_roles().get(&owner) else {
+            let role = roles.snapshot_roles().get(&owner);
+            let observe = |direct: bool| {
+                if trace && index < NATIVE_TRACE_ROWS {
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                        ?owner, available_original = ?id, available_mode = ?row.mode, canonical = ?row.canonical,
+                        selected_interface = ?role.map(CompilerInputRole::interface),
+                        selected_original = ?role.and_then(CompilerInputRole::original), direct,
+                        "native availability direct root decision");
+                }
+            };
+            let Some(role) = role else {
+                observe(false);
                 continue;
             };
             if role.interface() != row.canonical
                 || role.original().is_some_and(|selected| selected != *id)
             {
+                observe(false);
                 continue;
             }
+            observe(true);
             retained.insert(*id);
             for contribution in row.contributions.iter() {
                 let entry = roots_by_contribution
@@ -1641,8 +1711,32 @@ impl RequestNativeAvailability {
             ArtifactId,
             Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
         > = BTreeMap::new();
-        for (_, (contribution, roots)) in roots_by_contribution {
+        let contribution_count = roots_by_contribution.len();
+        if trace {
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                rows = self.0.len(), row_omissions = self.0.len().saturating_sub(NATIVE_TRACE_ROWS),
+                contributions = roots_by_contribution.len(),
+                contribution_omissions = roots_by_contribution.len().saturating_sub(NATIVE_TRACE_ROWS),
+                complete = self.0.len() <= NATIVE_TRACE_ROWS && roots_by_contribution.len() <= NATIVE_TRACE_ROWS,
+                "native availability root observation coverage");
+        }
+        for (index, (identity, (contribution, roots))) in
+            roots_by_contribution.into_iter().enumerate()
+        {
             let restricted = contribution.for_groups(&roots)?;
+            if trace && index < NATIVE_TRACE_ROWS {
+                let observed_roots = roots.iter().take(NATIVE_TRACE_ROOTS).collect::<Vec<_>>();
+                let members = restricted.originals();
+                let observed_members = members.iter().take(NATIVE_TRACE_ROWS).collect::<Vec<_>>();
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    contribution = ?identity, issuer_original = ?contribution.offer().original(),
+                    roots = ?observed_roots, root_count = roots.len(),
+                    root_omissions = roots.len().saturating_sub(NATIVE_TRACE_ROOTS),
+                    closure_members = ?observed_members, member_count = members.len(),
+                    member_omissions = members.len().saturating_sub(NATIVE_TRACE_ROWS),
+                    complete = roots.len() <= NATIVE_TRACE_ROOTS && members.len() <= NATIVE_TRACE_ROWS,
+                    "native availability closure from direct roots");
+            }
             for id in restricted.originals() {
                 dependencies
                     .entry(*id)
@@ -1650,7 +1744,15 @@ impl RequestNativeAvailability {
                     .push(Arc::clone(&restricted));
             }
         }
+        if trace {
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                contribution_count, emitted = contribution_count.min(NATIVE_TRACE_ROWS),
+                omitted = contribution_count.saturating_sub(NATIVE_TRACE_ROWS),
+                complete = contribution_count <= NATIVE_TRACE_ROWS,
+                "native availability closure observation coverage");
+        }
         let mut rows = BTreeMap::new();
+        let mut historical_observations = 0usize;
         for (id, row) in self.0.iter() {
             let direct = retained.contains(id);
             if !direct && !dependencies.contains_key(id) {
@@ -1701,6 +1803,19 @@ impl RequestNativeAvailability {
                             );
                         }
                     }
+                    if trace {
+                        if historical_observations < NATIVE_TRACE_ROWS {
+                            let observed =
+                                roots.iter().take(NATIVE_TRACE_ROOTS).collect::<Vec<_>>();
+                            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                                required_original = ?id, issuer_original = ?contribution.offer().original(),
+                                required_groups = ?observed, group_count = roots.len(),
+                                group_omissions = roots.len().saturating_sub(NATIVE_TRACE_ROOTS),
+                                complete = roots.len() <= NATIVE_TRACE_ROOTS,
+                                "native availability historical dependency permissions");
+                        }
+                        historical_observations += 1;
+                    }
                     if !roots.is_empty() {
                         contributions.push(contribution.for_groups(&roots)?);
                     }
@@ -1719,6 +1834,14 @@ impl RequestNativeAvailability {
                 NativeInputClassification::PrivateInput
             };
             rows.insert(*id, Arc::new(selected));
+        }
+        if trace {
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                observations = historical_observations,
+                emitted = historical_observations.min(NATIVE_TRACE_ROWS),
+                omitted = historical_observations.saturating_sub(NATIVE_TRACE_ROWS),
+                complete = historical_observations <= NATIVE_TRACE_ROWS,
+                "native availability historical dependency observation coverage");
         }
         Ok(Self(Arc::new(rows)))
     }
@@ -2362,9 +2485,26 @@ impl ProtectedScaffoldRequirements {
     ) -> Result<RequestCompilerInputs, CompileError> {
         #[cfg(test)]
         REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.set(count.get() + 1));
+        trace_native_input_roles(
+            "request_before_private_composition",
+            Some(context.compiler_input_projection()),
+        );
+        trace_native_input_roles(
+            "request_private_fragment",
+            private.map(|input| &input.projection),
+        );
         let support = context
             .compiler_source_support()
-            .close_request(private, self)?;
+            .close_request(private, self)
+            .inspect_err(|error| {
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    stage = "request_private_composition", outcome = "error", %error,
+                    "native input construction refused");
+            })?;
+        trace_native_input_roles(
+            "request_after_private_composition",
+            Some(support.projection()),
+        );
         let metadata = support
             .projection()
             .project_metadata(support.artifacts().metadata_snapshot())?;

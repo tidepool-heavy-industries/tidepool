@@ -1493,6 +1493,11 @@ impl ModuleCandidateOffer {
             retained,
             &catalog,
         )
+        .inspect_err(|error| {
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                stage = "inspection_offer", outcome = "error", %error,
+                "native input construction refused");
+        })
     }
 
     /// Reload compares candidate source for every original in the retained
@@ -1559,12 +1564,22 @@ impl ModuleCandidateOffer {
             ));
         }
         let inputs = crate::checked_cell::CheckedValueInputs::capture_checked(values, retained)?;
+        crate::declaration_context::trace_native_input_roles(
+            "inspection_before_value_extension",
+            context
+                .as_ref()
+                .map(|context| context.declarations().compiler_input_projection()),
+        );
         let declarations = checked_value_context(
             context
                 .as_ref()
                 .map(|context| context.declarations().clone()),
             &inputs,
         )?;
+        crate::declaration_context::trace_native_input_roles(
+            "inspection_after_value_extension",
+            Some(declarations.compiler_input_projection()),
+        );
         let context = compile_context_with_declarations(context, declarations.clone());
         let authorization = checked_search_authorization(
             encode_inspection_authorization_for(purpose, &owners, inputs.baseline_authorization()),
@@ -1579,6 +1594,10 @@ impl ModuleCandidateOffer {
             catalog,
         )?;
         let private = private_native_availability(&declarations, producer, selected.as_deref())?;
+        crate::declaration_context::trace_native_input_roles(
+            "inspection_private_fragment",
+            private.as_ref().map(|input| input.role_projection()),
+        );
         Ok(Self {
             selected,
             producer: producer.to_vec(),
