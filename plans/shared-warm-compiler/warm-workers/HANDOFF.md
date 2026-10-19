@@ -1,82 +1,78 @@
-# Warm worker implementation handoff
+# Warm compiler handoff
 
-Owner `/root/warm_compiler_campaign/warm_workers`; one reserved implementation
-leaf `warm_workers/protocol` (Sol high). Checkout
-`tidepool-shared-warm-warm-workers-20261019`, branch
-`feature/shared-warm/warm-workers`. Campaign owns shared contracts/integration.
+Campaign owns integration. Warm owns the cross-language world client, protocol,
+Haskell service, and cold constructor. HOST owns the actual runtime/actor query
+and per-item publication consumers; its existing reserved leaf owns the real
+Rooted retention histories. There are no active Warm native commands.
 
-## Reviewable candidate and evidence
+## Qualified old-profile parcel
 
-Production candidate `a3c033def2f9768a622a9d184c193a17f17b6785` is independently
-source-accepted over full base `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
-It contains the actual open/query/restore client, current version 2 cold
-restoration binding both ordered semantic row vectors, source-first resolution
-and unit-qualified reexport validation, source-local output/bytecode guards,
-exception-safe unissued materialization, tiny late request bindings, and the
-existing ExactInputOwner's combined optional world/raw retention budget.
+The area joins the independently qualified reachable frontier `ade307993b8d`
+with canonical producer/diagnostic source `d7cd1bbb6956`, retaining the existing
+four-argument query factory and old profile. It excludes typed bindings,
+TPCWBIND3, new CID parsing and crypton. The merge keeps current-root block
+custody/counters, admits the actual endpoint's canonical producer before the
+first snapshot/root seal, and retains authentic cold FD bytes and geometry in
+existing opt-in diagnostics. Joined source review/compilation must be recorded
+separately from these component passes.
 
 Private evidence root:
 `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/`.
-`WORLD-FORMAT2-NATIVE-a3.json` records exact commands, artifacts, hashes and counts
-(SHA256 `f2feb20c4ee45637664af8c081a5473c2bcbca31527ebc15076e542de6cd5b6f`).
-Production worker plus SourceBoot binary compiled: exit 0, seven local actions.
-Toolchain production plus cfg(test) compiled: exit 0, three local actions.
-Five maintained Rust controls and five maintained SourceBoot leaves executed
-and passed. These include the genuine Rust-issued cold row reader's mutation
-controls, raw retention/pruning, unissued cleanup/cancellation, effective
-transitive source guards and boot/hold/executor boundaries.
 
-Prior `039c80da76` executed four SourceBoot leaves: three passed and the bytecode
-flag guard failed. That evidence remains in `SOURCEBOOT-TERMINAL-039c.json`.
-The pinned parser can set Opt_ByteCode while retaining NoBackend; the repaired
-control verifies this parser behavior and the effective-flag refusal. No foreign
-compiler execution was established by the original failure.
+- `cold-producer-367/TERMINAL.json`, SHA256
+  `f03d844a4ab741c6d3673f3782aba0426214876b9660a0ec0654bf27ea64126b`:
+  six production/cfgtest targets compiled at45f (1022 local actions), two actual
+  Rust controls and two Haskell controls passed. The d7 successor changes only
+  test support. The earlier Unicode capture fixture failure is retained.
+- Independent execution receipt
+  `owned-inputs/source-lifetime/COLD-PRODUCER-EXECUTION-REVIEW-d7cd.md`, SHA256
+  `f56bfbfb80979ebd8493a892f61907937f642b9108ce4efa082a545cd22fb31d`,
+  verifies all29 references. Diagnostic slice copies are evidence, not replayable
+  authority. Directory-resource hashes remain unknown; Rust compiler/hosted
+  cleanup is not_observed.
+- `cell/RUST-FRONTIER-NATIVE-acb.json`, SHA256
+  `4cfb90a00ca47246938114b123bf2fdaa49fdcb76f7863c3d8623c346dc5b1b1`:
+  production/cfgtest compilation and five counted frontier controls passed,
+  including full-recomputation histories, multiplicity/forks, actual changed-path
+  work and failure isolation. Production use is cold bootstrap only.
 
-The actual package service foundation is separately qualified at owned
-`dd0297a75e`: two Rooted owner controls/four semantic GHC inspections, normal
-retirement and native interrupted finalization retry. Original failed epoch's
-73 pins remain retained. That evidence does not establish persistent-world
-query or eviction correctness.
+## Actual consumer gates
 
-## Current observer and required gates
+HOST's real query at eea reached service Ready but both first Complete offers
+were rejected. Their authentic carriers were not retained; the exact observed
+cause remains unproven. Static raw-versus-canonical producer defects are fixed.
+After HOST's frozen typed gate settles, its actual query checkout must join the
+qualified old-profile repair and retry fresh under source admission. Preserve
+frontend effect resumption, ordered different-body source receipts, defining
+package reexports and exact hot work counters. No accepted request is replayed.
 
-All warm native commands are terminal; the prospective 8 GiB additional memory
-and 2 GiB growth grant is released. Campaign LIVE warm entry is zero. Idle Buck
-PID4101866 remains in `/build.slice/inanna-build-1792404990-4101779.scope` and its
-memory remains in global accounting. No command is orphaned.
+Required Rooted histories remain unqualified: Resident hit, eviction followed by
+same-world Complete restore, budget-zero active hold through actual END followed
+by disposal/NeedsAcquisition, and backing cleanup failure causing worker exit.
+Conditional oversize disposal walks its owned tree; ordinary cached END does
+not inventory the baseline. The separately qualified package owner/retirement
+controls do not establish these world/query properties.
 
-Actual Rooted public-module query and genuine world retention histories remain
-unqualified: Resident hit; eviction to same-world NeedsAcquisition/Complete;
-oversize active use through actual END followed by disposal/nonresidency;
-cleanup failure causing worker exit and conservative custody. Cold filesystem
-and quota controls are not substitutes. Coordinate those through the existing
-host Rooted actor execution group, keeping source and protocol observations
-with the actual consumer. Conditional oversize disposal walks its owned tree;
-ordinary cached END does not inventory the baseline.
+## Required ordinary-cell work
 
-Host owns the joined runtime/actor consumer and original plus target source
-admission. Integrate this matched candidate after its frozen compile settles.
-Retain the real frontend effect-resumption gate, exact requested/defining
-source-unit receipts, first-root different-body/reverse-order controls, refusal
-without replay and hot work counters. No Ready/hit performance claim is made.
+`RUST-CLIENT-MIGRATION` and the accepted CELL-WORLD contract require the world
+API for ordinary prepare, every publishable ordinal's successor, both bindings
+and declaration publication, fork/reload/recovery, and deletion of old full
+ordinary input preparation. This is required work, not an optional cache.
 
-## Authorized ordinary-cell successor work
+Separate unqualified source holds typed SymbolIdentity/SessionVarId/scope/row
+capture, a binding HAMT and both-root receiver. The new crypton outputs have
+been realized/rooted, but metadata projection, native compilation, matched
+profile/provider boot and a genuine checked-value alias roundtrip remain open.
+The protocol leaf is implementing matched plan/prepare operations; no ordinary
+cell or delta-publication execution has been accepted.
 
-The accepted `RUST-CLIENT-MIGRATION` and paired
-`CELL-SUCCESSOR-CONTRACT-8d69.md` require ordinary prepareCell, every publishable
-ordinal's private successor, atomic binding/declaration publication, fork,
-reload and exact recovery. This is required implementation, not an optional
-cache. The concrete Haskell packet is private
-`protocol/HASKELL-PREPARE-CELL-SIGNATURES.md` (SHA256
-`1f432599d3d7102e77262b0d94d27935ffafb005309b1d84dc00ed5f1f8f2905`).
+The approved primary carrier extends actual AdmittedCompilerRoles acquired
+ArtifactBinding/ArtifactEntry pairs with a third persistent Materializer root.
+Context role/namespace/scope chooses associations; image content sharing never
+chooses scope. Retain lexical/instance/native proof owners and actual output
+checks. Per-item publication changes only persistent nodes; no full flat seal,
+snapshot offers fold, predecessor chain or hidden ExactCompilationRequest.
 
-Next paired fields: actual visible SymbolIdentity/SessionVarId/scope linked to
-its exact checked row; service-issued actual target/output observations before
-universe target stripping; runtime per-item completion and publication delta;
-existing Materializer persistent changed nodes/shared block roots. Cold flat
-row seals must not become an ordinary commit scan. No predecessor-world chain,
-whole support fold, or hidden full ExactCompilationRequest reconstruction.
-
-Before yielding, name the awaited event, producer, recipient and continuation.
-Wake dormant owners with followup_task. Campaign folds only after its current
-source-frozen gate settles; no deployment or live Persona changes are authorized.
+Terminal producers wake dormant owners with exact source/evidence and the next
+consumer action. Keep the old-profile query independent of new profile work.
