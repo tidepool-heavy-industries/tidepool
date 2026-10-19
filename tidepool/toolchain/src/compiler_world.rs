@@ -374,8 +374,11 @@ pub struct CompilerWorldBindings {
 
 // The occurrence is the existing SnapshotKey<String>. The row link names the
 // independently materialized exact semantic row plus its original issuer.
+// Compiler generation comes from that retained row owner; SessionVarId remains
+// an independent runtime identity and never supplies a compiler generation.
 type WorldBindingSnapshotFact = (
     (String, String, String, String, Option<String>),
+    u64,
     u64,
     u64,
     cid::Cid,
@@ -489,6 +492,7 @@ impl CompilerWorldBindings {
                     ),
                     entry.session_var.raw(),
                     entry.defining_scope,
+                    entry.row.owner().gen.0,
                     *row,
                 ),
             );
@@ -874,7 +878,7 @@ fn binding_metadata_bound(fields: [usize; 5], parent_bytes: usize) -> Result<u64
     let hamt_node = 9 + (9 + 4) + 9;
     let routing = 52 * (hamt_node + cid_link);
     let key_bucket_heads = 5 * 9;
-    let binding_heads = 2 * 9 + 5 * 9 + 2 * 9 + cid_link;
+    let binding_heads = 2 * 9 + 5 * 9 + 3 * 9 + cid_link;
     fields.into_iter().chain([parent_bytes]).try_fold(
         routing + key_bucket_heads + binding_heads,
         |size, field| {
@@ -1482,7 +1486,7 @@ impl CompilerWorldOpenInputs {
             work.link_visits.saturating_add(work.unlink_visits),
         );
         let visibility = world_bytes(&world_array(vec![
-            world_text("TPCWBIND3"),
+            world_text("TPCWBIND4"),
             self.bindings.query_scope.into(),
             world_blob(bindings.root().cid().to_bytes()),
         ]))?;
@@ -2438,7 +2442,7 @@ mod answer_tests {
                 symbol.4.as_ref().unwrap().len(),
             )
             .unwrap();
-            facts.insert(occurrence, (symbol, index, index, row));
+            facts.insert(occurrence, (symbol, index, index, index, row));
         }
         materializer.materialize_map(None, &facts).unwrap();
         let staged = materializer.finish().unwrap();
