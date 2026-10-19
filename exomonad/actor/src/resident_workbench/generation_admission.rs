@@ -26,6 +26,7 @@ struct WorldState {
     claims: usize,
     unconfirmed: usize,
     uncertainty_fence: Option<tidepool_runtime::session::RuntimeSourceFence>,
+    publication: Option<Arc<()>>,
 }
 impl std::fmt::Debug for WorldState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,6 +56,7 @@ impl BootstrapWorld {
                 claims: 0,
                 unconfirmed: 0,
                 uncertainty_fence: None,
+                publication: None,
             }),
         }))
     }
@@ -144,10 +146,7 @@ impl BootstrapWorld {
             .get()
             .ok_or(GenerationAdmissionError::Unqualified)?;
         scope.validate_source_issuer()?;
-        if !scope
-            .source_admission()
-            .same_owner(target.runtime_admission())
-        {
+        if !Arc::ptr_eq(scope, target.runtime_lease()) {
             return Err(GenerationAdmissionError::StaleSourceLease);
         }
         let fence = scope.source_admission().fence()?;
@@ -163,11 +162,18 @@ impl BootstrapWorld {
             });
         }
         state.phase = WorldPhase::Publishing(target.clone());
+        let attempt = Arc::new(());
+        state.publication = Some(attempt.clone());
         Ok(WorldPublication {
             world: self.clone(),
             settled: false,
             prerequisite,
             fence: Some(fence),
+            visibility: WorldPublicationVisibility {
+                world: self.clone(),
+                target: target.clone(),
+                attempt,
+            },
         })
     }
 }
@@ -224,28 +230,119 @@ pub(super) struct WorldPublication {
     settled: bool,
     prerequisite: Option<tidepool_runtime::session::RuntimeSourceLeaseClaim>,
     fence: Option<tidepool_runtime::session::RuntimeSourceFence>,
+    visibility: WorldPublicationVisibility,
 }
+
+/// Visibility of one prepared attempt, without its fence or settlement rights.
+#[derive(Clone)]
+pub(super) struct WorldPublicationVisibility {
+    world: BootstrapWorld,
+    target: GenerationDependency,
+    attempt: Arc<()>,
+}
+
+impl WorldPublicationVisibility {
+    pub(super) fn install(
+        &self,
+        installed: &super::InstalledToolsState,
+        attempt: &Arc<super::ActorPublicationAttempt>,
+        generation: Arc<super::ActorGeneration>,
+    ) -> bool {
+        let mut world = self.world.0.state.lock();
+        let mut current = installed.0.lock();
+        let exact = world
+            .publication
+            .as_ref()
+            .is_some_and(|issued| Arc::ptr_eq(issued, &self.attempt))
+            && Arc::ptr_eq(&self.target.0, &generation.dependency().0)
+            && Arc::ptr_eq(self.target.runtime_lease(), &generation.scope);
+        let live = exact
+            && matches!(&world.phase, WorldPhase::Publishing(_))
+            && matches!(&*current, super::InstalledToolsAvailability::PublicationInProgress(issued) if Arc::ptr_eq(issued, attempt));
+        if exact {
+            world.phase = if live {
+                WorldPhase::Bound(self.target.clone())
+            } else {
+                WorldPhase::Unavailable(self.target.clone())
+            };
+        }
+        // A late callback records actual visibility, never operational authority.
+        if matches!(&*current,
+            super::InstalledToolsAvailability::PublicationInProgress(issued)
+            | super::InstalledToolsAvailability::PublicationUnavailable(issued)
+            if Arc::ptr_eq(issued, attempt))
+        {
+            *current = if live {
+                super::InstalledToolsAvailability::Generation(generation)
+            } else {
+                super::InstalledToolsAvailability::GenerationUnavailable(generation)
+            };
+        }
+        live
+    }
+}
+
 impl WorldPublication {
+    pub(super) fn visibility(&self) -> WorldPublicationVisibility {
+        self.visibility.clone()
+    }
+
+    pub(super) fn unavailable(&mut self, mark_installed: impl FnOnce()) {
+        let mut state = self.world.0.state.lock();
+        if state
+            .publication
+            .as_ref()
+            .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
+        {
+            state.phase = WorldPhase::Unavailable(self.visibility.target.clone());
+            state.uncertainty_fence = self.fence.take();
+            mark_installed();
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn visible(&mut self, target: &GenerationDependency) {
         let mut state = self.world.0.state.lock();
         match &state.phase {
-            WorldPhase::Publishing(expected) if expected.same_owner(target) => {}
+            WorldPhase::Publishing(expected) if Arc::ptr_eq(&expected.0, &target.0) => {}
             _ => panic!("initial world publication lost its exact owner"),
         }
         state.phase = WorldPhase::Bound(target.clone());
     }
-    pub(super) fn confirmed(mut self) {
+    pub(super) fn confirmed_when(mut self, current: impl FnOnce() -> bool) -> bool {
+        let mut state = self.world.0.state.lock();
+        if !state
+            .publication
+            .as_ref()
+            .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
+            || !matches!(&state.phase, WorldPhase::Bound(target) if target.same_prepared(&self.visibility.target))
+            || !current()
+        {
+            return false;
+        }
         self.fence
             .take()
             .expect("initial source publication fence")
             .reopen()
             .expect("confirmed publisher owns source fence");
         self.settled = true;
+        state.publication = None;
+        true
+    }
+    #[cfg(test)]
+    pub(super) fn confirmed(self) {
+        assert!(self.confirmed_when(|| true));
     }
     pub(super) fn refused(mut self) {
         let mut state = self.world.0.state.lock();
-        if matches!(state.phase, WorldPhase::Publishing(_)) {
+        if state
+            .publication
+            .as_ref()
+            .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
+            && matches!(state.phase, WorldPhase::Publishing(_))
+        {
             state.phase = WorldPhase::Bootstrap;
+            state.publication = None;
         }
         self.fence
             .take()
@@ -258,14 +355,9 @@ impl WorldPublication {
 impl Drop for WorldPublication {
     fn drop(&mut self) {
         if !self.settled {
+            self.unavailable(|| {});
             if let Some(prerequisite) = self.prerequisite.take() {
                 prerequisite.retain_unconfirmed();
-            }
-            let mut state = self.world.0.state.lock();
-            if let WorldPhase::Publishing(target) | WorldPhase::Bound(target) = &state.phase {
-                let target = target.clone();
-                state.uncertainty_fence = self.fence.take();
-                state.phase = WorldPhase::Unavailable(target);
             }
         }
     }
@@ -493,6 +585,9 @@ impl GenerationDependency {
     }
     pub(crate) fn same_owner(&self, other: &Self) -> bool {
         self.0.admission.same_owner(&other.0.admission)
+    }
+    pub(super) fn same_prepared(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) && Arc::ptr_eq(self.runtime_lease(), other.runtime_lease())
     }
     pub(crate) fn depends_on(&self, other: &Self) -> bool {
         self.0.admission.depends_on(&other.0.admission)
