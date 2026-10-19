@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::artifact_inventory::{CanonicalProducerIdentity, NativeArtifactDemand};
+use crate::artifact_inventory::{CanonicalProducerIdentity, NativeArtifactDemand, NativeGroupKey};
 use crate::cache::{DependencyEvidence, ModuleEvidence, SourceEvidence};
 use crate::certified_products::{
     AcceptedGlobal, AcceptedGroup, CertifiedModuleReceipt, CertifiedProducts, CertifiedReceipt,
@@ -380,11 +380,50 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let public_request = public_original
         .prepare_compilation(&directory.path().join("public-original-inputs"), &PRODUCER)
         .unwrap();
-    assert_eq!(public_request.groups[0].owner(), issued.groups[0].owner());
+    assert!(public_request.groups.is_empty());
+    assert!(public_original
+        .artifact_view()
+        .selected_native_groups()
+        .is_empty());
+    let public_inputs = public_request.compiler_inputs();
+    let public_selection = CertifiedSourceSelection::from_compiler_inputs(
+        public_inputs,
+        &public_inputs.metadata,
+        &InventoryOperation::new(Default::default()),
+    )
+    .unwrap();
+    let inventory = public_inputs.artifacts().inventory();
+    let mut bound = inventory
+        .bind_segment(public_inputs.artifacts(), Vec::new(), &public_selection)
+        .unwrap();
+    let demanded = inventory
+        .admit_bound_target(
+            &mut bound,
+            public_inputs.artifacts(),
+            NativeArtifactDemand::CertifiedTargetImports(&imports),
+            Vec::new(),
+            &public_selection,
+        )
+        .unwrap()
+        .bind_target(None, imports.clone());
+    let resolved = demanded.resolve().unwrap();
+    assert_eq!(resolved.groups().len(), 1);
     assert_eq!(
-        public_request.groups[0].imports(),
-        issued.groups[0].imports()
+        resolved
+            .groups()
+            .iter()
+            .map(|group| NativeGroupKey {
+                artifact: group.binding.artifact(),
+                original_ordinal: group.original_ordinal,
+            })
+            .collect::<BTreeSet<_>>(),
+        view.selected_native_groups(),
     );
+    assert!(resolved
+        .groups()
+        .iter()
+        .all(|group| view.contains_issued_native_group(*group)));
+    assert_eq!(resolved.imports(), imports);
     let inherited = selected_package_closure(
         &BTreeMap::new(),
         &issued,
