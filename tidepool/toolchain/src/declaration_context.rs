@@ -7680,14 +7680,19 @@ impl DecodedWorldSourceReceipt {
 }
 
 pub(crate) fn decode_world_source_receipt(
-    binding: WorldSourceCompilationBinding,
-    output_root: &Path,
+    output: &crate::compiler_world::WorldCellOutputAdmission,
+    segment_index: usize,
     receipt_relative: &Path,
-    common_files: &BTreeMap<PathBuf, [u8; 32]>,
-    captured_files: &BTreeMap<PathBuf, crate::compiler_world::WorldOutputFile>,
     operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<DecodedWorldSourceReceipt, CompileError> {
     use sha2::Digest;
+    if !std::ptr::eq(operation, output.validation.inventory.as_ref()) {
+        return Err(failure("world source receipt has another inventory operation"));
+    }
+    let binding = WorldSourceCompilationBinding::from_output(output, segment_index)?;
+    let output_root = output.directory.path();
+    let common_files = &output.common_files;
+    let captured_files = &output.captured_files;
     if !output_root.is_absolute() {
         return Err(failure("world source output owner is not absolute"));
     }
