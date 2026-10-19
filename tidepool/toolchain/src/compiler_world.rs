@@ -946,45 +946,52 @@ impl WorldColdRows {
         }
         // Equal immutable type content shares the original receiving aliases.
         // Its independently issued historical runtime receipt remains in visibility.
-        let row = self
-            .rows
-            .entry(key.clone())
-            .or_insert(interface_row)
-            .clone();
+        let row = self.receiving_aliases(key.clone(), interface_row)?;
         self.images.entry(key).or_insert(image);
         Ok((world_array(vec![row, world_blob(digest)]), digest))
+    }
+    fn receiving_aliases(
+        &mut self,
+        key: (String, String, String),
+        incoming: ciborium::value::Value,
+    ) -> Result<ciborium::value::Value, CompileError> {
+        use std::collections::btree_map::Entry;
+        match self.rows.entry(key) {
+            Entry::Vacant(slot) => Ok(slot.insert(incoming).clone()),
+            Entry::Occupied(slot) => {
+                if world_interface_semantics(slot.get())? != world_interface_semantics(&incoming)? {
+                    return Err(source_failure(
+                        "equal world input image has conflicting role or required owners",
+                    ));
+                }
+                Ok(slot.get().clone())
+            }
+        }
     }
 }
 
 /// Logical transfer facts only: paths and descriptor aliases do not identify a
 /// row. The image binds all immutable part hashes; role and required owners are
 /// separate semantic facts and must also survive transport unchanged.
-fn world_semantic_row(
-    row: &ciborium::value::Value,
-    producer: &[u8; 32],
-) -> Result<ciborium::value::Value, CompileError> {
+fn world_interface_semantics(
+    interface: &ciborium::value::Value,
+) -> Result<(&str, std::collections::BTreeSet<(&str, &str)>), CompileError> {
     use ciborium::value::Value;
-    let Value::Array(row) = row else {
-        return Err(source_failure("invalid world row"));
+    let Value::Array(fields) = interface else {
+        return Err(source_failure("invalid world interface row"));
     };
-    let [Value::Array(fields), Value::Bytes(image)] = row.as_slice() else {
-        return Err(source_failure("invalid world row image"));
-    };
-    let [Value::Text(unit), Value::Text(module), _, _, Value::Array(requires), _, _, Value::Array(evidence)] =
-        fields.as_slice()
+    let [_, _, _, _, Value::Array(requires), _, _, Value::Array(evidence)] = fields.as_slice()
     else {
         return Err(source_failure("invalid world interface row"));
     };
     let Some(Value::Text(role)) = evidence.first() else {
         return Err(source_failure("invalid world row role"));
     };
-    if image.len() != 32
-        || !matches!(
-            role.as_str(),
-            "module" | "native-declaration" | "join" | "value"
-        )
-    {
-        return Err(source_failure("invalid world row semantic facts"));
+    if !matches!(
+        role.as_str(),
+        "module" | "native-declaration" | "join" | "value"
+    ) {
+        return Err(source_failure("invalid world row role"));
     }
     let mut owners = std::collections::BTreeSet::new();
     for owner in requires {
@@ -994,22 +1001,41 @@ fn world_semantic_row(
         let [Value::Text(unit), Value::Text(module)] = key.as_slice() else {
             return Err(source_failure("invalid world required owner"));
         };
-        if !owners.insert((unit, module)) {
+        if !owners.insert((unit.as_str(), module.as_str())) {
             return Err(source_failure("duplicate world required owner"));
         }
     }
+    Ok((role, owners))
+}
+
+fn world_semantic_row(
+    row: &ciborium::value::Value,
+    producer: &[u8; 32],
+) -> Result<ciborium::value::Value, CompileError> {
+    use ciborium::value::Value;
+    let Value::Array(row) = row else {
+        return Err(source_failure("invalid world row"));
+    };
+    let [interface @ Value::Array(fields), Value::Bytes(image)] = row.as_slice() else {
+        return Err(source_failure("invalid world row image"));
+    };
+    let [Value::Text(unit), Value::Text(module), ..] = fields.as_slice() else {
+        return Err(source_failure("invalid world interface row"));
+    };
+    if image.len() != 32 {
+        return Err(source_failure("invalid world row image identity"));
+    }
+    let (role, owners) = world_interface_semantics(interface)?;
     Ok(world_array(vec![
         world_text(unit.clone()),
         world_text(module.clone()),
         world_blob(producer),
         world_blob(image),
-        world_text(role.clone()),
+        world_text(role),
         world_array(
             owners
                 .into_iter()
-                .map(|(unit, module)| {
-                    world_array(vec![world_text(unit.clone()), world_text(module.clone())])
-                })
+                .map(|(unit, module)| world_array(vec![world_text(unit), world_text(module)]))
                 .collect(),
         ),
     ]))
@@ -1932,6 +1958,48 @@ mod answer_tests {
             seal(vec![second, original])
         );
     }
+    #[test]
+    fn equal_world_image_reuses_aliases_only_with_equal_semantics() {
+        let interface = |role: &str, required: &str, path: &str| {
+            world_array(vec![
+                world_text("main"),
+                world_text("Module"),
+                world_text(path),
+                world_text("ifacehash"),
+                world_array(vec![world_array(vec![
+                    world_text("main"),
+                    world_text(required),
+                ])]),
+                world_text("packages"),
+                world_text("packagehash"),
+                world_array(vec![world_text(role)]),
+            ])
+        };
+        let mut rows = WorldColdRows {
+            producer: [0; 32],
+            files: BTreeMap::new(),
+            images: BTreeMap::new(),
+            rows: BTreeMap::new(),
+            arenas: Default::default(),
+        };
+        let key = ("main".into(), "Module".into(), "image".into());
+        let first = rows
+            .receiving_aliases(key.clone(), interface("value", "Dependency", "/first"))
+            .unwrap();
+        assert_eq!(
+            rows.receiving_aliases(key.clone(), interface("value", "Dependency", "/alias"))
+                .unwrap(),
+            first
+        );
+        assert!(rows
+            .receiving_aliases(key.clone(), interface("join", "Dependency", "/first"))
+            .is_err());
+        assert!(rows
+            .receiving_aliases(key, interface("value", "Other", "/first"))
+            .is_err());
+        assert_eq!(rows.rows.len(), 1);
+    }
+
     #[test]
     fn cold_visibility_rejects_oversize_before_clone_or_allocation() {
         assert!(binding_metadata_bound([usize::MAX; 5], 0).is_err());
