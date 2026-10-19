@@ -1,13 +1,13 @@
 # Shared warm compiler: delivery plan
 
 Status: active, incomplete implementation campaign; see [current status](STATUS.md) and [resumable handoff](HANDOFF.md).
-Integrated aa59 passed both actual service-backed public-module query histories,
-including strict frontend resumption and growing-history controls. Joined f88 compiled
-nine production/test consumers and passed154 workflow plus27 counted Rust checks.
-The critical next outcome is a genuine nonempty three-root/import ordinary cell,
-private successor, atomic bindings/world publication and second-cell use with exact
-world-owned dependency reuse. Query acceptance does not establish ordinary-cell
-migration, frozen qualification, full force/drain or a measured speedup.
+Integrated bedfe31 passed eight production/test consumers,154 workflow checks and43
+counted tests, including actual service-backed public-module query histories and
+reviewed Reload publisher/opaque-root/reply ownership. The critical next outcome is
+a genuine nonempty three-root/import ordinary cell, private successor, atomic
+bindings/world publication and second-cell use with exact world-owned dependency
+reuse. Query/foundation acceptance does not establish ordinary-cell migration,
+frozen qualification, full force/drain or a measured speedup.
 
 This directory is the handoff for a Sol supervision tree. Read this file, the
 [shared contracts](CONTRACTS.md), and the [supervisor assignment](supervisor/README.md)

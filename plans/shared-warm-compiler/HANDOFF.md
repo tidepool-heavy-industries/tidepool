@@ -1,133 +1,128 @@
 # Campaign handoff
 
-Implementation continues. This file supports backend/account continuity; it is
-not a stop order, completion claim or authorization to change live deployments.
-Read [STATUS.md](STATUS.md), [RUST-CLIENT-MIGRATION.md](RUST-CLIENT-MIGRATION.md)
-and [SERVICE-API.md](SERVICE-API.md) before resuming implementation.
+Implementation continues. This supports backend/account continuity; it is not a
+stop/completion/deployment instruction. Read [STATUS.md](STATUS.md),
+[RUST-CLIENT-MIGRATION.md](RUST-CLIENT-MIGRATION.md) and [SERVICE-API.md](SERVICE-API.md).
 
-## Exact campaign owner and accepted source
+## Exact source and disposition
 
-- Owner: `/root/warm_compiler_campaign`, gpt-6.1-sol high.
-- Checkout: `/srv/swarm/checkouts/tidepool-shared-warm-campaign-20261019`.
-- Branch: `campaign/shared-warm-compiler`; remote `github` is authoritative.
-- Last published checkpoint before this handoff: `c634de8fa60d5fcfc862b82b43221b93efef081c`.
-  Push session47034 settled exit0. Tested product is unchanged parent
-  `aa59c48c030371b1b107b181c46c1dbb6e2d9cfb`.
-- Dirty scope while writing this handoff: only campaign plan Markdown. No source
-  WIP or native command is owned by campaign. Read actual `git status --short`
-  and HEAD; do not reset/stash another owner's work.
-- Parent `/root` coordinates the performance fork. Release/main/live-host owner
-  is unconfirmed. Campaign publication is authorized, release/deploy is separate.
+- Owner `/root/warm_compiler_campaign`, gpt-6.1-sol high; checkout
+  `/srv/swarm/checkouts/tidepool-shared-warm-campaign-20261019`.
+- Branch `campaign/shared-warm-compiler`, authoritative remote `github`.
+- Tested product **bedfe31be13c8afe1388d5be7444063bbab0eff5** receives full reviewed
+  Reload f062 foundation into earlier qualified actual-query aa59. This handoff's
+  documentation commit preserves that tested product. Exact published OID/push
+  receipt is in private `campaign/CONTINUATION.json`; verify actual Git HEAD/status.
+- Only campaign plan Markdown is being updated at this terminal boundary. No
+  campaign product WIP or running native command. Do not reset/stash another owner.
+- Parent `/root` coordinates performance fork; release/main/live-host owner remains
+  unconfirmed. Campaign publication is authorized, release/deploy is separate.
 
-Private operational handoff directory:
+Private operational root:
 `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/campaign/`.
-`CONTINUATION.json` records awaited producer, recipient and actual next action;
-`LIVE.json` records live native grants and observers. These supersede static
-resource samples. Never assume an ended turn schedules its own continuation.
+LIVE.json owns current allowances/observers; CONTINUATION.json owns exact event
+producers/recipients/next actions. HANDOFF-INDEX.json records all five supervisors
+and all nine leaves, including completed/unmerged candidates, at exact snapshots.
+Changing private operational files supersede static resource samples.
 
-## What passed and what did not
+## Qualified checkpoint and limits
 
-At f88, nine production/cfg(test)/actor consumers compiled, workflow154 and counted
-Rust27 passed;103 hashes verified. At aa59, actor cfg(test) compiled and actual
-service-backed public-module queries executed2/PASS2;19 hashes verified.
-Exact receipts: `campaign/foundation-join-f88/TERMINAL.json` and
-`campaign/query-qualified-join/TERMINAL.json`. Actual frontend strict answer guard,
-its wrong-name negative, history and source-domain/reexport controls passed.
-Helper zero-old-work counters do not establish frontend-zero-work; no frontend
-HostWorkObservation was emitted. Per-report cleanup/diagnostic/directory hash limits
-remain. Build times are not runtime speedups.
+bedfe: eight production/cfg(test)/actor integration consumers compiled,2376 local/
+0remote;154 workflow checks and43 counted runtime/actor/host/notebook/actual-query
+checks passed. `campaign/reload-f062-receiving/TERMINAL.json` binds seven serial
+commands, source, selected/executed counts and170 hashes. SHA256:
+`bd399f6416f1108d5fdb6765d12c21436d3a7e3705164de4074bff3a53d28d73`.
+Four actual executed binaries are independent regular copies under
+`retained-executables/`,911490336B. Process cleanup43confirmed; compiler2confirmed/
+41not_observed; hosted1confirmed/42not_observed. Directory-resource hashes UNKNOWN
+and individual diagnostic limitations remain. Actual frontend did not emit
+HostWorkObservation; helper-zero assertions do not prove frontend-zero-work.
 
-Ordinary-cell Prepare, actual per-item runtime consumer, private successor, atomic
-bindings/world publication and second-cell use remain unfinished. Exact completed
-dependency/HPT/validity/recovery reuse is CORE (arm B), not optional. Arm C's deeper
-import/GRE reuse remains conditional. Full force/drain/recovery, strict matched
-Persona and actual query/appended-cell measurement are still required. Existing
-user/evidence files stay preserved; old authority formats explicitly refuse.
+Earlier f88 and aa59 receipts remain. Build timings are not runtime speedups.
+No ordinary-cell/private successor/B reuse/fullforce/frozen/performance acceptance.
 
-## Actual continuation
+Campaign session31983 and verification18780 are terminal0.14GiB TOTAL/16growth
+allowance released; idle Buck705523/fork705564 remain globally charged in scope
+`inanna-build-1792430608-705441.scope`. Exact settlement/cumulative peak and separate
+client-scope limits are in `SETTLED-RESOURCES.json`. Do not infer future admission
+from old samples or stop that daemon without ownership checks.
 
-1. Warm owns real Rust Prepare/output certification and the actual demanded input
-   issuer. OWN rowsad094 supplies cold primary constructor plus decoder derived
-   from SAME output/reservation/captured manifest, not a complete hot adapter.
-   Warm must explicitly wake dormant OWN rows/parent when its concrete input basis
-   arrives. Cold primary issuer runs once; value-only successors share it. No
-   retained-value context fold, empty authority or hot full-basis certifier scan.
-2. Host owns the SINGLE runtime finalizer/adopter. Source306d separates World basis,
-   checks actual original transaction and adds BindingTable-owned predicted witness;
-   its early compile is observed by Host. Checked completion first advances PRIVATE
-   roots from actual binder/native deltas; final namespace transformation uses SAME
-   final prepared promotion after removals/exact-base CAS, atomically with bindings.
-   No copied full binding snapshot or caller-derived revision formula.
-3. Join genuine three-root/import world, actual protected Seed recipe for BOTH
-   value-only cells: x from seed then y from x. Both must demand the import; test
-   actual values/effect truth, successor association, prior output deletion,
-   predecessor eviction, hot/cold dependency reuse and host work counters. Real
-   prologue/expressions/GRE not supported by the first slice must explicitly refuse
-   and remain named later migration obligations. Do not invent a passing canary
-   target: Qualification/Host must supply its actual maintained production filter.
-4. Qualification's birth Rust product7fdb plus same-production1d6c passed eight+one
-   controls, including pure Recorded fact lifetime, order equality, modes, real
-   native conflicts and bounded changed work. OWN high reviews COMPLETE
-   d334/943a→1d6c history. That review found independently composed endorsement
-   can pair identical ids/graph with a different native birth owner; Qualification
-   must enforce correspondence at publish_original and add a wrong-domain refusal.
-   No actual user bypass was demonstrated. Context5→6 and published role native descriptor2/fourroots
-   require matching Haskell production reader/profile and genuine Published fixture
-   BEFORE campaign fold. Rust-only passes cannot bless the old matched worker.
-5. Reload observes c934 readiness-repair retry. Prior986 had35 reports pass and one
-   natural completed-startup regression; its source repairfc748 retains truthful
-   early terminal intent and guards readiness under actual shutdown owner. Fold only
-   complete reviewed repaired history/native. SAME Deployment versus Complete source
-   capsule, mount policy and authorized Checking/force successors remain area work.
+## Dependency-ready continuation
 
-For a concrete reviewed candidate, inspect full `base..candidate` history and actual
-production consumers; responsible parent integrates its area, campaign integrates
-reviewed complete histories. Compile joined directly affected production AND cfg(test)
-consumers early through supported `swarm-build just build -j1 <exact labels>`, then
-counted actual production-path controls. For a wire/profile change, rerun actual
-query gate with its matching worker, plus the new ordinary-cell canary; compile-only
-or zero matches never count as execution. Publish only reviewable checkpoints:
-`git push github HEAD:campaign/shared-warm-compiler`, and collect terminal result.
+1. **Warm owns the actual Prepare/output certifier and private successor.**
+   Supply real closed native/checked/scaffold/instance/prototype authority; no
+   full cold support passed to generic hot certifier. Native helper5ee is source
+   accepted, cost execution still pending scaled generic-path discriminator.
+   OWN rows6fcc/4ed supplies keyed membership and closed demanded Product view;
+   full constructor remains actual issuer dependent. Cold primary issuance once,
+   value-only successors share it; no full retained-value fold or hot full scan.
+2. **Host owns the SINGLE runtime per-item/final atomic adopter.** ACA3 component
+   compiled eight consumers and passed three controls, but real Prepare cap is
+   absent. Warm must explicitly followup dormant Host/OWN parents and rows when
+   exact cap/issuer arrives. Private per-item roots derive actual bind/native delta;
+   final public roots use SAME final promotion/removals/exact-base CAS with bindings.
+3. Join actual three-root Seed world and protected recipe importing Seed in BOTH
+   value-only cells: x from seed, y from x. Exact values/effect truth, second-use
+   activation, atomic association, prior output deletion, predecessor eviction and
+   matched B warm/cold counters are required. Unsupported prologue/expressions/GRE
+   explicitly refuse and remain later migration obligations. No invented test target.
+4. **Warm owns matched publication gate and wakes Qualification/campaign.** Rust
+   birth9529 has full source acceptance and12PASS at666ee plus separate passive1PASS
+   at9529. Tuple12 genuine issuer2b1498 and matching Context6/Published8/descriptor2
+   reader are composed but actual matched execution awaits reviewed Rust/Haskell
+   repairs and matching production profile. Do not fold an unmatched wire break.
+   Captured-source transport aliases must normalize against SAME immutable ordered
+   root domain; no reopening retired worker materializations or logical-world change.
+5. **Reload owns coherent next R1 and raw-live-source migration.** f062 is joined.
+   Separate04cd mount policy passed15controls;2a421 lower fixture retry passed6,
+   with earlierd4387 MissingTransaction failures retained. Raw public Ordinary turn
+   has no original runtime A lease: migrate/remove retained-context live route using
+   existing opaque owner products, actual precompiler A admission, SAME END/checkpoint
+   and original+target install. Explicit independently acquired bootstrap is separate;
+   no fresh unrelated B wrapper. Actual finalslot/Display lease, R2Checking/force and
+   full retirement remain approved work. Current checked actor path is protected.
+6. **Qualification owns exact frozen/performance and final scratch analysis.**
+   Frozen428b role-promotion source repair is already in d334/943a/campaign; actual
+   retained lookup preserves roles via ScopeInterfaces+custody. Component positive/
+   genuine-conflict controls pass; exact frozen Persona rerun remains pending.
+   Final bounded scratch analysis waits until ALL approved frontiers settle and is
+   analysis only: ownership, active/idle use, products/evidence and safe boundaries;
+   no deletion/unmount/GC/stopping others.
 
-## Area handoffs
+## Resumable area records
 
-Current durable records are verified for all five supervisors and all nine leaves,
-including every completed/unmerged candidate. Completed leaves were reactivated
-only for concrete handoffs within existing grants. Exact source/hashes and any
-later gaps are retained in private `campaign/HANDOFF-INDEX.json`, updated from
-area terminal packets. Current supervisor entry points:
-
-| Area | Current handoff |
+| Owner | Current entry point |
 | --- | --- |
 | Host | `/srv/swarm/checkouts/tidepool-shared-warm-host-inputs-20261019/plans/shared-warm-compiler/host-inputs/HANDOFF.md` |
-| Owned inputs | `owned-inputs/SERVICE-SOURCE-CONTINUATION.json`, section `backend_account_handoff` in campaign evidence root |
-| Warm workers | `warm-workers/HANDOFF.md` in campaign evidence root |
-| Reload | `reload/BACKEND-HANDOFF.json` in campaign evidence root |
+| Owned inputs | `owned-inputs/SERVICE-SOURCE-CONTINUATION.json`, backend_account_handoff |
+| Warm | `warm-workers/HANDOFF.md` (current main docs6d074, later terminal updates authoritative) |
+| Reload | `reload/BACKEND-HANDOFF.json` |
 | Qualification | `/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/SUPERVISOR-HANDOFF.md` |
 
- Committed area
-handoffs in this checkout describe only their integrated histories; unmerged source
-handoffs live in the owning checkout or private evidence, as the index states.
-Do not treat an old integrated area snapshot as current unmerged implementation.
+Relative private area paths use the campaign evidence root. Leaf paths/OIDs/models/
+hashes/dirty files/commands/observer disposition are indexed in HANDOFF-INDEX.json.
+Committed area snapshots in this checkout describe integrated histories; unmerged
+current handoffs live in their owning checkouts/private evidence. Do not confuse them.
 
-## Process/resource and resumption ownership
+## Review, resources and event delivery
 
-Campaign has no active external process. Host owns306d compile/count controls;
-Reload ownsc934 repaired native controls; Warm owns transport terminal collection
-and any next focused controls; Qualification owns its explicit next codec/history
-native gate. Check LIVE and exact cgroups again before launching. Idle daemons stay
-in global memory. Native admission uses actual global+remaining TOTAL+ADDITIONAL
-allowances below80GiB high/96max, physical headroom/Nix and100GiB disk floor plus
-all expected growth. Verify bind mounts, use pinned local-only workflow. No broad
-cache deletion, daemon restart, cleanup or capacity inference from old samples.
+Inspect full base..candidate histories plus actual production consumers. Compile
+joined affected production AND cfg(test) early through supported pinned/local-only
+`swarm-build just build -j1 <labels>`, then counted actual controls. Source/linking/
+zero matches are not execution. Wire/profile changes require matching actual worker
+and genuine consumer. Preserve failure inputs and exact primary stderr.
 
-All terminal outcomes must deliver exact task/source/evidence/status/next action.
-Producer checks recipient: running→send_message; completed non-root→followup_task.
-Auto completion is supporting delivery, not a restart guarantee. No recurring timed
-poll/status-only wake. Each process owner observes its terminal result; each parent
-reconciles source review and fold disposition. No routine decision waits on root.
+Native admission: actual build.slice plus remaining TOTAL and full ADDITIONAL grants
+below80GiB high/96max, physical/Nix headroom and100GiB disk floor plus all growth.
+Idle daemons remain global. Verify bind mounts; installed swarm-build is COMMAND-only.
+No substitute admission wrapper, arbitrary cache cleanup or shared daemon restart.
+Publish reviewed campaign checkpoints with `git push github HEAD:campaign/shared-warm-compiler`
+and observe terminal result; no release/main/live-session mutations.
 
-After ALL implementation/review/folds and owned tests settle, Qualification owns
-bounded scratch analysis by checkout/output owner, active/idle use, independently
-required products/evidence and safe reclaim boundaries. Analysis only: no deletion,
-unmount, GC or stopping others. Do not call this incomplete campaign complete.
+Event-driven only. Every terminal outcome sends exact source/evidence/status/next
+step: running recipient→send_message; dormant non-root→followup_task. Producer checks
+status and owns actual wake. Auto completion is supporting delivery. No periodic
+status-only wakes. Each process retains terminal observer; parents reconcile review/
+repair/fold, not merely leaf done. No routine decision waits on root. Drain approved
+independent successor work before finite MORNING/hard-gap handoff; this campaign is
+not complete.

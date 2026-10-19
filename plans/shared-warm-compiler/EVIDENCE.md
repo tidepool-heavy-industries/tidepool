@@ -246,3 +246,52 @@ retained. Source aa59 stayed clean and frozen until terminal verification. Campa
 14TOTAL/8growth released, idle Buck570528 globally retained; cumulative scope peak
 14,056,955,904B is not a phase/client peak. No ordinary-cell/private successor/B,
 frozen/fullforce or performance acceptance follows.
+
+
+## Joined Reload publisher/source-query checkpoint bedfe31be13
+
+Full independently reviewed Reload9852..f062 joins actual-query foundation at
+bedfe31be13c8afe1388d5be7444063bbab0eff5. Source stayed clean/frozen through seven
+serial phases. Eight owning production/cfg(test)/actor integration consumers passed
+2376local/0remote actions in1288.07s;154 workflow checks passed. Actual runtime5,
+actor30,host2,notebook4 and Rooted2 selected/executed/PASS43, no failed/zero selection.
+`campaign/reload-f062-receiving/TERMINAL.json` SHA256
+`bd399f6416f1108d5fdb6765d12c21436d3a7e3705164de4074bff3a53d28d73`
+reconciles170 report/stream/executable/regular-resource hashes and four independent
+executed-binary copies (911490336B). All43 process cleanup confirmed; compiler2
+confirmed/41not_observed, hosted1confirmed/42not_observed. Directory-resource hashes
+UNKNOWN and individual diagnostics limits retained. No ordinary-cell/B/force/frozen/
+performance acceptance. Existing frontend helper-counter distinction remains.
+
+Actual rustc718801/737332 and native worker743460/client scopes were observed in
+build.slice. All native clients/session31983 terminal0;14TOTAL/16growth released.
+Idle daemon705523/fork705564 remain global. SETTLED-RESOURCES.json records scope
+6518751232B, cumulative peak13168066560B, global41050849280B, physical available
+98201354240B and disk free413766856704B. Separate native client scopes are not
+included in Buck-scope peak. Old570528 expired; no shared daemon was stopped.
+
+Current source-review dispositions retain qualification limits. Frozen428b unnecessary
+Original-B promotion producer was already replaced by ba89/032690/d334/943a; current
+real retained lookup preserves selected roles while adding ScopeInterfaces custody.
+`FROZEN-428b-REPAIR-DISPOSITION-bedfe31.md` SHA9f7946265add2597637046ce71b11f326719a2a74dd0ad6f3059f3806ec3bec8
+in qualification native-constructor-discriminator retains exact ancestry/component
+positive and genuine-conflict control; exact frozen Persona rerun is still pending.
+
+Campaign critical native helper review caught public InterfaceOnly advertisement
+promotion missed by a private-core test; exact native roots now distinguish it.
+A quadratic group intersection was replaced by keyed membership. Independent OWN
+review then caught unchanged generic fact-root reconstruction/counter blind spot;
+5ee repairs sharing but scaled generic cost execution remains pending. All source-only,
+no demand/cost/ordinary-cell pass inferred. `campaign/NATIVE-DEMAND-CRITICAL-REVIEW.md`
+and OWN receipts retain findings/repairs. Publication9529 critical source review is
+`campaign/PUBLICATION-CRITICAL-RECEIVING-REVIEW-9529.md`; matching production reader/
+profile/genuine fixture remains required before fold.
+
+Reload finite source classifier `reload/raw-turn-provenance-classifier-d438e0.md`
+SHA301c1788ee1247e431f7fa719c479bcf1074dff8dabbb6a7ff8e58f2c54d10cc confirms raw
+Ordinary turn lacks original runtime lease A while later install gates current B.
+No executed exploit/current checked-actor regression claimed. Existing opaque live
+owner product migration is approved; explicit independently acquired bootstrap remains
+separate. This cone, finalslot and full force work remain unqualified despite bounded
+f062 foundation acceptance. Later04cd (15 PASS) and2a421 (6 PASS) are area evidence, not this
+campaign source. Earlierd4387failures were setup MissingTransaction before discard.
