@@ -4237,6 +4237,20 @@ class CompilerServicePackageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'exact retained root'):
                 qualification.release_compiler_service_source(release)
 
+    def test_guard_cannot_reuse_package_root_recovery_states(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            qualification.acquire_compiler_service_source(acquire)
+            release = self.retirement_args(acquire)
+            settled = qualification.release_compiler_service_source(release)
+            progress = json.loads(settled.read_text())
+            guard = next(item for item in progress['roots'] if item['store_path'] == progress['provider_guard_store_path'])
+            Path(guard['path']).unlink()
+            guard['state'] = 'released'
+            qualification.write_private_json(settled, progress)
+            with self.assertRaisesRegex(ValueError, 'retained root guard'):
+                qualification.release_compiler_service_source(release)
+
     def test_partial_registration_is_owned_and_settled_before_boot(self):
         with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
             acquire = provider.acquire_args()

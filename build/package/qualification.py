@@ -1285,6 +1285,9 @@ def release_compiler_service_source(args) -> Path:
     guard = state["provider_guard_store_path"]
     if sum(item["store_path"] == guard for item in roots) != 1:
         raise ValueError("compiler package release lacks its exact provider guard")
+    guard_item = next(item for item in roots if item["store_path"] == guard)
+    if guard_item["state"] != "registered" or not _package_root_present(guard_item):
+        raise ValueError("compiler package release cannot confirm its exact retained root guard")
     for item in roots:
         target = receipt.parent / "gc-roots" / hashlib.sha256(item["store_path"].encode()).hexdigest()
         if item["path"] != str(target) or item["state"] not in ("registered", "releasing", "released"):
