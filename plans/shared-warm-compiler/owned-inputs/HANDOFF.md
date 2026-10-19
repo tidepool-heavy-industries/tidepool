@@ -16,8 +16,8 @@ Two descendants granted across all depths; no descendant may subdivide.
 
 | Actual identity | Model / effort | Assignment / checkout | State |
 | --- | --- | --- | --- |
-| `/root/warm_compiler_campaign/owned_inputs/rows` | `gpt-6.1-sol` / medium, fresh context | Baseline row reuse and value-sized ownership; `/srv/swarm/checkouts/tidepool-shared-warm-owned-rows-20261019`, `feature/shared-warm/owned-rows` | Running, base `5b74c2f1` |
-| `/root/warm_compiler_campaign/owned_inputs/source_lifetime` | `gpt-6.1-sol` / high, fresh context | Independent consumed-package-source and backing-lifetime investigation; area checkout read-only source | Running, base `5b74c2f1` |
+| `/root/warm_compiler_campaign/owned_inputs/rows` | `gpt-6.1-sol` / medium, fresh context | Baseline row reuse and value-sized ownership; `/srv/swarm/checkouts/tidepool-shared-warm-owned-rows-20261019`, `feature/shared-warm/owned-rows` | Dormant/reserved; exact29 accepted source, production/test compile and6affected cases passed; all clients terminal |
+| `/root/warm_compiler_campaign/owned_inputs/source_lifetime` | `gpt-6.1-sol` / high, fresh context | Independent consumed-package-source and backing-lifetime investigation; exact-candidate review | Dormant/reserved; source29 accepted and terminal evidence reconciled |
 
 Actual starts were reported to parent. No settlement or review acceptance yet.
 
@@ -29,6 +29,12 @@ Host inputs owns logical selected support, `compiler_projection.rs` and
 and `owned_input_arena.rs`. Any shared helper is coordinated before editing.
 Warm workers owns Haskell/extractor protocol and source-free realization
 registration. No new byte registry or alternative transport table is planned.
+
+Host 01D's acquired-owner index reserves `ViewLease`/`from_issued_draft` and
+only the payload clone/removal subsection of `retain_projected_materializations`:
+clone exact per-view counts alongside payloads and decrement on actual payload-ID
+removal. Owned29 does not edit that subsection. Physical materialization source,
+fixed frontier and row-lifetime code remain outside that host reservation.
 
 | Stage | Logical authority | Physical owner / lifetime |
 | --- | --- | --- |
