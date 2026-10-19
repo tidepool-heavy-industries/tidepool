@@ -13092,7 +13092,10 @@ pub(crate) mod tests {
                     &operation,
                 )
                 .unwrap();
-            let physical = inventory
+            let physical = request
+                .compiler_inputs()
+                .artifacts()
+                .inventory()
                 .admit_shared_with_demand(
                     request.compiler_inputs().artifacts(),
                     vec![output.clone()],
