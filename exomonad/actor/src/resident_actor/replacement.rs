@@ -426,6 +426,10 @@ where
             candidate.placement.provisioned(descriptor.placement());
         }
         let context = descriptor.session_context(actor);
+        self.environment
+            .runner
+            .adopt_final_source_scope(context.clone())
+            .await?;
         let (entry, request_value) = self
             .environment
             .runner
