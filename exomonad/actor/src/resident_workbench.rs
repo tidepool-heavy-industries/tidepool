@@ -32,6 +32,7 @@ mod display_callback_tests;
 pub(crate) mod generation_admission;
 #[cfg(test)]
 mod replacement_input_tests;
+pub(crate) mod compiler_query;
 pub(crate) mod request;
 mod structured_introspection;
 pub(crate) mod to_haskell;
@@ -4584,6 +4585,10 @@ pub(crate) enum ResidentActorBoundary {
         query: tidepool_runtime::session::NameQuery,
         kind: StructuredInspectionKind,
     },
+    CompilerQuery {
+        continuation: ResidentHole,
+        query: compiler_query::CompilerQuery,
+    },
     AgentInspect(AgentInspectionBoundary),
     AgentList(ResidentHole),
     /// The caller's own recent conversation. It carries no actor argument:
@@ -4834,6 +4839,7 @@ impl ResidentActorBoundary {
                 StructuredInspectionKind::Info => "structured info",
                 StructuredInspectionKind::Type => "structured type",
             },
+            Self::CompilerQuery { query, .. } => query.operation(),
             Self::AgentInspect(_) => "observeAgent",
             Self::AgentList(_) => "listAgents",
             Self::ToolResultPublication { .. } => "tool semantic result publication",
@@ -10848,11 +10854,50 @@ where
                         .into(),
                         kind: StructuredInspectionKind::Type,
                     }),
-                    ResidentRequest::Introspection(request) => {
-                        Err(ResidentActorWorkbenchError::UnsupportedRequest {
-                            constructor: introspection_operation(&request).to_owned(),
-                        })
-                    }
+                    ResidentRequest::Introspection(
+                        crate::generated::introspection::IntrospectionReq::CurrentScopeView,
+                    ) => Ok(ResidentActorBoundary::CompilerQuery {
+                        continuation: hole,
+                        query: compiler_query::CompilerQuery::CurrentScopeView,
+                    }),
+                    ResidentRequest::Introspection(
+                        crate::generated::introspection::IntrospectionReq::ScopeBindings,
+                    ) => Ok(ResidentActorBoundary::CompilerQuery {
+                        continuation: hole,
+                        query: compiler_query::CompilerQuery::ScopeBindings,
+                    }),
+                    ResidentRequest::Introspection(
+                        crate::generated::introspection::IntrospectionReq::ModuleExports(module),
+                    ) => Ok(ResidentActorBoundary::CompilerQuery {
+                        continuation: hole,
+                        query: compiler_query::CompilerQuery::ModuleExports(module),
+                    }),
+                    ResidentRequest::Introspection(
+                        crate::generated::introspection::IntrospectionReq::RowFit(identifier),
+                    ) => Ok(ResidentActorBoundary::CompilerQuery {
+                        continuation: hole,
+                        query: compiler_query::CompilerQuery::RowFit(
+                            compiler_query::IntrospectionIdentifier::from_value(
+                                &identifier,
+                                session.data_con_table(),
+                            )?
+                            .into(),
+                        ),
+                    }),
+                    ResidentRequest::Introspection(
+                        crate::generated::introspection::IntrospectionReq::TypeOfExpression(
+                            expression,
+                        ),
+                    ) => Ok(ResidentActorBoundary::CompilerQuery {
+                        continuation: hole,
+                        query: compiler_query::CompilerQuery::TypeOfExpression(expression),
+                    }),
+                    ResidentRequest::Introspection(
+                        crate::generated::introspection::IntrospectionReq::TypeSearch(type_pattern),
+                    ) => Ok(ResidentActorBoundary::CompilerQuery {
+                        continuation: hole,
+                        query: compiler_query::CompilerQuery::TypeSearch(type_pattern),
+                    }),
                     ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
                     ) => Ok(ResidentActorBoundary::AgentList(hole)),

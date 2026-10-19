@@ -42,7 +42,7 @@ fn visit_introspection_query(
     })
 }
 
-fn visit_introspection_identifier(
+pub(super) fn visit_introspection_identifier(
     table: &DataConTable,
     visitor: &mut dyn HaskellVisitor,
     identifier: &tidepool_runtime::session::IdentifierRef,
@@ -77,7 +77,7 @@ fn visit_introspection_type_expression(
     })
 }
 
-fn visit_introspection_provenance(
+pub(super) fn visit_introspection_provenance(
     table: &DataConTable,
     visitor: &mut dyn HaskellVisitor,
     provenance: &tidepool_runtime::session::ScopeProvenance,
@@ -100,7 +100,7 @@ fn visit_introspection_field(
     })
 }
 
-fn visit_structural_list<T>(
+pub(super) fn visit_structural_list<T>(
     table: &DataConTable,
     visitor: &mut dyn HaskellVisitor,
     values: &[T],
@@ -241,7 +241,7 @@ fn visit_introspection_type(
     })
 }
 
-fn visit_introspection_query_error(
+pub(super) fn visit_introspection_query_error(
     table: &DataConTable,
     visitor: &mut dyn HaskellVisitor,
     error: &tidepool_runtime::session::QueryError,
