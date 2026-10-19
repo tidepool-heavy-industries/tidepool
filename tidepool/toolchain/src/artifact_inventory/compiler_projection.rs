@@ -292,10 +292,21 @@ impl IssuedInputNativeDecisions {
 
 /// Exact binding observations retained from successful compiler-role admission.
 /// These entries are acquisition owners, not a reconstruction from payload IDs.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(super) struct ResolvedCompilerRole {
     pub(super) interface: (ArtifactBinding, Arc<ArtifactEntry>),
     pub(super) original: Option<(ArtifactBinding, Arc<ArtifactEntry>)>,
+}
+
+impl Clone for ResolvedCompilerRole {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        type_query_work::cloned_row();
+        Self {
+            interface: self.interface.clone(),
+            original: self.original.clone(),
+        }
+    }
 }
 
 /// The solver's chosen bindings and their acquired payloads, not raw projection authority.
@@ -351,12 +362,14 @@ mod type_query_work {
         pub lookups: usize,
         pub resolved_rows: usize,
         pub canonical_checks: usize,
+        pub cloned_rows: usize,
     }
 
     thread_local! {
         static COUNTS: std::cell::Cell<Counts> = const { std::cell::Cell::new(Counts {
             census_rows: 0, iterated_rows: 0, lookups: 0, resolved_rows: 0,
             canonical_checks: 0,
+            cloned_rows: 0,
         }) };
     }
 
@@ -385,13 +398,17 @@ mod type_query_work {
     pub(super) fn canonical_check() {
         observe(|counts| counts.canonical_checks += 1);
     }
+    pub(super) fn cloned_row() {
+        observe(|counts| counts.cloned_rows += 1);
+    }
 }
 
 /// Canonical classification belongs to the exact admitted rows. A raw role
 /// projection cannot supply home units independently of those interfaces.
+/// Persistent rows let a publication share unchanged exact bindings with forks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdmittedCompilerRoles {
-    rows: BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
+    rows: imbl::OrdMap<ExactModuleIdentity, ResolvedCompilerRole>,
     home_units: Arc<BTreeSet<String>>,
 }
 
@@ -406,9 +423,23 @@ impl AdmittedCompilerRoles {
             }
         }
         Self {
-            rows,
+            rows: rows.into_iter().collect(),
             home_units: Arc::new(home_units),
         }
+    }
+
+    fn retain_acquisitions(
+        &self,
+        artifacts: &ArtifactView,
+    ) -> Result<imbl::OrdMap<ExactModuleIdentity, ResolvedCompilerRole>, CompileError> {
+        self.rows
+            .iter()
+            .map(|(owner, row)| {
+                let mut row = row.clone();
+                row.retain_acquisitions(artifacts)?;
+                Ok((owner.clone(), row))
+            })
+            .collect()
     }
 }
 
@@ -1213,10 +1244,7 @@ impl CompilerSourceSupport {
         let artifacts = self.artifacts.retain_custody(incoming)?;
         let artifacts =
             artifacts.retain_issued_offer_custody(self.native_offers.iter().cloned())?;
-        let mut selected = self.selected.rows.clone();
-        for row in selected.values_mut() {
-            row.retain_acquisitions(&artifacts)?;
-        }
+        let selected = self.selected.retain_acquisitions(&artifacts)?;
         // Custody attachment preserves the exact namespace and executable
         // roots. Its acquisition owners may change; its qualified rows cannot.
         Ok(Self {
@@ -1261,10 +1289,7 @@ impl CompilerSourceSupport {
                     }
                 }),
         )?;
-        let mut selected = self.selected.rows.clone();
-        for row in selected.values_mut() {
-            row.retain_acquisitions(&artifacts)?;
-        }
+        let selected = self.selected.retain_acquisitions(&artifacts)?;
         // Raw offers add checked custody only. They cannot change the admitted
         // namespace, normalized permissions or recorded execution decisions.
         Ok(Self {
@@ -2472,6 +2497,69 @@ mod tests {
             &catalog,
         )?;
         source.rebuild(projection, artifacts, source.native_offers.iter().cloned())
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+        #[test]
+        fn value_publication_forks_share_unchanged_selected_rows(
+            unrelated in 128usize..513,
+            history in proptest::collection::vec((0usize..8, proptest::bool::ANY), 1..9),
+        ) {
+            let inventory = ArtifactInventory::default();
+            let entries = (0..unrelated).map(|index| {
+                Arc::new(crate::artifact_inventory::tests::entry(&format!("Initial{index}"), &[]))
+            }).collect::<Vec<_>>();
+            let expected = entries.iter().map(|entry| {
+                (entry.descriptor.owner.clone(), entry.descriptor.id)
+            }).collect::<BTreeMap<_, _>>();
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let artifacts = inventory.admit_shared(&inventory.empty_view(), entries).unwrap();
+            let support = CompilerSourceSupport::new(projection, artifacts, [], Default::default()).unwrap();
+            let mut worlds = vec![(support, expected)];
+            for (step, (parent, drop_parent)) in history.into_iter().enumerate() {
+                let parent = parent % worlds.len();
+                let value = value_certificate(&format!("Published{step}"), vec![]);
+                let owner = ExactModuleIdentity { unit: "unit".into(), module: format!("Published{step}") };
+                let (base, expected) = &worlds[parent];
+                type_query_work::take();
+                let fork = base.clone();
+                let fork_work = type_query_work::take();
+                proptest::prop_assert_eq!(fork_work.cloned_rows, 0);
+                let next = fork.admit_value_interfaces(&[value.clone()]).unwrap();
+                let append_work = type_query_work::take();
+                eprintln!("selected-row-publication unrelated={unrelated} step={step} rows={} work={append_work:?}", expected.len());
+                // Count actual row clones, including the map's copy-on-write
+                // nodes. A BTreeMap clone copies every prior row and fails here.
+                proptest::prop_assert!(append_work.cloned_rows < expected.len());
+                proptest::prop_assert!(append_work.cloned_rows <= 64);
+                proptest::prop_assert_eq!(append_work.resolved_rows, 0);
+                proptest::prop_assert_eq!(append_work.census_rows, 0);
+                let mut expected_next = expected.clone();
+                expected_next.insert(owner, value.artifact_id());
+                for (owner, before) in base.selected.iter() {
+                    let after = &next.selected[owner];
+                    proptest::prop_assert_eq!(after.interface.0, before.interface.0);
+                    proptest::prop_assert!(Arc::ptr_eq(&after.interface.1, &before.interface.1));
+                    proptest::prop_assert_eq!(&after.original, &before.original);
+                }
+                worlds.push((next, expected_next));
+                if drop_parent {
+                    worlds.remove(parent);
+                }
+                // This oracle comes from the issued input recipe and each
+                // branch's publications, independently of map sharing.
+                for (world, expected) in &worlds {
+                    let selected = world.selected_interfaces().unwrap();
+                    proptest::prop_assert_eq!(selected.iter().map(|(owner, entry)| {
+                        (owner.clone(), entry.descriptor.id)
+                    }).collect::<BTreeMap<_, _>>(), expected.clone());
+                    proptest::prop_assert_eq!(world.projection.snapshot_roles().len(), expected.len());
+                    proptest::prop_assert!(world.artifacts.selected_native_groups().is_empty());
+                    proptest::prop_assert_eq!(world.native_availability.rows().count(), 0);
+                }
+            }
+        }
     }
 
     #[test]
