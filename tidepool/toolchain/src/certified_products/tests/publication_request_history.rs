@@ -445,7 +445,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     ]).remove(0).product;
                     let output = Arc::new(ArtifactEntry::original(CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(), product.clone()).unwrap());
                     let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
-                    let output_role = CompilerInputProjection::from_issued_entries(&[output.clone()]).unwrap().roles();
+                    let output_role = CompilerInputProjection::from_issued_entries(&[Arc::new(canonical.clone())]).unwrap().roles();
                     let request = ExactCompileContext::new(Arc::new(context.clone()))
                         .prepare_compilation(&request_scratch.path().join(format!("input-{step}")), PRODUCER).unwrap();
                     let operation = InventoryOperation::new(Default::default());
@@ -453,13 +453,14 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         request.compiler_inputs(), &operation,
                     ).unwrap();
                     let existing = request.compiler_inputs().projection().snapshot_roles()
-                        .get(&output.descriptor.owner).and_then(CompilerInputRole::original);
+                        .get(&output.descriptor.owner);
                     let origin = if let Some(existing) = existing {
-                        prop_assert_eq!(existing, output.descriptor.id);
+                        prop_assert_eq!(existing.interface(), canonical.descriptor.id);
+                        prop_assert!(existing.original().is_none());
+                        prop_assert!(request.compiler_inputs().native_availability(output.descriptor.id)
+                            .is_some_and(|row| row.permits(0)));
                         ProductOrigin::Cached
                     } else {
-                        prop_assert!(!request.compiler_inputs().projection().snapshot_roles()
-                            .contains_key(&output.descriptor.owner));
                         ProductOrigin::RetainedCore
                     };
                     selection.admit_current(product.owner(), origin,
@@ -468,6 +469,15 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         .admit_shared_with_demand(request.compiler_inputs().artifacts(), vec![output.clone()],
                             crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces).unwrap();
                     let completed = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+                    prop_assert!(matches!(completed.role_projection().snapshot_roles()[&output.descriptor.owner],
+                        CompilerInputRole::InterfaceOnly { interface } if interface == canonical.descriptor.id));
+                    let output_permission = completed.native_availability().rows()
+                        .find(|row| row.original_owner() == product.owner()).unwrap();
+                    prop_assert!(output_permission.permits(0));
+                    prop_assert_eq!(completed.native_availability().snapshot_facts().unwrap()[&output.descriptor.id].mode.clone(),
+                        crate::declaration_context::NativeTransportMode::Full);
+                    prop_assert!(!completed.issued_artifacts().selected_native_groups().iter()
+                        .any(|group| group.artifact == output.descriptor.id));
                     let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&completed).unwrap();
                     context = context.extend_issued_compiler_support(&support).unwrap();
                     prop_assert_eq!(&output.requirements, &vec![root.descriptor.owner.clone()]);
@@ -477,7 +487,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     };
                     let mut lexical = context.lexical_graph().to_vec();
                     lexical.push(output_lexical.clone());
-                    context = context.extend(&[], &[], lexical).unwrap();
+                    context = context.extend_lexical_joins(&[], &lexical).unwrap();
                     expected_lexical.insert(output_lexical.owner.clone(), output_lexical);
                     let definitions = crate::certified_products::original_native_group_definitions(
                         match &output.payload { ArtifactPayload::Original(product) => product, _ => unreachable!() }, 0,
