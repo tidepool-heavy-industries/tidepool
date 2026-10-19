@@ -2883,7 +2883,32 @@ fn value_interface_append_keeps_materialized_inputs_until_last_context_release()
     let context = Arc::new(
         ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products(producer.sha256(), &[native])
+            .extend_issued_compiler_support(&{
+                let entry =
+                    Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+                let inventory = ArtifactInventory::default();
+                let artifacts = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        vec![entry.clone()],
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+                let selection =
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        &projection,
+                        &artifacts.metadata_snapshot(),
+                        &tidepool_repr::execution_schema::InventoryOperation::new(
+                            Default::default(),
+                        ),
+                    )
+                    .unwrap();
+                let output =
+                    OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            })
             .unwrap(),
     );
     let scratch = tempfile::tempdir().unwrap();
@@ -2937,7 +2962,32 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
     let context = Arc::new(
         ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products(producer.sha256(), &[native])
+            .extend_issued_compiler_support(&{
+                let entry =
+                    Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+                let inventory = ArtifactInventory::default();
+                let artifacts = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        vec![entry.clone()],
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+                let selection =
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        &projection,
+                        &artifacts.metadata_snapshot(),
+                        &tidepool_repr::execution_schema::InventoryOperation::new(
+                            Default::default(),
+                        ),
+                    )
+                    .unwrap();
+                let output =
+                    OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            })
             .unwrap(),
     );
     let scratch = tempfile::tempdir().unwrap();
@@ -5121,7 +5171,29 @@ fn selected_authored_availability_refuses_source_original_spelling_with_full_gro
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let mut context = ExactDeclarationContext::new(&[], &[], vec![])
         .unwrap()
-        .extend_checked_original_products(producer.sha256(), std::slice::from_ref(&native))
+        .extend_issued_compiler_support(&{
+            let entry =
+                Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+            let inventory = ArtifactInventory::default();
+            let artifacts = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    vec![entry.clone()],
+                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )
+                .unwrap();
+            let output = OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap();
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                .unwrap()
+        })
         .unwrap();
     {
         let updated = context
@@ -11175,7 +11247,32 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     let context = Arc::new(
         ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products(producer.sha256(), &[native.clone()])
+            .extend_issued_compiler_support(&{
+                let entry =
+                    Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+                let inventory = ArtifactInventory::default();
+                let artifacts = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        vec![entry.clone()],
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+                let selection =
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        &projection,
+                        &artifacts.metadata_snapshot(),
+                        &tidepool_repr::execution_schema::InventoryOperation::new(
+                            Default::default(),
+                        ),
+                    )
+                    .unwrap();
+                let output =
+                    OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            })
             .unwrap(),
     );
     let scratch = tempfile::tempdir().unwrap();
