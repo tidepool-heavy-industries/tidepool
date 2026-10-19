@@ -534,6 +534,7 @@ pub struct CompilerWorldRestoration {
     primary_root: ContextRoot,
     primary_blocks: ReachableBlocks,
     primary_associations: MaterializedMap<ArtifactBinding, cid::Cid>,
+    primary_compiler_inputs: Arc<crate::declaration_context::RequestCompilerInputs>,
     bindings: MaterializedMap<String, WorldBindingSnapshotFact>,
     producer: [u8; 32],
     profile: [u8; 32],
@@ -1393,6 +1394,16 @@ impl CompilerWorldOpenInputs {
         let (primary_context, primary_root, mut primary_blocks) =
             self.materialize_primary(endpoint)?;
         self.primary_context = primary_context;
+        // This cold issuer preserves the actual primary selection and native
+        // lineage. Visible checked rows keep their independent issuing support;
+        // ordinary operations select demanded closures from these owners.
+        let primary_compiler_inputs = self
+            .primary_context
+            .capture_world_primary_compiler_inputs(producer)?;
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::ColdWorldCompilerBasisCapture,
+            1,
+        );
         crate::host_work::record_host_work(
             crate::host_work::HostWorkCounter::InputFdEnumeration,
             1,
@@ -1536,6 +1547,7 @@ impl CompilerWorldOpenInputs {
             primary_root,
             primary_blocks,
             primary_associations,
+            primary_compiler_inputs,
             bindings,
             producer,
             profile,
