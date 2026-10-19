@@ -1662,6 +1662,14 @@ impl TurnPurpose {
         admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
     ) -> Result<Self, CompileError> {
         use tidepool_toolchain::artifacts::CheckedNativeProof;
+        // The toolchain seals ordinary input only without an exact request;
+        // checked output is issued from that request instead. Both proofs in
+        // one product would claim incompatible compiler-output purposes.
+        if proof.is_some() && original.is_some() {
+            return Err(CompileError::ExtractFailed(
+                "checked output also carries ordinary compiler input authority".into(),
+            ));
+        }
         let Some(admission) = admission else {
             return match proof {
                 None => Ok(Self::Ordinary { original }),
@@ -1927,8 +1935,9 @@ impl CompiledTurn {
         )
     }
 
-    /// Completed-original custody, independent of new source replay eligibility.
-    pub fn original_compile_input(
+    /// Ordinary source-compilation identity, independent of source replay eligibility.
+    /// Use `code().original_source()` for producer-independent execution custody.
+    pub fn ordinary_original_compile_input(
         &self,
     ) -> Option<&Arc<tidepool_toolchain::artifacts::SealedOriginalCompileInput>> {
         self.certification.as_ref()?.ordinary_original()
