@@ -976,6 +976,8 @@ struct NativeOfferFacts {
     owner: ExactModuleIdentity,
     body: NativeOfferBody,
     custody: NativeOfferCustody,
+    snapshot: OnceLock<crate::exact_context::NativeOfferSnapshotFacts>,
+    identity: OnceLock<[u8; 32]>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1290,6 +1292,8 @@ impl IssuedNativeOffer {
                     owner,
                     body,
                     custody: NativeOfferCustody::from_checked_nodes(lease, nodes)?,
+                    snapshot: OnceLock::new(),
+                    identity: OnceLock::new(),
                 })))
             })
             .collect()
@@ -1447,6 +1451,8 @@ impl IssuedNativeOffer {
             owner: entry.descriptor.owner.clone(),
             body,
             custody,
+            snapshot: OnceLock::new(),
+            identity: OnceLock::new(),
         })))
     }
 
@@ -1458,22 +1464,34 @@ impl IssuedNativeOffer {
 
     pub(crate) fn snapshot_facts(&self) -> crate::exact_context::NativeOfferSnapshotFacts {
         use crate::exact_context::{NativeOfferSnapshotBody, NativeOfferSnapshotFacts};
-        NativeOfferSnapshotFacts {
-            original: self.0.original,
-            interface: self.0.interface,
-            owner: self.0.owner.clone(),
-            body: match &self.0.body {
-                NativeOfferBody::Empty => NativeOfferSnapshotBody::Empty(
-                    ExactArtifactSelection::from_snapshot(Arc::clone(self.custody_snapshot())),
-                ),
-                NativeOfferBody::Partial(proof) => {
-                    NativeOfferSnapshotBody::Partial(proof.selection.clone())
-                }
-                NativeOfferBody::Full { proof, .. } => {
-                    NativeOfferSnapshotBody::Full(proof.selection.clone())
-                }
-            },
+        self.0
+            .snapshot
+            .get_or_init(|| NativeOfferSnapshotFacts {
+                original: self.0.original,
+                interface: self.0.interface,
+                owner: self.0.owner.clone(),
+                body: match &self.0.body {
+                    NativeOfferBody::Empty => NativeOfferSnapshotBody::Empty(
+                        ExactArtifactSelection::from_snapshot(Arc::clone(self.custody_snapshot())),
+                    ),
+                    NativeOfferBody::Partial(proof) => {
+                        NativeOfferSnapshotBody::Partial(proof.selection.clone())
+                    }
+                    NativeOfferBody::Full { proof, .. } => {
+                        NativeOfferSnapshotBody::Full(proof.selection.clone())
+                    }
+                },
+            })
+            .clone()
+    }
+
+    pub(crate) fn snapshot_identity(&self) -> Result<[u8; 32], CompileError> {
+        if let Some(identity) = self.0.identity.get() {
+            return Ok(*identity);
         }
+        let identity = self.snapshot_facts().identity()?;
+        let _ = self.0.identity.set(identity);
+        Ok(identity)
     }
 
     /// Restore the recorded availability class against authenticated recovered
@@ -1643,6 +1661,8 @@ impl IssuedNativeOffer {
             owner: facts.owner.clone(),
             body,
             custody,
+            snapshot: OnceLock::new(),
+            identity: OnceLock::new(),
         })))
     }
 
@@ -2059,6 +2079,8 @@ impl IssuedNativeOffer {
             owner: self.0.owner.clone(),
             body: NativeOfferBody::Partial(proof.clone()),
             custody: self.0.custody.clone(),
+            snapshot: OnceLock::new(),
+            identity: OnceLock::new(),
         }))))
     }
 }
