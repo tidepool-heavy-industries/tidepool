@@ -6818,7 +6818,7 @@ impl<'a> ExactProductAdmission<'a> {
                     .metadata
                     .entries
                     .values()
-                    .filter(|entry| !entry.is_native())
+                    .filter(|entry| !matches!(&entry.payload, ArtifactPayload::Original(_)))
                     .chain(
                         self.facts
                             .compiler
