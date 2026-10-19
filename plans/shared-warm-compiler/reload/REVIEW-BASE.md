@@ -1,9 +1,10 @@
 # Reload authority review
 
 Original campaign base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
-Current source repair: `e0a4b7ff682ee8db09d8732018b24fa23aa430a9`.
-Joined93 cumulative source acceptance plus one-line1bf import repair compose;
-exact native retry remains pending.
+Current compiled/tested source: `69bf78f01a090a51b36ee1c67ad17aee6b76a047`.
+Joined93 cumulative source acceptance plus one-line1bf import repair compose.
+Owning9 compilation passed; exact21 controls passed13/failed8. Current bounded
+production/fixture repairs below require independent exact review and execution.
 Independent reviewer: `/root/warm_compiler_campaign/reload/authority_review`,
 retained Sol-high grant. Supervisor directly inspected canonical owner, source/
 target custody, opaque producer/finisher/install, actual recipe caller, ancestry
@@ -11,8 +12,8 @@ issuance and the ordinary-cell mutation consumers. Native evidence is in HANDOFF
 
 ## Current source disposition
 
-The complete owned histories have independent exact source reviews. No remaining
-confirmed source blocker in these bounded parcels; native/combined acceptance is
+The complete owned histories have independent exact source reviews. Actual notebook execution exposed the publication-phase mismatch below; the
+current introduced regression blocks foundation acceptance. Native/combined acceptance is
 separate. Earlier failures and repaired checkpoints remain in Git/private evidence.
 This is not full R1, physical END-loss, reload force-drain or release acceptance.
 
@@ -35,14 +36,21 @@ registration under issuer/gate exclusion and matching-owner sealed target produc
 No raw gate, raw origin, empty callback or retained bytes grants fresh source work.
 ## Current qualification gaps
 
-Joined93 production/cfg(test)/actor-binary compilation stopped on the new fixture
-module import. Independent one-line repair1bf0fab8ef2523eba75131efd223afe3f2ebc87c
-is source accepted (target-fixture-import-review-1bf0fab.md). Exact native retry
-is required; neither source acceptance nor successful sibling actions establish it.
+Exact69bf owning9 compiled exit0. Counted runtime12=9PASS3FAIL, actor5=4PASS1FAIL,
+notebook4=0PASS4FAIL; all commands terminal. The actual21 reports and cleanup
+observations are bound by `c6-canonical-joined-controls-receipt.json`.
 
-* Repaired target context, real stale-owner transfer, primary/outer-close,
-  ancestry/registration controls and actual four notebook consumers need execution
-  on the joined repair. Prior exact80ad results remain separately recorded.
+* Introduced publication Restage mismatch: InvocationWork is already Publishing,
+  but new runtime-owner composition requests Active cleanup admission. Reuse
+  existing Publication continuation purpose with lazy source claim, never reopen
+  Active or reject admitted pure Binding continuation. Actual fresh join/certification
+  gate remains mandatory. Leaf repairs; reviewer checks exact joined consumers.
+* Runtime transfer oracle must compare actual durable predecessor epoch1→2,
+  not fresh driver's local0. Both close controls need real owner setup in existing
+  CheckedHome fixture before begin-private admission; no generic helper weakening.
+* Durable Sleep positive failed initial compilation MissingDependency Prelude62→
+  Data.Text8 before resume. Qualification traces actual native producer; strict
+  oracle retained and no physical ACK-loss relay allowed.
 * Real storage owner-transfer ACK loss, races at the actual enqueue/retirement
   seam and physical post-resume GHC END loss remain unqualified. Component guard
   injections and synthetic aggregate Unknown are labelled and cannot substitute.
