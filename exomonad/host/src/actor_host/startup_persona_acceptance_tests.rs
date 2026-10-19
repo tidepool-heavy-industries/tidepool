@@ -733,11 +733,11 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
             assert_eq!(seed.sections[1].label, "runtime at arrival");
             let at_arrival = &seed.sections[1].body;
             assert!(
-                at_arrival.contains("InitialContextPreparing"),
+                at_arrival.contains("Startup as of this observation: preparing"),
                 "{at_arrival}"
             );
             assert!(
-                !at_arrival.contains("InitialContextPublished"),
+                !at_arrival.contains("context published"),
                 "{at_arrival}"
             );
             assert!(
@@ -745,11 +745,12 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
                 "{at_arrival}"
             );
             assert!(
-                at_arrival.contains("RuntimeConfiguredInference"),
+                at_arrival.contains("Configured inference:"),
                 "{at_arrival}"
             );
+            assert!(!at_arrival.contains("Configured inference: unavailable"), "{at_arrival}");
             assert!(
-                at_arrival.contains("runtimeToolName = \"haskell\""),
+                at_arrival.contains("haskell (before next inference)"),
                 "{at_arrival}"
             );
             host.input("Observe the completed startup").await.unwrap();
@@ -808,8 +809,15 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
             assert_eq!(retained_committed_display_text(&host.runtime.store(), &origin,
                 &reloaded.settled_output("runtime-during-reload")), "True");
             let operation = reloaded.operation("runtime-after-reload");
-            reloaded.sync_call_named("runtime-after-reload", "haskell",
-                "Right afterReloadFacts <- getRuntimeInfo\ndisplay (runtimeExecutingSpec afterReloadFacts /= runtimeExecutingSpec runtimeFacts && runtimeExecutingGeneration afterReloadFacts /= runtimeExecutingGeneration runtimeFacts && runtimeStartup afterReloadFacts == runtimeStartup runtimeFacts)\n");
+            let original_identity = retained.identity.as_ref().unwrap();
+            // The post-reload notebook is fresh. Only owner-issued scalar facts
+            // cross this boundary; no old notebook binding is required.
+            let after_reload_source = format!(
+                "Right afterReloadFacts <- getRuntimeInfo\ndisplay (case (runtimeExecutingSpec afterReloadFacts, runtimeStartup afterReloadFacts) of {{ (Just selected, RuntimeStartupObserved (InitialContextPublished initial _ _ _)) -> runtimeSpecInstall selected > {install} && runtimeSpecSource selected /= {source:?} && initialContextSpecInstall initial == {install} && initialContextSpecSource initial == {source:?}; _ -> False }})\n",
+                install = original_identity.spec_install,
+                source = original_identity.spec_source,
+            );
+            reloaded.sync_call_named("runtime-after-reload", "haskell", &after_reload_source);
             let final_round = host.while_operation_succeeds(&operation,
                 next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
             assert_eq!(retained_committed_display_text(&host.runtime.store(), &origin,

@@ -44,7 +44,37 @@ startup _ = do
 -- This runtime section is arrival-only: Context.refresh replaces the aggregate
 -- startup block with memory. Call renderRuntime again for a fresh observation.
 renderRuntime :: Member RuntimeInfo effects => Eff effects (Either RuntimeInfoError Text)
-renderRuntime = fmap (T.pack . show) <$> E.getRuntimeInfo
+renderRuntime = fmap renderSnapshot <$> E.getRuntimeInfo
+  where
+    shown value = T.pack (show value)
+    renderSnapshot info = T.intercalate "\n"
+      [ maybe "Selected spec: unavailable" renderSpec (E.runtimeExecutingSpec info)
+      , "Executing notebook generation: " <> maybe "unavailable" shown (E.runtimeExecutingGeneration info)
+      , case E.runtimeConfiguredInference info of
+          E.RuntimeInferenceUnavailable -> "Configured inference: unavailable"
+          E.RuntimeConfiguredInference model effort -> "Configured inference: " <> shown model <> "; effort " <> shown effort
+      , "Startup as of this observation: " <> renderStartup (E.runtimeStartup info)
+      ]
+    renderSpec spec = T.intercalate "\n"
+      [ "Selected spec: " <> maybe "live value (no entry name)" id (E.runtimeSpecEntry spec)
+          <> "; install " <> shown (E.runtimeSpecInstall spec)
+      , "Executing source: " <> E.runtimeSpecSource spec
+      , "Tools: " <> T.intercalate ", " (map renderTool (E.runtimeSpecTools spec))
+      ]
+    renderTool tool = E.runtimeToolName tool <> " (" <> case E.runtimeToolSchedule tool of
+      E.RuntimeAsynchronous -> "asynchronous)"
+      E.RuntimeBeforeNextInference -> "before next inference)"
+    renderStartup E.RuntimeStartupNotAdmitted = "not admitted"
+    renderStartup (E.RuntimeStartupObserved observed) = case observed of
+      E.InitialContextAbsent -> "no initializer declared"
+      E.InitialContextCaptured -> "captured parent context"
+      E.InitialContextPreparing _ -> "preparing"
+      E.InitialContextRetained _ _ -> "result retained; publication not acknowledged"
+      E.InitialContextPublishedEmpty _ _ -> "empty result published"
+      E.InitialContextPublished _ _ _ _ -> "context published"
+      E.InitialContextFailed _ detail -> "failed: " <> detail
+      E.InitialContextCancelled _ -> "cancelled"
+      E.InitialContextUncertain _ detail -> "recovery required: " <> detail
 
 startupWithRuntime :: (Member FsRead effects, Member FsWrite effects, Member RuntimeInfo effects)
   => StartupInput -> Eff effects ContextSeed
