@@ -369,7 +369,7 @@ impl CompilerWorldBindings {
         bindings: impl IntoIterator<Item = CompilerWorldBinding<'a>>,
     ) -> Result<Self, CompileError> {
         let allowance = capture_allowance()?;
-        let mut remaining = allowance.checked_sub(64).ok_or_else(source_size_failure)?;
+        let mut remaining = allowance.checked_sub(128).ok_or_else(source_size_failure)?;
         let mut entries = imbl::OrdMap::new();
         for input in bindings {
             crate::host_work::checkpoint()?;
@@ -781,22 +781,41 @@ fn world_path(path: &Path) -> Result<ciborium::value::Value, CompileError> {
         .ok_or_else(|| source_failure("world input path must be absolute UTF-8"))
 }
 
-// Nine bytes bounds every CBOR head and integer. Each occurrence is charged
-// for its own issuer row even when aliases will share that row. SessionModule's
-// generated name has a bounded u64 generation, independently of SymbolIdentity.
+// Bound the actual fixed HAMT representation before copying borrowed fields.
+// SHA256 has at most 52 five-bit routing levels. Charge each occurrence for an
+// entire private path: every node header plus a CID edge, even though real
+// paths share nodes. The separate row-fact check includes its exact requirements.
 fn binding_metadata_bound(fields: [usize; 5], parent_bytes: usize) -> Result<u64, CompileError> {
-    let max_owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(u64::MAX))
-        .module_name()
-        .len() as u64;
-    let entry_heads = 11 * 9;
-    let issuer_row = 9 + 9 + max_owner + 3 * (9 + 32);
-    fields
-        .into_iter()
-        .chain([parent_bytes])
-        .try_fold(entry_heads + issuer_row, |size, field| {
+    let cid_link = 9 + 9 + 39;
+    let hamt_node = 9 + (9 + 4) + 9;
+    let routing = 52 * (hamt_node + cid_link);
+    let key_bucket_heads = 5 * 9;
+    let binding_heads = 2 * 9 + 5 * 9 + 2 * 9 + cid_link;
+    fields.into_iter().chain([parent_bytes]).try_fold(
+        routing + key_bucket_heads + binding_heads,
+        |size, field| {
             size.checked_add(field as u64)
                 .ok_or_else(source_size_failure)
-        })
+        },
+    )
+}
+
+fn binding_row_metadata_bound(
+    unit: &str,
+    module: &str,
+    requires: &[crate::declaration_join::ExactModuleIdentity],
+) -> Result<u64, CompileError> {
+    // rowFact[semanticRow[unit,module,producer,image,role,requires],artifact,receipt]
+    let fixed = 2 * 9 + 2 * 9 + 4 * (9 + 32) + (9 + 32) + 9;
+    requires.iter().try_fold(
+        fixed + unit.len() as u64 + module.len() as u64,
+        |size, key| {
+            size.checked_add(3 * 9)
+                .and_then(|n| n.checked_add(key.unit.len() as u64))
+                .and_then(|n| n.checked_add(key.module.len() as u64))
+                .ok_or_else(source_size_failure)
+        },
+    )
 }
 
 struct WorldColdRows {
@@ -1095,6 +1114,13 @@ impl CompilerWorldOpenInputs {
         for artifact in &self.visible_rows {
             crate::host_work::checkpoint()?;
             let (entry, parts) = artifact.world_type_parts()?;
+            remaining_raw = remaining_raw
+                .checked_sub(binding_row_metadata_bound(
+                    &entry.descriptor.owner.unit,
+                    &entry.descriptor.owner.module,
+                    &entry.requirements,
+                )?)
+                .ok_or_else(source_size_failure)?;
             for part in &parts {
                 remaining_raw = remaining_raw
                     .checked_sub(part.bytes)
@@ -1910,30 +1936,61 @@ mod answer_tests {
     fn cold_visibility_rejects_oversize_before_clone_or_allocation() {
         assert!(binding_metadata_bound([usize::MAX; 5], 0).is_err());
         assert!(binding_metadata_bound([0; 5], usize::MAX).is_err());
-        let symbol = ["alias", "base", "Actual.Defining", "Value", "definition"];
-        let encoded_entry = world_array(vec![
-            world_text(symbol[0]),
-            world_array(
-                symbol[1..]
-                    .iter()
-                    .map(|s| world_text(*s))
-                    .chain([ciborium::value::Value::Null])
-                    .collect(),
-            ),
-            u64::MAX.into(),
-            u64::MAX.into(),
-            u64::MAX.into(),
-        ]);
-        let owner =
-            tidepool_repr::SessionModule::val(tidepool_repr::Generation(u64::MAX)).module_name();
-        let issuer = world_array(vec![
-            world_text(owner),
+        // Data-only values through the actual Materializer, including a large
+        // requirement list omitted by the old flat-visibility estimate.
+        let requires = (0..256)
+            .map(|n| crate::declaration_join::ExactModuleIdentity {
+                unit: "main".into(),
+                module: format!("Dependency.LongModule{n}"),
+            })
+            .collect::<Vec<_>>();
+        let row_bound = binding_row_metadata_bound("main", "ValueOwner", &requires).unwrap();
+        assert!(row_bound > binding_row_metadata_bound("main", "ValueOwner", &[]).unwrap());
+        let semantic = world_array(vec![
+            world_text("main"),
+            world_text("ValueOwner"),
             world_blob([0; 32]),
             world_blob([1; 32]),
-            world_blob([2; 32]),
+            world_text("value"),
+            world_array(
+                requires
+                    .iter()
+                    .map(|key| world_array(vec![world_text(&key.unit), world_text(&key.module)]))
+                    .collect(),
+            ),
         ]);
-        let encoded = world_bytes(&world_array(vec![encoded_entry, issuer])).unwrap();
-        assert!(binding_metadata_bound(symbol.map(str::len), 0).unwrap() >= encoded.len() as u64);
+        let row_fact = world_array(vec![semantic, world_blob([2; 32]), world_blob([3; 32])]);
+        assert!(world_bytes(&row_fact).unwrap().len() as u64 <= row_bound);
+        let store = fvm_ipld_blockstore::MemoryBlockstore::new();
+        let mut materializer = Materializer::new(&store);
+        let row = materializer.materialize_value(&row_fact).unwrap();
+        let mut facts = imbl::OrdMap::<String, WorldBindingSnapshotFact>::new();
+        let mut bound = 128 + row_bound;
+        for index in 0..128 {
+            let occurrence = format!("alias{index}");
+            let symbol = (
+                "main".to_owned(),
+                "Original.Defining".to_owned(),
+                "value".to_owned(),
+                "original".to_owned(),
+                Some("Parent".to_owned()),
+            );
+            bound += binding_metadata_bound(
+                [
+                    occurrence.len(),
+                    symbol.0.len(),
+                    symbol.1.len(),
+                    symbol.2.len(),
+                    symbol.3.len(),
+                ],
+                symbol.4.as_ref().unwrap().len(),
+            )
+            .unwrap();
+            facts.insert(occurrence, (symbol, index, index, row));
+        }
+        materializer.materialize_map(None, &facts).unwrap();
+        let staged = materializer.finish().unwrap();
+        assert!(staged.metrics().staged_bytes <= bound);
     }
     #[test]
     fn world_identifier_namespace_is_checked_beyond_question_echo() {
