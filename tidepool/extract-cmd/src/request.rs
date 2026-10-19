@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v22";
-const MAGIC: &[u8; 8] = b"TPREQ022";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v23";
+const MAGIC: &[u8; 8] = b"TPREQ023";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -14,22 +14,22 @@ pub(crate) const PRINT_WORKER_REQUEST_FLAG: &str = "--print-worker-request-flag"
 
 /// Transport data only: the host and compiler owners authenticate these references.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ExactInputsRequest {
+pub struct ExactInputsRequest {
     pub root: String,
     pub acquisition: ExactInputsAcquisition,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ExactInputsAcquisition {
+pub enum ExactInputsAcquisition {
     Resident(String),
-    /// Existing exact-scope manifest; input descriptors retain their existing owner.
+    /// Strict cold-world descriptor; input descriptors retain their existing owner.
     Complete(PathBuf),
 }
 
 impl ExactInputsRequest {
     fn valid(&self) -> bool {
         let valid = |value: &str| !value.is_empty() && !value.contains('\0');
-        valid(&self.root)
+        valid_world_identity(&self.root)
             && match &self.acquisition {
                 ExactInputsAcquisition::Resident(reference) => valid(reference),
                 ExactInputsAcquisition::Complete(path) => path.to_str().is_some_and(valid),
@@ -38,7 +38,7 @@ impl ExactInputsRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ExactInputsRejection {
+pub enum ExactInputsRejection {
     UnsupportedOperation,
     InvalidRealization,
     InvalidRoot,
@@ -46,42 +46,88 @@ pub(crate) enum ExactInputsRejection {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum EnsureExactInputsOutcome {
-    Ready(String),
+pub enum EnsureExactInputsOutcome {
+    Ready { world: String, realization: String },
     NeedsAcquisition(String),
     Rejected(ExactInputsRejection),
 }
 
 impl EnsureExactInputsOutcome {
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        if bytes.get(..8) != Some(b"TPEXO001") {
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.get(..8) != Some(b"TPEXO002") {
             return Err(ProtocolError::InvalidHeader);
         }
         let mut decoder = Decoder { bytes, cursor: 8 };
-        let outcome = match decoder.byte()? {
-            0 | 1 => {
-                let kind = bytes[8];
-                let reference = decoder.string()?;
-                if reference.is_empty() || reference.contains('\0') {
+        match decoder.byte()? {
+            0 => {
+                let world = decoder.text()?;
+                let realization = decoder.text()?;
+                if !valid_world_identity(world) || !valid_reference(realization) {
                     return Err(ProtocolError::InvalidExactInputs);
                 }
-                if kind == 0 {
-                    Self::Ready(reference)
-                } else {
-                    Self::NeedsAcquisition(reference)
-                }
+                decoder.finish()?;
+                Ok(Self::Ready {
+                    world: world.to_owned(),
+                    realization: realization.to_owned(),
+                })
             }
-            2 => Self::Rejected(match decoder.byte()? {
-                0 => ExactInputsRejection::UnsupportedOperation,
-                1 => ExactInputsRejection::InvalidRealization,
-                2 => ExactInputsRejection::InvalidRoot,
-                3 => ExactInputsRejection::AcquisitionRejected,
-                _ => return Err(ProtocolError::InvalidExactInputs),
-            }),
-            _ => return Err(ProtocolError::InvalidExactInputs),
-        };
-        decoder.finish()?;
-        Ok(outcome)
+            1 => {
+                let world = decoder.text()?;
+                if !valid_world_identity(world) {
+                    return Err(ProtocolError::InvalidExactInputs);
+                }
+                decoder.finish()?;
+                Ok(Self::NeedsAcquisition(world.to_owned()))
+            }
+            2 => {
+                let cause = match decoder.byte()? {
+                    0 => ExactInputsRejection::UnsupportedOperation,
+                    1 => ExactInputsRejection::InvalidRealization,
+                    2 => ExactInputsRejection::InvalidRoot,
+                    3 => ExactInputsRejection::AcquisitionRejected,
+                    _ => return Err(ProtocolError::InvalidExactInputs),
+                };
+                decoder.finish()?;
+                Ok(Self::Rejected(cause))
+            }
+            _ => Err(ProtocolError::InvalidExactInputs),
+        }
+    }
+}
+
+fn valid_world_identity(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_reference(value: &str) -> bool {
+    !value.is_empty() && !value.contains('\0')
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldQueryMode {
+    Info,
+    Type,
+}
+
+/// Transport question only; an actual held compiler world authorizes execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldPublicModuleRequest {
+    pub world: String,
+    pub realization: String,
+    pub mode: WorldQueryMode,
+    pub query: StructuredInspection,
+    pub output: PathBuf,
+}
+
+impl WorldPublicModuleRequest {
+    fn valid(&self) -> bool {
+        valid_world_identity(&self.world)
+            && valid_reference(&self.realization)
+            && self.output.to_str().is_some_and(valid_reference)
+            && matches!(&self.query.scope, InspectionScope::PublicModule(module) if valid_reference(module))
     }
 }
 
@@ -334,6 +380,7 @@ enum Field {
     InspectionStrict,
     PortableOutput,
     EnsureExactInputs(ExactInputsRequest),
+    WorldPublicModule(WorldPublicModuleRequest),
 }
 
 /// A versioned, typed request for the Haskell compiler worker.
@@ -352,6 +399,7 @@ pub struct ExtractRequest {
 pub(crate) enum RequestMode {
     Invalid,
     EnsureExactInputs,
+    WorldPublicModule,
     ActivationPreview,
     DeclarationInterface,
     CellPlan,
@@ -368,6 +416,7 @@ impl std::fmt::Display for RequestMode {
         formatter.write_str(match self {
             Self::Invalid => "invalid",
             Self::EnsureExactInputs => "ensure_exact_inputs",
+            Self::WorldPublicModule => "world_public_module",
             Self::ActivationPreview => "activation_preview",
             Self::DeclarationInterface => "declaration_interface",
             Self::CellPlan => "cell_plan",
@@ -418,6 +467,9 @@ impl ExtractRequest {
             EnsureExactInputsOutcome::NeedsAcquisition(root) if root != request.root => {
                 Err(ProtocolError::InvalidExactInputs)
             }
+            EnsureExactInputsOutcome::Ready { world, .. } if world != request.root => {
+                Err(ProtocolError::InvalidExactInputs)
+            }
             _ => Ok(()),
         }
     }
@@ -439,6 +491,20 @@ impl ExtractRequest {
                 }
                 _ => Err(CliError::new(
                     "exact input acquisition must be source-free and exclusive",
+                )),
+            };
+        }
+        if self
+            .fields
+            .iter()
+            .any(|field| matches!(field, Field::WorldPublicModule(_)))
+        {
+            return match self.fields.as_slice() {
+                [Field::WorldPublicModule(request)] if request.valid() => {
+                    Ok(RequestMode::WorldPublicModule)
+                }
+                _ => Err(CliError::new(
+                    "world public module query must be source-free, public and exclusive",
                 )),
             };
         }
@@ -830,6 +896,24 @@ impl ExtractRequest {
                     };
                     Field::EnsureExactInputs(ExactInputsRequest { root, acquisition })
                 }
+                58 => {
+                    let world = decoder.string()?;
+                    let realization = decoder.string()?;
+                    let mode = match decoder.byte()? {
+                        0 => WorldQueryMode::Info,
+                        1 => WorldQueryMode::Type,
+                        _ => return Err(ProtocolError::InvalidWorldPublicModule),
+                    };
+                    let query = decoder.structured_inspection()?;
+                    let output = PathBuf::from(decoder.os_string()?);
+                    Field::WorldPublicModule(WorldPublicModuleRequest {
+                        world,
+                        realization,
+                        mode,
+                        query,
+                        output,
+                    })
+                }
                 45 => return Err(ProtocolError::RetiredFieldTag(45)),
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
@@ -849,6 +933,15 @@ impl ExtractRequest {
             request
                 .admitted_mode()
                 .map_err(|_| ProtocolError::InvalidExactInputs)?;
+        }
+        if request
+            .fields
+            .iter()
+            .any(|field| matches!(field, Field::WorldPublicModule(_)))
+        {
+            request
+                .admitted_mode()
+                .map_err(|_| ProtocolError::InvalidWorldPublicModule)?;
         }
         if request.hosted_lookup_batch().is_some() {
             request
@@ -1163,6 +1256,16 @@ impl ExtractRequest {
         self.fields.push(Field::InspectSearch(query.to_owned()));
     }
 
+    pub fn ensure_exact_inputs(&mut self, request: ExactInputsRequest) -> &mut Self {
+        self.fields.push(Field::EnsureExactInputs(request));
+        self
+    }
+
+    pub fn world_public_module(&mut self, request: WorldPublicModuleRequest) -> &mut Self {
+        self.fields.push(Field::WorldPublicModule(request));
+        self
+    }
+
     pub(crate) fn inspect_structured_info(&mut self, query: StructuredInspection) {
         self.fields.push(Field::InspectStructuredInfo(query));
     }
@@ -1299,6 +1402,11 @@ impl ExtractRequest {
                 Field::ActivationPreview => flags.push("--activation-preview".into()),
                 Field::InspectionStrict => flags.push("--inspection-strict".into()),
                 Field::PortableOutput => flags.push("--portable-output".into()),
+                Field::WorldPublicModule(request) => flag(
+                    &mut flags,
+                    "<world-public-module>",
+                    OsStr::new(&format!("{request:?}")),
+                ),
                 Field::EnsureExactInputs(request) => flag(
                     &mut flags,
                     "<ensure-exact-inputs>",
@@ -1388,8 +1496,12 @@ impl<'a> Decoder<'a> {
         self.take(len)
     }
 
+    fn text(&mut self) -> Result<&'a str, ProtocolError> {
+        std::str::from_utf8(self.frame()?).map_err(|_| ProtocolError::NonUtf8Text)
+    }
+
     fn string(&mut self) -> Result<String, ProtocolError> {
-        String::from_utf8(self.frame()?.to_vec()).map_err(|_| ProtocolError::NonUtf8Text)
+        self.text().map(str::to_owned)
     }
 
     fn os_string(&mut self) -> Result<OsString, ProtocolError> {
@@ -1558,6 +1670,7 @@ pub enum ProtocolError {
     UnknownLookupNameMode(u8),
     InvalidHostedLookup,
     InvalidExactInputs,
+    InvalidWorldPublicModule,
     UnknownInspectionNamespace(u8),
     UnknownOptionalTextTag(u8),
 }
@@ -1577,6 +1690,9 @@ impl std::fmt::Display for ProtocolError {
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
             Self::InvalidHostedLookup => f.write_str("invalid hosted lookup batch"),
             Self::InvalidExactInputs => f.write_str("invalid source-free exact input acquisition"),
+            Self::InvalidWorldPublicModule => {
+                f.write_str("invalid source-free world public module query")
+            }
             Self::InvalidHeader => f.write_str("invalid worker request header"),
             Self::Truncated => f.write_str("truncated worker request"),
             Self::NonUtf8Text => f.write_str("worker request text is not UTF-8"),
@@ -1774,6 +1890,24 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::ActivationPreview => out.push(41),
         Field::InspectionStrict => out.push(42),
         Field::PortableOutput => out.push(53),
+        Field::WorldPublicModule(request) => {
+            out.push(58);
+            push_frame(out, OsStr::new(&request.world));
+            push_frame(out, OsStr::new(&request.realization));
+            out.push(match request.mode {
+                WorldQueryMode::Info => 0,
+                WorldQueryMode::Type => 1,
+            });
+            encode_name_selection(
+                out,
+                &request.query.scope,
+                request.query.namespace,
+                &request.query.name,
+            );
+            out.extend_from_slice(&request.query.generation.to_le_bytes());
+            push_frame(out, OsStr::new(&request.query.fingerprint));
+            push_frame(out, request.output.as_os_str());
+        }
         Field::EnsureExactInputs(request) => {
             out.push(57);
             push_frame(out, OsStr::new(&request.root));
@@ -2010,7 +2144,7 @@ mod tests {
     fn hosted_lookup_matches_shared_independent_wire_fixture() {
         let (request, batch) = hosted_fixture();
         // Fixed independently encoded bytes also consumed by the Haskell codec test.
-        let bytes = unhex("545052455130323200010000000100000005000000010b0000006d657461646174612e68730107000000747970652e6873010b0000006d657461646174612e687338030000000001000000070000006e616d6520ceb1000500000076616c7565000000030000000a000000496e74202d3e20496e74010a000000496e74202d3e20496e7401020000000000000002000000010c00000050726f6a6563742e576f726b0205000000546f6b656e0102000000070000000200000000010c00000050726f6a6563742e576f726b1c080000006f75742e63626f72").unwrap();
+        let bytes = unhex("545052455130323300010000000100000005000000010b0000006d657461646174612e68730107000000747970652e6873010b0000006d657461646174612e687338030000000001000000070000006e616d6520ceb1000500000076616c7565000000030000000a000000496e74202d3e20496e74010a000000496e74202d3e20496e7401020000000000000002000000010c00000050726f6a6563742e576f726b0205000000546f6b656e0102000000070000000200000000010c00000050726f6a6563742e576f726b1c080000006f75742e63626f72").unwrap();
         assert_eq!(request.encode(), bytes);
         let decoded = ExtractRequest::decode(&bytes).unwrap();
         assert_eq!(decoded.hosted_lookup_batch(), Some(&batch));
@@ -2537,6 +2671,7 @@ mod tests {
             b"TPREQ018",
             b"TPREQ020",
             b"TPREQ021",
+            b"TPREQ022",
         ] {
             let mut request = magic.to_vec();
             request.extend_from_slice(&0u32.to_le_bytes());
@@ -2819,9 +2954,105 @@ mod tests {
     }
 
     #[test]
+    fn world_public_module_wire_is_exclusive_and_matches_haskell() {
+        let query = WorldPublicModuleRequest {
+            world: "a".repeat(64),
+            realization: "realized".into(),
+            mode: WorldQueryMode::Info,
+            query: StructuredInspection {
+                scope: InspectionScope::PublicModule("Data.List".into()),
+                namespace: InspectionNamespace::Value,
+                name: "map".into(),
+                generation: 1,
+                fingerprint: "display-only".into(),
+            },
+            output: "answer.bin".into(),
+        };
+        let mut request = ExtractRequest::default();
+        request.world_public_module(query.clone());
+        let bytes = unhex("5450524551303233000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e").unwrap();
+        assert_eq!(request.encode(), bytes);
+        for mode in [WorldQueryMode::Info, WorldQueryMode::Type] {
+            let mut request = ExtractRequest::default();
+            request.world_public_module(WorldPublicModuleRequest {
+                mode,
+                ..query.clone()
+            });
+            assert_eq!(
+                request.admitted_mode().unwrap(),
+                RequestMode::WorldPublicModule
+            );
+            assert_eq!(
+                ExtractRequest::decode(&request.encode()).unwrap().encode(),
+                request.encode()
+            );
+        }
+        for extra in [
+            Field::Input("missing.hs".into()),
+            Field::OutputDir("missing".into()),
+            Field::Include("ambient".into()),
+            Field::SessionArtifacts("missing".into()),
+            Field::InspectOut("other".into()),
+            Field::WorldPublicModule(query.clone()),
+            Field::EnsureExactInputs(ExactInputsRequest {
+                root: query.world.clone(),
+                acquisition: ExactInputsAcquisition::Resident("realized".into()),
+            }),
+        ] {
+            for reverse in [false, true] {
+                let mut mixed = request.clone();
+                if reverse {
+                    mixed.fields.insert(0, extra.clone());
+                } else {
+                    mixed.fields.push(extra.clone());
+                }
+                assert!(mixed.admitted_mode().is_err());
+                assert!(ExtractRequest::decode(&mixed.encode()).is_err());
+            }
+        }
+        for invalid in [
+            WorldPublicModuleRequest {
+                world: "caller-label".into(),
+                ..query.clone()
+            },
+            WorldPublicModuleRequest {
+                realization: String::new(),
+                ..query.clone()
+            },
+            WorldPublicModuleRequest {
+                output: PathBuf::new(),
+                ..query.clone()
+            },
+            WorldPublicModuleRequest {
+                query: StructuredInspection {
+                    scope: InspectionScope::Current,
+                    ..query.query.clone()
+                },
+                ..query.clone()
+            },
+        ] {
+            let mut invalid_request = ExtractRequest::default();
+            invalid_request.world_public_module(invalid);
+            assert_eq!(
+                ExtractRequest::decode(&invalid_request.encode()).unwrap_err(),
+                ProtocolError::InvalidWorldPublicModule
+            );
+        }
+        for end in 0..bytes.len() {
+            assert!(ExtractRequest::decode(&bytes[..end]).is_err());
+        }
+        let mut bad_mode = bytes;
+        bad_mode[102] = 2;
+        assert_eq!(
+            ExtractRequest::decode(&bad_mode).unwrap_err(),
+            ProtocolError::InvalidWorldPublicModule
+        );
+    }
+
+    #[test]
     fn exact_inputs_requests_are_source_free_and_exclusive() {
         let resident = ExactInputsRequest {
-            root: "root".into(),
+            root: "a".repeat(64),
             acquisition: ExactInputsAcquisition::Resident("realized".into()),
         };
         let make = |inputs| ExtractRequest {
@@ -2830,7 +3061,7 @@ mod tests {
         };
         let request = make(resident.clone());
         // Independent fixed bytes also checked by the maintained Haskell codec case.
-        let bytes = unhex("5450524551303232000100000001000000010000003904000000726f6f7400080000007265616c697a6564").unwrap();
+        let bytes = unhex("54505245513032330001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564").unwrap();
         assert_eq!(request.encode(), bytes);
         assert_eq!(
             ExtractRequest::decode(&bytes).unwrap().mode(),
@@ -2841,7 +3072,7 @@ mod tests {
             request.encode()
         );
         let complete = make(ExactInputsRequest {
-            root: "root".into(),
+            root: "a".repeat(64),
             acquisition: ExactInputsAcquisition::Complete("/scope.cbor".into()),
         });
         assert_eq!(
@@ -2894,11 +3125,11 @@ mod tests {
                 acquisition: resident.acquisition.clone(),
             },
             ExactInputsRequest {
-                root: "root".into(),
+                root: "a".repeat(64),
                 acquisition: ExactInputsAcquisition::Resident("".into()),
             },
             ExactInputsRequest {
-                root: "root".into(),
+                root: "a".repeat(64),
                 acquisition: ExactInputsAcquisition::Complete("".into()),
             },
         ] {
@@ -2911,7 +3142,7 @@ mod tests {
             assert!(ExtractRequest::decode(&bytes[..end]).is_err());
         }
         let mut unknown = bytes.clone();
-        unknown[30] = 2;
+        unknown[90] = 2;
         assert_eq!(
             ExtractRequest::decode(&unknown).unwrap_err(),
             ProtocolError::InvalidExactInputs
@@ -2930,22 +3161,38 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         let request = ExtractRequest {
             fields: vec![Field::EnsureExactInputs(ExactInputsRequest {
-                root: "root".into(),
+                root: "a".repeat(64),
                 acquisition: ExactInputsAcquisition::Resident("realized".into()),
             })],
             ..ExtractRequest::default()
         };
+        let frame = |tag: u8, root: &str, reference: Option<&str>| {
+            let mut bytes = b"TPEXO002".to_vec();
+            bytes.push(tag);
+            push_frame(&mut bytes, OsStr::new(root));
+            if let Some(reference) = reference {
+                push_frame(&mut bytes, OsStr::new(reference));
+            }
+            bytes
+        };
         let mut output = std::process::Output {
             status: std::process::ExitStatus::from_raw(0),
-            stdout: b"TPEXO001\x01\x04\x00\x00\x00root".to_vec(),
+            stdout: frame(1, &"a".repeat(64), None),
             stderr: Vec::new(),
         };
         assert!(request.validate_exact_inputs_response(&output).is_ok());
-        output.stdout = b"TPEXO001\x01\x05\x00\x00\x00other".to_vec();
-        assert_eq!(
-            request.validate_exact_inputs_response(&output),
-            Err(ProtocolError::InvalidExactInputs)
-        );
+        for bytes in [
+            frame(1, &"b".repeat(64), None),
+            frame(0, &"b".repeat(64), Some("realized")),
+        ] {
+            output.stdout = bytes;
+            assert_eq!(
+                request.validate_exact_inputs_response(&output),
+                Err(ProtocolError::InvalidExactInputs)
+            );
+        }
+        output.stdout = frame(0, &"a".repeat(64), Some("realized"));
+        assert!(request.validate_exact_inputs_response(&output).is_ok());
         output.stdout = b"human captured output".to_vec();
         assert!(request.validate_exact_inputs_response(&output).is_err());
         // Ordinary reports and unsuccessful diagnostic responses keep their
@@ -2960,30 +3207,12 @@ mod tests {
     #[test]
     fn exact_inputs_outcomes_match_closed_wire_and_reject_uncertain_frames() {
         let cases = [
-            (
-                "545045584f30303100080000007265616c697a6564",
-                EnsureExactInputsOutcome::Ready("realized".into()),
-            ),
-            (
-                "545045584f3030310104000000726f6f74",
-                EnsureExactInputsOutcome::NeedsAcquisition("root".into()),
-            ),
-            (
-                "545045584f3030310200",
-                EnsureExactInputsOutcome::Rejected(ExactInputsRejection::UnsupportedOperation),
-            ),
-            (
-                "545045584f3030310201",
-                EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRealization),
-            ),
-            (
-                "545045584f3030310202",
-                EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRoot),
-            ),
-            (
-                "545045584f3030310203",
-                EnsureExactInputsOutcome::Rejected(ExactInputsRejection::AcquisitionRejected),
-            ),
+            ("545045584f303032004000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564", EnsureExactInputsOutcome::Ready { world: "a".repeat(64), realization: "realized".into() }),
+            ("545045584f303032014000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161", EnsureExactInputsOutcome::NeedsAcquisition("a".repeat(64))),
+            ("545045584f3030320200", EnsureExactInputsOutcome::Rejected(ExactInputsRejection::UnsupportedOperation)),
+            ("545045584f3030320201", EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRealization)),
+            ("545045584f3030320202", EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRoot)),
+            ("545045584f3030320203", EnsureExactInputsOutcome::Rejected(ExactInputsRejection::AcquisitionRejected)),
         ];
         for (hex, expected) in cases {
             let bytes = unhex(hex).unwrap();
@@ -2999,12 +3228,22 @@ mod tests {
             );
         }
         for hex in [
-            "545045584f30303103",
-            "545045584f3030310204",
-            "545045584f3030310000000000",
-            "545045584f303031010100000000",
+            "545045584f30303203",
+            "545045584f3030320204",
+            "545045584f3030320000000000",
+            "545045584f303032010100000000",
+            "545045584f3030310200",
         ] {
             assert!(EnsureExactInputsOutcome::decode(&unhex(hex).unwrap()).is_err());
+        }
+        for reference in ["", "realized\0other"] {
+            let mut bytes = b"TPEXO002\0".to_vec();
+            push_frame(&mut bytes, OsStr::new(&"a".repeat(64)));
+            push_frame(&mut bytes, OsStr::new(reference));
+            assert_eq!(
+                EnsureExactInputsOutcome::decode(&bytes).unwrap_err(),
+                ProtocolError::InvalidExactInputs
+            );
         }
     }
 
