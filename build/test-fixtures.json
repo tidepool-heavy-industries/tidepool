@@ -307,6 +307,7 @@
     "exomonad/host/src/actor_host/fixtures/startup_persona_refresh.hs",
     "exomonad/host/src/actor_host/fixtures/startup_persona_refuse_native.hs",
     "exomonad/host/src/actor_host/fixtures/startup_persona_web_selection.hs",
+    "exomonad/host/src/actor_host/fixtures/startup_runtime_published.hs",
     "exomonad/host/src/actor_host/fixtures/supplied_live_observe.hs",
     "exomonad/host/src/actor_host/fixtures/supplied_live_observe_again.hs",
     "exomonad/host/src/actor_host/fixtures/supplied_live_observe_immediate.hs",
