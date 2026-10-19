@@ -137,11 +137,21 @@ Completion auto-notification is supporting evidence only. The build/process
 owner observes its terminal result and emits this event; the parent reconciles
 review, repair and fold disposition.
 
-Concrete dependency added during row lifetime review: selected support may
-already retain broad physical V+S materialization before the V leaf is issued.
-The row producer requested a same-logical-selection physical-frontier refresh
-through the existing ArtifactView projection owner. Host inputs owns approval
-of the small CompilerSourceSupport forwarding helper; source_lifetime is active
-for bounded strong-retainer review. This is part of the existing once-only
-promotion/sibling-release assignment, not a new work scope. The row producer
-continues independent mutex/collector tests while that helper is coordinated.
+Lifetime review found that selected support could already retain broad physical
+V+S materialization before the V leaf was issued. Host review rejected an extra
+physical-frontier refresh because it would add another retained-history scan at
+publication. The accepted ordering repair promotes and attaches the output row
+under the completed context's exact selected support before existing
+`retain_output`/`source_support` narrowing; host bindings promote before
+`select_value_interface`. Existing narrowing then sees the leaf on its first
+physical-frontier capture. No CompilerSourceSupport helper is authorized or
+needed, and the draft refresh is removed. Both host and independent reviewer
+accepted this direction; exact candidate acceptance remains pending.
+
+Independent strong-retainer review also identified native offers/availability
+custody and host prototype contexts as possible required owners of broad
+backing. Never remove their issued owners for a synthetic release assertion.
+The empty-native V+S regression must prove unrelated sibling backing release;
+V requiring A separately preserves A's exact original physical owner and reports
+its actual retained backing. Source_lifetime's review report records these
+distinctions, without executed lifetime evidence yet.

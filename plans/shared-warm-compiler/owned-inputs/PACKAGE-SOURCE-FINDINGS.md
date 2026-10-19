@@ -346,3 +346,58 @@ the explicit fallback mode must replace that expectation honestly and report
 decoded warm reuse unavailable. Low-level tests that explicitly open one shared
 `withResidentCompilerScopes` continue testing its fixed-source precondition,
 not production fallback freshness.
+
+## Same-selection physical refresh review
+
+Bounded follow-up reviewed rows WIP at base `5b74c2f1` after it identified that
+`retain_surface` chooses a fixed materialization frontier before issuing the new
+leaf. A later leaf can win the next request's physical selection while the
+checked value's own `CompilerSourceSupport.artifacts` still holds that old fixed
+frontier. Thus next-request row precedence alone does not prove old backing
+release.
+
+The proposed existing-owner helper that refreshes physical inputs under the
+**same exact issued selection** is sound in principle for that retainer. It must
+preserve namespace, binding/scope facts, roots and custody roots,
+`admission_roots`, inventory, selected acquisitions and per-view absence. It may
+replace derived read caches and materialization sources with the current exact
+projected physical frontier after leaf attachment. The forwarding
+`CompilerSourceSupport` operation should clone its logical fields and replace
+only the artifact view, without reissuing roles, permissions or native offers.
+Host-input ownership must approve the exact diff. No exact implementation was
+accepted by this review.
+
+Replacing `artifacts` does not replace every physical retainer in support:
+
+- `native_offers` retains `NativeOfferFacts.custody`, whose private `ViewLease`
+  owns `materialization.fixed`; `NativeOfferCustody::from_checked_nodes`
+  explicitly captures that exact physical subset. `native_availability` rows
+  retain contributions that hold the same offers. These owners remain when the
+  main artifact view is refreshed.
+- `selected` retains acquired `Arc<ArtifactEntry>` payloads, which can retain
+  catalog/source byte custody but do not themselves own a materialization view.
+- Projection and recorded input choices contain logical facts. The returned
+  `TemplateImportEvidence` is a pure graph; `CapturedTemplateImports` consumes
+  its support during merge and does not survive as a parallel owner.
+- Outside support, a host-built value's `original_interface_prototype` retains
+  an exact declaration context; that is a separate physical retainer governed
+  by the host owner.
+
+Consequently V with no native/support dependency can release a broad historical
+V+S owner after refresh. V requiring A can legitimately retain A's old row; if
+A shares an arena/directory with S, that backing still remains through A or an
+issued native offer. Do not reissue those offers or change logical support to
+manufacture a release claim. Required acceptance distinguishes: V-only actual
+broad-owner release; V→A identical A row and no copy; native-offer and catalog
+backing that remains required and is measured separately. Source review only;
+no build/test/resource action executed in this follow-up.
+
+Host-input owner subsequently withheld the helper on structural cost: another
+physical refresh adds a whole-history pass. Rows accepted an ordering repair
+instead. Promote/attach the exact output packet's value leaf on the final
+context's existing compiler support **before** `retain_output`/`source_support`
+chooses its fixed physical frontier; host binding does likewise before
+`select_value_interface`. The existing selector then sees the leaf during its
+required pass. This direction supersedes the helper proposal above. Exact
+candidate review and an empty-native V+S broad-backing release control remain
+pending; genuine required native/prototype retainers remain separate.
