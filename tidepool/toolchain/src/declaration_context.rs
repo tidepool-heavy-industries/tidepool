@@ -18366,7 +18366,13 @@ mod tests {
     fn metadata_identity_is_path_independent_and_tracks_graph_selection() {
         let (context, _) = metadata_fixture();
         let expected = context.semantic_sha256();
-        assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            context
+                .owner
+                .semantic_issuances
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
         let before = context
             .owner
             .facts
@@ -18385,7 +18391,13 @@ mod tests {
         // The first identity query owns the metadata, encoding and digest.
         assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(after.view_queries - before.view_queries, 0);
-        assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            context
+                .owner
+                .semantic_issuances
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
         for _ in 0..2 {
             let directory = tempfile::tempdir().unwrap();
             context.materialize_scratch(&directory).unwrap();

@@ -8203,7 +8203,7 @@ mod module_product_tests {
         }];
         assert!(file_path_role.original().is_none());
         assert!(matches!(
-            &selected.artifacts().metadata_snapshot().artifacts[&file_path_role.interface()]
+            &selected.issued_artifacts().metadata_snapshot().artifacts[&file_path_role.interface()]
                 .payload,
             crate::artifact_inventory::ArtifactPayload::Canonical(_)
         ));

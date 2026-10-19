@@ -19304,7 +19304,6 @@ pub(crate) mod tests {
         use crate::artifact_inventory::CanonicalProducerIdentity;
         use crate::declaration_context::ExactDeclarationContext;
         use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
-        use crate::recovery_artifacts::CertifiedRecoveryProduct;
         use tidepool_repr::{Generation, SessionModule};
         let root = tempfile::tempdir().unwrap();
         let source = "module Target where";
