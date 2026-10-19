@@ -333,7 +333,7 @@ fn source_boot_codec_packet_producer() {
             // child block for the missing-child integrity control.
             let facts = (0..128)
                 .map(|n| (format!("fact-{n}"), format!("value-{n}")))
-                .collect::<imbl::OrdMap<_, _>>();
+                .collect::<imbl::OrdMap<String, String>>();
             let mut materializer = crate::exact_context::Materializer::new(&store);
             let map = materializer.materialize_map(None, &facts).unwrap();
             let staged = materializer.finish().unwrap();
