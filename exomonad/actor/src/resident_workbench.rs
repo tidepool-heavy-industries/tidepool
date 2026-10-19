@@ -1936,6 +1936,24 @@ struct ActorPublicationGuard {
     decision: Arc<tidepool_runtime::session::PublicationDecision>,
     owner: ActorPublicationOwner,
     settled: bool,
+    #[cfg(test)]
+    settlement_probe: Option<Arc<PublicationSettlementProbe>>,
+}
+
+#[cfg(test)]
+pub(super) struct PublicationSettlementProbe {
+    pub(super) entered: std::sync::mpsc::SyncSender<()>,
+    pub(super) release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+#[cfg(test)]
+impl PublicationSettlementProbe {
+    fn wait(&self) {
+        self.entered.send(()).unwrap();
+        self.release
+            .lock()
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+    }
 }
 
 #[derive(Clone)]
@@ -2012,6 +2030,8 @@ impl ActorPublicationGuard {
             decision,
             owner,
             settled: false,
+            #[cfg(test)]
+            settlement_probe: None,
         }))
     }
 
@@ -2062,6 +2082,8 @@ impl ActorPublicationGuard {
                     ActorRequestSnapshot::Generation(generation) => InstalledToolsAvailability::Generation(generation.clone()),
                     ActorRequestSnapshot::SourceCallback(_) => unreachable!("callback is not current publication"),
                 };
+                #[cfg(test)]
+                if let Some(probe) = &self.settlement_probe { probe.wait(); }
                 reopen.commit();
                 Ok(())
             }).unwrap_or(Err(()))
@@ -2097,6 +2119,10 @@ impl ActorPublicationGuard {
                         return Err(());
                     };
                     *current = InstalledToolsAvailability::Generation(generation);
+                    #[cfg(test)]
+                    if let Some(probe) = &self.settlement_probe {
+                        probe.wait();
+                    }
                     reopen.commit();
                     Ok(())
                 })

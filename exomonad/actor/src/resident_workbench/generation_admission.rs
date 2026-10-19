@@ -875,6 +875,45 @@ mod tests {
     }
 
     #[test]
+    fn publisher_settlement_holds_installed_compare_through_gate_commit() {
+        for bootstrap in [true, false] {
+            let fixture = if bootstrap {
+                PublicationFixture::new()
+            } else {
+                PublicationFixture::after_confirmed_c()
+            };
+            let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            assert!(owner.visibility().install(fixture.generation.clone()));
+            let (entered, observed) = std::sync::mpsc::sync_channel(0);
+            let (release, released) = std::sync::mpsc::channel();
+            owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
+                entered,
+                release: parking_lot::Mutex::new(released),
+            }));
+            let settling = std::thread::spawn(move || owner.confirmed());
+            observed
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            // This observation occurs in the actual publisher callback, after
+            // selection but before the same borrowed gate token commits.
+            assert!(fixture.state.0.try_lock().is_none());
+            let state = fixture.state.clone();
+            let (clearing, started) = std::sync::mpsc::sync_channel(0);
+            let clear = std::thread::spawn(move || {
+                clearing.send(()).unwrap();
+                state.clear();
+            });
+            started
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            release.send(()).unwrap();
+            assert!(settling.join().unwrap());
+            clear.join().unwrap();
+            assert!(fixture.state.snapshot_for_call().is_err());
+        }
+    }
+
+    #[test]
     fn publisher_closed_actual_preparation_owner_prevents_confirmation_and_refusal_reopen() {
         for confirmed in [true, false] {
             let mut fixture = PublicationFixture::new();
