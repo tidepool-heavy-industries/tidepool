@@ -124,7 +124,7 @@ pub(crate) fn declaration() -> HostedTool {
         implementation: Default::default(),
         effect_keys: Vec::new(),
         name: STATUS_TOOL.into(),
-        description: "Inspect this actor and its workbench without running a Haskell cell. Omit view (or use changed) for compact roster rows changed since your last changed/summary/all call; the first call shows the full compact roster. summary/all shows every compact row. Choose {\"view\":\"recovery\"} for replayed declarations and losses after machine replacement; bindings for currently available names; live for retained command jobs and binding provenance; watches for watch states and pending responses; revisions for checkout, assignment and active source identities/drift; detailed for provider health and expanded actor state; lineage for ancestry; trace for provider usage and prompt identity. Use view=operation without operation to discover exact references (unfinalized first; 32 per page; pass next_after as after). Supply an operation reference with full origin, request_id and call_id to read execution, native finalization, durable settlement and delivery independently, without awaiting a notebook cell. Status does not acknowledge watches or retrieve settled values; use pollWatch/pollResponse for those values.".into(),
+        description: "Inspect this actor and its workbench without running a Haskell cell. Use view=changed for compact roster rows changed since your last changed/summary/all call. In the strict provider schema, null means omit an optional field: view=null selects changed; unused operation and after must be null. Host callers may omit these fields; the first call shows the full compact roster. summary/all shows every compact row. Choose {\"view\":\"recovery\"} for replayed declarations and losses after machine replacement; bindings for currently available names; live for retained command jobs and binding provenance; watches for watch states and pending responses; revisions for checkout, assignment and active source identities/drift; detailed for provider health and expanded actor state; lineage for ancestry; trace for provider usage and prompt identity. Use view=operation without operation to discover exact references (unfinalized first; 32 per page; pass next_after as after). Supply an operation reference with full origin, request_id and call_id to read execution, native finalization, durable settlement and delivery independently, without awaiting a notebook cell. Status does not acknowledge watches or retrieve settled values; use pollWatch/pollResponse for those values.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -266,6 +266,42 @@ mod tests {
             ])
         );
         assert!(tool.input_schema.get("required").is_none());
+    }
+
+    #[test]
+    fn issued_status_schema_decodes_null_omission_before_applying_defaults() {
+        let HostedTool::Function(tool) = declaration() else {
+            panic!("status must be a function tool");
+        };
+        let schema = harness_schema::FunctionToolSchema::new(tool.input_schema).unwrap();
+        assert_eq!(
+            schema.parameters()["required"],
+            serde_json::json!(["after", "operation", "view"])
+        );
+        let decoded = schema
+            .decode_arguments(serde_json::json!({
+                "view":null,"operation":null,"after":null
+            }))
+            .unwrap();
+        assert_eq!(decoded, serde_json::json!({}));
+        assert_eq!(parse(decoded.clone()).unwrap(), StatusView::Changed);
+        assert_eq!(operation(decoded.clone()).unwrap(), None);
+        assert!(operation_after(decoded).unwrap().is_none());
+        let identity = serde_json::json!({"origin":{"kind":"embedded","run":"run","actor":"/root","incarnation":"1"},"request_id":"request","call_id":"call"});
+        let decoded = schema
+            .decode_arguments(serde_json::json!({
+                "view":"operation","operation":identity,"after":null
+            }))
+            .unwrap();
+        assert_eq!(parse(decoded.clone()).unwrap(), StatusView::Operation);
+        assert_eq!(
+            serde_json::to_value(operation(decoded).unwrap().unwrap()).unwrap(),
+            identity
+        );
+        assert!(
+            parse(serde_json::json!({"view":null})).is_err(),
+            "provider null must pass through the issued decoder"
+        );
     }
 
     #[test]

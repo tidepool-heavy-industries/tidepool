@@ -4216,7 +4216,7 @@ impl ResidentActorBoundary {
             Self::Source { request, .. } => source_operation(request),
             Self::Reload { .. } => "reloadSource",
             Self::SpecValidation { .. } => "validateAgentSpec",
-            Self::Command { .. } => "command job",
+            Self::Command { request, .. } => command_operation(request),
             Self::Console { .. } => "print",
             Self::Form { .. } => "human form",
             Self::Green(boundary) => boundary.operation(),
@@ -4422,6 +4422,17 @@ fn source_operation(request: &crate::generated::source::SourceReq) -> &'static s
     }
 }
 
+fn command_operation(request: &crate::generated::commands::CommandsReq) -> &'static str {
+    use crate::generated::commands::CommandsReq;
+    match request {
+        CommandsReq::CommandStartWith(_)
+        | CommandsReq::CommandStartOwnedWith(_, _)
+        | CommandsReq::CommandBackgroundWith(_) => "command start",
+        CommandsReq::CommandWaitWith(_) => "command wait",
+        _ => "command job",
+    }
+}
+
 impl ResidentRequest {
     fn decode(
         request: &HaskellValue,
@@ -4525,7 +4536,7 @@ impl ResidentRequest {
             Self::Context(_) => "context transformation",
             Self::Source(request) => source_operation(request),
             Self::Reload(_) => "reloadSource",
-            Self::Commands(_) => "command job",
+            Self::Commands(request) => command_operation(request),
             Self::Console(_) => "console output",
             Self::AskUser(_) => "human form",
             Self::Green(_) => "green thread",

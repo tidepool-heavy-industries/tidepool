@@ -2650,6 +2650,52 @@ async fn flat_output_pending_is_distinct_from_empty_and_failure() {
 }
 
 #[tokio::test]
+async fn command_run_receipts_distinguish_start_and_wait_without_merging_effect_ids() {
+    let campaign = TestCampaign::start().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let mut running = tokio::spawn(async move {
+                    super::tests::dispatch_haskell_script_result(
+                        policy.as_ref(),
+                        "result <- Cmd.run (Cmd.argv [\"true\"])",
+                    )
+                    .await
+                });
+                backend_request_while_live(
+                    campaign,
+                    &mut running,
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                )
+                .await
+                .supply(Ok(TestCommands::completed("once")));
+                let result = running.await.unwrap().unwrap();
+                require_committed(&result);
+                let operations = result["items"][0]["operations"].as_array().unwrap();
+                assert_eq!(operations.len(), 2, "{result}");
+                assert_eq!(operations[0]["effect"], "command start");
+                assert_eq!(operations[1]["effect"], "command wait");
+                for operation in operations {
+                    assert_eq!(operation["disposition"], "committed");
+                    assert_eq!(operation["id"]["inputUnitIndex"], 0);
+                }
+                assert_eq!(operations[0]["id"]["effectOrdinal"], 0);
+                assert_eq!(operations[1]["id"]["effectOrdinal"], 1);
+                assert_eq!(
+                    operations[0]["id"]["execution"],
+                    operations[1]["id"]["execution"]
+                );
+                assert!(operations[0]["id"]["execution"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty()));
+                assert_ne!(operations[0]["id"], operations[1]["id"]);
+            })
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn command_receipts_preserve_owner_settlement_across_continuation_failure() {
     let campaign = TestCampaign::start().await;
     campaign
@@ -2664,12 +2710,12 @@ async fn command_receipts_preserve_owner_settlement_across_continuation_failure(
                 .await
                 .unwrap_err()
                 .to_string();
-                assert!(rejected.contains("Rejected (command job)"), "{rejected}");
+                assert!(rejected.contains("Rejected (command start)"), "{rejected}");
                 assert!(
                     rejected.contains("no job created, no cleanup required"),
                     "{rejected}"
                 );
-                assert!(!rejected.contains("Unknown (command job)"), "{rejected}");
+                assert!(!rejected.contains("Unknown (command start)"), "{rejected}");
                 assert!(
                     tokio::time::timeout(Duration::from_millis(20), backend_request(campaign))
                         .await
@@ -2684,8 +2730,8 @@ async fn command_receipts_preserve_owner_settlement_across_continuation_failure(
                 .await
                 .unwrap_err()
                 .to_string();
-                assert!(failed.contains("Committed (command job)"), "{failed}");
-                assert!(!failed.contains("Unknown (command job)"), "{failed}");
+                assert!(failed.contains("Committed (command start)"), "{failed}");
+                assert!(!failed.contains("Unknown (command start)"), "{failed}");
                 backend_request(campaign)
                     .await
                     .supply(Ok(TestCommands::completed("started-once")));

@@ -608,6 +608,16 @@ fn project_tools(tools: &[HostedTool]) -> Result<EmbeddedToolProjection, String>
 
 #[cfg(test)]
 mod tests {
+    struct UnusedDispatcher;
+    #[async_trait::async_trait]
+    impl harness::provider::Provider for UnusedDispatcher {
+        async fn call(&self, _: &str, _: Value) -> Result<Value, harness::provider::ProviderError> {
+            panic!("schema observation must not dispatch a tool")
+        }
+        fn tools(&self) -> Vec<Value> {
+            vec![]
+        }
+    }
     use super::*;
     use exomonad_actor::ResidentToolDispatchFuture;
     use exomonad_tool::{CustomToolDeclaration, ToolDeclaration, ToolKind};
@@ -1082,20 +1092,6 @@ mod tests {
 
     #[test]
     fn installed_haskell_text_fields_reach_function_only_surface_without_name_inference() {
-        struct UnusedDispatcher;
-        #[async_trait::async_trait]
-        impl harness::provider::Provider for UnusedDispatcher {
-            async fn call(
-                &self,
-                _: &str,
-                _: Value,
-            ) -> Result<Value, harness::provider::ProviderError> {
-                panic!("schema observation must not dispatch a tool")
-            }
-            fn tools(&self) -> Vec<Value> {
-                vec![]
-            }
-        }
         use exomonad_tool::{ToolImplementation, ToolScheduling};
         let custom = |name: &str, implementation, schedule| {
             HostedTool::Custom(CustomToolDeclaration {
@@ -1352,6 +1348,34 @@ mod tests {
                     )
                     .request_snapshot()
                     .unwrap();
+                    let encoded = harness::embedding::ToolSurface::from_manifest(
+                        "builtin-projection".into(),
+                        snapshot.manifest(),
+                        Arc::new(UnusedDispatcher),
+                    )
+                    .unwrap()
+                    .with_encoding(
+                        harness::transport::ToolEncodingProfile::FunctionOnlyExplicitDelivery,
+                    )
+                    .unwrap();
+                    let issued_status = encoded
+                        .tools()
+                        .iter()
+                        .find(|tool| tool["name"] == "status")
+                        .unwrap();
+                    assert_eq!(
+                        issued_status["parameters"]["required"],
+                        json!(["arguments", "delivery"])
+                    );
+                    let host_status = snapshot
+                        .tools()
+                        .iter()
+                        .find(|tool| tool["name"] == "status")
+                        .unwrap();
+                    assert_eq!(
+                        issued_status["parameters"]["properties"]["arguments"],
+                        host_status["parameters"]
+                    );
                     for (name, field) in [("status", "view")] {
                         let declaration = snapshot
                             .tools()
@@ -1359,7 +1383,10 @@ mod tests {
                             .find(|tool| tool["name"] == name)
                             .unwrap();
                         assert_eq!(declaration["strict"], true);
-                        assert_eq!(declaration["parameters"]["required"], json!([field]));
+                        assert_eq!(
+                            declaration["parameters"]["required"],
+                            json!(["after", "operation", "view"])
+                        );
                         assert_eq!(declaration["parameters"]["additionalProperties"], false);
                         assert_eq!(
                             declaration["parameters"]["properties"][field]["anyOf"][1],
@@ -1368,7 +1395,9 @@ mod tests {
                         let result = snapshot
                             .dispatch(
                                 name.into(),
-                                ToolArguments::Structured(json!({(field):null})),
+                                ToolArguments::Structured(
+                                    json!({(field):null,"operation":null,"after":null}),
+                                ),
                                 context(),
                                 None,
                                 None,
