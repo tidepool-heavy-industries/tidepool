@@ -103,3 +103,34 @@ to commit remain required adversarial controls. No absent counter is zero.
 The new service may break internal APIs and explicitly version/refuse old persisted
 authority. Qualification must not depend on legacy adapters or test authority
 factories. Immutable baseline bundles, user files and evidence remain preserved.
+
+## Required Rust actor migration
+
+The accepted `RUST-CLIENT-MIGRATION.md` amendment makes ordinary actor cell
+preparation, successors and recovery mandatory alongside the first query slice.
+Real actor front doors acquire the scoped client from one published session owner;
+tests cannot hand-pair worlds, values, source and profile. Bindings and world publish
+coherently only after required execution/output/END evidence. Query hydration does
+not change the logical world; same-tip mutation must still produce the right change.
+
+Use matched fixed-query **and small appended-cell** histories at three increasing
+unrelated-history sizes. Record preparation, execution, publication and restore-product
+work separately, with whole-wall timing; fixed actual changes/dependencies/output
+must not cause growing baseline visits, hashes, encoding, FD enumeration or compiler
+reconstruction. Real demanded dependencies may grow. Cold creation may visit the
+primary snapshot once, keeping historical binding support separate from the current
+namespace. It cannot call a renamed all-values `checked_value_context` fold.
+
+Joined acceptance includes lookup → bind → later use → fork divergence → eviction
+and exact cold restore, plus declaration/import/alias/shadow/removal/source-change
+successors, stale commit, failed preparation, cancellation and uncertain END.
+Multi-item preparation preserves per-item publication; no later item becomes visible
+early and no source/effect replay repairs a lost realization. Required old native
+edges retain identity; unused custody remains non-current. A service query bypass
+does not repair or qualify the failed catalog-backed Persona path.
+
+Final deletion audit classifies native/notebook lookup, ordinary/declaration-only
+cells, renderer specialization, startup, fork, reload and recovery as migrated,
+intentionally distinct runtime consumption, explicitly unsupported, or obsolete/deleted.
+Unclassified supported reconstruction fronts block migration acceptance. Current map
+entries are source observations and open dispositions, not successful migrations.
