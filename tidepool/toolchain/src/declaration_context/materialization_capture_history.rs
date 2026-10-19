@@ -529,8 +529,18 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
     };
     let b_product = product(&b);
     let a_product = product(&a);
-    assert!(b_product.original_native().unwrap().groups.is_empty());
-    assert!(a_product.original_native().unwrap().groups.is_empty());
+    assert!(
+        crate::certified_products::original_available_groups(&b_product)
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    assert!(
+        crate::certified_products::original_available_groups(&a_product)
+            .unwrap()
+            .next()
+            .is_none()
+    );
     assert!(b_product
         .execution_source()
         .unwrap()

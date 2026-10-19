@@ -23999,8 +23999,8 @@ mod tests {
             .expect("conflicting selected support must refuse actual preparation");
         assert!(matches!(conflicting_support,
             CompileError::ArtifactInventory(error)
-                if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { owner: actual }
-                    if actual == owner)));
+                if matches!(&error.failure, ArtifactInventoryFailure::OwnerConflict { owner: actual }
+                    if actual == &owner)));
         let configured_output = support_offer(&configured_support);
         let configured_private = OriginalCompilerInputs::from_selection(
             &configured_output.source_selection().unwrap(),
