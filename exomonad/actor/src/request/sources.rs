@@ -783,7 +783,7 @@ mod tests {
         use crate::resident_workbench::{
             ActorWorkbenchSource, ResidentActorBoundary, ResidentActorRunner,
         };
-        use tidepool_codegen::{scope::ScopeId, suspension::RealmId};
+        use tidepool_codegen::suspension::RealmId;
         use tidepool_runtime::session::turn::{run_turn, TurnRequest, TurnResult};
         use tidepool_runtime::session::{
             insert_preamble_imports, resident_workbench_templates, ModuleEnv, ResidentSession,
@@ -842,12 +842,13 @@ mod tests {
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(library),
         );
+        let scope = session.mint_isolated_scope();
         let mut context = crate::ActorDescriptor::new(
             "route-source",
             crate::ActorPlacement {
                 session: session_id,
                 resource_scope: RealmId::ROOT,
-                lexical_scope: ScopeId::ROOT,
+                lexical_scope: scope,
             },
         )
         .admit_independent_world()
@@ -856,7 +857,7 @@ mod tests {
         context.haskell_effects_alias = "'[RouteW.Watches]".into();
         context
             .source_dependency()
-            .adopt_final_scope(&mut session, ScopeId::ROOT)
+            .adopt_final_scope(&mut session, scope)
             .unwrap();
         session
             .set_actor_execution(
