@@ -1,15 +1,24 @@
 # Compiler-query effects
 
 Status: accepted direction, refreshed 2026-10-19 against integration code at
-`c830d1f585` (schema `9329e7f216`, generated protocol snapshots `c830d1f585`;
-plan commits through `6909452508`), with the handlers WIP folded in below. The schema in
+`447567c2c0` (schema `9329e7f216`, generated protocol snapshots `c830d1f585`;
+prior plan commits through `ff415cb313`, with this spike refresh on top), and
+with the held-world enumeration verdicts and the handlers WIP folded in below.
+The schema in
 `bridge/protocol/src/effects/introspection.rs` is authoritative; the runtime
 projection is in `tidepool/runtime/src/session/inspection.rs`. This document
 states the contract, not that every consumer is wired. No native build or
 execution was run for this revision.
 
 Citation basis: every line below is validated against committed integration code
-at `c830d1f585`, unless the surrounding text names the handlers WIP. The schema
+at `447567c2c0`, unless the surrounding text names the handlers WIP or the
+enumeration spike. The enumeration verdicts come from
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/compiler-query/handlers/ENUMERATION-SPIKE.md`
+(`REPORT_SHA256 3e28ca250aebdc4cadb8b430257f2009e387003bfe4e46f8ef734481ae2a4c2b`),
+a read-only source inspection at `52337d6220` with that checkout's in-flight
+worktree. Its line numbers describe that working tree, not a commit, so this
+plan cites the spike for its verdicts and re-derives every code anchor against a
+committed blob. The schema
 source was last changed by `9329e7f216`, which reordered
 `nameEntryReference`/`typeMatchReference` after their `*References` fields and
 shifted line numbers from the earlier `bc58326f30` correction; generated
@@ -18,11 +27,11 @@ snapshots were committed by `c830d1f585`. Citations to
 `exomonad/actor/src/resident_actor.rs`, and the identity changes in
 `tidepool/runtime/src/session/inspection.rs` and
 `bridge/haskell/src/Tidepool/Introspection.hs` are against the handlers branch
-`cf4cd87e99` plus its working tree (`cf4cd87e99 + WT`); those paths are absent
+`d9b5053f2d` plus its working tree (`d9b5053f2d + WT`); those paths are absent
 or not current at integration HEAD, and their WIP line numbers can differ from
 HEAD. Cite the committed blob for integration claims and the WIP tree for
 handler claims. WIP working-tree citations are pinned by blob hash:
-`compiler_query.rs` `1e6a5c41`, `resident_workbench.rs` `7c744a32`,
+`compiler_query.rs` `cfb4dc79`, `resident_workbench.rs` `7c744a32`,
 `resident_actor.rs` `a15a777d`, `inspection.rs` `bf72d0b0`, and
 `Introspection.hs` `dab03861`. The WIP tree's protocol and generated snapshots
 predate the identity schema, so schema citations always use integration HEAD.
@@ -84,13 +93,13 @@ handler captures the compile-view provenance before the query, recomputes it
 afterward, and returns `ScopeChanged(before, after)` if the compile view moved,
 instead of returning the stale answer. For the six new verbs this decision lives
 in the handler module: `entry_scope_refusal` refuses a pin that never matched at
-entry (`exomonad/actor/src/resident_workbench/compiler_query.rs:410-420`), and
+entry (`exomonad/actor/src/resident_workbench/compiler_query.rs:419-431`), and
 `compiler_query_answer` refuses a view that moved while the query ran
-(`exomonad/actor/src/resident_workbench/compiler_query.rs:423-440`). Thus
+(`exomonad/actor/src/resident_workbench/compiler_query.rs:434-512`). Thus
 entry-versus-pre-reply drift is refused for **every** query, including a
 `Nothing` query that supplied no expected scope. The older `info`/`typeOf`
 structured path keeps its own pre/post comparison
-(`exomonad/actor/src/resident_workbench.rs:14498-14509`; projection at
+(`exomonad/actor/src/resident_workbench.rs:14514-14525`; projection at
 `exomonad/actor/src/resident_workbench/structured_introspection.rs:275-284,
 300-305`), but that path does not cover the new verbs.
 
@@ -182,7 +191,39 @@ Two distinctions are load-bearing:
   `nameEntryReferences`/`typeMatchReferences` are dependencies the declaration
   mentions or resolves, not the entry's own identity. The handler fills the
   singular reference from the compiler payload's identity field
-  (`exomonad/actor/src/resident_workbench/compiler_query.rs:223-235, 290-302`).
+  (`exomonad/actor/src/resident_workbench/compiler_query.rs:231-244, 297-310`,
+  WIP).
+
+### Enumeration answer shape
+
+Enumeration does not return `NameEntry`. `NameEntry` is the `info` answer, and
+three of its fields are structurally unavailable world-side: `nameEntryDisplay`
+needs GHC `ppr` or an interface decode, `nameEntryAvailability` needs the
+executing actor's effect row, and `nameEntryReferences` needs GHC `NameInfo`
+(`bridge/protocol/src/effects/introspection.rs:357-377`). Encoding them would
+force either a fabricated value or a compile, which defeats the split.
+
+Enumeration therefore narrows to a distinct reference record. This is the
+accepted direction from the held-world spike, not yet a committed schema shape:
+
+```haskell
+data NameRef = NameRef
+  { nameRefName         :: Text
+  , nameRefModule       :: Maybe Text
+  , nameRefNamespace    :: NameNamespace
+  , nameRefDefinedScope :: NameScope
+  , nameRefReference    :: IdentifierRef
+  }
+```
+
+`nameRefReference` is the identity to chain into `info`, `typeOf`, or `rowFit`;
+`NameEntry` remains the `info` answer. This is a schema edit, not an adapter,
+because the old shape cannot be populated world-side and a nullable
+availability would let callers read "absent" as "unknown". `NameRef` is
+**not committed at HEAD**: `NameEntry` is still the element record at
+`bridge/protocol/src/effects/introspection.rs:357-377`, and `NameList` still
+types `entries` as `[NameEntry]` at `:378-387`. The accepted direction is
+pending that schema edit.
 
 ### Wire identity (handlers WIP)
 
@@ -218,7 +259,7 @@ Evidence for each protocol shape:
   reference shown: `bridge/protocol/src/effects/introspection.rs:357-377`;
   generated text `bridge/mcp/src/generated/introspection.rs:35`.
 - `NameList` adds `nameListProvenance` beside the observed and retained counts:
-  `bridge/protocol/src/effects/introspection.rs:378-388`; generated text
+  `bridge/protocol/src/effects/introspection.rs:378-387`; generated text
   `bridge/mcp/src/generated/introspection.rs:36`.
 - `FitAvailability` has exactly the four constructors shown:
   `bridge/protocol/src/effects/introspection.rs:388-396`; generated text
@@ -249,7 +290,7 @@ declaration records: protocol fields `typeCanonical`, `typeVariables`, and
 `typeConstraints` (`bridge/protocol/src/effects/introspection.rs:250-258`;
 Haskell record `bridge/haskell/src/Tidepool/Introspection.hs:181-186`), projected
 at runtime as `canonical`, `variables`, and `constraints`
-(`tidepool/runtime/src/session/inspection.rs:79-84`). It is **not** the
+(`tidepool/runtime/src/session/inspection.rs:80-84`). It is **not** the
 result of `typeOfExpression`; `ExpressionType` is the separate record above.
 
 ## Compile-view provenance and staleness
@@ -264,14 +305,14 @@ The actor builds provenance from the `ActorCompileView` it actually compiled
 from (`exomonad/actor/src/mount.rs:731-743`):
 
 - `generation` is the compile view's value generation
-  (`exomonad/actor/src/resident_workbench.rs:14555`;
+  (`exomonad/actor/src/resident_workbench.rs:14571`;
   `exomonad/actor/src/mount.rs:835-837`). The published tip for a compile view
   is exposed by `CompileViewKey::generation()`
   (`tidepool/runtime/src/session/persistent.rs:312-323`).
 - `fingerprint` is a content digest over the prepared preamble, imports,
   generation, include paths, and injected modules, finalized into
   `ScopeProvenance { scope, generation, fingerprint }`
-  (`exomonad/actor/src/resident_workbench.rs:14556-14572`). It commits to the
+  (`exomonad/actor/src/resident_workbench.rs:14572-14588`). It commits to the
   exact source/import view, so two answers with the same scope and generation
   but different content do not compare equal.
 
@@ -281,8 +322,8 @@ provenance now current (`current`/`after`)
 (`bridge/protocol/src/effects/introspection.rs:489-495`). For the six new verbs
 the handler makes this decision in `entry_scope_refusal` and
 `compiler_query_answer`
-(`exomonad/actor/src/resident_workbench/compiler_query.rs:410-440`), before any
-projection (`exomonad/actor/src/resident_workbench/compiler_query.rs:423-506`).
+(`exomonad/actor/src/resident_workbench/compiler_query.rs:419-512`), before any
+projection (`exomonad/actor/src/resident_workbench/compiler_query.rs:434-512`).
 A stale view must never become an empty success.
 
 There is deliberately no synthesized compiler-world identity in this contract.
@@ -302,43 +343,109 @@ separate runtime-owner follow-up, not current compiler-query behavior.
 
 ## Enumeration and row fit
 
-- Enumeration must not compile a checked target. `scopeBindings` and
-  `moduleExports` are specified as target-free enumeration
-  (`bridge/protocol/src/effects/introspection.rs:133-167`); `moduleExports`
-  also keeps generated session modules private
-  (`bridge/protocol/src/effects/introspection.rs:144`). **Known gap:** the
-  handler's `ScopeBrowse`/`Browse` batch still goes through
-  `run_admitted_inspections`, which compiles its inspection module
-  (`exomonad/actor/src/resident_workbench/compiler_query.rs:116-141, 1059-1079`,
-  WIP); it is not the zero-compile world read the effect docs describe. The
-  mapping table marks those rows as the known gap.
-- `rowFit` does not run the solver in the actor. The handler resolves the
-  identifier with `row_fit_query` to `Browse {expanded: true}` (or `ScopeBrowse`
-  for a session-reserved module), reads the typed
-  `InfoEntry.identity`/`availability` entries, and selects with
-  `fit_from_entries`
-  (`exomonad/actor/src/resident_workbench/compiler_query.rs:144-163, 460-466,
-  562-592`, WIP). Its cost is interface load plus module enumeration. Its result
-  is the `Fit` record above, and its availability component still comes from
-  compiler-typed evidence, never rendered text: `AvailabilityContext` carries
-  the `Eff` type constructor and row
-  (`bridge/haskell/src/Tidepool/Introspection.hs:240-246`); the row is read from
-  the sentinel's typed `Proxy` and rendered text never determines it
-  (`bridge/haskell/src/Tidepool/Introspection.hs:285-307`);
-  `availabilityFor` compares the rows and solves predicates
-  (`bridge/haskell/src/Tidepool/Introspection.hs:358-395`);
-  `signatureAvailability` splits the sigma type
-  (`bridge/haskell/src/Tidepool/Introspection.hs:409-412`); and
-  `thingAvailability` uses that evidence for values, returning `Unknown` when it
-  has none (`bridge/haskell/src/Tidepool/Introspection.hs:1013-1017`). Missing
-  or disagreeing evidence yields `FitUnknown`, never an inferred success.
-- `typeOfExpression` and `typeSearch` compile an explicit probe but never run
-  it (`bridge/protocol/src/effects/introspection.rs:154-167`). The existing
-  runtime queries are `InspectionQuery::TypeOf` and
-  `InspectionQuery::TypeSearch`
-  (`tidepool/runtime/src/session/inspection.rs:18-20, 856-875, 887-889`); the
-  `TypeOf` inspection reads the probe's typed identifier rather than evaluating
-  the expression (`bridge/haskell/src/Tidepool/Introspection.hs:586-593`).
+### Today's enumeration reads the probe target's scope
+
+`InspectScope` enumerates `globalRdrEnvElts rdrEnv`
+(`bridge/haskell/src/Tidepool/Introspection.hs:597-602`), where `rdrEnv` is the
+checked target's `tcg_rdr_env`
+(`bridge/haskell/src/Tidepool/GhcPipeline.hs:4968`, carried as
+`crTargetRdrEnv` at `:4832`, and handed to the inspector at
+`bridge/haskell/app/Main.hs:418`). The checked compile returns `(tcg, probes)`
+only for the target module (`GhcPipeline.hs:4866, 4951`), so the generated
+probe participates in the normal target compile.
+
+The cost is real, but the correctness defect matters more: the answer is the
+**probe module's** scope, not the actor's. Bindings that exist only in the
+actor's imports can be missing, and probe-only bindings can appear. Do not
+describe today's `ScopeBrowse`/`Browse` path as a correct answer that merely
+costs a compile.
+
+The compile is observable, and an existing test pins it:
+`qualified_info_and_browse_share_one_checked_target` requires exactly one
+`tidepool-checked module=Expr target=True` in worker stderr
+(`tidepool/runtime/src/session/inspection.rs:1968-2013`, assertion at
+`:1992-1998`).
+
+### Accepted split: three owners, one rule
+
+The schema specifies `scopeBindings` and `moduleExports` as target-free
+enumeration and keeps generated session modules private
+(`bridge/protocol/src/effects/introspection.rs:133-167`, `:144`). The held-world
+spike establishes that they reach that goal by two different routes, and that
+`rowFit` cannot:
+
+- `scopeBindings` is **runtime-owned**. It answers from the admitted world's
+  published value bindings with no compiler call and no extract worker. The
+  bindings are already materialized per admission: `CompilerWorldBinding`
+  carries occurrence, `SymbolIdentity`, `SessionVarId`, defining scope, and
+  `Arc<CheckedValueArtifact>` (`tidepool/toolchain/src/compiler_world.rs:331-353`),
+  built by `capture_inspection_world_in`
+  (`tidepool/runtime/src/session/persistent.rs:1712, 1782, 1792`) and attached
+  as `InspectionWorldInputs::Cold { bindings, .. }`
+  (`tidepool/runtime/src/session/inspection.rs:397-404`). The table is keyed to
+  one `query_scope` and holds published value bindings only
+  (`compiler_world.rs:369-370, 390-448`), so other scopes, types, classes,
+  constructors, and imported-but-unpublished names are not enumerable.
+  Exposure is the missing piece: `ActorCompileView` has no world accessor
+  (`exomonad/actor/src/mount.rs:731-743`) and
+  `CompilerWorldRestoration.bindings` is private
+  (`compiler_world.rs:530-543`). One runtime accessor plus one actor route is
+  the minimal addition; no new cache is required.
+- `moduleExports` is **held-HPT world query**. It resolves the realized HPT
+  (`bridge/haskell/src/Tidepool/GhcPipeline.hs:1777`), loads a package module
+  through `findImportedModule` when it is not home (`:1822-1826`), and reads
+  `getModuleInfo`/`modInfoExports` on a fresh context with `hsc_targets=[]`
+  (`:1831-1838`). A miss — a home module absent from the realized HPT, or a
+  module whose interface is missing from the package DB — is a **typed
+  refusal**, never a compile. The cold-demand branch that calls
+  `runCompileCycle CheckedPublicModule` (`:1783-1816`) is what must be
+  replaced; it is invisible to `inspection.compile_attempts`, so a
+  zero-compile test would not catch it. Package modules pay an interface load
+  (I/O plus deserialization), a distinct cost class. Do not fabricate
+  availability: `availabilityFor` returns `Available` whenever the output does
+  not resolve to an `Eff` row
+  (`bridge/haskell/src/Tidepool/Introspection.hs:358-372`), a false success
+  when no row evidence exists.
+- `rowFit` is **NO-GO world-side** and stays solver-backed in the actor. The
+  retained row is an authority artifact for a checked value interface
+  (`tidepool/toolchain/src/checked_cell.rs:1312-1321`), not the executing
+  actor's effect row, and it carries no solved-predicate evidence. `rowFit`
+  needs `AvailabilityContext`
+  (`bridge/haskell/src/Tidepool/Introspection.hs:240-246`), the typed row from
+  the sentinel binder (`:576-582`), and predicate solving (`:397-407`); none
+  exists world-side. A target-free `rowFit` needs a new retained row plus an
+  instance-context contract, which is its own parcel.
+
+The acceptance rule "enumeration does not compile a checked target" now applies
+to `scopeBindings` and `moduleExports` only; `rowFit` keeps its compile and its
+compiler-typed availability evidence. Today's handler still routes both
+enumeration verbs through one `run_admitted_inspections` batch that compiles its
+inspection module
+(`exomonad/actor/src/resident_workbench/compiler_query.rs:136-162, 1059-1085`,
+WIP); that is the known gap, and the mapping table marks it.
+
+### `compile_attempts == 0` is vacuous today
+
+`inspection.compile_attempts` is emitted by `withInspectionWork`
+(`bridge/haskell/src/Tidepool/Introspection.hs:255-267`) and incremented only by
+`inspectionCompilationWork` at the inspection compile callback (`:269-271`;
+callback `bridge/haskell/app/Main.hs:405-412`). `runBoundWorldQuery` never
+enters `withInspectionWork`
+(`bridge/haskell/src/Tidepool/CompilerRequest.hs:336-340`), and the cold-demand
+`runCompileCycle` (`GhcPipeline.hs:1783-1816`) is not counted. So
+`compile_attempts == 0` on the world path passes vacuously. The real assertions
+are: no extract worker is spawned (`scopeBindings`), and no
+`tidepool-checked ... target=True` line appears on stderr (`moduleExports`),
+asserted in the style of `tidepool/runtime/src/session/inspection.rs:1996-2000`.
+Keep the counter check as a secondary observation, not as the evidence.
+
+`typeOfExpression` and `typeSearch` still compile an explicit probe and never
+run it (`bridge/protocol/src/effects/introspection.rs:154-167`). The existing
+runtime queries are `InspectionQuery::TypeOf` and
+`InspectionQuery::TypeSearch`
+(`tidepool/runtime/src/session/inspection.rs:18-20, 856-875, 887-889`); the
+`TypeOf` inspection reads the probe's typed identifier rather than evaluating
+the expression (`bridge/haskell/src/Tidepool/Introspection.hs:586-593`).
 
 ## Mapping to current runtime paths
 
@@ -347,31 +454,45 @@ consumer should reuse. Costs are as measured by the source path, not the target.
 
 | Verb | Current runtime path | Cost |
 | --- | --- | --- |
-| `currentScopeView` | `current_scope_provenance` → `structured_provenance` (`exomonad/actor/src/resident_workbench/compiler_query.rs:173-179`; `exomonad/actor/src/resident_workbench.rs:14545-14572`) | prepare+hash, no compiler query |
-| `scopeBindings` | `InspectionQuery::ScopeBrowse` (`tidepool/runtime/src/session/inspection.rs:21, 890-892`) to `InspectScope` (`bridge/haskell/src/Tidepool/Introspection.hs:597-602`); **known gap:** handler compiles the inspection module (`exomonad/actor/src/resident_workbench/compiler_query.rs:130, 1059-1079`, WIP) | interface/scope enumeration, compiles today |
-| `moduleExports` | `InspectionQuery::Browse { expanded: false }` (`tidepool/runtime/src/session/inspection.rs:22-25, 893-895`) to `InspectModule` (`bridge/haskell/src/Tidepool/Introspection.hs:603-605, 885-901`); **known gap:** handler compiles the inspection module (`exomonad/actor/src/resident_workbench/compiler_query.rs:131-134, 1059-1079`, WIP) | interface load, compiles today |
+| `currentScopeView` | `current_scope_provenance` → `structured_provenance` (`exomonad/actor/src/resident_workbench/compiler_query.rs:182-187`; `exomonad/actor/src/resident_workbench.rs:14561-14588`) | prepare+hash, no compiler query |
+| `scopeBindings` | accepted: runtime-owned read of the admitted world's published bindings (`tidepool/toolchain/src/compiler_world.rs:331-353, 369-370`; `tidepool/runtime/src/session/inspection.rs:397-404`), no `InspectionQuery`. **Known gap:** the handler still submits `InspectionQuery::ScopeBrowse` (`exomonad/actor/src/resident_workbench/compiler_query.rs:139, 1059-1085`, WIP), which compiles the inspection module | accepted: no compiler query, no extract worker. Today: interface/scope enumeration plus compile |
+| `moduleExports` | accepted: held-HPT world query (`bridge/haskell/src/Tidepool/GhcPipeline.hs:1777, 1822-1838`) with typed refusal on miss. **Known gap:** the handler still submits `InspectionQuery::Browse { expanded: false }` (`exomonad/actor/src/resident_workbench/compiler_query.rs:140-143, 1059-1085`, WIP), whose `InspectModule` path (`bridge/haskell/src/Tidepool/Introspection.hs:603-605, 885-901`) compiles the inspection module | accepted: HPT lookup plus possible interface load, never `runCompileCycle`. Today: compiles |
 | `info` | `InspectionQuery::StructuredInfo` (`tidepool/runtime/src/session/inspection.rs:26-29, 896-898`) | interface load |
 | `typeOf` | `InspectionQuery::StructuredType` (`tidepool/runtime/src/session/inspection.rs:30-33, 899-901`) | interface load |
-| `rowFit` | `row_fit_query` → `Browse`/`ScopeBrowse`, then `fit_from_entries` over typed entries (`exomonad/actor/src/resident_workbench/compiler_query.rs:154-163, 460-466, 562-592`, WIP) | interface load + module enumeration |
+| `rowFit` | `row_fit_query` → `Browse`/`ScopeBrowse`, then `fit_from_entries` over typed entries (`exomonad/actor/src/resident_workbench/compiler_query.rs:163-171, 470-478, 578-608`, WIP) | interface load + module enumeration; NO-GO world-side, so this remains the only route |
 | `typeOfExpression` | `InspectionQuery::TypeOf` (`tidepool/runtime/src/session/inspection.rs:18, 857, 881-883`) | probe compile |
 | `typeSearch` | `InspectionQuery::TypeSearch` (`tidepool/runtime/src/session/inspection.rs:20, 871-875, 887-889`) | probe compile |
 
 ## Known limitations (handlers WIP)
 
+- Enumeration answers are narrowed to `NameRef` (see the answer-shape section):
+  world-side there is no `display`, no actor-row `availability`, and no
+  `NameInfo` reference set to report
+  (`bridge/protocol/src/effects/introspection.rs:357-377`). `NameRef` itself is
+  not committed at HEAD; the schema edit is pending.
+- `scopeBindings` covers one `query_scope`'s published value bindings only
+  (`tidepool/toolchain/src/compiler_world.rs:369-370, 390-448`). Other scopes,
+  non-value names (types, classes, constructors), and imported-but-unpublished
+  names cannot be returned by this route.
+- `moduleExports` must refuse, not compile, when a home module is absent from the
+  realized HPT (`bridge/haskell/src/Tidepool/GhcPipeline.hs:1777, 1820-1826`) or
+  when a package interface cannot be loaded (`:1836-1838`). The refusal is
+  typed (`WorldQueryUnavailable`); an empty export list would misreport a
+  missing interface as a module with no exports.
 - `ExpressionRejected` carries `Diagnostic` values whose `span` is always
   `None`: probe compilation returns rendered text with no usable location, and
   `Diagnostic::error` constructs `span: None`
-  (`exomonad/actor/src/resident_workbench/compiler_query.rs:347-377`, WIP;
-  rejections built at 447-448 and 480-483). `DiagnosticSpan` remains in the type
+  (`exomonad/actor/src/resident_workbench/compiler_query.rs:375-390`, WIP;
+  rejections built at 457 and 491). `DiagnosticSpan` remains in the type
   only so the wire shape can carry a span later
-  (`exomonad/actor/src/resident_workbench/compiler_query.rs:350-361`, WIP).
+  (`exomonad/actor/src/resident_workbench/compiler_query.rs:375-390`, WIP).
 - `NameNamespace` has no `Field` constructor
   (`bridge/protocol/src/effects/introspection.rs:215-218`), so a `rowFit`
   refusal for a field identifier reconstructs the query namespace as `Any`
-  (`exomonad/actor/src/resident_workbench/compiler_query.rs:523-532`, WIP;
-  the `Field => Any` arm is line 532).
+  (`exomonad/actor/src/resident_workbench/compiler_query.rs:539-548`, WIP;
+  the `Field => Any` arm is line 548).
 - `QUERY_RESULT_LIMIT = 256` is provisional
-  (`exomonad/actor/src/resident_workbench/compiler_query.rs:41-47`, WIP). The
+  (`exomonad/actor/src/resident_workbench/compiler_query.rs:42-47`, WIP). The
   contributor guide requires each resource limit to record its workload/resource
   basis and observed usage; the 256-row boundary does not yet have that recorded
   basis, so it is an open item, not an accepted limit.
@@ -382,13 +503,13 @@ consumer should reuse. Costs are as measured by the source path, not the target.
   `identifierModule`, `identifierName`, and `identifierNamespace`
   (`bridge/protocol/src/effects/introspection.rs:232-240`), projected at runtime
   as `module`, `name`, and `namespace`
-  (`tidepool/runtime/src/session/inspection.rs:72-77`). `DiagnosticSpan` exists
+  (`tidepool/runtime/src/session/inspection.rs:73-78`). `DiagnosticSpan` exists
   for compiler diagnostics, not for every answer
   (`bridge/protocol/src/effects/introspection.rs:448-458`).
 - Batching. Each verb asks one typed question and returns one `Either`
   (`bridge/protocol/src/effects/introspection.rs:189-198`); `NameList` and
   `TypeMatches` expose observed and retained counts but no continuation token
-  (`bridge/protocol/src/effects/introspection.rs:378-388, 438-447`).
+  (`bridge/protocol/src/effects/introspection.rs:378-387, 438-447`).
 - A second effect per cost class. Cost is documentation and prompt guidance;
   the effect and its `Member Introspection effs` constraint stay single
   (`bridge/protocol/src/effects/introspection.rs:603-619`).
@@ -403,13 +524,19 @@ consumer should reuse. Costs are as measured by the source path, not the target.
   `FitAvailability`, and the `Fit` record
   (`bridge/mcp/src/generated/introspection.rs:11-19, 35-46, 50-57`;
   actor request enum at `exomonad/actor/src/generated/introspection.rs:23-32`).
-- The handlers WIP (`cf4cd87e99 + WT`) adds
+- The handlers WIP (`d9b5053f2d + WT`) adds
   `exomonad/actor/src/resident_workbench/compiler_query.rs` with
   `entry_scope_refusal`/`compiler_query_answer`, the six-verb decode dispatch
-  (`exomonad/actor/src/resident_workbench.rs:10865-10946`, WIP), and the
-  service call (`exomonad/actor/src/resident_actor.rs:6489-6496`, WIP). It also
+  (`exomonad/actor/src/resident_workbench.rs:10868-10946`, WIP), and the
+  service call (`exomonad/actor/src/resident_actor.rs:6496`, WIP). It also
   carries the 7-field identity wire described above. None of this is at
   integration HEAD.
+- The enumeration split is accepted design, not implemented at HEAD: the handler
+  still answers both enumeration verbs from one `ScopeBrowse`/`Browse` batch
+  that compiles an inspection module (see the mapping table), and `rowFit`
+  still reads browsed typed entries. `NameRef` is pending the schema edit. No
+  runtime accessor exposes the admitted world's bindings to the actor yet
+  (`exomonad/actor/src/mount.rs:731-743`).
 - At integration HEAD the runtime is still the pre-identity, unpinned form:
   `InfoEntry` has six fields (`tidepool/runtime/src/session/inspection.rs:159-167`)
   and `TypeMatch` six (`tidepool/runtime/src/session/inspection.rs:200-208`).
@@ -430,10 +557,12 @@ the row; a component pass alone is not evidence for the integrated claim.
 
 | Claim | Observation | Oracle | Status |
 | --- | --- | --- | --- |
-| Persona flow compiles no target | `currentScopeView → moduleExports → info` under one admitted view keeps `inspection.compile_attempts == 0` | worker's `inspection.compile_attempts` count (`bridge/haskell/src/Tidepool/Introspection.hs:262-272`) | no evidence yet |
-| Pinned stale view refused through the actor path | a `Just p` captured before a publication returns `ScopeChanged p current`, never an empty list | handler `entry_scope_refusal` (`exomonad/actor/src/resident_workbench/compiler_query.rs:410-420`, WIP) and the decoded `Either QueryError` (`bridge/protocol/src/effects/introspection.rs:489-495`) | no evidence yet |
-| Entry-vs-pre-reply drift refused even for `Nothing` | the view moves between capture and reply; the answer is `ScopeChanged(before, after)` rather than the stale result | handler `compiler_query_answer` (`exomonad/actor/src/resident_workbench/compiler_query.rs:423-440`, WIP) | no evidence yet |
+| `scopeBindings` calls no compiler | the verb answers from the admitted world's published bindings and spawns no extract worker | binding set equals the admitted scope's published values (`tidepool/toolchain/src/compiler_world.rs:331-353, 369-370`) and worker-spawn accounting is zero for the request | no evidence yet |
+| `moduleExports` compiles no target | the held-HPT query answers with no `tidepool-checked ... target=True` and no `tidepool-target` line on worker stderr | stderr assertion in the style of `tidepool/runtime/src/session/inspection.rs:1996-2000` | no evidence yet |
+| Persona flow holds both rules | `currentScopeView → moduleExports → info` in one admitted view spawns no extract worker for enumeration and compiles no target | the two oracles above, read from one request's worker accounting and stderr | no evidence yet |
+| Pinned stale view refused through the actor path | a `Just p` captured before a publication returns `ScopeChanged p current`, never an empty list | handler `entry_scope_refusal` (`exomonad/actor/src/resident_workbench/compiler_query.rs:419-431`, WIP) and the decoded `Either QueryError` (`bridge/protocol/src/effects/introspection.rs:489-495`) | no evidence yet |
+| Entry-vs-pre-reply drift refused even for `Nothing` | the view moves between capture and reply; the answer is `ScopeChanged(before, after)` rather than the stale result | handler `compiler_query_answer` (`exomonad/actor/src/resident_workbench/compiler_query.rs:434-512`, WIP) | no evidence yet |
 | `typeOfExpression` never evaluates | a compiled probe returns `ExpressionType` with no evaluation or side effect | probe compile and evaluation boundary (`bridge/protocol/src/effects/introspection.rs:154-167, 406-415`) | no evidence yet |
 | `typeSearch` never evaluates | a compiled type-pattern probe returns `TypeMatches` with no evaluation or side effect | probe compile and evaluation boundary (`bridge/protocol/src/effects/introspection.rs:154-167, 438-447`) | no evidence yet |
-| Truncation is visible, not silent | `observed > limit` returns the complete observed count with `limit = 256` and a retained prefix | `NameList::from_entries`/`TypeMatches::from_matches` (`exomonad/actor/src/resident_workbench/compiler_query.rs:245-262, 312-327`, WIP) | no evidence yet |
+| Truncation is visible, not silent | `observed > limit` returns the complete observed count with `limit = 256` and a retained prefix | `NameList::from_entries`/`TypeMatches::from_matches` (`exomonad/actor/src/resident_workbench/compiler_query.rs:255-268, 322-336`, WIP) | no evidence yet |
 | No Lookup survives | repo-wide assertion finds no Lookup effect in prompts, fixtures, or generated artifacts | search/assertion over `exomonad/prompts`, fixtures, and generated outputs | no evidence yet |
