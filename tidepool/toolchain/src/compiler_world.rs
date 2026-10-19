@@ -1777,8 +1777,24 @@ pub(crate) struct WorldCellOutputAdmission {
     pub(crate) items: Vec<ciborium::value::Value>,
     pub(crate) common_files: BTreeMap<PathBuf, [u8; 32]>,
     pub(crate) demanded_rows: Vec<Arc<CheckedValueArtifact>>,
-    pub(crate) captured_files: BTreeMap<PathBuf, Arc<[u8]>>,
+    pub(crate) captured_files: BTreeMap<PathBuf, WorldOutputFile>,
     pub(crate) validation: crate::recovery_artifacts::PackageInterfaceValidation,
+}
+
+/// Bytes and their observed seal from the one named output acquisition. This
+/// carries physical custody, independently of semantic or native admission.
+pub(crate) struct WorldOutputFile {
+    bytes: Arc<[u8]>,
+    sha256: [u8; 32],
+}
+
+impl WorldOutputFile {
+    pub(crate) fn bytes(&self) -> &Arc<[u8]> {
+        &self.bytes
+    }
+    pub(crate) fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
 }
 
 /// Obtain the actual held-world completion. This is kept private to the
@@ -2046,6 +2062,10 @@ fn admit_world_preparation_response(
         {
             return Err(world_response_error(true));
         }
+        validation
+            .inventory
+            .charge_value_copies(&observed[9], 1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         world_output_symbol(&observed[9])?;
         let manifest = world_output_manifest(&observed[12], &validation.inventory)?;
         for (path, digest) in manifest {
@@ -2063,10 +2083,16 @@ fn admit_world_preparation_response(
         }
         validation
             .inventory
-            .reserve::<(PathBuf, Arc<[u8]>)>(1)
+            .reserve::<(PathBuf, WorldOutputFile)>(1)
             .and_then(|_| validation.inventory.charge(item_bytes.len()))
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        captured_files.insert(item_path, item_bytes.into());
+        captured_files.insert(
+            item_path,
+            WorldOutputFile {
+                bytes: item_bytes.into(),
+                sha256: answer_hash(&completed[2])?,
+            },
+        );
         items.push(item);
     }
     let ciborium::value::Value::Array(input_refs) = &fields[6] else {
@@ -2176,7 +2202,7 @@ fn capture_world_output(
     root: &tempfile::TempDir,
     relative: PathBuf,
     digest: [u8; 32],
-    files: &mut BTreeMap<PathBuf, Arc<[u8]>>,
+    files: &mut BTreeMap<PathBuf, WorldOutputFile>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<(), CompileError> {
     relative_source_path(&relative).map_err(|_| world_response_error(false))?;
@@ -2185,7 +2211,7 @@ fn capture_world_output(
     }
     validation
         .inventory
-        .reserve::<(PathBuf, Arc<[u8]>)>(1)
+        .reserve::<(PathBuf, WorldOutputFile)>(1)
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     validation
         .inventory
@@ -2208,7 +2234,13 @@ fn capture_world_output(
     validation
         .record_captured_bytes(&path, &bytes)
         .map_err(|error| source_failure(error.to_string()))?;
-    files.insert(relative, bytes.into());
+    files.insert(
+        relative,
+        WorldOutputFile {
+            bytes: bytes.into(),
+            sha256: digest,
+        },
+    );
     Ok(())
 }
 
@@ -3028,7 +3060,11 @@ mod answer_tests {
         )
         .unwrap();
         std::fs::write(&path, b"changed after capture").unwrap();
-        assert_eq!(&*files[Path::new("product.cbor")], original);
+        assert_eq!(&**files[Path::new("product.cbor")].bytes(), original);
+        assert_eq!(
+            *files[Path::new("product.cbor")].sha256(),
+            world_digest(original)
+        );
         assert!(capture_world_output(
             &directory,
             "product.cbor".into(),
