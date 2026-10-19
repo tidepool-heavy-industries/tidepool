@@ -22879,9 +22879,7 @@ pub(crate) mod request_tests {
                 None,
             );
             let public_scope = session
-                .mint_notebook_scope_with_lease(
-                    (kind == 2).then(|| parent.runtime_admission().clone()),
-                )
+                .mint_notebook_scope_with_lease((kind == 2).then(|| parent.runtime_lease().clone()))
                 .unwrap();
             let generation = GenerationDependency::new(
                 crate::ActorRef::first(crate::ActorId(8871 + kind)),
