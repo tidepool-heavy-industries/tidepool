@@ -838,19 +838,33 @@ mod tests {
             // Warning production is covered independently; this control checks
             // that the target harness retains all fields of the execution result.
             artifacts.artifacts.warnings.warnings = vec!["constructor admission warning".into()];
-            let through_consumer = tidepool_testing::eval_harness::EvalHarness::new().run_target(
-                &artifacts,
-                "__prepared",
-                frunk::HNil,
-            );
-            assert_eq!(through_consumer.json(), result.to_json());
+            let with_warning = artifacts
+                .run(
+                    "__prepared",
+                    DEFAULT_NURSERY_SIZE,
+                    &mut frunk::HNil,
+                    &(),
+                    |_| {},
+                )
+                .unwrap();
             assert_eq!(
-                through_consumer.result().warnings(),
-                artifacts.artifacts.warnings.warnings,
+                with_warning.warnings(),
+                artifacts.artifacts.warnings.warnings
             );
+            // A libtest crate and its testing dependency link distinct runtime
+            // types. The public harness issues its own real compilation product.
+            let harness = tidepool_testing::eval_harness::EvalHarness::new().with_includes([
+                root.path().to_path_buf(),
+                tidepool_testing::eval_harness::prelude_path(),
+            ]);
+            let harness_prepared = harness.compile_many(source, &["__prepared"]).unwrap();
+            let expected_warnings = harness_prepared.artifacts().warnings.warnings.clone();
+            let through_consumer = harness.run_target(&harness_prepared, "__prepared", frunk::HNil);
+            assert_eq!(through_consumer.json(), result.to_json());
+            assert_eq!(through_consumer.result().warnings(), expected_warnings);
             let retained = through_consumer.expect("retained target result");
             assert_eq!(retained.table().get(id).unwrap().name, "Ticket");
-            assert_eq!(retained.warnings(), artifacts.artifacts.warnings.warnings);
+            assert_eq!(retained.warnings(), expected_warnings);
         }
     }
 
