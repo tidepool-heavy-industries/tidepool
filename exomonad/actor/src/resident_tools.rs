@@ -2699,6 +2699,7 @@ mod tests {
             .executor_started()
             .await
             .expect("actual collector start");
+        directory.observe_executor_linked(&actor);
         (actor, address, task, terminal, directory)
     }
 

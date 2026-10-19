@@ -756,6 +756,17 @@ impl KernelContext {
         successor: bool,
         mut reservation: run_control::ActorReservation,
     ) -> Result<LocalActorRef, ractor::SpawnErr> {
+        if !successor
+            && (lifetime == crate::WorkerLifetime::RunOwned)
+                != reservation.planned_ownership().is_independent()
+        {
+            return Err(ractor::SpawnErr::StartupFailed(
+                run_control::DirectoryError::Unauthorized {
+                    actor: reservation.identity(),
+                }
+                .into(),
+            ));
+        }
         let admission = reservation.take_parent_admission().ok_or_else(|| {
             ractor::SpawnErr::StartupFailed(
                 std::io::Error::other(
@@ -773,13 +784,11 @@ impl KernelContext {
                 let lifecycle = reservation.lifecycle().clone();
                 let startup_refusal = startup_admission.as_ref().and_then(|admission| admission.reserve(identity).err())
                     .map(StartupFailureCause::Reservation);
-                let supervisor = if successor {
-                    match context.supervisor_identity().await? {
-                        Some(parent) => Some(context.directory.context(parent).await?.ok_or(run_control::DirectoryError::Unauthorized { actor: parent })?),
-                        None => None,
-                    }
-                } else if lifetime == crate::WorkerLifetime::RunOwned { None } else { Some(Arc::new(context.clone())) };
-                let ownership = supervisor.as_ref().map_or(SpawnOwnership::Independent, |supervisor| SpawnOwnership::Supervised(supervisor.identity));
+                let ownership = reservation.planned_ownership();
+                let supervisor = match ownership {
+                    SpawnOwnership::Independent => None,
+                    SpawnOwnership::Supervised(parent) => Some(context.directory.context(parent).await?.ok_or(run_control::DirectoryError::Unauthorized { actor: parent })?),
+                };
                 let cleanup_only = startup_refusal.is_some();
                 let arguments = LocalActorArguments { spawn_ownership: ownership, behavior, startup_refusal,
                     startup_admission, terminal: terminal.clone(), directory: context.directory.clone(), identity,
@@ -801,6 +810,7 @@ impl KernelContext {
                     }
                 };
                 let child = LocalActorRef::with_identity_admission(address, terminal, identity, lifecycle);
+                context.directory.observe_executor_linked(&child);
                 custody.accounted = true;
                 drop(admission);
                 Ok(run_control::RootAdmissionOutcome::Actor(child, task))
@@ -3514,17 +3524,16 @@ where
             behavior: Box::new(behavior),
             startup_admission: None,
             terminal: terminal.clone(),
-            directory,
+            directory: directory.clone(),
             identity,
             lifecycle: lifecycle.clone(),
             reservation,
         },
     )
     .await?;
-    Ok((
-        LocalActorRef::with_identity_admission(address, terminal, identity, lifecycle),
-        task,
-    ))
+    let actor = LocalActorRef::with_identity_admission(address, terminal, identity, lifecycle);
+    directory.observe_executor_linked(&actor);
+    Ok((actor, task))
 }
 
 /// A handler failure pauses the actor so replacement can recover it in
@@ -4467,6 +4476,7 @@ mod tests {
         cleanup_peers: Option<Arc<Mutex<Vec<LocalActorRef>>>>,
         replacement_staged: bool,
         startup_gate: Option<(Arc<Notify>, Arc<Notify>)>,
+        startup_successor: Option<Arc<Mutex<Option<LocalActorRef>>>>,
         startup_terminal: Option<ActorTerminal>,
         calls: Arc<Mutex<Vec<&'static str>>>,
         mailbox_calls: Arc<Mutex<Vec<SessionId>>>,
@@ -4689,13 +4699,21 @@ mod tests {
         ) -> BoxFuture<'_, Result<KernelStep<()>, KernelBehaviorError>> {
             self.record_custody_address("start");
             let observations = self.start_observations.clone();
+            let startup_successor = self.startup_successor.clone();
             let context = context.clone();
             let gate = self.startup_gate.clone();
             let terminal = self.startup_terminal.clone();
             Box::pin(async move {
-                if let Some(observations) = observations {
+                if let Some(observations) = &observations {
                     let supervisor = context.supervisor_identity().await.unwrap();
-                    observations.lock().push((context, supervisor));
+                    observations.lock().push((context.clone(), supervisor));
+                }
+                if let Some(successor) = startup_successor {
+                    let child = context
+                        .spawn_successor(observed_probe(observations.as_ref().unwrap()))
+                        .await
+                        .unwrap();
+                    *successor.lock() = Some(child);
                 }
                 if let Some((entered, release)) = gate {
                     entered.notify_one();
@@ -5267,6 +5285,7 @@ mod tests {
                 cleanup_peers: None,
                 replacement_staged: false,
                 startup_gate: None,
+                startup_successor: None,
                 startup_terminal: None,
                 calls: Arc::clone(&calls),
                 mailbox_calls: Arc::clone(&mailbox_calls),
@@ -5477,7 +5496,7 @@ mod tests {
                 startup_refusal: None,
                 startup_admission: None,
                 terminal: terminal.clone(),
-                directory,
+                directory: directory.clone(),
                 identity,
                 lifecycle: lifecycle.clone(),
                 reservation,
@@ -5486,6 +5505,7 @@ mod tests {
         .await
         .unwrap();
         let actor = LocalActorRef::with_identity_admission(address, terminal, identity, lifecycle);
+        directory.observe_executor_linked(&actor);
         send_kernel_resume(&actor);
         tokio::time::timeout(Duration::from_secs(2), custody.entered.notified())
             .await
@@ -7568,6 +7588,149 @@ mod tests {
         ));
         recipient.shutdown(terminal).await.unwrap();
         recipient_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unfinished_worker_link_refuses_reparent_without_reminting_plan() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (directory, _directory_task) = LocalActorDirectory::start().await.unwrap();
+        let (parent, parent_task) = spawn_local_actor_in_directory(
+            None,
+            observed_probe(&observations),
+            crate::Incarnation(1),
+            directory.clone(),
+        )
+        .await
+        .unwrap();
+        let parent_context = observations.lock()[0].0.clone();
+        let (target, target_task) = spawn_local_actor_in_directory(
+            None,
+            observed_probe(&observations),
+            crate::Incarnation(1),
+            directory.clone(),
+        )
+        .await
+        .unwrap();
+        let target_context = observations.lock()[1].0.clone();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut probe = observed_probe(&observations);
+        probe.startup_gate = Some((entered.clone(), release.clone()));
+        let creator = parent_context.clone();
+        let starting = tokio::spawn(async move {
+            creator
+                .spawn_worker(None, probe, crate::WorkerLifetime::ActorOwned)
+                .await
+        });
+        entered.notified().await;
+        let pending = observations.lock().last().unwrap().0.clone();
+        assert_eq!(pending.supervisor_identity().await.unwrap(), None);
+        assert!(
+            matches!(directory.transfer_children(parent.identity(), target.identity()).await,
+            Err(run_control::DirectoryError::LifetimeTransitionPending { actor }) if actor == pending.identity())
+        );
+        assert_eq!(
+            pending.spawn_ownership(),
+            SpawnOwnership::Supervised(parent.identity())
+        );
+        release.notify_one();
+        let child = starting.await.unwrap().unwrap();
+        assert_eq!(
+            pending.supervisor_identity().await.unwrap(),
+            Some(parent.identity())
+        );
+        directory
+            .transfer_children(parent.identity(), target.identity())
+            .await
+            .unwrap();
+        assert_eq!(
+            pending.supervisor_identity().await.unwrap(),
+            Some(target.identity())
+        );
+        // Repeated startup observation is historical, never a reset to old parent.
+        directory.observe_executor_linked(&child);
+        let transfer = directory
+            .reserve_worker_transfer(target.identity(), child.clone(), true)
+            .await
+            .unwrap();
+        drop(transfer);
+        assert!(target_context.owns_child(child.identity()).await.unwrap());
+        assert!(!parent_context.owns_child(child.identity()).await.unwrap());
+        parent
+            .shutdown(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "test complete",
+            ))
+            .await
+            .unwrap();
+        parent_task.await.unwrap();
+        target
+            .shutdown(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "test complete",
+            ))
+            .await
+            .unwrap();
+        target_task.await.unwrap();
+        assert!(child.terminal().get().is_some());
+    }
+
+    #[tokio::test]
+    async fn successor_started_before_live_link_keeps_issued_supervisor() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (directory, _directory_task) = LocalActorDirectory::start().await.unwrap();
+        let (parent, parent_task) = spawn_local_actor_in_directory(
+            None,
+            observed_probe(&observations),
+            crate::Incarnation(1),
+            directory.clone(),
+        )
+        .await
+        .unwrap();
+        let parent_context = observations.lock()[0].0.clone();
+        let successor = Arc::new(Mutex::new(None));
+        let mut child_probe = observed_probe(&observations);
+        child_probe.startup_successor = Some(successor.clone());
+        let child = parent_context
+            .spawn_worker(None, child_probe, crate::WorkerLifetime::ActorOwned)
+            .await
+            .unwrap();
+        let observed = observations.lock().clone();
+        assert_eq!(observed.len(), 3);
+        assert_eq!(
+            observed[1].1, None,
+            "child start precedes actual Ractor link"
+        );
+        assert_eq!(
+            observed[2].1, None,
+            "successor start precedes actual Ractor link"
+        );
+        let successor = successor.lock().clone().unwrap();
+        assert_ne!(successor.identity(), child.identity());
+        assert_eq!(
+            observed[2].0.spawn_ownership(),
+            SpawnOwnership::Supervised(parent.identity())
+        );
+        assert_eq!(
+            observed[2].0.supervisor_identity().await.unwrap(),
+            Some(parent.identity())
+        );
+        assert!(parent_context
+            .owns_child(successor.identity())
+            .await
+            .unwrap());
+        parent
+            .shutdown(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "test complete",
+            ))
+            .await
+            .unwrap();
+        parent_task.await.unwrap();
+        assert!(
+            successor.terminal().get().is_some(),
+            "parent lifetime includes successor"
+        );
     }
 
     #[tokio::test]

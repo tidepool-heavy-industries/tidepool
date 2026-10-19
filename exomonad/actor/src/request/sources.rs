@@ -567,6 +567,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            self.directory.observe_executor_linked(&actor);
             lifecycle.executor_started().await.unwrap();
             (actor, address, task)
         }
