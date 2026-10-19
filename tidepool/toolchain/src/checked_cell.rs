@@ -688,10 +688,34 @@ fn decode_typed_segment_plans(
     value: &Value,
     program: &CheckedPlannedCellSpecification,
 ) -> Result<Vec<CheckedTypedSegmentPlan>, CompileError> {
+    decode_typed_segment_plan_facts(
+        value,
+        program.parsed_plan.items(),
+        &program.slots,
+        program.reservation_digest,
+    )
+}
+
+pub(crate) fn decode_world_typed_segment_plans(
+    value: &Value,
+    reservation: &crate::cell_plan::CompilerWorldCellReservation,
+) -> Result<Vec<CheckedTypedSegmentPlan>, CompileError> {
+    decode_typed_segment_plan_facts(
+        value,
+        reservation.plan().items(),
+        reservation.slots(),
+        *reservation.admission_digest(),
+    )
+}
+
+fn decode_typed_segment_plan_facts(
+    value: &Value,
+    parsed_items: &[crate::cell_plan::ParsedCellPlanItem],
+    slots: &[CheckedPlannedCellSlot],
+    reservation_digest: [u8; 32],
+) -> Result<Vec<CheckedTypedSegmentPlan>, CompileError> {
     use crate::cell_plan::ParsedCellPlanKind as Kind;
-    let expected = program
-        .parsed_plan
-        .items()
+    let expected = parsed_items
         .iter()
         .filter(|item| matches!(item.kind(), Kind::Bind | Kind::Expression))
         .map(|item| item.index())
@@ -703,8 +727,7 @@ fn decode_typed_segment_plans(
         let digest = string(&fields[0])?;
         let reservation = string(&fields[1])?;
         let root = string(&fields[2])?;
-        if reservation != hex(&program.reservation_digest) || root.is_empty() || root.len() > 65536
-        {
+        if reservation != hex(&reservation_digest) || root.is_empty() || root.len() > 65536 {
             return Err(failure("typed segment root or reservation differs"));
         }
         let mut hash = Sha256::new();
@@ -736,9 +759,7 @@ fn decode_typed_segment_plans(
                 .iter()
                 .map(|value| string(value).map(str::to_owned))
                 .collect::<Result<Vec<_>, _>>()?;
-            let parsed = program
-                .parsed_plan
-                .items()
+            let parsed = parsed_items
                 .get(ordinal)
                 .ok_or_else(|| failure("typed segment item is outside parser plan"))?;
             if consumed.len() >= expected.len()
@@ -762,7 +783,7 @@ fn decode_typed_segment_plans(
             frame(entry);
             frame(&generation.to_string());
             frame(kind);
-            let body = match (kind, parsed.kind(), program.slots.get(ordinal)) {
+            let body = match (kind, parsed.kind(), slots.get(ordinal)) {
                 ("action", Kind::Bind, Some(CheckedPlannedCellSlot::Bind { value }))
                     if *value == generation
                         && captures == parsed.binders()

@@ -1779,6 +1779,16 @@ pub(crate) struct WorldCellOutputAdmission {
     pub(crate) demanded_rows: Vec<Arc<CheckedValueArtifact>>,
     pub(crate) captured_files: BTreeMap<PathBuf, WorldOutputFile>,
     pub(crate) validation: crate::recovery_artifacts::PackageInterfaceValidation,
+    segments: Vec<Arc<crate::checked_cell::CheckedTypedSegmentPlan>>,
+}
+
+impl WorldCellOutputAdmission {
+    pub(crate) fn reservation(&self) -> &Arc<crate::cell_plan::CompilerWorldCellReservation> {
+        &self.reservation
+    }
+    pub(crate) fn segments(&self) -> &[Arc<crate::checked_cell::CheckedTypedSegmentPlan>] {
+        &self.segments
+    }
 }
 
 /// Bytes and their observed seal from the one named output acquisition. This
@@ -1989,11 +1999,11 @@ fn admit_world_preparation_response(
         .inventory
         .decode_value(bytes, 8 << 20)
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-    let fields = answer_array(&packet, 8)?;
+    let fields = answer_array(&packet, 9)?;
     let plan = reservation.plan();
     let base = plan.world().logical_id();
     let plan_digest = world_digest(plan.receipt());
-    if answer_text(&fields[0])? != "TPCWPREP2"
+    if answer_text(&fields[0])? != "TPCWPREP3"
         || answer_hash(&fields[1])? != *base
         || answer_hash(&fields[2])? != plan_digest
         || answer_hash(&fields[3])? != *reservation.admission_digest()
@@ -2005,6 +2015,7 @@ fn admit_world_preparation_response(
         if !answer_blob(&fields[5])?.is_empty()
             || !answer_array(&fields[6], 0)?.is_empty()
             || !answer_array(&fields[7], 0)?.is_empty()
+            || !answer_array(&fields[8], 0)?.is_empty()
         {
             return Err(world_response_error(false));
         }
@@ -2018,6 +2029,31 @@ fn admit_world_preparation_response(
     if answer_text(&outcome[0])? != "prepared" {
         return Err(world_response_error(false));
     }
+    validation
+        .inventory
+        .charge_value_copies(&fields[8], 1)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let segments = crate::checked_cell::decode_world_typed_segment_plans(&fields[8], &reservation)?;
+    validation
+        .inventory
+        .reserve::<Arc<crate::checked_cell::CheckedTypedSegmentPlan>>(segments.len())
+        .and_then(|_| {
+            validation
+                .inventory
+                .reserve::<(usize, (usize, usize))>(reservation.slots().len())
+        })
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let segments: Vec<_> = segments.into_iter().map(Arc::new).collect();
+    let by_ordinal: BTreeMap<_, _> = segments
+        .iter()
+        .enumerate()
+        .flat_map(|(segment, plan)| {
+            plan.items()
+                .iter()
+                .enumerate()
+                .map(move |(item, planned)| (planned.ordinal(), (segment, item)))
+        })
+        .collect();
     let completed = answer_array(&outcome[1], reservation.slots().len())?;
     validation
         .inventory
@@ -2052,6 +2088,11 @@ fn admit_world_preparation_response(
             .decode_value(&item_bytes, 4 << 20)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         let observed = answer_array(&item, 13)?;
+        let &(segment_index, item_index) = by_ordinal
+            .get(&index)
+            .ok_or_else(|| world_response_error(true))?;
+        let segment = &segments[segment_index];
+        let typed_item = &segment.items()[item_index];
         if answer_text(&observed[0])? != "TPCWITEM1"
             || answer_hash(&observed[1])? != *base
             || answer_hash(&observed[2])? != plan_digest
@@ -2059,6 +2100,8 @@ fn admit_world_preparation_response(
             || answer_u64(&observed[4])? != index as u64
             || answer_u64(&observed[5])? != world_cell_generation(slot)
             || answer_hash(&observed[7])? != world_digest(plan.items()[index].source().as_bytes())
+            || answer_text(&observed[6])? != segment.digest()
+            || answer_text(&observed[8])? != typed_item.entry()
         {
             return Err(world_response_error(true));
         }
@@ -2066,7 +2109,9 @@ fn admit_world_preparation_response(
             .inventory
             .charge_value_copies(&observed[9], 1)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        world_output_symbol(&observed[9])?;
+        if world_output_symbol(&observed[9])?.occurrence != typed_item.entry() {
+            return Err(world_response_error(true));
+        }
         let manifest = world_output_manifest(&observed[12], &validation.inventory)?;
         for (path, digest) in manifest {
             validation
@@ -2194,6 +2239,7 @@ fn admit_world_preparation_response(
         common_files,
         captured_files,
         validation,
+        segments,
         demanded_rows: demanded.into_values().collect(),
     }))
 }
