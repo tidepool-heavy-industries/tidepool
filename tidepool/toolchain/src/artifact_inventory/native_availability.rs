@@ -173,7 +173,10 @@ pub(super) fn bind_certified_input_demand(
 #[derive(Clone, Copy)]
 enum NativeDemandSource<'a> {
     Certified(&'a crate::certified_products::CertifiedSourceSelection),
-    Catalog(&'a NativeDependencyCatalog<'a>),
+    Catalog {
+        catalog: &'a NativeDependencyCatalog<'a>,
+        consumed_namespace: &'a BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+    },
 }
 
 fn bind_input_demand(
@@ -248,7 +251,7 @@ fn bind_input_demand(
                     })
                     .collect::<Result<Vec<_>, _>>()?
             }
-            NativeDemandSource::Catalog(catalog) => catalog
+            NativeDemandSource::Catalog { catalog, .. } => catalog
                 .group_supports(*key, product.owner())
                 .into_iter()
                 .map(|(group, offer)| {
@@ -259,7 +262,7 @@ fn bind_input_demand(
                 })
                 .collect(),
         };
-        if let NativeDemandSource::Catalog(catalog) = source {
+        if let NativeDemandSource::Catalog { catalog, .. } = source {
             if let InputNativeDecision::IssuedChoices(choices) =
                 catalog.decision(&entry.descriptor.owner)
             {
@@ -360,7 +363,7 @@ fn bind_input_demand(
             {
                 continue;
             }
-            if matches!(source, NativeDemandSource::Catalog(_))
+            if matches!(source, NativeDemandSource::Catalog { .. })
                 && !namespace.contains_key(&canonical)
             {
                 continue;
@@ -374,9 +377,30 @@ fn bind_input_demand(
                     if binding.artifact != canonical || edge != ArtifactDependency::Interface {
                         return false;
                     }
+                    // Consuming an issued historical body does not requalify it
+                    // as Full in the receiving namespace. A canonical-only role
+                    // can use its unchanged exact closure with the same type
+                    // bytes. Explicit Original selection still binds its scope.
+                    let historical_interface = match source {
+                        NativeDemandSource::Catalog {
+                            consumed_namespace, ..
+                        } => {
+                            !namespace.contains_key(&key.artifact)
+                                && consumed_namespace.get(&entry.descriptor.owner).is_some_and(
+                                    |selected| {
+                                        selected.descriptor.id == canonical
+                                            && matches!(
+                                                &selected.payload,
+                                                ArtifactPayload::Canonical(_)
+                                            )
+                                    },
+                                )
+                        }
+                        NativeDemandSource::Certified(_) => false,
+                    };
                     let matches = namespace
                         .get(&canonical)
-                        .is_none_or(|selected| *selected == binding);
+                        .is_none_or(|selected| *selected == binding || historical_interface);
                     if !matches {
                         tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                             stage = "input_demand_canonical_scope", ?key, ?group, ?carrier,
@@ -404,7 +428,7 @@ fn bind_input_demand(
                 ?canonical, selected_canonical = ?namespace.get(&canonical), candidate_count,
                 source = match source {
                     NativeDemandSource::Certified(_) => "certified_selection",
-                    NativeDemandSource::Catalog(_) => "native_dependency_catalog",
+                    NativeDemandSource::Catalog { .. } => "native_dependency_catalog",
                 },
                 "native input candidates do not match selected carrier or canonical binding");
             return Err(admission_failure(
@@ -544,7 +568,10 @@ pub(super) fn bind_fresh_product_dependencies(
         entries,
         BTreeMap::new(),
         &wanted,
-        NativeDemandSource::Catalog(dependencies),
+        NativeDemandSource::Catalog {
+            catalog: dependencies,
+            consumed_namespace,
+        },
     )?;
     acquired.retain_dependency_groups(entries, consumed_namespace, required)?;
     Ok(acquired)
@@ -2432,7 +2459,10 @@ mod normalized_dependency_tests {
                 &entries,
                 BTreeMap::new(),
                 &demanded,
-                NativeDemandSource::Catalog(&catalog),
+                NativeDemandSource::Catalog {
+                    catalog: &catalog,
+                    consumed_namespace: &namespace,
+                },
             )
             .unwrap();
             assert_eq!(acquired.bindings.len(), 1);
@@ -2512,6 +2542,99 @@ mod normalized_dependency_tests {
             drop(state);
             assert_eq!(parent.capture_graph_selection(), before_selection);
         }
+        // Historical dependency consumption preserves the issued closure even
+        // when the receiving interface has an independently issued scope. This
+        // does not authorize Full qualification or an explicit Original role.
+        let canonical = Arc::new(ArtifactEntry::canonical(
+            products[0].module_interface().unwrap().clone(),
+        ));
+        let receiving = inventory
+            .admit_shared(&inventory.empty_view(), vec![canonical.clone()])
+            .unwrap()
+            .retain_custody(parent)
+            .unwrap();
+        let canonical_id = canonical.descriptor.id;
+        assert_ne!(
+            receiving.namespace()[&canonical_id],
+            parent.namespace()[&canonical_id]
+        );
+        assert!(!receiving.namespace().contains_key(&hidden_id));
+        assert!(
+            NativeOriginalRequirement::from_issued_group_custody(
+                hidden_id,
+                canonical_id,
+                &receiving,
+            )
+            .unwrap()
+            .is_none(),
+            "independent canonical scope cannot mint Full availability"
+        );
+        let before_receiving = receiving.capture_graph_selection();
+        let catalog = NativeDependencyCatalog::from_source(&retained).unwrap();
+        let supports = catalog.group_supports(*demanded.first().unwrap(), products[0].owner());
+        let (expected_group, expected_offer) = supports[0];
+        let expected_closure = expected_offer
+            .custody_snapshot()
+            .nodes_from_seeds([InventoryNodeKey::Group(expected_group)])
+            .unwrap();
+        for (selected, permitted) in [
+            (canonical.clone(), true),
+            (entries[&hidden_id].clone(), false),
+        ] {
+            let effective_namespace =
+                BTreeMap::from([(selected.descriptor.owner.clone(), selected)]);
+            let mut state = inventory.0.lock().expect("inventory lock");
+            let result = bind_input_demand(
+                &mut state,
+                &receiving,
+                &entries,
+                BTreeMap::new(),
+                &demanded,
+                NativeDemandSource::Catalog {
+                    catalog: &catalog,
+                    consumed_namespace: &effective_namespace,
+                },
+            );
+            if permitted {
+                let acquired =
+                    result.expect("canonical-only dependency preserves historical binding");
+                assert_eq!(
+                    acquired.bindings[&NativeGroupKey {
+                        artifact: hidden_id,
+                        original_ordinal: 7
+                    }]
+                        .binding,
+                    expected_group
+                );
+                assert_eq!(
+                    acquired.bindings[&NativeGroupKey {
+                        artifact: hidden_id,
+                        original_ordinal: 7
+                    }]
+                        .closure,
+                    expected_closure
+                );
+                let mut required = BTreeMap::new();
+                acquired
+                    .retain_dependency_groups(&entries, &effective_namespace, &mut required)
+                    .unwrap();
+                assert_eq!(
+                    required[&NativeGroupKey {
+                        artifact: hidden_id,
+                        original_ordinal: 7
+                    }],
+                    [expected_group].into_iter().collect::<imbl::OrdSet<_>>()
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 } if artifact == hidden_id)),
+                    "incoming Original role cannot borrow a different canonical scope"
+                );
+            }
+            drop(state);
+            assert_eq!(receiving.capture_graph_selection(), before_receiving);
+        }
         let empty_source = CompilerSourceSupport::empty();
         for (source, ordinal) in [(&retained, 9), (&empty_source, 7)] {
             let catalog = NativeDependencyCatalog::from_source(source).unwrap();
@@ -2525,7 +2648,10 @@ mod normalized_dependency_tests {
                     artifact: hidden_id,
                     original_ordinal: ordinal,
                 }]),
-                NativeDemandSource::Catalog(&catalog),
+                NativeDemandSource::Catalog {
+                    catalog: &catalog,
+                    consumed_namespace: &namespace,
+                },
             )
             .err()
             .expect("unissued native demand must refuse");
