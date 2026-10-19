@@ -122,7 +122,7 @@ impl CapturedCompilerSources {
                 source_frame(&mut encoded, body)?;
             }
         }
-        let seal = Sha256::digest(&encoded).into();
+        let seal = world_digest(&encoded);
         // Restricted conventional filename precedence is a primary captured
         // namespace fact. It is not a copy of GHC's hydrated HPT/import world.
         let mut selected_sources = BTreeMap::new();
@@ -151,7 +151,7 @@ impl CapturedCompilerSources {
                     .or_insert_with(|| WorldModuleOrigin::Home {
                         root: root as u32,
                         path: path.to_str().expect("validated source path").to_owned(),
-                        source_sha256: Sha256::digest(body).into(),
+                        source_sha256: world_digest(body),
                     });
             }
         }
@@ -538,6 +538,7 @@ mod tests {
 }
 
 fn world_bytes(value: &ciborium::value::Value) -> Result<Vec<u8>, CompileError> {
+    crate::host_work::record_host_work(crate::host_work::HostWorkCounter::SemanticEncoding, 1);
     struct Bounded {
         bytes: Vec<u8>,
         remaining: u64,
@@ -562,6 +563,10 @@ fn world_bytes(value: &ciborium::value::Value) -> Result<Vec<u8>, CompileError> 
         remaining: capture_allowance()?,
     };
     ciborium::ser::into_writer(value, &mut writer).map_err(|e| source_failure(e.to_string()))?;
+    crate::host_work::record_host_work(
+        crate::host_work::HostWorkCounter::ScopeEncodedByte,
+        writer.bytes.len() as u64,
+    );
     Ok(writer.bytes)
 }
 
@@ -575,6 +580,10 @@ fn world_hex(bytes: &[u8]) -> String {
         })
 }
 fn world_digest(bytes: &[u8]) -> [u8; 32] {
+    crate::host_work::record_host_work(
+        crate::host_work::HostWorkCounter::SemanticDigestInputByte,
+        bytes.len() as u64,
+    );
     Sha256::digest(bytes).into()
 }
 fn world_text(value: impl Into<String>) -> ciborium::value::Value {
@@ -607,6 +616,18 @@ impl WorldColdRows {
         parts: Vec<crate::declaration_context::original_inputs::OriginalInputPart>,
     ) -> Result<(ciborium::value::Value, [u8; 32]), CompileError> {
         use crate::artifact_inventory::{ArtifactPayload, JoinedInterfaceRole};
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::ColdWorldBuilderRowVisit,
+            1,
+        );
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::InputFdSelectedRowVisit,
+            1,
+        );
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::InputFdSliceVisit,
+            parts.len() as u64,
+        );
         use crate::declaration_context::original_inputs::{encode_image, OriginalInputKind as K};
         use ciborium::value::Value;
         if entry.descriptor.producer_sha256 != self.producer {
@@ -734,6 +755,10 @@ impl CompilerWorldOpenInputs {
                 source_failure("compiler world requires a retained service package source")
             })?
             .profile_id();
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::InputFdEnumeration,
+            1,
+        );
         let mut rows = WorldColdRows {
             producer,
             files: BTreeMap::new(),
@@ -975,6 +1000,10 @@ fn ensure_world(
                 root: root.clone(),
                 acquisition: A::Complete(restoration.descriptor.clone()),
             });
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::InputFdExport,
+                restoration.input_files.len() as u64,
+            );
             let run = world_execute(&cmd, endpoint, restoration.input_files.clone())?;
             match O::decode(&run.output.stdout).map_err(|_| world_response_error(false))? {
                 O::Ready { world, realization } if world == root => realization,
