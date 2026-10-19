@@ -1,5 +1,6 @@
 //! One run owns actor membership, identity claims and preparation admission.
 use super::*;
+use crate::resident_workbench::generation_admission::GenerationDependency;
 use ractor::ActorStatus;
 use std::collections::HashSet;
 use tokio::sync::oneshot;
@@ -11,6 +12,11 @@ mod preparation;
 mod startup;
 pub(crate) use startup::{
     RootStartupAdmission, RootStartupRecoveryAuthority, StartupPredecessorAuthority,
+};
+mod generation;
+pub(crate) use generation::{
+    GenerationDirectoryError, GenerationPopulation, GenerationResourceIdentity,
+    GenerationResourceObservation, GenerationResourceState,
 };
 mod transfers;
 #[cfg(test)]
@@ -197,6 +203,7 @@ struct OwnedResource {
     resource: ResourceChild,
     issued_to: ActorRef,
     owner: ResourceOwner,
+    dependency: Option<GenerationDependency>,
 }
 
 #[derive(Clone)]
@@ -306,6 +313,7 @@ enum ReservationPhase {
     Ready,
     Registered,
     Abandoned,
+    NotStarted,
 }
 struct ReservationRecord {
     phase: ReservationPhase,
@@ -316,6 +324,7 @@ struct ReservationRecord {
     lifecycle: Option<crate::kernel::LifecycleHandle>,
     executor: Option<ractor::ActorCell>,
     reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
+    dependency: Option<GenerationDependency>,
 }
 
 impl ReservationRecord {
@@ -347,6 +356,7 @@ struct RootPreparationRecord {
     phase: PreparationPhase,
     compiler: RetainedActorExit,
     placement: Option<crate::ActorPlacement>,
+    dependency: Option<GenerationDependency>,
 }
 impl RunState {
     fn start_pending_actor_resources(&mut self) {
@@ -540,6 +550,10 @@ impl RunState {
 }
 
 pub(super) enum RunControlMessage {
+    GenerationPopulation {
+        dependency: GenerationDependency,
+        reply: oneshot::Sender<GenerationPopulation>,
+    },
     SharedCompilerClient {
         reply: oneshot::Sender<(
             crate::CompilerPreparationClient,
@@ -597,11 +611,13 @@ pub(super) enum RunControlMessage {
     ReserveWorker {
         parent: ActorRef,
         incarnation: crate::Incarnation,
+        dependency: Option<GenerationDependency>,
         reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
     },
     ReserveSuccessor {
         predecessor: ActorRef,
         incarnation: crate::Incarnation,
+        dependency: Option<GenerationDependency>,
         reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
     },
     ReplacementIngressGrant {
@@ -706,6 +722,7 @@ pub(super) enum RunControlMessage {
         reply: oneshot::Sender<()>,
     },
     BeginPreparation {
+        dependency: Option<GenerationDependency>,
         intent: PreparationIntent,
         operation: RootOperation,
         reply: oneshot::Sender<Result<oneshot::Receiver<RootDelivery>, DirectoryError>>,
@@ -779,6 +796,7 @@ fn reserve_actor(
     parent: Option<ActorRef>,
     incarnation: crate::Incarnation,
     purpose: ReservationPurpose,
+    dependency: Option<GenerationDependency>,
     reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
 ) {
     if state.phase != RunPhase::Running {
@@ -798,7 +816,7 @@ fn reserve_actor(
         }
     };
     state.identities.claimed.insert(actor.id, actor);
-    begin_reservation(state, actor, purpose, reply);
+    begin_reservation_after(state, actor, purpose, None, dependency, reply);
 }
 
 fn begin_reservation(
@@ -807,13 +825,14 @@ fn begin_reservation(
     purpose: ReservationPurpose,
     reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
 ) {
-    begin_reservation_after(state, actor, purpose, None, reply);
+    begin_reservation_after(state, actor, purpose, None, None, reply);
 }
 fn begin_reservation_after(
     state: &mut RunState,
     actor: ActorRef,
     purpose: ReservationPurpose,
     predecessor: Option<crate::kernel::LifecycleHandle>,
+    dependency: Option<GenerationDependency>,
     reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
 ) {
     let terminal = RetainedActorExit::new();
@@ -830,6 +849,7 @@ fn begin_reservation_after(
             lifecycle: None,
             executor: None,
             reply: Some(reply),
+            dependency,
         },
     );
     if state
@@ -846,7 +866,7 @@ fn begin_reservation_after(
         })
     {
         if let Some(record) = state.reservations.get_mut(&actor) {
-            record.phase = ReservationPhase::Abandoned;
+            record.phase = ReservationPhase::NotStarted;
             if let Some(reply) = record.reply.take() {
                 let _ = reply.send(Err(DirectoryError::Unavailable));
             }
@@ -873,6 +893,9 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            RunControlMessage::GenerationPopulation { dependency, reply } => {
+                let _ = reply.send(state.generation_population(dependency));
+            }
             RunControlMessage::FinishRun { members, reply } => {
                 let exact = members.len()
                     == state
@@ -1159,6 +1182,7 @@ impl Actor for RunControl {
             RunControlMessage::ReserveWorker {
                 parent,
                 incarnation,
+                dependency,
                 reply,
             } => {
                 reserve_actor(
@@ -1166,12 +1190,14 @@ impl Actor for RunControl {
                     Some(parent),
                     incarnation,
                     ReservationPurpose::Worker { parent },
+                    dependency,
                     reply,
                 );
             }
             RunControlMessage::ReserveSuccessor {
                 predecessor,
                 incarnation,
+                dependency,
                 reply,
             } => {
                 reserve_actor(
@@ -1179,6 +1205,7 @@ impl Actor for RunControl {
                     Some(predecessor),
                     incarnation,
                     ReservationPurpose::Replacement { predecessor },
+                    dependency,
                     reply,
                 );
             }
@@ -1325,6 +1352,10 @@ impl Actor for RunControl {
                             resource,
                             issued_to: parent,
                             owner: ResourceOwner::Owned(ResourceLifetime::Actor(parent)),
+                            dependency: state
+                                .preparations
+                                .get(&preparation)
+                                .and_then(|record| record.dependency.clone()),
                         },
                     );
                     Ok(())
@@ -1623,6 +1654,7 @@ impl Actor for RunControl {
                 let _ = reply.send(());
             }
             RunControlMessage::BeginPreparation {
+                dependency,
                 intent,
                 operation,
                 reply,
@@ -1650,6 +1682,7 @@ impl Actor for RunControl {
                         phase: PreparationPhase::Running,
                         compiler: compiler.clone(),
                         placement: None,
+                        dependency,
                     },
                 );
                 let (delivery, receiver) = oneshot::channel();
@@ -1760,7 +1793,7 @@ impl Actor for RunControl {
                                     state.identities.claimed.remove(&actor.id);
                                 }
                             }
-                            record.phase = ReservationPhase::Abandoned;
+                            record.phase = ReservationPhase::NotStarted;
                             if let Some(reply) = record.reply.take() {
                                 let _ = reply.send(Err(DirectoryError::Unavailable));
                             }
@@ -1774,6 +1807,9 @@ impl Actor for RunControl {
             }
             RunControlMessage::AbandonReservation { actor } => {
                 if let Some(record) = state.reservations.get_mut(&actor) {
+                    if matches!(record.phase, ReservationPhase::NotStarted) {
+                        return Ok(());
+                    }
                     record.phase = if matches!(
                         record.phase,
                         ReservationPhase::Creating | ReservationPhase::Abandoning
@@ -1854,6 +1890,7 @@ impl Actor for RunControl {
                         actor,
                         ReservationPurpose::Root,
                         predecessor,
+                        None,
                         reply,
                     );
                 }
@@ -2300,6 +2337,7 @@ impl RunControlClient {
         self.ask(|reply| RunControlMessage::ReserveWorker {
             parent,
             incarnation,
+            dependency: None,
             reply,
         })
         .await?
@@ -2312,6 +2350,7 @@ impl RunControlClient {
         self.ask(|reply| RunControlMessage::ReserveSuccessor {
             predecessor,
             incarnation,
+            dependency: None,
             reply,
         })
         .await?
@@ -2502,6 +2541,7 @@ impl RunControlClient {
     ) -> Result<RootOperationResult, DirectoryError> {
         let receiver = self
             .ask(|reply| RunControlMessage::BeginPreparation {
+                dependency: None,
                 intent: PreparationIntent::Creation,
                 operation,
                 reply,
@@ -2524,6 +2564,7 @@ impl RunControlClient {
     ) -> Result<RootOperationResult, DirectoryError> {
         let receiver = self
             .ask(|reply| RunControlMessage::BeginPreparation {
+                dependency: None,
                 intent: PreparationIntent::ExistingInput,
                 operation,
                 reply,
