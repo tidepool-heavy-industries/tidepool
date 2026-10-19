@@ -417,19 +417,6 @@ pub(crate) struct OriginalCompilerInputs {
     native_availability: RequestNativeAvailability,
 }
 
-#[cfg(test)]
-fn native_requirement_facts(
-    offers: &[crate::artifact_inventory::IssuedNativeOffer],
-) -> Vec<crate::artifact_inventory::NativeOriginalRequirement> {
-    let mut facts = Vec::new();
-    for proof in offers.iter().filter_map(|offer| offer.proof()) {
-        if !facts.contains(proof) {
-            facts.push(proof.clone());
-        }
-    }
-    facts
-}
-
 fn preserve_native_offers(
     projection: &CompilerInputProjection,
     namespace: &ArtifactView,
@@ -1101,13 +1088,6 @@ impl OriginalCompilerInputs {
             artifacts,
             native_offers,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn native_original_requirements(
-        &self,
-    ) -> Vec<crate::artifact_inventory::NativeOriginalRequirement> {
-        native_requirement_facts(&self.native_offers)
     }
 }
 
@@ -2257,25 +2237,6 @@ impl RequestCompilerInputs {
 
     pub(crate) fn artifacts(&self) -> &ArtifactView {
         self.source_support.artifacts()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn native_original_requirements(
-        &self,
-    ) -> Vec<crate::artifact_inventory::NativeOriginalRequirement> {
-        let mut facts = Vec::new();
-        for proof in self
-            .native_selection
-            .availability
-            .values()
-            .flat_map(|row| row.offers())
-            .filter_map(|offer| offer.proof())
-        {
-            if !facts.contains(proof) {
-                facts.push(proof.clone());
-            }
-        }
-        facts
     }
 
     pub(crate) fn native_availability(
@@ -22540,10 +22501,19 @@ mod tests {
         .unwrap();
         let private =
             OriginalCompilerInputs::from_selection(&selection, context.artifact_view()).unwrap();
-        assert!(!private.native_original_requirements().is_empty());
+        assert!(private
+            .native_offers()
+            .iter()
+            .any(|offer| offer.original() == original_id && offer.proof().is_some()));
         assert_eq!(
-            private.native_original_requirements(),
-            inputs.native_original_requirements()
+            private
+                .native_availability()
+                .semantic_observations()
+                .unwrap(),
+            inputs
+                .private_native_availability()
+                .semantic_observations()
+                .unwrap()
         );
         let available_private = OriginalCompilerInputs::from_native_availability(
             &context,
@@ -22552,10 +22522,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            available_private.native_original_requirements(),
-            private.native_original_requirements(),
-            "a partial private offer preserves the selected original before admission"
+            available_private.native_offers().len(),
+            private.native_offers().len()
         );
+        for expected in private.native_offers() {
+            assert!(
+                available_private
+                    .native_offers()
+                    .iter()
+                    .any(|offer| offer.same_issuance(expected)),
+                "a private offer preserves its original exact issuer before admission"
+            );
+        }
+        let expected_availability = available_private
+            .native_availability()
+            .semantic_observations()
+            .unwrap();
         // The recipe keeps its certificate while the declaration baseline is
         // narrowed to types. Its original arrives through the private issuer,
         // after baseline native choices have been captured independently.
@@ -22585,8 +22567,17 @@ mod tests {
         assert_eq!(
             private_request
                 .compiler_inputs()
-                .native_original_requirements(),
-            private.native_original_requirements()
+                .private_native_availability()
+                .semantic_observations()
+                .unwrap(),
+            expected_availability
+        );
+        assert_eq!(
+            private_request
+                .compiler_inputs()
+                .artifacts()
+                .selected_native_groups(),
+            inputs.artifacts().selected_native_groups()
         );
         let private_receipt =
             crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
@@ -22595,12 +22586,17 @@ mod tests {
                 &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
             )
             .unwrap();
+        let received_private = OriginalCompilerInputs::from_selection(
+            &private_receipt,
+            private_request.compiler_inputs().artifacts(),
+        )
+        .unwrap();
         assert_eq!(
-            private_receipt
-                .native_original_requirements()
-                .cloned()
-                .collect::<Vec<_>>(),
-            private.native_original_requirements()
+            received_private
+                .native_availability()
+                .semantic_observations()
+                .unwrap(),
+            expected_availability
         );
         let published = request
             .admit_program_support_with_selection(

@@ -846,11 +846,11 @@ fn preview_reuses_selected_original_with_issued_group_custody() {
         .prepare_compilation_with_private_input(scratch.path(), PRODUCER, None, Some(private))
         .unwrap();
     request.validate_artifacts().unwrap();
-    assert!(request
+    let availability = request
         .compiler_inputs()
-        .native_original_requirements()
-        .iter()
-        .any(|proof| proof.original == fixture.original.descriptor.id));
+        .native_availability(fixture.original.descriptor.id)
+        .unwrap();
+    assert!(availability.offers().any(|offer| offer.proof().is_some()));
     assert_eq!(context.as_ref(), &before);
     assert!(context.artifact_view().selected_native_groups().is_empty());
 }

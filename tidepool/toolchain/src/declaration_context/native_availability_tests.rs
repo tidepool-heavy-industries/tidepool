@@ -890,13 +890,12 @@ fn private_fragment_closes_baseline_only_interface_dependencies_at_request() {
         roots,
         "private availability cannot add executable body roots"
     );
-    let final_proof = final_inputs
-        .native_original_requirements()
-        .into_iter()
-        .find(|proof| proof.original == original)
+    let availability = final_inputs.native_availability(original).unwrap();
+    let final_proof = availability
+        .offers()
+        .find_map(|offer| offer.proof())
         .unwrap();
     assert_eq!(final_proof.original, original);
-    let availability = final_inputs.native_availability(original).unwrap();
     assert_eq!(availability.original_owner(), consumer.owner());
     assert_eq!(availability.mode, NativeTransportMode::Full);
     let support = availability
@@ -1328,9 +1327,10 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             "private complete issuance preserves the caller's exact chosen execution roots"
         );
         let issued = input
-            .native_original_requirements()
+            .native_offers()
             .iter()
-            .find(|proof| proof.original == consumer_entry.descriptor.id)
+            .find(|offer| offer.original() == consumer_entry.descriptor.id)
+            .and_then(|offer| offer.proof())
             .cloned()
             .unwrap();
         assert!(
@@ -1368,9 +1368,10 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .unwrap();
         let retained = request
             .compiler_inputs()
-            .native_original_requirements()
-            .iter()
-            .find(|proof| proof.original == consumer_entry.descriptor.id)
+            .native_availability(consumer_entry.descriptor.id)
+            .unwrap()
+            .offers()
+            .find_map(|offer| offer.proof())
             .cloned()
             .unwrap();
         let retained_offer = request
@@ -2158,10 +2159,18 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
                 .unwrap();
             assert_eq!(wire_mode(&request, "OptionalCensus"), full_mode());
             assert!(request.groups.is_empty());
-            let requirements = request.compiler_inputs().native_original_requirements();
-            assert_eq!(requirements.as_slice(), &[chosen.proof().unwrap().clone()]);
+            let availability = request
+                .compiler_inputs()
+                .native_availability(chosen.original())
+                .unwrap();
+            assert_eq!(availability.offers().len(), 1);
+            let retained = availability.offers().next().unwrap();
+            assert!(retained.same_issuance(chosen));
+            assert_eq!(retained.proof(), chosen.proof());
             assert_eq!(
-                requirements[0]
+                retained
+                    .proof()
+                    .unwrap()
                     .issued_group_carriers(request.compiler_inputs().artifacts())
                     .unwrap(),
                 chosen.issued_group_carriers().unwrap()
@@ -4474,12 +4483,13 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         "transport availability does not upgrade compiler roles"
     );
     assert!(!request.input_transport_files().is_empty());
-    let retained = request
+    let availability = request
         .compiler_inputs()
-        .native_original_requirements()
-        .iter()
-        .find(|requirement| requirement.original == authored_id)
-        .cloned()
+        .native_availability(authored_id)
+        .unwrap();
+    let retained = availability
+        .offers()
+        .find_map(|offer| offer.proof())
         .unwrap();
     assert_eq!(&retained.selection, &proof.selection);
     assert!(request
@@ -6410,10 +6420,12 @@ fn replay_native_transport_history(
     assert_eq!(wire_mode(&request, "IndependentLeft"), full_mode());
     coverage.full_without_demand += 1;
     for index in 0..2 {
-        assert!(inputs.native_original_requirements().iter().any(|proof| {
-            proof.original == proofs[index].original
-                && proof.issued_group_carriers(inputs.artifacts()).unwrap() == expected[index]
-        }));
+        let availability = inputs.native_availability(proofs[index].original).unwrap();
+        assert!(availability.offers().any(|offer| offer
+            .proof()
+            .is_some_and(
+                |proof| proof.issued_group_carriers(inputs.artifacts()).unwrap() == expected[index]
+            )));
     }
     let validation = PackageInterfaceValidation::default();
     let selected = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
@@ -6557,9 +6569,10 @@ fn replay_native_transport_history(
     .unwrap();
     coverage.dependent_issuances += 1;
     let proof = produced
-        .native_original_requirements()
+        .native_offers()
         .iter()
-        .find(|proof| proof.original == dependent_entry.descriptor.id)
+        .find(|offer| offer.original() == dependent_entry.descriptor.id)
+        .and_then(|offer| offer.proof())
         .unwrap()
         .clone();
     assert!(
