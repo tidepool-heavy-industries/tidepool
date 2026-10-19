@@ -735,19 +735,119 @@ mod tests {
                 .execution()
                 .relocated(execution_recipient)
                 .activation_context();
-            let outcome = runner
+            let mut outcome = runner
                 .run_route_entry(admitted_context.clone(), started, running)
                 .await
                 .unwrap();
+            assert!(Arc::ptr_eq(
+                &admitted_context.source_dependency().source_lease().unwrap(),
+                &original
+            ));
+            let mut counts = [0usize; 4];
+            let mut completed = false;
+            // Public pollWatch first owns a transient read, then observes,
+            // projects its original decision, and releases that read. None of
+            // these operations registers another callable or compiles source.
+            for _ in 0..6 {
+                use crate::request_effect::{ReplyResult, WatchSubject};
+                use crate::resident_workbench::ResidentActorBoundary;
+                let boundary = runner
+                    .capture_boundary(admitted_context.clone(), outcome, RealmId::ROOT)
+                    .await
+                    .unwrap();
+                eprintln!("admitted fenced route boundary: {}", boundary.operation());
+                assert_eq!(fence.pending_claims(), 0);
+                outcome = match boundary {
+                    ResidentActorBoundary::WatchRegistration(registration)
+                        if registration.transient =>
+                    {
+                        counts[0] += 1;
+                        let plan = registration
+                            .dependencies
+                            .try_map(|(subject, _)| match subject {
+                                WatchSubject::Watch(watch) if watch == running => {
+                                    Ok(super::super::ReadinessDependency::Watch(watch))
+                                }
+                                WatchSubject::Watch(other) => panic!(
+                                    "route read selected watch {other:?}, expected {running:?}"
+                                ),
+                                WatchSubject::Request(request) => {
+                                    panic!("route read unexpectedly selected request {request:?}")
+                                }
+                                WatchSubject::Command(job) => {
+                                    panic!("route read unexpectedly selected command {job}")
+                                }
+                            })
+                            .unwrap();
+                        let transient = registry
+                            .register_transient_watch(successor.identity(), plan)
+                            .unwrap();
+                        runner
+                            .resume_value(
+                                admitted_context.clone(),
+                                registration.continuation,
+                                ReplyResult(Ok::<i64, ReplyError>(transient.0.try_into().unwrap())),
+                            )
+                            .await
+                            .unwrap()
+                    }
+                    ResidentActorBoundary::WatchPoll(poll) => {
+                        counts[1] += 1;
+                        runner
+                            .resume_watch_observation(
+                                admitted_context.clone(),
+                                poll.continuation,
+                                registry.observe_watch(successor.identity(), poll.watch),
+                            )
+                            .await
+                            .unwrap()
+                    }
+                    ResidentActorBoundary::WatchDecisionPoll {
+                        continuation,
+                        watch,
+                        path,
+                    } => {
+                        counts[2] += 1;
+                        let decision = registry
+                            .observe_watch_snapshot_decision(watch, &path)
+                            .unwrap();
+                        runner
+                            .resume_value(admitted_context.clone(), continuation, decision)
+                            .await
+                            .unwrap()
+                    }
+                    ResidentActorBoundary::WatchRelease(release) => {
+                        counts[3] += 1;
+                        registry
+                            .release_transient_watch(successor.identity(), release.watch)
+                            .unwrap();
+                        runner
+                            .resume_value(
+                                admitted_context.clone(),
+                                release.continuation,
+                                ReplyResult(Ok::<(), ReplyError>(())),
+                            )
+                            .await
+                            .unwrap()
+                    }
+                    ResidentActorBoundary::Completed => {
+                        assert_eq!(
+                            counts,
+                            [1, 1, 1, 1],
+                            "public route performs one complete read protocol"
+                        );
+                        completed = true;
+                        break;
+                    }
+                    other => panic!(
+                        "unexpected admitted route boundary under the original source fence: {}",
+                        other.operation()
+                    ),
+                };
+            }
             assert!(
-                matches!(
-                    runner
-                        .capture_boundary(admitted_context, outcome, RealmId::ROOT)
-                        .await
-                        .unwrap(),
-                    crate::resident_workbench::ResidentActorBoundary::WatchPoll(_)
-                ),
-                "already admitted route reaches its pure watch read after the source fence"
+                completed,
+                "admitted route must finish its bounded public read protocol"
             );
             assert!(registry
                 .finish_route(successor.identity(), running, Ok(()))
