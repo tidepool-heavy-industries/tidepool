@@ -1658,7 +1658,10 @@ impl CompilerEndpoint {
         if cmd.request.is_exact_inputs() && !matches!(self.transport, Transport::Scoped) {
             return Err(SpawnError::not_submitted(
                 &cmd.program,
-                io::Error::new(io::ErrorKind::InvalidInput, "exact input acquisition requires a pinned compiler transaction"),
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "exact input acquisition requires a pinned compiler transaction",
+                ),
             ));
         }
         let cwd = std::env::current_dir()
@@ -2249,9 +2252,14 @@ impl CompilerTransaction {
             ));
         }
         let result = self.execute_inner(cmd).and_then(|run| {
-            cmd.request.validate_exact_inputs_response(&run.output).map_err(|error| {
-                SpawnError::indeterminate(&cmd.program, io::Error::new(io::ErrorKind::InvalidData, error))
-            })?;
+            cmd.request
+                .validate_exact_inputs_response(&run.output)
+                .map_err(|error| {
+                    SpawnError::indeterminate(
+                        &cmd.program,
+                        io::Error::new(io::ErrorKind::InvalidData, error),
+                    )
+                })?;
             Ok(run)
         });
         if result.is_err() {
@@ -4489,34 +4497,63 @@ mod tests {
 
     #[test]
     fn malformed_exact_inputs_response_poisoning_preserves_original_end_owner() {
-        let mut fixture = DeferredDaemonFixture::new(DaemonFixtureBehavior::Normal, CompilerTransactionCancellation::new());
+        let mut fixture = DeferredDaemonFixture::new(
+            DaemonFixtureBehavior::Normal,
+            CompilerTransactionCancellation::new(),
+        );
         let mut command = fixture.command();
         let mut bytes = b"TPREQ022".to_vec();
         bytes.push(0);
-        for count in [1u32, 1, 1] { bytes.extend_from_slice(&count.to_le_bytes()); }
+        for count in [1u32, 1, 1] {
+            bytes.extend_from_slice(&count.to_le_bytes());
+        }
         bytes.push(57);
-        bytes.extend_from_slice(&4u32.to_le_bytes()); bytes.extend_from_slice(b"root");
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(b"root");
         bytes.push(0);
-        bytes.extend_from_slice(&8u32.to_le_bytes()); bytes.extend_from_slice(b"realized");
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(b"realized");
         command.request = ExtractRequest::decode(&bytes).unwrap();
-        let settled = with_compiler_transaction(|_| {}, || {
-            let file = compiler_input_file(b"exact input ownership");
-            let weak = Arc::downgrade(&file);
-            assert!(retain_compiler_input_file(file));
-            let endpoint = fixture.bind(&command).unwrap();
-            let failure = endpoint.execute(&command).unwrap_err();
-            assert!(!failure.permits_rebind());
-            assert!(!failure.definitely_unsubmitted());
-            assert!(weak.upgrade().is_some(), "response failure cannot release inputs before END");
-            // The same pinned transaction refuses another submission after the
-            // accepted machine response failed validation.
-            let failure = fixture.bind(&command).unwrap().execute(&command).unwrap_err();
-            assert!(!failure.permits_rebind());
-        });
-        assert!(matches!(settled.close, CompilerTransactionClose::Retired(_)));
+        let settled = with_compiler_transaction(
+            |_| {},
+            || {
+                let file = compiler_input_file(b"exact input ownership");
+                let weak = Arc::downgrade(&file);
+                assert!(retain_compiler_input_file(file));
+                let endpoint = fixture.bind(&command).unwrap();
+                let failure = endpoint.execute(&command).unwrap_err();
+                assert!(!failure.permits_rebind());
+                assert!(!failure.definitely_unsubmitted());
+                assert!(
+                    weak.upgrade().is_some(),
+                    "response failure cannot release inputs before END"
+                );
+                // The same pinned transaction refuses another submission after the
+                // accepted machine response failed validation.
+                let failure = fixture
+                    .bind(&command)
+                    .unwrap()
+                    .execute(&command)
+                    .unwrap_err();
+                assert!(!failure.permits_rebind());
+            },
+        );
+        assert!(matches!(
+            settled.close,
+            CompilerTransactionClose::Retired(_)
+        ));
         fixture.settle();
         let counts = fixture.counts.lock().unwrap();
-        assert_eq!((counts.begins, counts.admissions, counts.requests, counts.ends, counts.active), (1, 1, 1, 1, 0));
+        assert_eq!(
+            (
+                counts.begins,
+                counts.admissions,
+                counts.requests,
+                counts.ends,
+                counts.active
+            ),
+            (1, 1, 1, 1, 0)
+        );
     }
 
     #[test]

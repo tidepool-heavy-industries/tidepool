@@ -29,10 +29,11 @@ pub(crate) enum ExactInputsAcquisition {
 impl ExactInputsRequest {
     fn valid(&self) -> bool {
         let valid = |value: &str| !value.is_empty() && !value.contains('\0');
-        valid(&self.root) && match &self.acquisition {
-            ExactInputsAcquisition::Resident(reference) => valid(reference),
-            ExactInputsAcquisition::Complete(path) => path.to_str().is_some_and(valid),
-        }
+        valid(&self.root)
+            && match &self.acquisition {
+                ExactInputsAcquisition::Resident(reference) => valid(reference),
+                ExactInputsAcquisition::Complete(path) => path.to_str().is_some_and(valid),
+            }
     }
 }
 
@@ -64,7 +65,11 @@ impl EnsureExactInputsOutcome {
                 if reference.is_empty() || reference.contains('\0') {
                     return Err(ProtocolError::InvalidExactInputs);
                 }
-                if kind == 0 { Self::Ready(reference) } else { Self::NeedsAcquisition(reference) }
+                if kind == 0 {
+                    Self::Ready(reference)
+                } else {
+                    Self::NeedsAcquisition(reference)
+                }
             }
             2 => Self::Rejected(match decoder.byte()? {
                 0 => ExactInputsRejection::UnsupportedOperation,
@@ -392,12 +397,17 @@ impl ExtractRequest {
     }
 
     pub(crate) fn is_exact_inputs(&self) -> bool {
-        self.fields.iter().any(|field| matches!(field, Field::EnsureExactInputs(_)))
+        self.fields
+            .iter()
+            .any(|field| matches!(field, Field::EnsureExactInputs(_)))
     }
 
     /// Validate only machine framing and the echoed transport reference. Root
     /// authentication and realization issuance belong to the semantic owners.
-    pub(crate) fn validate_exact_inputs_response(&self, output: &std::process::Output) -> Result<(), ProtocolError> {
+    pub(crate) fn validate_exact_inputs_response(
+        &self,
+        output: &std::process::Output,
+    ) -> Result<(), ProtocolError> {
         if !self.is_exact_inputs() || !output.status.success() {
             return Ok(());
         }
@@ -405,7 +415,9 @@ impl ExtractRequest {
             return Err(ProtocolError::InvalidExactInputs);
         };
         match EnsureExactInputsOutcome::decode(&output.stdout)? {
-            EnsureExactInputsOutcome::NeedsAcquisition(root) if root != request.root => Err(ProtocolError::InvalidExactInputs),
+            EnsureExactInputsOutcome::NeedsAcquisition(root) if root != request.root => {
+                Err(ProtocolError::InvalidExactInputs)
+            }
             _ => Ok(()),
         }
     }
@@ -416,10 +428,18 @@ impl ExtractRequest {
     }
 
     fn admitted_mode(&self) -> Result<RequestMode, CliError> {
-        if self.fields.iter().any(|field| matches!(field, Field::EnsureExactInputs(_))) {
+        if self
+            .fields
+            .iter()
+            .any(|field| matches!(field, Field::EnsureExactInputs(_)))
+        {
             return match self.fields.as_slice() {
-                [Field::EnsureExactInputs(request)] if request.valid() => Ok(RequestMode::EnsureExactInputs),
-                _ => Err(CliError::new("exact input acquisition must be source-free and exclusive")),
+                [Field::EnsureExactInputs(request)] if request.valid() => {
+                    Ok(RequestMode::EnsureExactInputs)
+                }
+                _ => Err(CliError::new(
+                    "exact input acquisition must be source-free and exclusive",
+                )),
             };
         }
         let has = |predicate: fn(&Field) -> bool| self.fields.iter().any(predicate);
@@ -821,8 +841,14 @@ impl ExtractRequest {
             workload,
             execution_grant,
         };
-        if request.fields.iter().any(|field| matches!(field, Field::EnsureExactInputs(_))) {
-            request.admitted_mode().map_err(|_| ProtocolError::InvalidExactInputs)?;
+        if request
+            .fields
+            .iter()
+            .any(|field| matches!(field, Field::EnsureExactInputs(_)))
+        {
+            request
+                .admitted_mode()
+                .map_err(|_| ProtocolError::InvalidExactInputs)?;
         }
         if request.hosted_lookup_batch().is_some() {
             request
@@ -1274,7 +1300,9 @@ impl ExtractRequest {
                 Field::InspectionStrict => flags.push("--inspection-strict".into()),
                 Field::PortableOutput => flags.push("--portable-output".into()),
                 Field::EnsureExactInputs(request) => flag(
-                    &mut flags, "<ensure-exact-inputs>", OsStr::new(&format!("{request:?}")),
+                    &mut flags,
+                    "<ensure-exact-inputs>",
+                    OsStr::new(&format!("{request:?}")),
                 ),
             }
         }
@@ -2807,40 +2835,96 @@ mod tests {
         // Independent fixed bytes also checked by the maintained Haskell codec case.
         let bytes = unhex("5450524551303232000100000001000000010000003904000000726f6f7400080000007265616c697a6564").unwrap();
         assert_eq!(request.encode(), bytes);
-        assert_eq!(ExtractRequest::decode(&bytes).unwrap().mode(), RequestMode::EnsureExactInputs);
-        assert_eq!(ExtractRequest::decode(&bytes).unwrap().encode(), request.encode());
+        assert_eq!(
+            ExtractRequest::decode(&bytes).unwrap().mode(),
+            RequestMode::EnsureExactInputs
+        );
+        assert_eq!(
+            ExtractRequest::decode(&bytes).unwrap().encode(),
+            request.encode()
+        );
         let complete = make(ExactInputsRequest {
-            root: "root".into(), acquisition: ExactInputsAcquisition::Complete("/scope.cbor".into()),
+            root: "root".into(),
+            acquisition: ExactInputsAcquisition::Complete("/scope.cbor".into()),
         });
-        assert_eq!(ExtractRequest::decode(&complete.encode()).unwrap().encode(), complete.encode());
+        assert_eq!(
+            ExtractRequest::decode(&complete.encode()).unwrap().encode(),
+            complete.encode()
+        );
         // Envelope admission metadata does not become source or selection authority.
         let mut admitted = request.clone();
         admitted.set_workload(CompileWorkload::Preparation);
-        admitted.set_execution_grant(ExecutionGrant { jobs: 2, capabilities: 3 });
-        assert_eq!(ExtractRequest::decode(&admitted.encode()).unwrap().mode(), RequestMode::EnsureExactInputs);
-        for extra in [Field::Input("missing.hs".into()), Field::OutputDir("missing".into()),
-            Field::Include("missing".into()), Field::SessionArtifacts("missing".into()),
-            Field::ModuleCandidates("missing".into()), Field::HarnessProfile,
-            Field::EnsureExactInputs(resident.clone()), Field::Turn, Field::PortableOutput] {
+        admitted.set_execution_grant(ExecutionGrant {
+            jobs: 2,
+            capabilities: 3,
+        });
+        assert_eq!(
+            ExtractRequest::decode(&admitted.encode()).unwrap().mode(),
+            RequestMode::EnsureExactInputs
+        );
+        for extra in [
+            Field::Input("missing.hs".into()),
+            Field::OutputDir("missing".into()),
+            Field::Include("missing".into()),
+            Field::SessionArtifacts("missing".into()),
+            Field::ModuleCandidates("missing".into()),
+            Field::HarnessProfile,
+            Field::EnsureExactInputs(resident.clone()),
+            Field::Turn,
+            Field::PortableOutput,
+        ] {
             for reverse in [false, true] {
                 let mut bad = request.clone();
-                if reverse { bad.fields.insert(0, extra.clone()); } else { bad.fields.push(extra.clone()); }
-                assert_eq!(ExtractRequest::decode(&bad.encode()).unwrap_err(), ProtocolError::InvalidExactInputs);
+                if reverse {
+                    bad.fields.insert(0, extra.clone());
+                } else {
+                    bad.fields.push(extra.clone());
+                }
+                assert_eq!(
+                    ExtractRequest::decode(&bad.encode()).unwrap_err(),
+                    ProtocolError::InvalidExactInputs
+                );
                 assert!(bad.admitted_mode().is_err());
             }
         }
-        for bad in [ExactInputsRequest { root: "".into(), acquisition: resident.acquisition.clone() },
-            ExactInputsRequest { root: "root\0other".into(), acquisition: resident.acquisition.clone() },
-            ExactInputsRequest { root: "root".into(), acquisition: ExactInputsAcquisition::Resident("".into()) },
-            ExactInputsRequest { root: "root".into(), acquisition: ExactInputsAcquisition::Complete("".into()) }] {
-            assert_eq!(ExtractRequest::decode(&make(bad).encode()).unwrap_err(), ProtocolError::InvalidExactInputs);
+        for bad in [
+            ExactInputsRequest {
+                root: "".into(),
+                acquisition: resident.acquisition.clone(),
+            },
+            ExactInputsRequest {
+                root: "root\0other".into(),
+                acquisition: resident.acquisition.clone(),
+            },
+            ExactInputsRequest {
+                root: "root".into(),
+                acquisition: ExactInputsAcquisition::Resident("".into()),
+            },
+            ExactInputsRequest {
+                root: "root".into(),
+                acquisition: ExactInputsAcquisition::Complete("".into()),
+            },
+        ] {
+            assert_eq!(
+                ExtractRequest::decode(&make(bad).encode()).unwrap_err(),
+                ProtocolError::InvalidExactInputs
+            );
         }
-        for end in 0..bytes.len() { assert!(ExtractRequest::decode(&bytes[..end]).is_err()); }
+        for end in 0..bytes.len() {
+            assert!(ExtractRequest::decode(&bytes[..end]).is_err());
+        }
         let mut unknown = bytes.clone();
         unknown[30] = 2;
-        assert_eq!(ExtractRequest::decode(&unknown).unwrap_err(), ProtocolError::InvalidExactInputs);
-        let mut trailing = bytes.clone(); trailing.push(0);
-        assert_eq!(ExtractRequest::decode(&trailing).unwrap_err(), ProtocolError::TrailingBytes);
+        assert_eq!(
+            ExtractRequest::decode(&unknown).unwrap_err(),
+            ProtocolError::InvalidExactInputs
+        );
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(
+            ExtractRequest::decode(&trailing).unwrap_err(),
+            ProtocolError::TrailingBytes
+        );
         assert!(ExtractRequest::from_cli(&["--ensure-exact-inputs".into()]).is_err());
     }
 
@@ -2849,21 +2933,29 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         let request = ExtractRequest {
             fields: vec![Field::EnsureExactInputs(ExactInputsRequest {
-                root: "root".into(), acquisition: ExactInputsAcquisition::Resident("realized".into()),
-            })], ..ExtractRequest::default()
+                root: "root".into(),
+                acquisition: ExactInputsAcquisition::Resident("realized".into()),
+            })],
+            ..ExtractRequest::default()
         };
         let mut output = std::process::Output {
             status: std::process::ExitStatus::from_raw(0),
-            stdout: b"TPEXO001\x01\x04\x00\x00\x00root".to_vec(), stderr: Vec::new(),
+            stdout: b"TPEXO001\x01\x04\x00\x00\x00root".to_vec(),
+            stderr: Vec::new(),
         };
         assert!(request.validate_exact_inputs_response(&output).is_ok());
         output.stdout = b"TPEXO001\x01\x05\x00\x00\x00other".to_vec();
-        assert_eq!(request.validate_exact_inputs_response(&output), Err(ProtocolError::InvalidExactInputs));
+        assert_eq!(
+            request.validate_exact_inputs_response(&output),
+            Err(ProtocolError::InvalidExactInputs)
+        );
         output.stdout = b"human captured output".to_vec();
         assert!(request.validate_exact_inputs_response(&output).is_err());
         // Ordinary reports and unsuccessful diagnostic responses keep their
         // existing machine formats; validation never parses a human channel.
-        assert!(ExtractRequest::default().validate_exact_inputs_response(&output).is_ok());
+        assert!(ExtractRequest::default()
+            .validate_exact_inputs_response(&output)
+            .is_ok());
         output.status = std::process::ExitStatus::from_raw(1 << 8);
         assert!(request.validate_exact_inputs_response(&output).is_ok());
     }
@@ -2871,21 +2963,50 @@ mod tests {
     #[test]
     fn exact_inputs_outcomes_match_closed_wire_and_reject_uncertain_frames() {
         let cases = [
-            ("545045584f30303100080000007265616c697a6564", EnsureExactInputsOutcome::Ready("realized".into())),
-            ("545045584f3030310104000000726f6f74", EnsureExactInputsOutcome::NeedsAcquisition("root".into())),
-            ("545045584f3030310200", EnsureExactInputsOutcome::Rejected(ExactInputsRejection::UnsupportedOperation)),
-            ("545045584f3030310201", EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRealization)),
-            ("545045584f3030310202", EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRoot)),
-            ("545045584f3030310203", EnsureExactInputsOutcome::Rejected(ExactInputsRejection::AcquisitionRejected)),
+            (
+                "545045584f30303100080000007265616c697a6564",
+                EnsureExactInputsOutcome::Ready("realized".into()),
+            ),
+            (
+                "545045584f3030310104000000726f6f74",
+                EnsureExactInputsOutcome::NeedsAcquisition("root".into()),
+            ),
+            (
+                "545045584f3030310200",
+                EnsureExactInputsOutcome::Rejected(ExactInputsRejection::UnsupportedOperation),
+            ),
+            (
+                "545045584f3030310201",
+                EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRealization),
+            ),
+            (
+                "545045584f3030310202",
+                EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRoot),
+            ),
+            (
+                "545045584f3030310203",
+                EnsureExactInputsOutcome::Rejected(ExactInputsRejection::AcquisitionRejected),
+            ),
         ];
         for (hex, expected) in cases {
             let bytes = unhex(hex).unwrap();
             assert_eq!(EnsureExactInputsOutcome::decode(&bytes).unwrap(), expected);
-            for end in 0..bytes.len() { assert!(EnsureExactInputsOutcome::decode(&bytes[..end]).is_err()); }
-            let mut trailing = bytes; trailing.push(0);
-            assert_eq!(EnsureExactInputsOutcome::decode(&trailing).unwrap_err(), ProtocolError::TrailingBytes);
+            for end in 0..bytes.len() {
+                assert!(EnsureExactInputsOutcome::decode(&bytes[..end]).is_err());
+            }
+            let mut trailing = bytes;
+            trailing.push(0);
+            assert_eq!(
+                EnsureExactInputsOutcome::decode(&trailing).unwrap_err(),
+                ProtocolError::TrailingBytes
+            );
         }
-        for hex in ["545045584f30303103", "545045584f3030310204", "545045584f3030310000000000", "545045584f303031010100000000"] {
+        for hex in [
+            "545045584f30303103",
+            "545045584f3030310204",
+            "545045584f3030310000000000",
+            "545045584f303031010100000000",
+        ] {
             assert!(EnsureExactInputsOutcome::decode(&unhex(hex).unwrap()).is_err());
         }
     }
