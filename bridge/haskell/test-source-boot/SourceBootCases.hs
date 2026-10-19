@@ -664,7 +664,8 @@ exactScopeBinders = withScratch $ \work -> do
       refused groups = do
         result <- readGroups groups
         unless (case result of Left reason -> "expected word" `isInfixOf` reason || "expected uint" `isInfixOf` reason || "expected" `isInfixOf` reason; Right _ -> False) $
-          fail "exact scope accepted request-supplied native binder outlines"
+          fail ("native binder outline did not reach ordinal refusal: "
+            ++ either id (const "accepted") result)
       answer = binder "value" "answer" Nothing
       sameSpelling = [answer, binder "type" "answer" Nothing
         , binder "value" "answer" (Just "RecordA"), binder "value" "answer" (Just "RecordB")]
