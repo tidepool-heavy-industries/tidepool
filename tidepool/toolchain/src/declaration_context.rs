@@ -18342,11 +18342,53 @@ mod tests {
                         .unwrap()
                 })
                 .collect::<Vec<_>>();
-            recover_fixture_compiler_support(projection, support.artifacts().clone(), offers)
-                .unwrap()
+            assert!(offers.iter().all(|offer| !offer.is_full()));
+            let support = recover_fixture_compiler_support(
+                projection.clone(),
+                support.artifacts().clone(),
+                offers,
+            )
+            .unwrap();
+            assert!(
+                support
+                    .native_availability()
+                    .validate_role_coverage(&projection)
+                    .is_err(),
+                "recorded roles plus offer custody alone cannot issue normalized permissions"
+            );
+            let rows = RequestNativeAvailability::issue_checked(
+                &projection,
+                support.artifacts(),
+                support.native_offers(),
+            )
+            .unwrap();
+            support.retain_normalized_availability(&rows).unwrap()
         } else {
             support
         };
+        support
+            .native_availability()
+            .validate_role_coverage(&projection)
+            .unwrap();
+        for row in support.native_availability().rows() {
+            assert_eq!(
+                row.mode == NativeTransportMode::Full,
+                matches!(
+                    demand,
+                    crate::artifact_inventory::NativeArtifactDemand::AllGroups
+                ) && !partial,
+                "cold fixture must retain its actual Full/partial/empty permission mode"
+            );
+            if matches!(
+                demand,
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces
+            ) {
+                assert!(
+                    row.issued_ordinals().is_empty(),
+                    "type-only graph issues an explicit empty row"
+                );
+            }
+        }
         let context = ExactDeclarationContext::from_authenticated_execution_support(
             producer,
             support,
