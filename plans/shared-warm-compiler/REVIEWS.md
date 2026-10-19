@@ -55,4 +55,21 @@ with compiler cleanup unobserved and diagnostic evidence incomplete; see EVIDENC
 
 ## Integrated host/owned receiving review
 
-Sol-high campaign reviewed host b449..b5 owner-index/deferred-encoding successors and owned full5b74..5113/f330 history, including both baseline-discriminated test repairs. Accepted receiving merges at f088 after critical production/constructor/authority and refusal-path inspection. Private receipt `campaign/REVIEW-host-b5-owned-f330.txt`; joined compilation and36/36 controls then passed independently of area evidence. New shared APIs remain paused for user-directed C2/C5 service-owner amendment.
+Sol-high campaign reviewed host b449..b5 owner-index/deferred-encoding successors and owned full5b74..5113/f330 history, including both baseline-discriminated test repairs. Accepted receiving merges at f088 after critical production/constructor/authority and refusal-path inspection. Private receipt `campaign/REVIEW-host-b5-owned-f330.txt`; joined compilation and36/36 controls then passed independently of area evidence. The user-directed service-owner amendment and required Rust-client migration are
+accepted; shared implementation is active under DEMAND-SERVICE.md,
+RUST-CLIENT-MIGRATION.md and SERVICE-API.md.
+
+Campaign independently reviewed complete host ebb98..9f086 source history:
+fact-only mutation-owner key lookup and bounded producer observations. Catalog
+replacement advances invalidation; counter overflow disables reuse; observations
+preserve original traversal/policy and count actual encoding before write failure.
+Area production/cfgtest compiled and four exact controls passed. Campaign verified
+all four report/stream hashes and executed counts; joined compilation is running
+at exact e1cfc49, not yet execution acceptance. Private receipt
+campaign/fact-key-counter-join/AREA-RECEIPT-VERIFICATION.json.
+
+Campaign also directly reviewed qualification278..e00 native-constructor tracing:
+source accepted, existing opt-in full-profile target and bounded observations,
+explicit omissions, no policy/authority changes. Actual constructor/frozen failure
+attribution awaits native execution; matching interfaces never replace exact issued
+historical edges. Independent area review and fresh native admission remain separate.

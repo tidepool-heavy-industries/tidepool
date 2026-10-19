@@ -283,3 +283,22 @@ be measured and reported.
   itself. Confirmed success reopens the same gate; proven no-effect may reopen;
   uncertainty retains it closed until explicit recovery into a new context.
   This is an approved bounded implementation contract, not native acceptance.
+
+- 2026-10-19, required compiler-client migration: RUST-CLIENT-MIGRATION.md
+  controls query, ordinary cells, publication and recovery. Campaign accepted the
+  paired host/warm contract in private CELL-SUCCESSOR-CONTRACT-8d69.md
+  (SHA895bbea0ee1a95560209bf7a3b433979b9ee2d905c7ccd3ae7a974230f4ae6e9).
+  One published-session operation captures the actual world/base/source lease.
+  Cold creation keeps primary selection separate from unmerged visible-row
+  historical custody; it cannot call checked_value_context over retained values.
+  Prepare-cell returns existing prepared execution products plus an exact private
+  successor for each publishable item/ordinal. Existing checked-prefix and
+  FinalExecutionIntent/PublicManifestBase owners publish matching world and
+  bindings on both value and declaration routes. Earlier committed items survive
+  a later refusal. Restoration shares prior owned blocks and encodes actual
+  changed nodes, never the entire history per successor. Output certification
+  consumes exact demanded evidence and real runtime custody; preserving a hidden
+  full-request reconstruction to satisfy an obsolete API is not migration.
+  Warm owns shared client/wire types, host owns runtime/publication composition;
+  inspect is the first joined milestone, not completion. Source implementation,
+  native execution, deletion audit and frozen performance remain pending.
