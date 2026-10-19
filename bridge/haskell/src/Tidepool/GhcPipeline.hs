@@ -36,12 +36,12 @@ module Tidepool.GhcPipeline
   , withResidentPipelineSelected
   , withResidentPipelineSelectedRequests
   , CompilerScope, scopedCompile, scopedCompileCompleted, scopedReadExactScope, scopedRunGhc, scopedParserFlags
-  , scopedEnsureWorld, scopedReadHeldWorld, scopedQueryWorld, scopedPlanWorldCell, scopedValidateWorldCell, scopedCompileWorldCell, HeldWorldQueryBinding
+  , scopedEnsureWorld, scopedReadHeldWorld, scopedQueryWorld, scopedPlanWorldCell, scopedValidateWorldCell, scopedCompileWorldCell, scopedCommitWorldDependencies, HeldWorldQueryBinding
   , WorldCellRefusal(..)
   , materializeWorldSources, worldMaterializationCharge, retainWorldMaterialization, releaseWorldMaterialization
   , worldMaterializationOwners, emitWorldAcquisitionRejection
   , CompletedCompilerResult, completedCompilerResult, completedCompilerRecovery, completedCompilerGuard
-  , completedCompilerWorldInputs, WorldCellInputs, worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports
+  , completedCompilerWorldInputs, completedCompilerWorldDependencies, WorldCellInputs, worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports
   , PendingWorldDependencies
   , CompilerScopeRunner, withResidentCompilerScopes
   , CompilerRecoveryCaches(..)
@@ -2011,14 +2011,14 @@ compileHeldWorldCell :: IO () -> Maybe CompilerProducerIdentity -> CompilerUnive
   -> Ghc (CompletedCompilerResult result)
 compileHeldWorldCell guard producer universe baseEnv timing attempt
     world@(HeldCompilerWorld facts _ (WorldMaterialization _ _ roots _ _ _ _ _ _) _) grant executor question selection retained purpose path = do
+  -- Dependency completions use one closed compiler route. Caller-composed
+  -- purpose wrappers cannot silently widen the retained dependency policy.
+  unless (closedWorldCellPurpose purpose) (liftIO (throwIO WorldCellUnsupported))
   directory <- liftIO (canonicalizePath (worldCellPrepareDirectory question))
   target <- liftIO (canonicalizePath path)
   unless ((directory ++ [pathSeparator]) `isPrefixOf` target) (liftIO (throwIO WorldCellCorrupt))
   borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
-  let flags = foldl' gopt_unset ((hsc_dflags baseEnv)
-        {backend=noBackend,ghcLink=NoLink,importPaths=roots,workingDirectory=Nothing
-        ,hiDir=Just directory,objectDir=Just directory,stubDir=Just directory})
-        [Opt_WriteInterface,Opt_WriteIfSimplifiedCore,Opt_ByteCode,Opt_ByteCodeAndObjectCode]
+  let flags = heldWorldCellFlags baseEnv directory roots
   setSession ((hscUpdateHPT (const emptyHomePackageTable) (hscUpdateFlags (const flags) borrowed))
     {hsc_hooks=hsc_hooks baseEnv,hsc_logger=hsc_logger baseEnv,hsc_targets=[]})
   variant <- liftIO (normalVariant purpose)
@@ -2061,14 +2061,11 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   importsRef <- liftIO (newIORef Nothing)
   let policy = retainedContext (Set.union retained (Map.keysSet generations))
   setSession (installRetainedUnfoldingsPlugin policy hydrated)
-  cache <- liftIO newIfaceCache
-  memo <- liftIO (newIORef Map.empty)
-  recovery <- liftIO freshCompilerRecoveryCaches
+  dependencies <- liftIO (beginHeldWorldDependencyAttempt universe world)
   identity <- liftIO newTimingRequestIdentity
   start <- monotonicTime
   resources <- beginResourceTiming timing
-  let cycle = TransactionCycle cache memo Nothing Map.empty (const (pure recovery))
-        (universeInterpreter universe) (universePackageFinder universe) attempt
+  let cycle = worldDependencyCycle dependencies universe attempt
       withAliases = variant
         { pvCompilerProducer=producer,pvWorldOnly=True
         , pvTransformParsed = \target environment summary parsed -> do
@@ -2097,8 +2094,16 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
         }
   result <- runCompileCycle (WithCompilerExecution grant executor selection) cycle policy
     Nothing timing identity start resources withAliases path
+  final <- getSession
+  pending <- liftIO (stageHeldWorldDependencies dependencies withAliases final path)
+  recovery <- liftIO (worldDependencyRecovery dependencies)
   imports <- liftIO (readIORef importsRef >>= maybe (throwIO WorldCellCorrupt) pure)
-  pure (CompletedCompilerResult result recovery guard (Just (WorldCellInputs generations references (target,SHA256.hash source) imports)))
+  pure (CompletedCompilerResult result recovery guard (Just (WorldCellInputs generations references (target,SHA256.hash source) imports)) (Just pending))
+
+closedWorldCellPurpose :: CompilePurpose -> Bool
+closedWorldCellPurpose (ParsedImportSelection _ (GeneratedScaffoldCompile _
+    (GeneratedInstanceCheck _ (TypedSegmentCompile _ _ (CheckedItemCompile [] Nothing []))))) = True
+closedWorldCellPurpose _ = False
 
 -- Executable seals come from the same module-version owner as the products.
 -- Timestamps associate GHC's loaded linkable with a seal; they do not prove
@@ -5704,6 +5709,7 @@ data CompilerScope = CompilerScope
   , ownedScopedCompileWorldCell :: forall result. Maybe HeldWorldQueryBinding -> CompilerExecutionGrant -> CompilerExecutor
       -> WorldCellPrepareRequest -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> FilePath
       -> IO (CompletedCompilerResult result)
+  , ownedScopedCommitWorldDependencies :: Maybe HeldWorldQueryBinding -> CompilerExecutor -> WorldCellPrepareRequest -> PendingWorldDependencies -> IO ()
   , ownedScopedRunGhc :: forall result. Ghc result -> IO result
   , ownedScopedParserFlags :: DynFlags
   }
@@ -5757,6 +5763,10 @@ scopedCompileWorldCell :: CompilerScope -> Maybe HeldWorldQueryBinding -> Compil
   -> IO (CompletedCompilerResult result)
 scopedCompileWorldCell = ownedScopedCompileWorldCell
 
+scopedCommitWorldDependencies :: CompilerScope -> Maybe HeldWorldQueryBinding -> CompilerExecutor
+  -> WorldCellPrepareRequest -> PendingWorldDependencies -> IO ()
+scopedCommitWorldDependencies = ownedScopedCommitWorldDependencies
+
 scopedRunGhc :: CompilerScope -> Ghc result -> IO result
 scopedRunGhc scope = ownedScopedRunGhc scope
 
@@ -5776,21 +5786,24 @@ data WorldCellInputs = WorldCellInputs
   , worldCellExactImports :: [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])]
   }
 
-data CompletedCompilerResult result = CompletedCompilerResult result CompilerRecoveryCaches (IO ()) (Maybe WorldCellInputs)
+data CompletedCompilerResult result = CompletedCompilerResult result CompilerRecoveryCaches (IO ()) (Maybe WorldCellInputs) (Maybe PendingWorldDependencies)
 
 completedCompilerResult :: CompletedCompilerResult result -> result
-completedCompilerResult (CompletedCompilerResult result _ _ _) = result
+completedCompilerResult (CompletedCompilerResult result _ _ _ _) = result
 
 completedCompilerRecovery :: CompletedCompilerResult result -> CompilerRecoveryCaches
-completedCompilerRecovery (CompletedCompilerResult _ recovery _ _) = recovery
+completedCompilerRecovery (CompletedCompilerResult _ recovery _ _ _) = recovery
 
 completedCompilerWorldInputs :: CompletedCompilerResult result -> Maybe WorldCellInputs
-completedCompilerWorldInputs (CompletedCompilerResult _ _ _ inputs) = inputs
+completedCompilerWorldInputs (CompletedCompilerResult _ _ _ inputs _) = inputs
+
+completedCompilerWorldDependencies :: CompletedCompilerResult result -> Maybe PendingWorldDependencies
+completedCompilerWorldDependencies (CompletedCompilerResult _ _ _ _ pending) = pending
 
 -- This closure retains only the issuing thread and its existing phase cell.
 -- It does not keep the resident universe or a usable compiler capability alive.
 completedCompilerGuard :: CompletedCompilerResult result -> IO ()
-completedCompilerGuard (CompletedCompilerResult _ _ guard _) = guard
+completedCompilerGuard (CompletedCompilerResult _ _ guard _ _) = guard
 
 type CompletedResidentCompiler = forall result.
   PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
@@ -6097,6 +6110,16 @@ withResidentCompilerScopes baseIncludes useRequests = do
                             reflectGhc (compileHeldWorldCell requireReady producer selected baseEnv timing interpreterAttempt world grant executor
                               question selection retained purpose path) session
                     _ -> throwIO WorldCellUnavailable
+                commitWorldDependencies expected executor question pending = runGuarded $ do
+                  requireCompilerExecutorOpen executor
+                  held <- readIORef heldWorld
+                  case (expected,held) of
+                    (Just (HeldWorldQueryBinding identity reference),Just world@(HeldCompilerWorld facts issued _ _))
+                      | worldInputsIdentity facts == identity && issued == reference
+                        && worldCellPrepareIdentity question == identity
+                        && worldCellPrepareRealization question == reference ->
+                          commitHeldWorldDependencies pending world
+                    _ -> throwIO WorldCellUnavailable
                 runOperation :: forall result. Ghc result -> IO result
                 runOperation operation = runGuarded $ do
                   requestIdentity <- newTimingRequestIdentity
@@ -6168,7 +6191,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   completed <- captureCompletion (pure ())
                   finishCompletion (appendCleanupFailures completed failures)
             withCompletionRelease CompilerScopeRestore (pure ()) (const finish)
-              (const (captureCompletion (action (CompilerScope compile compileCompleted readScope ensureWorld readHeldWorld queryWorld planWorldCell validateWorldCell compileWorldCell runOperation parserFlags)))))
+              (const (captureCompletion (action (CompilerScope compile compileCompleted readScope ensureWorld readHeldWorld queryWorld planWorldCell validateWorldCell compileWorldCell commitWorldDependencies runOperation parserFlags)))))
               >>= finishCompletion
           acquire = do
             caller <- myThreadId
@@ -6332,7 +6355,7 @@ residentCompileOne guard producer selection retained universeRef active interpre
       , universeOriginalVersions=if admitted then Map.unionWith preferOriginalVersion
           originalVersions (universeOriginalVersions current)
           else universeOriginalVersions current })
-  pure (CompletedCompilerResult result recovery guard Nothing)
+  pure (CompletedCompilerResult result recovery guard Nothing Nothing)
 
 -- Each key owns one immutable product. Upgrade incomplete acceleration once,
 -- retaining the original completed facts on ordinary hits across changing views.

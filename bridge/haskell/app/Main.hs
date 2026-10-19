@@ -962,7 +962,9 @@ runWorldCellPrepareMode bound question = do
       | otherwise -> do
           attempted <- trySynchronous (prepareSegment initial)
           case attempted of
-            Right (items,observations,inputs,common) -> writeResult (Right items) observations inputs common
+            Right (items,observations,inputs,common,completion) -> do
+              writeResult (Right items) observations inputs common
+              commitPreparedWorldDependencies bound completion
             Left failure -> case fromException failure of
               Just refusal -> writeResult (Left refusal) BS.empty [] []
               Nothing -> case fromException failure of
@@ -1164,7 +1166,7 @@ runWorldCellPrepareMode bound question = do
           prefix = recordTypedSegment finalized typedPlan observations (concatMap snd signaturesByItem) rendered
             (initialProgramCellState (cellPlanPrologue initial) (worldCellPrepareIdentity question,planDigest) Map.empty)
       pure (descriptions,encodeCellOut finalized [] (programObservations prefix) (concat (programSources prefix))
-        ,worldCellInputReferences inputFacts,(sourceReceiptName,SHA256.hash sourceEnvelope):common)
+        ,worldCellInputReferences inputFacts,(sourceReceiptName,SHA256.hash sourceEnvelope):common,completion)
     rawWorldID [] = BS.empty
     rawWorldID (a:b:rest) = BS.cons (fromIntegral (16 * digitToInt a + digitToInt b)) (rawWorldID rest)
     rawWorldID _ = error "world identity left its admitted shape"
