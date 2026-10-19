@@ -199,13 +199,20 @@ all five native lookup answers before physical submission. Effective selected
 catalog `Jev.Tidepool` B differs from exact required historical A. Real retained
 `Jev.Operators` group edges consume A; matching source/product/interface bytes
 cannot substitute certification or bindings. All cleanup domains were confirmed
-and diagnostics complete. The exact current root operands and first contradictory
-composition stage remain unobserved; production roles before/after value support,
-authored fallback and catalog/private composition are the discriminating next
-observation. The strict consumed-native validator remains correct. See the
+and diagnostics complete. The later exact `428b` trace observes InterfaceOnly through value extension/authored
+fallback, then first B Original in Candidate native issuance. Protected catalog
+closure rows leave the candidate producer as AvailabilityOnly but reach the fresh
+Original constructor. Current Full/InterfaceOnly Operators roots retain exact A7/A2
+edges under role policy; those roots are not proof of explicit executable lookup
+demand. A typed availability-versus-selection repair is proposed at that owner,
+with genuine fresh outputs remaining certified selected Originals. The strict consumed-native validator remains correct. See the
 [exact frozen report](/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/fixture-repair-e6d/run-shared-persona/report.json)
 and [issuer review](/srv/swarm/evidence/inanna/shared-warm-qualification-20261019/baseline-oracle-review/FROZEN-NATIVE-LOOKUP-REVIEW.md).
-This is a failed semantic gate, separate from the valid fixture repair.
+Exact428b built/froze/verified and reran the stronger Persona: 1 executed / 1 failed
+before lookup physical submission, all cleanup confirmed, diagnostics incomplete
+because physical timing detail was sampled (178 of 29357 records). The complete
+728745362-byte raw host trace is retained. This is a failed semantic gate, separate
+from the valid fixture repair; no matched speedup or release acceptance follows.
 
 ## Later joined source and remaining physical work
 
