@@ -3,6 +3,8 @@
 -- options; CLI compatibility is owned by the launcher layer.
 module Tidepool.ExtractRequest
   ( CompileWorkload(..)
+  , ExactInputsRequest(..), ExactInputsAcquisition(..)
+  , EnsureExactInputsOutcome(..), ExactInputsRejection(..), encodeEnsureExactInputsOutcomeWithin
   , RequestField(..)
   , HostedLookupBatch(..), HostedLookupOperation(..), HostedLookupQuery(..), HostedLookupDiscovery(..)
   , InspectionRequest(..)
@@ -22,17 +24,67 @@ module Tidepool.ExtractRequest
   ) where
 
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Lazy as LT
+import qualified Data.Text.Lazy.Encoding as LTE
 import Data.Bits ((.|.), shiftL, shiftR)
 import Data.Char (digitToInt, isHexDigit)
 import Data.Word (Word32, Word64, Word8)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 
 data CompileWorkload = Foreground | Preparation deriving (Eq, Show)
+
+-- References remain transport data until their issuing owners admit them.
+data ExactInputsRequest = ExactInputsRequest String ExactInputsAcquisition
+  deriving (Eq, Show)
+
+data ExactInputsAcquisition = ResidentExactInputs String | CompleteExactInputs FilePath
+  deriving (Eq, Show)
+
+validExactInputsRequest :: ExactInputsRequest -> Bool
+validExactInputsRequest (ExactInputsRequest root acquisition) = valid root && case acquisition of
+  ResidentExactInputs reference -> valid reference
+  CompleteExactInputs manifest -> valid manifest
+  where valid value = not (null value) && '\0' `notElem` value
+
+data EnsureExactInputsOutcome
+  = ExactInputsReady String
+  | ExactInputsNeedsAcquisition String
+  | ExactInputsRejected ExactInputsRejection
+  deriving (Eq, Show)
+
+data ExactInputsRejection
+  = UnsupportedOperation | InvalidRealization | InvalidRoot | AcquisitionRejected
+  deriving (Eq, Show)
+
+-- Bound UTF-8 expansion before materializing the reference. The envelope and
+-- frame length are charged to the existing aggregate response payload budget.
+encodeEnsureExactInputsOutcomeWithin :: Integer -> EnsureExactInputsOutcome -> Maybe BS.ByteString
+encodeEnsureExactInputsOutcomeWithin budget outcome = case outcome of
+  ExactInputsReady reference -> referenceFrame 0 reference
+  ExactInputsNeedsAcquisition root -> referenceFrame 1 root
+  ExactInputsRejected cause
+    | budget < 10 -> Nothing
+    | otherwise -> Just ("TPEXO001" <> BS.pack [2, rejectionTag cause])
+  where
+    referenceFrame tag reference
+      | budget < 13 = Nothing
+      | otherwise =
+          let limit = min (budget - 13) (toInteger (maxBound :: Word32))
+              prefix = LBS.take (fromInteger (limit + 1)) (LTE.encodeUtf8 (LT.pack reference))
+          in if toInteger (LBS.length prefix) > limit then Nothing else
+            let bytes = LBS.toStrict prefix
+            in if BS.null bytes || BS.elem 0 bytes then Nothing else
+              Just ("TPEXO001" <> BS.singleton tag <> putU32 (BS.length bytes) <> bytes)
+    rejectionTag UnsupportedOperation = 0
+    rejectionTag InvalidRealization = 1
+    rejectionTag InvalidRoot = 2
+    rejectionTag AcquisitionRejected = 3
 
 data RequestField
   = Input FilePath
@@ -80,6 +132,7 @@ data RequestField
   | ActivationPreview
   | InspectionStrict
   | PortableOutput
+  | EnsureExactInputs ExactInputsRequest
   deriving (Eq, Show)
 
 -- | A decoded compiler-worker invocation. This is the Haskell boundary's
@@ -135,6 +188,7 @@ data WorkerRequest = WorkerRequest
   -- same compile, linked against 'requestRetainedGenerations'.
   , requestActivationPreview :: Bool
   , requestPortableOutput :: Bool
+  , requestEnsureExactInputs :: Maybe ExactInputsRequest
   , requestInspectionStrict :: Bool
   }
   deriving (Eq, Show)
@@ -142,7 +196,8 @@ data WorkerRequest = WorkerRequest
 -- | One operation admitted from the externally encoded request fields. Preview
 -- refines a turn; declaration operations own both their manifest and output.
 data RequestOperation
-  = SourceOperation
+  = EnsureExactInputsOperation ExactInputsRequest
+  | SourceOperation
   | TurnOperation
   | ActivationPreviewOperation
   | ClassificationOperation
@@ -154,7 +209,8 @@ data RequestOperation
   deriving (Eq, Show)
 
 data RequestShapeError
-  = InvalidSourceCheckShape
+  = InvalidExactInputsShape
+  | InvalidSourceCheckShape
   | InvalidPortableOutputShape
   | InvalidCellPlanShape
   | IncompleteDeclarationOperation
@@ -170,6 +226,14 @@ validateRequestShape args = () <$ admitRequestOperation args
 
 admitRequestOperation :: WorkerRequest -> Either RequestShapeError RequestOperation
 admitRequestOperation args
+  | Just request <- requestEnsureExactInputs args =
+      if validExactInputsRequest request && args == emptyWorkerRequest
+        { requestWorkload = requestWorkload args
+        , requestCompilerJobs = requestCompilerJobs args
+        , requestCompilerCapabilities = requestCompilerCapabilities args
+        , requestEnsureExactInputs = Just request }
+      then Right (EnsureExactInputsOperation request)
+      else Left InvalidExactInputsShape
   | Just batch <- requestHostedLookup args,
       not (validHostedLookup batch) || not (null (requestInspections args))
         || present (requestInspectTypeBatch args)
@@ -276,6 +340,7 @@ emptyWorkerRequest = WorkerRequest
   , requestRetainedGenerations = Map.empty
   , requestActivationPreview = False
   , requestPortableOutput = False
+  , requestEnsureExactInputs = Nothing
   , requestInspectionStrict = False
   }
 
@@ -451,9 +516,10 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       ActivationPreview -> request { requestActivationPreview = True }
       InspectionStrict -> request { requestInspectionStrict = True }
       PortableOutput -> request { requestPortableOutput = True }
+      EnsureExactInputs inputs -> request { requestEnsureExactInputs = Just inputs }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v21"
+workerRequestFlag = "--worker-request-v22"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -466,12 +532,21 @@ workerRequestFromArgv [flag] | flag == workerRequestFlag = Left (workerRequestFl
 workerRequestFromArgv [flag, payload]
   | flag == workerRequestFlag = do
       (workload, jobs, capabilities, fields) <- decodeHex payload >>= decodeRequest
+      validateExactInputsFields fields
       validateCertificationFields fields
       validateHostedLookupFields fields
       pure (Just ((requestFromFields fields)
         { requestWorkload = workload, requestCompilerJobs = jobs
         , requestCompilerCapabilities = capabilities }))
 workerRequestFromArgv _ = Left "worker requires exactly one versioned request"
+
+-- Inspect the original fields: projection into WorkerRequest must not hide
+-- duplicate operations or source/output authority beside a source-free exchange.
+validateExactInputsFields :: [RequestField] -> Either String ()
+validateExactInputsFields fields
+  | null [() | EnsureExactInputs _ <- fields] = Right ()
+  | [EnsureExactInputs request] <- fields, validExactInputsRequest request = Right ()
+  | otherwise = Left "worker request: exact input acquisition must be source-free and exclusive"
 
 -- Certification produces originals for every fresh home module. Authenticated
 -- candidates may supply unchanged originals through the same compiler pipeline;
@@ -525,7 +600,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String (CompileWorkload, Int, Int, [RequestField])
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ021"
+  if magic /= "TPREQ022"
     then Left "worker request: unsupported magic or version"
     else do
       (workloadTag, afterWorkload) <- pWord8 body
@@ -545,7 +620,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ021" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ022" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -596,6 +671,10 @@ encodeField field = case field of
   ActivationPreview -> BS.singleton 41
   InspectionStrict -> BS.singleton 42
   PortableOutput -> BS.singleton 53
+  EnsureExactInputs (ExactInputsRequest root acquisition) ->
+    BS.singleton 57 <> textFrame root <> case acquisition of
+      ResidentExactInputs reference -> BS.singleton 0 <> textFrame reference
+      CompleteExactInputs manifest -> BS.singleton 1 <> textFrame manifest
   InspectScopeBrowse -> BS.singleton 43
 
 encodeSymbolIdentity :: SymbolIdentity -> BS.ByteString
@@ -738,6 +817,17 @@ pField bytes = do
     41 -> Right (ActivationPreview, rest)
     42 -> Right (InspectionStrict, rest)
     53 -> Right (PortableOutput, rest)
+    57 -> do
+      (root, afterRoot) <- pText rest
+      (kind, afterKind) <- pWord8 afterRoot
+      (value, afterValue) <- pText afterKind
+      acquisition <- case kind of
+        0 -> Right (ResidentExactInputs value)
+        1 -> Right (CompleteExactInputs value)
+        _ -> Left "worker request: invalid exact input acquisition tag"
+      let request = ExactInputsRequest root acquisition
+      if validExactInputsRequest request then Right (EnsureExactInputs request, afterValue)
+        else Left "worker request: invalid exact input reference"
     43 -> Right (InspectScopeBrowse, rest)
     45 -> retired tag
     _  -> Left ("worker request: unknown field tag " ++ show tag)

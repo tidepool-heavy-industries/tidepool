@@ -93,6 +93,8 @@ boundParserFlags (BoundCompilerRequest scope _ _ _ _ _ _) = scopedParserFlags sc
 
 withBoundCompilerRequest :: PhaseSink -> CompilerScope -> WorkerRequest -> (BoundCompilerRequest -> IO a) -> IO (Completion a)
 withBoundCompilerRequest sink compilerScope parsed use = do
+  when (isJust (requestEnsureExactInputs parsed)) $
+    fail "source-free exact input acquisition cannot enter compiler request binding"
   grant <- either fail pure (compilerExecutionGrant (requestCompilerJobs parsed))
   withCompletionRelease CapabilitiesRestore getNumCapabilities (releaseWithPhase sink CapabilitiesRestore . setNumCapabilities) $ \_previous -> do
     setNumCapabilities (requestCompilerCapabilities parsed)

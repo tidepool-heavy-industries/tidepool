@@ -400,6 +400,7 @@ def analyze(events):
         request['admission_queue_ms'] = admissions.get((key[0], key[2]), [])
         cycles = sorted({(event['cycle'], event['purpose']) for event in request['events']})
         request['cycles'] = [{'cycle': cycle, 'purpose': purpose} for cycle, purpose in cycles]
+        invalid_request_evidence = bool(request_problems)
         request['cycle_stages'] = []
         for cycle in cycles:
             cycle_events = [event for event in request['events']
@@ -409,7 +410,9 @@ def analyze(events):
                 'stages': {stage: stage_observation(
                     [event for event in cycle_events if event['stage'] == stage], [cycle])[0]
                     for stage in STAGES}})
-        invalid_request_evidence = bool(request_problems)
+            if not successful or invalid_request_evidence:
+                for observation in request['cycle_stages'][-1]['stages'].values():
+                    observation.update(status='UNKNOWN', counts=None, bytes=None)
         for stage in STAGES:
             selected = [event for event in request['events'] if event['stage'] == stage]
             observation, stage_problems = stage_observation(selected, cycles)
@@ -687,7 +690,7 @@ def analyze_workload(manifest, report):
         if (not path.is_absolute() or not path.is_file() or path.stat().st_size > 32 * 1024 * 1024
                 or hashlib.sha256(path.read_bytes()).hexdigest() != digest):
             raise ValueError(f'{name}: authored source reference missing or changed')
-        if request is None or request.get('exit_code') != 0:
+        if request is None or request.get('exit_code') != 0 or request.get('status') != 'observed':
             problems.append(f'{name}: no successful exact physical request')
             continue
         physical = tuple(request['identity'][key] for key in KEY_FIELDS)

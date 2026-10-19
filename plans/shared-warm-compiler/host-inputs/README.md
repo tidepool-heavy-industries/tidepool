@@ -1,5 +1,10 @@
 # Host selected inputs — Sol branch supervisor assignment
 
+The [compiler-owned demand-service amendment](../DEMAND-SERVICE.md) controls
+new cross-area interfaces and sequencing. Keep the concrete source/invariant
+evidence below, but do not implement a duplicate host compiler world or
+require full input export before the service can answer a warm query.
+
 This is an implementation assignment for a later authorized execution of the shared warm compiler plan. Authoring this plan does not start implementation. Source baseline: `70a92c65a02a591f76590daf4e5bfa3e6fcbf723`. The [parent plan](../README.md), [shared contracts](../CONTRACTS.md) and [supervision rules](../SUPERVISION.md) control cross-area interfaces, grants and integration; confirm its accepted revision before unfolding a child. Names below describe responsibilities, not mandatory new types or services.
 
 Own the host-inputs area branch. Remove growing-history reconstruction before compiler submission, during retained-value input preparation (P1), during ordered support admission (P4), and during contextual sealing (P6). Deliver issuer-owned persistent exact selected inputs through the existing production owners. Carry immutable selections by reference and update only changed facts plus genuinely affected dependencies. Do not move a repeated fold to publication, serialization, a new cache initializer or another caller. A full initial acquisition/restore may be linear; repeated small publications may not repeatedly pay that same initialization cost.

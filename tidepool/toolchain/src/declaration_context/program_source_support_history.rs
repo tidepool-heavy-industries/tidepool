@@ -211,7 +211,7 @@ mod program_source_support_history {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(&actual, expected);
-        assert_eq!(inputs.declaration_semantic_sha256, public.semantic_sha256());
+        assert!(Arc::ptr_eq(&request.context().owner, &public.owner));
         assert!(public.compiler_original_products().unwrap().is_empty());
         assert!(public.lexical_graph().is_empty());
         assert!(request.program_source_lexical().is_empty());

@@ -35,7 +35,11 @@ expected the incorrect refusal. Preserve intended semantics, not those mistakes.
 
 The stronger hosted selector is
 `actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_lookup_and_later_cells_usable`
-in `exomonad-host`. It was **running, not accepted**, at peer handoff. Evidence:
+in `exomonad-host`. It was running at peer handoff; kickoff inspected the later
+actual result: **executed1/passed1/exit0**. Process and hosted cleanup confirmed;
+compiler cleanup not_observed with observation complete, diagnostic evidence
+incomplete. This is focused prerequisite evidence, not campaign release qualification.
+Exact case report `host-cases/e27eec134184eea75959071896799d075b55b040628a49a0e25165b9be2fab4e.json`. Evidence:
 `/srv/swarm/evidence/inanna/admission-analysis-review-20261018/overnight-70a-strong-persona/`.
 Its shared-source identity and startup-derived JSON/Jev support matter. Byte-equal
 local copies do not establish the same source/custody history. Earlier hosted
@@ -121,3 +125,7 @@ HLS is an architectural influence, not evidence that its editor state model can
 be transplanted into concurrent divergent actor worlds or used as execution
 authority. Proposed Tidepool changes are design inferences from these sources
 and the inspected production consumers.
+
+## Integrated core checkpoint f088e3e783
+
+Reviewed host b5, owned f330 and worker0bd histories join at f088e3e7837c72cf0e82aab8e71a2687d767da34. Pinned production/cfgtest and declared runner resources compiled,52 local/0remote actions,303.4s, exit0. Thirty-six selected controls passed:25 toolchain,2 real-worker runtime histories,4 Rust protocol and5 Haskell. Exact source/commands/report and binary hashes/counts/status: private `campaign/CORE-JOINED-TERMINAL.json`, `core-joined-native-build.json`, `core-joined-tests.json` beneath `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`. All clients terminal. Runtime compiler/host cleanup not_observed and diagnostic completeness limits retained. No production Ready or performance/release claim.

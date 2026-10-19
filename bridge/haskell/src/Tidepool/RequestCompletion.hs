@@ -65,6 +65,10 @@ data Completion a
   = Completion (Either SomeException a) [CleanupFailure]
   | AbortedByCleanup (NonEmpty CleanupFailure)
 
+instance Functor Completion where
+  fmap project (Completion result failures) = Completion (fmap project result) failures
+  fmap _ (AbortedByCleanup failures) = AbortedByCleanup failures
+
 completionResult :: Completion a -> BodyOutcome a
 completionResult (Completion (Right value) _) = BodySucceeded value
 completionResult (Completion (Left failure) _) = BodyFailed failure
