@@ -44,7 +44,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -3794,7 +3794,7 @@ impl Worker {
             .stdin
             .take()
             .ok_or_else(|| FrontendError::Daemon("worker stdin was not piped".to_owned()))?;
-        let mut stdout = child
+        let stdout = child
             .stdout
             .take()
             .ok_or_else(|| FrontendError::Daemon("worker stdout was not piped".to_owned()))?;

@@ -973,7 +973,7 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
         Ok((code, stdout, stderr))
     })();
     if result.is_ok() {
-        worker.shutdown();
+        worker.shutdown_confirmed()?;
     } else {
         // A rejected frame can leave the worker blocked writing its unread
         // body. Waiting for stdin EOF would not make that worker exit.

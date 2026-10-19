@@ -48,7 +48,7 @@ pub(crate) fn parse_hex(value: &str) -> io::Result<[u8; 32]> {
     Ok(result)
 }
 
-fn read_bounded(mut file: &File) -> io::Result<Vec<u8>> {
+fn read_bounded(file: &File) -> io::Result<Vec<u8>> {
     if file.metadata()?.len() > LIMIT as u64 {
         return Err(invalid("package source control file exceeds 16 MiB"));
     }
