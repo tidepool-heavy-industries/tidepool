@@ -167,6 +167,12 @@ pub struct CompilerWorldCellPlan {
 }
 
 impl CompilerWorldCellPlan {
+    pub(crate) fn recipe_owned(&self) -> Arc<tidepool_extract_cmd::WorldCellRecipe> {
+        Arc::clone(&self.recipe)
+    }
+    pub(crate) fn receipt_owned(&self) -> Arc<[u8]> {
+        Arc::clone(&self.receipt)
+    }
     pub fn world(&self) -> &crate::compiler_world::CompilerWorld {
         &self.world
     }
