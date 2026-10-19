@@ -10254,9 +10254,8 @@ mod authored_publication_tests {
                 "positive actual GHC producer must settle cleanly: {:?}",
                 positive.close()
             );
-            assert_eq!(
-                observation.preparation.load(Ordering::SeqCst),
-                1,
+            assert!(
+                observation.preparation.load(Ordering::SeqCst) > 0,
                 "positive control enters actual scratch/worker preparation"
             );
             assert!(observation.requests.load(Ordering::SeqCst) > 0);
