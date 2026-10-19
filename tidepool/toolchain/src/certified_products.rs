@@ -13006,6 +13006,338 @@ pub(crate) mod tests {
         );
     }
 
+    // Replay actual Request continuation and new-output admission with independent
+    // input permission and selected execution demand. Unrelated prior roots cannot
+    // widen permissions or become fresh-output obligations.
+    fn replay_completed_request_obligations(
+        permitted: &[u32],
+        inherited: &[u32],
+        siblings: usize,
+        grant_full: bool,
+    ) -> BTreeSet<u32> {
+        use crate::artifact_inventory::{
+            ArtifactBindingNode, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure,
+            CanonicalProducerIdentity, CompilerInputProjection, NativeArtifactDemand,
+            NativeGroupKey,
+        };
+        use crate::declaration_context::{
+            ExactCompileContext, ExactDeclarationContext, NativeTransportMode,
+            OriginalCompilerInputs,
+        };
+        use crate::CompileError;
+        let producer_bytes = b"request-obligation-history";
+        let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
+        let product = |module: &str, version, groups| {
+            fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    module,
+                    groups,
+                    version,
+                    &BTreeMap::new(),
+                    format!("{module} interface").into_bytes(),
+                ),
+                producer.sha256(),
+            )
+        };
+        let dependency = product(
+            "ObligationBaseline",
+            95,
+            vec![(7, vec![]), (9001, vec![]), (42, vec![]), (43, vec![])],
+        );
+        let mut binder = testing::identity("ObligationBaseline", "entry_7");
+        binder.unit = dependency.owner().unit.clone();
+        let fresh = product(
+            "ObligationFresh",
+            96,
+            vec![(
+                3,
+                vec![PendingImportOwner::Source {
+                    owner: dependency.owner().clone(),
+                    original_ordinal: 7,
+                    binder,
+                }],
+            )],
+        );
+        let mut products = vec![dependency, fresh];
+        products.extend((0..siblings).map(|index| {
+            product(
+                &format!("ObligationSibling{index}"),
+                97,
+                vec![(9001, vec![])],
+            )
+        }));
+        let products = recovered_witness_fixtures(&products);
+        let dependency = &products[0].product;
+        let fresh = &products[1].product;
+        let input =
+            Arc::new(ArtifactEntry::original(producer.sha256(), dependency.clone()).unwrap());
+        let fresh_id = ArtifactEntry::original(producer.sha256(), fresh.clone())
+            .unwrap()
+            .descriptor
+            .id;
+        let mut entries = vec![input.clone()];
+        entries.extend(products[2..].iter().map(|row| {
+            Arc::new(ArtifactEntry::original(producer.sha256(), row.product.clone()).unwrap())
+        }));
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let inventory = ArtifactInventory::default();
+        let full = inventory
+            .admit_shared(&inventory.empty_view(), entries.clone())
+            .unwrap();
+        let full_support =
+            crate::declaration_context::issue_fixture_compiler_support(projection.clone(), full)
+                .unwrap();
+        let selected = inherited
+            .iter()
+            .map(|ordinal| NativeGroupKey {
+                artifact: input.descriptor.id,
+                original_ordinal: *ordinal,
+            })
+            .chain(entries[1..].iter().map(|entry| NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal: 9001,
+            }))
+            .collect::<BTreeSet<_>>();
+        let chosen = if grant_full {
+            // Change demand under this same issued carrier and canonical namespace.
+            // A separate admission would issue different bindings and correctly
+            // demote the earlier Full qualification during normalization.
+            let issued = full_support.artifacts();
+            let mut graph = issued.capture_graph_selection();
+            let namespace = graph.namespace.clone();
+            let unused = graph
+                .roots
+                .iter()
+                .filter(|node| match node {
+                    ArtifactBindingNode::Group(group) => !selected.contains(&NativeGroupKey {
+                        artifact: group.binding.artifact(),
+                        original_ordinal: group.original_ordinal,
+                    }),
+                    ArtifactBindingNode::Artifact(_) => false,
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            graph.roots.retain(|node| !unused.contains(node));
+            graph.custody_roots.extend(unused);
+            graph.custody_roots.sort();
+            graph.custody_roots.dedup();
+            let chosen = issued
+                .select_issued(
+                    namespace.iter().map(|binding| binding.artifact).collect(),
+                    &crate::artifact_inventory::ExactArtifactSelection::from_recovered_graph_selection(
+                        graph,
+                    ),
+                )
+                .unwrap();
+            assert_eq!(chosen.capture_graph_selection().namespace, namespace);
+            assert_eq!(chosen.selected_native_groups(), selected);
+            chosen
+        } else {
+            inventory
+                .admit_recovery_selection(&inventory.empty_view(), entries, &selected)
+                .unwrap()
+        };
+        let mut support =
+            crate::declaration_context::issue_fixture_compiler_support(projection, chosen)
+                .unwrap()
+                .retain_offers(full_support.native_offers().iter().cloned())
+                .unwrap();
+        if grant_full {
+            support = support
+                .retain_normalized_availability(full_support.native_availability())
+                .unwrap();
+        }
+        let input_row = support
+            .native_availability()
+            .rows()
+            .find(|row| row.original.descriptor.id == input.descriptor.id)
+            .unwrap();
+        assert!(
+            support
+                .native_offers()
+                .iter()
+                .any(|offer| { offer.original() == input.descriptor.id && offer.is_full() }),
+            "all cases retain genuine broader Full proof custody"
+        );
+        assert_eq!(input_row.mode == NativeTransportMode::Full, grant_full);
+        for ordinal in [7, 9001, 42, 43] {
+            assert_eq!(input_row.permits(ordinal), permitted.contains(&ordinal));
+        }
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&support)
+                .unwrap(),
+        );
+        let source_before = context.artifact_view().capture_graph_selection();
+        let root = tempfile::tempdir().unwrap();
+        let exact_request = ExactCompileContext::new(context.clone())
+            .prepare_compilation(root.path(), producer_bytes)
+            .unwrap();
+        let request = exact_request.compiler_inputs();
+        let operation = InventoryOperation::new(Default::default());
+        let mut selection =
+            CertifiedSourceSelection::from_compiler_inputs(request, &operation).unwrap();
+        selection
+            .admit_current(
+                fresh.owner(),
+                ProductOrigin::RetainedCore,
+                fresh.module_interface().unwrap(),
+                &operation,
+            )
+            .unwrap();
+        let physical = request
+            .artifacts()
+            .inventory()
+            .admit_shared_with_demand(
+                request.artifacts(),
+                vec![Arc::new(
+                    ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap(),
+                )],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let result = OriginalCompilerInputs::from_selection(&selection, &physical);
+        let allowed = permitted.contains(&7);
+        let consumer = "request";
+        {
+            if !allowed {
+                let actual_error = format!("{:?}", result.as_ref().err());
+                assert!(
+                    matches!(result, Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact, original_ordinal: 7,
+                    } if artifact == input.descriptor.id)),
+                    "{consumer}: broader proof cannot grant unavailable B7; actual_error={actual_error}"
+                );
+                assert_eq!(
+                    context.artifact_view().capture_graph_selection(),
+                    source_before
+                );
+                return BTreeSet::new();
+            }
+            let fragment = result.unwrap_or_else(|error| {
+                panic!("{consumer}: inherited={inherited:?} siblings={siblings}: {error:?}")
+            });
+            let fresh_row = fragment
+                .native_availability()
+                .rows()
+                .find(|row| row.original.descriptor.id == fresh_id)
+                .unwrap();
+            assert_eq!(fresh_row.mode, NativeTransportMode::Full);
+            let fresh_groups = fresh_row.issued_ordinals();
+            assert_eq!(fresh_groups, BTreeSet::from([3]));
+            assert!(
+                !fragment
+                    .issued_artifacts()
+                    .selected_native_groups()
+                    .iter()
+                    .any(|group| { group.artifact == fresh_id }),
+                "fresh availability does not select fresh execution"
+            );
+            let dependency_row = fragment
+                .native_availability()
+                .rows()
+                .find(|row| row.original.descriptor.id == input.descriptor.id)
+                .unwrap();
+            assert_eq!(dependency_row.mode == NativeTransportMode::Full, grant_full);
+            assert_eq!(
+                fragment
+                    .native_availability()
+                    .rows()
+                    .map(|row| row.original.descriptor.id)
+                    .collect::<BTreeSet<_>>(),
+                std::iter::once(fresh_id)
+                    .chain(
+                        support
+                            .projection()
+                            .roles()
+                            .iter()
+                            .filter_map(|role| role.original())
+                    )
+                    .collect::<BTreeSet<_>>(),
+            );
+            let expected = permitted.iter().copied().collect::<BTreeSet<_>>();
+            let actual = [7, 9001, 42, 43]
+                .into_iter()
+                .filter(|ordinal| dependency_row.permits(*ordinal))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(actual, expected, "{consumer} retains exactly the input permissions, independently of selected execution");
+            assert_eq!(
+                context.artifact_view().capture_graph_selection(),
+                source_before
+            );
+            actual
+        }
+    }
+
+    #[test]
+    fn completed_request_obligations_exclude_unrelated_selected_groups() {
+        for permitted in [vec![7, 9001, 42, 43], vec![7], vec![9001], vec![]] {
+            replay_completed_request_obligations(&permitted, &permitted, 0, permitted.len() == 4);
+        }
+    }
+
+    #[test]
+    fn generated_completed_request_obligations_ignore_unrelated_selected_history() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{contextualize_config, Config, TestCaseError, TestRunner};
+        let config = Config {
+            cases: 24,
+            source_file: Some(file!()),
+            test_name: Some(concat!(
+                module_path!(),
+                "::generated_completed_request_obligations_ignore_unrelated_selected_history"
+            )),
+            ..Config::default()
+        };
+        let callbacks = std::cell::Cell::new(0usize);
+        let completed = std::cell::Cell::new(0usize);
+        TestRunner::new(contextualize_config(config))
+            .run(
+                &(any::<[bool; 3]>(), 0usize..4),
+                |(extra_groups, siblings)| {
+                    callbacks.set(callbacks.get() + 1);
+                    let mut inherited = vec![7];
+                    inherited.extend(
+                        [9001, 42, 43]
+                            .into_iter()
+                            .zip(extra_groups)
+                            .filter_map(|(ordinal, selected)| selected.then_some(ordinal)),
+                    );
+                    std::panic::catch_unwind(|| {
+                        let allowed = [7, 9001, 42, 43];
+                        let baseline =
+                            replay_completed_request_obligations(&allowed, &[7], 0, true);
+                        let varied = replay_completed_request_obligations(
+                            &allowed, &inherited, siblings, true,
+                        );
+                        assert_eq!(
+                            varied, baseline,
+                            "request permission must ignore unrelated inherited demand"
+                        );
+                    })
+                    .map(|()| completed.set(completed.get() + 1))
+                    .map_err(|panic| {
+                        let message = panic
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| {
+                                panic
+                                    .downcast_ref::<&str>()
+                                    .map(|value| (*value).to_owned())
+                            })
+                            .unwrap_or_else(|| "non-string panic".into());
+                        TestCaseError::fail(format!(
+                            "extra_groups={extra_groups:?} siblings={siblings}: {message}"
+                        ))
+                    })
+                },
+            )
+            .unwrap();
+        eprintln!("completed_request_obligation_property configured_fresh_cases=24 callbacks={} completed={}", callbacks.get(), completed.get());
+    }
+
     #[test]
     fn full_original_availability_is_read_only_and_checks_selected_authority() {
         let operation = InventoryOperation::new(Default::default());
