@@ -659,6 +659,18 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
     (packet 3 product primary blockPairs (map relocate base) [] (relocate acquisition) emptyBinding)
   unless (worldInputsIdentityBytes aliased == worldInputsIdentityBytes original)
     (fail "physical receiving aliases changed logical world identity")
+  forM_ (Map.elems aliases) $ \path -> do
+    exists <- doesFileExist (T.unpack path)
+    unless (not exists) (fail "captured package control requires absent physical aliases")
+  withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
+    environment <- getSession
+    captured <- liftIO (readWorldSourceInputs environment aliased selectedOwners)
+    case captured of
+      Left reason -> liftIO (fail ("captured package/owning-interface authentication failed for absent receiving aliases: " ++ reason))
+      Right (proofs,interfaces,packages) -> unless
+        (Map.keysSet proofs == Set.fromList selectedOwners && Map.keysSet packages == Map.keysSet proofs
+          && Set.fromList [(exactUnit artifact,exactModule artifact) | (artifact,_) <- interfaces] == Map.keysSet proofs)
+        (liftIO (fail "captured package authentication lost a demanded owner after alias relocation"))
   where
     unsigned (TInt value) | value >= 0 = pure (toInteger value)
     unsigned (TInteger value) | value >= 0 = pure value
