@@ -43,7 +43,14 @@ actor generation or bootstrap installation. Argument admission travels with that
 selection; dispatch enters the retained handler by ordinal, without declaration
 equality or a second name lookup. Reload replaces the active generation while
 issued selections retain their original source, context, public owner and
-implementation. The native status control reserves its name at authored endpoint admission.
+implementation. Retained selection is not fresh source authority: compile,
+installation and resource-registration consumers preserve the original dependency
+through callback transfer and recheck its owner. The actual capture issuer gives
+each actor one bootstrap world, with external prerequisites for typed children;
+first visible publication binds old bootstrap aliases once. Replacements keep
+external prerequisites and exclude their own retired predecessor. A generic
+descriptor or missing generation cannot issue independent authority.
+The native status control reserves its name at authored endpoint admission.
 Reload uses the ordinary Haskell effect route from an exact admitted synchronous
 endpoint carrying Reload, with separate source-owner authorization. Compatible
 publication preserves the surface; explicit opt-in still validates the candidate

@@ -63,9 +63,13 @@ Binding/Projected continuation completion can compile retraction with scoped
 runtime admission None. The ticket's runtime claim transfer then sees None,
 while its outer bootstrap checkout claim drops cleanly despite unknown END.
 Typed bootstrap also loses its own world obligation even if external A survives.
-The leaf is frozen pending campaign approval of a narrow scoped lazy source-use
-hook into the same compiler ticket's claim collection. No opaque foreign claim
-factory, registry, blanket continuation refusal or force-drain work is proposed.
+Campaign approved the narrow scoped lazy source-use hook into the same compiler
+ticket's claim collection. The leaf is implementing it: invoke before actual
+source allocation/mutation, retain exact bootstrap/external prerequisites once
+per scoped operation, restore nested context on unwind, and settle only through
+actual END/abandon. Pure continuation never invokes it. The existing concrete
+runtime gate remains authoritative. No opaque foreign claim factory, registry,
+blanket continuation refusal or force-drain work is included.
 Joined Generation/root-bootstrap/typed-bootstrap hidden-bind-to-unknown-END
 controls are required; split component tests do not prove that wiring.
 No R1 source has yet been folded into the area branch.
@@ -88,8 +92,8 @@ an informed worker yields.
   R1 source is `3d56ffcc344a12606f095d1f0bac2ff0abf69959`, joined with area
   `a0d293d2a0` at `fe3ef791f96788d9d71ac1d2333b6d6436bac35d` in the leaf
   checkout. The final source checkpoint is `9bb4c1eb4bf5a0775dae68beb119446bb34d06b9`;
-  the leaf awaits the bounded bootstrap END owner-contract decision, then owns
-  the repair candidate plus terminal receipt with exact focused selectors and
+  the leaf owns the approved bounded bootstrap END hook repair candidate plus
+  terminal receipt with exact focused selectors and
   held successor map. The area owner then integrates the reviewed checkpoint,
   regenerates source maps and owns the first admitted compile/repair stage.
 - `/root/warm_compiler_campaign/reload/authority_review` is read-only except
@@ -97,8 +101,9 @@ an informed worker yields.
   and completed the bootstrap-world/typed-child strategy review with the settled
   reopen-only recovery contract. It was reactivated for exact cumulative
   `5b74..9bb4c1eb` repair review after the blocked `fe3ef791` report. That review
-  completed blocked on bootstrap END custody; reviewer is dormant awaiting the
-  next exact repair. Actual compile/focused-gate evidence is still pending.
+  completed blocked on bootstrap END custody; reviewer is preparing bounded
+  joined-oracle guidance, then awaits the next exact repair. Actual
+  compile/focused-gate evidence is still pending.
   The area owner uses `followup_task` for that candidate, then supplies native
   evidence and any compile repairs for cumulative review, then
   repairs findings, requests exact rereview and owns the fold.
