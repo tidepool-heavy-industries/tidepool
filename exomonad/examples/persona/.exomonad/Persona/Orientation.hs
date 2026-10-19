@@ -9,6 +9,7 @@ import qualified Data.Text as T
 import Tidepool.Agent.Contract (StartupInput, ContextSeed, contextSection)
 import Tidepool.Effects.Core (FsRead, FsWrite, RuntimeInfo, RuntimeInfoError)
 import qualified Tidepool.Effects as E
+import qualified Tidepool.Agent.Context as C
 import Tidepool.Records (FsError)
 import qualified Persona.Memory as Memory
 
@@ -66,15 +67,15 @@ renderRuntime = fmap renderSnapshot <$> E.getRuntimeInfo
       E.RuntimeBeforeNextInference -> "before next inference)"
     renderStartup E.RuntimeStartupNotAdmitted = "not admitted"
     renderStartup (E.RuntimeStartupObserved observed) = case observed of
-      E.InitialContextAbsent -> "no initializer declared"
-      E.InitialContextCaptured -> "captured parent context"
-      E.InitialContextPreparing _ -> "preparing"
-      E.InitialContextRetained _ _ -> "result retained; publication not acknowledged"
-      E.InitialContextPublishedEmpty _ _ -> "empty result published"
-      E.InitialContextPublished _ _ _ _ -> "context published"
-      E.InitialContextFailed _ detail -> "failed: " <> detail
-      E.InitialContextCancelled _ -> "cancelled"
-      E.InitialContextUncertain _ detail -> "recovery required: " <> detail
+      C.InitialContextAbsent -> "no initializer declared"
+      C.InitialContextCaptured -> "captured parent context"
+      C.InitialContextPreparing _ -> "preparing"
+      C.InitialContextRetained _ _ -> "result retained; publication not acknowledged"
+      C.InitialContextPublishedEmpty _ _ -> "empty result published"
+      C.InitialContextPublished _ _ _ _ -> "context published"
+      C.InitialContextFailed _ detail -> "failed: " <> detail
+      C.InitialContextCancelled _ -> "cancelled"
+      C.InitialContextUncertain _ detail -> "recovery required: " <> detail
 
 startupWithRuntime :: (Member FsRead effects, Member FsWrite effects, Member RuntimeInfo effects)
   => StartupInput -> Eff effects ContextSeed

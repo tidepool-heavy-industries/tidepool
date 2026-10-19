@@ -721,6 +721,9 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
     .unwrap();
     host.run_scenario(|host| {
         Box::pin(async move {
+            let original_generation = host.context.observer
+                .installation(host.context.actor.identity()).await.policy
+                .snapshot_for_request().unwrap().request_generation().unwrap().get();
             let retained = host
                 .context
                 .forest
@@ -813,9 +816,10 @@ async fn authored_runtime_info_reports_preparing_then_actual_publication() {
             // The post-reload notebook is fresh. Only owner-issued scalar facts
             // cross this boundary; no old notebook binding is required.
             let after_reload_source = format!(
-                "Right afterReloadFacts <- getRuntimeInfo\ndisplay (case (runtimeExecutingSpec afterReloadFacts, runtimeStartup afterReloadFacts) of {{ (Just selected, RuntimeStartupObserved (InitialContextPublished initial _ _ _)) -> runtimeSpecInstall selected > {install} && runtimeSpecSource selected /= {source:?} && initialContextSpecInstall initial == {install} && initialContextSpecSource initial == {source:?}; _ -> False }})\n",
+                "import qualified Tidepool.Agent.Context as C\nRight afterReloadFacts <- getRuntimeInfo\ndisplay (case (runtimeExecutingSpec afterReloadFacts, runtimeStartup afterReloadFacts) of {{ (Just selected, RuntimeStartupObserved (C.InitialContextPublished initial _ _ _)) -> runtimeSpecInstall selected > {install} && runtimeSpecSource selected /= {source:?} && runtimeExecutingGeneration afterReloadFacts > Just {generation} && C.initialContextSpecInstall initial == {install} && C.initialContextSpecSource initial == {source:?}; _ -> False }})\n",
                 install = original_identity.spec_install,
                 source = original_identity.spec_source,
+                generation = original_generation,
             );
             reloaded.sync_call_named("runtime-after-reload", "haskell", &after_reload_source);
             let final_round = host.while_operation_succeeds(&operation,
@@ -841,13 +845,17 @@ async fn runtime_info_distinguishes_absent_initializer_from_unobserved_startup()
     host.run_scenario(|host| Box::pin(async move {
         assert_eq!(host.context.forest.initial_context_observation(host.context.actor.identity())
             .await.unwrap().state, InitialContextState::AbsentHook);
+        assert_eq!(host.context.config.model, exomonad_actor::Model::for_backend(
+            exomonad_actor::Backend::OpenAIPlan, "test-model"));
+        assert_eq!(host.context.config.reasoning, exomonad_actor::Reasoning::OpenAIReasoning(
+            exomonad_actor::OpenAIReasoning::OpenAILow));
         host.input("Observe this spec without an initializer").await.unwrap();
         let mut pending = VecDeque::new();
         let root = harness::model::AgentPath("/root".into());
         let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
         let operation = first.operation("runtime-absent-initializer");
         first.sync_call_named("runtime-absent-initializer", "haskell",
-            "Right observedRuntime <- getRuntimeInfo\ndisplay (case runtimeStartup observedRuntime of { RuntimeStartupObserved InitialContextAbsent -> True; _ -> False })\n");
+            "import qualified Tidepool.Agent.Context as C\nRight observedRuntime <- getRuntimeInfo\ndisplay ((case runtimeStartup observedRuntime of { RuntimeStartupObserved C.InitialContextAbsent -> True; _ -> False }) && runtimeConfiguredInference observedRuntime == RuntimeConfiguredInference (C.CustomModel C.OpenAIPlan \"test-model\") (C.OpenAIReasoning C.OpenAILow))\n");
         let after = host.while_operation_succeeds(&operation,
             next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
         assert_eq!(retained_committed_display_text(&host.runtime.store(),
