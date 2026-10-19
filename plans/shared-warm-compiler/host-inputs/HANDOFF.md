@@ -98,14 +98,26 @@ exercise actual admission; the latter is not an isolated reference-only mutant.
 
 Independent receipt `oracle/query-source-owner-admission-review-945d58c2.txt`
 accepted exact diff SHA7870853ab5bd52f30323a4e8ef2615f7b9362ee6cc6678f7fa32f9516a5da90e.
-Root and campaign direct review also accepted. Minimal actor cfg-test compilation
-is ACTIVE64153, observed by selected_root (launcher498721), followed serially by
-the same actualRooted2 only after compilation passes. Source945 is frozen, and
-HOST14GiB TOTAL/8GiB growth is active. Fresh projection52,057,079,808 bytes includes
-current global22,765,387,776 bytes, actual own-scope remaining allowance, Warm8 ADD
-and known qualification8 ADD. Campaign and Reload were explicitly settled0;
-their idle daemons remain global. No source/profile/API extension or baseline reset
-is authorized inside this gate. No native pass for945 has been claimed.
+Root and campaign direct review also accepted. The minimal actor cfg-test gate
+passed at945, one local action/82.33s. Actual Rooted2 executed2, passed1 and
+failed1, exit1/14.55s. The larger first-case source domain exposed a REAL shared
+codec defect before frontend: Rust PathBuf component order differs from full UTF8
+wire-string order. Root1 emits Tidepool/Effects/Core.hs before Tidepool/Effects.hs;
+root3 has sixteen similar inversions. Haskell's strict ordering guard correctly
+refused. Authentic sources.bin, world.cbor, request and stderr are retained;
+sources.bin is1,043,122 bytes, SHA256
+79a8cb6cbb60ed6f3a518804b61d5cb55b5c6b87fdd753127856cccba9a838e9.
+`WORLD-QUERY-945-TERMINAL.json` and `actual-query-945-path-order.json` bind evidence.
+Both cleanup and retirement receipts are confirmed; first diagnostics complete,
+second timing-summary records truncate with raw logs intact. Source-domain case
+passed again; actual frontend/growing history remain unqualified.
+
+Warm owns canonical source-wire repair39754360 (old supplier) /5cbe50ce (new
+profile), independently source accepted and under native validation. No fixture
+filter, source-order guard waiver or root precedence change is allowed. A qualified
+supplier event triggers exact full-history query join/review/fresh native retry.
+All HOST clients are terminal, grant0/0; idle query407847 and typed509870 remain
+global. No additional HOST lane or source reset is active.
 The unchanged service command is:
 `swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --trace-profile full --output-dir EVIDENCE`.
 Campaign's separate exact6f9 joined12699 also completed: ten labels compiled,
@@ -170,12 +182,15 @@ ordinary-cell coverage, not permanently unsupported by convenience.
 Independent cumulative source receipt is
 `oracle/typed-binding-consumer-repair-review-ebd3ea9c.txt`. Four runtime/actor
 production and cfg-test targets passed at ebd3, 1811 local actions/737.15s;
-matched worker/wrappers passed25 actions/124.69s. The TWO new focused controls are
-still UNRUN, explicitly pending because genuine query qualification took priority:
+matched worker/wrappers passed25 actions/124.69s. The TWO required focused controls now each selected/executed/passed1, total2/2:
 `session::persistent::checkpoint_scope_tests::world_binding_capture_refuses_visible_stubs_before_missing_rows`
 and
 `resident_workbench::request_tests::world_capture_keeps_each_checked_binding_from_one_value_row`.
-`host-bindings/TYPED-EBD3-TERMINAL.json` binds exact artifacts and limits. The stub
+`host-bindings/TYPED-EBD3-TERMINAL.json` binds compilation;
+`TYPED-EBD3-FOCUSED-TERMINAL.json` binds actual counted execution and matching
+runtime/actor binaries. Runners implicitly rebuilt861/409 local actions; no
+redundant explicit build. Process cleanup is confirmed, compiler cleanup is not
+observed and actor trace is absent; no physical retirement/zero-work claim. The stub
 control is representation/capture coverage, not physical generic-mount ownership.
 The two-name checked capture is not service serialization. Do not fold typed API
 changes into the frozen four-argument query source. Later owner-guided composition
@@ -191,7 +206,25 @@ committed prefixes on later refusal. Share current changed nodes/restoration
 frontier, with no predecessor replay chain, per-item snapshot/native-offer fold,
 full-world encoding hidden at commit or legacy ExactCompilationRequest rebuild.
 Runtime Original, instance, prototype and executable dependency proofs remain.
-Warm's actual paired plan/prepare successor API is not caller-ready yet.
+HOST is the SINGLE runtime finalization/adoption owner; Warm owns Prepare/output
+certification/private successor issuance, with OWN read-only review. Concrete
+packet `host-inputs/cell-world/RUNTIME-SUCCESSOR-ADOPTION-945.md` binds actual
+CheckedTurnCompletion/AcceptedJoin settlement and persistent.rs atomic promotion.
+First adoption must typed-refuse semantic world/base changes rather than reuse
+privateW1 after a legacy rebase with publicz; storage-only restage may retain it.
+Service-backed semantic rebase remains required later. The critical ordinary
+bind/use path needs genuine nonempty primary/import closure and all three roots
+under the matched new profile, then actual x=7 and y=x+1=8. No empty-root proof.
+
+Real source checkout `tidepool-shared-warm-host-cells-20261019`, branch
+`feature/shared-warm/host-cells`, starts at0a1c789733 and joins typedebd3 full
+history. Current3141d6133d repairs shared canonical/typed composition under Warm's
+exact hunk guidance, preserving canonical-before-root and ReachableBlocks owner.
+Its canonical regression callers use truthful empty typed binding DATA. Independent
+joined review is pending; no configuration, formatting or native lane has run in
+this new checkout. Mount is provisioned. Actual new-profile Plan cd30 exists;
+Prepare/output certifier/product-update API is not yet caller-ready. Do not invent
+placeholder capability or silently reconstruct ExactCompilationRequest to proceed.
 
 Required retention histories follow first-query acceptance: actual A/B eviction
 and exact restore, zero optional budget holding TWO questions through real END,
