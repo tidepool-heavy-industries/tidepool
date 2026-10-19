@@ -1,15 +1,11 @@
 use tidepool_testing::eval_harness::{self, EvalHarness};
 
-use exomonad_actor::{
-    ActorDescriptor, ActorPlacement, ActorWorkbenchSource, LocalResidentDeployment, ResidentForest,
-};
+use exomonad_actor::{ActorWorkbenchSource, LocalResidentDeployment, ResidentForest};
 use exomonad_tool::{ToolArguments, ToolInvocation};
 use tidepool_bridge::HaskellValue;
-use tidepool_codegen::scope::ScopeId;
-use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
-use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
+use tidepool_effect::Response;
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv, OutputSink,
     ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
@@ -113,7 +109,7 @@ async fn run_record_case(source: &str, discriminator: u32) {
     )
     .unwrap()
     .with_validation_include(include.clone());
-    let mut machine =
+    let machine =
         ResidentSession::unbootstrapped(NoHandlers, Sink, DEFAULT_NURSERY_SIZE, Some(lib));
     let retained = machine.prepared_retained();
     let compiled = match tidepool_testing::with_settlement(|settlement| {
@@ -139,29 +135,6 @@ async fn run_record_case(source: &str, discriminator: u32) {
         TurnResult::Expr { compiled, .. } => compiled,
         other => panic!("watcher should be an expression, got {other:?}"),
     };
-    let descriptor = ActorDescriptor::new(
-        "record-dynamic-sources",
-        ActorPlacement {
-            session,
-            resource_scope: RealmId::fresh(),
-            lexical_scope: ScopeId::ROOT,
-        },
-    );
-    machine
-        .set_actor_execution(
-            tidepool_runtime::session::SessionRunContext {
-                resource_scope: descriptor.placement().resource_scope,
-                lexical_scope: descriptor.placement().lexical_scope,
-                ..tidepool_runtime::session::SessionRunContext::ROOT
-            },
-            EffectRunPolicy::SuspendAll,
-            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-        )
-        .expect("initial policy actor placement");
-    let outcome = tidepool_testing::with_settlement(|settlement| {
-        machine.run_with_sites("record_dynamic_sources", compiled.code(), settlement)
-    })
-    .expect("first actor boundary");
     let (forest, mut deployments) = ResidentForest::new(
         ActorWorkbenchSource::new(preamble, include),
         session,
@@ -171,7 +144,20 @@ async fn run_record_case(source: &str, discriminator: u32) {
     )
     .await
     .expect("start resident forest");
-    let (actor, task) = forest.admit_root(descriptor, outcome).await.unwrap();
+    let mut preparation = exomonad_actor::CompilerPreparationOwner::new();
+    let prepared = preparation
+        .scope(forest.new_program_root(
+            "record-dynamic-sources".into(),
+            exomonad_actor::ActorCapabilities::default(),
+            std::sync::Arc::new(compiled),
+        ))
+        .await;
+    assert!(
+        prepared.cleanup.observation().is_confirmed(),
+        "root preparation: {:?}",
+        prepared.cleanup
+    );
+    let (actor, task) = prepared.action.unwrap();
     let LocalResidentDeployment::PolicyInstalled(installation) = deployments.recv().await.unwrap()
     else {
         panic!("root retired before installing the test policy");

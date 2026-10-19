@@ -5214,6 +5214,16 @@ impl<H, O> ResidentActorRunner<H, O> {
         self.access.source.clone()
     }
 
+    pub(crate) fn insert_root_machine(
+        &self,
+        session: tidepool_repr::SessionId,
+        machine: ResidentSession<H, O>,
+    ) -> Result<(), Box<ResidentSession<H, O>>> {
+        self.access
+            .machines
+            .try_insert_idle(session, Box::new(machine))
+    }
+
     #[cfg(test)]
     pub(crate) fn machines_for_test(&self) -> &Arc<ActorMachineRegistry<H, O>> {
         &self.access.machines
@@ -11415,13 +11425,21 @@ where
     }
 
     /// Consume the original installed root only after its actor's durable release.
-    pub(crate) async fn run_startup_entry(
+    pub(crate) async fn run_root_startup(
         &self,
         context: crate::ActorSessionContext,
-        entry: tidepool_runtime::session::PreparedStartupEntry,
+        startup: crate::resident_actor::root_preparation::RootStartupCode,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_compiler_machine(context, move |session, _, _, settlement| {
+                let entry = match startup {
+                    crate::resident_actor::root_preparation::RootStartupCode::Installed(entry) => {
+                        entry
+                    }
+                    crate::resident_actor::root_preparation::RootStartupCode::Recovered(
+                        program,
+                    ) => session.prepare_startup_entry(program.code())?,
+                };
                 session
                     .run_startup_entry(entry, settlement)
                     .map_err(ResidentActorWorkbenchError::Resident)
@@ -13135,11 +13153,7 @@ where
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
         mint: crate::local_actor::run_control::RootPlacementMint,
     ) -> Result<
-        (
-            crate::local_actor::run_control::PublishedRootPlacement,
-            ResidentOutcome,
-            generation_admission::SourceDependency,
-        ),
+        crate::resident_actor::root_preparation::PreparedRootExecution,
         ResidentActorWorkbenchError,
     > {
         let owner = crate::capabilities::CompilerOwnerScope::current()?;
@@ -13195,7 +13209,13 @@ where
                         return Err(error);
                     }
                 };
-                Ok((publication, outcome, dependency))
+                Ok(
+                    crate::resident_actor::root_preparation::PreparedRootExecution {
+                        publication,
+                        outcome,
+                        dependency,
+                    },
+                )
             })
             .await
     }
