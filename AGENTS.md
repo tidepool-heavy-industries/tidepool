@@ -97,7 +97,9 @@ Most changes touch one of three layers, and it helps to know which:
   that merely narrate the code. Git is the history.
 - Keep imports and warnings clean. When a test needs a substantial Haskell
   program, put it in an adjacent fixture file and use `include_str!` instead
-  of maintaining an escaped Rust string.
+  of maintaining an escaped Rust string. Regenerate and check its declared
+  Buck input mappings through the owning source generator; a file present in
+  the checkout is not automatically an input to its isolated build action.
 
 ## Choose the investigation and evidence
 
@@ -264,7 +266,10 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   acceptance evidence, and escalation condition. Keep shared contracts and
   accepted decisions visible in the parent workspace; a child's captured
   context does not receive later changes automatically. Review the concrete
-  result and failure paths, then verify the integrated revision.
+  result and failure paths, then verify the integrated revision. Handoffs name
+  both base and final revision. Integrate and compare the complete base-to-tip
+  delta; a final review-fix or test commit may depend on earlier implementation
+  commits that are not yet on the receiving branch.
 - Give review and investigation passes one primary goal and two or three
   adjacent secondary questions that reuse the same source context. For example,
   while verifying ownership, inspect bypass APIs, redundant copying, and whether
