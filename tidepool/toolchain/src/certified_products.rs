@@ -21879,6 +21879,105 @@ None,
             None,
         )
         .unwrap();
+        let raw_entries = rebound.entries();
+        let raw_prior = raw_entries
+            .iter()
+            .filter(|entry| {
+                matches!(&entry.payload,
+            crate::artifact_inventory::ArtifactPayload::Original(product)
+                if product.owner() == prior_module_product.owner())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raw_prior.len(),
+            1,
+            "raw fixture has one exact prior body owner"
+        );
+        let raw_prior = raw_prior[0];
+        let crate::artifact_inventory::ArtifactPayload::Original(raw_prior_product) =
+            &raw_prior.payload
+        else {
+            unreachable!()
+        };
+        assert_eq!(raw_prior_product.owner(), prior_module_product.owner());
+        assert_eq!(
+            raw_prior_product.module_interface(),
+            prior_module_product.module_interface()
+        );
+        let expected_binder = prior_native
+            .groups
+            .iter()
+            .find(|group| group.group.original_ordinal() == 7)
+            .unwrap()
+            .group
+            .binders()
+            .iter()
+            .find(|binder| binder.occurrence == "ancestor_7")
+            .unwrap();
+        assert!(authenticates_original_native_entry(
+            raw_prior_product,
+            7,
+            expected_binder
+        ));
+        let expected_missing = raw_prior.descriptor.id;
+        let expected_canonical = crate::artifact_inventory::ArtifactEntry::canonical(
+            raw_prior_product.module_interface().unwrap().clone(),
+        )
+        .descriptor
+        .id;
+        let raw_current = raw_entries
+            .iter()
+            .filter(|entry| {
+                matches!(&entry.payload,
+            crate::artifact_inventory::ArtifactPayload::Original(product)
+                if product.owner() == planned_product.owner())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(raw_current.len(), 1);
+        let raw_edges = rebound.binding_dependencies();
+        let required_edges = raw_edges.iter().filter(|(source, target, edge)|
+            matches!((source, target, edge), (
+                crate::artifact_inventory::ArtifactBindingNode::Group(source),
+                crate::artifact_inventory::ArtifactBindingNode::Group(target),
+                crate::artifact_inventory::ArtifactDependency::NativeGroup { dependent_ordinal: 7, required_ordinal: 7 }
+            ) if source.binding.artifact() == raw_current[0].descriptor.id
+                && source.original_ordinal == 7
+                && target.binding.artifact() == expected_missing
+                && target.original_ordinal == 7)).collect::<Vec<_>>();
+        assert_eq!(
+            required_edges.len(),
+            1,
+            "actual raw G7 requires this exact prior group7"
+        );
+        let raw_projection = planned
+            .certified
+            .source_selection
+            .compiler_projection(&rebound)
+            .unwrap();
+        let prior_identity = ExactModuleIdentity {
+            unit: prior_module_product.owner().unit.clone(),
+            module: prior_module_product.owner().module.clone(),
+        };
+        assert_eq!(
+            raw_projection.snapshot_roles()[&prior_identity].original(),
+            Some(expected_missing)
+        );
+        assert_eq!(
+            raw_projection.snapshot_roles()[&prior_identity].interface(),
+            expected_canonical
+        );
+        let earlier = crate::artifact_inventory::ArtifactEntry::original(
+            canonical_producer,
+            prior_module_product.clone(),
+        )
+        .unwrap();
+        assert!(prior_support
+            .artifacts()
+            .artifact_ids()
+            .contains(&earlier.descriptor.id));
+        eprintln!("raw prior certificate: earlier_id={:?} earlier_cert={:?} raw_id={:?} raw_cert={:?} exact_required_edges={required_edges:?}",
+            earlier.descriptor.id, earlier.descriptor.certification_sha256,
+            expected_missing, raw_prior.descriptor.certification_sha256);
         let rebound_result = planned
             .certified
             .source_selection
@@ -21909,15 +22008,6 @@ None,
             Err(CertificationError::Mismatch(reason)) => format!("Mismatch({reason})"),
             Err(other) => format!("other typed error {:?}", std::mem::discriminant(other)),
         };
-        let expected_missing = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
-            canonical_producer,
-            &prior_module_product,
-        );
-        let expected_canonical = crate::artifact_inventory::ArtifactEntry::canonical(
-            prior_module_product.module_interface().unwrap().clone(),
-        )
-        .descriptor
-        .id;
         let raw_namespace = rebound.capture_graph_selection().namespace;
         let raw_binding = |id| {
             raw_namespace
