@@ -14222,7 +14222,10 @@ mod tests {
                         .compiler_inputs()
                         .native_availability(original.descriptor.id)
                         .unwrap();
-                    assert!(availability.offers().any(|offer| offer.proof().is_some()));
+                    assert!(availability
+                        .offers()
+                        .any(|offer| offer.original() == original.descriptor.id
+                            && offer.proof().is_some()));
                 }
                 let request_group_roots = request
                     .compiler_inputs()

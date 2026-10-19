@@ -850,7 +850,12 @@ fn preview_reuses_selected_original_with_issued_group_custody() {
         .compiler_inputs()
         .native_availability(fixture.original.descriptor.id)
         .unwrap();
-    assert!(availability.offers().any(|offer| offer.proof().is_some()));
+    assert!(
+        availability
+            .offers()
+            .any(|offer| offer.original() == fixture.original.descriptor.id
+                && offer.proof().is_some())
+    );
     assert_eq!(context.as_ref(), &before);
     assert!(context.artifact_view().selected_native_groups().is_empty());
 }
