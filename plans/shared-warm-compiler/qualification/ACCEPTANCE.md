@@ -22,7 +22,7 @@ and dormant retained owners cannot supply this census.
 | Reload | Preparation failure/no-op/default blockers stop nobody; force fences old admissions; partial retirement stays partial; Continuing/source-neutral custody and independent LLM worlds survive | Reload source-reviewed area `59d801946394aee98fb7bfc30a9cf181b494df48` (docs `7d5bf5ea0a`): production/cfg(test) compile and execution unexecuted. Eighteen new controls plus joined resume→bind and pre-bind refusal; aggregate Unknown is injected, not a real post-resume GHC END fault. R1 WatchRoute/forms/reply/display successors and earliest coherent host acceptance remain pending. |
 | Measurement | Whole-wall ledger, matching physical IDs, known changed-input sensitivity, three increasing sizes with fixed D/A/output | Exact frozen `6d3` minimal AABA and Persona13 baseline passed 1/1 each with accepted owner-issued workload/frozen timing claims. No matched candidate comparison. Detailed AABA attribution completed; predeclare benefit/variance/resource bounds before a paired sweep. Historical `20d7`/B108 is not the denominator. |
 | Frontend experiment | Normal-module/GHC semantic parity, fresh target identities, measured import/HPT work and bounded retained owners | Go/no-go pending; no-go leaves valid lower-level gains eligible and ordinary frontend scope cost explicit. |
-| Frozen release and deployment | Exact source/profile/Harness/compiler/assets/roster; counted sealed cases and truthful cleanup | Exact `6d3` build/freeze/verify and AABA/Persona13 passed; stronger shared Persona failed in readonly fixture setup before host startup. Immutable failure retained; fixture repair successor pending review/compile/refreeze. Candidate release and deployment unqualified. |
+| Frozen release and deployment | Exact source/profile/Harness/compiler/assets/roster; counted sealed cases and truthful cleanup | Exact `6d3` build/freeze/verify and AABA/Persona13 passed; stronger shared Persona failed in readonly fixture setup during fixture setup before compiler requests. Immutable failure retained; fixture repair successor pending review/compile/refreeze. Candidate release and deployment unqualified. |
 | Final storage analysis | Bounded top-down by registered checkout/output owner; active versus idle users; retained products/evidence and safe possible reclaim boundaries | After campaign workers settle, analysis only. No deletion, GC, unmount or stopping another owner. |
 
 Required early commands after pinned preparation and observed disk admission:
@@ -80,8 +80,7 @@ Source retention, native bundle assembly (872 local actions, 718.763 s), freeze
 and bundled verify passed within refreshed admission. Frozen minimal AABA and
 Persona13 each executed/passed one case; exact-scope workload and frozen timing
 claims accepted. Cleanup confirmed in all three domains; Persona13 diagnostics
-remain incomplete. Strong shared-root Persona executed/failed one before host
-startup because the fixture copied a read-only lock into an editable workspace.
+remain incomplete. Strong shared-root Persona executed/failed one during fixture setup before compiler requests because the fixture copied a read-only lock into an editable workspace.
 Original frozen baseline retained unchanged; source repair successor is pending.
 A bounded detailed AABA capture completed; no paired speedup, frontend go or
 candidate release/deployment acceptance exists.

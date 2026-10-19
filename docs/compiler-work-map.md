@@ -185,7 +185,7 @@ a full-profile AABA attribution capture is separate. These are baseline
 observations, not a candidate comparison or a speedup.
 
 The same frozen baseline's stronger shared-root Persona failed in editable
-workspace fixture setup before host startup: a read-only frozen lock was copied
+workspace fixture setup during fixture setup before compiler requests: a read-only frozen lock was copied
 with its mode and then overwritten. The exact failure remains retained; a new
 source repair/build/freeze is required. It supplies no compiler defect or passing
 Persona semantic evidence. Candidate frozen release qualification remains open.
