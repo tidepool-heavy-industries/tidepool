@@ -4081,7 +4081,7 @@ class CompilerServicePackageTests(unittest.TestCase):
                 + struct.pack('<I', 0) * 4)
 
     @contextlib.contextmanager
-    def declared_provider(self, root, retain_alias=False):
+    def declared_provider(self, root, retain_alias=False, closure_alias=False):
         """Real declaration/acquisition entrypoints; external compiler/Nix are mocked."""
         tools = runtime_tools_fixture(root)
         libdir = root / 'compiler/lib'
@@ -4136,7 +4136,7 @@ class CompilerServicePackageTests(unittest.TestCase):
                 self.assertEqual(command[-2], 'sha256')
                 return fixed + '\n'
             if '--requisites' in command:
-                return '\n'.join(sorted(set(command[3:]))) + '\n'
+                return '\n'.join(sorted(set(command[3:]) | ({str(alias)} if closure_alias else set()))) + '\n'
             if '--hash' in command:
                 return 'sha256:fixture-nar\n' * (len(command) - 3)
             if '--size' in command:
@@ -4307,6 +4307,15 @@ class CompilerServicePackageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'canonical top-level Nix objects'):
                 with self.declared_provider(root, retain_alias=True):
                     self.fail('noncanonical profile declaration succeeded')
+            self.assertFalse(list(root.glob('service-*/package-source')))
+            self.assertFalse((root / 'declaration/compiler-service-source.bin').exists())
+
+    def test_declaration_refuses_transitive_noncanonical_closure_objects(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, 'canonical top-level closure objects'):
+                with self.declared_provider(root, closure_alias=True):
+                    self.fail('transitive alias profile declaration succeeded')
             self.assertFalse(list(root.glob('service-*/package-source')))
             self.assertFalse((root / 'declaration/compiler-service-source.bin').exists())
 

@@ -1042,6 +1042,8 @@ def declare_compiler_service_source(args) -> Path:
     if any(Path(root).resolve(strict=True) != Path(root) for root in roots):
         raise ValueError("supported package profile requires canonical top-level Nix objects")
     closure = nix_metadata(tools, roots)
+    if any(Path(root).resolve(strict=True) != Path(root) for root in closure["closure"]):
+        raise ValueError("supported package profile requires canonical top-level closure objects")
     wrapper = (b"TPSPF001" + _package_frame(body) + struct.pack("<I", len(closure["closure"]))
                + b"".join(_package_frame(path) for path in closure["closure"]))
     if len(wrapper) > PACKAGE_PROFILE_LIMIT:
