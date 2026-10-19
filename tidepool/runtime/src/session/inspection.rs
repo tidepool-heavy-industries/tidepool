@@ -621,6 +621,12 @@ impl CompletedInspectionWorld {
         self.prepared.receipt.resolution()
     }
 
+    pub fn defining_module(
+        &self,
+    ) -> Option<&tidepool_toolchain::compiler_world::WorldModuleReceipt> {
+        self.prepared.receipt.defining_module()
+    }
+
     pub fn provenance(&self) -> &ScopeProvenance {
         &self.prepared.provenance
     }
