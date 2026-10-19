@@ -240,15 +240,35 @@ Sol-high cumulative `5b74..49b65` review accepts source only, with no remaining
 confirmed assigned-scope source findings. Production/test compilation and
 executed counts remain separate gates.
 
-The retry is running under row-owner observation, session `14002`, log
-`rows/check-exact-provenance.log` in the evidence directory above. The campaign
+The retry terminated exit 0, compiling production and test consumers through
+27 local commands; log `rows/check-exact-provenance.log` in the evidence
+directory above. The campaign
 explicitly admitted its 12 GiB memory allowance based on prior observed 7.18 GiB
 scope peak and fresh memory/disk accounting. The already-running actual command
 is the same `just check` recipe without a jobs argument; the campaign approved
 that crossed start, without cancellation or duplication. Future retries use
 the same check-plan labels through the existing pinned Buck entry point with
-`-j1`. No unobserved build is handed off. Rows owns terminal result collection
-and then meaningful counted controls within the admitted graph/resources.
+`-j1`. No unobserved build is handed off. Sixteen focused toolchain cases and
+the real checked-expression publication/next-cell history each passed 1/1.
+The fresh-worker paired-join case executed 1 and failed an unchanged lexical
+assertion at `turn.rs:8693` before this case's checked value/P6/transport path.
+All 18 case reports and pre-execution artifact hashes are retained in
+`rows/native-results-49b65.json` and `rows/49b65-case-reports/`.
+
+Host and independent source review traced the likely expectation error:
+`library()` is the reserved native generation, while `library_import_module()`
+is the actual lexical interface; certified publication intentionally reuses
+the existing interface without renaming it. Qualification owns the exact
+baseline discriminator; no runtime assertion was changed and no causal verdict
+is inferred yet. The retained failure cache is
+`/tmp/tidepool-libtest-cache-jv8erlca`.
+
+Cost successor `29d6467c30` removes the kind restriction from an all-direct-row
+exact-Arc unchanged-owner fast path and adds direct original-complete/P6
+zero-detach controls. Supervisor source read and independent bounded direction
+review agree; exact successor native checks and final review remain row-owned.
+Remaining scoped cache/leaf scans and inherited-row one-time detachment are
+explicit later migration obligations, not constant-time or speedup claims.
 
 Required real-worker selections include the existing runtime checked-expression
 publication/next-cell history and source-hidden paired-join fresh-worker case,
