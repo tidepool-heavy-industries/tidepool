@@ -1001,14 +1001,47 @@ impl InvocationWork {
     pub(super) fn admit_form(
         &self,
         form: Arc<crate::forms::FormCleanup>,
-        open: impl FnOnce() -> Result<(), tidepool_bridge_effects::FormCause>,
-    ) -> Result<(), tidepool_bridge_effects::FormCause> {
-        self.with_admission_state(|state| {
-            open()?;
-            state.forms.push(form);
-            Ok(())
-        })
-        .map_err(|_| tidepool_bridge_effects::FormCause::FormClosed)?
+        publication: &crate::FormPublication,
+        descriptor: &serde_json::Value,
+        control: Option<&Arc<crate::WorkbenchExecutionControl>>,
+    ) -> Result<(), crate::forms::FormAdmissionError> {
+        use crate::forms::FormAdmissionError;
+        use tidepool_bridge_effects::FormCause;
+        if form.actor != self.owner || publication.actor != self.owner {
+            return Err(FormAdmissionError::Form(FormCause::FormUnauthorized));
+        }
+        let source = form.source_dependency().clone();
+        source
+            .with_open_admission(|| {
+                let reserve = || {
+                    self.with_admission_state(|state| {
+                        form.reserve()?;
+                        state.forms.push(form.clone());
+                        Ok::<_, FormCause>(())
+                    })
+                    .map_err(|_| FormCause::FormClosed)?
+                };
+                match control {
+                    Some(control) => control
+                        .admit_interaction(reserve)
+                        .ok_or(FormCause::FormClosed)?,
+                    None => reserve(),
+                }
+            })
+            .map_err(FormAdmissionError::Source)??;
+        // The source and invocation guards above are gone before host IO. The
+        // actual interaction cutoff, not reservation alone, owns publication.
+        let open = || form.open(publication, descriptor);
+        match control {
+            Some(control) => match control.admit_interaction(open) {
+                Some(result) => result.map_err(FormAdmissionError::Form),
+                None => {
+                    form.close().map_err(FormAdmissionError::Form)?;
+                    Err(FormAdmissionError::Form(FormCause::FormClosed))
+                }
+            },
+            None => open().map_err(FormAdmissionError::Form),
+        }
     }
 
     pub(super) fn close(&self) {
@@ -1123,7 +1156,8 @@ impl InvocationWork {
                 .collect(),
             ..InvocationCleanup::default()
         };
-        for form in self.state.lock().forms.clone() {
+        let forms = { self.state.lock().forms.clone() };
+        for form in forms {
             if let Err(cause) = form.close() {
                 cleanup
                     .failures

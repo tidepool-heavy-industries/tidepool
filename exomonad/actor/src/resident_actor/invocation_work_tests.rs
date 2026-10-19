@@ -3557,3 +3557,204 @@ async fn native_rpc_model_budget_ingress_preserves_existing_execution_allowances
     );
     fixture.finish().await;
 }
+
+mod form_source_admission {
+    use super::*;
+    use crate::forms::{FormAdmissionError, FormCleanup, FormHost, FormPublication};
+    use crate::resident_workbench::generation_admission::{BootstrapWorld, SourceDependency};
+    use tidepool_bridge_effects::{FormAttempt, FormCause, FormTransition};
+    use tidepool_runtime::session::{
+        PersistentSession, RuntimeLexicalScopeLease, SourceAdmissionError,
+    };
+
+    #[derive(Default)]
+    struct Host {
+        opens: AtomicUsize,
+        closes: AtomicUsize,
+        fail_open: AtomicUsize,
+        panic_open: AtomicUsize,
+        work: Mutex<Option<std::sync::Weak<InvocationWork>>>,
+    }
+    impl FormHost for Host {
+        fn changed(&self) -> BoxFuture<'static, Result<(), FormCause>> {
+            Box::pin(std::future::pending())
+        }
+        fn open(
+            &self,
+            _: &FormPublication,
+            mount: &str,
+            _: &serde_json::Value,
+        ) -> Result<(), FormCause> {
+            let work = self
+                .work
+                .lock()
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .unwrap();
+            let state = work
+                .state
+                .try_lock()
+                .expect("invocation guard must be released before host IO");
+            assert!(
+                state.forms.iter().any(|form| form.mount == mount),
+                "pending membership precedes the host effect"
+            );
+            drop(state);
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                self.panic_open.load(Ordering::SeqCst),
+                0,
+                "host panics after effect"
+            );
+            if self.fail_open.load(Ordering::SeqCst) != 0 {
+                return Err(FormCause::FormTransportFailed(
+                    "effect recorded before failure".into(),
+                ));
+            }
+            Ok(())
+        }
+        fn attempt(&self, _: ActorRef, _: &str) -> Result<Option<FormAttempt>, FormCause> {
+            Ok(None)
+        }
+        fn reject(
+            &self,
+            _: ActorRef,
+            _: &str,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> Result<FormTransition, FormCause> {
+            Ok(FormTransition::FormApplied)
+        }
+        fn commit(
+            &self,
+            _: ActorRef,
+            _: &str,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> Result<FormTransition, FormCause> {
+            Ok(FormTransition::FormApplied)
+        }
+        fn close(&self, _: ActorRef, _: &str) -> Result<(), FormCause> {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn display(
+            &self,
+            _: &FormPublication,
+            _: u64,
+            _: &serde_json::Value,
+        ) -> Result<(), FormCause> {
+            Ok(())
+        }
+    }
+    fn source(
+        parent: Option<Arc<RuntimeLexicalScopeLease>>,
+    ) -> (PersistentSession, SourceDependency) {
+        let mut session = PersistentSession::new(None, 1024);
+        let scope = session.mint_notebook_scope_with_lease(parent).unwrap();
+        let world = BootstrapWorld::new(None);
+        world.adopt_scope(scope).unwrap();
+        (session, SourceDependency::World(world))
+    }
+
+    #[test]
+    fn form_registration_uses_original_source_before_effects_and_retains_attempts() {
+        let actor = ActorRef::first(crate::ActorId(811));
+        let work = InvocationWork::new(actor, reservation());
+        let publication = FormPublication {
+            actor,
+            operation: None,
+        };
+        let descriptor = serde_json::json!({});
+        let (original, source_a) = source(None);
+        let (_recipient, source_b) = source(None);
+        let host = Arc::new(Host::default());
+        *host.work.lock() = Some(Arc::downgrade(&work));
+        let first =
+            FormCleanup::new(actor, "first".into(), host.clone(), source_a.clone()).unwrap();
+        work.admit_form(first.clone(), &publication, &descriptor, None)
+            .unwrap();
+        assert_eq!(host.opens.load(Ordering::SeqCst), 1);
+        assert_eq!(work.state.lock().forms.len(), 1);
+        let scope = source_a.source_lease().unwrap();
+        let late = FormCleanup::new(actor, "late".into(), host.clone(), source_a.clone()).unwrap();
+        let fence = scope.source_admission().fence().unwrap();
+        assert!(matches!(
+            work.admit_form(late, &publication, &descriptor, None),
+            Err(FormAdmissionError::Source(
+                SourceAdmissionError::Closed { .. }
+            ))
+        ));
+        assert_eq!(host.opens.load(Ordering::SeqCst), 1);
+        assert_eq!(work.state.lock().forms.len(), 1);
+        first.close().unwrap();
+        assert!(first.is_closed());
+        assert_eq!(host.closes.load(Ordering::SeqCst), 1);
+        assert_eq!(fence.pending_claims(), 0);
+        // B remains independently authorized; it cannot refresh A's authority.
+        let second =
+            FormCleanup::new(actor, "independent".into(), host.clone(), source_b.clone()).unwrap();
+        work.admit_form(second.clone(), &publication, &descriptor, None)
+            .unwrap();
+        assert_eq!(host.opens.load(Ordering::SeqCst), 2);
+        second.close().unwrap();
+        fence.reopen().unwrap();
+        let (_child, child) = source(Some(scope.clone()));
+        let pending =
+            FormCleanup::new(actor, "external-stale".into(), host.clone(), child).unwrap();
+        drop(original);
+        assert!(matches!(
+            work.admit_form(pending, &publication, &descriptor, None),
+            Err(FormAdmissionError::Source(
+                SourceAdmissionError::StaleSourceLease
+            ))
+        ));
+        assert_eq!(host.opens.load(Ordering::SeqCst), 2);
+        assert_eq!(work.state.lock().forms.len(), 2);
+
+        for panic in [false, true] {
+            host.fail_open.store(usize::from(!panic), Ordering::SeqCst);
+            host.panic_open.store(usize::from(panic), Ordering::SeqCst);
+            let form = FormCleanup::new(
+                actor,
+                format!("attempted-{panic}"),
+                host.clone(),
+                source_b.clone(),
+            )
+            .unwrap();
+            let before = work.state.lock().forms.len();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work.admit_form(form.clone(), &publication, &descriptor, None)
+            }));
+            if panic {
+                assert!(result.is_err());
+            } else {
+                assert!(matches!(
+                    result.unwrap(),
+                    Err(FormAdmissionError::Form(FormCause::FormTransportFailed(_)))
+                ));
+            }
+            assert_eq!(
+                work.state.lock().forms.len(),
+                before + 1,
+                "attempted host effect keeps exact membership"
+            );
+            assert!(Arc::ptr_eq(work.state.lock().forms.last().unwrap(), &form));
+            assert!(!form.is_closed());
+            form.close().unwrap();
+            assert!(form.is_closed());
+        }
+        assert_eq!(host.opens.load(Ordering::SeqCst), 4);
+        assert_eq!(host.closes.load(Ordering::SeqCst), 4);
+        let cancelled = crate::WorkbenchExecutionControl::untracked();
+        cancelled.request_cancellation();
+        let before = work.state.lock().forms.len();
+        let form = FormCleanup::new(actor, "cancelled".into(), host.clone(), source_b).unwrap();
+        assert!(matches!(
+            work.admit_form(form, &publication, &descriptor, Some(&cancelled)),
+            Err(FormAdmissionError::Form(FormCause::FormClosed))
+        ));
+        assert_eq!(work.state.lock().forms.len(), before);
+        assert_eq!(host.opens.load(Ordering::SeqCst), 4);
+    }
+}
