@@ -66,10 +66,11 @@ impl RunState {
                 });
                 continue;
             }
-            if !record
-                .terminal
-                .cleanup()
-                .is_some_and(|cleanup| cleanup.is_confirmed())
+            if matches!(record.phase, ReservationPhase::Registered)
+                && !record
+                    .terminal
+                    .cleanup()
+                    .is_some_and(|cleanup| cleanup.is_confirmed())
             {
                 let link_state = match record.executor_link {
                     ExecutorLink::Confirmed => None,
