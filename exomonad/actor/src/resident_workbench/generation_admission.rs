@@ -476,30 +476,46 @@ mod tests {
     use super::*;
     use tidepool_runtime::session::PersistentSession;
 
+    struct History {
+        session: PersistentSession,
+        scopes: Vec<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+    }
+    impl History {
+        fn new() -> Self {
+            Self {
+                session: PersistentSession::new(None, 1024),
+                scopes: Vec::new(),
+            }
+        }
+    }
+
     fn generation(
-        session: &mut PersistentSession,
+        history: &mut History,
         id: NotebookGenerationId,
         prerequisite: Option<GenerationDependency>,
     ) -> GenerationDependency {
-        let scope = session
+        let scope = history
+            .session
             .mint_notebook_scope_with_lease(
                 prerequisite
                     .as_ref()
                     .map(|parent| parent.runtime_admission().clone()),
             )
             .unwrap();
-        GenerationDependency::new(
+        let dependency = GenerationDependency::new(
             crate::ActorRef::first(crate::ActorId(71)),
             id,
             crate::CheckpointSourceLayer::default(),
             &scope,
             prerequisite,
-        )
+        );
+        history.scopes.push(scope);
+        dependency
     }
 
     #[test]
     fn first_visible_world_closes_old_alias_after_replacement() {
-        let mut session = PersistentSession::new(None, 1024);
+        let mut session = History::new();
         let world = BootstrapWorld::new(None);
         let alias = SourceDependency::World(world.clone());
         let first = generation(&mut session, NotebookGenerationId::INITIAL, None);
@@ -523,7 +539,7 @@ mod tests {
 
     #[test]
     fn bootstrap_claim_and_unknown_end_prevent_publication_cutoff() {
-        let mut session = PersistentSession::new(None, 1024);
+        let mut session = History::new();
         let world = BootstrapWorld::new(None);
         let alias = SourceDependency::World(world.clone());
         let first = generation(&mut session, NotebookGenerationId::INITIAL, None);
@@ -547,7 +563,7 @@ mod tests {
 
     #[test]
     fn known_unpublished_retry_and_unknown_publication_are_distinct() {
-        let mut session = PersistentSession::new(None, 1024);
+        let mut session = History::new();
         let world = BootstrapWorld::new(None);
         let alias = SourceDependency::World(world.clone());
         let first = generation(&mut session, NotebookGenerationId::INITIAL, None);
@@ -565,7 +581,7 @@ mod tests {
 
     #[test]
     fn typed_bootstrap_alias_tracks_child_while_parent_stays_open() {
-        let mut session = PersistentSession::new(None, 1024);
+        let mut session = History::new();
         let parent = generation(&mut session, NotebookGenerationId::INITIAL, None);
         let world = BootstrapWorld::new(Some(parent.clone()));
         let alias = SourceDependency::World(world.clone());
@@ -610,7 +626,7 @@ mod tests {
 
     #[test]
     fn typed_initial_publication_retains_external_claim_through_visibility() {
-        let mut session = PersistentSession::new(None, 1024);
+        let mut session = History::new();
         let parent = generation(&mut session, NotebookGenerationId::INITIAL, None);
         let world = BootstrapWorld::new(Some(parent.clone()));
         let child = generation(
@@ -631,7 +647,7 @@ mod tests {
 
     #[tokio::test]
     async fn actual_compiler_ticket_retains_uncertainty_at_generation_fence() {
-        let mut session = PersistentSession::new(None, 1024);
+        let mut session = History::new();
         let dependency = generation(&mut session, NotebookGenerationId::INITIAL, None);
         let services = crate::capabilities::WorkbenchServices::new();
         let scope = services
@@ -662,7 +678,7 @@ mod tests {
 
     #[test]
     fn source_callback_transfer_keeps_dependency_without_generation_metadata() {
-        let mut session = PersistentSession::new(None, 1024);
+        let mut session = History::new();
         let dependency = generation(&mut session, NotebookGenerationId::INITIAL, None);
         let actor = crate::ActorRef::first(crate::ActorId(71));
         let placement = crate::ActorPlacement {
@@ -713,7 +729,7 @@ mod tests {
 
     #[test]
     fn typed_child_replacement_preserves_external_parent_only() {
-        let mut session = PersistentSession::new(None, 1024);
+        let mut session = History::new();
         let parent = generation(&mut session, NotebookGenerationId::INITIAL, None);
         let child = generation(
             &mut session,
