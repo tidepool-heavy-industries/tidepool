@@ -2204,6 +2204,14 @@ impl CheckedValueArtifact {
         self.authority
     }
 
+    /// Type transport can share aliases only when their issuing row is the
+    /// same immutable owner. Equal payloads or receipts alone do not prove that.
+    pub(crate) fn same_world_type_row(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.row, &other.row)
+            && self.authority == other.authority
+            && self.certified_interface.artifact_id() == other.certified_interface.artifact_id()
+    }
+
     pub(crate) fn compiler_source_support(
         &self,
     ) -> &crate::artifact_inventory::CompilerSourceSupport {
