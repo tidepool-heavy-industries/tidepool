@@ -8197,6 +8197,8 @@ mod module_product_tests {
                 "source shadow {module}: prior_owner={:?}; issued_groups={issued_groups:?}; source_witnesses={source_witnesses:?}",
                 owners.get(module)
             );
+        }
+        for module in ["Tidepool.FilePath", "Tidepool.Prelude"] {
             assert!(
                 shadowed
                     .certified_groups
