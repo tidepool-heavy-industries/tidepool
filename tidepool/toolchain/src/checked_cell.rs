@@ -5283,10 +5283,36 @@ mod tests {
             authenticated
         };
         let context = |version| {
+            use crate::artifact_inventory::{
+                ArtifactEntry, ArtifactInventory, CompilerInputProjection, CompilerSourceSupport,
+                NativeArtifactDemand,
+            };
+            let entry = Arc::new(ArtifactEntry::original(producer, epoch(version)).unwrap());
+            let inventory = ArtifactInventory::default();
+            let artifacts = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    vec![entry.clone()],
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &artifacts.metadata_snapshot(),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )
+                .unwrap();
+            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &selection, &artifacts,
+            )
+            .unwrap();
+            let support = CompilerSourceSupport::close_complete_output(&output).unwrap();
             Arc::new(
                 crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
-                    .extend_checked_original_products(producer, &[epoch(version)])
+                    .extend_issued_compiler_support(&support)
                     .unwrap(),
             )
         };

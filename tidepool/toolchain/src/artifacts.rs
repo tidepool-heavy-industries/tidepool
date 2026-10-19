@@ -9308,34 +9308,29 @@ mod module_product_tests {
                     .collect::<Vec<_>>();
                 assert_eq!(native.len(), 1);
                 let owner = native[0].owner().clone();
-                let producer =
-                    crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                        compiled.producer_identity.as_ref().unwrap(),
-                    )
-                    .sha256();
+                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                    compiled.source_selection.as_ref().unwrap(),
+                    &compiled.artifact_view,
+                )
+                .unwrap();
                 let compiled_support =
-                    crate::declaration_context::recover_fixture_compiler_support(
-                        compiled
-                            .source_selection
-                            .as_ref()
-                            .unwrap()
-                            .compiler_projection(&compiled.artifact_view)
-                            .unwrap(),
-                        compiled.artifact_view.clone(),
-                        [],
+                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                        &output,
                     )
+                    .unwrap();
+                let interfaces = compiled_support
+                    .selected_interfaces()
+                    .unwrap()
+                    .support_for_owners(owners)
+                    .unwrap();
+                let original = compiled_support
+                    .source_support(&BTreeSet::from([quoted_owner.clone()]))
                     .unwrap();
                 let context = ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
-                    .extend_issued_compiler_support(
-                        &compiled_support
-                            .selected_interfaces()
-                            .unwrap()
-                            .support_for_owners(owners)
-                            .unwrap(),
-                    )
+                    .extend_issued_compiler_support(&interfaces)
                     .unwrap()
-                    .extend_checked_original_products(producer, &native)
+                    .extend_issued_compiler_support(&original)
                     .unwrap()
                     .extend(&[], &[], surface.lexical)
                     .unwrap();
@@ -10555,13 +10550,14 @@ mod source_proof_pairing_tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(products.len(), 1);
+            let issued = certificate
+                .compiler_source_support()
+                .source_support(&BTreeSet::from([owner.clone()]))
+                .unwrap();
             let persisted =
                 crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
-                    .extend_checked_original_products(
-                        certificate.toolchain_identity_sha256(),
-                        &products,
-                    )
+                    .extend_issued_compiler_support(&issued)
                     .unwrap();
             assert!(persisted.authored_native_root(1).is_err());
             let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
