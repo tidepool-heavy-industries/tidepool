@@ -95,8 +95,6 @@ pub(crate) enum SnapshotProjectionError {
     Operation(#[from] tidepool_repr::execution_schema::ParseError),
     #[error("snapshot projection checkpoint: {0}")]
     Checkpoint(#[from] std::io::Error),
-    #[error("changed or new snapshot value has no bounded projection encoding")]
-    UnboundedEncode,
     #[error("selected snapshot key is outside its cold fact owner")]
     MissingFact,
 }
@@ -811,12 +809,12 @@ impl Materializer<'_, ReachableBlocks> {
             crate::host_work::checkpoint()?;
             operation.charge(1)?;
             work.key_lookups += 1;
+            projection_wire_bound(&(key,), operation)?;
             if !base.facts.contains_key(key) {
                 return Err(SnapshotProjectionError::MissingFact);
             }
             operation.reserve::<(BytesKey, C::Wire)>(4)?;
             operation.reserve::<usize>(64)?;
-            projection_wire_bound(&(key,), operation)?;
             let key = BytesKey(key.encode_key()?);
             let wire = cold
                 .as_ref()
@@ -2039,6 +2037,7 @@ impl PublicationNativeFacts {
         // owned strings are charged first; proof and persistent maps share roots.
         for key in &keys.roles {
             crate::host_work::checkpoint()?;
+            owner_strings(key, operation)?;
             let value = self
                 .receipt
                 .roles
@@ -2049,7 +2048,6 @@ impl PublicationNativeFacts {
                 ExactModuleIdentity,
                 crate::artifact_inventory::RecordedCompilerRole,
             )>(4)?;
-            owner_strings(key, operation)?;
             role_strings(value, operation)?;
             maps.roles.insert(key.clone(), value.clone());
         }
@@ -2080,6 +2078,7 @@ impl PublicationNativeFacts {
         }
         for key in &keys.input_decisions {
             crate::host_work::checkpoint()?;
+            owner_strings(key, operation)?;
             let value = self
                 .receipt
                 .input_decisions
@@ -2090,7 +2089,6 @@ impl PublicationNativeFacts {
                 ExactModuleIdentity,
                 crate::artifact_inventory::RecordedInputNativeDecision,
             )>(4)?;
-            owner_strings(key, operation)?;
             role_strings(&value.role, operation)?;
             maps.input_decisions.insert(key.clone(), value.clone());
         }
