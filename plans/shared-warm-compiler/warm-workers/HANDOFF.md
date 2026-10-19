@@ -12,7 +12,7 @@ unchanged from that amendment. Only the campaign owner edits shared contracts/st
 
 | Native task | Configured model/effort | Checkout/branch | Start/settlement | Work |
 | --- | --- | --- | --- | --- |
-| `/root/warm_compiler_campaign/warm_workers/protocol` | `gpt-6.1-sol`, high, fresh context | `tidepool-shared-warm-worker-protocol-20261019`, `feature/shared-warm/worker-protocol` | Running; start before 2026-10-19T07:54:42Z; no settlement observed | Protocol implementation at `992a6d0458`; now bounded review of the area's independently authored WorkerServer response route |
+| `/root/warm_compiler_campaign/warm_workers/protocol` | `gpt-6.1-sol`, high, fresh context | `tidepool-shared-warm-worker-protocol-20261019`, `feature/shared-warm/worker-protocol` | Settled after bounded followup review; implementation and review terminal events received | Protocol implementation at `992a6d0458`; independent response-route review and final retirement-oracle repair receipt at `d779105e05` |
 
 The initial grant is one active descendant total. No other descendants were
 started. The area directly owns the existing WorkerServer typed completion path,
@@ -44,6 +44,17 @@ formatter. These are source checkpoints pending cumulative independent review
 and native compilation. The source-free production dispatch currently returns
 typed UnsupportedOperation. It issues no Ready/reference and is not a completed
 realization consumer.
+
+The protocol child independently reviewed the area-authored response/completion
+route. `b7c3f3090b` preserves a typed Rejected diagnosis when unsafe capture
+overrides its successful control response. The reviewer then found that the new
+retirement control could close stdin and induce the exit it was meant to observe.
+`d779105e05` keeps stdin open until bounded nonzero process termination is
+observed; the reviewer source-accepted that exact repair with no further findings.
+`cc6486c743` states the reusable detection rule in the owning process guide.
+All of these controls remain uncompiled/unexecuted. The child reviewed only
+the independently authored response route, not its own protocol implementation;
+full cumulative independent review remains with the campaign supervisor.
 
 ## Current decisions and dependencies
 
@@ -120,3 +131,11 @@ producers are host-inputs for the exact portable selected root, owned-inputs
 for admitted row/byte owner and consumed-package-source coverage, qualification
 for a measured focused compile growth bound, and the campaign supervisor for
 the cumulative independent review. There are no orphaned command observers.
+Qualification's retained dependency census measures about 559 MiB of terminal
+extract-cmd outputs, excluding transient scratch/cache-upload growth; this is
+not yet a safe upper bound for admission. The currently awaited event is an
+exact root/byte-owner API, an independent cumulative review result, or a bounded
+native-build admission decision. Its producer must send the concrete candidate,
+evidence and next action with followup_task if this area has yielded. No periodic
+wake is scheduled. Reactivate the settled protocol child only for concrete
+repair or newly ready semantic work under the retained single-descendant grant.
