@@ -8821,14 +8821,11 @@ impl ExactDeclarationContext {
             .collect()
     }
     pub fn snapshot(&self) -> crate::exact_context::ExactContextSnapshot {
+        let native = self.owner.facts.compiler_support.native_fact_owner();
         crate::exact_context::ExactContextSnapshot {
-            native_availability: self
-                .owner
-                .facts
-                .compiler_support
-                .native_availability()
-                .snapshot_facts()
-                .expect("issued native availability identity"),
+            native_fact_owner: Some(Arc::clone(native)),
+            native_availability: native.native_availability.clone(),
+            offers: native.offers.clone(),
             producer: self.owner.facts.producer,
             selection: self
                 .owner
@@ -8844,17 +8841,6 @@ impl ExactDeclarationContext {
                 .projection()
                 .snapshot_roles()
                 .clone(),
-            offers: self
-                .owner
-                .facts
-                .compiler_support
-                .native_offers()
-                .iter()
-                .map(|offer| {
-                    let facts = offer.snapshot_facts();
-                    (facts.identity().expect("issued offer identity"), facts)
-                })
-                .collect(),
             lexical: self.owner.facts.lexical.clone(),
             input_decisions: self
                 .owner

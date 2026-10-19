@@ -18075,6 +18075,10 @@ mod tests {
                 },
             ),
             selection_sha256: [5; 32],
+            native_authority:crate::artifact_inventory::PublicationNativeAuthority::recorded(
+                crate::exact_context::PublicationNativeFacts::maintain(None,crate::exact_context::PublicationNativeMaps {
+                    roles:Default::default(),offers:Default::default(),native_availability:Default::default(),input_decisions:Default::default(),
+                }).unwrap()),
         };
         let mut projection = CompilerInputProjection::default();
         projection

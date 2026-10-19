@@ -247,7 +247,7 @@ pub(crate) struct FrontierWork {
     pub(crate) decoded_bytes: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 struct ReachableBlock {
     bytes: Arc<[u8]>,
     children: Arc<[Cid]>,

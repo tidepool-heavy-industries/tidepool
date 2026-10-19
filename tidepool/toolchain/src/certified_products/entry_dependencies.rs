@@ -158,6 +158,18 @@ mod tests {
             original_input_identity: "input identity".into(),
             selection: ExactArtifactSelection::capture(&inventory.empty_view()),
             selection_sha256: [0; 32],
+            native_authority: crate::artifact_inventory::PublicationNativeAuthority::recorded(
+                crate::exact_context::PublicationNativeFacts::maintain(
+                    None,
+                    crate::exact_context::PublicationNativeMaps {
+                        roles: Default::default(),
+                        offers: Default::default(),
+                        native_availability: Default::default(),
+                        input_decisions: Default::default(),
+                    },
+                )
+                .unwrap(),
+            ),
         };
         let wire = serde_json::to_value(&published).unwrap();
         assert!(serde_json::from_value::<CompilerInputRole>(wire.clone()).is_ok());
