@@ -981,7 +981,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                          '$(location toolchains//:exomonad_runtime_tools)/bin/git')
         self.assertNotIn('//exomonad/examples/workspace:shipped_skills', group['resources'])
 
-    def test_actor_lookup_trace_cases_declare_owned_resident_mode(self):
+    def test_actor_compiler_owner_cases_declare_owned_resident_mode(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [
             ('exomonad_actor', 'lib', 'src/lib.rs'),
         ])
@@ -991,16 +991,13 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         metadata['resolve']['nodes'].append({'id': actor['id'], 'deps': []})
         self.metadata.write_text(json.dumps(metadata))
         self.write('exomonad/actor/Cargo.toml', "[package]\nname = 'exomonad-actor'\n")
-        self.write('exomonad/actor/src/lib.rs', '#[test] fn lookup() {}\n')
+        self.write('exomonad/actor/src/lib.rs', '#[test] fn compiler_owner() {}\n')
         result = self.generate('--package', 'exomonad-actor')
         self.assertEqual(result.returncode, 0, result.stderr)
         group = self.rule('exomonad/actor', 'exomonad_actor_unit_tests_all', 'tidepool_rust_test_cases')
         self.assertEqual(group['case_compiler_modes'], {
             name: 'owned-resident'
             for name in [
-                'resident_workbench::request_tests::cancelled_lookup_interrupts_its_started_compiler_request_and_recovers',
-                'resident_workbench::request_tests::lookup_batches_qualified_export_facts_in_one_compiler_request',
-                'resident_workbench::request_tests::lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc',
                 'resident_actor::child_launch::tests::child_factory_requires_clean_uncancelled_preparation_before_runtime_adoption',
                 'resident_workbench::request_tests::durable_sleep_binding_observes_real_retraction_request_and_clean_end',
             ]
