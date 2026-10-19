@@ -9,14 +9,14 @@ is prerequisite source, not a campaign result. No host deployment is authorized.
 
 | Native identity | Model / effort | Checkout / branch | State and outcome |
 | --- | --- | --- | --- |
-| `/root/warm_compiler_campaign/host_inputs` | Sol high | area checkout above | issuer production/test compile and eight focused controls passed; joined runtime and root/transition work remain |
-| `/root/warm_compiler_campaign/host_inputs/selected_root` | `gpt-6.1-sol` / high, fresh | `tidepool-shared-warm-selected-root-20261019`, `feature/shared-warm/selected-root` | reactivated at exact `d33b9a29` for acquired-owner membership slice and bounded bridge proposal |
-| `/root/warm_compiler_campaign/host_inputs/selection_oracle` | `gpt-6.1-sol` / high, fresh | read-only area source | reactivated for independent membership semantics, candidate review and bridge counterexample |
+| `/root/warm_compiler_campaign/host_inputs` | Sol high | area checkout above | joined `c6c7d8ad` production/cfg(test) compile and 17 distinct controls passed; runtime and root/transition work remain |
+| `/root/warm_compiler_campaign/host_inputs/selected_root` | `gpt-6.1-sol` / high, fresh | `tidepool-shared-warm-selected-root-20261019`, `feature/shared-warm/selected-root` | settled `d33b9a29..334ba52b` acquired-owner slice; source/native accepted and full history folded |
+| `/root/warm_compiler_campaign/host_inputs/selection_oracle` | `gpt-6.1-sol` / high, fresh | read-only area source | index and deferred-observation reviews settled; bounded actual-output adoption provenance audit active |
 
 Two descendant grants retained; no deeper descendants permitted. Starts,
 reviewer settlement/reactivation and repaired candidate review were reported to
 the campaign owner. The compiled issuer gate reopened the approved successor
-frontier; both existing descendants are active again. No grant was transferred
+frontier; their actual starts and subsequent settlements were reported. No grant was transferred
 outside this area and no extra descendant was created.
 
 `selected_root` owns `compiler_projection.rs` selected-support representation
@@ -68,6 +68,18 @@ reviewed concrete issuance contract.
   counted controls passed. Receipt: `oracle/deferred-observation-review-a845.txt`
   under the area's evidence directory. Metadata and group recensus still remain;
   no end-to-end speedup is claimed.
+- Acquired-owner successor `d33b9a29..334ba52b` is folded with the above in area
+  `c6c7d8ad5d61d8bef66176301873fc1bfbec2f01`. Its persistent owner counts follow
+  distinct actual payload IDs in every `ViewLease` constructor and removal;
+  `prepare_value_interface_append` no longer rebuilds that owner census.
+  Acquired dormant collisions still use general admission, while sibling-only
+  custody cannot grant membership. First native compilation exposed two missed
+  nested constructors; the repaired recursive audit covers all three literals
+  and the payload-pruning path. Independent review also required and accepted a
+  distinct acquired-Arc/same-ID overlap control. Source and six native controls
+  passed before fold; joined checks below passed afterward. Complete receipt:
+  `oracle/acquired-owner-review-334ba.txt`; initial `fde63` review is explicitly
+  superseded by its recorded E0063 integration defect and audit-scope correction.
 - Accepted C2 amendment: campaign `e2bd2611102566085d0c573568d820a50ed62fb3`,
   inspected directly. The selected row's exact binding and admitted payload is
   its home witness: canonical finalization, checked Val certificate or accepted
@@ -185,9 +197,24 @@ reports and commands are in `deferred-observation-summary.json` and adjacent
 The executable is 110,954,328 bytes, SHA-256
 `3c15f37364484393f35eb17cb297e86aa78f1c437a95aeca429b6c06f3f5ee18`.
 All area clients settled before releasing the host compiler lease to 01D's
-isolated checkout. Its index source candidate `fde63bc1` has source acceptance,
-with a bounded additional acquisition-replacement/overlap test requested before
-final review; native compilation remains owned and observed by that leaf.
+isolated checkout. Repaired `334ba52b` passed production/cfg(test) compilation,
+declared runner resources, and six exact tests after its initial E0063 failure.
+Private leaf evidence is under
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/host-inputs/selected-root/01d`.
+Its 24 generated histories observed 39 restrictions, 33 custody joins, 29 forks,
+49 appends and 75 parent drops. These count the changed membership invariant;
+the remaining full-history scans listed below still occur.
+
+The full joined area checkpoint `c6c7d8ad5d61d8bef66176301873fc1bfbec2f01`
+compiled owning production and cfg(test) targets with `-j1`, exit 0, then executed
+all 17 distinct focused controls from these parcels, passed 17, failed 0, exit 0.
+`joined-c6-summary.json`, `joined-c6-command.json`, `joined-c6-counted.log`,
+`joined-index-observation-compile.log` and 17 per-case reports preserve the exact
+native evidence. Its test executable is 111,342,248 bytes, SHA-256
+`7bbe1acfc3175995fcb577eb437025d72c80cad795eb7386943b7a9cd8c71b47`.
+All host clients settled; both owned daemons remain warm. At the joined terminal,
+area daemon scope current was 1,533,509,632 bytes (peak 5,929,332,736), aggregate
+`build.slice` current 32,575,270,912 bytes, and free space 466,350,837,760 bytes.
 
 Host Buck daemon PID 3873490 belongs to
 `/build.slice/inanna-build-1792399827-3873418.scope`.
@@ -263,8 +290,8 @@ The source-backed deferred design is
 Persistent roots must not hold a strong
 predecessor chain. Even value-only additions can change `HomePresence`, so native
 group equality does not by itself permit reusing Package absence conclusions.
-The acquired-owner collision query in `prepare_value_interface_append` still
-scans all acquired payloads. The approved 01D successor puts a private persistent
+The acquired-owner collision query in `prepare_value_interface_append` now uses
+the folded 01D private persistent
 owner-count index beside `ViewLease.payloads`, counting distinct actual payload
 IDs. It clones the first parent's counts and updates only actual inserted,
 replaced or removed payload rows in the existing issuer loops. The fast-path
@@ -273,7 +300,9 @@ the selected-home census; acquired dormant custody must still prevent the fast
 append. Owned-inputs explicitly reserved the narrow
 `retain_projected_materializations` payload copy/removal subsection for matching
 count updates; its physical frontier/cache/lifetime code stays with that owner.
-Current owned candidate `29d6467c` does not overlap that subsection.
+Current owned candidate `29d6467c` does not overlap that subsection. Native offer
+capture copies the index with the same full payload map; offer issuance builds
+the index inside its existing selected-payload loop.
 The existing full-payload `state.intern`, live-view pruning and restriction scans
 remain explicit; this slice cannot establish total delta-sized append work.
 
@@ -306,14 +335,28 @@ producer, recipient and continuation, then yield. The producer checks recipient
 state and uses `followup_task` for a completed/idle non-root parent; `send_message`
 suffices while it is running. Every command retains its observer until terminal.
 
-The campaign owns the shared transition decision and joined qualification
-admission. Independent acquired-owner implementation and review proceed now at
-exact base `d33b9a29`; both leaves also supply the minimal old/new-owner bridge
-option before bridge code. The implementation leaf configures/builds its own
-checkout serially within the area's admitted 32 GiB disk / 24 GiB memory allowance,
-including the retained area daemon, with actual transition accounting. It must
-compile production and cfg(test) consumers early, run meaningful counted guards,
-then return an exact candidate for independent review/repair and owner fold.
+The campaign owns shared transition decisions and joined runtime qualification.
+The next approved narrow direction is one private `ItemAdmission` result carrying
+the final context C2 and continuation together. The actual output owner F couples
+private inputs, source selection and artifact custody. A receipt must compose
+C0→source C1→value C2 locally; a source-only receipt still leaves value cursor lag.
+The fast case may share pre-admitted E's compiler facts only when owner-issued
+changed rows prove every exact binding, acquisition, decision and permission is
+already held in E, including unchanged selected-home facts. Certified nonabsorption
+uses existing checked recomputation/refusal for that transition, with counted
+work, rather than silently reusing E. Real changed-home selective validation still
+needs the selected-owner census and package-negative dependency facts/index.
+
+The directional same-payload p-versus-f constructor discriminator is not yet a
+confirmed physical history. `CertifiedSourceSelection::admit_current` rejects a
+fresh/retained-Core replacement over an existing physical input, and inherited
+inputs preserve their issuing choices. The reviewer is tracing cursor inputs
+accumulated within a segment against its fixed physical input before claiming a
+complete exclusion or reachable counterexample. Exact source notes are
+`oracle/item-adoption-constructor-audit-a845.txt` and its bounded successor audit.
+No bridge code or worker Ready issuer exists yet. Future native commands need
+fresh aggregate admission; the latest area-only bounded allowance was 12 GiB
+memory, with all prior commands terminal and no extra compiler started.
 Preserve checkouts, scratch registrations, grants, remaining warm folds and exact
 pending commands. This issuer checkpoint is not completion of the host-inputs
 area or campaign.
