@@ -289,6 +289,8 @@ impl Default for PackageOwnerDiagnosticLimits {
 #[derive(Debug, thiserror::Error)]
 pub enum PreparedRuntimeError {
     #[error(transparent)]
+    SourceAdmission(#[from] super::SourceAdmissionError),
+    #[error(transparent)]
     ConstructorMetadata(#[from] tidepool_repr::datacon_table::ConstructorMetadataMismatch),
     #[error(transparent)]
     ConstructorMetadataCollision(#[from] tidepool_repr::datacon_table::DataConCollision),
@@ -531,7 +533,8 @@ impl PreparedRuntimeError {
     #[must_use]
     pub fn stage(&self) -> PreparedFailureStage {
         match self {
-            Self::Parse(_)
+            Self::SourceAdmission(_)
+            | Self::Parse(_)
             | Self::ConstructorMetadata(_)
             | Self::ConstructorMetadataCollision(_)
             | Self::Link(_)
@@ -642,7 +645,7 @@ impl PreparedRuntimeError {
             },
             Self::MissingPreparedNativeImage => PreparedFailureKind::Integrity,
             Self::Cancelled => PreparedFailureKind::Cancelled,
-            Self::Compile(_) => PreparedFailureKind::Rejected,
+            Self::Compile(_) | Self::SourceAdmission(_) => PreparedFailureKind::Rejected,
             // A handler fault is this turn's own failure, so the machine stays reusable.
             Self::Handler { .. } => PreparedFailureKind::Language,
             Self::Install(error) | Self::Run(error) => match error {

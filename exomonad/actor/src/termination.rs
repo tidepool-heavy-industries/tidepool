@@ -265,6 +265,7 @@ pub(crate) struct CompilerWorkTicket {
     control: CompilerWorkControl,
     settled: bool,
     owner: crate::resident_workbench::CompilerCloseOwner,
+    source_claim: Option<crate::resident_workbench::generation_admission::SourceClaim>,
 }
 
 #[derive(Clone, Copy)]
@@ -338,6 +339,7 @@ impl CompilerWorkTicket {
             control,
             settled: false,
             owner,
+            source_claim: None,
         };
         if ticket.owner.register_receipt(registration, admission) {
             return Ok(ticket);
@@ -349,6 +351,14 @@ impl CompilerWorkTicket {
 
     pub(crate) fn control(&self) -> CompilerWorkControl {
         self.control.clone()
+    }
+
+    pub(crate) fn with_source_claim(
+        mut self,
+        claim: Option<crate::resident_workbench::generation_admission::SourceClaim>,
+    ) -> Self {
+        self.source_claim = claim;
+        self
     }
 
     pub(crate) fn run<T>(
@@ -395,6 +405,11 @@ impl CompilerWorkTicket {
     }
 
     fn consume_close(mut self, close: tidepool_runtime::CompilerTransactionClose) {
+        if !close.resources_retired() {
+            if let Some(claim) = self.source_claim.take() {
+                claim.retain_unconfirmed();
+            }
+        }
         *self.control.observation.close.lock() = CompilerWorkClose::Settled(close);
         self.settled = true;
         self.owner.close_settled();
@@ -404,6 +419,9 @@ impl CompilerWorkTicket {
 impl Drop for CompilerWorkTicket {
     fn drop(&mut self) {
         if !self.settled {
+            if let Some(claim) = self.source_claim.take() {
+                claim.retain_unconfirmed();
+            }
             *self.control.observation.close.lock() = CompilerWorkClose::Abandoned;
             self.owner.close_settled();
         }
@@ -440,6 +458,7 @@ impl ActorCompilerCloseOwner {
 pub struct CompilerPreparationClient {
     retained: RetainedActorExit,
     preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
+    source_dependency: Option<crate::resident_workbench::generation_admission::SourceDependency>,
 }
 
 impl CompilerPreparationClient {
@@ -447,12 +466,36 @@ impl CompilerPreparationClient {
         &self,
         claim: impl FnOnce() -> T,
     ) -> Result<T, crate::ResidentActorWorkbenchError> {
-        let shutdown = self.retained.state.requested_shutdown.lock();
-        let admission = self.retained.state.cleanup.lock();
-        if shutdown.is_some() || admission.compiler_admission != CompilerAdmission::Active {
-            return Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed);
+        let claim = || {
+            let shutdown = self.retained.state.requested_shutdown.lock();
+            let admission = self.retained.state.cleanup.lock();
+            if shutdown.is_some() || admission.compiler_admission != CompilerAdmission::Active {
+                return Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed);
+            }
+            Ok(claim())
+        };
+        match &self.source_dependency {
+            Some(dependency) => dependency.with_open_admission(claim)?,
+            None => claim(),
         }
-        Ok(claim())
+    }
+
+    pub(crate) fn with_source_dependency(
+        mut self,
+        dependency: &crate::resident_workbench::generation_admission::SourceDependency,
+    ) -> Self {
+        self.source_dependency = Some(dependency.clone());
+        self
+    }
+
+    pub(crate) fn compiler_scope(
+        &self,
+        owner: crate::capabilities::CompilerOwnerScope,
+    ) -> crate::capabilities::CompilerOwnerScope {
+        match &self.source_dependency {
+            Some(dependency) => owner.with_source_dependency(dependency),
+            None => owner,
+        }
     }
 
     pub(crate) fn preparation(&self) -> Arc<crate::agent_spec::preparation::ToolsetPreparation> {
@@ -491,6 +534,7 @@ impl CompilerPreparationOwner {
         CompilerPreparationClient {
             retained: self.retained.clone(),
             preparation: Arc::clone(&self.preparation),
+            source_dependency: None,
         }
     }
 
@@ -516,7 +560,7 @@ impl CompilerPreparationOwner {
         let client = self.client();
         let owner =
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained.clone());
-        let owner = self.services.with_compiler_owner(owner);
+        let owner = self.services.with_compiler_owner(owner).for_preparation();
         async move {
             let action = owner.scope(operation(client)).await;
             drop(guard);
@@ -537,7 +581,11 @@ impl CompilerPreparationOwner {
         let cleanup = self.cleanup();
         let owner =
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained.clone());
-        let action = self.services.with_compiler_owner(owner).run(action);
+        let action = self
+            .services
+            .with_compiler_owner(owner)
+            .for_preparation()
+            .run(action);
         admission.completed = true;
         drop(admission);
         CompilerPreparationOutcome { action, cleanup }
@@ -566,6 +614,7 @@ impl CompilerPreparationOwner {
             let action = self
                 .services
                 .with_compiler_owner(owner)
+                .for_preparation()
                 .scope(operation)
                 .await;
             admission.completed = true;
@@ -614,7 +663,7 @@ impl CompilerFinalizationGuard {
     ) -> impl std::future::Future<Output = F::Output> {
         let owner =
             crate::resident_workbench::CompilerCloseOwner::ActorFinalization(self.retained.clone());
-        let scope = services.with_compiler_owner(owner);
+        let scope = services.with_compiler_owner(owner).for_cleanup();
         async move { scope.scope(operation).await }
     }
 }
@@ -1107,6 +1156,24 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn compiler_ticket_unknown_close_keeps_source_fence_unconfirmed() {
+        let services = crate::capabilities::WorkbenchServices::new();
+        let retained = super::RetainedActorExit::new();
+        let world = crate::resident_workbench::generation_admission::BootstrapWorld::new(None);
+        let dependency =
+            crate::resident_workbench::generation_admission::SourceDependency::World(world);
+        let scope = services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(retained),
+            )
+            .with_source_dependency(&dependency);
+        let ticket = scope.admit_work().unwrap();
+        ticket.run(|close| close(uncertain_close()));
+        assert!(scope.admit_work().is_err());
+        assert!(dependency.registration_dependency().is_err());
+    }
+
     #[test]
     fn synchronous_preparation_retains_callback_uncertainty_and_primary_action() {
         let mut owner = super::CompilerPreparationOwner::new();
@@ -1278,9 +1345,13 @@ mod tests {
     fn dropping_unpolled_source_scope_closes_admission_without_fabricated_actor() {
         let services = crate::capabilities::WorkbenchServices::new();
         let mut owner = super::CompilerPreparationOwner::new();
-        let captured = services.with_compiler_owner(
-            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.retained.clone()),
-        );
+        let captured = services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                    owner.retained.clone(),
+                ),
+            )
+            .for_preparation();
         let observation = owner.cleanup();
         let operation = owner.scope(async {
             panic!("unpolled action cannot execute");
@@ -1296,9 +1367,13 @@ mod tests {
     async fn cancelled_source_scope_retains_abandonment_and_closes_late_admission() {
         let services = crate::capabilities::WorkbenchServices::new();
         let mut owner = super::CompilerPreparationOwner::new();
-        let captured = services.with_compiler_owner(
-            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.retained.clone()),
-        );
+        let captured = services
+            .with_compiler_owner(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                    owner.retained.clone(),
+                ),
+            )
+            .for_preparation();
         let observation = owner.cleanup();
         let mut operation = Box::pin(owner.scope(async {
             let _ticket = crate::capabilities::CompilerOwnerScope::current()
@@ -1392,6 +1467,7 @@ mod tests {
             .with_compiler_owner(
                 crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.clone()),
             )
+            .for_preparation()
             .admit_work()
             .unwrap()
     }
@@ -1407,6 +1483,7 @@ mod tests {
                 .with_compiler_owner(
                     crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(observer.clone()),
                 )
+                .for_preparation()
                 .shared_preparation(intermediate.clone())
                 .shared_preparation(producer.clone());
             let ticket = owner.admit_work().unwrap();
@@ -1450,6 +1527,7 @@ mod tests {
             .with_compiler_owner(
                 crate::resident_workbench::CompilerCloseOwner::ActorFinalization(observer.clone()),
             )
+            .for_preparation()
             .shared_preparation(producer.clone());
         let ticket = owner.admit_work().unwrap();
         {
@@ -1519,9 +1597,13 @@ mod tests {
         ] {
             for retain_first in [false, true] {
                 let retained = RetainedActorExit::new();
-                let active = services.with_compiler_owner(
-                    crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(retained.clone()),
-                );
+                let active = services
+                    .with_compiler_owner(
+                        crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+                            retained.clone(),
+                        ),
+                    )
+                    .for_preparation();
                 active.admit_work().unwrap().run(|_| ());
                 retained.request_shutdown(ActorTerminal::new(kind, "stop active work"));
                 assert!(active.admit_work().is_err());
@@ -1603,6 +1685,7 @@ mod tests {
             .with_compiler_owner(
                 crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(retained.clone()),
             )
+            .for_preparation()
             .admit_work()
             .is_err()
     }
@@ -1760,6 +1843,7 @@ mod tests {
             .with_compiler_owner(
                 crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.clone())
             )
+            .for_preparation()
             .admit_work()
             .is_err());
     }

@@ -3498,6 +3498,34 @@ where
         }
     }
 
+    /// Select source authority separately from recipient placement. Read-only
+    /// observation and pure continuation evaluation do not claim source work.
+    /// The first actual source action earns one claim for this synchronous
+    /// checkout operation, including its nested installation/publication work.
+    pub fn with_source_admission<R>(
+        &mut self,
+        admission: Result<Option<super::RuntimeSourceAdmission>, super::SourceAdmissionError>,
+        action: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let (admission, refusal) = match admission {
+            Ok(admission) => (admission, None),
+            Err(error) => (None, Some(error)),
+        };
+        let previous_admission = std::mem::replace(&mut self.state.source_admission, admission);
+        let previous_refusal = std::mem::replace(&mut self.state.source_refusal, refusal);
+        let previous_claim = self.state.source_claim.take();
+        let previous_active = std::mem::replace(&mut self.state.source_context_active, true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self)));
+        self.state.source_claim = previous_claim;
+        self.state.source_refusal = previous_refusal;
+        self.state.source_admission = previous_admission;
+        self.state.source_context_active = previous_active;
+        match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     /// Observe the interpreters installed on this exact machine. The caller
     /// holds the session checkout; this does not dispatch an effect or grant
     /// authority over any handler-owned resource.
@@ -6464,12 +6492,28 @@ where
         self.settle_dropped_custody();
         self.state.mint_isolated_scope_with_lease()
     }
+    pub fn mint_notebook_scope_with_lease(
+        &mut self,
+        prerequisite: Option<super::RuntimeSourceAdmission>,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.mint_notebook_scope_with_lease(prerequisite)
+    }
     pub fn adopt_initial_notebook_scope(
         &mut self,
         scope: ScopeId,
     ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
         self.settle_dropped_custody();
         self.state.adopt_initial_notebook_scope(scope)
+    }
+    pub fn adopt_initial_notebook_scope_with_source(
+        &mut self,
+        scope: ScopeId,
+        prerequisite: Option<super::RuntimeSourceAdmission>,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
+        self.settle_dropped_custody();
+        self.state
+            .adopt_initial_notebook_scope_with_source(scope, prerequisite)
     }
 
     /// The persistent binding names visible at `scope`: its own mutable frame over
@@ -7056,6 +7100,10 @@ where
             scope,
             resolved,
         } = admission;
+        let _source_claim = self
+            .state
+            .admit_source_work_in(scope)
+            .map_err(SessionError::from)?;
         let (metadata, sites, prepared, certification) = code.into_parts();
         let (program, source_keys) = if let Some(resolved) = resolved {
             let (target, demanded) = match images {
@@ -9659,6 +9707,63 @@ mod authored_publication_tests {
         })
         .unwrap();
         (root, session)
+    }
+
+    #[test]
+    fn source_fence_keeps_precompiled_plain_execution_and_refuses_ready_install() {
+        let (_root, mut session) = startup_session();
+        let scope = session.mint_isolated_scope_with_lease().unwrap();
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: scope.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let entry = session
+            .prepare_startup_entry_installed(
+                startup_code_with_value(false, Some(11)),
+                StartupCompileIdentity::Fixture,
+            )
+            .unwrap();
+        let ready = session
+            .snapshot_run_prepared(
+                startup_code_with_value(false, Some(22)),
+                PendingPreparedMode::Value,
+                None,
+            )
+            .unwrap()
+            .compile_off_checkout()
+            .unwrap();
+        let fence = scope.source_admission().fence().unwrap();
+        let outcome = session
+            .with_source_admission(Ok(Some(scope.source_admission().clone())), |session| {
+                tidepool_testing::with_settlement(|settlement| {
+                    session.run_startup_entry(entry, settlement)
+                })
+            })
+            .unwrap();
+        let ResidentOutcome::Completed { result, .. } = outcome else {
+            panic!("precompiled plain result must settle")
+        };
+        assert_eq!(result.to_json(), serde_json::json!(11));
+        assert_eq!(
+            fence.pending_claims(),
+            0,
+            "plain execution needs no fresh source authority"
+        );
+        let refused =
+            session.with_source_admission(Ok(Some(scope.source_admission().clone())), |session| {
+                tidepool_testing::with_settlement(|settlement| {
+                    session.revalidate_and_run_prepared(ready, settlement)
+                })
+            });
+        assert!(matches!(
+            refused,
+            Err(ResidentError::Prepared(
+                PreparedRuntimeError::SourceAdmission(_)
+            ))
+        ));
+        assert!(session.state.scope_tree().is_live(scope.scope()));
     }
 
     #[test]

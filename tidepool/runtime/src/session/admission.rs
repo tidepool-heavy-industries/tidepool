@@ -590,8 +590,12 @@ pub(super) struct RuntimeAdmissionOwner {
     identity: uuid::Uuid,
     epoch: std::sync::atomic::AtomicU64,
     retired: parking_lot::Mutex<Vec<ScopeId>>,
-    lexical_leases:
-        parking_lot::Mutex<BTreeMap<ScopeId, std::sync::Weak<RuntimeLexicalScopeLease>>>,
+    lexical_leases: parking_lot::Mutex<BTreeMap<ScopeId, RuntimeLexicalScopeRecord>>,
+}
+
+struct RuntimeLexicalScopeRecord {
+    lease: Option<std::sync::Weak<RuntimeLexicalScopeLease>>,
+    source_admission: super::RuntimeSourceAdmission,
 }
 
 impl RuntimeAdmissionOwner {
@@ -617,8 +621,12 @@ pub struct RuntimeLexicalScopeLease {
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
     scope: ScopeId,
+    source_admission: super::RuntimeSourceAdmission,
 }
 impl RuntimeLexicalScopeLease {
+    pub fn source_admission(&self) -> &super::RuntimeSourceAdmission {
+        &self.source_admission
+    }
     pub fn scope(&self) -> ScopeId {
         self.scope
     }
@@ -1964,24 +1972,95 @@ impl PersistentSession {
         &self,
         scope: ScopeId,
     ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
+        self.prepared_lexical_scope_lease_with_source(scope, self.source_admission.clone())
+    }
+
+    pub(super) fn prepared_lexical_scope_lease_with_source(
+        &self,
+        scope: ScopeId,
+        prerequisite: Option<super::RuntimeSourceAdmission>,
+    ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
         let mut leases = self.admission_owner().lexical_leases.lock();
-        if let Some(existing) = leases.get(&scope) {
+        if let Some(existing) = leases.get(&scope).and_then(|record| record.lease.as_ref()) {
             let lease = existing.upgrade().ok_or(SessionError::DeadScope(scope))?;
             if lease.owner_epoch != self.admission_owner().epoch() {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
             return Ok(lease);
         }
+        let source_admission = leases
+            .get(&scope)
+            .map(|record| record.source_admission.clone())
+            .unwrap_or_else(|| super::RuntimeSourceAdmission::new(scope, prerequisite));
         let lease = Arc::new(RuntimeLexicalScopeLease {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
             scope,
+            source_admission: source_admission.clone(),
         });
-        leases.insert(scope, Arc::downgrade(&lease));
+        leases.insert(
+            scope,
+            RuntimeLexicalScopeRecord {
+                lease: Some(Arc::downgrade(&lease)),
+                source_admission,
+            },
+        );
         Ok(lease)
+    }
+
+    pub(super) fn source_admission_in(
+        &self,
+        scope: ScopeId,
+    ) -> Option<super::RuntimeSourceAdmission> {
+        self.admission_owner()
+            .lexical_leases
+            .lock()
+            .get(&scope)
+            .map(|record| record.source_admission.clone())
+    }
+
+    pub(super) fn prepared_notebook_scope_lease(
+        &self,
+        scope: ScopeId,
+        prerequisite: Option<super::RuntimeSourceAdmission>,
+    ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
+        // An unleased captured scope has custody provenance, but has not yet
+        // selected its own executable world. Only initial notebook adoption
+        // replaces that inherited admission with the actual issuer's gate.
+        {
+            let mut scopes = self.admission_owner().lexical_leases.lock();
+            if scopes
+                .get(&scope)
+                .is_some_and(|record| record.lease.is_none())
+            {
+                scopes.remove(&scope);
+            }
+        }
+        self.prepared_lexical_scope_lease_with_source(scope, prerequisite)
+    }
+
+    pub(super) fn inherit_source_admission(&self, source: ScopeId, target: ScopeId) {
+        let source_admission = self
+            .source_admission_in(source)
+            .or_else(|| self.source_admission.clone());
+        if let Some(source_admission) = source_admission {
+            self.admission_owner().lexical_leases.lock().insert(
+                target,
+                RuntimeLexicalScopeRecord {
+                    lease: None,
+                    source_admission,
+                },
+            );
+        }
+    }
+
+    pub(super) fn retire_source_admission(&self, scope: ScopeId) {
+        if let Some(record) = self.admission_owner().lexical_leases.lock().remove(&scope) {
+            record.source_admission.retire_scope(scope);
+        }
     }
     /// Validate a retained placement without minting another scope or changing
     /// its custody. Owner transfer invalidates an unconsumed placement grant.
@@ -2286,6 +2365,8 @@ impl PersistentSession {
         &mut self,
         public_scope: ScopeId,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
+        let _source_claim = self.admit_source_work_in(public_scope)?;
+
         let store = self.held_admission_store()?;
         super::generation_lease::requested_end(self.val_gen(), 1)?;
         self.reap_admission_leases();
@@ -2311,11 +2392,7 @@ impl PersistentSession {
             super::complete_native_transition(admission)?;
             private_scope
         };
-        let scope_lease = Arc::new(RuntimeLexicalScopeLease {
-            owner: self.admission_owner().clone(),
-            owner_epoch: self.admission_owner().epoch(),
-            scope: private_scope,
-        });
+        let scope_lease = self.prepared_lexical_scope_lease(private_scope)?;
         let view = self
             .compile_view_in(private_scope)
             .expect("fresh detached scope has a library")
@@ -2488,6 +2565,8 @@ impl PersistentSession {
         purpose: RuntimeCellPurpose,
         compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        let _source_claim = self.admit_source_work_in(scope)?;
+
         let store = self.held_admission_store()?;
         super::generation_lease::requested_end(self.val_gen(), 1)?;
         self.reap_admission_leases();

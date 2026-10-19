@@ -120,6 +120,10 @@ pub(crate) struct ChildSessionSeed {
 #[derive(Debug, thiserror::Error)]
 pub enum ActorStartCaptureError {
     #[error(transparent)]
+    SourceAdmission(
+        #[from] crate::resident_workbench::generation_admission::GenerationAdmissionError,
+    ),
+    #[error(transparent)]
     Session(#[from] tidepool_runtime::session::SessionError),
     #[error(transparent)]
     Resident(#[from] tidepool_runtime::session::ResidentError),
@@ -233,6 +237,7 @@ impl ResidentActorStart {
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
+        let _source_claim = actor_context.source_dependency().claim()?;
         let session_id = actor_context.placement.session;
         let parent_actor = actor_context.actor;
         let captured = matches!(&context, SpawnContextWire::CapturedSpawn(_));
@@ -289,6 +294,7 @@ impl ResidentActorStart {
             },
         )
         .with_capabilities(crate::ActorCapabilities::default().with_effect_keys(keys.clone()))
+        .admit_independent_world()
         .with_creator(parent_actor)
         .with_checkpoint_token(checkpoint)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades(&facades))
@@ -331,6 +337,7 @@ impl ResidentActorStart {
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
+        let _source_claim = actor_context.source_dependency().claim()?;
         let ActorStartRequest {
             model_permissions,
             label,
@@ -381,6 +388,7 @@ impl ResidentActorStart {
             },
         )
         .with_capabilities(capabilities)
+        .admit_dependent_world(actor_context.source_dependency().selected_dependency()?)
         .with_creator(parent_actor)
         .with_supervisor_parent(parent_actor)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades(&facades));

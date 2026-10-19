@@ -2219,9 +2219,11 @@ mod tests {
     fn pending_compiler_close_blocks_context_commit_without_rewriting_completed_action() {
         let services = crate::capabilities::WorkbenchServices::new();
         let control = WorkbenchExecutionControl::untracked();
-        let owner = services.with_compiler_owner(
-            crate::resident_workbench::CompilerCloseOwner::Hosted(control.clone()),
-        );
+        let owner = services
+            .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Hosted(
+                control.clone(),
+            ))
+            .for_preparation();
         let ticket = owner.admit_work().unwrap();
         let response = Ok(crate::KernelStep::Continue(WorkbenchResponse {
             publication: None,

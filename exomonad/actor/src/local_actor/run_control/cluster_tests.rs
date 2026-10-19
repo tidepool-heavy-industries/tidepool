@@ -229,13 +229,18 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
                 other_control.preparation_client().producer(),
             ),
         )
+        .for_preparation()
         .admit_work()
         .unwrap();
     let client = control.preparation_client();
     let observer = crate::RetainedActorExit::new();
     let owner = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(observer.clone())
         .shared_preparation(client.producer());
-    let ticket = services.with_compiler_owner(owner).admit_work().unwrap();
+    let ticket = services
+        .with_compiler_owner(owner)
+        .for_preparation()
+        .admit_work()
+        .unwrap();
     let observed_cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let physical_cancellation = observed_cancellation.clone();
     let (started, entered) = tokio::sync::oneshot::channel();
@@ -271,6 +276,7 @@ async fn run_seal_cancels_shared_physical_work_before_cleanup_confirmation() {
         .with_compiler_owner(
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(client.producer())
         )
+        .for_preparation()
         .admit_work()
         .is_err());
     assert!(!control.shared_cleanup.observation().is_confirmed());
