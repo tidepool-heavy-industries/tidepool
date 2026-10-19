@@ -20,7 +20,7 @@ import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import SourceBootFixtureSupport (hasIntResultLiteral, withScratch)
-import System.Directory (copyFile, doesFileExist, getPermissions, setPermissions, listDirectory, Permissions(..))
+import System.Directory (copyFile, createDirectory, doesFileExist, getPermissions, setPermissions, listDirectory, Permissions(..))
 import System.FilePath ((</>), takeFileName)
 import Test.QuickCheck
 import Tidepool.CompilerProducts
@@ -181,6 +181,19 @@ checkedPublicModuleHistories = do
       writeTarget work
       prependDependency work pragma
       refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldUntrackedOptions
+  forM_ [("-ddump-parsed -ddump-to-file -dumpdir ",WorldSideOutputs)
+        ,("-fwrite-ide-info -hiedir ",WorldSideOutputs)
+        ,("-hidir ",WorldOutputPolicyChanged)
+        ,("-tmpdir ",WorldOutputPolicyChanged)
+        ,("-ddump-file-prefix ",WorldOutputPolicyChanged)] $ \(flags,reason) ->
+    withRequestFixture $ \_ request work -> do
+      writeTarget work
+      let ambient = work </> "ambient-outputs"
+      createDirectory ambient
+      prependDependency work ("{-# OPTIONS_GHC " ++ flags ++ show ambient ++ " #-}")
+      refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" reason
+      outputs <- listDirectory ambient
+      unless (null outputs) (fail ("world module admission wrote untracked outputs: " ++ show outputs))
   forM_ ["-fbyte-code","-fobject-code"] $ \backendFlag ->
     withRequestFixture $ \_ request work -> do
       writeTarget work

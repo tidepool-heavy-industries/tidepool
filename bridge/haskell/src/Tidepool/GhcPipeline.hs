@@ -122,6 +122,7 @@ import GHC.Driver.Session
   , packageFlagsChanged
   , PackageFlag(..), PackageArg(..), ModRenaming(..)
   , PackageDBFlag(..), PkgDbRef(..), ParMakeCount(..) )
+import GHC.Utils.TmpFs (TempDir(..))
 import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
 import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
 import qualified Data.Set as Set
@@ -676,7 +677,8 @@ checkedPublicModuleEvidence :: CheckedPublicModuleResult -> DependencyEvidence
 checkedPublicModuleEvidence (CheckedPublicModuleResult _ _ evidence _) = evidence
 
 data WorldModulePolicy = WorldLiterateSource | WorldPreprocessing
-  | WorldUntrackedOptions | WorldCodeGeneration | WorldSearchInputsChanged | WorldUncapturedDependency | WorldPrivateModule
+  | WorldUntrackedOptions | WorldCodeGeneration | WorldSideOutputs | WorldOutputPolicyChanged
+  | WorldSearchInputsChanged | WorldUncapturedDependency | WorldPrivateModule
   deriving (Eq, Show)
 
 data WorldModulePolicyFailure = WorldModulePolicyFailure FilePath WorldModulePolicy
@@ -2531,6 +2533,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     when (checksPublicModule selection) $
       forM_ [summary | ModuleNode _ summary <- mgModSummaries' modGraphDownsweep] $ \summary -> liftIO $ do
         requireWorldModuleFlags (ms_hspp_file summary) (ms_hspp_opts summary)
+        requireWorldOutputPolicy (ms_hspp_file summary) (hsc_dflags previous) (ms_hspp_opts summary)
         when (isReservedSessionModuleName (moduleNameString (ms_mod_name summary)))
           (throwIO (WorldModulePolicyFailure (ms_hspp_file summary) WorldPrivateModule))
     forM_ (pvExactScope variant) $ \scope -> do
@@ -6033,7 +6036,8 @@ withWorldModulePreprocessing selection path action
     install = do
       env <- getSession
       liftIO (requireWorldModuleFlags path (hsc_dflags env))
-      let original = runPhaseHook (hsc_hooks env)
+      let admitted = hsc_dflags env
+          original = runPhaseHook (hsc_hooks env)
           delegate :: forall value. TPhase value -> IO value
           delegate phase = case original of
             Nothing -> runPhase phase
@@ -6045,12 +6049,13 @@ withWorldModulePreprocessing selection path action
             T_HsPp _ _ source _ -> throwIO (WorldModulePolicyFailure source WorldPreprocessing)
             T_FileArgs sourceEnv source -> do
               requireWorldModuleFlags source (hsc_dflags sourceEnv)
+              requireWorldOutputPolicy source admitted (hsc_dflags sourceEnv)
               result@(effective,_,_) <- delegate phase
               requireWorldModuleFlags source effective
-              let initial = hsc_dflags sourceEnv
-              unless (importPaths effective == importPaths initial
-                  && workingDirectory effective == workingDirectory initial
-                  && not (packageFlagsChanged initial effective))
+              requireWorldOutputPolicy source admitted effective
+              unless (importPaths effective == importPaths admitted
+                  && workingDirectory effective == workingDirectory admitted
+                  && not (packageFlagsChanged admitted effective))
                 (throwIO (WorldModulePolicyFailure source WorldSearchInputsChanged))
               pure result
             _ -> delegate phase
@@ -6070,6 +6075,26 @@ requireWorldModuleFlags path flags = do
   -- before make can invoke a compiler or read uncaptured foreign headers.
   when (backendGeneratesCode (backend flags))
     (throwIO (WorldModulePolicyFailure path WorldCodeGeneration))
+  when (any (`gopt` flags) [Opt_WriteHie,Opt_DumpToFile,Opt_Hpc])
+    (throwIO (WorldModulePolicyFailure path WorldSideOutputs))
+
+-- Compare with the operation's fixed admitted policy, not a source environment
+-- that may already contain another module's options. GHC sets dumpPrefix from
+-- each filename itself; only the explicit override belongs to source policy.
+requireWorldOutputPolicy :: FilePath -> DynFlags -> DynFlags -> IO ()
+requireWorldOutputPolicy path admitted effective =
+  unless (policy effective == policy admitted)
+    (throwIO (WorldModulePolicyFailure path WorldOutputPolicyChanged))
+  where
+    policy flags =
+      ( (hiDir flags,objectDir flags,hieDir flags,stubDir flags,dumpDir flags,hpcDir flags,temp flags)
+      , (outputFile_ flags,dynOutputFile_ flags,outputHi flags,dynOutputHi flags,dumpPrefixForce flags)
+      , (hiSuf_ flags,hieSuf flags,objectSuf_ flags,dynHiSuf_ flags,dynObjectSuf_ flags,hcSuf flags)
+      , map (`gopt` flags)
+          [Opt_WriteInterface,Opt_WriteIfSimplifiedCore,Opt_WriteHie,Opt_DumpToFile,Opt_Hpc
+          ,Opt_KeepTmpFiles,Opt_KeepHscppFiles,Opt_KeepHcFiles,Opt_KeepSFiles,Opt_KeepLlvmFiles
+          ,Opt_KeepHiFiles,Opt_KeepOFiles,Opt_BuildDynamicToo])
+    temp flags = case tmpDir flags of TempDir directory -> directory
 
 -- Make owns temporary interface cleanup. Every candidate view is staged in
 -- this private request directory, retained through deferred target checking,

@@ -133,6 +133,10 @@ the existing completion owner, retaining both the primary and cleanup failures.
 The masked final publication performs only preforced owner writes. Published
 backing files remain with their actual world/worker owner until safe release;
 dropping an index entry does not establish release of global GHC state.
+Effective source flags preserve the operation's fixed output policy, including
+directories, explicit filenames and suffixes. World queries refuse dump files,
+IDE outputs and coverage files before load; these are not captured world inputs
+or implicitly owned products.
 
 Exact-scope manifests use strict `TPEXACTSCOPE` version 16 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization
