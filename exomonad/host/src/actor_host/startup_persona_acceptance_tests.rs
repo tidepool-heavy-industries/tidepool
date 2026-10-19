@@ -538,6 +538,86 @@ async fn persona_quickstart_displays_lookup_and_rejects_native_io() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn authored_persona_directory_reads_leave_later_cells_and_lookup_usable() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+        configure_persona(config, "AgentSpec.agentSpec", |workspace, _| {
+            let notes = workspace.join(".exomonad/state/notes");
+            std::fs::create_dir_all(&notes).unwrap();
+            std::fs::write(notes.join("history-seed.md"), "retained note\n").unwrap();
+        });
+    })
+    .await
+    .unwrap();
+    host.run_scenario(|host| Box::pin(async move {
+        let startup = host.context.forest
+            .initial_context_observation(host.context.actor.identity())
+            .await.unwrap();
+        assert_eq!(startup.state, InitialContextState::Published);
+        let seed = startup.result.as_ref().unwrap();
+        assert_eq!(seed.sections.len(), 1);
+        for (_, memory) in PERSONA_MEMORIES {
+            assert!(seed.sections[0].body.contains(memory), "{}", seed.sections[0].body);
+        }
+
+        host.input("Read the notes and memory directories").await.unwrap();
+        let mut pending = VecDeque::new();
+        let root = harness::model::AgentPath("/root".into());
+        let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+        super::startup_context_acceptance_tests::assert_request_user_texts(
+            host, host.context.actor.identity(), &first.request,
+            &[seed.rendered.as_str(), "Read the notes and memory directories"],
+        ).await;
+        let notes_operation = first.operation("persona-notes-list");
+        let memory_operation = first.operation("persona-memory-list");
+        first.sync_calls_named(&[
+            ("persona-notes-list", "haskell", "import qualified Tidepool.Effects.Authored as Files\nlisting <- Files.listDirectory \".exomonad/state/notes\"\ndisplay listing"),
+            ("persona-memory-list", "haskell", "import qualified Tidepool.Effects.Authored as Files\nmem <- Files.listDirectory \".exomonad/state/memory\"\ndisplay mem"),
+        ]);
+        let after_reads = host.while_operation_succeeds(
+            &notes_operation,
+            host.while_operation_succeeds(
+                &memory_operation,
+                next_hosted_script_round(&mut requests, &mut pending, &root),
+            ),
+        ).await.unwrap().unwrap();
+        let origin = harness::store::actor_output::ActorOutputOrigin {
+            run: host.runtime.run_identity().to_owned(),
+            native_actor: host.context.actor.identity().id.0,
+            incarnation: host.context.actor.identity().incarnation.0,
+        };
+        let notes = retained_committed_display_text(
+            &host.runtime.store(), &origin, &after_reads.settled_output("persona-notes-list"));
+        assert!(notes.starts_with("Right ") && notes.contains("history-seed.md"), "{notes}");
+        let memory = retained_committed_display_text(
+            &host.runtime.store(), &origin, &after_reads.settled_output("persona-memory-list"));
+        assert!(memory.starts_with("Right ") && memory.contains("persona.md")
+            && memory.contains("human.md") && memory.contains("curiosities.md"), "{memory}");
+
+        let trivial_operation = after_reads.operation("persona-later-trivial");
+        after_reads.sync_call_named("persona-later-trivial", "haskell", "display (1 + 1 :: Int)");
+        let after_trivial = host.while_operation_succeeds(
+            &trivial_operation,
+            next_hosted_script_round(&mut requests, &mut pending, &root),
+        ).await.unwrap();
+        assert_eq!(retained_committed_display_text(
+            &host.runtime.store(), &origin, &after_trivial.settled_output("persona-later-trivial")), "2");
+
+        let installation = host.context.observer.installation(host.context.actor.identity()).await;
+        let lookup = super::test_campaign::dispatch_lookup(
+            installation.policy.as_ref(), &["getRuntimeInfo"],
+        ).await;
+        assert_eq!(lookup["status"], "committed", "{lookup}");
+        let found = lookup["items"][0]["output"].as_str().unwrap();
+        assert!(found.contains("getRuntimeInfo") && found.contains("[available]")
+            && !found.contains("no match:"), "{found}");
+        after_trivial.finish();
+    })).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn persona_snapshot_memory_examples_preserve_versions_errors_and_context() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);
