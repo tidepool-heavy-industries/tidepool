@@ -76,10 +76,15 @@ The adjacent actual compiler-producer audit also confirmed facade materializatio
 outside mutable runtime admission: continuation-only capture_boundary invokes
 capture_spawn/capture_decoded, whose local source claim precedes
 surface.materialize/select_exact_exports compiler work and drops before outer
-END. The mutation hook alone cannot retain that obligation. Campaign has the
-bounded seam-extension request: notify the same scoped ticket collector at the
-actual facade producer, or explicitly hand that capture claim to the same owner.
-No eager refusal of every boundary-capture operation is acceptable.
+END. The mutation hook alone cannot retain that obligation. Campaign approved
+closing this same category at the actual facade producer. The leaf is moving
+source-bearing facade operations behind owning ResidentSession wrappers and
+privatizing the object producer methods, with deliberate caller migration.
+The same ticket hook runs before actual compilation after empty/unchanged
+selection returns, sharing one earned source claim across immutable and mutable
+producers. A joined nonempty/narrow facade-producer control is required alongside
+the binding controls. No eager refusal of every boundary-capture operation is
+acceptable.
 No R1 source has yet been folded into the area branch.
 The suspected pre-initial retained-lease/parent-gate alias has no demonstrated
 production path: retention mints a separate detached scope, and actual child
