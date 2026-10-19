@@ -3596,6 +3596,21 @@ impl PersistentSession {
             return Err(SessionError::StaleStagedDeclaration);
         }
         self.validate_lexical_scope_lease(scope, &execution.scope_lease)?;
+        let original_source = match &execution.compiler_basis {
+            PrivateExecutionCompilerBasis::World { published, .. } => {
+                &published.base.original_source
+            }
+            PrivateExecutionCompilerBasis::Finite { .. } => {
+                return Err(SessionError::WorldCellRequiresServicePreparation)
+            }
+        };
+        let transaction = self
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?;
+        if !Arc::ptr_eq(&transaction.source, original_source) {
+            return Err(super::SourceAdmissionError::ForeignTransaction.into());
+        }
         self.admit_source_work_in(scope)?;
         let store = self.held_admission_store()?;
         let (world, private_key) = execution.world_basis()?;
