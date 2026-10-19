@@ -654,3 +654,15 @@ mod context_constructor_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod nominal_wire_tests {
+    #[test]
+    fn nominal_actor_effect_keys_roundtrip_without_fabricating_legacy_keys() {
+        for key in exomonad_tool::ActorEffectKey::ALL {
+            let wire = super::ActorEffectKeyWire::try_from(*key).unwrap();
+            assert_eq!(exomonad_tool::ActorEffectKey::from(wire), *key);
+        }
+        assert!(super::ActorEffectKeyWire::try_from(exomonad_tool::ActorEffectKey::Forks).is_err());
+    }
+}

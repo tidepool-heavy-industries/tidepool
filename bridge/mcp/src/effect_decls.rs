@@ -344,3 +344,24 @@ pub fn effect_documentation_for(key: exomonad_tool::ActorEffectKey) -> Option<Ef
     }
     effect_documentation(&declaration)
 }
+
+#[cfg(test)]
+mod documentation_tests {
+    #[test]
+    fn nominal_docs_preserve_families_and_curated_surfaces() {
+        use exomonad_tool::{ActorEffectKey, ModelFamily};
+        let openai = ActorEffectKey::ModelCallOpenAI;
+        let deepseek = ActorEffectKey::ModelCallDeepSeek;
+        assert_eq!(openai.model_permission().unwrap().family, ModelFamily::OpenAI);
+        assert_eq!(deepseek.model_permission().unwrap().family, ModelFamily::DeepSeek);
+        assert_ne!(openai.nominal_identity(), deepseek.nominal_identity());
+        assert!(super::effect_documentation_for(openai).is_some());
+        assert!(super::effect_documentation_for(deepseek).is_some());
+        let commands = super::effect_documentation_for(ActorEffectKey::Commands).unwrap();
+        assert!(commands.operations.iter().any(|operation| operation.name == "run"));
+        assert!(!commands.operations.iter().any(|operation| operation.name == "CommandStartWith"));
+        let fs = super::effect_documentation_for(ActorEffectKey::FsRead).unwrap();
+        assert!(!fs.description.is_empty());
+        assert!(super::effect_documentation_for(ActorEffectKey::Replies).is_none());
+    }
+}
