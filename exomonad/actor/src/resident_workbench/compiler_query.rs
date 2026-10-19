@@ -19,6 +19,13 @@
 //! enters the compiler path; the remaining verbs reuse the admitted inspection
 //! batch already owned by the structured-introspection path instead of
 //! starting a second compiler attempt.
+//!
+//! `rowFit` is the one verb whose plan depends on the held session: a local
+//! binder (empty defining module) and a reference into a session module this
+//! view still carries both resolve in the executing scope, while a reference
+//! into a generation this view has replaced is answered `FitUnknown` from
+//! held state. It must not fall through to an enumerated browse, which would
+//! read whatever binding now holds the same spelling.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -107,10 +114,18 @@ impl CompilerQuery {
         }
     }
 
-    /// `currentScopeView` reads the snapshot the caller already holds; it must
-    /// never admit compiler work.
-    pub(super) fn plans_compiler_work(&self) -> bool {
-        !matches!(self, Self::CurrentScopeView)
+    /// Whether this verb still has a question for the compiler. A `rowFit`
+    /// reference into a session module this view no longer carries is
+    /// answered `Fit::Unknown` from held state; submitting it to an enumerated
+    /// browse would read whatever binding now holds the same spelling.
+    pub(super) fn plans_compiler_work(&self, live: &LiveSessionModules) -> bool {
+        match self {
+            Self::CurrentScopeView => false,
+            Self::RowFit { identifier, .. } => {
+                !matches!(row_fit_target(identifier, live), RowFitTarget::StaleSessionModule)
+            }
+            _ => true,
+        }
     }
 
     /// The probes compile a generated expression; every other verb asks a
@@ -122,7 +137,10 @@ impl CompilerQuery {
         )
     }
 
-    /// The exact queries submitted for this verb. `currentScopeView` has none.
+    /// What this verb needs from the exact view the actor holds. Planning is
+    /// pure: it reads the view's live session module identities and never the
+    /// compiler's source, so a verb answered from held state can never start a
+    /// compiler attempt.
     ///
     /// Enumeration and `rowFit` currently reuse the admitted inspection batch
     /// (`ScopeBrowse`, `Browse`), which compiles its inspection module.
@@ -142,27 +160,119 @@ impl CompilerQuery {
     ///
     /// `rowFit` reads availability from the browsed entries because the Lookup
     /// excision removes the keyed `ExactName` query.
-    pub(super) fn inspection_queries(&self) -> Vec<InspectionQuery> {
+    pub(super) fn plan(
+        &self,
+        live: &LiveSessionModules,
+        provenance: &ScopeProvenance,
+    ) -> CompilerPlan {
         match self {
-            Self::CurrentScopeView => Vec::new(),
+            Self::CurrentScopeView => {
+                CompilerPlan::Answered(CompilerQueryAnswer::ScopeView(provenance.clone()))
+            }
             Self::ScopeBindings { .. } => {
-                vec![InspectionQuery::ScopeBrowseBounded(QUERY_RESULT_LIMIT)]
+                CompilerPlan::Queries(vec![InspectionQuery::ScopeBrowseBounded(
+                    QUERY_RESULT_LIMIT,
+                )])
             }
-            Self::ModuleExports { module, .. } => vec![InspectionQuery::BrowseBounded {
-                module: module.clone(),
-                expanded: false,
-                budget: QUERY_RESULT_LIMIT,
-            }],
-            Self::RowFit { identifier, .. } => vec![row_fit_query(identifier)],
+            Self::ModuleExports { module, .. } => CompilerPlan::Queries(vec![
+                InspectionQuery::BrowseBounded {
+                    module: module.clone(),
+                    expanded: false,
+                    budget: QUERY_RESULT_LIMIT,
+                },
+            ]),
+            Self::RowFit { identifier, .. } => match row_fit_target(identifier, live) {
+                RowFitTarget::CurrentScope => {
+                    CompilerPlan::Queries(vec![InspectionQuery::ScopeBrowse])
+                }
+                RowFitTarget::Module(module) => CompilerPlan::Queries(vec![
+                    InspectionQuery::Browse {
+                        module,
+                        expanded: true,
+                    },
+                ]),
+                RowFitTarget::StaleSessionModule => CompilerPlan::Answered(
+                    CompilerQueryAnswer::Fit(Fit {
+                        availability: FitAvailability::Unknown,
+                        identifier: identifier.clone(),
+                        provenance: provenance.clone(),
+                    }),
+                ),
+            },
             Self::TypeOfExpression { expression, .. } => {
-                vec![InspectionQuery::TypeOf(expression.clone())]
+                CompilerPlan::Queries(vec![InspectionQuery::TypeOf(expression.clone())])
             }
-            Self::TypeSearch { pattern, .. } => vec![InspectionQuery::TypeSearchBounded {
-                pattern: pattern.clone(),
-                budget: QUERY_RESULT_LIMIT,
-            }],
+            Self::TypeSearch { pattern, .. } => {
+                CompilerPlan::Queries(vec![InspectionQuery::TypeSearchBounded {
+                    pattern: pattern.clone(),
+                    budget: QUERY_RESULT_LIMIT,
+                }])
+            }
         }
     }
+}
+
+/// The session modules an exact view can still name.
+///
+/// `library` is the declaration module this view imports. `injected_values`
+/// includes every value module the compile loads, retained shadowed
+/// generations among them, because an already-compiled reference may still be
+/// loaded through them. Both come from the runtime's own compile view rather
+/// than from re-deriving a generation: `next_value_generation` is the
+/// generation a *future* compile would mint, so it is one past the live
+/// declaration module and says nothing about which value generations remain
+/// loadable.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct LiveSessionModules {
+    library: Option<tidepool_repr::SessionModule>,
+    injected_values: Vec<tidepool_repr::SessionModule>,
+}
+
+impl LiveSessionModules {
+    fn of(view: &tidepool_runtime::session::SessionCompileView) -> Self {
+        Self {
+            library: view.library(),
+            injected_values: view.injected_values().to_vec(),
+        }
+    }
+
+    #[cfg(test)]
+    fn fixture(
+        library: Option<tidepool_repr::SessionModule>,
+        injected_values: Vec<tidepool_repr::SessionModule>,
+    ) -> Self {
+        Self {
+            library,
+            injected_values,
+        }
+    }
+
+    fn serves(&self, module: tidepool_repr::SessionModule) -> bool {
+        match module.kind {
+            tidepool_repr::SessionModuleKind::Lib => self.library == Some(module),
+            tidepool_repr::SessionModuleKind::Val => self.injected_values.contains(&module),
+        }
+    }
+}
+
+/// What one verb needs from the compiler. `Answered` is decided by the held
+/// view alone; `Queries` is one admitted inspection batch.
+pub(super) enum CompilerPlan {
+    Answered(CompilerQueryAnswer),
+    Queries(Vec<InspectionQuery>),
+}
+
+/// Where a `rowFit` reference resolves.
+enum RowFitTarget {
+    /// A binding in the executing scope: no defining module, or a module this
+    /// view still carries.
+    CurrentScope,
+    /// A public module's exports.
+    Module(String),
+    /// A session module this view no longer carries. Its spelling may be
+    /// reused by a newer generation, so the reference must not read the
+    /// current binding of the same name.
+    StaleSessionModule,
 }
 
 /// Row fit asks about an identifier's availability under the executing row.
@@ -170,11 +280,14 @@ impl CompilerQuery {
 /// `signatureAvailability` for values and reads the solved row for other
 /// declarations, so browsing the name's owner yields typed availability.
 ///
-/// Session modules are private to the compiler and refuse module browsing, so
-/// a reference that belongs to one is resolved against the executing scope.
-/// Every other reference names its defining public module explicitly. The
-/// Lookup excision removes `InspectionQuery::ExactName`; until a keyed,
-/// non-enumerating availability query lands, this reads the browsed entries.
+/// A reference with no defining module is a local binder: the compiler
+/// publishes those with an empty module (`Introspection.hs`), and their
+/// identity is `(name, namespace)` in the executing scope. A reference into a
+/// session module resolves the same way only while this view still carries
+/// that exact generation. Any other reference names its defining public module
+/// explicitly. The Lookup excision removes `InspectionQuery::ExactName`; until
+/// a keyed, non-enumerating availability query lands, this reads the browsed
+/// entries.
 ///
 /// This is the one deliberately unbounded enumeration in the verb set. A cap
 /// can drop the requested identifier from the retained prefix and turn a real
@@ -183,14 +296,19 @@ impl CompilerQuery {
 /// enumeration spike ruled a non-compiling `rowFit` out; replacing this with a
 /// keyed availability query is the follow-up that removes the last unbounded
 /// compiler read.
-fn row_fit_query(identifier: &IdentifierRef) -> InspectionQuery {
-    if tidepool_repr::SessionModule::is_reserved_name(&identifier.module) {
-        InspectionQuery::ScopeBrowse
-    } else {
-        InspectionQuery::Browse {
-            module: identifier.module.clone(),
-            expanded: true,
+fn row_fit_target(identifier: &IdentifierRef, live: &LiveSessionModules) -> RowFitTarget {
+    if identifier.module.is_empty() {
+        return RowFitTarget::CurrentScope;
+    }
+    match tidepool_repr::SessionModule::from_module_name(&identifier.module) {
+        Some(module) if live.serves(module) => RowFitTarget::CurrentScope,
+        Some(_) => RowFitTarget::StaleSessionModule,
+        // A reserved spelling that does not parse names no module that can
+        // exist, so it is stale rather than a public module to browse.
+        None if tidepool_repr::SessionModule::is_reserved_name(&identifier.module) => {
+            RowFitTarget::StaleSessionModule
         }
+        None => RowFitTarget::Module(identifier.module.clone()),
     }
 }
 
@@ -417,6 +535,7 @@ impl Diagnostic {
 
 /// The actor-side answer; projected to `Either QueryError _` exactly like the
 /// existing structured introspection answers.
+#[derive(Clone)]
 pub(super) enum CompilerQueryAnswer {
     ScopeView(ScopeProvenance),
     Names(NameList),
@@ -556,8 +675,11 @@ fn enumerated_names(entries: Vec<InfoEntry>, provenance: ScopeProvenance) -> Com
 fn refusal_query(query: &CompilerQuery, before: &ScopeProvenance, name: &str) -> NameQuery {
     let scope = match query {
         CompilerQuery::ModuleExports { module, .. } => NameScope::PublicModule(module.clone()),
+        // An empty module is a local binder, and a reserved session module is
+        // private: neither is a public module scope to name in the refusal.
         CompilerQuery::RowFit { identifier, .. }
-            if !tidepool_repr::SessionModule::is_reserved_name(&identifier.module) =>
+            if !identifier.module.is_empty()
+                && !tidepool_repr::SessionModule::is_reserved_name(&identifier.module) =>
         {
             NameScope::PublicModule(identifier.module.clone())
         }
@@ -1022,24 +1144,29 @@ where
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let source = self.access.source.config.clone();
         let snapshot_source = source.clone();
-        let needs_compiler = query.plans_compiler_work();
+        let query_for_snapshot = query.clone();
         let snapshot = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 let view = actor_compile_view(session, context, &snapshot_source)?;
                 let provenance =
                     current_scope_provenance(&view, &snapshot_source, NameScope::Current);
-                // `currentScopeView` reads the view it already holds; it must
-                // not capture the compiler inputs a checked query would need.
-                let inputs = needs_compiler.then(|| {
+                let live = LiveSessionModules::of(view.session_view());
+                let plan = query_for_snapshot.plan(&live, &provenance);
+                // A pinned view that already moved is refused before any
+                // compiler input is captured; `currentScopeView` and a stale
+                // session reference need no inputs because the held view
+                // answers them.
+                let refused = entry_scope_refusal(&query_for_snapshot, &provenance).is_some();
+                let inputs = (!refused && matches!(plan, CompilerPlan::Queries(_))).then(|| {
                     session
                         .capture_inspection_inputs(view.session_view())
                         .map_err(|error| error.to_string())
                 });
-                Ok((view, provenance, inputs))
+                Ok((view, provenance, plan, inputs))
             })
             .await?;
-        let (compile_view, provenance, inputs) = snapshot;
+        let (compile_view, provenance, plan, inputs) = snapshot;
 
         if let Some(refusal) = entry_scope_refusal(&query, &provenance) {
             return self
@@ -1052,23 +1179,23 @@ where
                 .await;
         }
 
-        if !query.plans_compiler_work() {
-            return self
-                .access
-                .with_continuation_machine(context, move |session, _, _, settlement| {
-                    session
-                        .resume_classified(
-                            hole,
-                            CompilerQueryAnswer::ScopeView(provenance),
-                            settlement,
-                        )
-                        .map_err(classify_resumption)
-                })
-                .await;
-        }
+        let queries = match plan {
+            CompilerPlan::Answered(answer) => {
+                return self
+                    .access
+                    .with_continuation_machine(
+                        context,
+                        move |session, _, _, settlement| {
+                            session
+                                .resume_classified(hole, answer, settlement)
+                                .map_err(classify_resumption)
+                        },
+                    )
+                    .await;
+            }
+            CompilerPlan::Queries(queries) => queries,
+        };
 
-        let query = Arc::new(query);
-        let queries = query.inspection_queries();
         let compiler_source = source.clone();
         let effects = context.haskell_effects_alias.clone();
         self.access
@@ -1183,6 +1310,44 @@ mod tests {
             name: "Thing".into(),
             namespace,
         }
+    }
+
+    /// One held view: declaration module `Lib.G4`, with `Val.G3` retained for
+    /// references compiled before the last generation.
+    fn live() -> LiveSessionModules {
+        LiveSessionModules::fixture(
+            Some(SessionModule::lib(tidepool_repr::Generation(4))),
+            vec![
+                SessionModule::val(tidepool_repr::Generation(3)),
+                SessionModule::val(tidepool_repr::Generation(4)),
+            ],
+        )
+    }
+
+    /// Test-only projection of the pure plan against one representative
+    /// view, so a verb's queries can be asserted without a live machine.
+    trait Planned {
+        fn inspection_queries(&self) -> Vec<InspectionQuery>;
+        fn compiler_work_planned(&self) -> bool;
+    }
+
+    impl Planned for CompilerQuery {
+        fn inspection_queries(&self) -> Vec<InspectionQuery> {
+            match planned(self) {
+                CompilerPlan::Queries(queries) => queries,
+                CompilerPlan::Answered(_) => {
+                    panic!("expected compiler queries from {}", self.operation())
+                }
+            }
+        }
+
+        fn compiler_work_planned(&self) -> bool {
+            CompilerQuery::plans_compiler_work(self, &live())
+        }
+    }
+
+    fn planned(query: &CompilerQuery) -> CompilerPlan {
+        query.plan(&live(), &provenance(4, "world"))
     }
 
     fn entry(name: &str, module: &str, availability: InspectionAvailability) -> InfoEntry {
@@ -1411,6 +1576,110 @@ mod tests {
     }
 
     #[test]
+    fn row_fit_resolves_local_and_live_session_references() {
+        let current_scope = |identifier| {
+            CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier,
+            }
+            .inspection_queries()
+        };
+        // A binder with no defining module is published as the empty module.
+        assert_eq!(
+            current_scope(identifier("", "local")),
+            vec![InspectionQuery::ScopeBrowse]
+        );
+        // The live declaration generation is this view's own scope.
+        assert_eq!(
+            current_scope(identifier("Tidepool.Session.Lib.G4", "local")),
+            vec![InspectionQuery::ScopeBrowse]
+        );
+        // A shadowed value generation is still loadable, so it still resolves.
+        assert_eq!(
+            current_scope(identifier("Tidepool.Session.Val.G3", "local")),
+            vec![InspectionQuery::ScopeBrowse]
+        );
+        // Public modules keep their keyed owner read.
+        assert_eq!(
+            current_scope(identifier("Data.Thing", "thing")),
+            vec![InspectionQuery::Browse {
+                module: "Data.Thing".into(),
+                expanded: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn stale_session_reference_answers_unknown_without_compiler_work() {
+        let view = provenance(4, "world");
+        for stale in [
+            // A declaration module this view has replaced.
+            "Tidepool.Session.Lib.G3",
+            // A value module this view no longer injects.
+            "Tidepool.Session.Val.G2",
+            // A reserved spelling that names no module at all.
+            "Tidepool.Session.Lib.G",
+        ] {
+            let query = CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier: identifier(stale, "local"),
+            };
+            assert!(
+                !query.plans_compiler_work(&live()),
+                "{stale}: a stale reference must not enumerate the current scope"
+            );
+            match query.plan(&live(), &view) {
+                CompilerPlan::Answered(CompilerQueryAnswer::Fit(fit)) => {
+                    assert_eq!(fit.availability, FitAvailability::Unknown, "{stale}");
+                    assert_eq!(fit.identifier, identifier(stale, "local"), "{stale}");
+                    assert_eq!(fit.provenance, view, "{stale}");
+                }
+                CompilerPlan::Answered(_) => {
+                    panic!("{stale}: expected a fit answer, got another held-view answer")
+                }
+                CompilerPlan::Queries(_) => {
+                    panic!("{stale}: stale session reference planned compiler work")
+                }
+            }
+        }
+        // The namespace is never widened to the current scope's same spelling:
+        // a type query cannot read a value's availability.
+        let asked = typed_identifier(IdentifierNamespace::Type);
+        let query = CompilerQuery::RowFit {
+            expected_scope: None,
+            identifier: IdentifierRef {
+                module: "Tidepool.Session.Lib.G3".into(),
+                ..asked
+            },
+        };
+        assert!(!query.plans_compiler_work(&live()));
+    }
+
+    #[test]
+    fn row_fit_refusals_name_the_executing_scope_for_local_references() {
+        let view = provenance(4, "world");
+        for module in ["", "Tidepool.Session.Lib.G3"] {
+            let query = CompilerQuery::RowFit {
+                expected_scope: None,
+                identifier: identifier(module, "local"),
+            };
+            let refusal = refusal_query(&query, &view, "local");
+            assert_eq!(refusal.scope, NameScope::Current, "{module:?}");
+            assert_eq!(refusal.namespace, NameNamespace::Value, "{module:?}");
+            assert_eq!(refusal.name, "local");
+        }
+        // Public modules keep their named scope in the refusal payload.
+        let query = CompilerQuery::RowFit {
+            expected_scope: None,
+            identifier: identifier("Data.Thing", "thing"),
+        };
+        assert_eq!(
+            refusal_query(&query, &view, "thing").scope,
+            NameScope::PublicModule("Data.Thing".into())
+        );
+    }
+
+    #[test]
     fn a_large_scope_cannot_encode_more_than_the_budget() {
         // `visit_name_list` iterates exactly `NameList::entries`, so bounding
         // the retained entries is what bounds the encoded effect result. A
@@ -1481,12 +1750,12 @@ mod tests {
         // The handler never plans `TypeOf`/`TypeSearch` for an enumeration.
         // Runtime-level `inspection.compile_attempts == 0` remains pending:
         // the admitted batch still compiles its inspection module today.
-        assert!(!CompilerQuery::CurrentScopeView.plans_compiler_work());
+        assert!(!CompilerQuery::CurrentScopeView.compiler_work_planned());
         assert!(CompilerQuery::CurrentScopeView
             .inspection_queries()
             .is_empty());
         for query in compiler_verbs() {
-            assert!(query.plans_compiler_work(), "{query:?}");
+            assert!(query.compiler_work_planned(), "{query:?}");
             if !query.compiles_probe() {
                 let planned = query.inspection_queries();
                 assert!(
