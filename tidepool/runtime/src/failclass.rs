@@ -83,6 +83,9 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::MissingDeclarationLibrary
         | SessionError::MissingRetainedValueInterface(_)
         | SessionError::UnsupportedCompilerWorldBinding { .. }
+        | SessionError::MissingPublishedCompilerWorld(_)
+        | SessionError::WorldCellRequiresServicePreparation
+        | SessionError::WorldCellExpressionReservationUnsupported { .. }
         | SessionError::WrongPublicManifestTicket
         | SessionError::InvalidDurablePublicAdmission { .. }
         | SessionError::InvalidRecoveryInitialization { .. }
