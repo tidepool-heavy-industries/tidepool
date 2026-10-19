@@ -5,7 +5,7 @@ import Tidepool.Agent.Contract (AgentSpec (..))
 import qualified Persona.Spec as Persona
 import qualified Persona.ReentryProbe as Probe
 
-agentSpec = let original = Persona.agentSpec in original
+agentSpec = let original = Persona.runtimeSpec in original
   { initialContext = Just $ \input -> do
       Probe.arrival
       case initialContext original of
