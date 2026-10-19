@@ -287,24 +287,12 @@ impl ConfiguredSource {
         bytes: &[u8],
         epoch: [u8; 32],
     ) -> io::Result<ServicePackageSource> {
-        let mut decoder = Decoder(bytes);
-        if decoder.take(8)? != b"TPSRC001"
-            || decoder.hash()? != epoch
-            || decoder.hash()? != self.source
-            || decoder.hash()? != self.profile
-        {
-            return Err(invalid(
-                "service acquisition receipt differs from configured epoch/source/profile",
-            ));
-        }
-        let receipt = decoder.path()?;
-        let receipt_sha = decoder.hash()?;
-        let profile_path = decoder.path()?;
-        let profile_sha = decoder.hash()?;
-        decoder.end()?;
-        if digest(&read_bounded(&File::open(&receipt)?)?) != receipt_sha {
-            return Err(invalid("service receipt bytes differ"));
-        }
+        let ReceiptMetadata {
+            receipt,
+            receipt_sha,
+            profile_path,
+            profile_sha,
+        } = self.decode_receipt_metadata(bytes, epoch)?;
         if std::fs::canonicalize(&profile_path)? != profile_path
             || !profile_path.starts_with("/nix/store")
         {
@@ -340,13 +328,44 @@ impl ConfiguredSource {
         })
     }
 
+    fn decode_receipt_metadata(
+        &self,
+        bytes: &[u8],
+        epoch: [u8; 32],
+    ) -> io::Result<ReceiptMetadata> {
+        let mut decoder = Decoder(bytes);
+        if decoder.take(8)? != b"TPSRC001"
+            || decoder.hash()? != epoch
+            || decoder.hash()? != self.source
+            || decoder.hash()? != self.profile
+        {
+            return Err(invalid(
+                "service acquisition receipt differs from configured epoch/source/profile",
+            ));
+        }
+        let receipt = decoder.path()?;
+        let receipt_sha = decoder.hash()?;
+        let profile_path = decoder.path()?;
+        let profile_sha = decoder.hash()?;
+        decoder.end()?;
+        if digest(&read_bounded(&File::open(&receipt)?)?) != receipt_sha {
+            return Err(invalid("service receipt bytes differ"));
+        }
+        Ok(ReceiptMetadata {
+            receipt,
+            receipt_sha,
+            profile_path,
+            profile_sha,
+        })
+    }
+
     pub(crate) fn release_after_complete(
         self: &Arc<Self>,
         owner: &Path,
         epoch: [u8; 32],
     ) -> io::Result<()> {
         let bytes = read_bounded(&File::open(owner.join(HANDOFF))?)?;
-        let source = self.decode_receipt(&bytes, epoch)?;
+        let source = self.decode_receipt_metadata(&bytes, epoch)?;
         let completion = source
             .receipt
             .parent()
@@ -375,6 +394,13 @@ impl ConfiguredSource {
             )))
         }
     }
+}
+
+struct ReceiptMetadata {
+    receipt: PathBuf,
+    receipt_sha: [u8; 32],
+    profile_path: PathBuf,
+    profile_sha: [u8; 32],
 }
 
 /// Strongly retained by every live or quarantined worker. Drop has no release

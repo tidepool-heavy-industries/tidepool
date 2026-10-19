@@ -474,7 +474,9 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
         .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
         .env("TIDEPOOL_BUILD_PRODUCTS_DIR", cache.join("products"))
-        .stdin(daemon_control.map_or_else(Stdio::null, Stdio::from))
+        .stdin(daemon_control.map_or_else(Stdio::null, |control| {
+            Stdio::from(std::os::fd::OwnedFd::from(control))
+        }))
         .stdout(Stdio::null())
         .stderr(Stdio::from(daemon_log));
     let mut daemon = OwnedDaemonChild(command.spawn().map_err(FrontendError::Io)?);
