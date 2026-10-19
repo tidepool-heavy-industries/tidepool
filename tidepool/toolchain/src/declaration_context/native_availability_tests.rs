@@ -5771,15 +5771,27 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
                 .is_none(),
             "body custody alone does not grant a selected authored root"
         );
-        assert!(
-            OriginalCompilerInputs::issue_candidate_from_context(
-                &context,
-                producer,
-                std::slice::from_ref(current),
-            )
-            .is_err(),
-            "a canonical-only role cannot choose among retained native bodies"
+        let availability = crate::module_candidates::CandidateSet {
+            manifest_path: PathBuf::from("authored-winner-availability"),
+            by_owner: BTreeMap::new(),
+            contextual_native_availability: vec![current.clone()],
+            catalog_owner: None,
+            input_transport: Vec::new(),
+        };
+        let received = OriginalCompilerInputs::from_candidates(&context, producer, &availability)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received.role_projection(),
+            context.compiler_input_projection()
         );
+        assert!(received
+            .role_projection()
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        assert!(received.native_availability().rows().next().is_none());
+        assert!(received.issued_offers().is_empty());
         let mut unissued = context.clone();
         {
             let updated = CompilerInputProjection::default();
@@ -5795,52 +5807,97 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             .unwrap();
             unissued = unissued.rebuild(|facts| facts.compiler_support = support);
         }
-        assert!(
-            OriginalCompilerInputs::issue_candidate_from_context(
-                &unissued,
-                producer,
-                std::slice::from_ref(current),
-            )
-            .is_err(),
-            "absence of an issuing role preserves ambiguous custody refusal"
+        let received = OriginalCompilerInputs::from_candidates(&unissued, producer, &availability)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received.role_projection(),
+            unissued.compiler_input_projection()
         );
-
-        let projection =
-            CompilerInputProjection::from_issued_entries(&[entries[0].clone()]).unwrap();
-        let selected = projection
-            .admit_interfaces_under_unissued_policy(
+        assert!(received.role_projection().roles().is_empty());
+        assert!(received.native_availability().rows().next().is_none());
+        assert!(received.issued_offers().is_empty());
+        let available_context = context.clone();
+        let physical_a = context
+            .artifact_view()
+            .inventory()
+            .admit_shared_with_demand(
                 context.artifact_view(),
                 vec![entries[0].clone()],
-                &[],
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
             )
-            .expect("the inventory issuer selects the explicit original and canonical pair");
-        let support = recover_fixture_compiler_support(
-            projection,
-            selected,
-            context
-                .compiler_source_support()
-                .native_offers()
-                .iter()
-                .cloned(),
-        )
-        .unwrap();
-        context = context.rebuild(|facts| facts.compiler_support = support);
-        context.compiler_metadata_snapshot().unwrap();
-        let private = OriginalCompilerInputs::issue_candidate_from_context(
-            &context,
-            producer,
-            std::slice::from_ref(current),
-        )
-        .expect("an exact issued native winner distinguishes same-canonical bodies");
-        assert!(
-            OriginalCompilerInputs::issue_candidate_from_context(
-                &context,
-                producer,
-                std::slice::from_ref(&products[1]),
+            .unwrap();
+        let projection_a =
+            CompilerInputProjection::from_issued_entries(&[entries[0].clone()]).unwrap();
+        let selection_a =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection_a,
+                &physical_a.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
             )
-            .is_err(),
-            "a canonical-equal competing body cannot replace the native winner"
+            .unwrap();
+        let selected_a = OriginalCompilerInputs::from_selection(&selection_a, &physical_a).unwrap();
+        let support_a =
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&selected_a)
+                .unwrap();
+        context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&support_a)
+            .unwrap();
+        assert!(context.artifact_view().selected_native_groups().is_empty());
+        let private = OriginalCompilerInputs::from_candidates(&context, producer, &availability)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            private.role_projection(),
+            context.compiler_input_projection()
         );
+        assert_eq!(
+            private.native_availability(),
+            context.compiler_source_support().native_availability()
+        );
+        let available_b = crate::module_candidates::CandidateSet {
+            manifest_path: PathBuf::from("authored-other-availability"),
+            by_owner: BTreeMap::new(),
+            contextual_native_availability: vec![products[1].clone()],
+            catalog_owner: None,
+            input_transport: Vec::new(),
+        };
+        let competing_native = entries[1].descriptor.id;
+        let received_b = OriginalCompilerInputs::from_candidates(&context, producer, &available_b)
+            .unwrap()
+            .unwrap();
+        assert_eq!(received_b.role_projection(), private.role_projection());
+        assert_eq!(
+            received_b.native_availability(),
+            private.native_availability()
+        );
+        assert_eq!(received_b.issued_offers(), private.issued_offers());
+        let physical_b = available_context
+            .artifact_view()
+            .inventory()
+            .admit_shared_with_demand(
+                available_context.artifact_view(),
+                vec![entries[1].clone()],
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let projection_b =
+            CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
+        let selection_b =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection_b,
+                &physical_b.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        let other = OriginalCompilerInputs::from_selection(&selection_b, &physical_b).unwrap();
+        let conflict_root = tempfile::tempdir().unwrap();
+        assert!(matches!(ExactCompileContext::new(Arc::new(context.clone()))
+            .prepare_compilation_with_private_input(conflict_root.path(), PRODUCER, None, Some(other.clone())),
+            Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                ArtifactInventoryFailure::CompilerOriginalOfferConflict { existing, incoming, .. }
+                    if existing == current_native && incoming == competing_native)));
         let root = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(context.clone()))
             .prepare_compilation_with_private_input(
@@ -6008,21 +6065,17 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             BTreeSet::from([current_native]),
             "one exact issued offer wins over unoffered equal-canonical custody"
         );
+        let received_b =
+            OriginalCompilerInputs::from_candidates(&canonical_only, producer, &available_b)
+                .unwrap()
+                .unwrap();
+        assert_eq!(received_b.role_projection(), exact.role_projection());
         assert!(
-            OriginalCompilerInputs::from_selected_authored_declarations(
-                &canonical_only,
-                producer,
-                std::slice::from_ref(&products[1]),
-            )
-            .is_err(),
-            "a genuine unique authored private claim cannot be replaced by a fresh same-owner candidate",
+            matches!(exact.merge(&other), Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::CompilerOriginalOfferConflict { existing, incoming, .. }
+                if (existing == current_native && incoming == competing_native)
+                    || (incoming == current_native && existing == competing_native)))
         );
-        let other = OriginalCompilerInputs::issue_candidate_from_context(
-            &type_context(std::slice::from_ref(&products[1])),
-            producer,
-            std::slice::from_ref(&products[1]),
-        )
-        .unwrap();
         assert!(other.native_offers().iter().any(|offer| offer.is_full()));
         for reverse in [false, true] {
             let before = selected_context.artifact_view().selected_native_groups();
@@ -6085,13 +6138,10 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
                 .native_offers()
                 .iter()
                 .any(|offer| offer.original() == other.native_offers()[0].original()));
-            let mixed = OriginalCompilerInputs::from_selected_authored_declarations(
-                &historical,
-                producer,
-                std::slice::from_ref(current),
-            )
-            .unwrap()
-            .unwrap();
+            let mixed =
+                OriginalCompilerInputs::from_candidates(&historical, producer, &availability)
+                    .unwrap()
+                    .unwrap();
             assert_eq!(mixed.artifacts.selected_native_groups(), before);
             assert_eq!(mixed.projection, direct.projection);
         }
