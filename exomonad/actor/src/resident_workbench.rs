@@ -22502,6 +22502,7 @@ pub(crate) mod request_tests {
             tier: tidepool_runtime::session::ValueTier::ForceData,
             type_display: "()".into(),
             root_head: None,
+            host_authority: None,
         };
         session
             .snapshot_run_prepared(

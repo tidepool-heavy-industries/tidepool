@@ -14,10 +14,7 @@ pub(crate) use startup::{
     RootStartupAdmission, RootStartupRecoveryAuthority, StartupPredecessorAuthority,
 };
 mod generation;
-pub(crate) use generation::{
-    GenerationDirectoryError, GenerationPopulation, GenerationResourceIdentity,
-    GenerationResourceObservation, GenerationResourceState,
-};
+pub(crate) use generation::GenerationPopulation;
 mod transfers;
 #[cfg(test)]
 pub(crate) use preparation::RootPlacementPublicationError;
