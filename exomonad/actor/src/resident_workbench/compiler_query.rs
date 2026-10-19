@@ -116,14 +116,23 @@ impl CompilerQuery {
     /// The exact queries submitted for this verb. `currentScopeView` has none.
     ///
     /// Enumeration and `rowFit` currently reuse the admitted inspection batch
-    /// (`ScopeBrowse`, `Browse`). That batch compiles its inspection module, so
-    /// these verbs are not yet the zero-compile world reads described by the
-    /// effect docs. A non-compiling path needs a world-owned `Browse` question
-    /// (the public-module question kind currently admits only
-    /// `StructuredInfo`/`StructuredType`) and a held-world current-scope
-    /// enumeration. `rowFit` additionally reads availability from the browsed
-    /// entries because the Lookup excision removes the keyed `ExactName`
-    /// query.
+    /// (`ScopeBrowse`, `Browse`), which compiles its inspection module.
+    ///
+    /// Ownership split after the held-world enumeration spike
+    /// (`compiler-query/handlers/ENUMERATION-SPIKE.md`):
+    /// - `scopeBindings` becomes a runtime-owned, in-process read of the
+    ///   admitted world's published bindings (no extract call) on
+    ///   `feature/compiler-query/world-enum-20261019`. Keep this compile-path
+    ///   arm working until that handoff lands.
+    /// - `moduleExports` moves to a world query once the compiler service
+    ///   exposes exports without a target compile; its answer shape then
+    ///   narrows to `NameRef` (no display, availability, or references).
+    /// - `rowFit` is NO-GO world-side: availability needs the executing
+    ///   actor's effect row, which is not retained, so it stays on the
+    ///   solver/compile path.
+    ///
+    /// `rowFit` reads availability from the browsed entries because the Lookup
+    /// excision removes the keyed `ExactName` query.
     pub(super) fn inspection_queries(&self) -> Vec<InspectionQuery> {
         match self {
             Self::CurrentScopeView => Vec::new(),
@@ -455,7 +464,7 @@ pub(super) fn compiler_query_answer(
     match (query, result) {
         (CompilerQuery::ScopeBindings { .. }, InspectionResult::Browse { entries, .. })
         | (CompilerQuery::ModuleExports { .. }, InspectionResult::Browse { entries, .. }) => {
-            CompilerQueryAnswer::Names(NameList::from_entries(entries, before))
+            enumerated_names(entries, before)
         }
         (CompilerQuery::RowFit { identifier, .. }, InspectionResult::Browse { entries, .. }) => {
             CompilerQueryAnswer::Fit(Fit {
@@ -510,6 +519,13 @@ pub(super) fn compiler_query_answer(
 /// The identity of the question an `Unknown`/`Ambiguous` refusal answers. The
 /// enumeration and probe queries do not carry a `NameQuery`, so reconstruct
 /// only the fields the error payload needs from the request itself.
+/// The single construction site for an enumeration answer. `moduleExports`
+/// narrows to `NameRef` once the world-query path lands; only this function
+/// and the wire type change then, not each verb arm or its tests.
+fn enumerated_names(entries: Vec<InfoEntry>, provenance: ScopeProvenance) -> CompilerQueryAnswer {
+    CompilerQueryAnswer::Names(NameList::from_entries(entries, provenance))
+}
+
 fn refusal_query(query: &CompilerQuery, before: &ScopeProvenance, name: &str) -> NameQuery {
     let scope = match query {
         CompilerQuery::ModuleExports { module, .. } => NameScope::PublicModule(module.clone()),
@@ -1332,6 +1348,51 @@ mod tests {
                         )),
                     "probe verb planned no probe query: {query:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn both_probes_request_only_their_type_question_and_project_no_value() {
+        // The admitted inspection batch compiles a probe to obtain its type
+        // and never evaluates it (`tidepool/runtime/src/session/inspection.rs`,
+        // "Inspect an ordered batch without evaluating it"). Each probe verb
+        // must therefore plan exactly its type question, and its answer must
+        // carry only the type evidence — never a rendered or evaluated value.
+        for (query, planned) in [
+            (
+                CompilerQuery::TypeOfExpression {
+                    expected_scope: None,
+                    expression: "1 + 1".into(),
+                },
+                InspectionQuery::TypeOf("1 + 1".into()),
+            ),
+            (
+                CompilerQuery::TypeSearch {
+                    expected_scope: None,
+                    pattern: "a -> a".into(),
+                },
+                InspectionQuery::TypeSearch("a -> a".into()),
+            ),
+        ] {
+            assert!(query.compiles_probe(), "{query:?}");
+            assert_eq!(query.inspection_queries(), vec![planned], "{query:?}");
+
+            let answer = compiler_query_answer(
+                &query,
+                provenance(1, "world"),
+                provenance(1, "world"),
+                BatchOutcome::Answer(Ok(successful_result(&query))),
+            );
+            match answer {
+                CompilerQueryAnswer::Expression(expression) => {
+                    assert_eq!(expression.source, "1 + 1");
+                    assert_eq!(expression.display, "Int");
+                }
+                CompilerQueryAnswer::Matches(matches) => {
+                    assert_eq!(matches.matches[0].signature, "Int -> Int");
+                }
+                other => panic!("expected a type-only answer, got {}", answer_name(&other)),
             }
         }
     }
