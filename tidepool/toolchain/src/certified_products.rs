@@ -9743,6 +9743,7 @@ pub(crate) mod tests {
     #[path = "../planned_original_history_tests.rs"]
     mod planned_original_history_tests;
     mod promotion_import_history;
+    mod publication_request_history;
     mod sparse_interface_selection_properties;
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
