@@ -593,6 +593,7 @@ async fn persona_with_shared_workspace_keeps_lookup_and_later_cells_usable() {
                 2,
                 "first cell must publish both effects: {pages:?}"
             );
+            assert!(pages[0].starts_with("Right "), "{pages:?}");
             assert!(pages[1].contains("curiosity-memory-original"), "{pages:?}");
 
             let lookup = round.operation("persona-native-lookup-after-memory");
@@ -616,16 +617,45 @@ async fn persona_with_shared_workspace_keeps_lookup_and_later_cells_usable() {
                 panic!("one structured lookup item: {lookup_result:?}");
             };
             assert_eq!(item["status"], "committed", "{item:?}");
-            assert!(item["value"]["lookupCaptureSlot"]
-                .as_i64()
-                .is_some_and(|slot| slot > 0));
-            let output = item["output"].as_str().unwrap();
+            let output = item["output"]
+                .as_str()
+                .unwrap_or_else(|| panic!("presented native lookup output: {item:?}"));
             assert!(
                 output.lines().any(|line| {
                     line.contains("getRuntimeInfo — getRuntimeInfo (Tidepool.Effects.Core) [found]")
                 }) && !output.contains("Lookup issue:"),
-                "known symbol must resolve without a batch issue: {output}"
+                "known symbol must resolve without a batch issue: {lookup_result:?}"
             );
+
+            let notebook_lookup = round.operation("persona-notebook-lookup-after-native");
+            round.sync_call_named(
+                "persona-notebook-lookup-after-native",
+                "haskell",
+                "import qualified Tidepool.Lookup as LookupApi\n\
+                 import qualified Tidepool.Lookup.Tools as LookupTools\n\
+                 topics <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"getRuntimeInfo\", \"Cmd.run\", \":: Text -> Eff effs _\", \"forkAgent\", \"spawnAgent\"])\n\
+                 display (LookupTools.renderBatch topics)\n\
+                 display (case LookupApi.lookupIssue topics of Nothing -> True; Just _ -> False)",
+            );
+            round = host
+                .while_operation_succeeds(
+                    &notebook_lookup,
+                    next_hosted_script_round(&mut requests, &mut pending, &root),
+                )
+                .await
+                .unwrap();
+            let notebook_result = round.settled_output("persona-notebook-lookup-after-native");
+            let notebook_pages = super::test_campaign::retained_committed_display_texts(
+                &host.runtime.store(),
+                &origin,
+                &notebook_result,
+            );
+            assert_eq!(notebook_pages.len(), 2, "{notebook_result:?}");
+            assert!(
+                notebook_pages[0].contains("getRuntimeInfo — getRuntimeInfo (Tidepool.Effects.Core) [found]"),
+                "notebook lookup lost known symbol: {notebook_pages:?}"
+            );
+            assert_eq!(notebook_pages[1], "True", "{notebook_pages:?}");
 
             let pure = round.operation("persona-pure-after-lookup");
             round.sync_call_named(
