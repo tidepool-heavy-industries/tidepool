@@ -69,7 +69,7 @@ import Tidepool.GhcPipeline
   , withResidentCompilerScopes, checkCellInstances
   , captureSupportedPackageProfile
   , scopedEnsureWorld, WorldCellRefusal(..), WorldModulePolicyFailure(..)
-  , worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports, worldCellSourceSelection
+  , worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports, worldCellSourceSelection, worldCellSourceRootAliases
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
 import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes, encodeSymbol)
@@ -1151,13 +1151,15 @@ runWorldCellPrepareMode bound question = do
           moduleRow ((unit,name,boot),edges) = encodeListLen 4
             <> text unit <> text name <> encodeBool boot
             <> encodeListLen (fromIntegral (length edges)) <> foldMap importRow edges
-          sourceEnvelope = toStrictByteString (encodeListLen 10 <> text "TPCWSOURCE1"
+          sourceEnvelope = toStrictByteString (encodeListLen 11 <> text "TPCWSOURCE2"
             <> encodeBytes base <> encodeBytes planDigest <> encodeBytes admission
             <> text (typedSegmentPlanDigest typedPlan)
             <> fileRef sourceName <> fileRef "dependencies.json" <> fileRef "module-package-imports.cbor"
             <> encodeListLen (fromIntegral (length (worldCellExactImports inputFacts)))
             <> foldMap moduleRow (worldCellExactImports inputFacts)
-            <> encodeSourceSelectedOriginals (worldCellSourceSelection inputFacts))
+            <> encodeSourceSelectedOriginals (worldCellSourceSelection inputFacts)
+            <> encodeListLen (fromIntegral (length (worldCellSourceRootAliases inputFacts)))
+            <> foldMap text (worldCellSourceRootAliases inputFacts))
           sourceReceiptName = "world-source.cbor"
       BS.writeFile (directory </> sourceReceiptName) sourceEnvelope
       let observations = [CellExpressionPlan (plannedItemEntry (typedItemPlan item))

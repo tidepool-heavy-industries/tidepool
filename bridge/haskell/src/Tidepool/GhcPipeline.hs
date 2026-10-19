@@ -41,7 +41,7 @@ module Tidepool.GhcPipeline
   , materializeWorldSources, worldMaterializationCharge, retainWorldMaterialization, releaseWorldMaterialization
   , worldMaterializationOwners, emitWorldAcquisitionRejection
   , CompletedCompilerResult, completedCompilerResult, completedCompilerRecovery, completedCompilerGuard
-  , completedCompilerWorldInputs, completedCompilerWorldDependencies, WorldCellInputs, worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports, worldCellSourceSelection
+  , completedCompilerWorldInputs, completedCompilerWorldDependencies, WorldCellInputs, worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports, worldCellSourceSelection, worldCellSourceRootAliases
   , PendingWorldDependencies
   , CompilerScopeRunner, withResidentCompilerScopes
   , CompilerRecoveryCaches(..)
@@ -2104,7 +2104,7 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
     unchanged <- liftIO (revalidateSourceSelectedOriginals selected)
     unless unchanged (liftIO (throwIO WorldCellUnavailable))
   pure (CompletedCompilerResult result recovery guard
-    (Just (WorldCellInputs generations references (target,SHA256.hash source) imports sourceSelection)) (Just pending))
+    (Just (WorldCellInputs generations references (target,SHA256.hash source) imports sourceSelection roots)) (Just pending))
 
 closedWorldCellPurpose :: CompilePurpose -> Bool
 closedWorldCellPurpose (ParsedImportSelection _ (GeneratedScaffoldCompile _
@@ -5808,6 +5808,9 @@ data WorldCellInputs = WorldCellInputs
   , worldCellSourceSnapshot :: (FilePath,BS.ByteString)
   , worldCellExactImports :: [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])]
   , worldCellSourceSelection :: Maybe SourceSelectedOriginals
+  -- Ordered physical aliases from this completion's held source backing.
+  -- They retain no lease and grant no source identity or filesystem authority.
+  , worldCellSourceRootAliases :: [FilePath]
   }
 
 data CompletedCompilerResult result = CompletedCompilerResult result CompilerRecoveryCaches (IO ()) (Maybe WorldCellInputs) (Maybe PendingWorldDependencies)
