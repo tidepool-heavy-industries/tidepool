@@ -31,6 +31,7 @@ import Tidepool.Effects.Core (ForkAgent)
 import Tidepool.Effects.Core (FsRead)
 import Tidepool.Effects.Core (FsWrite)
 import Tidepool.Effects.Core (Green)
+import Tidepool.Effects.Core (Introspection)
 import Tidepool.Effects.Core (Jev)
 import Tidepool.Effects.Core (Journal)
 import Tidepool.Effects.Core (ModelCall)
@@ -97,6 +98,7 @@ instance KnownEffect (AskUser) where effectWitness = EffectWitness EffectAskUser
 instance KnownEffect (Green) where effectWitness = EffectWitness EffectGreen
 instance KnownEffect (Notifications) where effectWitness = EffectWitness EffectNotifications
 instance KnownEffect (Jev) where effectWitness = EffectWitness EffectJev
+instance KnownEffect (Introspection) where effectWitness = EffectWitness EffectIntrospection
 instance KnownEffect (Actor) where effectWitness = EffectWitness EffectActor
 instance KnownEffect (Reflect) where effectWitness = EffectWitness EffectReflect
 instance KnownEffect (RepoEvent) where effectWitness = EffectWitness EffectRepoEvent

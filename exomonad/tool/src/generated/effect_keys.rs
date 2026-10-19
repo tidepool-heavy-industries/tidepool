@@ -122,6 +122,8 @@ pub enum ActorEffectKey {
     SpawnAgentDeepSeek,
     #[serde(rename = "RuntimeInfo")]
     RuntimeInfo,
+    #[serde(rename = "Introspection")]
+    Introspection,
 }
 
 impl ActorEffectKey {
@@ -144,6 +146,7 @@ impl ActorEffectKey {
         Self::Green,
         Self::Notifications,
         Self::Jev,
+        Self::Introspection,
         Self::ModelCallOpenAI,
         Self::ModelCallArgon,
         Self::ModelCallDeepSeek,
@@ -203,6 +206,7 @@ impl ActorEffectKey {
             Self::SpawnAgentArgon => "SpawnAgent",
             Self::SpawnAgentDeepSeek => "SpawnAgent",
             Self::RuntimeInfo => "RuntimeInfo",
+            Self::Introspection => "Introspection",
         }
     }
 
@@ -226,6 +230,7 @@ impl ActorEffectKey {
             Self::Green => "Green",
             Self::Notifications => "Notifications",
             Self::Jev => "Jev",
+            Self::Introspection => "Introspection",
             Self::ModelCallOpenAI => "ModelCall OpenAI",
             Self::ModelCallArgon => "ModelCall Argon",
             Self::ModelCallDeepSeek => "ModelCall DeepSeek",
@@ -287,6 +292,7 @@ impl ActorEffectKey {
             Self::SpawnAgentArgon => "SpawnAgent.Argon",
             Self::SpawnAgentDeepSeek => "SpawnAgent.DeepSeek",
             Self::RuntimeInfo => "RuntimeInfo",
+            Self::Introspection => "Introspection",
         }
     }
 
@@ -310,6 +316,7 @@ impl ActorEffectKey {
             Self::Green => Some("Tidepool.Effects.Core"),
             Self::Notifications => Some("Tidepool.Effects.Core"),
             Self::Jev => Some("Tidepool.Effects.Core"),
+            Self::Introspection => Some("Tidepool.Effects.Core"),
             Self::ModelCallOpenAI => Some("Tidepool.Effects.Core"),
             Self::ModelCallArgon => Some("Tidepool.Effects.Core"),
             Self::ModelCallDeepSeek => Some("Tidepool.Effects.Core"),
@@ -352,6 +359,7 @@ impl ActorEffectKey {
             Self::Green => Some("EffectGreen"),
             Self::Notifications => Some("EffectNotifications"),
             Self::Jev => Some("EffectJev"),
+            Self::Introspection => Some("EffectIntrospection"),
             Self::ModelCallOpenAI => Some("EffectModelCallOpenAI"),
             Self::ModelCallArgon => Some("EffectModelCallArgon"),
             Self::ModelCallDeepSeek => Some("EffectModelCallDeepSeek"),
@@ -394,6 +402,7 @@ impl ActorEffectKey {
             Self::Green => &[],
             Self::Notifications => &[],
             Self::Jev => &[],
+            Self::Introspection => &[],
             Self::ModelCallOpenAI => &[HaskellTypeIdentity {
                 module: "Tidepool.Effects.Core",
                 name: "OpenAI",
@@ -524,6 +533,7 @@ impl ToolEffectKey {
         Self::Actor(ActorEffectKey::Green),
         Self::Actor(ActorEffectKey::Notifications),
         Self::Actor(ActorEffectKey::Jev),
+        Self::Actor(ActorEffectKey::Introspection),
         Self::Actor(ActorEffectKey::ModelCallOpenAI),
         Self::Actor(ActorEffectKey::ModelCallArgon),
         Self::Actor(ActorEffectKey::ModelCallDeepSeek),

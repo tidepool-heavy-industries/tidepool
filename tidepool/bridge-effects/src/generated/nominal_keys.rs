@@ -74,6 +74,8 @@ pub enum ActorEffectKeyWire {
     EffectSpawnAgentDeepSeek,
     #[haskell(module = "Tidepool.Effects.Core")]
     EffectRuntimeInfo,
+    #[haskell(module = "Tidepool.Effects.Core")]
+    EffectIntrospection,
 }
 
 impl ActorEffectKeyWire {
@@ -96,6 +98,7 @@ impl ActorEffectKeyWire {
         Self::EffectGreen,
         Self::EffectNotifications,
         Self::EffectJev,
+        Self::EffectIntrospection,
         Self::EffectModelCallOpenAI,
         Self::EffectModelCallArgon,
         Self::EffectModelCallDeepSeek,
@@ -154,6 +157,7 @@ impl ActorEffectKeyWire {
             Self::EffectSpawnAgentArgon => "EffectSpawnAgentArgon",
             Self::EffectSpawnAgentDeepSeek => "EffectSpawnAgentDeepSeek",
             Self::EffectRuntimeInfo => "EffectRuntimeInfo",
+            Self::EffectIntrospection => "EffectIntrospection",
         }
     }
 }
@@ -197,6 +201,7 @@ impl From<ActorEffectKeyWire> for exomonad_tool::ActorEffectKey {
             ActorEffectKeyWire::EffectSpawnAgentArgon => Self::SpawnAgentArgon,
             ActorEffectKeyWire::EffectSpawnAgentDeepSeek => Self::SpawnAgentDeepSeek,
             ActorEffectKeyWire::EffectRuntimeInfo => Self::RuntimeInfo,
+            ActorEffectKeyWire::EffectIntrospection => Self::Introspection,
         }
     }
 }
@@ -241,6 +246,7 @@ impl TryFrom<exomonad_tool::ActorEffectKey> for ActorEffectKeyWire {
             exomonad_tool::ActorEffectKey::SpawnAgentArgon => Self::EffectSpawnAgentArgon,
             exomonad_tool::ActorEffectKey::SpawnAgentDeepSeek => Self::EffectSpawnAgentDeepSeek,
             exomonad_tool::ActorEffectKey::RuntimeInfo => Self::EffectRuntimeInfo,
+            exomonad_tool::ActorEffectKey::Introspection => Self::EffectIntrospection,
             _ => return Err("legacy actor effect has no nominal wire identity"),
         })
     }

@@ -30,4 +30,5 @@ pub const DEFAULT_ACTOR_EFFECTS: &[ActorEffectKey] = &[
     ActorEffectKey::FsWrite,
     ActorEffectKey::RepoEvent,
     ActorEffectKey::RuntimeInfo,
+    ActorEffectKey::Introspection,
 ];

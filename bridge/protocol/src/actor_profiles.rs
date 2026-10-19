@@ -257,6 +257,14 @@ pub const EFFECTS: &[NominalEffect] = &[
         "Tidepool.Effects.Core"
     ),
     nominal!(Jev, EffectJev, 13, 14, 13, "Tidepool.Effects.Core"),
+    nominal!(
+        Introspection,
+        EffectIntrospection,
+        27,
+        41,
+        40,
+        "Tidepool.Effects.Core"
+    ),
     NominalEffect {
         identity: ExternalType {
             haskell_name: "ModelCall",
