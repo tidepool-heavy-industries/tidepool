@@ -1630,7 +1630,7 @@ impl SnapshotValueCodec<NativeAvailabilitySnapshotFacts> for NativeAvailabilityC
 #[serde(deny_unknown_fields)]
 pub(crate) struct PublicationNativeMaps {
     #[serde(with = "serde_ord_map")]
-    pub(crate) roles: OrdMap<ExactModuleIdentity, CompilerInputRole>,
+    pub(crate) roles: OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedCompilerRole>,
     #[serde(with = "serde_ord_map")]
     pub(crate) offers: OrdMap<[u8; 32], NativeOfferSnapshotFacts>,
     #[serde(with = "serde_ord_map")]
@@ -1797,7 +1797,7 @@ pub struct ExactContextSnapshot {
     pub(crate) native_fact_owner: Option<Arc<PublicationNativeFacts>>,
     pub(crate) producer: [u8; 32],
     pub(crate) selection: Arc<ExactSelectionSnapshot>,
-    pub(crate) roles: OrdMap<ExactModuleIdentity, CompilerInputRole>,
+    pub(crate) roles: OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedCompilerRole>,
     pub(crate) lexical: ExactLexicalSnapshot,
     pub(crate) offers: OrdMap<[u8; 32], NativeOfferSnapshotFacts>,
     pub(crate) native_availability: OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>,
@@ -1833,7 +1833,10 @@ impl ExactContextSnapshot {
         self.selection.binding_dependencies()
     }
     pub fn compiler_roles(&self) -> Vec<CompilerInputRole> {
-        self.roles.values().cloned().collect()
+        self.roles
+            .values()
+            .map(|role| role.as_role().clone())
+            .collect()
     }
     pub fn lexical(&self) -> Vec<ExactLexicalNode> {
         self.lexical.to_vec()
@@ -1949,6 +1952,23 @@ impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
     }
 }
 
+impl SnapshotValueCodec<crate::artifact_inventory::RecordedCompilerRole> for CompilerRoleCodec {
+    type Wire = Cid;
+    fn encode<BS: Blockstore>(
+        store: &mut Materializer<'_, BS>,
+        value: &crate::artifact_inventory::RecordedCompilerRole,
+    ) -> Result<Cid, SnapshotError> {
+        <Self as SnapshotValueCodec<CompilerInputRole>>::encode(store, value.as_role())
+    }
+    fn decode<BS: Blockstore>(
+        store: &SnapshotHydrator<'_, BS>,
+        wire: Cid,
+    ) -> Result<crate::artifact_inventory::RecordedCompilerRole, SnapshotError> {
+        <Self as SnapshotValueCodec<CompilerInputRole>>::decode(store, wire)
+            .map(|role| role.recorded_fact())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InputNativeDecisionWire {
@@ -2008,7 +2028,11 @@ struct PublicationNativeDescriptor {
 }
 struct NativeFactReceipt {
     root: Cid,
-    roles: MaterializedMap<ExactModuleIdentity, CompilerInputRole, CompilerRoleCodec>,
+    roles: MaterializedMap<
+        ExactModuleIdentity,
+        crate::artifact_inventory::RecordedCompilerRole,
+        CompilerRoleCodec,
+    >,
     offers: MaterializedMap<[u8; 32], NativeOfferSnapshotFacts, NativeOfferCodec>,
     native_availability:
         MaterializedMap<ArtifactId, NativeAvailabilitySnapshotFacts, NativeAvailabilityCodec>,
@@ -2131,7 +2155,11 @@ pub struct MaterializedContext {
     root: ContextRoot,
     snapshot: ExactContextSnapshot,
     selection: MaterializedSelection,
-    roles: MaterializedMap<ExactModuleIdentity, CompilerInputRole, CompilerRoleCodec>,
+    roles: MaterializedMap<
+        ExactModuleIdentity,
+        crate::artifact_inventory::RecordedCompilerRole,
+        CompilerRoleCodec,
+    >,
     lexical: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec>,
     offers: MaterializedMap<[u8; 32], NativeOfferSnapshotFacts, NativeOfferCodec>,
     native_availability:

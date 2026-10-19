@@ -67,7 +67,7 @@ impl PublicationNativeAuthority {
             ));
         };
         let facts = Arc::clone(self.facts());
-        if facts.roles.get(owner)
+        if facts.roles.get(owner).map(RecordedCompilerRole::as_role)
             != Some(&CompilerInputRole::ReusableOriginal {
                 interface: *interface,
                 original: *original,
@@ -78,11 +78,8 @@ impl PublicationNativeAuthority {
             ));
         }
         let artifacts = artifacts.select_issued(vec![*original], selection)?;
-        let prior = CompilerInputProjection {
-            roles: facts.roles.clone(),
-            recorded_roles: facts.roles.clone(),
-        }
-        .bind_publications(&artifacts)?;
+        let prior = CompilerInputProjection::from_recorded_roles(facts.roles.clone())
+            .bind_publications(&artifacts)?;
         let empty = CompilerSourceSupport::new(prior.clone(), artifacts, [], Default::default())?;
         let restored = empty.restore_native_maps(
             &prior.roles,
@@ -203,7 +200,7 @@ impl Eq for CompilerInputRole {}
 
 impl CompilerInputRole {
     /// Durable facts share the birth descriptor, never its per-view acquisition.
-    pub(super) fn recorded_fact(&self) -> Self {
+    pub(crate) fn recorded_fact(&self) -> RecordedCompilerRole {
         let mut fact = self.clone();
         if let Self::PublishedSourceOriginal {
             native_authority, ..
@@ -212,7 +209,7 @@ impl CompilerInputRole {
             *native_authority =
                 PublicationNativeAuthority::recorded(Arc::clone(native_authority.facts()));
         }
-        fact
+        RecordedCompilerRole(fact)
     }
 
     pub fn interface(&self) -> ArtifactId {
@@ -291,6 +288,39 @@ pub(crate) enum CompilerRoleObservation<'a> {
     },
 }
 
+/// A closed immutable role fact. Construction strips only a per-view acquired
+/// wrapper; neither deserialization nor this value grants a live compiler role.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct RecordedCompilerRole(CompilerInputRole);
+
+impl RecordedCompilerRole {
+    pub(crate) fn as_role(&self) -> &CompilerInputRole {
+        &self.0
+    }
+}
+impl std::ops::Deref for RecordedCompilerRole {
+    type Target = CompilerInputRole;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl PartialEq<CompilerInputRole> for RecordedCompilerRole {
+    fn eq(&self, other: &CompilerInputRole) -> bool {
+        self.0 == *other
+    }
+}
+impl PartialEq<RecordedCompilerRole> for CompilerInputRole {
+    fn eq(&self, other: &RecordedCompilerRole) -> bool {
+        *self == other.0
+    }
+}
+impl<'de> Deserialize<'de> for RecordedCompilerRole {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        CompilerInputRole::deserialize(deserializer).map(|role| role.recorded_fact())
+    }
+}
+
 /// One compiler namespace selected by accepted declarations and import proofs.
 /// Availability and executable native demand remain in the retained view.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -298,7 +328,7 @@ pub struct CompilerInputProjection {
     roles: imbl::OrdMap<ExactModuleIdentity, CompilerInputRole>,
     // Updated only with changed roles. Snapshots borrow this pure fact root;
     // live roles separately retain their actual acquired publication owners.
-    recorded_roles: imbl::OrdMap<ExactModuleIdentity, CompilerInputRole>,
+    recorded_roles: imbl::OrdMap<ExactModuleIdentity, RecordedCompilerRole>,
 }
 
 /// Matched compiler roles and exact custody selected by their existing issuer.
@@ -336,7 +366,7 @@ impl Eq for CompilerSourceSupport {}
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RecordedInputNativeDecision {
-    pub(crate) role: CompilerInputRole,
+    pub(crate) role: RecordedCompilerRole,
     #[serde(with = "crate::exact_context::serde_ord_map")]
     pub(crate) groups: imbl::OrdMap<u32, NativeGroupBinding>,
 }
@@ -420,7 +450,7 @@ impl IssuedInputNativeDecisions {
     fn for_exact_roles(&self, projection: &CompilerInputProjection) -> Self {
         let mut facts = self.facts.clone();
         for (owner, fact) in &self.facts {
-            if projection.snapshot_roles().get(owner) != Some(&fact.role) {
+            if projection.snapshot_roles().get(owner) != Some(fact.role.as_role()) {
                 facts.remove(owner);
             }
         }
@@ -434,7 +464,7 @@ impl IssuedInputNativeDecisions {
         let roots = view.roots();
         let mut facts = self.facts.clone();
         for (owner, fact) in &self.facts {
-            if projection.snapshot_roles().get(owner) != Some(&fact.role) {
+            if projection.snapshot_roles().get(owner) != Some(fact.role.as_role()) {
                 facts.remove(owner);
                 continue;
             }
@@ -1302,7 +1332,7 @@ impl CompilerSourceSupport {
 
     fn restore_native_maps(
         &self,
-        roles: &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole>,
+        roles: &imbl::OrdMap<ExactModuleIdentity, RecordedCompilerRole>,
         offer_facts: &imbl::OrdMap<[u8; 32], crate::exact_context::NativeOfferSnapshotFacts>,
         availability_facts: &imbl::OrdMap<
             ArtifactId,
@@ -1310,7 +1340,7 @@ impl CompilerSourceSupport {
         >,
         decision_facts: &imbl::OrdMap<ExactModuleIdentity, RecordedInputNativeDecision>,
     ) -> Result<Self, CompileError> {
-        if self.projection.snapshot_roles() != roles {
+        if self.projection.recorded_roles() != roles {
             return Err(failure(
                 "recovered availability roles differ from their context",
             ));
@@ -1348,7 +1378,7 @@ impl CompilerSourceSupport {
             .lock()
             .expect("inventory lock");
         for (owner, fact) in decision_facts {
-            if restored.projection.snapshot_roles().get(owner) != Some(&fact.role) {
+            if restored.projection.snapshot_roles().get(owner) != Some(fact.role.as_role()) {
                 return Err(failure(
                     "recorded input decision differs from its exact compiler role",
                 ));
@@ -1888,17 +1918,10 @@ impl CompilerSourceSupport {
             .original()
             .ok_or_else(|| failure("published root lacks an original"))?;
         if let CompilerInputRole::PublishedSourceOriginal {
-            selection,
-            native_authority,
-            ..
+            native_authority, ..
         } = role
         {
             let saved = native_authority.acquired()?;
-            if saved.artifacts.selection_snapshot().as_ref() != selection.snapshot().as_ref() {
-                return Err(failure(
-                    "publication native owner differs from its issued selection",
-                ));
-            }
             if roots
                 .iter()
                 .any(|id| !saved.artifacts.contains_namespace_artifact(*id))
@@ -2218,6 +2241,20 @@ impl CompilerRolePayloads<'_> {
 }
 
 impl CompilerInputProjection {
+    // Cold restoration authenticates these facts against its actual view next.
+    fn from_recorded_roles(
+        recorded_roles: imbl::OrdMap<ExactModuleIdentity, RecordedCompilerRole>,
+    ) -> Self {
+        let roles = recorded_roles
+            .iter()
+            .map(|(owner, role)| (owner.clone(), role.as_role().clone()))
+            .collect();
+        Self {
+            roles,
+            recorded_roles,
+        }
+    }
+
     fn bind_publications(&self, artifacts: &ArtifactView) -> Result<Self, CompileError> {
         let mut bound = self.clone();
         for (owner, role) in &self.roles {
@@ -2370,14 +2407,16 @@ impl CompilerInputProjection {
     pub(crate) fn snapshot_roles(&self) -> &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole> {
         &self.roles
     }
-    pub(crate) fn recorded_roles(&self) -> &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole> {
+    pub(crate) fn recorded_roles(
+        &self,
+    ) -> &imbl::OrdMap<ExactModuleIdentity, RecordedCompilerRole> {
         &self.recorded_roles
     }
     pub(crate) fn bind_snapshot_roles(
         &mut self,
-        roles: &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole>,
+        roles: &imbl::OrdMap<ExactModuleIdentity, RecordedCompilerRole>,
     ) -> Result<(), CompileError> {
-        if &self.roles != roles {
+        if &self.recorded_roles != roles {
             return Err(failure(
                 "restored compiler roles differ from exact snapshot",
             ));
@@ -2535,7 +2574,11 @@ impl CompilerInputProjection {
             self.roles.insert(owner.clone(), incoming);
         }
         let role = self.roles.get(&owner).expect("admitted role");
-        if self.recorded_roles.get(&owner) != Some(role) {
+        if self
+            .recorded_roles
+            .get(&owner)
+            .is_none_or(|fact| fact.as_role() != role)
+        {
             self.recorded_roles.insert(owner, role.recorded_fact());
         }
         Ok(())
