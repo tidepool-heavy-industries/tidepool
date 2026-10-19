@@ -793,6 +793,7 @@ fn issued_offer_retention_preserves_materialization_parent_precedence() {
                     &metadata,
                     parents,
                     tempfile::tempdir().unwrap(),
+                    &RequestInputTransport::OwnedArena,
                 )
             })
             .unwrap();

@@ -540,6 +540,7 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
                     &metadata,
                     parents,
                     tempfile::tempdir().unwrap(),
+                    &RequestInputTransport::OwnedArena,
                 )
             })
             .unwrap()
@@ -735,6 +736,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
                     metadata,
                     parents,
                     tempfile::tempdir().unwrap(),
+                    &RequestInputTransport::OwnedArena,
                 )
             })
             .unwrap()

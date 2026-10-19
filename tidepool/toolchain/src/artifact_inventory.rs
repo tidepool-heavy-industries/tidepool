@@ -1837,6 +1837,13 @@ pub(crate) fn original_entry_construction_calls() -> usize {
 }
 
 impl ArtifactEntry {
+    /// Physical reuse requires the acquired facts owner, not equal payload facts.
+    pub(crate) fn same_issued_facts(&self, other: &Self) -> bool {
+        self.facts.same_owner(&other.facts)
+            && self.descriptor == other.descriptor
+            && self.requirements == other.requirements
+    }
+
     pub(crate) fn finalize_joined_requirements(
         self,
         requirements: Vec<ExactModuleIdentity>,

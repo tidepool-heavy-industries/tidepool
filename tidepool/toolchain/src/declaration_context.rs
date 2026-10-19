@@ -4131,7 +4131,7 @@ impl RetainedArtifactMaterialization {
         self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
             if let Some(candidate) = owner.rows.get(&entry.descriptor.id) {
                 if let ValueRowCustody::Private(issued) = &candidate.value_custody {
-                    if Arc::ptr_eq(issued, entry) || issued.as_ref() == entry.as_ref() {
+                    if issued.same_issued_facts(entry) {
                         row = Some(candidate.clone());
                     }
                 }
@@ -16202,6 +16202,49 @@ mod tests {
         let mut foreign = request.artifacts.clone();
         foreign[0].interface.sha256 = sha256(b"different claimed owner");
         assert!(request.context().validate_artifacts(&foreign).is_err());
+    }
+
+    #[test]
+    fn dedicated_value_row_refuses_independent_equal_payload_facts() {
+        let (context, producer) = metadata_fixture();
+        let scratch = tempfile::tempdir().unwrap();
+        let request = context
+            .prepare_compilation(scratch.path(), &producer)
+            .unwrap();
+        let entries = context
+            .artifact_view()
+            .entries_for_owners(std::iter::once(identity("fixture", "Value")))
+            .unwrap();
+        let entry = &entries[&identity("fixture", "Value")];
+        let owner = request.materialization.as_ref().unwrap();
+        let row = owner.issued_value_row(entry).unwrap();
+        let ArtifactPayload::Interface(interface, role) = &entry.payload else {
+            panic!("value interface fixture");
+        };
+        let foreign = Arc::new(ArtifactEntry::interface(
+            interface.clone(),
+            *role,
+            entry.requirements.clone(),
+        ));
+        assert_eq!(foreign.descriptor.id, entry.descriptor.id);
+        assert_eq!(
+            foreign.as_ref(),
+            entry.as_ref(),
+            "equal payload is insufficient"
+        );
+        assert!(!entry.same_issued_facts(&foreign));
+        assert!(owner.issued_value_row(&foreign).is_none());
+        let mut validation = PackageInterfaceValidation::default();
+        let fresh = RetainedArtifactRow::issue_value(
+            foreign.clone(),
+            &mut validation,
+            ValueRowLocation::Private,
+        )
+        .unwrap();
+        assert_ne!(fresh.interface.path, row.interface.path);
+        assert_eq!(fresh.interface.sha256, row.interface.sha256);
+        assert!(validation.work().written_bytes > 0);
+        assert!(owner.issued_value_row(entry).is_some());
     }
 
     #[test]
