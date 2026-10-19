@@ -16,11 +16,11 @@ inDirectory :: Text -> Cmd.Command -> Cmd.Command
 inDirectory = Cmd.inDirectory
 withEnvironment :: [(Text, Text)] -> Cmd.Command -> Cmd.Command
 withEnvironment = Cmd.withEnvironment
-run :: Member Commands effs => Cmd.Command -> Eff effs Cmd.RunResult
+run :: forall effs. Member Commands effs => Cmd.Command -> Eff effs Cmd.RunResult
 run = Cmd.run
-start :: Member Commands effs => Cmd.Command -> Eff effs Cmd.Job
+start :: forall effs. Member Commands effs => Cmd.Command -> Eff effs Cmd.Job
 start = Cmd.start
-await :: Member Commands effs => Cmd.Job -> Eff effs Cmd.RunResult
+await :: forall effs. Member Commands effs => Cmd.Job -> Eff effs Cmd.RunResult
 await = Cmd.await
 job :: Cmd.RunResult -> Cmd.Job
 job = Cmd.job
@@ -28,20 +28,20 @@ stdout :: Cmd.RunResult -> Either Cmd.OutputIssue Text
 stdout = Cmd.stdout
 failure :: Cmd.RunResult -> Maybe Text
 failure = Cmd.failure
-readStdout :: Member Commands effs => Cmd.Job -> Eff effs (Either Cmd.OutputIssue Text)
+readStdout :: forall effs. Member Commands effs => Cmd.Job -> Eff effs (Either Cmd.OutputIssue Text)
 readStdout = Cmd.readStdout
-observe :: Member Commands effs => Cmd.Observation -> Cmd.Job -> Eff effs Cmd.CommandStatus
+observe :: forall effs. Member Commands effs => Cmd.Observation -> Cmd.Job -> Eff effs Cmd.CommandStatus
 observe = Cmd.observe
-output :: Member Commands effs => Cmd.Job -> Eff effs Cmd.OutputPage
+output :: forall effs. Member Commands effs => Cmd.Job -> Eff effs Cmd.OutputPage
 output = Cmd.output
 pageText :: Cmd.OutputPage -> Text
 pageText = Cmd.pageText
-next :: Member Commands effs => Cmd.OutputPage -> Eff effs Cmd.OutputPage
+next :: forall effs. Member Commands effs => Cmd.OutputPage -> Eff effs Cmd.OutputPage
 next = Cmd.next
-cancel :: Member Commands effs => Cmd.Job -> Eff effs ()
+cancel :: forall effs. Member Commands effs => Cmd.Job -> Eff effs ()
 cancel = Cmd.cancel
 
-example :: Member Commands effs => Eff effs (Maybe Text, Either Cmd.OutputIssue Text)
+example :: forall effs. Member Commands effs => Eff effs (Maybe Text, Either Cmd.OutputIssue Text)
 example = do
   result <- Cmd.run (Cmd.withMemory (Cmd.MiB 256) (Cmd.argv ["printf", "hello\n"]))
   pure (Cmd.failure result, Cmd.stdout result)

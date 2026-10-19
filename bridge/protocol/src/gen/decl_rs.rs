@@ -165,7 +165,7 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
         }
         if effect.name == "Commands" {
             for operation in crate::effects::commands::companion_operations() {
-                contents.push_str(&format!("            crate::EffectOperationDocumentation {{ name: {}.into(), signature: {}.into(), contract: vec![{}], source: Some({}.into()), examples: vec![{}.into()] }},\n", rust_string_literal(operation.name), rust_string_literal(&operation.signature()), operation.contract.iter().map(|line| format!("{}.into()", rust_string_literal(line))).collect::<Vec<_>>().join(", "), rust_string_literal(operation.source), rust_string_literal("do\n  result <- Cmd.run (Cmd.withMemory (Cmd.MiB 256) (Cmd.argv [\"printf\", \"hello\\n\"]))\n  pure (Cmd.failure result, Cmd.stdout result)")));
+                contents.push_str(&format!("            crate::EffectOperationDocumentation {{ name: {}.into(), signature: {}.into(), contract: vec![{}], source: Some({}.into()), examples: vec![{}] }},\n", rust_string_literal(operation.name), rust_string_literal(&operation.signature()), operation.contract.iter().map(|line| format!("{}.into()", rust_string_literal(line))).collect::<Vec<_>>().join(", "), rust_string_literal(operation.source), operation.examples.iter().map(|example| format!("{}.into()", rust_string_literal(example))).collect::<Vec<_>>().join(", ")));
             }
         }
         contents.push_str("        ],\n");

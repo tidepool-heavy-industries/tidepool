@@ -247,7 +247,10 @@ fn command_composition_documentation_compiles_against_authored_exports() {
     let fixture = std::fs::read_to_string(surface.fixtures.join("CommandComposition.hs")).unwrap();
     let docs = tidepool_mcp::effect_documentation(&tidepool_mcp::commands_decl()).unwrap();
     assert!(!docs.operations.is_empty());
+    assert!(docs.operations.iter().any(|operation| operation.name == "run" && !operation.examples.is_empty()));
     for operation in &docs.operations {
+        let signature = operation.signature.strip_prefix("Cmd.").expect("companion documentation uses the Cmd import");
+        assert!(fixture.lines().any(|line| line == signature), "{} signature differs from compiled fixture: {}", operation.name, signature);
         for example in &operation.examples {
             assert!(fixture.contains(example), "{} example differs from compiled fixture", operation.name);
         }

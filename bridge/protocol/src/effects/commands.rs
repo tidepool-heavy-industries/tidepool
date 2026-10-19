@@ -441,6 +441,7 @@ pub struct CompanionOperation {
     pub effectful: bool,
     pub contract: &'static [&'static str],
     pub source: &'static str,
+    pub examples: &'static [&'static str],
 }
 impl CompanionOperation {
     pub fn signature(&self) -> String {
@@ -462,6 +463,7 @@ pub fn companion_operations() -> Vec<CompanionOperation> {
     let mut add = |name, arguments, result, effectful, contract| operations.push(CompanionOperation {
         name, arguments, result, effectful, contract,
         source: "bridge/haskell/lib/Tidepool/Command.hs",
+        examples: &[],
     });
     add("argv", vec![HsType::list(HsType::Text)], command.clone(), false, &["Describe a command with exact argv; execution is explicit."]);
     add("bashCommand", vec![HsType::Text], command.clone(), false, &["Describe a bash script; execution is explicit."]);
@@ -481,9 +483,13 @@ pub fn companion_operations() -> Vec<CompanionOperation> {
     add("next", vec![named("Cmd.OutputPage")], named("Cmd.OutputPage"), true, &["Read the next output page."]);
     add("cancel", vec![job], HsType::Unit, true, &["Request cancellation; inspect subsequent status for terminal and cleanup evidence."]);
     for operation in &mut operations {
+        if operation.name == "run" { operation.examples = &[COMMAND_COMPOSITION_EXAMPLE]; }
         if matches!(operation.name, "argv" | "bashCommand" | "withMemory" | "inDirectory" | "withEnvironment") {
             operation.source = "bridge/haskell/lib/Tidepool/Command/Types.hs";
         }
     }
     operations
 }
+
+/// Compiled verbatim by the authored command surface contract fixture.
+pub const COMMAND_COMPOSITION_EXAMPLE: &str = "do\n  result <- Cmd.run (Cmd.withMemory (Cmd.MiB 256) (Cmd.argv [\"printf\", \"hello\\n\"]))\n  pure (Cmd.failure result, Cmd.stdout result)";
