@@ -17055,6 +17055,33 @@ pub(crate) mod request_tests {
             assert!(cold.snapshot().get(HostWorkCounter::CompilerMetadataSnapshot) > 0);
             let fingerprint = first.provenance().fingerprint.clone();
 
+            {
+                let (frontend, frontend_context) = workbench.shared_view().admit_private_cell_for_test(context.clone()).await.unwrap();
+                let cell = include_str!("fixtures/compiler-world-info.hs").to_owned();
+                let (checked, prepared) = frontend.prepare_cell(frontend_context.clone(), cell.clone()).await.unwrap();
+                let PreparedCell { mut items, dependencies } = prepared;
+                assert_eq!(checked.items.len(), 1);
+                assert_eq!(items.len(), 1);
+                let step = frontend.begin_prepared_cell_item(frontend_context.clone(), ParsedBlock {
+                    ordinal: 1, total: 1, source: cell,
+                }, items.remove(0)).await.unwrap();
+                let ResidentWorkbenchStep::Running { fragment, outcome } = step else { panic!("actual Introspection effect must suspend"); };
+                let boundary = workbench_runner_for_test(&frontend).capture_boundary(
+                    frontend_context.clone(), (*outcome).into(), frontend_context.placement.resource_scope,
+                ).await.unwrap();
+                let ResidentActorBoundary::Introspection { continuation, query, kind } = boundary else { panic!("real structured inspection boundary"); };
+                assert_eq!(query.scope, tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()));
+                assert!(matches!(kind, StructuredInspectionKind::Info));
+                let outcome = frontend.resume_structured_introspection(frontend_context.clone(), continuation, query, kind).await.unwrap();
+                let step = frontend.settle_item(frontend_context, *fragment, outcome).await.unwrap();
+                let ResidentWorkbenchStep::Committed { output, installed_bindings, .. } = step else { panic!("real world answer must resume and complete the authored item"); };
+                assert_eq!(installed_bindings, ["frontendAnswer"]);
+                assert!(output.contains("known") && output.contains("compiler-world:"), "{output}");
+                assert_eq!(owner.captures.load(std::sync::atomic::Ordering::Relaxed), 1,
+                    "the real frontend must borrow the retained captured source domain");
+                drop(dependencies);
+            }
+
             let history_context = workbench.access.with_machine(context.clone(), |session, context, _| {
                 let placement = crate::ActorPlacement { lexical_scope: session.mint_isolated_scope(), ..context.placement };
                 let mut history = crate::ActorDescriptor::new("unrelated history", placement)
@@ -17119,31 +17146,6 @@ pub(crate) mod request_tests {
             assert!(checked.snapshot().get(HostWorkCounter::CompileViewBuild) > 0);
             assert!(checked.snapshot().get(HostWorkCounter::InjectedValueVisit) > 0);
             assert!(checked.snapshot().get(HostWorkCounter::ReachableValueVisit) > 0);
-
-            let (frontend, frontend_context) = workbench.admit_private_cell_for_test(context).await.unwrap();
-            let cell = include_str!("fixtures/compiler-world-info.hs").to_owned();
-            let (checked, prepared) = frontend.prepare_cell(frontend_context.clone(), cell.clone()).await.unwrap();
-            let PreparedCell { mut items, dependencies } = prepared;
-            assert_eq!(checked.items.len(), 1);
-            assert_eq!(items.len(), 1);
-            let step = frontend.begin_prepared_cell_item(frontend_context.clone(), ParsedBlock {
-                ordinal: 1, total: 1, source: cell,
-            }, items.remove(0)).await.unwrap();
-            let ResidentWorkbenchStep::Running { fragment, outcome } = step else { panic!("actual Introspection effect must suspend"); };
-            let boundary = workbench_runner_for_test(&frontend).capture_boundary(
-                frontend_context.clone(), (*outcome).into(), frontend_context.placement.resource_scope,
-            ).await.unwrap();
-            let ResidentActorBoundary::Introspection { continuation, query, kind } = boundary else { panic!("real structured inspection boundary"); };
-            assert_eq!(query.scope, tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()));
-            assert!(matches!(kind, StructuredInspectionKind::Info));
-            let outcome = frontend.resume_structured_introspection(frontend_context.clone(), continuation, query, kind).await.unwrap();
-            let step = frontend.settle_item(frontend_context, *fragment, outcome).await.unwrap();
-            let ResidentWorkbenchStep::Committed { output, installed_bindings, .. } = step else { panic!("real world answer must resume and complete the authored item"); };
-            assert_eq!(installed_bindings, ["frontendAnswer"]);
-            assert!(output.contains("known") && output.contains("compiler-world:"), "{output}");
-            assert_eq!(owner.captures.load(std::sync::atomic::Ordering::Relaxed), 1,
-                "the real frontend must borrow the retained captured source domain");
-            drop(dependencies);
         }).await;
     }
 
