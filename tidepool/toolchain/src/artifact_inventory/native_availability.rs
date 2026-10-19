@@ -2342,5 +2342,138 @@ mod normalized_dependency_tests {
             .native_availability(sibling_id)
             .is_none());
         assert!(request.groups.is_empty());
+
+        let parent = complete.artifacts();
+        let inventory = parent.inventory();
+        let entries = parent
+            .entries()
+            .into_iter()
+            .map(|entry| (entry.descriptor.id, entry))
+            .collect::<BTreeMap<_, _>>();
+        let namespace = complete
+            .projection()
+            .entries_from_artifacts(&entries)
+            .unwrap();
+        let demanded = BTreeSet::from([NativeGroupKey {
+            artifact: hidden_id,
+            original_ordinal: 7,
+        }]);
+        for source in [&complete, &retained, &repeated] {
+            let catalog = NativeDependencyCatalog::from_source(source).unwrap();
+            let supports = catalog.group_supports(*demanded.first().unwrap(), products[0].owner());
+            assert_eq!(supports.len(), 1);
+            let (issued_binding, issuer) = supports[0];
+            let issuer_closure = issuer
+                .custody_snapshot()
+                .nodes_from_seeds([InventoryNodeKey::Group(issued_binding)])
+                .unwrap();
+            let before_selection = parent.capture_graph_selection();
+            let mut state = inventory.0.lock().expect("inventory lock");
+            let acquired = bind_input_demand(
+                &mut state,
+                parent,
+                &entries,
+                BTreeMap::new(),
+                &demanded,
+                NativeDemandSource::Catalog(&catalog),
+            )
+            .unwrap();
+            assert_eq!(acquired.bindings.len(), 1);
+            assert_eq!(
+                acquired.bindings[demanded.first().unwrap()].binding,
+                issued_binding
+            );
+            assert_eq!(
+                acquired.bindings[demanded.first().unwrap()].closure,
+                issuer_closure
+            );
+            let verified = &acquired.bindings[demanded.first().unwrap()];
+            assert!(verified
+                .closure
+                .contains(&InventoryNodeKey::Group(verified.binding)));
+            // The old consumer is an independently executed closure oracle.
+            // Count it separately so a zero-work assertion has a positive control.
+            let before_reference = state.graph_visits.load(Ordering::Relaxed);
+            let reference = admitted_closure(
+                &state,
+                [InventoryNodeKey::Group(verified.binding)].into_iter(),
+            )
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+            assert_eq!(verified.closure, reference);
+            assert!(state.graph_visits.load(Ordering::Relaxed) > before_reference);
+            let mut expected = BTreeMap::<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>::new();
+            for node in &reference {
+                if let InventoryNodeKey::Group(group) = node {
+                    expected
+                        .entry(NativeGroupKey {
+                            artifact: group.binding.artifact(),
+                            original_ordinal: group.original_ordinal,
+                        })
+                        .or_default()
+                        .insert(*group);
+                }
+            }
+            // Repeated receiving uses share the verified closure, not a graph walk.
+            let before_consume = state.graph_visits.load(Ordering::Relaxed);
+            for _ in 0..4 {
+                let mut actual = BTreeMap::new();
+                acquired
+                    .retain_dependency_groups(&entries, &namespace, &mut actual)
+                    .unwrap();
+                assert_eq!(actual, expected);
+            }
+            assert_eq!(state.graph_visits.load(Ordering::Relaxed), before_consume);
+            let root_id = ArtifactEntry::original(producer.sha256(), products[1].clone())
+                .unwrap()
+                .descriptor
+                .id;
+            let mut required = BTreeMap::new();
+            let fresh = bind_fresh_product_dependencies(
+                &mut state,
+                parent,
+                &namespace,
+                &entries,
+                &BTreeSet::from([NativeGroupKey {
+                    artifact: root_id,
+                    original_ordinal: 3,
+                }]),
+                &catalog,
+                &mut required,
+            )
+            .unwrap();
+            assert_eq!(required, expected);
+            assert_eq!(
+                fresh.bindings[&NativeGroupKey {
+                    artifact: hidden_id,
+                    original_ordinal: 7
+                }]
+                    .closure,
+                reference
+            );
+            drop(state);
+            assert_eq!(parent.capture_graph_selection(), before_selection);
+        }
+        let empty_source = CompilerSourceSupport::empty();
+        for (source, ordinal) in [(&retained, 9), (&empty_source, 7)] {
+            let catalog = NativeDependencyCatalog::from_source(source).unwrap();
+            let mut state = inventory.0.lock().expect("inventory lock");
+            let error = bind_input_demand(
+                &mut state,
+                parent,
+                &entries,
+                BTreeMap::new(),
+                &BTreeSet::from([NativeGroupKey {
+                    artifact: hidden_id,
+                    original_ordinal: ordinal,
+                }]),
+                NativeDemandSource::Catalog(&catalog),
+            )
+            .err()
+            .expect("unissued native demand must refuse");
+            assert!(matches!(error, CompileError::ArtifactInventory(ref error)
+                if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { .. })));
+        }
     }
 }
