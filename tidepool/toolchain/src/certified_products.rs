@@ -14195,11 +14195,12 @@ pub(crate) mod tests {
         use crate::artifact_inventory::{
             ArtifactDependency, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure,
             CanonicalProducerIdentity, CompilerInputProjection, CompilerInputRole,
-            NativeArtifactDemand,
+            IssuedNativeOffer, NativeArtifactDemand,
         };
         use crate::declaration_context::{
-            issue_fixture_compiler_support, ExactCompileContext, ExactDeclarationContext,
-            NativeTransportMode, OriginalCompilerInputs,
+            issue_fixture_compiler_support, recover_fixture_compiler_support, ExactCompileContext,
+            ExactDeclarationContext, NativeTransportMode, OriginalCompilerInputs,
+            RequestNativeAvailability,
         };
         use crate::declaration_join::ExactModuleIdentity;
         use crate::CompileError;
@@ -14334,6 +14335,69 @@ pub(crate) mod tests {
             .unwrap();
             let support_output =
                 OriginalCompilerInputs::from_selection(&support_selection, &support_view).unwrap();
+            let issued_view = support_output.issued_artifacts();
+            let issued_graph = issued_view.capture_graph_selection();
+            let empty_offer =
+                IssuedNativeOffer::issue(support_entry.descriptor.id, issued_view, None).unwrap();
+            let empty_rows = RequestNativeAvailability::issue_checked(
+                support_output.role_projection(),
+                issued_view,
+                std::slice::from_ref(&empty_offer),
+            )
+            .unwrap();
+            let empty_support = recover_fixture_compiler_support(
+                support_output.role_projection().clone(),
+                issued_view.clone(),
+                [empty_offer],
+            )
+            .unwrap()
+            .retain_normalized_availability(&empty_rows)
+            .unwrap()
+            .for_source_owners(&BTreeSet::new())
+            .unwrap();
+            assert_eq!(empty_support.projection(), type_only.projection());
+            let issued_a_binding = *issued_graph
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == support_entry.descriptor.id)
+                .unwrap();
+            let empty_graph = empty_support.artifacts().capture_graph_selection();
+            assert!(empty_graph.bindings.contains(&issued_a_binding));
+            assert_eq!(
+                empty_graph.namespace,
+                issued_graph
+                    .namespace
+                    .iter()
+                    .filter(|binding| binding.artifact != support_entry.descriptor.id)
+                    .copied()
+                    .collect::<Vec<_>>()
+            );
+            assert!(empty_support
+                .artifacts()
+                .artifact_ids()
+                .contains(&support_entry.descriptor.id));
+            let empty_row = empty_support
+                .native_availability()
+                .rows()
+                .find(|row| row.original_owner() == support_product.owner())
+                .unwrap();
+            assert!(!empty_row.permits(required_ordinal));
+            assert_eq!(
+                empty_support
+                    .native_availability()
+                    .snapshot_facts()
+                    .unwrap()[&support_entry.descriptor.id]
+                    .mode,
+                NativeTransportMode::IssuedGroups
+            );
+            assert!(empty_support
+                .native_offers()
+                .iter()
+                .all(|offer| !offer.is_full()));
+            assert!(empty_support
+                .artifacts()
+                .selected_native_groups()
+                .is_empty());
             let issued_support =
                 crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
                     &support_output,
@@ -14343,7 +14407,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(issued_support.projection().roles().len(), 1);
             for (label, support, expected) in [
-                ("absent", type_only, false),
+                ("empty", empty_support, false),
                 ("issued", issued_support, true),
             ] {
                 let context = Arc::new(
@@ -14377,7 +14441,27 @@ pub(crate) mod tests {
                     expected
                 );
                 if !expected {
-                    assert!(input.compiler_source_support().native_offers().is_empty());
+                    assert!(input
+                        .compiler_source_support()
+                        .native_offers()
+                        .iter()
+                        .all(|offer| !offer.is_full()));
+                    let row = input
+                        .native_availability(support_entry.descriptor.id)
+                        .expect("bounded-empty A is an actual input permission row");
+                    assert_eq!(
+                        row.target_original(support_product.owner())
+                            .unwrap()
+                            .descriptor
+                            .id,
+                        support_entry.descriptor.id
+                    );
+                    assert!(!row.permits(required_ordinal));
+                    assert!(input
+                        .artifacts()
+                        .capture_graph_selection()
+                        .bindings
+                        .contains(&issued_a_binding));
                 }
                 let operation = InventoryOperation::new(Default::default());
                 let mut selection =
