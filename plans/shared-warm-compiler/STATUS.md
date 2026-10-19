@@ -161,14 +161,23 @@ running recipient→send_message, dormant non-root→followup_task. Automatic co
 notification supports delivery, never replaces resumption. Process owners collect
 terminal results; no orphan commands. Area parents reconcile review/fold disposition.
 
-Campaign next actions: publish the reviewed f088 production tree with current
-receipts and handoffs;
+Public campaign checkpoint62495a4db6 carries the tested f088 production tree,
+current receipts and reconciled area handoffs. All campaign commands settled.
+Campaign next actions:
 consume root C2/C5 revision and service-owner source maps before shared APIs;
 collect reload first compiled foundation then approve its bounded successor;
 execute repaired fixture and exact frozen qualification successor. No hard strategy
 stop is declared. A real unresolved strategy gap closes only its cone after bounded
 review; drain all other approved independent successors, reviews, repairs, merges
 and running tests before MORNING handoff.
+
+Awaited events and continuation: root owns the exact committed C2/C5 decision;
+qualification owns the reviewed fixture successor native terminal and receiving
+OID; reload owns counted foundation controls and the canonical transaction-owner
+issuer decision packet. Warm/host source maps and owned source-lifetime options
+are delivered. Each producer checks campaign status and uses followup_task if it
+is dormant; campaign then reviews/repairs/folds or activates the approved next
+source wave. No campaign process lacks an observer and no periodic wake is set.
 
 After ALL campaign subagent work settles, qualification must perform the requested
 bounded scratch analysis by checkout/output owner: active versus idle users,
