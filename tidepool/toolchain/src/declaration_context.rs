@@ -15647,6 +15647,29 @@ mod tests {
             version: u32,
             roles: SnapshotMapRoot,
         }
+        // Generic role transport also decodes facts only. Its mandatory domain
+        // cannot become a default-empty publication policy.
+        let raw_role = serde_json::to_value(&original_role).unwrap();
+        let decoded_role: CompilerInputRole = serde_json::from_value(raw_role.clone()).unwrap();
+        assert_eq!(decoded_role, original_role);
+        let mut missing_authority = raw_role.clone();
+        assert!(missing_authority
+            .as_object_mut()
+            .unwrap()
+            .remove("native_authority")
+            .is_some());
+        assert!(serde_json::from_value::<CompilerInputRole>(missing_authority).is_err());
+        let mut malformed_authority = raw_role.clone();
+        malformed_authority["native_authority"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<CompilerInputRole>(malformed_authority).is_err());
+        let mut missing_roles = raw_role;
+        assert!(missing_roles["native_authority"]["maps"]
+            .as_object_mut()
+            .unwrap()
+            .remove("roles")
+            .is_some());
+        assert!(serde_json::from_value::<CompilerInputRole>(missing_roles).is_err());
+
         let context_links: ContextLinks = read_value(&store, written.root().cid()).unwrap();
         let role_cid: cid::Cid = lookup_map(&store, &context_links.roles, &root)
             .unwrap()
