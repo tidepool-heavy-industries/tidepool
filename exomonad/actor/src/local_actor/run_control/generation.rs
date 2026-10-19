@@ -22,7 +22,10 @@ pub(crate) enum GenerationResourceState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GenerationResourceIdentity {
     Actor(ActorRef),
-    Native { issued_to: ActorRef, id: ractor::ActorId },
+    Native {
+        issued_to: ActorRef,
+        id: ractor::ActorId,
+    },
     Preparation(u64),
 }
 
@@ -40,13 +43,27 @@ pub(crate) struct GenerationPopulation {
 }
 
 impl RunState {
-    pub(super) fn generation_population(&self, dependency: GenerationDependency) -> GenerationPopulation {
+    pub(super) fn generation_population(
+        &self,
+        dependency: GenerationDependency,
+    ) -> GenerationPopulation {
         let mut resources = Vec::new();
         for (actor, record) in &self.reservations {
-            if !record.dependency.as_ref().is_some_and(|issued| issued.depends_on(&dependency)) {
+            if !record
+                .dependency
+                .as_ref()
+                .is_some_and(|issued| issued.depends_on(&dependency))
+            {
                 continue;
             }
             if matches!(record.phase, ReservationPhase::NotStarted) {
+                continue;
+            }
+            if let ReservationPhase::StartUnconfirmed(detail) = &record.phase {
+                resources.push(GenerationResourceObservation {
+                    identity: GenerationResourceIdentity::Actor(*actor),
+                    state: GenerationResourceState::CleanupUnconfirmed(detail.clone()),
+                });
                 continue;
             }
             if let Some(entry) = self.entries.get(actor) {
@@ -55,15 +72,28 @@ impl RunState {
                         identity: GenerationResourceIdentity::Actor(*actor),
                         state: GenerationResourceState::Running,
                     });
-                } else if !entry.actor.terminal().cleanup().is_some_and(|cleanup| cleanup.is_confirmed()) {
+                } else if !entry
+                    .actor
+                    .terminal()
+                    .cleanup()
+                    .is_some_and(|cleanup| cleanup.is_confirmed())
+                {
                     resources.push(GenerationResourceObservation {
                         identity: GenerationResourceIdentity::Actor(*actor),
-                        state: GenerationResourceState::CleanupUnconfirmed("actor terminal cleanup is not confirmed".into()),
+                        state: GenerationResourceState::CleanupUnconfirmed(
+                            "actor terminal cleanup is not confirmed".into(),
+                        ),
                     });
                 }
-            } else if record.terminal.cleanup().is_some_and(|cleanup| cleanup.is_confirmed()) {
+            } else if record
+                .terminal
+                .cleanup()
+                .is_some_and(|cleanup| cleanup.is_confirmed())
+            {
                 continue;
-            } else if record.preparation_pending() || matches!(record.phase, ReservationPhase::Ready) {
+            } else if record.preparation_pending()
+                || matches!(record.phase, ReservationPhase::Ready)
+            {
                 resources.push(GenerationResourceObservation {
                     identity: GenerationResourceIdentity::Actor(*actor),
                     state: GenerationResourceState::Starting,
@@ -71,12 +101,18 @@ impl RunState {
             } else {
                 resources.push(GenerationResourceObservation {
                     identity: GenerationResourceIdentity::Actor(*actor),
-                    state: GenerationResourceState::CleanupUnconfirmed("reservation has no confirmed terminal cleanup".into()),
+                    state: GenerationResourceState::CleanupUnconfirmed(
+                        "reservation has no confirmed terminal cleanup".into(),
+                    ),
                 });
             }
         }
         for (id, record) in &self.resources {
-            if !record.dependency.as_ref().is_some_and(|issued| issued.depends_on(&dependency)) {
+            if !record
+                .dependency
+                .as_ref()
+                .is_some_and(|issued| issued.depends_on(&dependency))
+            {
                 continue;
             }
             let state = match record.owner {
@@ -85,23 +121,41 @@ impl RunState {
                 ResourceOwner::Owned(_) => GenerationResourceState::Running,
             };
             resources.push(GenerationResourceObservation {
-                identity: GenerationResourceIdentity::Native { issued_to: record.issued_to, id: *id },
+                identity: GenerationResourceIdentity::Native {
+                    issued_to: record.issued_to,
+                    id: *id,
+                },
                 state,
             });
         }
         for (id, record) in &self.preparations {
-            if !record.dependency.as_ref().is_some_and(|issued| issued.depends_on(&dependency)) {
+            if !record
+                .dependency
+                .as_ref()
+                .is_some_and(|issued| issued.depends_on(&dependency))
+            {
                 continue;
             }
             let state = match &record.phase {
                 PreparationPhase::Running => GenerationResourceState::Starting,
-                PreparationPhase::Accepted | PreparationPhase::Settled(crate::CleanupComponentOutcome::Confirmed) => continue,
-                PreparationPhase::Settled(crate::CleanupComponentOutcome::Unsupported) => GenerationResourceState::CleanupUnsupported,
-                PreparationPhase::Settled(crate::CleanupComponentOutcome::Unconfirmed(detail)) => GenerationResourceState::CleanupUnconfirmed(detail.clone()),
+                PreparationPhase::Accepted
+                | PreparationPhase::Settled(crate::CleanupComponentOutcome::Confirmed) => continue,
+                PreparationPhase::Settled(crate::CleanupComponentOutcome::Unsupported) => {
+                    GenerationResourceState::CleanupUnsupported
+                }
+                PreparationPhase::Settled(crate::CleanupComponentOutcome::Unconfirmed(detail)) => {
+                    GenerationResourceState::CleanupUnconfirmed(detail.clone())
+                }
             };
-            resources.push(GenerationResourceObservation { identity: GenerationResourceIdentity::Preparation(*id), state });
+            resources.push(GenerationResourceObservation {
+                identity: GenerationResourceIdentity::Preparation(*id),
+                state,
+            });
         }
-        GenerationPopulation { dependency, resources }
+        GenerationPopulation {
+            dependency,
+            resources,
+        }
     }
 }
 
@@ -114,7 +168,8 @@ impl RunControlClient {
         message: impl FnOnce(oneshot::Sender<T>) -> RunControlMessage,
     ) -> Result<oneshot::Receiver<T>, GenerationDirectoryError> {
         let (reply, receiver) = oneshot::channel();
-        dependency.with_open_admission(|| self.owner.send_message(message(reply)))?
+        dependency
+            .with_open_admission(|| self.owner.send_message(message(reply)))?
             .map_err(|_| DirectoryError::Unavailable)?;
         Ok(receiver)
     }
@@ -125,9 +180,13 @@ impl RunControlClient {
         parent: ActorRef,
         incarnation: crate::Incarnation,
     ) -> Result<ActorReservation, GenerationDirectoryError> {
-        let receiver = self.generation_enqueue(dependency, |reply| RunControlMessage::ReserveWorker {
-            parent, incarnation, dependency: Some(dependency.clone()), reply,
-        })?;
+        let receiver =
+            self.generation_enqueue(dependency, |reply| RunControlMessage::ReserveWorker {
+                parent,
+                incarnation,
+                dependency: Some(dependency.clone()),
+                reply,
+            })?;
         Ok(receiver.await.map_err(|_| DirectoryError::Unavailable)??)
     }
 
@@ -137,26 +196,55 @@ impl RunControlClient {
         predecessor: ActorRef,
         incarnation: crate::Incarnation,
     ) -> Result<ActorReservation, GenerationDirectoryError> {
-        let receiver = self.generation_enqueue(dependency, |reply| RunControlMessage::ReserveSuccessor {
-            predecessor, incarnation, dependency: Some(dependency.clone()), reply,
+        let receiver =
+            self.generation_enqueue(dependency, |reply| RunControlMessage::ReserveSuccessor {
+                predecessor,
+                incarnation,
+                dependency: Some(dependency.clone()),
+                reply,
+            })?;
+        Ok(receiver.await.map_err(|_| DirectoryError::Unavailable)??)
+    }
+
+    pub(crate) async fn reserve_generation_actor(
+        &self,
+        dependency: &GenerationDependency,
+        incarnation: crate::Incarnation,
+    ) -> Result<ActorReservation, GenerationDirectoryError> {
+        let receiver = self.generation_enqueue(dependency, |reply| {
+            RunControlMessage::ReserveGenerationActor {
+                dependency: dependency.clone(),
+                incarnation,
+                reply,
+            }
         })?;
         Ok(receiver.await.map_err(|_| DirectoryError::Unavailable)??)
     }
 
-    pub(crate) async fn prepare_generation_root(
+    /// The reservation owner supplies provenance; callers cannot substitute a
+    /// generation or omit it when preparing an already reserved worker.
+    pub(crate) async fn prepare_worker_root(
         &self,
-        dependency: &GenerationDependency,
+        reservation: ActorRef,
         operation: RootOperation,
-    ) -> Result<RootOperationResult, GenerationDirectoryError> {
-        let receiver = self.generation_enqueue(dependency, |reply| RunControlMessage::BeginPreparation {
-            dependency: Some(dependency.clone()), intent: PreparationIntent::Creation, operation, reply,
-        })?;
-        let delivery = receiver.await.map_err(|_| DirectoryError::Unavailable)??
-            .await.map_err(|_| DirectoryError::Unavailable)?;
+    ) -> Result<RootOperationResult, DirectoryError> {
+        let receiver = self
+            .ask(|reply| RunControlMessage::BeginPreparation {
+                reservation: Some(reservation),
+                intent: PreparationIntent::Creation,
+                operation,
+                reply,
+            })
+            .await??;
+        let delivery = receiver.await.map_err(|_| DirectoryError::Unavailable)?;
         if delivery.is_error() {
             return Ok(delivery.accept());
         }
-        self.ask(|reply| RunControlMessage::AcceptPreparation { id: delivery.id, reply }).await??;
+        self.ask(|reply| RunControlMessage::AcceptPreparation {
+            id: delivery.id,
+            reply,
+        })
+        .await??;
         Ok(delivery.accept())
     }
 
@@ -165,7 +253,9 @@ impl RunControlClient {
         fence: &GenerationFence,
     ) -> Result<GenerationPopulation, DirectoryError> {
         self.ask(|reply| RunControlMessage::GenerationPopulation {
-            dependency: fence.dependency().clone(), reply,
-        }).await
+            dependency: fence.dependency().clone(),
+            reply,
+        })
+        .await
     }
 }

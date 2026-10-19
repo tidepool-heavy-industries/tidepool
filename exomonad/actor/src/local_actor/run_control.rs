@@ -314,6 +314,12 @@ enum ReservationPhase {
     Registered,
     Abandoned,
     NotStarted,
+    StartUnconfirmed(String),
+}
+
+pub(super) enum ReservationStartFailure {
+    NotStarted(String),
+    Unconfirmed(String),
 }
 struct ReservationRecord {
     phase: ReservationPhase,
@@ -325,13 +331,16 @@ struct ReservationRecord {
     executor: Option<ractor::ActorCell>,
     reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
     dependency: Option<GenerationDependency>,
+    preparation: Option<u64>,
 }
 
 impl ReservationRecord {
     fn preparation_pending(&self) -> bool {
         matches!(
             self.phase,
-            ReservationPhase::Creating | ReservationPhase::Abandoning
+            ReservationPhase::Creating
+                | ReservationPhase::Abandoning
+                | ReservationPhase::StartUnconfirmed(_)
         ) || (matches!(self.purpose, ReservationPurpose::ExistingInput)
             && matches!(self.phase, ReservationPhase::Ready))
     }
@@ -614,6 +623,11 @@ pub(super) enum RunControlMessage {
         dependency: Option<GenerationDependency>,
         reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
     },
+    ReserveGenerationActor {
+        dependency: GenerationDependency,
+        incarnation: crate::Incarnation,
+        reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
+    },
     ReserveSuccessor {
         predecessor: ActorRef,
         incarnation: crate::Incarnation,
@@ -712,7 +726,7 @@ pub(super) enum RunControlMessage {
     },
     ReservationReady {
         actor: ActorRef,
-        lifecycle: Result<crate::kernel::LifecycleHandle, String>,
+        lifecycle: Result<crate::kernel::LifecycleHandle, ReservationStartFailure>,
     },
     AbandonReservation {
         actor: ActorRef,
@@ -722,7 +736,7 @@ pub(super) enum RunControlMessage {
         reply: oneshot::Sender<()>,
     },
     BeginPreparation {
-        dependency: Option<GenerationDependency>,
+        reservation: Option<ActorRef>,
         intent: PreparationIntent,
         operation: RootOperation,
         reply: oneshot::Sender<Result<oneshot::Receiver<RootDelivery>, DirectoryError>>,
@@ -850,6 +864,7 @@ fn begin_reservation_after(
             executor: None,
             reply: Some(reply),
             dependency,
+            preparation: None,
         },
     );
     if state
@@ -1191,6 +1206,20 @@ impl Actor for RunControl {
                     incarnation,
                     ReservationPurpose::Worker { parent },
                     dependency,
+                    reply,
+                );
+            }
+            RunControlMessage::ReserveGenerationActor {
+                dependency,
+                incarnation,
+                reply,
+            } => {
+                reserve_actor(
+                    state,
+                    None,
+                    incarnation,
+                    ReservationPurpose::Root,
+                    Some(dependency),
                     reply,
                 );
             }
@@ -1654,7 +1683,7 @@ impl Actor for RunControl {
                 let _ = reply.send(());
             }
             RunControlMessage::BeginPreparation {
-                dependency,
+                reservation,
                 intent,
                 operation,
                 reply,
@@ -1675,6 +1704,22 @@ impl Actor for RunControl {
                     .next_preparation
                     .checked_add(1)
                     .ok_or("root preparation identity exhausted")?;
+                let dependency = if let Some(actor) = reservation {
+                    let Some(record) = state.reservations.get_mut(&actor) else {
+                        let _ = reply.send(Err(DirectoryError::Unauthorized { actor }));
+                        return Ok(());
+                    };
+                    if !matches!(record.phase, ReservationPhase::Ready)
+                        || record.preparation.is_some()
+                    {
+                        let _ = reply.send(Err(DirectoryError::AlreadyRegistered { actor }));
+                        return Ok(());
+                    }
+                    record.preparation = Some(id);
+                    record.dependency.clone()
+                } else {
+                    None
+                };
                 let compiler = RetainedActorExit::new();
                 state.preparations.insert(
                     id,
@@ -1682,13 +1727,15 @@ impl Actor for RunControl {
                         phase: PreparationPhase::Running,
                         compiler: compiler.clone(),
                         placement: None,
-                        dependency,
+                        dependency: dependency.clone(),
                     },
                 );
                 let (delivery, receiver) = oneshot::channel();
                 if supervisor
                     .send_message(PreparationMessage::Start {
                         id,
+                        expected_worker: reservation,
+                        dependency,
                         operation,
                         compiler,
                         reply: delivery,
@@ -1756,7 +1803,10 @@ impl Actor for RunControl {
                                 && !matches!(record.purpose, ReservationPurpose::ExistingInput))
                                 || matches!(
                                     record.phase,
-                                    ReservationPhase::Abandoned | ReservationPhase::Abandoning
+                                    ReservationPhase::Abandoned
+                                        | ReservationPhase::Abandoning
+                                        | ReservationPhase::NotStarted
+                                        | ReservationPhase::StartUnconfirmed(_)
                                 )
                             {
                                 lifecycle.close_abandoned();
@@ -1783,17 +1833,24 @@ impl Actor for RunControl {
                                 }
                             }
                         }
-                        Err(_) => {
-                            // No affine reservation was issued and no executor can
-                            // have used this failed starter's identity.
-                            if state.identities.claimed.get(&actor.id) == Some(&actor) {
-                                if let Some(previous) = record.previous_claim {
-                                    state.identities.claimed.insert(actor.id, previous);
-                                } else {
-                                    state.identities.claimed.remove(&actor.id);
+                        Err(failure) => {
+                            match failure {
+                                ReservationStartFailure::NotStarted(_detail) => {
+                                    // The issuing producer proves startup never
+                                    // began; worker loss cannot issue this case.
+                                    if state.identities.claimed.get(&actor.id) == Some(&actor) {
+                                        if let Some(previous) = record.previous_claim {
+                                            state.identities.claimed.insert(actor.id, previous);
+                                        } else {
+                                            state.identities.claimed.remove(&actor.id);
+                                        }
+                                    }
+                                    record.phase = ReservationPhase::NotStarted;
+                                }
+                                ReservationStartFailure::Unconfirmed(detail) => {
+                                    record.phase = ReservationPhase::StartUnconfirmed(detail);
                                 }
                             }
-                            record.phase = ReservationPhase::NotStarted;
                             if let Some(reply) = record.reply.take() {
                                 let _ = reply.send(Err(DirectoryError::Unavailable));
                             }
@@ -1807,7 +1864,10 @@ impl Actor for RunControl {
             }
             RunControlMessage::AbandonReservation { actor } => {
                 if let Some(record) = state.reservations.get_mut(&actor) {
-                    if matches!(record.phase, ReservationPhase::NotStarted) {
+                    if matches!(
+                        record.phase,
+                        ReservationPhase::NotStarted | ReservationPhase::StartUnconfirmed(_)
+                    ) {
                         return Ok(());
                     }
                     record.phase = if matches!(
@@ -2031,7 +2091,12 @@ impl Actor for RunControl {
                         if matches!(record.purpose, ReservationPurpose::ExistingInput) {
                             continue;
                         }
-                        if !matches!(record.phase, ReservationPhase::Registered) {
+                        if !matches!(
+                            record.phase,
+                            ReservationPhase::Registered
+                                | ReservationPhase::NotStarted
+                                | ReservationPhase::StartUnconfirmed(_)
+                        ) {
                             record.terminal.request_shutdown(ActorTerminal::new(
                                 ActorExitKind::Cancelled,
                                 "forest reservation shutdown",
@@ -2541,7 +2606,7 @@ impl RunControlClient {
     ) -> Result<RootOperationResult, DirectoryError> {
         let receiver = self
             .ask(|reply| RunControlMessage::BeginPreparation {
-                dependency: None,
+                reservation: None,
                 intent: PreparationIntent::Creation,
                 operation,
                 reply,
@@ -2564,7 +2629,7 @@ impl RunControlClient {
     ) -> Result<RootOperationResult, DirectoryError> {
         let receiver = self
             .ask(|reply| RunControlMessage::BeginPreparation {
-                dependency: None,
+                reservation: None,
                 intent: PreparationIntent::ExistingInput,
                 operation,
                 reply,
@@ -2596,13 +2661,14 @@ impl RunControlClient {
     ) -> crate::CleanupComponentOutcome {
         let deadline = tokio::time::Instant::now() + timeout;
         let shared = self.shared_cleanup.wait_for_settlement(timeout).await;
-        let preparations = tokio::time::timeout_at(deadline, self.settle_root_preparations(timeout))
-            .await
-            .unwrap_or_else(|_| {
-                crate::CleanupComponentOutcome::Unconfirmed(
-                    "root preparation cleanup remains in flight".into(),
-                )
-            });
+        let preparations =
+            tokio::time::timeout_at(deadline, self.settle_root_preparations(timeout))
+                .await
+                .unwrap_or_else(|_| {
+                    crate::CleanupComponentOutcome::Unconfirmed(
+                        "root preparation cleanup remains in flight".into(),
+                    )
+                });
         if shared.is_confirmed() {
             preparations
         } else {

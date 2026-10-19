@@ -13,11 +13,16 @@ assert True _ = pure ()
 assert False message = fail message
 main :: IO ()
 main = do
-  assert (fromJSON (object []) == Success (ReloadInput [] False)) "omitted reload options changed defaults"
-  assert (fromJSON (object ["also_check" .= (["Extra"] :: [String]), "accept_cache_invalidation" .= True]) == Success (ReloadInput ["Extra"] True)) "explicit policy lost"
+  assert (fromJSON (object []) == Success (ReloadInput [] False False)) "omitted reload options changed defaults"
+  mapM_ (\(accept, stopServices) ->
+    assert (fromJSON (object ["also_check" .= (["Extra"] :: [String]), "accept_cache_invalidation" .= accept, "force" .= stopServices]) == Success (ReloadInput ["Extra"] accept stopServices)) "force and surface policy were conflated")
+    [(False, False), (False, True), (True, False), (True, True)]
   case (fromJSON (object ["accept_cache_invalidation" .= ("yes" :: String)]) :: Result ReloadInput) of
     Error _ -> pure ()
     Success _ -> fail "malformed policy flag accepted"
+  case (fromJSON (object ["force" .= ("yes" :: String)]) :: Result ReloadInput) of
+    Error _ -> pure ()
+    Success _ -> fail "malformed force flag accepted"
   case compileInstalledTools (specTools (defaultWorkbenchSpec :: AgentSpec (WorkbenchTools '[]) '[])) of
     Left problem -> fail (show problem)
     Right compiled -> do
