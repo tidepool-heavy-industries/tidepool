@@ -194,7 +194,7 @@ admit(&CompilerEndpoint); service association is not actual worker boot proof.
 No caller binds/spawns merely to fabricate that proof.
 
 Declared provider actions reuse the same qualification.py and pinned runtime
-tools. Immutable profile uses nix-store --add/post-add verification and the
+tools. Immutable profile uses nix-store --add-fixed sha256/post-add verification and the
 profile root in the same service pinset. Child publishes its exact receipt before
 rooted readiness; parent complete retirement releases before control-directory
 cleanup, preserving pins/receipt on unknown or release failure. Unsupported rooted
@@ -202,10 +202,12 @@ manual startup refuses before acquisition. Source/profile identities exclude
 epoch/receipt and remain distinct from raw file seal. Partial acquisition must
 persist its plan before any registration side effect.
 
-Native allowance is provisional8GiB memory/16GiB growth, not an active grant:
-refresh actual build.slice plus remaining concurrent increments below80GiB and
-100GiB unreserved disk before any command. Qualification24/reload14 are occupied,
-not free reusable allowances. Compile changed production/cfgtest early with the
+Campaign admitted the exact early native lane at8GiB memory/16GiB growth using
+campaign/service-early-native-admission.json: actual plus remaining concurrent
+increments71,604,457,472bytes below80GiB, disk454,482,493,440bytes available.
+Rows owns the smallest production/cfgtest/provider -j1 command and its terminal
+observer; no command has launched from this grant yet. The separate warm6GiB
+Haskell allowance cannot be reused or silently added. Compile changed production/cfgtest early with the
 smallest pinned targets; new compiler_service_deployment is a required actual
 production resource. No whole-bundle gate for the first service test.
 
@@ -221,3 +223,11 @@ Awaited concrete events: rows early API/provider candidate and native observer
 terminal; warm exact codec/profile capture dependency; reviewer exact source
 acceptance/findings. Producers check recipient status and reactivate dormant
 recipients. No empty polling, orphan commands or new descendant grants.
+
+Independent provider WIP review still requires exact repaired controls for
+symlink-before-dotdot resolution, retention of both immutable root-object alias
+and target in the final declaration, and directory sync after retry observes an
+already absent releasing root. No source acceptance or provider lifetime pass
+is inferred from script formatting. Warm shared types compiled two targets at
+8acf33c49a with no executed tests; actual rooted issuer and new Haskell capture
+producer remain separate dependencies.
