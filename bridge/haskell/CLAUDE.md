@@ -123,7 +123,8 @@ the active `CompilerScope` holds that realization through END. Home queries
 check only captured source roots with the world-only preprocessing guard;
 prepared queries use their exact completed HPT. They never manufacture an
 expression checking target or fall back to ambient source after refusal.
-The guard admits effective per-file flags only with GHC's checking backend:
+The guard admits effective per-file flags only with GHC's checking backend and
+without separate bytecode-generation flags:
 bytecode generation can compile foreign stubs even when CPP and TH are disabled.
 Authenticated source-row names without captured finder-representable paths
 produce Unavailable; passive custody can prevent an absence claim but cannot
@@ -144,12 +145,20 @@ Optional worlds and original images share the existing input owner's byte and
 entry allowance. World charges conservatively include captured custody and
 physical source copies; equal seals alone do not prove physical sharing between
 world acquisitions. FIFO admission order and charges belong to the existing
-universe index. Resident hits and END do not rescan backing files or inventories.
+universe index. Resident hits and retained-world END do not inventory backing.
+Releasing a nonresident world at END recursively removes its owned tree, with
+work proportional to that tree; stored charges do not eliminate deletion cost.
 A valid oversize world remains held through END, then becomes nonresident.
 World metadata uses in-memory interfaces with interface/Core file output disabled.
 Retire an unheld private world before deleting its backing; failed cleanup keeps
 the actual worker namespace and release evidence until confirmed reap. Worker
 RSS rotation still owns total GHC residency, including shared EPS and NameCache.
+Opt-in world retention observations use the existing Timing owner and the sole
+Rust machine-stderr prefix list. Request events reach the compiler log; scope
+release events outside request capture reach the owned daemon stderr log.
+Missing observations remain incomplete evidence. Emit admission after ownership
+transfer, and keep observations outside atomic publication. Cleanup failure
+cannot become a release event; a scope-release event is not a transport END ack.
 
 Exact-scope manifests use strict `TPEXACTSCOPE` version 16 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization
