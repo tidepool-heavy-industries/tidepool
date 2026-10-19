@@ -131,7 +131,8 @@ parcels. Exclude overlay/parser WIP and unqualified debug instrumentation.
 
 Run the joined production history early. Then qualify one exact matched bundle,
 smoke with Sol 6.1 medium, and launch replacement Persona with Astra medium while
-preserving authored files. Lookup optimization remains a separate background task.
+preserving authored files. Compiler-query introspection optimization remains a
+separate background task.
 
 ## Overnight completion wave
 

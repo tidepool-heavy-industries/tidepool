@@ -48,7 +48,7 @@ The worker currently permits shared fixed EPS only for CompManager with one defi
 
 Metadata retention and executable residency are separate. Compatible graphs may share the current interpreter; incompatible object/native replacements require the existing epoch retirement/relink path. Plugin process globals and untracked TH need explicit eligibility/refusal and existing no-replay policy. One active outer transaction per worker remains mandatory because CWD, hooks, capture and session state are shared.
 
-Lookup already uses CheckOnly, shares metadata checking within a request and elides unused leaf interfaces. The target opportunity is cross-request exact state and repeated scope assembly, not imaginary lookup code generation. Original input content/decoded interface reuse also already exists.
+Introspection already uses CheckOnly, shares metadata checking within a request and elides unused leaf interfaces. The target opportunity is cross-request exact state and repeated scope assembly, not imaginary query code generation. Original input content/decoded interface reuse also already exists.
 
 ## Proposed minimal wire decision
 

@@ -86,7 +86,8 @@ generic RPC framework or mandatory public names:
 3. **Ask a bounded question.** Inspection, cell checking, executable preparation,
    and explicit whole-world validation have distinct result contracts. Use the
    existing request types and pipeline selections where they express this.
-   Lookup must not ask for executable products merely to learn a type. Checking
+   An introspection query must not ask for executable products merely to learn a
+   type. Checking
    must not publish bindings. Executable preparation returns only the actual
    output and required dependency evidence, with independently retained original
    edges preserved. Some questions legitimately need a large transitive closure.
