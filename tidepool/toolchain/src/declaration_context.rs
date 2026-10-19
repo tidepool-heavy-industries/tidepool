@@ -16075,9 +16075,9 @@ mod tests {
                 matches!(
                     birth.publish_original(&endorsement),
                     Err(CompileError::ArtifactInventory(error))
-                        if matches!(error.failure,
+                        if matches!(&error.failure,
                             ArtifactInventoryFailure::PublicationNativeDomainMismatch { owner }
-                                if owner == root)
+                                if owner == &root)
                 ),
                 "equal original/interface IDs and graph cannot substitute a different birth domain"
             );
