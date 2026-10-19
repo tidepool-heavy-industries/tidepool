@@ -1,258 +1,209 @@
 # Reload implementation handoff
 
-Contract/base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
-Area: `/srv/swarm/checkouts/tidepool-shared-warm-reload-20261019`,
-branch `feature/shared-warm/reload`, integrated source checkpoint
-`59d801946394aee98fb7bfc30a9cf181b494df48`.
-Campaign owner: `/root/warm_compiler_campaign`; area owner:
-`/root/warm_compiler_campaign/reload`.
+Original contract/base: `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`.
+Area: `/srv/swarm/checkouts/tidepool-shared-warm-reload-20261019`, branch
+`feature/shared-warm/reload`; supervisor `/root/warm_compiler_campaign/reload`.
+Current implementation checkpoint: `ab7246e569`, joining campaign contract
+`923fd554a0` through `aebe74eac5` and reviewed Ready repair
+`4e790ab850f4df886fc185e15a7b28139f6bf530` through `3fcbbb4bfc`.
+This joined successor is not compiled or accepted. Campaign owns shared contracts
+and qualification; this file owns the area continuation.
 
 ## Current disposition
 
-This is uncompiled source work, not a usable or qualified reload feature.
-The campaign explicitly holds broad dependent R2/R3 force publication and hosted
-migration until issuing production/test consumers compile and the focused gate
-executes. The admitted early compile gate waits campaign memory-lane release.
-No force publication, selective
-drain or complete changed-reload fence is wired at this checkpoint.
+The R1 foundation implements explicit private source dependencies, exact generation
+admission under the existing runtime lexical-scope lease, original callback
+provenance, generation-filtered directory admissions, bootstrap first-publication
+fencing and uncertainty retention. Independent LLM worlds have their own issuers;
+typed children retain external parent dependencies. Missing provenance refuses.
+The mandatory HLS handoff was read: retained bytes, selected roots, exact original
+dependencies and permission to compile remain separate. Preserve strict namespace
+validation and `RequestNativeAvailability::for_compiler_roles`.
 
-The area source contains:
+Full R1 remains incomplete. The public runtime source transaction boundary and
+fresh deferred compilation consumers require the approved repair below. WatchRoute
+provenance, forms, reply-tool definition installs and callable display admissions
+remain required, held successors. R2 selective retirement/drain/publication and
+R3 hosted migration are not wired. `force=true` explicitly refuses before reload
+preparation in `source_effect.rs` (`f147c79413`); surface-invalidation consent is
+independent. It must not be silently accepted before selective drain exists.
 
-- Existing-directory generation metadata and synchronous gated reservation
-  enqueue before asynchronous startup. Population membership follows exact
-  dependency ancestry. A RunOwned generation resource keeps its independent
-  cleanup lifetime through `reserve_generation_actor`.
-- Worker preparation derives dependency from its actual single-use Ready
-  reservation. The existing supervised producer checks the produced worker
-  identity before delivery; caller omission cannot erase that relationship.
-- Typed startup refusal versus unconfirmed completion. Only a producer proving
-  no startup can issue NotStarted. Worker loss/uncertain lifecycle startup keeps
-  the identity claim and pending cleanup, including whole-run accounting.
-- A narrow force-input foundation, independent of surface cache consent, in the
-  owning schema/authored helper and existing codec controls. The exact native
-  std-only generator compiled and refreshed its two mirrors; the owning snapshot
-  check passed. Generated Rust/Haskell consumer execution and actual force
-  semantics remain pending. The matched options
-  constructor deliberately changes from two fields to three.
+The reviewed Ready parcel adds admission at the actual legacy prepared-install
+consumer using Ready metadata's exact lexical scope. Its control proves positive
+installation first, then refusal with unchanged state, then precompiled pure
+completion under the same fenced scope. Public facade fixtures now use real
+PersistentSession/ResidentSession entry points instead of naked private callback
+issuers. These source changes await native execution. `ab7246e569` imports the
+real `minutes` helper into the minimal Sleep fixture; no assertion was relaxed.
 
-`dc2c85879579f5fa3543f4bde3d2c3fa2dce3b2b` was independently reviewed and
-required repair: generic startup errors included worker loss, so they could not
-all mean NotStarted. The complete repaired candidate is `96563ebbb95438e13faba7acf3ac2663d6ed4255`;
-its exact independent source review found no new blocking defect. The narrow
-`804a4d3e2f` successor carries reservation provenance into the producer compiler
-scope; its independent source review also found no new blocking defect. The joined
-R1 foundation source review passed; behavioral acceptance remains pending.
-`6978429d8f` is the
-narrow force-input source parcel.
-The directory/R1 consumers have no passing compilation or test evidence; the
-std-only generator and snapshot check do not establish those claims. See
-[the independent review](REVIEW-BASE.md) for findings and untested boundaries.
+## Executed evidence and independent blockers
 
-The complete frozen R1 source candidate is
-`fc92605eb78c52284f90249f6e5dd1200ba060de`. Exact cumulative independent source
-review found no new confirmed defect in the foundation. It is folded at
-`59d801946394aee98fb7bfc30a9cf181b494df48`; full R1 acceptance is withheld.
-Native production and test compilation remain zero.
+Evidence directory:
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/reload/`.
+Exact tested source: `f147c794130203ff9bf21096cbf6f910f38ea62e`.
 
-The source repairs the earlier review findings: invalid SpawnOwnership variant,
-premature test-fixture lease release, and source-claim loss before uncertain
-compiler END. The same actual compiler ticket now owns a once-success scoped
-source hook for bootstrap and generation dependencies, alongside concrete runtime
-gate claims. Both mutable binding/install paths and immutable facade compiler
-production retain their exact obligations through END/abandon. Pure continuation
-and empty/unchanged facade selection avoid fresh source claims. Facade producer
-methods are private behind owning session wrappers; affected callers migrated.
+- The four-target owning production/cfg(test) compilation exited 0 after two
+  bounded compile repairs (ResidentSession implementation module privacy and
+  BoundBinder fixture field). Both unit executables linked. The actor production
+  default output is compile metadata, not a standalone linked rlib. Exact command,
+  artifacts/hashes and attempts: `early-native-four-target-pass-receipt.json`,
+  `early-native-four-target-build.log`, `early-native-four-target-retry02.log`,
+  `early-native-four-target-retry03.log`.
+- Runtime counted foundation: 5 selected/executed, 4 passed, 1 Ready-install
+  refusal failure. Four source-admission owner/history controls passed. The
+  reviewed Ready consumer/test repair above remains unexecuted.
+- Actor counted foundation: 11 selected/executed, 7 passed, 4 failed. Bootstrap
+  unknown cleanup, publication distinction, typed-child prerequisite, transferred
+  callback, actual compiler ticket uncertainty, old alias and typed bootstrap
+  owner controls passed. The new joined Sleep fixture failed before its control
+  because `minutes` was not imported; the bounded import repair is now committed.
+- The existing capture selector failed before capture-END assertions at mixed
+  grandchild checked compilation (`start.rs`): NativeGroupUnavailable ordinal 8,
+  CertifiedSelection candidate_count 1. Both existing quoted-source generation
+  controls failed their initial source-original versus public-context commitment
+  assertion before durability. Preserve exact inputs and both identities. These
+  are unresolved product/fixture causal questions; qualification/campaign own a
+  controlled baseline discriminator. No validator or oracle waiver is authorized.
 
-Joined legacy-Sleep binding, source-refusal and real facade local/narrow controls
-are authored but unexecuted. Pinned formatting, source-map and whitespace checks
-passed in the leaf checkout. Exact independent review assessed hook timing,
-scoped restoration, original dependency, physical claim lifetime and actual
-consumer controls before fold. Leaf evidence and exact deferred selectors:
-`/srv/swarm/evidence/inanna/persona-1895-launch-20261019/compiler-failure/reload-admission-20261019/HANDOFF.md`
-and adjacent `DEFERRED-COMMANDS.txt`.
+Counted reports, exact selectors, artifacts and full stderr are retained in
+`foundation-runtime-focus/`, `foundation-actor-focus/`, their corresponding logs
+and consolidated `foundation-counted-receipt.json`. Real Sleep/bind/facade work
+plus injected aggregate Unconfirmed does not establish a real post-resume GHC END
+fault. Current public-owner uncertainty/panic controls remain pending.
 
-The suspected pre-initial retained-lease/parent-gate alias has no demonstrated
-production path: retention mints a separate detached scope, and actual child
-target leasing first occurs at adoption. No different-selected-generation target
-gate bypass was established in transferred callback consumers. Preserve those
-qualified distinctions; do not invent enclosure dependencies from them.
+The std-only protocol generator, generated mirror refresh and snapshot check
+passed earlier (tests executed: 0); receipt `protocol-generator-receipt.json`.
+Generated consumers still require their owning gates. Pinned format/source-map
+checks passed the foundation; repeat after each joined source change.
 
-## Owners and exact continuation
+## Approved C6 primary repair: one actual runtime transaction owner
 
-Both granted descendants use `gpt-6.1-sol`, high, fresh context, started
-2026-10-19 07:52 UTC. Neither has descendant capacity. The area grant remains
-two descendants across all depths; do not create replacements merely because
-an informed worker yields.
+Shared decision: campaign `923fd554a0`, C6 public runtime compiler owner receipt.
+Root and campaign approved implementation; escalate a concrete inability to
+separate physical phases without replay or to observe actual END, not routine
+signature choices. Do not introduce a registry, gate, trait framework, public
+None/Bool permission, or callback that can replace authority with Ok(None).
 
-- `/root/warm_compiler_campaign/reload/generation_admission` owns R1 in
-  `/srv/swarm/checkouts/tidepool-shared-warm-reload-admission-20261019`, branch
-  `feature/shared-warm/reload-admission`. Its terminal source checkpoint is
-  `fc92605eb78c52284f90249f6e5dd1200ba060de`, incorporating area `a0d293d2a0`
-  through the `fe3ef791` merge. It is dormant, reserved for concrete review or
-  compiler repairs. The area owner folded the reviewed checkpoint, checked source
-  maps, configured pinned test tools and owns the early compile/repair stage.
-- `/root/warm_compiler_campaign/reload/authority_review` owns only
-  `REVIEW-BASE.md` and completed exact cumulative `5b74..fc92605e` source review.
-  Its prior `9bb4c1eb` review blocked on bootstrap/facade END custody. The area
-  owner handles findings, activates the leaf for bounded repairs, requests exact
-  rereview and owns the fold. Reviewer is dormant awaiting native results or
-  concrete repairs. Native evidence and compile repairs also require
-  cumulative review before acceptance.
+Freeze the intended runtime entry at the existing ResidentSession owner:
 
-Before yielding, retain the exact awaited event, producer/observer, recipient
-and continuation. A terminal producer sends exact base/candidate/evidence/status
-and next action to its area owner and affected dependents: `send_message` if
-running, `followup_task` if idle/completed. Completion notification alone does
-not restart a dormant recipient. No periodic wake/poll loop is authorized.
-No builds or external commands are running for this area.
-
-## Accepted owner boundaries
-
-The mandatory HLS rewrite handoff was read. Retained bytes, selected compiler
-roots, exact issued dependency edges and executable permission stay distinct.
-Preserve `RequestNativeAvailability::for_compiler_roles` and strict consumed
-namespace validation.
-
-Campaign accepted explicit private context provenance and lower runtime source
-admission under `RuntimeLexicalScopeLease`; actor holds owner references, and
-runtime never depends on actor. Checks belong at actual compilation/install/
-mutation/registration consumers. A compiler machine ticket can serve only
-continuation custody: rejecting every ticket would block self-reload receipt
-delivery. Conversely, continuation completion can bind/compile and ready
-renderers can install; those real consumers require the lower gate. Derived
-scopes and transferred SourceCallback contexts must preserve original source
-prerequisites separately from recipient placement.
-
-Every actual actor capture issues a private bootstrap-world wrapper. Typed
-dependent captures retain immutable external parent prerequisites; independent
-root/LLM captures have no external prerequisite. The wrapper binds once to that
-actor's first published generation. Its old aliases then retain the closed first
-generation, while replacement generations exclude their own predecessor and
-keep external prerequisites. Missing provenance cannot establish independence.
-
-Independent cleanup worlds also have explicit lifetime ownership. A dependent
-service P can own an independent ActorOwned LLM child C. Stopping P normally
-stops C; force may not silently promote C to RunOwned or kill it as collateral.
-Campaign accepted a typed cleanup refusal naming P and C. Before stopping P,
-its actual owner must atomically fence lifetime/resource admissions and inspect
-its cleanup closure; a check followed by an unfenced stop can race new C.
-An explicit prior lifetime transfer permits the corresponding positive path.
-
-Forms, WatchRoute callbacks, SourceBinding connections and ActorDisplays have
-existing owners outside the run directory. Their generation-filtered inspect,
-stop and physical settlement paths remain joined R2 obligations. Closing an
-entire invocation/actor to substitute for selective cleanup is too broad.
-Their fresh source-dependent registration gates and callback provenance are
-required R1 successors: WatchRoute currently retains bare root/recipient, and
-forms/reply-tool/display issuing consumers still need exact source dependency
-carried through refusal. These acceptance blockers are held until the first
-runtime/actor production and unit harness compilation; they are not permission
-to begin force-drain implementation.
-A Closing/no-executor lifecycle snapshot is not terminal cleanup proof: a
-cleanup executor can attach later. Retain uncertainty until actual settlement.
-
-Bootstrap contexts issued before first generation A currently retain an unbound
-independent-world alias. That alias must not continue admitting fresh source work
-after A retires. Campaign accepted one-time binding on the same captured world
-owner: begin a Publishing/source-admission fence at the real first publication
-claim before IO can become uncertain; bind once to first actually visible A;
-old aliases forever consult A. Only confirmed nonpublication/no-effects may
-reopen an unbound world. Unknown publication remains unavailable even when the
-visibility callback never ran. Candidate preparation must not fill the binding.
-B retains external parent prerequisites only, excluding its retired bootstrap A.
-The R1 leaf implements this closure; the independent high reviewer checks actual
-atomicity and initial failure/uncertainty plus typed-child histories. An unbound
-world must retain real admission custody across the first-publication cutoff;
-returning None after a state precheck creates a race.
-
-Initial publication uncertainty must retain private candidate facts distinctly
-from a selected ActorGeneration: binding an owner with no runtime readiness
-would falsely grant current authority. The existing durable store remains fenced
-after unknown publication and has no live reconciliation API. Campaign selected
-the existing explicit host/run reopen recovery path. Retry on the same actor and
-store refuses; old bootstrap aliases stay permanently closed. Reopening selects
-the actual durable head and issues a new recovered context from its real selected
-references and readiness. No live reconciliation mechanism, fresh gate from an
-old generation integer, or prospective generation bound without readiness is
-part of this repair. The reviewed source implements this settled contract;
-execution evidence remains pending.
-
-## Verification admission and pending commands
-
-The area buck-out bind mount is provisioned and was verified; account is
-`inanna`. Root's settled storage cleanup removed the earlier disk blocker;
-the required 100 GiB unreserved floor remains in force. Campaign coordinates
-memory allowance and queued native lanes as recorded below. No build bypass,
-cache deletion, area-owned broad cleanup or shared compiler/daemon restart is
-authorized. Pinned test configuration is materialized and retained.
-
-Pinned rustfmt check and the source generator plus `--check` passed for the
-current area source; `exomonad/actor/BUCK` now declares the directory module.
-Required workspace submodule `ce60f76888c94e9d7229615f27762d02933549b1` is
-initialized from the verified local campaign repository. Receipts are under
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/reload/` in
-`formatting.json`, `source-generation.log` and `source-generation-check.log`.
-The campaign admitted a separate 128 MiB std-only protocol-generator lane.
-Default pinned configuration, `just build -j1 //bridge/protocol:tidepool_protocol_gen`,
-exact generator refresh and `just build -j1 //bridge/protocol:snapshots_check`
-all exited 0. The native artifact SHA-256 is
-`143f28f99a457a86aad2bbb52269a8f432bd95670bbe1d84b07e7f6911a047f4`,
-6,598,656 bytes. The generator build ran four local cold actions; the snapshot
-check ran three local actions. Zero tests executed. Receipt and logs:
-`protocol-generator-receipt.json` in the evidence directory above. The generated
-mirrors are committed, with no hand edits. The joined R1 owning source-map check
-also passed after integration (`early-native-source-generation-check.log`).
-
-Own buck-out final allocated bytes were 56,938,496 (initially zero); lowest
-observed global available bytes were 107,887,243,264, above the 100 GiB floor.
-Scratch peak and shared-cache attribution were not instrumented. Buck daemon
-PID 3835600 is retained idle in `/build.slice/inanna-build-1792398682-3835490.scope`;
-its enclosing observed MemoryPeak was 836,239,360 bytes. No commands are running.
-Campaign admitted the early runtime/actor production and unit compilation gate
-after exact-review disposition, area fold and source generation. Its allowance
-is 12 GiB memory and 32 GiB prospective growth, with fresh global accounting
-below 80 GiB and at least 100 GiB unreserved disk. Observed build.slice current
-29,587,906,560 bytes plus conservative remaining 24+8+8+12 GiB was 79.56 GiB;
-no current-lane subtraction was needed. RAM available was 98,148,052,992 bytes,
-disk available 471,212,376,064 bytes. Refresh before launch. The receipt is
-`early-native-gate-preflight.json` in the area evidence directory. Campaign then
-admitted an additional owned-input baseline lane, invalidating that initial
-snapshot for launch. Native compilation now waits campaign's resource-preparation
-session 32587 terminal/release, or fresh per-scope remaining accounting proving
-both 12 GiB lanes fit. Campaign owns that release event and must reactivate reload.
-No reload command is running or awaiting terminal collection. Pinned `--tests`
-configuration exited 0, generation `generation.fl1CACQc`, recorded in
-`early-native-configure-tests.log`; runtime/actor source maps `--check` exited 0.
-Host/browser and broader R2/R3 remain separate subsequent gates.
-
-After the coherent R1 candidate is joined and source maps are regenerated, the
-smallest first compilation stage is the runtime and actor production libraries
-plus their unit harnesses. Libraries are named explicitly to retain production
-and cfg(test) evidence separately. Host production and unit consumers follow
-with browser configuration before describing the parcel as integration-ready:
-
-```sh
-swarm-build bash scripts/buck2-configure.sh --tests
-swarm-build just build -j1 //tidepool/runtime:tidepool_runtime //exomonad/actor:exomonad_actor //tidepool/runtime:tidepool_runtime_unit_tests //exomonad/actor:exomonad_actor_unit_tests
-swarm-build bash scripts/buck2-configure.sh --tests --browser
-swarm-build just build -j1 //exomonad/host:exomonad_host //exomonad/host:exomonad_host_unit_tests
-swarm-build just build -j1 //tidepool/bridge-effects:tidepool_bridge_effects_unit_tests //bridge/mcp:tidepool_mcp_unit_tests //bridge/mcp:mcp
-swarm-build just test-lib tidepool-bridge-effects --exact tests::reload_options_and_typed_receipts_roundtrip_and_reject_wrong_arity --expected-count 1
-swarm-build just test-native //exomonad/actor:actor_notebook_contract_tests
+```rust
+with_source_compiler_transaction<T>(
+    source: Arc<RuntimeLexicalScopeLease>,
+    workload: CompileWorkload,
+    cancellation: CompilerTransactionCancellation,
+    supplemental_hook: Option<SourceAdmissionHook>,
+    close_sink: impl FnOnce(CompilerTransactionClose),
+    action: impl FnOnce(&mut Self, &mut dyn FnMut(CompilerTransactionClose)) -> T,
+) -> Result<CompilerTransactionSettled<T>, SourceAdmissionError>
 ```
 
-Discover the actual generated-surface integration selector before executing
-its ReloadCodec/ReloadSync consumers. New starter-loss controls must enter the
-real supervised producer and show uncertainty cannot release identity or let
-whole-run preparation accounting confirm. A lost producer's rendered error is
-not evidence of no startup. The independent history/control design is in
-REVIEW-BASE.md; these tests are pending, not executed.
+The nonoptional existing exact ORIGINAL source lease is canonical authority;
+validate its own owner/epoch/identity separately from recipient placement and
+check Open lazily at actual fresh source work. Supplemental hooks can restrict
+but never supply missing lease authority. The entry reuses existing
+`settle_compiler_transaction_cancellable_for_workload`; lower concrete source
+claims settle at its SAME real physical outer END/abandon. Make stacked source
+setter/claim-transfer helpers private. Public PersistentSession/ResidentSession
+facade producers require the actual owning entry or typed refusal. Foreign/raw
+nested transactions refuse; borrowed inner NotStarted never settles outer holds.
+Pure continuations and empty/unchanged facade paths remain claim-free.
 
-The hosted old-A late-new-call success assertion must migrate only with the
-joined gate and refusal controls. Preserve immutable source/prompt observation,
-old compiled pure continuation, independent IO and exact historical dependencies.
-Retain source/artifact/profile identity, nonzero selected/executed counts,
-exit/logs, compiler END and lifecycle cleanup reports. Current verification is
-source review, pinned formatting, source metadata, the std-only protocol
-generator build, snapshot check and `git diff --check`. No R1/actor/runtime/
-Haskell consumer compilation or behavioral acceptance exists.
+Pre-machine factories keep their actual preparation ticket. Collect its clean
+physical END BEFORE final machine/scope adoption and runtime-owned entry.
+Unknown/abandoned preparation retains exact obligations and primary failure plus
+independent cleanup uncertainty, and refuses advancement without automatic retry.
+The existing actor `run_source_transaction` delegates once to the runtime owner
+after final adoption; it does not enclose that phase in another ticket.run.
+
+Retain the strong exact final lease in immutable SourceDependency/bootstrap
+ownership without an ActorGeneration back-reference cycle. Actual issuer timing:
+
+- Fresh factory: ROOT is placement placeholder before machine creation, never
+  an admissible final source lease. Preparation END precedes final adoption.
+- Root/program-root: adopt at actual final RootScope/program preparation before
+  authored startup/source aliases, rather than waiting for Behavior.start.
+- Typed/independent child: adopt after checkpoint remint/fallback/new-machine
+  resolution and before mailbox/source transfer aliases. Typed capture retains
+  exact parent A; independently captured LLM world has no external prerequisite.
+- Recovered root: adopt after actual public-owner epoch transfer invalidates
+  old admissions, before startup release/authored resume. Do not refresh stale
+  leases or recreate gates from generation integers.
+- Transferred callback: retain original source A even when placed in recipient B.
+  Source eligibility and recipient custody are different checks.
+
+Once bootstrap C's canonical lease is exposed, all world and runtime admission
+consults that same C. First publication fences C before IO without claiming C
+itself (external prerequisites remain checked), refuses outstanding source claims,
+and retains the fence through visibility/ack. Confirmed success reopens SAME C;
+proven no-effect nonpublication may reopen. Unknown remains closed permanently
+for old aliases; recovery issues a new context from the selected actual head.
+A private observation context cannot authorize source work.
+
+Owned path cone: runtime `session/{admission,source_admission,resident,persistent,
+prepared,facade}.rs`; actor `termination.rs`,
+`resident_workbench/{generation_admission,replacement}.rs`, actual root/child/
+recovery issuers in `resident_workbench.rs`, `start.rs`, `mount.rs`, `local_actor.rs`
+and their direct constructor consumers. Coordinate host introspection query
+admission with host_inputs; provider-world/capsule ownership is not eligibility.
+No broad registration/drain scope is authorized in this primary repair.
+
+Include confirmed adjacent deferred compiler owners in the SAME repair:
+PendingPreparedInstall/Source currently lacks provenance at actual off-checkout
+Cranelift compile; retain exact source capability and refuse before fresh compile
+or registry mutation after fence. Separate cache reuse from new compilation and
+final install. Public host-value materialization compiles before its later install
+gate; legacy carrier writes before later admission. Close at actual fresh producer,
+not another test-local check. Already installed precompiled execution stays neutral.
+
+Required joined controls: positive public facade producer, unknown physical END,
+panic/abandon, retired source; root/typed bootstrap plus generation hidden binding;
+pure continuation claim-free; source A transfer into B; fresh deferred compile
+refusal before registry mutation; preparation uncertainty prevents second phase;
+first-publication same-gate fence; source-neutral independent world continues.
+Compile owning production and cfg(test) callers at first coherent checkpoint.
+
+## Owners, admission and exact continuation
+
+Two retained descendants, both `gpt-6.1-sol`, high, fork none; original starts
+2026-10-19 07:52 UTC, no descendant capacity:
+
+- `generation_admission`: isolated admission checkout, source terminal
+  `4e790ab850f4df886fc185e15a7b28139f6bf530`, reserved implementation owner for
+  the approved primary repair on this joined base. Area sends exact reactivation.
+- `authority_review`: report-only `REVIEW-BASE.md` owner, completed independent
+  cumulative foundation and bounded Ready review. Reserved for exact new owner
+  candidate full-history review, including issuer timing and missed analogues.
+
+Area owns next native Ready/Sleep controls independently. Qualification/campaign
+own baseline discrimination for preserved context/native-original failures.
+Host_inputs owns optimized PublicModule query consumer and receives the final
+fresh source admission API before consuming it. No source/native command is
+running at this handoff update; no orphan command observer exists.
+
+The owned bind mount and pinned --tests tools are realized; no browser gate yet.
+Latest measured build cgroup peak 13,410,226,176 bytes exceeded the initial 12 GiB
+estimate; future compile allowance is 14 GiB, 32 GiB prospective growth. Before
+launch refresh build.slice current plus remaining per-scope budgets (subtract
+actual currents already included), keep below 80 GiB and disk >=100 GiB+growth.
+Campaign's test lane released; qualification 24 GiB, host index 8 GiB and owned
+baseline 12 GiB may remain active. Never infer fresh admission from stale totals.
+Installed swarm-build storage flags remain unsupported. Use supported wrapper,
+local-only repository commands; no daemon restart/cleanup or ambient compiler.
+
+```sh
+swarm-build just build -j1 //tidepool/runtime:tidepool_runtime //exomonad/actor:exomonad_actor //tidepool/runtime:tidepool_runtime_unit_tests //exomonad/actor:exomonad_actor_unit_tests
+swarm-build just test-lib tidepool-runtime --exact session::resident::authored_publication_tests::source_fence_keeps_precompiled_plain_execution_and_refuses_ready_install --expected-count 1
+swarm-build just test-lib exomonad-actor --exact resident_workbench::request_tests::joined_continuation_binding_keeps_all_source_worlds_uncertain_at_end --expected-count 1
+```
+
+Host production/unit consumers and codec/Haskell caller gates remain pending;
+configure --tests --browser before host. No full qualification claim.
+
+Event-driven continuation: terminal producer includes exact task/base/candidate,
+evidence/status and next action to area plus affected dependents. send_message to
+running recipient; followup_task to dormant recipient. No periodic polling.
+Awaited implementation event: generation_admission exact coherent owner candidate
+with prod/cfg(test) evidence or concrete escalation; area reviews critical code,
+reactivates authority_review, repairs/folds then runs joined focused controls.
+Awaited discriminator event: qualification/campaign exact controlled baseline
+results; preserve current failing inputs until that event.
