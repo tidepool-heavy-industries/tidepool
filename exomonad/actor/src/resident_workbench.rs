@@ -9432,7 +9432,7 @@ where
                 ))
             })
             .await
-            .map_err(|error| PublicOwnerPublicationFailure::Uncommitted(error.to_string()))?
+            .map_err(|error| PublicOwnerPublicationFailure::OperationFailed(error.to_string()))?
     }
 
     fn finish_committed_source_setup(
@@ -9446,10 +9446,15 @@ where
         if let tidepool_runtime::session::DurablePublicOwnerPublication::Committed(readiness) =
             &publication
         {
-            if let Err(error) = context
-                .source_dependency()
-                .adopt_final_scope(session, context.placement.lexical_scope)
-            {
+            let source_setup = (|| {
+                context
+                    .source_dependency()
+                    .adopt_final_scope(session, context.placement.lexical_scope)?;
+                let lease = context.source_dependency().source_lease()?;
+                session.validate_lexical_scope_lease(context.placement.lexical_scope, &lease)?;
+                Ok::<(), ResidentActorWorkbenchError>(())
+            })();
+            if let Err(error) = source_setup {
                 return Err(crate::kernel::lifecycle::resident::PublicOwnerPublicationFailure::CommittedSourceUnavailable {
                     readiness: Arc::clone(readiness), cause: error.to_string(),
                 });
@@ -9557,7 +9562,7 @@ where
                 ))
             })
             .await
-            .map_err(|error| PublicOwnerPublicationFailure::Uncommitted(error.to_string()))?
+            .map_err(|error| PublicOwnerPublicationFailure::OperationFailed(error.to_string()))?
     }
 
     /// Admit one cell's independent lexical write domain and its exact public

@@ -26,7 +26,7 @@ pub(crate) enum RootStartupState {
 #[derive(Clone, thiserror::Error)]
 pub(crate) enum PublicOwnerPublicationFailure {
     #[error("{0}")]
-    Uncommitted(String),
+    OperationFailed(String),
     #[error("native public owner committed, but source setup is unavailable: {cause}")]
     CommittedSourceUnavailable {
         readiness: Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
@@ -42,7 +42,7 @@ impl std::fmt::Debug for PublicOwnerPublicationFailure {
 
 impl From<String> for PublicOwnerPublicationFailure {
     fn from(value: String) -> Self {
-        Self::Uncommitted(value)
+        Self::OperationFailed(value)
     }
 }
 
@@ -1198,7 +1198,7 @@ fn complete(
         (Pending::Owner(reply), Completion::Owner(result)) => {
             if let Err(error) = &result {
                 resident.current.settlement = match error {
-                    PublicOwnerPublicationFailure::Uncommitted(cause) => {
+                    PublicOwnerPublicationFailure::OperationFailed(cause) => {
                         ResidentSettlement::NeedsAttention(cause.clone())
                     }
                     PublicOwnerPublicationFailure::CommittedSourceUnavailable {
