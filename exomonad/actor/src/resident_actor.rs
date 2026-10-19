@@ -13443,7 +13443,7 @@ where
             let context = self.context(kernel.identity());
             if self.root_startup.is_none()
                 && ((self.descriptor.checkpoint_boundary().is_none()
-                    && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_))))
+                    && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_) | ResidentBoot::Startup(_))))
                     || (matches!(self.boot.as_ref(), Some(ResidentBoot::Workbench))
                         && self.explicit_installer.is_some()))
             {
