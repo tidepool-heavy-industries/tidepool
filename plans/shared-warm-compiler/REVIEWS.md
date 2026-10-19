@@ -52,3 +52,7 @@ implied. The frontend experiment, exact package-source association, quantitative
 retention and current speedup remain matters for the specified execution gates.
 The peer's later stronger Persona gate was acquired at kickoff: executed1/pass1/exit0,
 with compiler cleanup unobserved and diagnostic evidence incomplete; see EVIDENCE.md.
+
+## Integrated host/owned receiving review
+
+Sol-high campaign reviewed host b449..b5 owner-index/deferred-encoding successors and owned full5b74..5113/f330 history, including both baseline-discriminated test repairs. Accepted receiving merges at f088 after critical production/constructor/authority and refusal-path inspection. Private receipt `campaign/REVIEW-host-b5-owned-f330.txt`; joined compilation and36/36 controls then passed independently of area evidence. New shared APIs remain paused for user-directed C2/C5 service-owner amendment.

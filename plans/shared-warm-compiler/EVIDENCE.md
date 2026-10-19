@@ -125,3 +125,7 @@ HLS is an architectural influence, not evidence that its editor state model can
 be transplanted into concurrent divergent actor worlds or used as execution
 authority. Proposed Tidepool changes are design inferences from these sources
 and the inspected production consumers.
+
+## Integrated core checkpoint f088e3e783
+
+Reviewed host b5, owned f330 and worker0bd histories join at f088e3e7837c72cf0e82aab8e71a2687d767da34. Pinned production/cfgtest and declared runner resources compiled,52 local/0remote actions,303.4s, exit0. Thirty-six selected controls passed:25 toolchain,2 real-worker runtime histories,4 Rust protocol and5 Haskell. Exact source/commands/report and binary hashes/counts/status: private `campaign/CORE-JOINED-TERMINAL.json`, `core-joined-native-build.json`, `core-joined-tests.json` beneath `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`. All clients terminal. Runtime compiler/host cleanup not_observed and diagnostic completeness limits retained. No production Ready or performance/release claim.

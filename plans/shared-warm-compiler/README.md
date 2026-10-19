@@ -1,6 +1,9 @@
 # Shared warm compiler: delivery plan
 
-Status: cross-reviewed implementation plan; no implementation started by this research fork.
+Status: active implementation campaign. Reviewed host, input-custody and worker
+protocol tranches are integrated; see [current status](STATUS.md) for exact
+source and evidence. New shared host/worker/package APIs await the user-directed
+C2/C5 amendment toward a demand-based Haskell compiler service.
 
 This directory is the handoff for a Sol supervision tree. Read this file, the
 [shared contracts](CONTRACTS.md), and the [supervisor assignment](supervisor/README.md)
