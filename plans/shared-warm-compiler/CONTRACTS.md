@@ -1,8 +1,17 @@
 # Contracts shared by every branch
 
-Status: proposed implementation contracts, reviewed together with the area plans.
+Status: accepted implementation contracts; campaign amendments below are owner-reviewed decisions.
 These semantic decisions take precedence over a leaf's convenient local shape.
 Change them through the campaign supervisor and notify every affected owner.
+
+The [demand-service amendment](DEMAND-SERVICE.md) refines C2/C3/C5: Rust owns
+primary notebook selections, exact runtime artifacts and publication; Haskell
+owns the derived compiler world. A host-issued root below means an authoritative
+selection/restoration reference, not a second host implementation of GHC's
+dependency graph. Compiler-only invalidation and query preparation belong in
+the compiler service. Existing execution/provenance checks remain with their
+Rust consumer. Do not implement new shared interfaces until the bounded owner
+review of this amendment is resolved by the campaign.
 
 ## C1. Five facts that must remain separate
 
@@ -30,7 +39,7 @@ The current repair is `RequestNativeAvailability::for_compiler_roles` in
 `tidepool/toolchain/src/declaration_context.rs`. Preserve its semantics even if
 the implementation disappears. Do not weaken `validate_consumed_native_namespace`.
 
-## C2. The selected input root belongs to runtime publication
+## C2. Runtime publication selects the compiler world
 
 `SelectedInputs` is a conceptual role, not a demand for a new public struct.
 Extend the existing paired declaration/value/source publication owner so it
@@ -45,10 +54,25 @@ issues one immutable complete compiler-input root. It includes or references:
 - Immutable interface/template facts and actual byte owners, plus incremental
   visibility/native/commitment indexes where current consumers need them.
 
-The admitted world's home census is an explicitly issued fact. It is neither
-all historical custody nor merely the nodes reached by the current computation.
-The host-input supervisor must document its exact membership from the real
-resolution contract before implementing invalidation.
+The admitted world's home census is an explicitly issued exact module-membership
+fact attached to the selected-row owner. Every admitted selected compiler row
+carries its own authenticated home witness: canonical finalization validates its
+own unit; a ValueInterface carries its checked reserved-value certificate; a
+LexicalJoin carries its accepted reserved join and verified input witness.
+The existing selected `(ArtifactBinding, Arc<ArtifactEntry>)` retains this
+witness category; no public Home capability or name-prefix inference is needed.
+Maintain a persistent membership index from actual selected row additions and
+removals. Include zero-group and interface-only selected owners, value and lexical
+joins. Exclude dormant custody and modules merely mentioned by another row's
+home-unit set. The existing home-unit set for type-name classification remains
+a separate fact. Type requirements must close through admitted selected rows,
+not invent unissued census members. Inherited exact historical group dependencies
+retain their own issuing classification independently of the current census.
+
+A base-bound transition retains the exact old and successor selected owner
+references. Role equality, payload identity or ArtifactView equality alone cannot
+stand in for a transition: effective Original/canonical roles, scoped artifact
+and group bindings, native permission/decisions and the home census all matter.
 
 Capture is cheap: borrow the complete root, not rebuild it from every retained
 value. Every mutation route updates it with the actual state transition:
@@ -227,3 +251,19 @@ Do not add a parallel framework, selector, registry, test authority factory or
 full-scan escape hatch to make a leaf pass. A conservative cold path can remain
 where the contract genuinely needs full validation; warm fallback frequency must
 be measured and reported.
+
+## Campaign decision receipts
+
+- 2026-10-19, C2 exact home census: host-input supervisor and independent census
+  reviewer traced canonical/value/lexical production issuers. Campaign directly
+  inspected selected-row ownership and the broader OriginalValidationInventory
+  census before accepting the rule above. Consumers: host selected root/deltas,
+  package-negative resolution, worker exact-world inputs and qualification oracle.
+  Implementation and executed oracle acceptance remain pending; this decision
+  does not certify the old available-original census as equivalent.
+- 2026-10-19, C6 provenance direction: generation dependencies travel explicitly
+  in the owning actor/session context through callback transfer; migrate actual
+  constructor callers rather than encode authority in source-root names or add
+  an actor-current registry. Lower runtime gates must retain crate dependency
+  direction. Absence never grants source-dependent admission. Exact type/schema
+  and production fence/stop result remain under implementation review.

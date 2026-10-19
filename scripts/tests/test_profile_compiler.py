@@ -39,6 +39,10 @@ elif args[0] == "report":
     print("test leaf report")
 ''')
             perf.chmod(0o700)
+            subprocess.run(['git', 'init', '--quiet', str(base)], check=True)
+            subprocess.run(['git', '-C', str(base), '-c', 'user.name=fixture',
+                            '-c', 'user.email=fixture@example.invalid', 'commit',
+                            '--allow-empty', '--quiet', '-m', 'capture fixture'], check=True)
             marker = base / "settled"
             worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
             try:
@@ -48,7 +52,7 @@ elif args[0] == "report":
                     "--", sys.executable, "-c",
                     "import sys,time; from pathlib import Path; time.sleep(.2); Path(sys.argv[1]).write_text('settled')",
                     str(marker),
-                ], capture_output=True, text=True, timeout=15)
+                ], cwd=base, capture_output=True, text=True, timeout=15)
                 self.assertEqual(outcome.returncode, 1, outcome.stderr)
                 self.assertTrue(marker.exists(), outcome.stderr)
                 metadata = json.loads((base / "capture/capture.json").read_text())
@@ -339,6 +343,42 @@ class RequestAccountingTests(unittest.TestCase):
         self.assertEqual(report["requests"][0]["status"], "UNKNOWN")
         self.assertTrue(any("invalid trace" in problem for problem in report["problems"]))
 
+    def test_invalid_request_cannot_render_completed_cycle_as_observed_work(self):
+        for boundary in ('missing_terminal', 'duplicate_start', 'failed', 'wrong_digest'):
+            with self.subTest(boundary=boundary):
+                rows = self.history([self.event(), self.event("complete")])
+                if boundary == 'missing_terminal':
+                    rows.pop()
+                elif boundary == 'duplicate_start':
+                    rows.append(rows[0])
+                elif boundary == 'failed':
+                    rows[-1]['fields'].update(message='compiler request failed', exit_code=1)
+                else:
+                    rows.append({'fields': dict(rows[1]['fields']),
+                                 'span': {**self.span(), 'compile_request': 'wrong-input'}})
+                report = self.analyze(rows)
+                request = report['requests'][0]
+                cycle = request['cycle_stages'][0]['stages']['source_frontend']
+                self.assertEqual(request['status'], 'UNKNOWN')
+                self.assertEqual(cycle['status'], 'UNKNOWN')
+                self.assertIsNone(cycle['counts'])
+                rendered = profile.render_request_accounting(report)
+                self.assertIn('source_frontend: UNKNOWN', rendered)
+                self.assertNotIn('source_frontend: observed', rendered)
+                self.assertNotIn('decisions=', rendered)
+
+    def test_incomplete_later_cycle_preserves_only_completed_cycle_observation(self):
+        report = self.analyze(self.history([self.event(), self.event('complete'),
+                                            self.event(cycle=2)]))
+        request = report['requests'][0]
+        self.assertEqual(request['status'], 'UNKNOWN')
+        self.assertIsNone(request['source_frontend_work_items'])
+        self.assertEqual(request['cycle_stages'][0]['stages']['source_frontend']['counts'], {'work': 1})
+        self.assertIsNone(request['cycle_stages'][1]['stages']['source_frontend']['counts'])
+        rendered = profile.render_request_accounting(report)
+        self.assertEqual(rendered.count('source_frontend: observed'), 1)
+        self.assertEqual(rendered.count('source_frontend: UNKNOWN'), 1)
+
     def test_duplicate_stage_and_request_completion_are_refused(self):
         stage = self.analyze(self.history([self.event(), self.event("complete"), self.event("complete")]))
         self.assertEqual(stage["requests"][0]["cycle_stages"][0]["stages"]["source_frontend"]["status"], "UNKNOWN")
@@ -412,7 +452,7 @@ class RequestAccountingTests(unittest.TestCase):
         self.assertEqual(report["requests"][0]["status"], "observed")
         self.assertTrue(any("capture/recovery incomplete" in problem for problem in report["problems"]))
 
-    def test_selected_activation_and_reconstruction_totals_require_enclosing_boundaries(self):
+    def test_buffered_legacy_totals_require_unique_physical_terminal_not_arrival_order(self):
         lines = ["tidepool-count name=activation_preview_frontends count=9",
                  "tidepool-count name=exact_execution_original_load_owners count=9",
                  "tidepool-timing phase=retained_finalized_bytecode ms=2"]
@@ -432,6 +472,14 @@ class RequestAccountingTests(unittest.TestCase):
                         rows.append(rows[-1])
                 report = self.analyze(rows)
                 request = report["requests"][0]
+                if placement in ('before', 'after'):
+                    self.assertEqual(report['status'], 'observed')
+                    self.assertEqual(request['legacy_status'], 'observed')
+                    self.assertEqual(request['activation_preview_frontends'], 9)
+                    self.assertEqual(request['bytecode']['selected'], {'exact_execution_original_load_owners': 9})
+                    self.assertEqual(request['bytecode']['reconstructed']['retained_finalized_bytecode']
+                                     ['completed_operations'], 1)
+                    continue
                 self.assertEqual(report["status"], "incomplete")
                 self.assertEqual(request["legacy_status"], "UNKNOWN")
                 self.assertIsNone(request["activation_preview_frontends"])

@@ -1,5 +1,12 @@
 # 03 — Publish, narrow and release the same issued inputs
 
+Ownership amendment: read [DEMAND-SERVICE.md](../DEMAND-SERVICE.md) first.
+Rust retains primary notebook selections, execution provenance and atomic
+publication; Haskell owns compiler-derived worlds and invalidation. The
+paired owner review must classify mixed structures before moving or deleting
+them. The previous field/path inventory below remains investigative evidence,
+not a requirement to preserve its host-side decomposition.
+
 Assigned to a Sol implementation child after [01](01-selected-root.md) and [02](02-delta-admission.md) are reviewed and folded by the [area supervisor](README.md). Source baseline: `70a92c65a02a591f76590daf4e5bfa3e6fcbf723`; record the actual integrated starting OID and common contract. Current task is plan authoring only, with no product change or test execution authorized by this document.
 
 **Goal.** Complete the mutation-path migration and remove old reconstruction routes. P6, declaration/value publication, shadow/retract, fork/drop, explicit reload and recovery must carry or deliberately transition the exact selected-input owner. A small publication must not rebuild or re-encode all history to make the next request cheap. Old selected code retains its exact issued dependency edges in its world/forks. New current authority comes from runtime admission/publication owners, not from a retained input root or warmed compiler result.

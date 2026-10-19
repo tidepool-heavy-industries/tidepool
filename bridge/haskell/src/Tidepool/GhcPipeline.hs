@@ -1272,7 +1272,6 @@ data RecoveryContext = RecoveryContext
 
 data CompletedModuleVersion = CompletedModuleVersion
   { completedModuleEntry :: GutsMemoEntry
-  , completedModuleEnvironment :: HscEnv
   , completedModuleHome :: Maybe HomeModInfo
   , completedModuleRecovery :: RecoveryContext
   , completedModuleEpoch :: Word64
@@ -1280,8 +1279,7 @@ data CompletedModuleVersion = CompletedModuleVersion
   }
 
 data CompletedOriginalVersion = CompletedOriginalVersion
-  { completedOriginalEnvironment :: HscEnv
-  , completedOriginalHome :: HomeModInfo
+  { completedOriginalHome :: HomeModInfo
   , completedOriginalRecovery :: RecoveryContext
   , completedOriginalEpoch :: Word64
   }
@@ -2646,7 +2644,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , Just entry <- [Map.lookup owner validEntries]
               , Just node <- [Map.lookup owner selectedVersions]
               , let hmi = fromMaybe (finalizedHomeModInfo (payloadFinalized (gmePayload entry)))
-                      (completedModuleHome node <|> lookupHpt (hsc_HPT (completedModuleEnvironment node)) (moduleName owner))
+                      (completedModuleHome node)
               , isNothing (lookupHpt (hsc_HPT current) (ms_mod_name summary))
               , let finalized = hm_iface (finalizedHomeModInfo (loadedFinalized
                       (payloadLoaded summary (gmePayload entry))))
@@ -5143,14 +5141,14 @@ residentCompileOne guard producer selection retained universeRef active interpre
   epoch <- liftIO (compilerInterpreterEpoch <$> readIORef (universeInterpreter universe))
   let sourceNodes = Map.fromListWith Map.union
         [(owner,Map.singleton (memoSelectionKey (gmeValidity entry))
-            (Map.singleton (gmeValidity entry) (CompletedModuleVersion entry final home recoveryContext epoch (maybe [] (\product' -> [product' | preparedSiteDependenciesEquivalent
+            (Map.singleton (gmeValidity entry) (CompletedModuleVersion entry home recoveryContext epoch (maybe [] (\product' -> [product' | preparedSiteDependenciesEquivalent
                 (productPrepared product') (productPrepared product')]) (payloadProduct (gmePayload entry))))))
         | entry <- Map.elems admittedSnapshot
         , let owner = payloadOwner (gmePayload entry)
         , owner /= targetOwner
         , let home = lookupHpt (hsc_HPT final) (moduleName owner)]
       originalVersions = Map.fromList [((owner,digest,localIncarnation owner),
-          CompletedOriginalVersion final home recoveryContext epoch)
+          CompletedOriginalVersion home recoveryContext epoch)
         | scope <- maybe [] pure (pvExactScope variant), (artifact,_,_) <- scopeInterfaces scope
         , let owner = mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
         , Just digest <- [Map.lookup (exactUnit artifact,exactModule artifact) originals]
@@ -5176,7 +5174,7 @@ residentCompileOne guard producer selection retained universeRef active interpre
   pure (CompletedCompilerResult result recovery guard)
 
 -- Each key owns one immutable product. Upgrade incomplete acceleration once,
--- retaining the original environment on ordinary hits across changing views.
+-- retaining the original completed facts on ordinary hits across changing views.
 preferModuleVersion :: CompletedModuleVersion -> CompletedModuleVersion -> CompletedModuleVersion
 preferModuleVersion incoming previous = selected
   {completedModuleRecovery=completedModuleRecovery incoming
@@ -5371,7 +5369,8 @@ diagnosticCollectorHook targetPath warningRef errorRef fallback flags msgClass s
 extractionDynFlags :: DynFlags -> [FilePath] -> DynFlags
 extractionDynFlags dflags includes = canonicalizeDFlags dflags
   { importPaths = importPaths dflags ++ includes
-  -- Producer identity binds this libdir's complete pinned global database.
+  -- The selected libdir supplies the global database. Producer identity binds
+  -- its path; package reuse requires a retained consumed-source owner.
   -- GHC stores database flags in reverse command-line order. Clearing first
   -- removes both user databases and ambient GHC_PACKAGE_PATH entries before
   -- the initial setSessionDynFlags loads any package interfaces.
