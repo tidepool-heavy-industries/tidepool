@@ -1837,6 +1837,13 @@ pub(crate) fn original_entry_construction_calls() -> usize {
 }
 
 impl ArtifactEntry {
+    /// Physical reuse requires the acquired facts owner, not equal payload facts.
+    pub(crate) fn same_issued_facts(&self, other: &Self) -> bool {
+        self.facts.same_owner(&other.facts)
+            && self.descriptor == other.descriptor
+            && self.requirements == other.requirements
+    }
+
     pub(crate) fn finalize_joined_requirements(
         self,
         requirements: Vec<ExactModuleIdentity>,
@@ -5244,8 +5251,17 @@ struct ViewLease {
     materialization: MaterializationSource,
 }
 
-type MaterializationCache =
-    Mutex<BTreeMap<[u8; 32], Arc<crate::declaration_context::RetainedArtifactMaterialization>>>;
+type MaterializationCache = Mutex<
+    BTreeMap<MaterializationKey, Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+>;
+
+/// A physical leaf augments inherited custody; only a complete compiler
+/// materialization can replace traversal of its issuing view's parents.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MaterializationKey {
+    Compilation([u8; 32]),
+    CheckedValueLeaf(ArtifactBinding),
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct MaterializationCacheId(usize);
@@ -5274,8 +5290,12 @@ struct ViewDraft {
     parents: Vec<Arc<ViewLease>>,
     issuing_payloads: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     materialization_parents: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
-    materialization:
-        Mutex<BTreeMap<[u8; 32], Arc<crate::declaration_context::RetainedArtifactMaterialization>>>,
+    materialization: Mutex<
+        BTreeMap<
+            MaterializationKey,
+            Arc<crate::declaration_context::RetainedArtifactMaterialization>,
+        >,
+    >,
 }
 
 fn replace_snapshot_namespace(
@@ -5640,7 +5660,10 @@ impl ViewLease {
     ) -> std::io::Result<
         std::sync::MutexGuard<
             '_,
-            BTreeMap<[u8; 32], Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+            BTreeMap<
+                MaterializationKey,
+                Arc<crate::declaration_context::RetainedArtifactMaterialization>,
+            >,
         >,
     > {
         lock_materialization_cache(&self.materialization.cache)
@@ -5667,9 +5690,10 @@ impl ViewLease {
             .iter()
             .rev()
             .copied()
+            .map(|id| (id, false))
             .collect::<Vec<_>>();
-        while let Some(id) = pending.pop() {
-            if !visited.insert(id) {
+        while let Some((id, parents_visited)) = pending.pop() {
+            if !parents_visited && !visited.insert(id) {
                 continue;
             }
             let source = self
@@ -5677,7 +5701,10 @@ impl ViewLease {
                 .get(&id)
                 .expect("owned cache parent");
             let retained = lock_materialization_cache(&source.cache)?;
-            if retained.is_empty() {
+            let complete = retained
+                .keys()
+                .any(|key| matches!(key, MaterializationKey::Compilation(_)));
+            if !parents_visited && !complete {
                 for materialization in &source.fixed {
                     if !materializations
                         .iter()
@@ -5686,18 +5713,18 @@ impl ViewLease {
                         materializations.push(Arc::clone(materialization));
                     }
                 }
-                pending.extend(source.parents.iter().rev().copied());
-            } else {
-                // This owner retains the files actually observed when it was
-                // completed. Later alternate keys can materialize from their
-                // independently retained payloads without borrowing this branch.
-                for materialization in retained.values() {
-                    if !materializations
-                        .iter()
-                        .any(|existing| Arc::ptr_eq(existing, materialization))
-                    {
-                        materializations.push(Arc::clone(materialization));
-                    }
+                // Leaf facts follow all their inherited sources, so an exact
+                // newly promoted leaf overrides a broad historical row.
+                pending.push((id, true));
+                pending.extend(source.parents.iter().rev().copied().map(|id| (id, false)));
+                continue;
+            }
+            for materialization in retained.values() {
+                if !materializations
+                    .iter()
+                    .any(|existing| Arc::ptr_eq(existing, materialization))
+                {
+                    materializations.push(Arc::clone(materialization));
                 }
             }
         }
@@ -5715,16 +5742,18 @@ impl ViewLease {
             return Ok(());
         }
         let retained = self.lock_materialization()?;
-        if retained.is_empty() {
+        if !retained
+            .keys()
+            .any(|key| matches!(key, MaterializationKey::Compilation(_)))
+        {
             self.collect_inherited_materializations(materializations, visited)?;
-        } else {
-            for materialization in retained.values() {
-                if !materializations
-                    .iter()
-                    .any(|existing| Arc::ptr_eq(existing, materialization))
-                {
-                    materializations.push(Arc::clone(materialization));
-                }
+        }
+        for materialization in retained.values() {
+            if !materializations
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, materialization))
+            {
+                materializations.push(Arc::clone(materialization));
             }
         }
         Ok(())
@@ -5768,29 +5797,24 @@ fn lock_materialization_cache(
 ) -> std::io::Result<
     std::sync::MutexGuard<
         '_,
-        BTreeMap<[u8; 32], Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+        BTreeMap<
+            MaterializationKey,
+            Arc<crate::declaration_context::RetainedArtifactMaterialization>,
+        >,
     >,
 > {
-    loop {
-        crate::host_work::checkpoint()?;
-        match cache.try_lock() {
-            Ok(retained) => return Ok(retained),
-            Err(std::sync::TryLockError::WouldBlock) => {
-                #[cfg(test)]
-                MATERIALIZATION_WAIT_OBSERVER.with(|observer| {
-                    let mut observer = observer.borrow_mut();
-                    if observer.as_ref().is_some_and(|(expected, _)| {
-                        expected.0 == cache as *const MaterializationCache as usize
-                    }) {
-                        let (_, sender) = observer.take().expect("observed waiter");
-                        let _ = sender.send(());
-                    }
-                });
-                std::thread::sleep(std::time::Duration::from_millis(2))
+    crate::host_work::lock_with_wait(cache, || {
+        #[cfg(test)]
+        MATERIALIZATION_WAIT_OBSERVER.with(|observer| {
+            let mut observer = observer.borrow_mut();
+            if observer.as_ref().is_some_and(|(expected, _)| {
+                expected.0 == cache as *const MaterializationCache as usize
+            }) {
+                let (_, sender) = observer.take().expect("observed waiter");
+                let _ = sender.send(());
             }
-            Err(std::sync::TryLockError::Poisoned(_)) => panic!("materialization lock"),
-        }
-    }
+        });
+    })
 }
 
 fn admitted_closure(
@@ -6200,6 +6224,96 @@ impl ArtifactView {
             .get_or_init(|| Arc::new(projected_dependencies(state, &projection.nodes)))
     }
 
+    /// Retain one certified checked-value leaf under its exact scoped binding.
+    /// This additive cache entry never claims a complete compiler closure.
+    pub(crate) fn retain_checked_value_materialization(
+        &self,
+        value: &crate::recovery_artifacts::CertifiedValueInterface,
+        prepare: impl FnOnce(
+            Arc<ArtifactEntry>,
+            Option<Arc<crate::declaration_context::RetainedArtifactRow>>,
+        ) -> Result<
+            crate::declaration_context::RetainedArtifactMaterialization,
+            CompileError,
+        >,
+    ) -> Result<Arc<crate::declaration_context::RetainedArtifactMaterialization>, CompileError>
+    {
+        let id = value.artifact_id();
+        let binding = self
+            .lease
+            .selection
+            .namespace
+            .get(&id)
+            .ok_or_else(|| failure("checked value lacks its selected binding"))?;
+        let entry = self
+            .lease
+            .payloads
+            .get(&id)
+            .ok_or_else(|| failure("checked value lacks acquired interface custody"))?;
+        if entry.requirements != value.requirements()
+            || !matches!(&entry.payload, ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface) if interface == value.interface())
+        {
+            return Err(failure(
+                "checked value differs from its acquired issuing row",
+            ));
+        }
+        let key = MaterializationKey::CheckedValueLeaf(*binding);
+        let mut cache = self.lease.lock_materialization()?;
+        if let Some(retained) = cache.get(&key) {
+            return Ok(retained.clone());
+        }
+        // Prefer the current owner's exact acquired value row, then its
+        // recorded inherited custody. Dedicated provenance includes full facts.
+        let mut borrowed = cache
+            .values()
+            .rev()
+            .find_map(|owner| owner.issued_value_row(entry));
+        if borrowed.is_none() {
+            let mut inherited = Vec::new();
+            self.lease
+                .collect_inherited_materializations(&mut inherited, &mut BTreeSet::new())?;
+            borrowed = inherited
+                .iter()
+                .rev()
+                .find_map(|owner| owner.issued_value_row(entry));
+        }
+        let retained = Arc::new(prepare(entry.clone(), borrowed)?);
+        cache.insert(key, retained.clone());
+        Ok(retained)
+    }
+
+    fn checked_value_leaves(
+        &self,
+        retained: &BTreeMap<
+            MaterializationKey,
+            Arc<crate::declaration_context::RetainedArtifactMaterialization>,
+        >,
+        metadata: &CompilerArtifactMetadata,
+    ) -> Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>> {
+        let leaves = retained
+            .iter()
+            .filter_map(|(key, leaf)| match key {
+                MaterializationKey::CheckedValueLeaf(binding)
+                    if self
+                        .lease
+                        .payloads
+                        .get(&binding.artifact)
+                        .and_then(|entry| metadata.entries.get(&entry.descriptor.owner))
+                        .is_some_and(|entry| entry.descriptor.id == binding.artifact)
+                        && self.lease.selection.namespace.get(&binding.artifact)
+                            == Some(binding) =>
+                {
+                    Some(leaf.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_value_leaf_cache_scan",
+            cache_entries_visited = retained.len(), selected_leaf_references = leaves.len(),
+            "observed current scoped physical leaves");
+        leaves
+    }
+
     /// Private materialization belongs to this immutable graph view. Failed
     /// preparation leaves no retained entry; descendants borrow completed owners.
     pub(crate) fn retain_materialization(
@@ -6216,13 +6330,17 @@ impl ArtifactView {
         // Waiting for another producer must remain responsive to this scope's
         // stop edge without interrupting that producer or evicting its result.
         let mut retained = self.lease.lock_materialization()?;
-        let key = metadata.materialization_key();
-        if let Some(materialization) = retained.get(&key) {
-            return Ok(Arc::clone(materialization));
+        let key = MaterializationKey::Compilation(metadata.materialization_key());
+        let leaves = self.checked_value_leaves(&retained, metadata);
+        if let Some(complete) = retained.get(&key) {
+            let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata);
+            retained.insert(key, complete.clone());
+            return Ok(complete);
         }
         let mut parents = Vec::new();
         self.lease
             .collect_inherited_materializations(&mut parents, &mut BTreeSet::new())?;
+        parents.extend(leaves);
         let parents =
             crate::declaration_context::RetainedArtifactMaterialization::select_custody_inputs(
                 &parents,
@@ -6282,11 +6400,15 @@ impl ArtifactView {
         Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
         CompileError,
     > {
-        Ok(self
-            .lease
-            .lock_materialization()?
-            .get(&metadata.materialization_key())
-            .cloned())
+        let mut retained = self.lease.lock_materialization()?;
+        let key = MaterializationKey::Compilation(metadata.materialization_key());
+        let Some(complete) = retained.get(&key) else {
+            return Ok(None);
+        };
+        let leaves = self.checked_value_leaves(&retained, metadata);
+        let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata);
+        retained.insert(key, complete.clone());
+        Ok(Some(complete))
     }
     pub(crate) fn retained_payloads(&self) -> RetainedArtifactPayloads<'_> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
