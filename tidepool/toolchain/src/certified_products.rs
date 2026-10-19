@@ -13237,7 +13237,9 @@ pub(crate) mod tests {
                         let required_row = input.native_availability(entries[2].descriptor.id);
                         for ordinal in [7, 9001] {
                             assert_eq!(
-                                required_row.as_ref().is_some_and(|row| row.permits(ordinal)),
+                                required_row
+                                    .as_ref()
+                                    .is_some_and(|row| row.permits(ordinal)),
                                 grant_full || selected == Some(ordinal)
                             );
                         }
@@ -13291,7 +13293,7 @@ pub(crate) mod tests {
                                 .all(|group| output_indices
                                     .iter()
                                     .all(|index| group.artifact != entries[*index].descriptor.id)));
-                            let next = ExactCompileContext::new(context.clone())
+                            let next_request = ExactCompileContext::new(context.clone())
                                 .prepare_compilation_with_private_input(
                                     &root.path().join("output"),
                                     producer_bytes,
@@ -13299,7 +13301,74 @@ pub(crate) mod tests {
                                     Some(completed),
                                 )
                                 .unwrap();
-                            let next = next.compiler_inputs();
+                            let bytes = std::fs::read(&next_request.manifest).unwrap();
+                            let scope: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+                            let scope = scope.as_array().unwrap();
+                            assert_eq!(scope.len(), 11);
+                            assert_eq!(scope[0], Value::Text("TPEXACTSCOPE".into()));
+                            assert_eq!(scope[1], Value::Text("16".into()));
+                            let mut wire_rows = BTreeMap::new();
+                            for value in scope[6].as_array().unwrap() {
+                                let [unit, module, _, _, _, _, ordinals, _, mode, _] =
+                                    value.as_array().unwrap().as_slice()
+                                else {
+                                    panic!("native row has ten fields")
+                                };
+                                assert_eq!(unit.as_text(), Some("fixture"));
+                                let ordinals = ordinals
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|ordinal| {
+                                        u32::try_from(ordinal.as_integer().unwrap()).unwrap()
+                                    })
+                                    .collect::<Vec<_>>();
+                                assert!(wire_rows
+                                    .insert(
+                                        module.as_text().unwrap().to_owned(),
+                                        (ordinals, mode.clone())
+                                    )
+                                    .is_none());
+                            }
+                            let issued_mode = |ordinals: &[u32]| {
+                                Value::Array(vec![
+                                    Value::Text("issued-groups".into()),
+                                    Value::Array(
+                                        ordinals
+                                            .iter()
+                                            .map(|ordinal| Value::Integer((*ordinal).into()))
+                                            .collect(),
+                                    ),
+                                ])
+                            };
+                            let full_mode = Value::Array(vec![Value::Text("full-carrier".into())]);
+                            assert_eq!(
+                                wire_rows["FixedRequestInput"],
+                                (vec![7], issued_mode(&[7]))
+                            );
+                            assert_eq!(
+                                wire_rows["FreshRequestOutput"],
+                                (vec![], full_mode.clone())
+                            );
+                            assert_eq!(
+                                wire_rows["VariableRequestInput"],
+                                (
+                                    selected.into_iter().collect::<Vec<_>>(),
+                                    if grant_full {
+                                        full_mode.clone()
+                                    } else {
+                                        issued_mode(&[demanded])
+                                    },
+                                )
+                            );
+                            if extra_output {
+                                assert_eq!(
+                                    wire_rows["UnrelatedRequestOutput"],
+                                    (vec![], full_mode)
+                                );
+                            }
+                            assert_eq!(wire_rows.len(), if extra_output { 4 } else { 3 });
+                            let next = next_request.compiler_inputs();
                             assert_eq!(
                                 next.artifacts().selected_native_groups(),
                                 input.artifacts().selected_native_groups()
