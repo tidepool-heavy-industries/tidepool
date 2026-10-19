@@ -18066,7 +18066,42 @@ pub(crate) mod tests {
         let (_, mut receipt, current, original_a, original_b) = cached_closure_pair(root.path());
         let context = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products([3; 32], &[original_a, original_b])
+            .extend_issued_compiler_support(&{
+                let entries = (&[original_a, original_b])
+                    .iter()
+                    .cloned()
+                    .map(|product| {
+                        crate::artifact_inventory::ArtifactEntry::original([3; 32], product)
+                            .map(Arc::new)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let inventory = crate::artifact_inventory::ArtifactInventory::default();
+                let physical = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        entries.clone(),
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let projection =
+                    crate::artifact_inventory::CompilerInputProjection::from_issued_entries(
+                        &entries,
+                    )
+                    .unwrap();
+                let selection = CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &physical.metadata_snapshot(),
+                    &InventoryOperation::new(Default::default()),
+                )
+                .unwrap();
+                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                    &selection, &physical,
+                )
+                .unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            })
             .unwrap();
         for module in &mut receipt.modules {
             module.origin = ProductOrigin::Fresh;
@@ -18156,7 +18191,42 @@ pub(crate) mod tests {
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
         let overlapping = empty
             .clone()
-            .extend_checked_original_products([3; 32], &[a])
+            .extend_issued_compiler_support(&{
+                let entries = (&[a])
+                    .iter()
+                    .cloned()
+                    .map(|product| {
+                        crate::artifact_inventory::ArtifactEntry::original([3; 32], product)
+                            .map(Arc::new)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let inventory = crate::artifact_inventory::ArtifactInventory::default();
+                let physical = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        entries.clone(),
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let projection =
+                    crate::artifact_inventory::CompilerInputProjection::from_issued_entries(
+                        &entries,
+                    )
+                    .unwrap();
+                let selection = CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &physical.metadata_snapshot(),
+                    &InventoryOperation::new(Default::default()),
+                )
+                .unwrap();
+                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                    &selection, &physical,
+                )
+                .unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            })
             .unwrap();
         assert!(overlapping.recovery_products()[0].product_bytes().len() > 0);
         let originals = overlapping.recovery_products();
@@ -18173,7 +18243,42 @@ pub(crate) mod tests {
         .unwrap();
         let inherited = empty
             .clone()
-            .extend_checked_original_products([3; 32], &[b])
+            .extend_issued_compiler_support(&{
+                let entries = (&[b])
+                    .iter()
+                    .cloned()
+                    .map(|product| {
+                        crate::artifact_inventory::ArtifactEntry::original([3; 32], product)
+                            .map(Arc::new)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let inventory = crate::artifact_inventory::ArtifactInventory::default();
+                let physical = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        entries.clone(),
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let projection =
+                    crate::artifact_inventory::CompilerInputProjection::from_issued_entries(
+                        &entries,
+                    )
+                    .unwrap();
+                let selection = CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &physical.metadata_snapshot(),
+                    &InventoryOperation::new(Default::default()),
+                )
+                .unwrap();
+                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                    &selection, &physical,
+                )
+                .unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            })
             .unwrap();
         receipt.modules.pop();
         assert!(matches!(
@@ -18278,7 +18383,42 @@ pub(crate) mod tests {
         .unwrap();
         let context = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
-            .extend_checked_original_products([3; 32], &[b.clone()])
+            .extend_issued_compiler_support(&{
+                let entries = (&[b.clone()])
+                    .iter()
+                    .cloned()
+                    .map(|product| {
+                        crate::artifact_inventory::ArtifactEntry::original([3; 32], product)
+                            .map(Arc::new)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let inventory = crate::artifact_inventory::ArtifactInventory::default();
+                let physical = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        entries.clone(),
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                    )
+                    .unwrap();
+                let projection =
+                    crate::artifact_inventory::CompilerInputProjection::from_issued_entries(
+                        &entries,
+                    )
+                    .unwrap();
+                let selection = CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &physical.metadata_snapshot(),
+                    &InventoryOperation::new(Default::default()),
+                )
+                .unwrap();
+                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                    &selection, &physical,
+                )
+                .unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            })
             .unwrap();
         assert!(context.lexical_graph().is_empty());
         let accepted_b = receipt.modules.pop().unwrap();
