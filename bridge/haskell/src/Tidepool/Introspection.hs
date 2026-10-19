@@ -795,6 +795,16 @@ identifierRef name thing = IdentifierRef
       ACoAxiom _ -> TypeIdentifier
   }
 
+-- | The canonical identity of a resolved name, independent of how the caller
+-- happened to spell it. Enumeration and type search use this for the entry's
+-- own identity; the plural reference lists remain dependencies.
+nominalIdentity :: Name -> IdentifierNamespace -> IdentifierRef
+nominalIdentity name namespace = IdentifierRef
+  { identifierModule = maybe "" (moduleNameString . moduleName) (nameModule_maybe name),
+    identifierName = occNameString (nameOccName name),
+    identifierNamespace = namespace
+  }
+
 -- | Immediate nominal references, obtained from compiler declarations. Member
 -- visibility matches the declaration renderer; following a reference never
 -- recursively traverses the referenced declaration.
@@ -1102,19 +1112,20 @@ encodeEntries entries =
   encodeListLen (fromIntegral (length entries)) <> foldMap encodeEntry entries
 encodeEntry :: InfoEntry -> Encoding
 encodeEntry entry =
-  encodeListLen 6
+  encodeListLen 7
     <> encodeText (infoName entry)
     <> maybe encodeNull encodeText (infoModule entry)
     <> encodeText (infoKind entry)
     <> encodeText (infoDisplay entry)
     <> encodeAvailability (infoAvailability entry)
     <> encodeList encodeIdentifierRef (infoReferences entry)
+    <> encodeIdentifierRef (nominalIdentity (infoNominalName entry) (infoNamespace entry))
 encodeTypeMatches :: [TypeMatch] -> Encoding
 encodeTypeMatches matches =
   encodeListLen (fromIntegral (length matches)) <> foldMap encodeTypeMatch matches
 encodeTypeMatch :: TypeMatch -> Encoding
 encodeTypeMatch match =
-  encodeListLen 6
+  encodeListLen 7
     <> encodeText (typeMatchName match)
     <> maybe encodeNull encodeText (typeMatchModule match)
     <> encodeText (typeMatchSignature match)
@@ -1123,6 +1134,8 @@ encodeTypeMatch match =
       TypeMatchUsable -> "Usable")
     <> encodeAvailability (typeMatchAvailability match)
     <> encodeList encodeIdentifierRef (typeMatchReferences match)
+    <> encodeIdentifierRef
+      (nominalIdentity (typeMatchNominalName match) (typeMatchNamespace match))
 encodeAvailability :: Availability -> Encoding
 encodeAvailability = encodeString . T.pack . show
 
