@@ -10,6 +10,11 @@ const BYTE_LIMIT: u64 = 128 << 20;
 const ENTRY_LIMIT: usize = 4096;
 const DEPTH_LIMIT: usize = 16;
 
+fn diagnostic_path(path: &Path) -> io::Result<&str> {
+    path.to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "diagnostic path is not UTF-8"))
+}
+
 /// Diagnostic copies of already admitted input bytes. In particular, a sealed
 /// transport path may cease to exist when its transaction closes; it is never
 /// reopened to reconstruct the input observed by the compiler.
@@ -70,6 +75,8 @@ impl InputArtifactDiagnostics {
         use std::os::unix::fs::{FileExt, MetadataExt};
         let result = (|| {
             for part in parts {
+                let receiving_alias = diagnostic_path(&part.path)?;
+                let transport_endpoint = diagnostic_path(part.transport.endpoint())?;
                 if self.part_records >= ENTRY_LIMIT || part.bytes > self.remaining {
                     return Err(io::Error::other(
                         "owned input observations exceed diagnostic bound",
@@ -126,7 +133,7 @@ impl InputArtifactDiagnostics {
                 let body = self.bytes(part.kind.wire_tag(), &bytes)?;
                 let record = serde_json::json!({"schema":1,"authority":false,
                     "producer":producer,"unit":unit,"module":module,"kind":part.kind.wire_tag(),
-                    "receiving_alias":part.path,"transport_endpoint":part.transport.endpoint(),
+                    "receiving_alias":receiving_alias,"transport_endpoint":transport_endpoint,
                     "device":meta.dev(),"inode":meta.ino(),"arena_bytes":meta.len(),
                     "offset":offset,"length":part.bytes,"expected_sha256":part.sha256,
                     "captured":body});
@@ -414,7 +421,7 @@ impl CompilerDiagnosticCapture {
             "diagnostic snapshot counts");
         let report = serde_json::json!({
             "schema": 1, "kind": "compiler-execution-diagnostics", "authority": false,
-            "original_directory": source, "phase": stage.phase(),
+            "original_directory": diagnostic_path(source)?, "phase": stage.phase(),
             "submission": match stage { DiagnosticStage::Preparing | DiagnosticStage::Prepared | DiagnosticStage::Refused(_) => "not_attempted", DiagnosticStage::Started => "not_observed", DiagnosticStage::Completed { .. } => "observed" },
             "primary_error": match stage { DiagnosticStage::Refused(error) => Some(error.to_string()), _ => None },
             "compiler_process_success": match stage { DiagnosticStage::Completed { success, .. } => Some(success), _ => None },
@@ -498,8 +505,10 @@ impl Snapshot {
                     continue;
                 }
                 self.remaining -= bytes.len() as u64;
+                let path = entry.path();
+                let path = diagnostic_path(&path)?;
                 self.files.push(
-                    serde_json::json!({"original_path": entry.path(), "retained_path": entry.path(),
+                    serde_json::json!({"original_path": path, "retained_path": path,
                     "bytes": bytes.len(), "sha256": crate::checked_cell::hash(&bytes)}),
                 );
             } else {
@@ -654,6 +663,18 @@ mod tests {
         assert_eq!(record["offset"], 6);
         assert_eq!(record["length"], 20);
         let file = record["captured"]["file"].as_str().unwrap().to_owned();
+        // A non-UTF8 receiving label must become incomplete diagnostics,
+        // never a serde_json::json! panic replacing the compiler's refusal.
+        use std::os::unix::ffi::OsStringExt;
+        let before = capture.bytes_written();
+        part.path = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/receiving/invalid-\xff".to_vec(),
+        ));
+        let error = capture
+            .original_parts(&[7; 32], "main", "Module", std::slice::from_ref(&part))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(capture.bytes_written(), before);
         // Oversized advertised input must fail before allocating or reopening
         // its nonexistent receiving alias, with an explicit incomplete result.
         part.bytes = BYTE_LIMIT + 1;
