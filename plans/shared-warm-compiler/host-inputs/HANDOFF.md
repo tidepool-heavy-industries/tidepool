@@ -336,7 +336,7 @@ state and uses `followup_task` for a completed/idle non-root parent; `send_messa
 suffices while it is running. Every command retains its observer until terminal.
 
 The campaign owns shared transition decisions and joined runtime qualification.
-The next approved narrow direction is one private `ItemAdmission` result carrying
+The superseded 02A direction was one private `ItemAdmission` result carrying
 the final context C2 and continuation together. The actual output owner F couples
 private inputs, source selection and artifact custody. A receipt must compose
 C0→source C1→value C2 locally; a source-only receipt still leaves value cursor lag.
@@ -347,14 +347,40 @@ uses existing checked recomputation/refusal for that transition, with counted
 work, rather than silently reusing E. Real changed-home selective validation still
 needs the selected-owner census and package-negative dependency facts/index.
 
-The directional same-payload p-versus-f constructor discriminator is not yet a
-confirmed physical history. `CertifiedSourceSelection::admit_current` rejects a
-fresh/retained-Core replacement over an existing physical input, and inherited
-inputs preserve their issuing choices. The reviewer is tracing cursor inputs
-accumulated within a segment against its fixed physical input before claiming a
-complete exclusion or reachable counterexample. Exact source notes are
-`oracle/item-adoption-constructor-audit-a845.txt` and its bounded successor audit.
-No bridge code or worker Ready issuer exists yet. Future native commands need
+The directional same-payload p-versus-f constructor discriminator is not a
+confirmed physical history. The bounded same-segment source-upgrade sketch is
+excluded by the fixed physical input, common once-issued originals, and inherited
+exact decisions; this is not a generic associativity proof. Exact source notes
+are `oracle/item-adoption-constructor-audit-a845.txt` and
+`oracle/same-output-provenance-audit-c6c7.txt`.
+
+Explicit root/user architecture amendment now PAUSES new shared host/worker/
+package APIs, including 02A. The service should own the long-lived compiler world;
+Rust asks demand-specific questions while retaining runtime authority and exact
+artifact/native provenance. No 02A code was integrated. Implementation leaf
+`/root/warm_compiler_campaign/host_inputs/selected_root` stopped at base `b5ebb643`
+with four dirty owned files (+415/-100): artifact inventory, compiler projection,
+artifacts and declaration context. Exact incomplete patch is
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/host-inputs/selected-root/02a/paused-wip.patch`,
+SHA256 `264bee547c2f497e44e69f29bd1bd76e66bf957c02a0650d562b439c972d5f1d`;
+adjacent HANDOFF records no formatting/build/test, 0/0, unqualified. Preserve it.
+No worker Ready issuer exists. Both reserved Sol-high leaf grants remain; the
+implementation leaf is dormant pending an explicit architecture decision.
+
+Supervisor ownership inventory/proposed bounded slices were sent to root and
+campaign before any new API:
+`/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/PROVIDER-WORLD-OWNERSHIP-b5.md`.
+It traces runtime `capture_value_interfaces` and the actual
+`checked_value_context`/`extend_retained_value_artifacts` folds, distinguishes mixed
+runtime/provenance consumers of metadata/native selection from compiler-only
+preparation, and proposes actual resident inspection first, then one checked
+binding with atomic world/binding publication. The independent oracle was
+reactivated for source-inventory review only; no source/API/build authorization.
+The campaign folded reviewed host b5, owned f330 and worker 0bd at `f088e3e7` and
+owns its running joined production/cfg-test build. This is not new-architecture
+qualification.
+
+Future native commands need
 fresh aggregate admission; the latest area-only bounded allowance was 12 GiB
 memory, with all prior commands terminal and no extra compiler started.
 Preserve checkouts, scratch registrations, grants, remaining warm folds and exact
