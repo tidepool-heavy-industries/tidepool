@@ -52,47 +52,59 @@ pub fn introspection() -> Effect {
             verb_with(
                 "ScopeBindings",
                 "introspection_scope_bindings",
-                vec![],
+                vec![expected_scope_arg()],
                 HsType::Named("NameList"),
             ),
             verb_with(
                 "ModuleExports",
                 "introspection_module_exports",
-                vec![Arg {
-                    name: "module",
-                    ty: HsType::Text,
-                    rust: RustBinding::Derived,
-                }],
+                vec![
+                    expected_scope_arg(),
+                    Arg {
+                        name: "module",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                ],
                 HsType::Named("NameList"),
             ),
             verb_with(
                 "RowFit",
                 "introspection_row_fit",
-                vec![Arg {
-                    name: "identifier",
-                    ty: HsType::Named("IdentifierRef"),
-                    rust: RustBinding::HaskellValue,
-                }],
+                vec![
+                    expected_scope_arg(),
+                    Arg {
+                        name: "identifier",
+                        ty: HsType::Named("IdentifierRef"),
+                        rust: RustBinding::HaskellValue,
+                    },
+                ],
                 HsType::Named("Fit"),
             ),
             verb_with(
                 "TypeOfExpression",
                 "introspection_type_of_expression",
-                vec![Arg {
-                    name: "expression",
-                    ty: HsType::Text,
-                    rust: RustBinding::Derived,
-                }],
+                vec![
+                    expected_scope_arg(),
+                    Arg {
+                        name: "expression",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                ],
                 HsType::Named("ExpressionType"),
             ),
             verb_with(
                 "TypeSearch",
                 "introspection_type_search",
-                vec![Arg {
-                    name: "typePattern",
-                    ty: HsType::Text,
-                    rust: RustBinding::Derived,
-                }],
+                vec![
+                    expected_scope_arg(),
+                    Arg {
+                        name: "typePattern",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                ],
                 HsType::Named("TypeMatches"),
             ),
         ],
@@ -122,36 +134,36 @@ pub fn introspection() -> Effect {
                 name: "scopeBindings",
                 ctor: Some("ScopeBindings"),
                 substrate: false,
-                doc: &["List the identifiers bound in the executing scope without checking a target."],
-                body: HelperBody::Nullary,
+                doc: &["List the identifiers bound in the executing scope without checking a target. `Nothing` observes the actor's current compile view; `Just p` refuses with `ScopeChanged` if that compile view is no longer current."],
+                body: HelperBody::Applied(&["expectedScope"]),
             },
             Helper {
                 name: "moduleExports",
                 ctor: Some("ModuleExports"),
                 substrate: false,
-                doc: &["List a public module's exports without checking a target. Generated session modules remain private."],
-                body: HelperBody::Pointfree,
+                doc: &["List a public module's exports without checking a target. Generated session modules remain private. `Nothing` observes the actor's current compile view; `Just p` refuses with `ScopeChanged` if that compile view is no longer current."],
+                body: HelperBody::Applied(&["expectedScope", "module"]),
             },
             Helper {
                 name: "rowFit",
                 ctor: Some("RowFit"),
                 substrate: false,
-                doc: &["Observe whether an identifier's effects fit the executing actor's row. Runtime resource grants remain separate."],
-                body: HelperBody::Pointfree,
+                doc: &["Observe whether an identifier's effects fit the executing actor's row. Runtime resource grants remain separate. `Nothing` observes the actor's current compile view; `Just p` refuses with `ScopeChanged` if that compile view is no longer current."],
+                body: HelperBody::Applied(&["expectedScope", "identifier"]),
             },
             Helper {
                 name: "typeOfExpression",
                 ctor: Some("TypeOfExpression"),
                 substrate: false,
-                doc: &["Compile an expression probe and return its canonical type without evaluating it."],
-                body: HelperBody::Pointfree,
+                doc: &["Compile an expression probe and return its canonical type without evaluating it. `Nothing` observes the actor's current compile view; `Just p` refuses with `ScopeChanged` if that compile view is no longer current."],
+                body: HelperBody::Applied(&["expectedScope", "expression"]),
             },
             Helper {
                 name: "typeSearch",
                 ctor: Some("TypeSearch"),
                 substrate: false,
-                doc: &["Compile a type-pattern probe and return matching values without evaluating them."],
-                body: HelperBody::Pointfree,
+                doc: &["Compile a type-pattern probe and return matching values without evaluating them. `Nothing` observes the actor's current compile view; `Just p` refuses with `ScopeChanged` if that compile view is no longer current."],
+                body: HelperBody::Applied(&["expectedScope", "typePattern"]),
             },
         ],
         polymorphism: Polymorphism::None,
@@ -182,6 +194,14 @@ fn verb_with(ctor: &'static str, method: &'static str, args: Vec<Arg>, ok: HsTyp
         ret: HsType::either(HsType::Named("QueryError"), ok),
         errors: None,
         handling: HandlingClass::Actor,
+    }
+}
+
+fn expected_scope_arg() -> Arg {
+    Arg {
+        name: "expectedScope",
+        ty: HsType::maybe(HsType::Named("ScopeProvenance")),
+        rust: RustBinding::HaskellValue,
     }
 }
 
@@ -341,13 +361,14 @@ fn type_defs() -> Vec<TypeDef> {
                 field("nameEntryModule", HsType::maybe(HsType::Text)),
                 field("nameEntryKind", HsType::Text),
                 field("nameEntryDisplay", HsType::Text),
-                field("nameEntryAvailability", HsType::Named("Fit")),
+                field("nameEntryAvailability", HsType::Named("FitAvailability")),
                 field(
                     "nameEntryReferences",
                     HsType::list(HsType::Named("IdentifierRef")),
                 ),
+                field("nameEntryReference", HsType::Named("IdentifierRef")),
             ],
-            &["One enumerated name with its declaration identity, presentation, row availability, and referenced identifiers."],
+            &["One enumerated name with its declaration identity, presentation, row availability, and the references it names or resolves."],
         ),
         record(
             "NameList",
@@ -355,11 +376,12 @@ fn type_defs() -> Vec<TypeDef> {
                 field("entries", HsType::list(HsType::Named("NameEntry"))),
                 field("namesObserved", HsType::Int),
                 field("namesLimit", HsType::Int),
+                field("nameListProvenance", HsType::Named("ScopeProvenance")),
             ],
-            &["Name entries retained from one enumeration, with the complete count observed before admission and the applied limit."],
+            &["Name entries retained from one enumeration, with the complete count observed before admission, the applied limit, and the compile view the answer describes."],
         ),
         closed_sum(
-            "Fit",
+            "FitAvailability",
             &[
                 "FitAvailable",
                 "FitPolymorphic",
@@ -368,11 +390,20 @@ fn type_defs() -> Vec<TypeDef> {
             ],
         ),
         record(
+            "Fit",
+            vec![
+                field("fitAvailability", HsType::Named("FitAvailability")),
+                field("fitIdentifier", HsType::Named("IdentifierRef")),
+                field("fitProvenance", HsType::Named("ScopeProvenance")),
+            ],
+            &["One row-fit observation: the availability outcome together with the identifier it describes and the compile view it was measured in."],
+        ),
+        record(
             "ExpressionType",
             vec![
                 field("expressionSource", HsType::Text),
                 field("expressionDisplay", HsType::Text),
-                field("expressionAvailability", HsType::Named("Fit")),
+                field("expressionAvailability", HsType::Named("FitAvailability")),
                 field("expressionProvenance", HsType::Named("ScopeProvenance")),
             ],
             &["One compiled probe expression with its rendered type, row availability, and compile-view provenance. The probe is never evaluated."],
@@ -385,13 +416,14 @@ fn type_defs() -> Vec<TypeDef> {
                 field("typeMatchModule", HsType::maybe(HsType::Text)),
                 field("typeMatchSignature", HsType::Text),
                 field("typeMatchQuality", HsType::Named("TypeMatchQuality")),
-                field("typeMatchAvailability", HsType::Named("Fit")),
+                field("typeMatchAvailability", HsType::Named("FitAvailability")),
                 field(
                     "typeMatchReferences",
                     HsType::list(HsType::Named("IdentifierRef")),
                 ),
+                field("typeMatchReference", HsType::Named("IdentifierRef")),
             ],
-            &["One value whose type matches a probe pattern, with its rendered signature, match quality, row availability, and referenced identifiers."],
+            &["One value whose type matches a probe pattern, with its rendered signature, match quality, row availability, and the references it names or resolves."],
         ),
         record(
             "TypeMatches",
@@ -399,8 +431,9 @@ fn type_defs() -> Vec<TypeDef> {
                 field("typeMatches", HsType::list(HsType::Named("TypeMatch"))),
                 field("typeMatchesObserved", HsType::Int),
                 field("typeMatchesLimit", HsType::Int),
+                field("typeMatchesProvenance", HsType::Named("ScopeProvenance")),
             ],
-            &["Type matches retained from one probe, with the complete count observed before admission and the applied limit."],
+            &["Type matches retained from one probe, with the complete count observed before admission, the applied limit, and the compile view the answer describes."],
         ),
         record(
             "DiagnosticSpan",
@@ -529,11 +562,11 @@ mod tests {
                 "IntrospectionInfoWith :: NameQuery -> Introspection (Either QueryError IdentifierInfo)",
                 "IntrospectionTypeOfWith :: NameQuery -> Introspection (Either QueryError TypeInfo)",
                 "CurrentScopeView :: Introspection (Either QueryError ScopeProvenance)",
-                "ScopeBindings :: Introspection (Either QueryError NameList)",
-                "ModuleExports :: Text -> Introspection (Either QueryError NameList)",
-                "RowFit :: IdentifierRef -> Introspection (Either QueryError Fit)",
-                "TypeOfExpression :: Text -> Introspection (Either QueryError ExpressionType)",
-                "TypeSearch :: Text -> Introspection (Either QueryError TypeMatches)",
+                "ScopeBindings :: Maybe ScopeProvenance -> Introspection (Either QueryError NameList)",
+                "ModuleExports :: Maybe ScopeProvenance -> Text -> Introspection (Either QueryError NameList)",
+                "RowFit :: Maybe ScopeProvenance -> IdentifierRef -> Introspection (Either QueryError Fit)",
+                "TypeOfExpression :: Maybe ScopeProvenance -> Text -> Introspection (Either QueryError ExpressionType)",
+                "TypeSearch :: Maybe ScopeProvenance -> Text -> Introspection (Either QueryError TypeMatches)",
             ]
         );
         assert!(effect
@@ -554,11 +587,11 @@ mod tests {
                 "info :: forall effs. Member Introspection effs => NameQuery -> Eff effs (Either QueryError IdentifierInfo)",
                 "typeOf :: forall effs. Member Introspection effs => NameQuery -> Eff effs (Either QueryError TypeInfo)",
                 "currentScopeView :: forall effs. Member Introspection effs => Eff effs (Either QueryError ScopeProvenance)",
-                "scopeBindings :: forall effs. Member Introspection effs => Eff effs (Either QueryError NameList)",
-                "moduleExports :: forall effs. Member Introspection effs => Text -> Eff effs (Either QueryError NameList)",
-                "rowFit :: forall effs. Member Introspection effs => IdentifierRef -> Eff effs (Either QueryError Fit)",
-                "typeOfExpression :: forall effs. Member Introspection effs => Text -> Eff effs (Either QueryError ExpressionType)",
-                "typeSearch :: forall effs. Member Introspection effs => Text -> Eff effs (Either QueryError TypeMatches)",
+                "scopeBindings :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> Eff effs (Either QueryError NameList)",
+                "moduleExports :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> Text -> Eff effs (Either QueryError NameList)",
+                "rowFit :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> IdentifierRef -> Eff effs (Either QueryError Fit)",
+                "typeOfExpression :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> Text -> Eff effs (Either QueryError ExpressionType)",
+                "typeSearch :: forall effs. Member Introspection effs => Maybe ScopeProvenance -> Text -> Eff effs (Either QueryError TypeMatches)",
             ]
         );
 
@@ -568,13 +601,14 @@ mod tests {
             "data TypeInfo = TypeInfo { typeIdentifier :: IdentifierRef, typeExpression :: TypeExpression, typeProvenance :: ScopeProvenance } deriving (Show, Eq)",
             "data ConstructorInfo = ConstructorInfo { constructorRef :: IdentifierRef, constructorType :: TypeExpression, constructorArguments :: [TypeExpression], recordFields :: [FieldInfo] } deriving (Show, Eq)",
             "data FieldInfo = FieldInfo { fieldName :: Text, fieldType :: TypeExpression } deriving (Show, Eq)",
-            "data NameEntry = NameEntry { nameEntryName :: Text, nameEntryModule :: Maybe Text, nameEntryKind :: Text, nameEntryDisplay :: Text, nameEntryAvailability :: Fit, nameEntryReferences :: [IdentifierRef] } deriving (Show, Eq)",
-            "data NameList = NameList { entries :: [NameEntry], namesObserved :: Int, namesLimit :: Int } deriving (Show, Eq)",
-            "data Fit = FitAvailable | FitPolymorphic | FitUnavailable | FitUnknown deriving (Show, Eq)",
-            "data ExpressionType = ExpressionType { expressionSource :: Text, expressionDisplay :: Text, expressionAvailability :: Fit, expressionProvenance :: ScopeProvenance } deriving (Show, Eq)",
+            "data NameEntry = NameEntry { nameEntryName :: Text, nameEntryModule :: Maybe Text, nameEntryKind :: Text, nameEntryDisplay :: Text, nameEntryAvailability :: FitAvailability, nameEntryReferences :: [IdentifierRef], nameEntryReference :: IdentifierRef } deriving (Show, Eq)",
+            "data NameList = NameList { entries :: [NameEntry], namesObserved :: Int, namesLimit :: Int, nameListProvenance :: ScopeProvenance } deriving (Show, Eq)",
+            "data FitAvailability = FitAvailable | FitPolymorphic | FitUnavailable | FitUnknown deriving (Show, Eq)",
+            "data Fit = Fit { fitAvailability :: FitAvailability, fitIdentifier :: IdentifierRef, fitProvenance :: ScopeProvenance } deriving (Show, Eq)",
+            "data ExpressionType = ExpressionType { expressionSource :: Text, expressionDisplay :: Text, expressionAvailability :: FitAvailability, expressionProvenance :: ScopeProvenance } deriving (Show, Eq)",
             "data TypeMatchQuality = TypeMatchExact | TypeMatchUsable deriving (Show, Eq)",
-            "data TypeMatch = TypeMatch { typeMatchName :: Text, typeMatchModule :: Maybe Text, typeMatchSignature :: Text, typeMatchQuality :: TypeMatchQuality, typeMatchAvailability :: Fit, typeMatchReferences :: [IdentifierRef] } deriving (Show, Eq)",
-            "data TypeMatches = TypeMatches { typeMatches :: [TypeMatch], typeMatchesObserved :: Int, typeMatchesLimit :: Int } deriving (Show, Eq)",
+            "data TypeMatch = TypeMatch { typeMatchName :: Text, typeMatchModule :: Maybe Text, typeMatchSignature :: Text, typeMatchQuality :: TypeMatchQuality, typeMatchAvailability :: FitAvailability, typeMatchReferences :: [IdentifierRef], typeMatchReference :: IdentifierRef } deriving (Show, Eq)",
+            "data TypeMatches = TypeMatches { typeMatches :: [TypeMatch], typeMatchesObserved :: Int, typeMatchesLimit :: Int, typeMatchesProvenance :: ScopeProvenance } deriving (Show, Eq)",
             "data DiagnosticSpan = DiagnosticSpan { spanFile :: Text, spanStartLine :: Int, spanStartCol :: Int, spanEndLine :: Int, spanEndCol :: Int } deriving (Show, Eq)",
             "data DiagnosticSeverity = DiagnosticError | DiagnosticWarning deriving (Show, Eq)",
             "data Diagnostic = Diagnostic { diagnosticSpan :: Maybe DiagnosticSpan, diagnosticSeverity :: DiagnosticSeverity, diagnosticMessage :: Text } deriving (Show, Eq)",
