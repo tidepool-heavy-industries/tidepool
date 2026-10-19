@@ -805,6 +805,108 @@ struct RetainedSourceGraph {
     catalog: tidepool_toolchain::toolchain::CatalogSelection,
     evidence: exomonad_actor::SourceGenerationEvidence,
     source_revision_identity: String,
+    compiler_sources:
+        Mutex<Option<Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>>,
+}
+
+fn captured_compiler_source_error(
+    error: &(dyn std::error::Error + 'static),
+) -> exomonad_actor::SourceInspectionError {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::NotFound
+            )
+        }) {
+            return exomonad_actor::SourceInspectionError::Unavailable(error.to_string());
+        }
+        cause = error.source();
+    }
+    exomonad_actor::SourceInspectionError::Unreadable(error.to_string())
+}
+
+impl RetainedSourceGraph {
+    fn capture_compiler_sources(
+        &self,
+    ) -> std::result::Result<
+        Option<Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+        exomonad_actor::SourceInspectionError,
+    > {
+        use exomonad_actor::SourceInspectionError;
+        use tidepool_toolchain::compiler_world::{
+            CapturedCompilerSourceRoot, CapturedCompilerSources,
+        };
+        // Source-only worlds never acquire a later ambient catalog. Every
+        // catalog home root must already belong to this ordered captured graph.
+        let tidepool_toolchain::toolchain::CatalogSelection::Acquired(catalog) = &self.catalog
+        else {
+            return Ok(None);
+        };
+        if catalog.as_ref().is_some_and(|catalog| {
+            catalog
+                .source_selection()
+                .include_roots()
+                .iter()
+                .any(|root| !self.include_paths.contains(root))
+        }) {
+            return Ok(None);
+        }
+        if self.include_paths.len() != self.manifests.len() {
+            return Err(SourceInspectionError::Unavailable(
+                "retained source graph has incomplete ordered root evidence".into(),
+            ));
+        }
+        let mut captured = loop {
+            tidepool_extract_cmd::compiler_host_checkpoint()
+                .map_err(|error| captured_compiler_source_error(&error))?;
+            if let Some(captured) = self
+                .compiler_sources
+                .try_lock_for(std::time::Duration::from_millis(2))
+            {
+                break captured;
+            }
+        };
+        if let Some(captured) = captured.as_ref() {
+            return Ok(Some(Arc::clone(captured)));
+        }
+        let allowance = CapturedCompilerSources::capture_byte_allowance()
+            .map_err(|error| captured_compiler_source_error(&error))?;
+        let mut budget = super::workspace::CapturedSourceReadBudget::new(allowance);
+        let mut roots = Vec::with_capacity(self.include_paths.len());
+        for (path, expected) in self.include_paths.iter().zip(&self.manifests) {
+            let (files, bodies) =
+                super::workspace::read_captured_source_files(path, &mut budget)
+                    .map_err(|error| captured_compiler_source_error(error.as_ref()))?;
+            let manifest = tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)
+                .map_err(|error| SourceInspectionError::Unreadable(error.to_string()))?;
+            if !same_source_manifest(&manifest, expected) {
+                return Err(SourceInspectionError::Unreadable(
+                    "retained compiler source differs from its issued generation".into(),
+                ));
+            }
+            roots.push(CapturedCompilerSourceRoot { manifest, bodies });
+        }
+        // Retain the existing physical owners, not a new source authority.
+        // The cold seal authenticates these bodies; graph-v2 does not acquire
+        // new header-only revisions or authorize preprocessing.
+        let owner: Arc<dyn std::any::Any + Send + Sync> = Arc::new((
+            Arc::clone(&self._root_owner),
+            self._prepared_owner.clone(),
+            self.catalog.clone(),
+        ));
+        let sources = Arc::new(
+            CapturedCompilerSources::from_captured_roots(
+                roots,
+                Arc::from(self.evidence.reference.bytes()),
+                owner,
+            )
+            .map_err(|error| captured_compiler_source_error(&error))?,
+        );
+        *captured = Some(Arc::clone(&sources));
+        Ok(Some(sources))
+    }
 }
 
 impl exomonad_actor::RetainedSourceLayer for RetainedSourceGraph {
@@ -822,6 +924,15 @@ impl exomonad_actor::RetainedSourceLayer for RetainedSourceGraph {
 
     fn source_manifests(&self) -> Option<&[tidepool_toolchain::cache::SourceRootManifest]> {
         Some(&self.manifests)
+    }
+
+    fn capture_compiler_sources(
+        &self,
+    ) -> std::result::Result<
+        Option<Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+        exomonad_actor::SourceInspectionError,
+    > {
+        RetainedSourceGraph::capture_compiler_sources(self)
     }
 
     fn prepared_entries(&self) -> Option<&exomonad_actor::SourceEntryStorage> {
@@ -1977,6 +2088,81 @@ mod tests {
         )
         .unwrap();
         assert!(other.fresh_toolset_layer_from(&selected).is_err());
+    }
+
+    #[test]
+    fn compiler_source_capture_preserves_unimported_bytes_absence_and_cold_restore() {
+        use exomonad_actor::ActorSourceLayers;
+        use tidepool_toolchain::compiler_world::CapturedCompilerSources;
+        fn body<'a>(sources: &'a CapturedCompilerSources, path: &str) -> Option<&'a [u8]> {
+            sources
+                .roots()
+                .iter()
+                .find_map(|root| root.bodies.get(Path::new(path)).map(AsRef::as_ref))
+        }
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let run = Arc::new(run);
+        let public = project.path().join(".exomonad/Public");
+        std::fs::create_dir_all(&public).unwrap();
+        let a = b"module Public.Unimported where\nvalue :: Int\nvalue = 1\n";
+        let b = b"module Public.Unimported where\nvalue :: Bool\nvalue = True\n";
+        std::fs::write(public.join("Unimported.hs"), a).unwrap();
+        let mut frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        frozen.catalog_selection = tidepool_toolchain::toolchain::CatalogSelection::Acquired(None);
+        let reload = ExomonadSourceReload::new_owned(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+            SourceRootOwner::Temporary(Arc::clone(&run)),
+        )
+        .unwrap();
+        let source_a = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        let captured_a = source_a.capture_compiler_sources().unwrap().unwrap();
+        assert_eq!(
+            body(&captured_a, "Public/Unimported.hs"),
+            Some(a.as_slice())
+        );
+        assert!(body(&captured_a, "Public/Later.hs").is_none());
+        assert!(Arc::ptr_eq(
+            &captured_a,
+            &source_a.capture_compiler_sources().unwrap().unwrap()
+        ));
+        let reference = source_a.generation_evidence().unwrap().reference.clone();
+        std::fs::write(public.join("Unimported.hs"), b).unwrap();
+        std::fs::write(
+            public.join("Later.hs"),
+            "module Public.Later where\nlater = ()\n",
+        )
+        .unwrap();
+        let pending = reload
+            .layer
+            .capture_from_workspace(&reload.frozen, project.path())
+            .unwrap();
+        reload.layer.publish(pending).unwrap();
+        let source_b = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        let captured_b = source_b.capture_compiler_sources().unwrap().unwrap();
+        assert_eq!(
+            body(&captured_b, "Public/Unimported.hs"),
+            Some(b.as_slice())
+        );
+        assert!(body(&captured_b, "Public/Later.hs").is_some());
+        assert_ne!(captured_a.seal(), captured_b.seal());
+        let restored = reload.restore_graph(&reference).unwrap();
+        let cold_a = restored.capture_compiler_sources().unwrap().unwrap();
+        assert_eq!(body(&cold_a, "Public/Unimported.hs"), Some(a.as_slice()));
+        assert!(body(&cold_a, "Public/Later.hs").is_none());
+        assert_eq!(captured_a.seal(), cold_a.seal());
+        let run_path = run.path().to_path_buf();
+        drop((
+            reload, run, source_a, source_b, restored, captured_b, cold_a,
+        ));
+        assert!(
+            run_path.exists(),
+            "captured source bytes retain the actual source owner"
+        );
+        drop(captured_a);
+        assert!(!run_path.exists());
     }
 
     #[test]

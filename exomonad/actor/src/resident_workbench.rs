@@ -962,6 +962,10 @@ impl ActorWorkbenchSource {
     }
 
     fn prepare(&self, scope: &crate::ActorCompileView) -> WorkbenchCompilation {
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::ActorSourcePrepare,
+            1,
+        );
         WorkbenchCompilation {
             preamble: scope.shadow_preamble(&hide_preamble_exports(
                 &self.preamble,
@@ -13067,6 +13071,10 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
+    tidepool_toolchain::timing::record_host_work(
+        tidepool_toolchain::timing::HostWorkCounter::ActorCompileViewCapture,
+        1,
+    );
     let session_view = session
         .compile_view_in(context.placement.lexical_scope)
         .ok_or_else(|| {
@@ -13548,6 +13556,20 @@ where
     if queries.is_empty() {
         return Ok(Vec::new());
     }
+    if queries.iter().all(|query| matches!(query,
+        InspectionQuery::StructuredInfo { query, .. } | InspectionQuery::StructuredType { query, .. }
+            if matches!(query.scope, tidepool_runtime::session::NameScope::PublicModule(_))))
+    {
+        return Ok(queries.iter().map(|query| {
+            let error = tidepool_runtime::session::QueryError::Unsupported(
+                "public-module structured inspection requires the off-checkout world route".into());
+            Ok(match query {
+                InspectionQuery::StructuredInfo { .. } => tidepool_runtime::session::InspectionResult::StructuredInfo(Err(error)),
+                InspectionQuery::StructuredType { .. } => tidepool_runtime::session::InspectionResult::StructuredType(Err(error)),
+                _ => unreachable!("pure public-module structured batch"),
+            })
+        }).collect());
+    }
     let compile_view = actor_compile_view(session, context, source)?;
     let inputs = session
         .capture_inspection_inputs(compile_view.session_view())
@@ -13806,6 +13828,10 @@ fn structured_provenance(
     source: &ActorWorkbenchSource,
     scope: tidepool_runtime::session::NameScope,
 ) -> tidepool_runtime::session::ScopeProvenance {
+    tidepool_toolchain::timing::record_host_work(
+        tidepool_toolchain::timing::HostWorkCounter::StructuredProvenance,
+        1,
+    );
     let prepared = source.prepare(compile_view);
     let generation = compile_view.next_value_generation().0;
     let mut fingerprint = blake3::Hasher::new();
@@ -16149,6 +16175,72 @@ pub(crate) mod request_tests {
             Option::<String>::from_value(field("contextBoundWorktree"), &table).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn public_module_batch_refuses_before_checked_preparation() {
+        use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
+        let session_id = tidepool_repr::SessionId(44_201);
+        let (session, _root) = bare_session_at(session_id);
+        let context = crate::ActorSessionContext {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            placement: crate::ActorPlacement {
+                session: session_id,
+                resource_scope: RealmId::ROOT,
+                lexical_scope: ScopeId::ROOT,
+            },
+            effect_policy: tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+            live_payload: tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            source_imports: crate::ActorSourceImports::default(),
+            haskell_effects_alias: "'[]".into(),
+            current_model: None,
+            source_layer: Vec::new().into(),
+        };
+        let source = ActorWorkbenchSource::new("unused", Vec::new());
+        let query = tidepool_runtime::session::NameQuery {
+            scope: tidepool_runtime::session::NameScope::PublicModule("Data.Maybe".into()),
+            namespace: tidepool_runtime::session::NameNamespace::Value,
+            name: "isJust".into(),
+        };
+        let provenance = tidepool_runtime::session::ScopeProvenance {
+            scope: query.scope.clone(),
+            generation: 0,
+            fingerprint: "unused".into(),
+        };
+        let queries = [
+            InspectionQuery::StructuredInfo {
+                query: query.clone(),
+                provenance: provenance.clone(),
+            },
+            InspectionQuery::StructuredType { query, provenance },
+        ];
+        let observation = HostWorkObservation::new();
+        let results = observation
+            .scope(|| {
+                tidepool_testing::with_settlement(|settlement| {
+                    inspect_actor_batch(&session, &context, &source, &queries, settlement)
+                })
+            })
+            .unwrap();
+        assert!(matches!(
+            &results[..],
+            [
+                Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(
+                    Err(tidepool_runtime::session::QueryError::Unsupported(_))
+                )),
+                Ok(tidepool_runtime::session::InspectionResult::StructuredType(
+                    Err(tidepool_runtime::session::QueryError::Unsupported(_))
+                ))
+            ]
+        ));
+        for kind in [
+            HostWorkCounter::ActorCompileViewCapture,
+            HostWorkCounter::CompileViewCapture,
+            HostWorkCounter::InspectionInputCapture,
+            HostWorkCounter::ActorSourcePrepare,
+        ] {
+            assert_eq!(observation.snapshot().get(kind), 0);
+        }
     }
 
     #[test]

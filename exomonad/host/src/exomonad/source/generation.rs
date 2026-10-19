@@ -270,6 +270,7 @@ impl ExomonadSourceReload {
             entries,
             evidence,
             source_revision_identity,
+            compiler_sources: Mutex::new(None),
         })))
     }
 
@@ -414,6 +415,7 @@ impl ExomonadSourceReload {
             entries,
             evidence,
             source_revision_identity: graph.revision.identity,
+            compiler_sources: Mutex::new(None),
         })
     }
 

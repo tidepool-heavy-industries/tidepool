@@ -250,7 +250,7 @@ pub struct PersistentSession {
     /// Immutable scoped semantics, keyed by witnesses from the mutation owners.
     /// Request counters and the ambient injection inventory are refreshed separately.
     compile_views: parking_lot::Mutex<HashMap<ScopeId, Arc<CachedCompileView>>>,
-    // Shared invalidation revision for stub and catalog input selection.
+    // Shared invalidation revision for stub/catalog inputs and resident hiding.
     // Zero permanently disables cached witnesses after counter exhaustion.
     compiler_input_revision: u64,
     #[cfg(test)]
@@ -420,7 +420,7 @@ impl PersistentSession {
         }
     }
 
-    fn advance_compiler_input_revision(&mut self) {
+    pub(super) fn advance_compiler_input_revision(&mut self) {
         self.compiler_input_revision = if self.compiler_input_revision == 0 {
             0
         } else {
@@ -1622,10 +1622,20 @@ impl PersistentSession {
     /// `None` for a dead scope, a session without a declaration/include
     /// persistent binding store, or an exhausted value namespace.
     pub fn compile_view_in(&self, scope: ScopeId) -> Option<SessionCompileView> {
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::CompileViewCapture,
+            1,
+        );
         let cached = self.scoped_compile_view_in(scope)?;
         let injected_values = self
             .bindings
             .live_modules()
+            .inspect(|_| {
+                tidepool_toolchain::timing::record_host_work(
+                    tidepool_toolchain::timing::HostWorkCounter::InjectedValueVisit,
+                    1,
+                );
+            })
             .filter(|module| !self.is_stub_module(*module))
             .collect();
         Some(
@@ -1642,6 +1652,10 @@ impl PersistentSession {
     /// Read mutation-owner facts without constructing a view or its digest.
     /// A missing stable witness requires a checked cold observation.
     pub(super) fn compile_view_key_in(&self, scope: ScopeId) -> Option<CompileViewKey> {
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::WorldKeyFactRead,
+            1,
+        );
         if !self.scopes.is_live(scope) || self.compiler_input_revision == 0 {
             return None;
         }
@@ -1691,6 +1705,10 @@ impl PersistentSession {
     }
 
     fn build_scoped_compile_view(&self, scope: ScopeId, lib: &SessionLib) -> SessionCompileView {
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::CompileViewBuild,
+            1,
+        );
         let visible_entries = self
             .bindings
             .iter_current_in(&self.scopes, scope)
@@ -4316,6 +4334,36 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
+    fn inspection_digest_observation_counts_build_without_capture_entry() {
+        use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let session = publication_session(&recovery, root.path(), 419);
+        let observation = HostWorkObservation::new();
+        assert!(session.compile_views.lock().is_empty());
+        let digest = observation.scope(|| session.compile_view_digest_in(ScopeId::ROOT).unwrap());
+        let first = observation.snapshot();
+        assert_eq!(first.get(HostWorkCounter::CompileViewCapture), 0);
+        assert_eq!(first.get(HostWorkCounter::InjectedValueVisit), 0);
+        assert_eq!(first.get(HostWorkCounter::CompileViewBuild), 1);
+        assert!(first.get(HostWorkCounter::CompileViewDigestInputByte) > 0);
+        let repeated = observation.scope(|| session.compile_view_digest_in(ScopeId::ROOT).unwrap());
+        assert_eq!(digest, repeated);
+        assert_eq!(
+            observation
+                .snapshot()
+                .get(HostWorkCounter::CompileViewBuild),
+            1
+        );
+        assert_eq!(
+            observation
+                .snapshot()
+                .get(HostWorkCounter::CompileViewDigestInputByte),
+            first.get(HostWorkCounter::CompileViewDigestInputByte)
+        );
+    }
+
+    #[test]
     fn inspection_key_reads_only_publication_facts_before_view_capture() {
         for count in [1, 10, 100] {
             let root = tempfile::tempdir().unwrap();
@@ -4332,17 +4380,53 @@ mod checkpoint_scope_tests {
                 session.bind_in(scope, entry).unwrap();
             }
             assert!(session.compile_views.lock().is_empty());
-            let key = session.compile_view_key_in(scope).unwrap();
-            for _ in 0..100 {
-                assert!(session.compile_view_key_in(scope).as_ref() == Some(&key));
-            }
+            let observation = tidepool_toolchain::timing::HostWorkObservation::new();
+            let key = observation.scope(|| {
+                let key = session.compile_view_key_in(scope).unwrap();
+                for _ in 0..100 {
+                    assert!(session.compile_view_key_in(scope).as_ref() == Some(&key));
+                }
+                key
+            });
+            use tidepool_toolchain::timing::HostWorkCounter;
+            assert_eq!(
+                observation
+                    .snapshot()
+                    .get(HostWorkCounter::WorldKeyFactRead),
+                101
+            );
+            assert_eq!(
+                observation
+                    .snapshot()
+                    .get(HostWorkCounter::CompileViewCapture),
+                0
+            );
+            assert_eq!(
+                observation
+                    .snapshot()
+                    .get(HostWorkCounter::InjectedValueVisit),
+                0
+            );
             assert!(
                 session.compile_views.lock().is_empty(),
                 "key reads must not prepare a view"
             );
             assert_eq!(session.compile_view_bytes_hashed.load(Ordering::Relaxed), 0);
-            let prepared = session.scoped_compile_view_in(scope).unwrap();
-            assert!(prepared.key.as_ref() == Some(&key));
+            let prepared = observation.scope(|| session.compile_view_in(scope).unwrap());
+            assert_eq!(prepared.lexical_scope(), scope);
+            assert!(session.compile_view_key_in(scope).as_ref() == Some(&key));
+            assert_eq!(
+                observation
+                    .snapshot()
+                    .get(HostWorkCounter::CompileViewCapture),
+                1
+            );
+            assert!(
+                observation
+                    .snapshot()
+                    .get(HostWorkCounter::InjectedValueVisit)
+                    > 0
+            );
             assert!(
                 session.compile_view_bytes_hashed.load(Ordering::Relaxed) > 0,
                 "the ordinary view path must calibrate the work observation"

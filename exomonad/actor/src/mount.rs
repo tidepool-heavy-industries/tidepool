@@ -98,6 +98,17 @@ pub trait RetainedSourceLayer: Send + Sync {
         None
     }
 
+    /// Capture immutable compiler source bytes from this retained owner.
+    /// Unsupported owners keep the checked finite compiler path.
+    fn capture_compiler_sources(
+        &self,
+    ) -> Result<
+        Option<std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+        SourceInspectionError,
+    > {
+        Ok(None)
+    }
+
     fn prepared_entries(&self) -> Option<&SourceEntryStorage> {
         None
     }
@@ -217,6 +228,18 @@ impl CheckpointSourceLayer {
     #[must_use]
     pub fn source_manifests(&self) -> Option<&[tidepool_toolchain::cache::SourceRootManifest]> {
         self.retained.as_ref()?._owner.source_manifests()
+    }
+
+    pub fn capture_compiler_sources(
+        &self,
+    ) -> Result<
+        Option<std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+        SourceInspectionError,
+    > {
+        match &self.retained {
+            Some(source) => source._owner.capture_compiler_sources(),
+            None => Ok(None),
+        }
     }
 
     #[must_use]

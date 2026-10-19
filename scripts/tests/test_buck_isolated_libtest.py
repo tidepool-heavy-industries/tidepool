@@ -1651,6 +1651,36 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(child.stdout, direct.stdout)
         self.assertNotIn('/compiler-actions/bin', direct.stdout)
 
+    def test_declared_service_config_uses_its_digest_and_clears_ambient_selection(self):
+        config = Path(self.tmp.name) / 'compiler-service-source.bin'
+        config.write_bytes(b'TPSCF002 declared service data')
+        digest_file = config.with_suffix('.sha256')
+        digest_file.write_text('a' * 64 + '\n')
+        config_name = 'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG'
+        digest_name = 'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256'
+        with patch.dict(os.environ, {config_name: str(config), digest_name: 'ambient digest'}):
+            runner.resolve_resource_environment([config_name])
+            self.assertEqual(os.environ[digest_name], 'a' * 64)
+            command, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', {},
+                environment=dict(os.environ), declared_resources=[config_name])
+            self.assertIn(f'--setenv={config_name}={config.absolute()}', command)
+            self.assertIn(f'--setenv={digest_name}=' + 'a' * 64, command)
+            runner.resolve_resource_environment([])
+            self.assertNotIn(config_name, os.environ)
+            self.assertNotIn(digest_name, os.environ)
+
+    def test_service_digest_is_required_and_bounded_before_execution(self):
+        config = Path(self.tmp.name) / 'compiler-service-source.bin'
+        config.write_bytes(b'TPSCF002 declared service data')
+        config_name = 'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG'
+        with patch.dict(os.environ, {config_name: str(config)}):
+            with self.assertRaises(FileNotFoundError):
+                runner.resolve_resource_environment([config_name])
+            for contents in (b'a' * 64, b'A' * 64 + b'\n', b'a' * 64 + b'\nextra'):
+                config.with_suffix('.sha256').write_bytes(contents)
+                with self.assertRaisesRegex(RuntimeError, 'invalid declared compiler service digest'):
+                    runner.resolve_resource_environment([config_name])
+
     def test_missing_declared_resource_refuses_before_discovery(self):
         for value in ('', str(Path(self.tmp.name) / 'missing web')):
             with self.subTest(value=value), \

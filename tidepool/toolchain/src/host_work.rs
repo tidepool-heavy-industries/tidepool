@@ -10,6 +10,8 @@ use std::sync::Arc;
 #[repr(usize)]
 pub enum HostWorkCounter {
     CompileViewCapture,
+    CompileViewBuild,
+    CompileViewDigestInputByte,
     InjectedValueVisit,
     ValueInterfaceCapture,
     ReachableValueVisit,
@@ -48,6 +50,8 @@ const HOST_WORK_COUNTERS: usize = HostWorkCounter::ColdSourceByte as usize + 1;
 impl HostWorkCounter {
     pub const ALL: [Self; HOST_WORK_COUNTERS] = [
         Self::CompileViewCapture,
+        Self::CompileViewBuild,
+        Self::CompileViewDigestInputByte,
         Self::InjectedValueVisit,
         Self::ValueInterfaceCapture,
         Self::ReachableValueVisit,

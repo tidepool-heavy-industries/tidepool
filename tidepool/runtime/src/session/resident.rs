@@ -4446,8 +4446,12 @@ where
         });
         self.host_text_bindings
             .retain(|id, _| self.state.bindings().get(*id).is_some());
+        let previous_hidden = self.hidden_host_bindings.len();
         self.hidden_host_bindings
             .retain(|id, _| self.state.bindings().get(*id).is_some());
+        if self.hidden_host_bindings.len() != previous_hidden {
+            self.state.advance_compiler_input_revision();
+        }
     }
 
     /// The live `Val.G<g>` module names to inject (`--inject-val`) so a turn can
@@ -4500,6 +4504,10 @@ where
         &self,
         view: &super::SessionCompileView,
     ) -> Result<super::AdmittedInspectionInputs, SessionError> {
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::InspectionInputCapture,
+            1,
+        );
         let current = self
             .compile_view_in(view.lexical_scope())
             .ok_or(SessionError::DeadScope(view.lexical_scope()))?;
@@ -6000,6 +6008,7 @@ where
             ))));
         }
         if self.hidden_host_bindings.insert(id, ()).is_none() {
+            self.state.advance_compiler_input_revision();
             self.advance_public_visibility(scope);
         }
         Ok(())
@@ -6027,7 +6036,9 @@ where
         if let Some(scope) = scope {
             self.advance_public_visibility(scope);
         }
-        self.hidden_host_bindings.remove(&id);
+        if self.hidden_host_bindings.remove(&id).is_some() {
+            self.state.advance_compiler_input_revision();
+        }
         self.prune_binding_metadata();
     }
 
@@ -9448,6 +9459,83 @@ mod authored_publication_tests {
             SessionLib::open(SessionId(402), root.path(), ModuleEnv::standalone_default()).unwrap();
         let session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(library));
         (root, session)
+    }
+
+    #[test]
+    fn inspection_key_invalidates_hidden_inherited_binding_projection() {
+        let bind = |session: &mut TestSession, scope: ScopeId, generation| {
+            let entry = crate::session::prepared::tests::evaluated_publication_fixture(
+                &mut session.state,
+                "x",
+                generation,
+            );
+            let id = entry.id;
+            session.state.bind_in(scope, entry).unwrap();
+            id
+        };
+        let (_root, mut session) = startup_session();
+        let parent = session.mint_isolated_scope();
+        let id = bind(&mut session, parent, 701);
+        let child = session.mint_scope(parent).unwrap();
+        let before = session.state.compile_view_key_in(child).unwrap();
+        let visible = session.compile_view_in(child).unwrap();
+        let witness = session
+            .state
+            .bindings()
+            .scope_witness(session.state.scope_tree(), child);
+        let binder = BoundBinder {
+            name: "x".into(),
+            var_id: id.raw(),
+            module: SessionModule::val(Generation(701)).module_name(),
+            tier: ValueTier::ForceData,
+            type_display: "Int".into(),
+            root_head: None,
+            host_authority: None,
+        };
+        session.hide_host_binding_in(parent, &binder).unwrap();
+        assert_eq!(
+            session
+                .state
+                .bindings()
+                .scope_witness(session.state.scope_tree(), child),
+            witness
+        );
+        let hidden_key = session.state.compile_view_key_in(child).unwrap();
+        assert!(hidden_key != before);
+        let hidden = session.compile_view_in(child).unwrap();
+        assert!(!hidden.is_current_for(&visible));
+        session.hide_host_binding_in(parent, &binder).unwrap();
+        assert!(session.state.compile_view_key_in(child).as_ref() == Some(&hidden_key));
+        session.retire_binding_owner(id);
+        assert!(
+            session.state.resolve_in(child, "x").is_some(),
+            "frozen child retains exact binding"
+        );
+        assert!(session.state.compile_view_key_in(child).as_ref() != Some(&hidden_key));
+        assert!(!session
+            .compile_view_in(child)
+            .unwrap()
+            .is_current_for(&hidden));
+
+        let orphan_owner = session.mint_isolated_scope();
+        let orphan = bind(&mut session, orphan_owner, 702);
+        let orphan_binder = BoundBinder {
+            var_id: orphan.raw(),
+            module: SessionModule::val(Generation(702)).module_name(),
+            ..binder
+        };
+        session
+            .hide_host_binding_in(orphan_owner, &orphan_binder)
+            .unwrap();
+        session.state.retire_scope(orphan_owner);
+        assert!(session.hidden_host_bindings.contains_key(&orphan));
+        let before_prune = session.state.compile_view_key_in(child).unwrap();
+        session.prune_binding_metadata();
+        assert!(!session.hidden_host_bindings.contains_key(&orphan));
+        let after_prune = session.state.compile_view_key_in(child).unwrap();
+        assert!(after_prune != before_prune);
+        session.prune_binding_metadata();
+        assert!(session.state.compile_view_key_in(child).as_ref() == Some(&after_prune));
     }
 
     #[test]
