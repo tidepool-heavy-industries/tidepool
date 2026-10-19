@@ -4,7 +4,7 @@ Owner `/root/warm_compiler_campaign/host_inputs`; checkout
 `/srv/swarm/checkouts/tidepool-shared-warm-host-inputs-20261019`, branch
 `feature/shared-warm/host-inputs`, original base `5b74c2f1`.
 
-## Tested area checkpoint
+## Qualified source/catalog foundation
 
 Production source `da584c7421eefc77941ae9681d3821d1f27bbe9b` is independently
 reviewed and compiled through both coupled consumers:
@@ -32,12 +32,12 @@ host artifact SHA256 is
 Supervisor read production changes and actual reports. Process cleanup was
 confirmed; hosted/compiler cleanup and directory resource hashes remain limited.
 
-All host native clients are terminal; both six- and fourteen-GiB grants are
-released. Daemon PID 4122402 remains in build.slice with idle current
-6,247,665,664 B and observed lifetime peak 13,127,516,160 B (the peak increased
-during the host gate). Output remains its owned per-checkout XFS bind mount.
-New native work requires fresh actual phase/scope admission. Idle daemons stay
-in global usage; never subtract an old idle daemon from a future test allowance.
+Current HOST resource ownership: no native clients remain after the query
+component phase below. Host-world's retained daemon152834 and forkserver152875
+remain in build.slice scope1792412537, last terminal current4,574,601,216 B and
+lifetime peak12,053,938,176 B. HOST future allowance is zero in campaign LIVE.json.
+Idle daemons remain in global accounting. Every next build needs fresh actual
+phase/scope projection; no reservation or old idle-daemon subtraction is assumed.
 
 ## Source owners and the repaired boundary
 
@@ -91,68 +91,86 @@ service-issued logical world, ordinary cells, per-item successors, atomic paired
 publication, fork, recovery and obsolete-route deletion are required. First query
 is the delivery sequence, not an optional cache as final architecture.
 
-Reserved implementation leaf selected_root owns the actual query checkpoint in
-`tidepool-shared-warm-host-world-20261019`. Full area da584, Warm's actual service
-client/profile fix and Reload80ad source-lease consumers are integrated. Earlier
-world WIP and paused02A are preserved independently. Candidate
-`bd2bb236d34a26ed008e1ad846549c0cd31aca13` contains the actual PublicModule
-StructuredInfo/Type branch before the legacy compile view, provenance, value Vec,
-support merge, source preparation and FD export. Cold raw primary and visible
-checked rows remain separate. Original source A and existing canonical target B
-are admitted before deferred source capture or client work. Completed results
-require matching origin, clean END, cancellation and direct publication-key CAS.
-Source capture unsupported, unavailable and unreadable stay distinct from a
-service-issued closed absence. Lookup hydration advances no notebook publication.
+The full reviewed query history through `c8b922273fe4d0bac83e0862fb1aa29de20d41e6`
+was merged into the area at `20c016a273d10cf104db8d9e5e03e70a0bcfb061`. Relative
+to that tested leaf, area production adds only the separately source-reviewed
+five Ensure counters; matched consumer/native evidence remains separate.
 
-The dedicated generated `actor_compiler_world_queries_test` group was issued at
-`d32ea95fd98e06ac2fd4fd9d35e0639b797f5280` and merged into the query candidate.
-It shares `exomonad_actor_unit_tests`, selects exactly two ignored cases with the
-existing owned-resident runner, and supplies the declared service deployment and
-source configuration only to this group. Generic finite actor groups retain
-their resources. Generation and diff checks passed; the focused generator
-functional test executed/passed one case. Source packet:
-`/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/world-query-execution-group/SOURCE-CHECKPOINT.json`.
-The existing resource adapter reads the fixed sibling CF digest as launch DATA;
-actual endpoint association and independently configured deployment own admission.
+The production PublicModule StructuredInfo/Type branch precedes actor compile
+view, provenance, value Vec, support merge, source preparation and FD export.
+Cold raw primary and visible checked rows remain separate. Original source A and
+existing canonical target B are admitted before deferred source capture/client
+work. Matching origin, clean END, cancellation and direct publication-key CAS
+seal the result. Unsupported, unavailable and unreadable source observations
+remain distinct from a service-issued closed absence. Hydration advances no
+notebook publication. Current-scope mixed runtime proofs remain on their actual
+checked path until the required ordinary-cell migration replaces its compiler
+input preparation.
 
-Independent oracle accepted the complete production query and resource group
-source, including exact repairs. Receipts under the host evidence root's oracle
-directory: `world-route-review-e5a32b1a.txt`,
+Owning four-target runtime/actor production and cfg-test compilation passed at
+16ed. Resource/wrapper prebuild passed25local actions. The actor missing-source
+entry guard executed/passed1 at16ed. The runtime world-base control initially
+failed1 BEFORE its assertions at the existing prepared fixture's bare install,
+with SourceAdmission::MissingTransaction. Reload assigned the caller-only repair:
+use its already adopted original_source in the existing session source transaction
+for fixture install and bind together; require actual NotStarted/success, with
+all source/foreign-owner/same-tip/retirement checks intact. No generic prepared
+helper or capability factory changed. At c8, runtime production/cfg-test/wrapper
+compilation passed and this exact control executed/passed1. The actor guard was
+not repeated. Actual service/frontend/retention execution remains0.
+
+Exact native artifacts/reports are under campaign evidence
+`host-inputs/host-world/`: `early-query-16ed-retry`, `finite-resources-16ed`,
+`finite-actor-missing-capture-16ed`, `runtime-build-c8b`, and
+`finite-runtime-world-base-c8b`. Runtime test binary SHA256 is
+`12cde3fe27cf6814eff37c64601193ee629d087823f0fadc006aa0e566ebf063`;
+actor binary SHA256 is
+`e7d42dd66f74fc0cc0862455317f71f5bc04d0bf7d2540734386b5c0f3962291`.
+The earlier HashSet production compile failure, six fixture receiver compile
+errors and failed runtime control are retained. None was counted as passing
+world behavior. Process cleanup is confirmed; hosted/compiler cleanup was not
+observed by these pure controls, and directory resource hashing is incomplete.
+
+Independent source receipts under the host evidence root's oracle directory
+cover the complete query, dedicated resource group and each bounded repair:
+`world-route-review-e5a32b1a.txt`,
 `world-query-resource-group-review-d32ea95f.txt`,
-`world-route-repair-review-3a948490.txt`, and
-`world-source-none-counter-review-bd2bb236.txt`. Test-only repairs use existing
-counter names and distinguish original-A's early actor refusal from target-B's
-lower runtime refusal. Cold TPCWV001 encoding is counted before unsupported
-source acquisition; the hot path returns before that work.
+`world-route-repair-review-3a948490.txt`,
+`world-source-none-counter-review-bd2bb236.txt`,
+`world-adoption-receiver-review-16ed892e.txt`, and
+`world-base-fixture-owner-review-c8b92227.txt`.
 
-Actual service cases call the production actor query method and real runtime
-CAS, not frontend hole resumption. They grow unrelated sibling-scope history; a
-separate transferred-world cold control observes at least three visible raw rows
-without support merging. These are component limits. A real Info/Type effect,
-frontend dispatch, hole resumption and settled answer must extend the existing
-case after the separately reviewed Reload mutation-owner composition repair.
-The known80ad MissingTransaction failure must not be bypassed with a test scope.
+The generated `actor_compiler_world_queries_test` group shares the existing
+actor unit harness and owned-resident runner, selects exactly two ignored cases,
+and supplies the declared service deployment/config only there. Generic finite
+groups remain finite. Generation and its focused functional test passed1.
+The existing adapter reads a fixed sibling CF digest as DATA; actual service
+association and the independent deployment expectation own admission.
 
-The first frozen four-target compile at e5a failed exit3 after602.74s on the new
-cold dedup loop's missing HashSet import. Complete stderr and terminal result are
-retained in `host-inputs/host-world/early-query-e5a.{log,json}` under the campaign
-evidence root; no tests executed. The production import defect and companion
-counter/assertion controls are source-repaired at bd2. The incremental four-target
-retry is running with a leaf terminal observer, session21320, BuildID
-`7e0c9bba-4c24-4db5-8bd1-f9102d581718`. It uses fourteen-GiB TOTAL memory across
-retained daemon scope1792412537 and client scope1792413364, with eight-GiB
-prospective growth. The fresh conservative projection was70,335,270,912 B below
-85,899,345,920 B pressure; free disk435,090,063,360 B. Exact retry log and JSON are
-`host-inputs/host-world/early-query-bd2-retry.{log,json}`. Source remains frozen.
-Compilation and actual query execution remain unqualified until terminal evidence.
+The two pending service cases currently call the production actor query method
+and real runtime CAS. They grow unrelated sibling-scope history; transferred cold
+capture separately observes three visible raw rows without support merge. These
+are component limits. The next extension must drive actual Info/Type effects
+through frontend dispatch, source transaction, service, END/CAS and hole answer.
+No fake world/service/lease proof or local source-owner bypass is permitted.
 
-Actual two-case execution waits for compilation and the coherent matched
-Format2/re-export consumer join. The actual frontend extension also requires
-Reload's reviewed mutation-owner composition repair. Pending supported counted command:
+Reserved selected_root is active in the isolated host-world checkout. It has
+merged full reviewed Reload69bf (own1f2da0eee9, nine owning consumers compiled) and
+is integrating Warm's owner-confirmed `e2cf815e647977735e1d66c99042e58c7fdf9b77`:
+matched FORMAT2, actual Ensure counters and observer/async repairs. Warm owns
+shared Haskell/protocol conflicts; only its overlapping hunks are replaced,
+retaining all nonconflicted Reload/owned/HOST changes. This branch contains no
+ordinary-cell/new-hash/profile APIs. Actual frontend/re-export and split counter
+controls follow source integration; source review and fresh native admission
+precede their execution. The existing service2 counted command remains:
 `swarm-build just test-native //exomonad/actor:actor_compiler_world_queries_test --expected-count 2 --jobs 1 --retain-artifacts --output-dir EVIDENCE`.
-No service execution, speedup, final retention or ordinary-cell migration claim
-follows from the declared group or early compile. Warm owns service protocol and
-Haskell; owned owns package provider/boot; reload owns source transaction leases.
+
+Five observations extend the EXISTING host_work owner, with actual Warm producers:
+WorldEnsureResidentProbe/Hit, WorldEnsureNeedsAcquisition, WorldEnsureComplete,
+WorldEnsureCompleteReady. Receipt `world-ensure-counters-review-fb588fbd.txt` is
+source acceptance only. A successful hot query requires Probe1/Hit1 with all three
+acquisition counters0; fenced source refusals require all five0. Both preserve
+old preparation zeros. Empty-world FD count0 cannot establish a hit.
 
 ## Required successors and continuation
 
