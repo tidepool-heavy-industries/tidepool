@@ -190,6 +190,108 @@ impl CompilerWorldCellPlan {
     }
 }
 
+/// Runtime reservation data paired with one actual world parser plan. This
+/// carries expected identities only; checked output and runtime settlement
+/// remain separate issuers.
+#[derive(Debug)]
+pub struct CompilerWorldCellReservation {
+    plan: Arc<CompilerWorldCellPlan>,
+    admission_digest: [u8; 32],
+    slots: Arc<[crate::checked_cell::CheckedPlannedCellSlot]>,
+    expected_bindings: Arc<[Vec<(String, tidepool_repr::SessionVarId)>]>,
+}
+
+impl CompilerWorldCellPlan {
+    pub fn reserve(
+        self: &Arc<Self>,
+        admission_digest: [u8; 32],
+        slots: Vec<crate::checked_cell::CheckedPlannedCellSlot>,
+        expected_bindings: Vec<Vec<(String, tidepool_repr::SessionVarId)>>,
+    ) -> Result<Arc<CompilerWorldCellReservation>, CompileError> {
+        validate_world_cell_reservations(
+            &self.items,
+            admission_digest,
+            &slots,
+            &expected_bindings,
+        )?;
+        Ok(Arc::new(CompilerWorldCellReservation {
+            plan: Arc::clone(self),
+            admission_digest,
+            slots: slots.into(),
+            expected_bindings: expected_bindings.into(),
+        }))
+    }
+}
+
+fn validate_world_cell_reservations(
+    items: &[ParsedCellPlanItem],
+    admission_digest: [u8; 32],
+    slots: &[crate::checked_cell::CheckedPlannedCellSlot],
+    expected_bindings: &[Vec<(String, tidepool_repr::SessionVarId)>],
+) -> Result<(), CompileError> {
+    use crate::checked_cell::CheckedPlannedCellSlot as Slot;
+    if admission_digest == [0; 32]
+        || slots.len() != items.len()
+        || expected_bindings.len() != items.len()
+    {
+        return Err(failure("world cell reservation differs from parser plan"));
+    }
+    let mut generations = std::collections::BTreeSet::new();
+    let mut identifiers = std::collections::BTreeSet::new();
+    for ((item, slot), bindings) in items.iter().zip(slots).zip(expected_bindings) {
+        let (generation, names): (u64, Vec<&str>) = match (item.kind(), slot) {
+            (ParsedCellPlanKind::Prologue, Slot::Prologue { declaration })
+            | (ParsedCellPlanKind::Declaration, Slot::Declaration { declaration }) => {
+                if !bindings.is_empty() {
+                    return Err(failure("declaration has value reservations"));
+                }
+                (*declaration, Vec::new())
+            }
+            (ParsedCellPlanKind::Bind, Slot::Bind { value }) => {
+                (*value, item.binders().iter().map(String::as_str).collect())
+            }
+            (
+                ParsedCellPlanKind::Expression,
+                Slot::Expression {
+                    capture,
+                    observation_name,
+                },
+            ) if !observation_name.is_empty() && !observation_name.contains('\0') => {
+                (*capture, vec![observation_name.as_str()])
+            }
+            _ => return Err(failure("world cell slot differs from parsed item kind")),
+        };
+        if generation == 0
+            || !generations.insert(generation)
+            || names.len() != bindings.len()
+            || names
+                .iter()
+                .zip(bindings)
+                .any(|(name, (actual, id))| *name != actual || !identifiers.insert(id.raw()))
+        {
+            return Err(failure(
+                "world cell binder or generation reservation differs",
+            ));
+        }
+    }
+    Ok(())
+}
+
+impl CompilerWorldCellReservation {
+    pub fn plan(&self) -> &Arc<CompilerWorldCellPlan> {
+        &self.plan
+    }
+    pub fn admission_digest(&self) -> &[u8; 32] {
+        &self.admission_digest
+    }
+    pub fn slots(&self) -> &[crate::checked_cell::CheckedPlannedCellSlot] {
+        &self.slots
+    }
+    pub fn expected_bindings(&self) -> &[Vec<(String, tidepool_repr::SessionVarId)>] {
+        &self.expected_bindings
+    }
+}
+
 pub(crate) fn admit_world_plan(
     world: Arc<crate::compiler_world::CompilerWorld>,
     recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
@@ -657,6 +759,56 @@ mod tests {
         let admitted =
             admit_world_parser_receipt(&world, &recipe, producer, &encoded(&receipt)).unwrap();
         assert_eq!(admitted.items[0].binders(), ["owned"]);
+        // Runtime expectations remain data, but cannot substitute another
+        // occurrence, item kind or reserved generation for this parser plan.
+        use crate::checked_cell::CheckedPlannedCellSlot as Slot;
+        let binding = vec![(
+            "owned".into(),
+            tidepool_repr::SessionVarId::from_extract(91),
+        )];
+        assert!(validate_world_cell_reservations(
+            &admitted.items,
+            [3; 32],
+            &[Slot::Bind { value: 7 }],
+            &[binding.clone()]
+        )
+        .is_ok());
+        assert!(validate_world_cell_reservations(
+            &admitted.items,
+            [0; 32],
+            &[Slot::Bind { value: 7 }],
+            &[binding.clone()]
+        )
+        .is_err());
+        assert!(validate_world_cell_reservations(
+            &admitted.items,
+            [3; 32],
+            &[Slot::Bind { value: 0 }],
+            &[binding.clone()]
+        )
+        .is_err());
+        assert!(validate_world_cell_reservations(
+            &admitted.items,
+            [3; 32],
+            &[Slot::Declaration { declaration: 7 }],
+            &[binding.clone()]
+        )
+        .is_err());
+        assert!(validate_world_cell_reservations(
+            &admitted.items,
+            [3; 32],
+            &[Slot::Bind { value: 7 }],
+            &[vec![("other".into(), binding[0].1)]]
+        )
+        .is_err());
+        assert!(validate_world_cell_reservations(
+            &admitted.items,
+            [3; 32],
+            &[Slot::Bind { value: 7 }],
+            &[Vec::new()]
+        )
+        .is_err());
+
         assert!(admit_world_parser_receipt(&world, &recipe, [1; 32], &encoded(&receipt)).is_err());
         assert!(
             admit_world_parser_receipt(&[8; 32], &recipe, producer, &encoded(&receipt)).is_err()
