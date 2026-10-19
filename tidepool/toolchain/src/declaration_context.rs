@@ -10060,6 +10060,22 @@ impl ExactDeclarationContext {
         Ok(self)
     }
 
+    /// Capture the admitted primary selection once at cold world construction.
+    /// Default requirements add no scaffold roots or visible-value support.
+    pub(crate) fn capture_world_primary_compiler_inputs(
+        &self,
+        expected_canonical_producer: [u8; 32],
+    ) -> Result<Arc<RequestCompilerInputs>, CompileError> {
+        if expected_canonical_producer == [0; 32]
+            || expected_canonical_producer != self.owner.facts.producer
+        {
+            return Err(failure("world primary has another canonical producer"));
+        }
+        ProtectedScaffoldRequirements::default()
+            .compiler_inputs(self, None)
+            .map(Arc::new)
+    }
+
     /// Finalize a context at its issuing boundary. Historical custody remains
     /// complete; the compiler namespace contains exactly the issued roles.
     fn finish(mut self) -> Result<Self, CompileError> {
@@ -22694,6 +22710,71 @@ mod tests {
                 .expect("selected or planned source owner must refuse replacement")
                 .to_string()
                 .contains("fresh module replaced an admitted exact owner"));
+        }
+    }
+
+    #[test]
+    fn world_primary_capture_requires_an_admitted_canonical_producer() {
+        let raw_producer = [3; 32];
+        let canonical = CanonicalProducerIdentity::from_producer_bytes(&raw_producer).sha256();
+        assert_ne!(canonical, raw_producer);
+        let unbound = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
+        let before = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
+        for expected in [[0; 32], canonical] {
+            assert!(unbound
+                .capture_world_primary_compiler_inputs(expected)
+                .is_err());
+        }
+        let admitted = unbound.admit_producer(canonical).unwrap();
+        for expected in [[0; 32], raw_producer, [9; 32]] {
+            assert!(admitted
+                .capture_world_primary_compiler_inputs(expected)
+                .is_err());
+        }
+        assert_eq!(
+            REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
+            before,
+            "producer refusals must precede compiler input issuance",
+        );
+        let captured = admitted
+            .capture_world_primary_compiler_inputs(canonical)
+            .unwrap();
+        assert_eq!(
+            REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
+            before + 1,
+        );
+        assert!(captured.metadata.entries.is_empty());
+    }
+
+    #[test]
+    fn world_primary_capture_preserves_selected_roles_and_native_issuers() {
+        let (context, producer) = metadata_fixture();
+        let canonical = CanonicalProducerIdentity::from_producer_bytes(&producer).sha256();
+        let roles = context.compiler_input_roles();
+        let expected_originals = roles
+            .iter()
+            .filter_map(CompilerInputRole::original)
+            .collect::<BTreeSet<_>>();
+        assert!(!expected_originals.is_empty());
+        let captured = context
+            .capture_world_primary_compiler_inputs(canonical)
+            .unwrap();
+        assert_eq!(captured.projection().roles(), roles);
+        assert!(!captured.metadata.entries.is_empty());
+        assert_eq!(
+            captured
+                .native_selection
+                .availability
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            expected_originals,
+        );
+        let retained = context.artifact_view().metadata_snapshot();
+        for (id, availability) in captured.native_selection.availability.iter() {
+            assert_eq!(availability.original.descriptor.id, *id);
+            let selected = retained.artifacts.get(id).unwrap();
+            assert!(Arc::ptr_eq(&availability.original, selected));
         }
     }
 

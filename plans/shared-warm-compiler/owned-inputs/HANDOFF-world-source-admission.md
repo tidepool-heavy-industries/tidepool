@@ -27,3 +27,14 @@ The loose two-owner binding constructor is superseded by `WorldSourceCompilation
 The binding retains reservation/plan/base-world only for temporary source/product certification. No successor or restoration product may retain it: extract only the already-certified finite output facts and independently owned source/native/row/instance/prototype facts at that boundary. Actual producing transaction origin remains separately retained by the physical output owner.
 
 A bounded producer trace of db884 found the empty-selected-source branch returning `(Nothing, [])`: the empty import-row list omits the fresh generated module even when it has no exact imports. The unchanged Rust admission requires complete per-fresh-module rows. Protocol and Warm own the issuer correction using actual `sourceEvidenceGraphFor` rows; the consumer is not relaxed. No execution result is inferred from this source finding.
+
+## Cold primary compiler basis
+
+The approved `ExactDeclarationContext::capture_world_primary_compiler_inputs(expected_canonical_producer)` checks nonzero equality with the context’s already-admitted producer before calling the existing default-scaffold compiler-input issuer. Default adds no extra scaffold roots: real primary roles, metadata, normalized native availability and continuation owners still come from the same existing issuer. It returns one Arc for the actual cold WorldOpen owner to retain after `primary.admit_producer`. The caller must share this same basis across value-only successors and update it when primary declarations change; it is not a hot full-basis certificate fallback. Warm owns that production callsite and demanded narrowing.
+
+Added controls (source only, native grant zero):
+
+- `declaration_context::tests::world_primary_capture_requires_an_admitted_canonical_producer`: actual context issuer rejects zero, unbound, raw-vs-canonical and wrong producer before compiler-input computation; valid admitted producer invokes the existing issuer once.
+- `declaration_context::tests::world_primary_capture_preserves_selected_roles_and_native_issuers`: existing nonempty `metadata_fixture` retains original and interface roles and actual native original Arc identity through cold capture. This is a representation/issuer control, not a real GHC or runtime claim.
+
+Pending counted commands, after paired native admission and producer integration: `swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::world_primary_capture_requires_an_admitted_canonical_producer --expected-count 1` and `swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::world_primary_capture_preserves_selected_roles_and_native_issuers --expected-count 1`. Pinned production/cfg(test) compilation remains required before execution.
