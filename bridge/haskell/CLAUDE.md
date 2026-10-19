@@ -117,7 +117,13 @@ Worker requests use `TPREQ023`. Field 57 acquires one world without source
 request fields; field 58 queries public module metadata through the same
 `CompilerRequest` executor admission. `TPCWORLD` custody keeps base and unmerged
 value rows separate and names each owned image explicitly. Custody does not
-select compiler Originals or native groups. The logical world retains raw
+select compiler Originals or native groups. Cold block admission verifies the
+fixed CIDv1/DAG-CBOR/Blake2b-256 family with declared crypton, every body digest
+and root-reachable child membership. A SHA transfer seal cannot replace CID
+verification. Integrity controls consume actual Rust Materializer blocks, not
+handwritten content addresses; changing this dependency requires a fresh matched
+package-profile/provider/boot qualification before rooted reuse.
+The logical world retains raw
 immutable facts; its universe realization owns NameCache-bound interfaces, and
 the active `CompilerScope` holds that realization through END. Home queries
 check only captured source roots with the world-only preprocessing guard;
