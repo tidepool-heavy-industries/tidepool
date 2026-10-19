@@ -17142,9 +17142,11 @@ pub(crate) mod tests {
             let public = Arc::new(
                 ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
-                    .extend_checked_original_products(producer.sha256(), &[])
+                    .admit_producer(producer.sha256())
                     .unwrap(),
             );
+            assert_eq!(public.toolchain_identity_sha256(), producer.sha256());
+            assert!(public.compiler_input_roles().is_empty());
             let next = ExactCompileContext::new(public)
                 .prepare_compilation_with_private_input(
                     &root.path().join(format!("next-{interface_only}")),
