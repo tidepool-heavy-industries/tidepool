@@ -159,6 +159,8 @@ release events outside request capture reach the owned daemon stderr log.
 Missing observations remain incomplete evidence. Emit admission after ownership
 transfer, and keep observations outside atomic publication. Cleanup failure
 cannot become a release event; a scope-release event is not a transport END ack.
+After index retirement, release observations belong inside the same captured
+release action as backing cleanup, so observer cancellation retains that debt.
 
 Exact-scope manifests use strict `TPEXACTSCOPE` version 16 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization
