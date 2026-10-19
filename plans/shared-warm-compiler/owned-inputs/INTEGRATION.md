@@ -4,8 +4,14 @@ Status: complete reviewed row ancestry folded into the area at
 `2970ef611b886db472872c9e85aae7ec58efa66d`, finalized area
 `f3309fed5252b5afad30d57c1dea08dcabc22c18`. Campaign receiving fold
 `f088e3e7837c72cf0e82aab8e71a2687d767da34` is complete alongside host b5
-and worker0bd; joined production/cfgtest/resources -j1 build and subsequent
-actual cases are campaign-owned and pending. No deployment or measured performance claim.
+and worker0bd. Exact joined production/cfgtest/resources -j1 build exited0
+(52local actions,303.4s); all36 selected cases passed (31Rust,5Haskell).
+Stable row frontier accepted, integrated and joined verified; no repair needed.
+Public checkpoint62495a4db6 was pushed to campaign/shared-warm-compiler.
+Private campaign/CORE-JOINED-TERMINAL.json and core-joined-tests.json retain
+actual source/commands/counts/reports. Area supervisor independently verified
+report hashes and1pass counts for6row controls,2opaque owner controls, full
+pairedfreshworker and the separate checked-expression accounting case. No deployment or measured performance claim.
 
 Base `5b74c2f1fe010c5c343e0c6f331d54328fbd5090`; full leaf candidate
 `5113d9c962bdc06179628a0758cb0c768f3e5491` including production29d6467c,
@@ -121,6 +127,9 @@ supersedes per-host retention: borrow the actual deployment/service owner or
 retain once per actual service epoch, confirmed normal retirement and uncertainty
 retention. Fresh boot/profile and actual DB/interface/native coverage remain
 required; no posthoc EPS proof. No source/API implementation was started.
-Supervisor owns a successor only after the architectural/contract decision. Campaign owns receiving merge,
-joined compile and actor/Persona/frozen-bundle acceptance. No native goals or
+Supervisor owns a successor only after the architectural/contract decision. Campaign completed receiving merge and joined component/history gates.
+Actor/Persona/frozen-bundle acceptance, full END/owner-eviction, warm Ready/hit
+and matched performance remain separate unqualified claims. Await only the
+root/campaign C2/C5 decision for a concrete new successor; no source action,
+new lane or status polling is needed. No native goals or
 periodic polling; reserved children reactivate on concrete events.

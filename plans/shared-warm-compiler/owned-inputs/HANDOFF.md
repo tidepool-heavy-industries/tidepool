@@ -13,9 +13,13 @@ Complete reviewed row ancestry through5113 was folded at
 `2970ef611b886db472872c9e85aae7ec58efa66d`. Complete integration packet:
 `INTEGRATION.md`. Campaign receiving fold completed at
 `f088e3e7837c72cf0e82aab8e71a2687d767da34` alongside host b5 and worker0bd.
-Its owning supervisor observes the active joined production/cfgtest and runner
-resource build with -j1, then actual row/runtime/host/protocol cases. Area local
-passes do not establish that joined result.
+Campaign terminal evidence confirms exact f088 production/cfgtest and runner
+resources compiled0 (52local actions,303.4s), then all36 selected controls passed:
+31Rust and5Haskell. Supervisor independently verified the10 affected owned row/
+opaque-custody/runtime report hashes and1pass counts. Public campaign checkpoint
+62495a4db6 was pushed on campaign/shared-warm-compiler; later differences are docs
+only. Stable row disposition: accepted, integrated and joined verified; no
+integration repair remains. Runtime compiler/host cleanup limits remain separate.
 
 ## Current source and evidence
 
@@ -129,10 +133,11 @@ and FD enumeration remain; no O(delta), latency or release claim is made.
 Rows and reviewer delivered their terminal events; all source/native clients
 settled and row lane released (daemon current2,653,343,744bytes). Supervisor
 folded the complete accepted ancestry. Campaign accepted/integrated area f3309fed5252b5afad30d57c1dea08dcabc22c18
-and owns the joined checks. Awaited event: its supervisor sends exact joined
-compile/test terminal evidence or a concrete integration finding, then area
-reconciles or repairs its owned cone. Root/campaign separately produce the C2/C5
-service-boundary decision; package proposal remains held. Both children delivered
+and delivered its joined terminal success. Evidence is private campaign/
+CORE-JOINED-TERMINAL.json, core-joined-native-build.json and core-joined-tests.json.
+No new source action or test lane is needed. The only awaited event is root/
+campaign C2/C5 service-boundary decision with a concrete approved successor;
+package proposal and all new APIs remain held. Both children delivered
 terminal outcomes and are dormant with grants retained; neither owns live jobs. Producers check
 recipient status and use send_message for running recipients, followup_task for
 dormant ones. Every outcome requires a terminal event. No periodic polling or
