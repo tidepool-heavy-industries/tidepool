@@ -1,147 +1,49 @@
 # Warm compiler continuation
 
-Owner: `/root/warm_compiler_campaign/warm_workers`; account `inanna`.
-This is a continuing-work checkpoint, not completion or a stop request.
+Owner `/root/warm_compiler_campaign/warm_workers`, account `inanna`. This is a continuing-work handoff, not completion or a stop request.
 
-## Exact source and current work
+## Current source and exact next work
 
-Main checkout `/srv/swarm/checkouts/tidepool-shared-warm-cell-bindings-20261019`,
-branch `feature/shared-warm/cell-bindings`, production source
-`147b46cc3bf0f36efd733feb065a50aef72b90fb`. Clean at this checkpoint.
-The next handoff-only commit changes this document; retain the production OID.
-Full history includes qualified native-role foundation `943aafec9dbc4c849f094a9f82f798b819a87004`,
-Haskell `d3c17614c894a8fad2e472f9dd3690e624554606`, and source adapter prefix
-`ad094ae043059ed31c3a4958361fd895f53fe321`.
+Main: `/srv/swarm/checkouts/tidepool-shared-warm-cell-bindings-20261019`, branch `feature/shared-warm/cell-bindings`, product checkpoint `8e821a1fd2e642bf3345568421f45827a3f3af7c` (the next commit changes only this handoff).
+Native: `/srv/swarm/checkouts/tidepool-shared-warm-cell-native-20261019`, branch `feature/shared-warm/cell-native`, frozen `e30a9a85ced79f0cd9eec3e8c8c7fb21ad2591b9`. Main is clean at writing. Native is configured with pinned GHC9.12.2/Rust1.93.0/crypton and a provisioned buck-out bind mount.
 
-Implemented: three-root cold world (Context, selected primary associations,
-occurrences); canonical producer admission before root sealing; actual Plan and
-runtime reservation DATA; bounded private Prepare transport; authenticated held
-output bytes; producing transaction origin; PREP3 SAME-output normalized typed
-segments; SAME-output TPCWSOURCE1 decoder; borrowed existing certifier inputs.
-Latest production commit captures actual primary compiler inputs ONCE at cold
-admitted ingress and retains that Arc in restoration. It supplies no recipe-only
-import authority and does not fold visible checked values into the primary.
+Full current history includes qualified943a native-role foundation; canonical cold producer/root/frontier; typed three-root Context→primary associations→occurrences; actual Plan/reservation and bounded Prepare physical transport; PREP3 SAME-output normalized segments; SAME-output TPCWSOURCE1 decoder; ProductCompilerInputs and Exact/World context accessor factoring; qualified397 diagnostics/path ordering; keyed demanded compiler projection4e/b9; Context6/Published8/descriptor2 FOUR born maps from9529; genuine tuple12 Published producer2b1498; receiverd848; generated runtime fixture map e30. Private state rename9615 leaves the WorldBackingRemoved timing event unchanged.
 
-NOT implemented: the hot demanded compiler/native/source/scaffold/checked basis,
-full World source/MatchedProduct admission, checked Prepare/CellProgram world
-basis, per-item same-certifier output issuance, changed-root private successor,
-and actual runtime atomic adoption. No checked Prepare capability is caller-ready.
-Existing legacy full metadata/lexical/native-offer walks must not become the hot
-world route. The approved compiler-owner checked-row/refcount index inside
-CompilerWorldBindings is still pending. Do not reconstruct ExactCompilationRequest,
-ParsedCellPlan, whole support, or an ancestor world chain.
+Implemented physical output custody is not checked Prepare authority. STILL REQUIRED: actual hot demanded native/source/scaffold/checked/instance/prototype basis; full World source/MatchedProduct constructor; SAME existing certifier output admission; World CellProgram/ExactCheckedCell basis; per-item successful-target capability and changed-root private successor; actual runtime atomic adoption. No checked Prepare capability is caller-ready. Maintained compiler-owner checked-row/refcount index is approved but not implemented. Do not fabricate old ExactCompilationRequest/ParsedCellPlan, default authoritative native/instance facts, scan all prior rows/offers/lexical facts per cell, or retain a predecessor-world chain.
 
-The required joined slice is genuine initially published Seed.seed=7 under all
-three roots, then x <- pure(seed::Int), atomic publication, then y <- pure(x+1)=8.
-BOTH real protected recipe templates import Seed; actual GHC dependency selection
-and cold/reference/work counters must prove immutable dependency reuse. KDecl and
-inherited lexical migration remain required beyond the explicit bounded slice.
-Actual current primary Context5 is distinct from the separate Context6 birth
-repair; never mix descriptor layouts or infer native permission from passive CIDs.
+ONE authoritative cold primary compiler_inputs capture already occurs after canonical producer admission and is stored as Arc in restoration (147b). Hot source/certification must consume an owner-keyed demanded projection; merely borrowing that full cold Arc does not remove the old full scans. Cold source publication still walks metadata/lexical roots and is explicitly not a value-only changed-path route. Recipe text or captured custody alone supplies no home import authority.
 
-## Native evidence and next commands
+Required joined goal: genuine initially published Seed.seed=7 under all three roots, real x<-pure(seed::Int), atomic publication, then y<-pure(x+1)=8. BOTH actual protected recipe templates import Seed; GHC must demand Seed on both. Actual frontend/finalized/interface counters and cold reference establish Arm B. Bare second alone proves only alias activation. KDecl/inherited lexical remain required beyond this bounded value slice.
 
-Frozen native checkout `/srv/swarm/checkouts/tidepool-shared-warm-cell-native-20261019`,
-branch `feature/shared-warm/cell-native`, current OID
-`c9400fec56b343f7a0a2d59407b47fa60ef9c3d2` is the exact minimal layout-repair
-merge of qualified physical transport tree4dea and source0be344. Rust production,
-cfg(test), candidate fixture issuer compiled at4dea:1008local/exit0. Actual
-production Haskell worker compiled atc940:5local/exit0; declared runner resources
-3local/exit0 and extract-cmd cfg(test)2local/exit0. Four exact canonical controls
-executed4/PASS4/FAIL0, each report has1 executed/1pass/exit0:
+## Evidence and live disposition
 
-- compiler_world::answer_tests::world_output_capture_retains_authenticated_bytes_and_refuses_changed_products
-- cell_plan::tests::world_reservations_keep_declaration_and_value_generations_separate
-- request::tests::world_prepare_bounds_borrowed_names_before_owned_slot_copies
-- request::tests::world_cell_wire_is_exclusive_bounded_and_matches_haskell
+Latest matched e30 early compile: observer session76755 TERMINAL exit3, tests0, Haskell NOT launched. Complete first-action stderr is `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/matched-publication-e30/phase0/rust.log`; RUST-TERMINAL.json and STATE.json are adjacent. Actual errors: ProductCompilerInputs/cold ctor tests still used old native availability Arc-map API; tuple12 fixture referenced nonexistent hex crate. Minimal product repair8e821 uses SAME wrapper clone/map field and existing parent hex function. Independent OWN review requested; next fresh same8ADD/12 retry must freeze this repair. Do not report e30 as producer or test PASS.
 
-Aggregate private evidence:
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/prepare-transport-ac739/counted-c940/COMPONENT-EXECUTION.json`,
-SHA256 `4c808bf8896640c561b19f716db3f670f0f71371fe8147491d0fb2ff224bcb02`.
-It authenticates27 referenced reports/streams/logs/binary snapshots (28 files
-including aggregate). No actual compiler transactions were invoked by these
-Rust controls. Directory resource hashes remain UNKNOWN; process cleanup is
-confirmed, hosted/compiler cleanup not_observed, fast cgroup observation partial.
-No ordinary-cell/performance/certifier claim is made.
+Owning metadata before e30: actual `swarm-build python3 scripts/buck2-haskell-components.py` terminal0/2local. ONLY three actual Published source runtime paths changed in components.bzl. No pin/dependency changes or hand fingerprints. Evidence `warm-workers/matched-publication-9615/metadata` below private evidence root. Main/native matched source e30 has independent receiving SOURCE acceptance, not native acceptance.
 
-Earlier failures remain:4dea declared runner first exposed Source.hs layout
-GHC58481, exit3/tests0. Minimal owner repair0be344b75371d376306cc4c9d909421b38559097
-independently source accepted and now producer compiled. My first c940 exact
-selector used ::tests instead of ::answer_tests; canonical runner refused it,
-exit1/0execution. That procedure failure is not a product test failure. HOST
-independently owns its full0be+classifier retry.
+Earlier new-source feedback retained: bb26 (tree984) failed10 nested Exact cfgtest Result migrations, tests0;213 repairs those10 sites. fcca (tree213) Rust production/cfgtest/candidate issuer PASS1local0, Haskell failed GHC87543 private constructor collision, tests0;9615 repairs only three private names. Evidence `warm-workers/main984-early-bb26` and `warm-workers/main213-early`.
 
-All Warm clients are terminal, including83042/30702/71362/81697; Warm LIVE0/0.
-Idle Buck641810 remains globally charged in
-`/build.slice/inanna-build-1792428206-641740.scope`. No orphan client or Nix work.
-The4dea build sampled scope current maximum5596319744 bytes is not a full peak;
-outside Nix600453120 bytes and tmux are separate. Cell-native's pinned configured
-GHC9.12.2/Rust1.93.0/crypton closure and buck-out bind mount remain preserved.
+Qualified PHYSICAL TRANSPORT COMPONENT remains ac739/4dea +minimal layout fixc940: Rust prod/cfgtest/issuer1008local0; actual worker5local0; four actual counted controls PASS4/4, zero compiler transactions. Aggregate `warm-workers/prepare-transport-ac739/counted-c940/COMPONENT-EXECUTION.json`, SHA256 `4c808bf8896640c561b19f716db3f670f0f71371fe8147491d0fb2ff224bcb02` (27refs plus aggregate=28files). Independent receipt `owned-inputs/source-lifetime/PREPARE-TRANSPORT-EXECUTION-REVIEW-c940.md`, SHA256 `b5947bddcf2c84646ebeb2d8a60d9b0187e542792a1d2fa4a9fcd676f545558d`. Not later PREP3/ordinary/B acceptance. Retained zero-execution wrong-selector and Source layout failures are not passes. Dirs/resource hashes UNKNOWN; compiler/hosted cleanup not_observed; fast cgroup partial.
 
-Reproduction uses canonical isolated declared runners, for example:
-`swarm-build bash scripts/buck2-run.sh run --local-only -c remote.enabled=false -j1 //tidepool/toolchain:tidepool_toolchain_unit_tests -- --exact CASE --expected-count 1 --jobs 1 --timeout 600 --output-dir PRIVATE_CASE_DIR --retain-artifacts`.
-The corresponding extract-cmd label owns its two tests. Installed swarm-build is
-COMMAND-only; unsupported disk flags must not be used. Repeat only for a changed
-source or unresolved concern, after fresh LIVE/global/scope/disk admission.
+All Warm clients currently terminal; LIVE Warm0/0 updated after76755. Idle Buck641810 remains global in `/build.slice/inanna-build-1792428206-641740.scope`; do not subtract it from an ADD grant. Campaign bedfe14TOTAL/16 and Reload14TOTAL/32 were active at last sample: fresh LIVE and actual cgroup/disk samples are mandatory before retry. Last launch prospective67.307GB<80GiB, disk414.339GB, outside Nix601.522MB; these are not a future reservation. No Nix materialization active here. PRIVATE EVIDENCE ROOT: `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`.
 
-Then join current main source into the isolated native checkout with source-owner
-review, regenerate owning metadata only if changed, and compile actual affected
-production/cfg(test)/Haskell consumers early. Do not inherit frozen4dea success.
+Next commands in configured native, after full-history reviewed repair merge and fresh admission:
 
-## Paired owners and durable continuations
+- `swarm-build bash scripts/buck2-run.sh build --local-only -c remote.enabled=false -j1 //tidepool/toolchain:tidepool_toolchain //tidepool/toolchain:tidepool_toolchain_unit_tests_binary //tidepool/toolchain:candidate_fixture_issuer`
+- Same build command for `//bridge/haskell:tidepool_extract_bin //bridge/haskell:source_boot_product_reuse_test_bin`.
+- `swarm-build just test-native //bridge/haskell:source_boot_product_reuse_test --pattern 'owned scope input reuse'` (genuine Published three-file producer/receiver leaf).
+- Counted demanded projection/native helper controls after that source is reviewed/joined. Linking/listing/zero selection is not execution. Installed swarm-build is COMMAND-only; no unsupported growth flags.
 
-Warm owns Prepare transport, SAME output certifier and successful-target private
-successor. HOST owns actual runtime Finite/World admission, same per-item capability
-settlement and atomic binding/world adoption. Runtime source306d first compile failed (own classifier plus incoming Source layout);
-HOST full a25b+0be+classifier retry54780 is separate. Consult fresh LIVE.
-HOST requires SAME reservation Arc, actual ordinal/IDs/generations/native delta,
-and inseparable ExactCompiledItem/cap. Public scope/postkey comes from SAME final
-PreparedBindingPromotion after removals. Changed semantic base refuses; storage
-restaging may retry. No independently supplied world/output pair or silent rebase.
+## Paired owners and continuations
 
-OWN/rows source adapter checkout is
-`/srv/swarm/checkouts/tidepool-shared-warm-world-source-admission-20261019`, branch
-`feature/shared-warm/world-source-admission`, clean docs2918a61e2f17d90d10f05f0c550468a7f5e8cb89,
-production ad094 above. Its cold ctor and SAME-output decoder are already merged.
-Full source/MatchedProduct adapter is dependency-bound on actual HOT demanded
-basis. Wake rows AND its OWN parent with followup_task if completed once the
-concrete issuer API exists; no default native basis or recipe-text authority.
-Its handoff is `plans/shared-warm-compiler/owned-inputs/HANDOFF-world-source-admission.md`.
-Independent prefix receipt WORLD-SOURCE-PREFIX-REVIEW-e91d.md SHA256
-`de5b125150762249dde03462a4a237eb0d6f7063641e4cce21574e7a0f6d2364`.
+HOST is sole runtime finalizer/adopter. ACA3 actual component PASS: eight owning targets and three counted owner controls, independently verified; HOST0, idle663083 global. Actual runtime World admission retains SAME reservation Arc/current original/private key, no finite baseline arrays. Actual settlement must consume inseparable per-item ExactCompiledItem/cap, use actual new binder/native delta, and derive public scope/postkey from SAME PreparedBindingPromotion after removals. Exact semantic base CAS first; changed semantic base typed refuses, storage restaging may retry. HOST handoff: `/srv/swarm/checkouts/tidepool-shared-warm-host-inputs-20261019/plans/shared-warm-compiler/host-inputs/HANDOFF.md`. Wake HOST with actual checked capability body/OID, not placeholder signatures. Reload f062 must join genuine Seed cells.
 
-Protocol child core checkout
-`/srv/swarm/checkouts/tidepool-shared-warm-worker-cell-20261019`, branch
-`feature/shared-warm/worker-cell-bindings`, d3c176 above. Full core merged.
-Separate branch `feature/shared-warm/worker-cell-publication` is clean
-`d848367d1832673c60613e67717391a4b93d0469`, independently source accepted; native0. It pairs Qual's explicit
-TPSOURCEBOOTPUBLISHED1 tuple12 fixture and Context6/Published8 with required four
-born roots (roles/offers/availability/decisions), explicit old-layout refusal.
-Do not merge an unmatched wire break into core. Child durable private handoff:
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/protocol/cell/HANDOFF.md`,
-SHA256 `0ee946699ead1be2c43d3df50faa86721193e218b002ea1d30ba0ca2cd6af278`.
+OWN/rows checkout `/srv/swarm/checkouts/tidepool-shared-warm-world-source-admission-20261019`, branch `feature/shared-warm/world-source-admission`, docs7603554 over productionf064 (full prefix merged). Completed dependency-bound, no native/jobs. Owns ONLY ProductInputFacts/source binding/decoder/World source adapter, not native owner regions. Constructor waits actual demanded compiler/native/source/checked/scaffold plus original-instance/prototype witness. Followup SAME rows and OWNparent grant when that exact issuer exists. Handoff `plans/shared-warm-compiler/owned-inputs/HANDOFF-world-source-admission.md` in that checkout. No fake oldrequest/fullbasis fallback.
 
-World dependency helper checkout `/srv/swarm/checkouts/tidepool-world-dependencies-20261019`,
-branch warm-world-dependencies, clean61eccf36887564284c703bc1c5ab2e42aa1077a0.
-Helpers already joined into protocol; source accepted, actual reuse/cache/END
-histories unqualified. No jobs/grant. Direct lexical get helper in separate
-`tidepool-world-demanded-basis-20261019` at b9b63535ba73dc51ceed662e59ec8bad5aa6be62
-is NOT yet merged. It avoids lexical snapshot Deref full materialization.
-This SAME leaf is now reactivated on warm-world-demanded-support at147b for
-closed demanded role/interface projection+metadata; scope excludes native/instance
-permission issuance. It retains SAME cold support/metadata, uses keyed roots and
-canonical/Original requirement edges, charges actual request allocations. Source
-WIP helper is not yet reviewed/compiled or consumed; native0.
-Durable child handoff `/srv/swarm/evidence/inanna/world-dependencies-20261019/handoff.json`,
-SHA256 `75aad5b86e0dc808d6fadec18bbf091dc2db14fe1e0da721bc4bee7040d57347`.
-Required actual shared-backing eviction/oversize/quarantine/END controls remain;
-delete first operation output before second imported cell to expose lazy .hi use.
+Protocol child checkout `/srv/swarm/checkouts/tidepool-shared-warm-worker-cell-20261019`, publication branch tip9615, completed/no jobs. Full current matched history is merged main/e30. Handoff `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/warm-workers/protocol/cell/HANDOFF.md`. Same-token source selection, strict requirement SHA, exact fresh census, actual PREP3 and descriptor2 reader are source accepted only until actual matched compile/Published leaf. No native authority is reconstructed by Haskell from passive provenance CIDs. Repeated shared birth/drop-isolation tests remain pending.
 
-Actual old-profile query is now separately proven2/2 at HOSTf82e/campaignaa59.
-Both service/process cleanup confirmed. Source sorting397 genuine116-file carrier
-accepted, strict frontend effect/resume/commit and guard-negative passed. This is
-not ordinary-cell/B/retention acceptance. Existing failed EEA cause remains UNKNOWN.
+World_dependencies child ACTIVE in `/srv/swarm/checkouts/tidepool-world-demanded-basis-20261019`, branch `warm-world-demanded-native`, base9615, THREE uncommitted files: artifact_inventory.rs existing admitted_closure; artifact_inventory/native_availability.rs contribution keyed restriction/group lookup; declaration_context.rs NativeInputSelection/RequestNativeAvailability owner ONLY. No builds/grant. Keyed SAME-cold demanded subset, exact modes/contributions/scoped historical dependency intersection; operation charges root/node/duplicate EDGE before enqueue. Current review repair: InterfaceOnly cold-advertised body becomes direct only when actual native_roots selects it; Original roles remain direct for coverage. Public-helper regression must deny unselected child sibling9001. Source not yet accepted/frozen. Prior4e+b9+61ecc are preserved and merged; none is full actual B proof. Child current WIP handoff `/srv/swarm/evidence/inanna/world-dependencies-20261019/handoff.json`. Physical shared-backing eviction/oversize/quarantine/END histories remain; delete first operation OUTPUT before second imported cell to expose lazy .hi dependency.
 
-At exact result, status-check campaign/HOST/OWN: followup_task for completed/idle,
-send_message for running. Supply exact candidate/evidence/next action. Keep source,
-WIP and observer outcomes; no periodic wake or implicit completion.
+Actual old-profile query separately PASS2/2 at HOSTf82e/campaignaa59: genuine strict frontend effect/resume/Committed, wrong-guard negative, history/hot/source fences/reexport/CAS, both service/process cleanup confirmed. Frontend hostwork unmeasured. No ordinary-cell/B claim; original EEA cause remains UNKNOWN.
+
+At exact terminal/capability result, status-check campaign/HOST/OWN/Qualification: running→send_message, completed→followup_task with exact source/evidence/count/limits/next action. No periodic wakes; preserve failures/source/WIP and collect every live process terminal.
