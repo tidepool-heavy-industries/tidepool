@@ -8772,7 +8772,17 @@ mod tests {
             inventory
                 .admit_recovery_selection(
                     &base,
-                    vec![native.clone(), Arc::new(entry(name, &[]))],
+                    vec![
+                        native.clone(),
+                        Arc::new(ArtifactEntry::canonical(
+                            crate::certified_products::fixture_module_interface(
+                                producer_sha256,
+                                "fixture",
+                                name,
+                                BTreeMap::new(),
+                            ),
+                        )),
+                    ],
                     &groups,
                 )
                 .unwrap()
@@ -8822,6 +8832,14 @@ mod tests {
         };
         let left_groups = groups(&support);
         assert_eq!(left_groups.len(), 1);
+        let recorded_groups = |view: &ArtifactView| {
+            view.capture_graph_selection()
+                .native_groups
+                .into_iter()
+                .filter(|group| group.binding.artifact() == id && group.original_ordinal == 7)
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(left_groups, recorded_groups(&left));
         let mut expected = left_groups.clone();
         for index in 0..other_carriers {
             let selected = if competing {
@@ -8835,6 +8853,7 @@ mod tests {
                 let other = issue(&right);
                 let other_groups = groups(&other);
                 assert_eq!(other_groups.len(), 1);
+                assert_eq!(other_groups, recorded_groups(&right));
                 assert!(other_groups.iter().all(|group| !expected.contains(group)));
                 expected.extend(other_groups);
                 support = support.merge(&other).unwrap();
