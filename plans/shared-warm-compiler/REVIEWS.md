@@ -73,3 +73,29 @@ source accepted, existing opt-in full-profile target and bounded observations,
 explicit omissions, no policy/authority changes. Actual constructor/frozen failure
 attribution awaits native execution; matching interfaces never replace exact issued
 historical edges. Independent area review and fresh native admission remain separate.
+
+## Joined source/capture checkpoint40471
+
+Campaign directly reviewed hostcb888 critical source capture, budget, observer and
+query-refusal consumers; qualification428b bounded opt-in tracing folds without
+changing admission policy. Exact80db toolchain/runtime/actor/host production and
+cfg(test) compilation passed52local0remote. Workflow script fixture failed because
+its mock omitted existing WORKSPACE_SOURCE_PATHS; repair40471 has independent
+qualification source acceptance. Declared suites then592/592 passed; fourteen
+selected Rust controls14/14 passed, all report/stream/executable hashes reconciled.
+Receipt campaign/source-owner-join/TERMINAL.json. No actual service query qualified.
+
+Campaign bounded Warm6404 critical read covered source-free/exclusive v23 request,
+held-world sum preventing legacy compile entry, immutable source/row acquisition,
+actual selected source-unit receipts, public exports and defining-unit provenance,
+T_FileArgs/transitive preprocessing guards, and private realization publication.
+Approved native gate, not final merge acceptance. Required repairs before joined
+acceptance: avoid linear receipt lookup on hot query (20c now uses HPT lookup) and
+bound actual global world/materialized-directory retention with owning eviction.
+Initial compile missing Encoding helper is retained; exact retry belongs to Warm.
+
+Catalog policy correctionceda is accepted direction: conventional source paths
+under each authenticated record role; current captured ordered roots select actual
+source. Actual receipt must attest selected root/path/bytes, never catalog alias
+or native authority from equal bytes. Independent source/native controls remain
+with host. Actual frozen graph proves earlier distinct owner for7/94 targets.

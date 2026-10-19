@@ -3,8 +3,9 @@
 Status: active implementation campaign. Reviewed host, input-custody and worker
 protocol tranches are integrated and joined verified; see [current status](STATUS.md)
 for exact source and evidence. The demand-service architecture amendment is
-accepted after bounded owner and independent review. Concrete paired contracts
-and the first production slice are the active successor wave.
+accepted after bounded owner and independent review. Paired inspect/prepareCell contracts are accepted; the first actual service query
+and required ordinary-cell/publication/recovery migration are active. Joined source
+capture/observation checks passed; no service query or speedup is qualified.
 
 
 This directory is the handoff for a Sol supervision tree. Read this file, the
@@ -61,14 +62,16 @@ candidate, with remaining time honestly attributed.
 - The plan lives on `plan/shared-warm-compiler-20261019` in the isolated checkout
   `/srv/swarm/checkouts/tidepool-shared-warm-plan-20261019`.
 - Implementation branches from the **latest coordinated release tip at kickoff**,
-  not this research pin. The parent delivery session owns its release branch,
-  builds and live sessions. The campaign supervisor records the fresh remote and
+  not this research pin. The performance-fork root coordinates this campaign;
+  the external release/main/live-host owner remains unconfirmed. The campaign
+  supervisor records the fresh remote and
   local release OIDs and receiving owner; it must not change the parent's active
   checkout or race its pushes. Use a campaign branch and isolated area/leaf
   worktrees. Fold any required peer correctness repair before baselining.
 - The retained-implementation selection repair is already in this plan base.
-  Preserve it through rebases. Its stronger hosted Persona check was pending at
-  handoff; obtain its actual result rather than marking it passed here.
+  Preserve it through rebases. Its imported stronger direct Persona passed1/1,
+  with compiler cleanup not_observed and diagnostics incomplete; it is not a
+  matched frozen baseline for current campaign qualification.
 
 ## Supervision tree
 
