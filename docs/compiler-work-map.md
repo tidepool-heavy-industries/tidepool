@@ -47,6 +47,15 @@ A canonical-only projection can retain group custody without selecting code;
 `select_roots(OriginalId)` can add available Group roots. Empty native permission
 and absent decisions remain distinct.
 
+Before native input reception, `RequestNativeAvailability::for_compiler_roles`
+in [`declaration_context.rs`](../tidepool/toolchain/src/declaration_context.rs)
+filters optional direct roots by the effective interface and any explicit
+Original selection. It then retains exact transitive dependencies of surviving
+roots. An excluded historical body can remain as a required dependency; native
+input reception still checks its namespace against the selected roles and
+refuses a conflicting explicit Original. Filtering availability does not remove
+historical byte custody or select executable groups.
+
 Dependency consumption and Full qualification are separate decisions. Native
 binding consults the effective compiler role from its request owner, both when
 acquiring catalogue dependencies and when admitting a certified target. A
