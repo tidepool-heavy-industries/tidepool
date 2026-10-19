@@ -15,7 +15,9 @@ pub(crate) enum RootAdmissionOutcome {
 impl RootAdmissionOutcome {
     fn worker_identity(&self) -> Option<ActorRef> {
         match self {
-            Self::Actor(actor, _) | Self::Workbench(actor) | Self::Pending(actor, _, _) => Some(actor.identity()),
+            Self::Actor(actor, _) | Self::Workbench(actor) | Self::Pending(actor, _, _) => {
+                Some(actor.identity())
+            }
             Self::StartupPermit(_) | Self::NativeResource(_) => None,
         }
     }
@@ -713,8 +715,14 @@ impl Actor for RootWorker {
                     }
                 }
                 if let Some(expected) = state.expected_worker {
-                    if result.as_ref().is_ok_and(|produced| produced.worker_identity() != Some(expected)) {
-                        return Err("worker preparation produced a resource outside its reserved owner".into());
+                    if result
+                        .as_ref()
+                        .is_ok_and(|produced| produced.worker_identity() != Some(expected))
+                    {
+                        return Err(
+                            "worker preparation produced a resource outside its reserved owner"
+                                .into(),
+                        );
                     }
                 }
                 let (accepted, acceptance) = oneshot::channel();
@@ -785,16 +793,24 @@ impl Actor for ReservationStarter {
                 let receipt =
                     tokio::time::timeout(SHUTDOWN_BUDGET, predecessor.retire_for_successor())
                         .await
-                        .map_err(|_| ReservationStartFailure::Unconfirmed("predecessor retirement remains in flight".into()))?
+                        .map_err(|_| {
+                            ReservationStartFailure::Unconfirmed(
+                                "predecessor retirement remains in flight".into(),
+                            )
+                        })?
                         .map_err(|error| ReservationStartFailure::Unconfirmed(error.to_string()))?;
                 if receipt.predecessor() != predecessor.identity()
                     || !receipt.confirms_actor_retirement()
                 {
-                    return Err(ReservationStartFailure::Unconfirmed("predecessor retirement is unconfirmed".into()));
+                    return Err(ReservationStartFailure::Unconfirmed(
+                        "predecessor retirement is unconfirmed".into(),
+                    ));
                 }
             }
             if state.terminal.requested_shutdown().is_some() {
-                return Err(ReservationStartFailure::NotStarted("actor reservation was closed before lifecycle startup".into()));
+                return Err(ReservationStartFailure::NotStarted(
+                    "actor reservation was closed before lifecycle startup".into(),
+                ));
             }
             crate::kernel::LifecycleHandle::start_linked(
                 state.identity,

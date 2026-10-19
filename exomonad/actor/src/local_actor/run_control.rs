@@ -1209,8 +1209,19 @@ impl Actor for RunControl {
                     reply,
                 );
             }
-            RunControlMessage::ReserveGenerationActor { dependency, incarnation, reply } => {
-                reserve_actor(state, None, incarnation, ReservationPurpose::Root, Some(dependency), reply);
+            RunControlMessage::ReserveGenerationActor {
+                dependency,
+                incarnation,
+                reply,
+            } => {
+                reserve_actor(
+                    state,
+                    None,
+                    incarnation,
+                    ReservationPurpose::Root,
+                    Some(dependency),
+                    reply,
+                );
             }
             RunControlMessage::ReserveSuccessor {
                 predecessor,
@@ -1698,7 +1709,9 @@ impl Actor for RunControl {
                         let _ = reply.send(Err(DirectoryError::Unauthorized { actor }));
                         return Ok(());
                     };
-                    if !matches!(record.phase, ReservationPhase::Ready) || record.preparation.is_some() {
+                    if !matches!(record.phase, ReservationPhase::Ready)
+                        || record.preparation.is_some()
+                    {
                         let _ = reply.send(Err(DirectoryError::AlreadyRegistered { actor }));
                         return Ok(());
                     }
@@ -1851,7 +1864,10 @@ impl Actor for RunControl {
             }
             RunControlMessage::AbandonReservation { actor } => {
                 if let Some(record) = state.reservations.get_mut(&actor) {
-                    if matches!(record.phase, ReservationPhase::NotStarted | ReservationPhase::StartUnconfirmed(_)) {
+                    if matches!(
+                        record.phase,
+                        ReservationPhase::NotStarted | ReservationPhase::StartUnconfirmed(_)
+                    ) {
                         return Ok(());
                     }
                     record.phase = if matches!(
@@ -2075,7 +2091,12 @@ impl Actor for RunControl {
                         if matches!(record.purpose, ReservationPurpose::ExistingInput) {
                             continue;
                         }
-                        if !matches!(record.phase, ReservationPhase::Registered | ReservationPhase::NotStarted | ReservationPhase::StartUnconfirmed(_)) {
+                        if !matches!(
+                            record.phase,
+                            ReservationPhase::Registered
+                                | ReservationPhase::NotStarted
+                                | ReservationPhase::StartUnconfirmed(_)
+                        ) {
                             record.terminal.request_shutdown(ActorTerminal::new(
                                 ActorExitKind::Cancelled,
                                 "forest reservation shutdown",
@@ -2640,13 +2661,14 @@ impl RunControlClient {
     ) -> crate::CleanupComponentOutcome {
         let deadline = tokio::time::Instant::now() + timeout;
         let shared = self.shared_cleanup.wait_for_settlement(timeout).await;
-        let preparations = tokio::time::timeout_at(deadline, self.settle_root_preparations(timeout))
-            .await
-            .unwrap_or_else(|_| {
-                crate::CleanupComponentOutcome::Unconfirmed(
-                    "root preparation cleanup remains in flight".into(),
-                )
-            });
+        let preparations =
+            tokio::time::timeout_at(deadline, self.settle_root_preparations(timeout))
+                .await
+                .unwrap_or_else(|_| {
+                    crate::CleanupComponentOutcome::Unconfirmed(
+                        "root preparation cleanup remains in flight".into(),
+                    )
+                });
         if shared.is_confirmed() {
             preparations
         } else {
