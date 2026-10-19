@@ -7438,6 +7438,146 @@ impl ArtifactView {
         ))
     }
 
+    /// Select the already acquired compiler bindings and exact group choices.
+    /// Payloads retain their immutable bytes; old transport caches are optional
+    /// and do not become parents of this new semantic owner.
+    pub(crate) fn select_acquired_compiler_bindings(
+        &self,
+        namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
+        groups: &BTreeMap<NativeGroupKey, NativeGroupBinding>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Self, CompileError> {
+        let budget = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
+            result.map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))
+        };
+        budget(
+            operation.reserve::<InventoryNodeKey>(namespace.len().saturating_add(groups.len())),
+        )?;
+        let roots = namespace
+            .values()
+            .copied()
+            .map(InventoryNodeKey::Artifact)
+            .chain(groups.values().copied().map(InventoryNodeKey::Group))
+            .collect::<Vec<_>>();
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &self
+            .reads
+            .read_projection
+            .get()
+            .ok_or_else(|| failure("cold compiler binding projection was not captured"))?
+            .nodes;
+        for root in &roots {
+            crate::host_work::checkpoint()?;
+            budget(operation.charge(1))?;
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::InputProjectionBindingVisit,
+                1,
+            );
+            if !owned.contains(root) {
+                return Err(failure(
+                    "selected compiler binding is outside its acquired view",
+                ));
+            }
+        }
+        let (nodes, _) =
+            admitted_closure_with_operation(&state, roots.iter().copied(), Some(operation))?;
+        let mut selection = ExactSelectionSnapshot::default();
+        let mut pending = Vec::new();
+        for root in &roots {
+            budget(operation.reserve::<(InventoryNodeKey, (), [usize; 4])>(1))?;
+            selection.roots.insert(*root, ());
+            budget(operation.reserve::<ArtifactSelectionId>(1))?;
+            pending.push(root.selection());
+        }
+        for (id, binding) in namespace {
+            if *id != binding.artifact {
+                return Err(failure(
+                    "selected compiler namespace key differs from its acquired binding",
+                ));
+            }
+            budget(operation.reserve::<(ArtifactId, ArtifactBinding, [usize; 4])>(1))?;
+            selection.namespace.insert(*id, *binding);
+        }
+        // Atomic scope proofs can retain more than the selected node closure.
+        // Visit and charge that proof ancestry explicitly, without scanning the
+        // old view's unrelated scopes or payload table.
+        while let Some(scope) = pending.pop() {
+            crate::host_work::checkpoint()?;
+            budget(operation.charge(1))?;
+            if selection.scopes.contains_key(&scope) {
+                continue;
+            }
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::InputProjectionProofVisit,
+                1,
+            );
+            let proof = self.lease.selection.scopes.get(&scope).ok_or_else(|| {
+                failure("selected compiler binding lost its acquired scope proof")
+            })?;
+            budget(operation.reserve::<(
+                ArtifactSelectionId,
+                crate::exact_context::ImmutableScopeProofRef,
+                [usize; 4],
+            )>(1))?;
+            for (_, target, _) in &proof.proof().dependencies {
+                budget(operation.charge(1))?;
+                crate::host_work::record_host_work(
+                    crate::host_work::HostWorkCounter::InputProjectionProofEdgeVisit,
+                    1,
+                );
+                if target.selection() != scope {
+                    budget(operation.reserve::<ArtifactSelectionId>(1))?;
+                    pending.push(target.selection());
+                }
+            }
+            selection.scopes.insert(scope, proof.clone());
+        }
+        let mut payloads = BTreeMap::new();
+        let mut introduced = BTreeSet::new();
+        for node in nodes {
+            crate::host_work::checkpoint()?;
+            budget(operation.charge(1))?;
+            let id = node.artifact();
+            if payloads.contains_key(&id) {
+                continue;
+            }
+            let entry =
+                self.lease.payloads.get(&id).ok_or_else(|| {
+                    failure("selected compiler binding lost its acquired payload")
+                })?;
+            budget(operation.reserve::<(ArtifactId, Arc<ArtifactEntry>, [usize; 8])>(2))?;
+            budget(
+                operation.charge(
+                    entry
+                        .descriptor
+                        .owner
+                        .unit
+                        .len()
+                        .saturating_add(entry.descriptor.owner.module.len()),
+                ),
+            )?;
+            payloads.insert(id, Arc::clone(entry));
+            introduced.insert(id);
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::ArtifactMetadataRowVisit,
+                1,
+            );
+        }
+        drop(state);
+        let draft = ViewDraft {
+            roots,
+            selection: Arc::new(selection),
+            inventory: self.lease.inventory.clone(),
+            parents: Vec::new(),
+            issuing_payloads: payloads,
+            materialization_parents: Vec::new(),
+            materialization: Mutex::new(BTreeMap::new()),
+        };
+        Ok(Self::from_custody(ViewLease::from_issued_draft(
+            draft, introduced,
+        )))
+    }
+
     /// Reopen an issuer's immutable selection inside subsequently grown custody.
     /// Additional available artifacts and demanded groups cannot change it.
     pub(crate) fn select_issued(

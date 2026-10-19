@@ -1510,6 +1510,10 @@ impl RequestNativeAvailability {
         Ok(())
     }
 
+    pub(crate) fn issued_row(&self, id: ArtifactId) -> Option<&Arc<NativeTransportAvailability>> {
+        self.0.get(&id)
+    }
+
     pub(crate) fn rows(&self) -> impl Iterator<Item = &Arc<NativeTransportAvailability>> {
         self.0.values()
     }
@@ -2023,6 +2027,33 @@ pub(crate) struct DemandNativeInputs {
     work: DemandNativeInputsWork,
 }
 
+/// Executable payload rows remain paired with the exact scoped choices that
+/// admitted them. Pending group payloads alone do not carry those choices.
+pub(crate) struct DemandCertifiedGroups {
+    basis: Arc<RequestCompilerInputs>,
+    groups: Vec<PendingCertifiedGroup>,
+    bindings: BTreeMap<NativeGroupKey, crate::artifact_inventory::NativeGroupBinding>,
+}
+
+impl DemandCertifiedGroups {
+    pub(crate) fn belongs_to_source(
+        &self,
+        source: &Arc<crate::artifact_inventory::CompilerSourceSupport>,
+    ) -> bool {
+        Arc::ptr_eq(&self.basis.source_support, source)
+    }
+
+    pub(crate) fn groups(&self) -> &[PendingCertifiedGroup] {
+        &self.groups
+    }
+
+    pub(crate) fn bindings(
+        &self,
+    ) -> &BTreeMap<NativeGroupKey, crate::artifact_inventory::NativeGroupBinding> {
+        &self.bindings
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DemandNativeInputsError {
     #[error("demanded native inputs belong to another cold compiler owner")]
@@ -2056,6 +2087,19 @@ impl DemandNativeInputs {
         self.work
     }
 
+    pub(crate) fn semantic_source_support(
+        &self,
+        groups: &DemandCertifiedGroups,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Arc<crate::artifact_inventory::CompilerSourceSupport>, CompileError> {
+        self.cold.source_support.project_demanded_inputs(
+            &self.demand,
+            &self.native_selection.availability,
+            groups,
+            operation,
+        )
+    }
+
     /// Authenticate only the input groups named by this completion, through
     /// their existing scoped offers. Receipt names restrict issued permission;
     /// they do not issue an original or choose a historical carrier by name.
@@ -2063,7 +2107,7 @@ impl DemandNativeInputs {
         &self,
         receipt: &crate::certified_products::CertifiedReceipt,
         validation: &mut PackageInterfaceValidation,
-    ) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
+    ) -> Result<DemandCertifiedGroups, CompileError> {
         use crate::certified_products::{ProductOrigin, ReceiptImportOwner};
         let operation = validation.inventory.clone();
         let budget = NativeDemandBudget(Some(&operation));
@@ -2102,7 +2146,8 @@ impl DemandNativeInputs {
             if module_version.is_none() && produced.contains(&(unit, module)) {
                 continue;
             }
-            budget.strings(unit.len().saturating_add(module.len()))?;
+            // The shared choice owner also constructs one temporary owner key.
+            budget.strings(unit.len().saturating_add(module.len()).saturating_mul(2))?;
             let owner = identity(unit, module);
             let role = self
                 .demand
@@ -2124,7 +2169,6 @@ impl DemandNativeInputs {
             if native_owner.unit != *unit
                 || native_owner.module != *module
                 || module_version.as_ref() != Some(&native_owner.module_version)
-                || !row.permits(*original_ordinal)
             {
                 return Err(failure(
                     "receipt native group differs from its issued owner or permission",
@@ -2159,6 +2203,11 @@ impl DemandNativeInputs {
                 candidates,
             )
             .map_err(compiler_evidence_failure)?;
+            if !row.permits(*original_ordinal) {
+                return Err(failure(
+                    "receipt native group exceeds its issued permission",
+                ));
+            }
             let mut candidates = candidates.into_iter();
             let binding = candidates
                 .next()
@@ -2191,6 +2240,7 @@ impl DemandNativeInputs {
             }
         }
         let mut selected = BTreeSet::new();
+        let mut bindings = BTreeMap::new();
         let mut available = BTreeMap::new();
         for (key, binding) in roots {
             budget.checkpoint()?;
@@ -2234,20 +2284,35 @@ impl DemandNativeInputs {
                     }
                     if !selected.contains(&required) {
                         budget.reserve::<(NativeGroupKey, [usize; 4])>(1)?;
+                        budget.reserve::<(
+                            NativeGroupKey,
+                            crate::artifact_inventory::NativeGroupBinding,
+                            [usize; 4],
+                        )>(1)?;
                         selected.insert(required);
+                        bindings.insert(required, group);
+                    } else if bindings.get(&required) != Some(&group) {
+                        return Err(failure(
+                            "receipt closures require competing scoped native bindings",
+                        ));
                     }
                 }
             }
         }
         // The empty slice is only an absent reuse memo. This existing issuer
         // returns every selected authenticated group as the final authority.
-        certify_selected_owned_products_in_context_with_validation(
+        let groups = certify_selected_owned_products_in_context_with_validation(
             &available,
             &[],
             &selected,
             validation,
         )
-        .map_err(compiler_evidence_failure)
+        .map_err(compiler_evidence_failure)?;
+        Ok(DemandCertifiedGroups {
+            basis: Arc::clone(&self.cold),
+            groups,
+            bindings,
+        })
     }
 }
 
@@ -8212,7 +8277,10 @@ impl ProductInputFacts<'_> {
         }
         let is_selected = |unit: &str, module: &str| {
             selected.contains(&(unit, module))
-                || (world && context.source_lexical_node(&identity(unit, module)).is_some())
+                || (world
+                    && context
+                        .source_lexical_node(&identity(unit, module))
+                        .is_some())
         };
         let source_selection_roots = edges
             .iter()
@@ -8492,7 +8560,9 @@ impl DecodedWorldSourceReceipt<'_> {
             crate::host_work::checkpoint()?;
             charge(operation.charge(1))?;
             if !roles.contains_key(&claim.owner) {
-                return Err(failure("world source claim lacks its primary compiler role"));
+                return Err(failure(
+                    "world source claim lacks its primary compiler role",
+                ));
             }
             insert(&mut roots, &claim.owner)?;
             insert(&mut native_roots, &claim.owner)?;
@@ -8584,12 +8654,8 @@ pub(crate) fn decode_world_source_receipt<'a>(
     let receipt_sha = common_files
         .get(receipt_relative)
         .ok_or_else(|| failure("world source receipt is not a named common output"))?;
-    let receipt = captured_world_source_file(
-        receipt_name,
-        *receipt_sha,
-        common_files,
-        captured_files,
-    )?;
+    let receipt =
+        captured_world_source_file(receipt_name, *receipt_sha, common_files, captured_files)?;
     let limit =
         crate::certified_products::COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_bytes);
     let value = operation
@@ -8605,7 +8671,9 @@ pub(crate) fn decode_world_source_receipt<'a>(
         || world_source_digest(&header[3])? != *binding.reservation.admission_digest()
         || string(&header[4])? != binding.segment.digest()
     {
-        return Err(failure("world source receipt belongs to another preparation"));
+        return Err(failure(
+            "world source receipt belongs to another preparation",
+        ));
     }
     let aliases = decode_world_source_aliases(&header[10], operation)?;
     let resolve = |value: &Value| -> Result<(PathBuf, [u8; 32], Arc<[u8]>), CompileError> {
@@ -8628,7 +8696,9 @@ pub(crate) fn decode_world_source_receipt<'a>(
     operation
         .charge(source_bytes.len())
         .map_err(|error| compiler_evidence_failure(error.into()))?;
-    let source = std::str::from_utf8(&source_bytes).map_err(failure)?.to_owned();
+    let source = std::str::from_utf8(&source_bytes)
+        .map_err(failure)?
+        .to_owned();
     let source = decode_compilation_source_payload(
         output_root.join(source_relative),
         source_sha256,
@@ -8699,20 +8769,28 @@ fn captured_world_source_file(
         || name.contains('\0')
         || name.split('/').any(|part| matches!(part, "" | "." | ".."))
     {
-        return Err(failure("world source file reference is not canonical relative"));
+        return Err(failure(
+            "world source file reference is not canonical relative",
+        ));
     }
     let path = Path::new(name);
     let Some((issued_name, issued_sha)) = common_files.get_key_value(path) else {
-        return Err(failure("world source reference is not a named common output"));
+        return Err(failure(
+            "world source reference is not a named common output",
+        ));
     };
     if issued_name.as_os_str() != path.as_os_str() || *issued_sha != digest {
-        return Err(failure("world source reference differs from its named output"));
+        return Err(failure(
+            "world source reference differs from its named output",
+        ));
     }
     let file = captured_files
         .get(path)
         .ok_or_else(|| failure("world source named output has no captured bytes"))?;
     if *file.sha256() != digest {
-        return Err(failure("world source captured bytes differ from their named output"));
+        return Err(failure(
+            "world source captured bytes differ from their named output",
+        ));
     }
     Ok(Arc::clone(file.bytes()))
 }
@@ -18489,6 +18567,7 @@ mod tests {
             let groups = result.unwrap();
             assert_eq!(
                 groups
+                    .groups()
                     .iter()
                     .map(|group| (
                         group.owner().module.as_str(),
@@ -21772,11 +21851,9 @@ mod tests {
         });
         assert!(decode_world_source_aliases(&aliases, &exhausted).is_err());
         assert!(decode_world_source_aliases(&Value::Null, &operation).is_err());
-        assert!(decode_world_source_aliases(
-            &Value::Array(vec![Value::Null]),
-            &operation,
-        )
-        .is_err());
+        assert!(
+            decode_world_source_aliases(&Value::Array(vec![Value::Null]), &operation,).is_err()
+        );
     }
 
     #[test]
@@ -21795,7 +21872,10 @@ mod tests {
             let error = captured_world_source_file(alias, [7; 32], &named, &captured)
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("not canonical relative"), "{alias:?}: {error}");
+            assert!(
+                error.contains("not canonical relative"),
+                "{alias:?}: {error}"
+            );
         }
         let error = captured_world_source_file("other.hs", [7; 32], &named, &captured)
             .unwrap_err()
