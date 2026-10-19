@@ -2678,6 +2678,34 @@ impl RunStatus {
         if self.host_generation != host_generation || self.actors.as_ref() == Some(&actors) {
             return false;
         }
+        let root = match self.phase {
+            RunPhase::Ready { root_actor, .. } | RunPhase::EmbeddedReady { root_actor, .. } => {
+                Some(root_actor)
+            }
+            _ => None,
+        };
+        if let Some(root) = root {
+            if let Some(terminal) = actors.iter().find_map(|actor| {
+                let origin = actor.output_origin.as_ref()?;
+                if origin.run != self.run_id
+                    || origin.native_actor.get() != root.id.0
+                    || origin.incarnation.get() != root.incarnation.0
+                {
+                    return None;
+                }
+                actor.terminal.as_ref().filter(|terminal| {
+                    matches!(
+                        terminal.kind,
+                        harness::server::browser_contract::HostActorExitKind::Failed
+                            | harness::server::browser_contract::HostActorExitKind::Interrupted
+                    )
+                })
+            }) {
+                self.phase = RunPhase::Failed {
+                    error: terminal.summary.clone(),
+                };
+            }
+        }
         self.actors = Some(actors);
         true
     }
@@ -4645,6 +4673,57 @@ mod tests {
         let restored = decode_run_status(&serde_json::to_vec(&status).unwrap()).unwrap();
         assert_eq!(restored.actors, Some(vec![lost]));
         assert!(matches!(restored.phase, RunPhase::EmbeddedReady { .. }));
+    }
+
+    #[test]
+    fn root_terminal_failure_updates_persisted_phase_and_preserves_cause() {
+        let root = ActorRef::first(exomonad_actor::ActorId(7));
+        for (run, native, incarnation, kind, fails_run) in [
+            ("run-1", "7", "1", "failed", true),
+            ("run-1", "7", "1", "interrupted", true),
+            ("run-1", "8", "1", "failed", false),
+            ("run-1", "7", "2", "failed", false),
+            ("another-run", "7", "1", "failed", false),
+            ("run-1", "7", "1", "cancelled", false),
+            ("run-1", "7", "1", "completed", false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("status.json");
+            let status = RunStatus::new(
+                "run-1",
+                directory.path(),
+                "test",
+                test_agent_defaults(),
+                RunPhase::EmbeddedReady {
+                    root_actor: root,
+                    browser_address: "127.0.0.1:1234".parse().unwrap(),
+                },
+            )
+            .at_generation(2);
+            write_status(&path, &status).unwrap();
+            let observed: harness::server::HostActorProjection =
+                serde_json::from_value(serde_json::json!({
+                    "identity":{"run":run,"actor":"/root","incarnation":incarnation},
+                    "outputOrigin":{"run":run,"nativeActor":native,"incarnation":incarnation},
+                    "parent":null,"kind":"model","lifecycle":"lost","modelConversation":"/root",
+                    "terminal":{"kind":kind,"summary":"original terminal cause"}
+                }))
+                .unwrap();
+            assert!(!write_actor_observations(&path, "run-1", 1, vec![observed.clone()]).unwrap());
+            assert!(write_actor_observations(&path, "run-1", 2, vec![observed.clone()]).unwrap());
+            let retained = decode_run_status(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(retained.actors, Some(vec![observed]));
+            if fails_run {
+                assert_eq!(
+                    retained.phase,
+                    RunPhase::Failed {
+                        error: "original terminal cause".into()
+                    }
+                );
+            } else {
+                assert!(matches!(retained.phase, RunPhase::EmbeddedReady { .. }));
+            }
+        }
     }
 
     #[test]
