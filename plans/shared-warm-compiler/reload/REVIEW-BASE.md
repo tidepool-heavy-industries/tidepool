@@ -6,8 +6,9 @@ Current cumulative source review: campaign base
 `5b74c2f1fe010c5c343e0c6f331d54328fbd5090` through exact repair candidate
 `9bb4c1eb4bf5a0775dae68beb119446bb34d06b9`, read from committed objects in
 `/srv/swarm/checkouts/tidepool-shared-warm-reload-admission-20261019`.
-Disposition: BLOCKED on bootstrap continuation/native-END custody remaining
-outside CompilerWorkTicket, specified in the final checkpoint below. The fe3
+Disposition: BLOCKED on bootstrap continuation/native-END custody and the
+immutable actor-start facade compiler claim that drops before outer END,
+specified in the final checkpoint and adjacent producer audit below. The fe3
 runtime generation-claim loss, ownership enum and fixture lease findings have
 source repairs in this candidate. No source acceptance or integration readiness
 is issued. Compile/test execution remains 0: root's shared native lane is held
@@ -928,7 +929,119 @@ behavioral acceptance evidence after admitted native compilation.
 Verification: git diff --check base..9bb exits 0. Native compilation and test
 execution remain 0; source review is not an executed pass. Required R1
 registration successors remain HELD and complete-R1 acceptance remains blocked.
-Awaited event: reload supervisor authorizes the bounded remaining bootstrap
-END repair and leaf supplies its exact stable candidate; parent supplies
-admitted compile/focused evidence when the lane is available. Next action is
+Campaign has approved the bounded lazy source hook repair described below.
+Awaited event: admission leaf supplies its exact stable implementation candidate;
+parent supplies admitted compile/focused evidence when the lane is available. Next action is
 cumulative exact repair review including joined claim/END controls. No polling.
+
+
+### Approved lazy source hook: bounded oracle and producer guidance
+
+Campaign authorized the smaller scoped hook bridge for the remaining bootstrap
+END counterexample. No new implementation was reviewed in this activation:
+9bb remains the exact reviewed candidate and remains blocked pending repair.
+
+Owning contract: actual PersistentSession::admit_source_work_in invokes the
+scoped hook before source allocation/mutation. Only the existing
+ResidentMachineAccess::run_source_transaction installs it. The hook captures
+the original actor SourceDependency and the SAME CompilerWorkTicket claim
+collection, earns and stores that source claim once for the actual scoped
+compiler operation, and ties clean/unknown/abandoned settlement to actual END.
+Pure continuation never invokes this hook. The concrete RuntimeSourceAdmission
+gate remains authoritative; hook absence supplies no bypass. No registry,
+foreign authority trait, new gate, or runtime-to-actor dependency is needed.
+
+Review/test requirements sent to the leaf:
+
+- Invoke hook admission before the current source_claim.is_some early return,
+  so a previously earned runtime claim cannot bypass a newly installed scoped
+  source owner. Mark the per-operation once-success only after the original
+  dependency's affine claim is earned and stored in the real ticket collection.
+  Failed admission has no source side effect and supplies no success marker.
+- Preserve previous hook, once-state and runtime claim ownership across nested
+  lexical scopes and unwind. Each actual transaction must own its own once
+  state. Compiler transaction scopes themselves continue to reject nesting
+  under the existing extract-cmd owner contract; do not invent nested END.
+- Run the smallest joined control through actual with_continuation_machine or
+  its production run_source_transaction composition under a real checkout.
+  Actual bind/retraction must earn the hook claim; the actual ticket's existing
+  aggregate close sink reports Unconfirmed; generation fence/world admission
+  then retains uncertainty. Cover selected Generation, root/LLM Bootstrap(None)
+  and typed Bootstrap(Some(parentA)). The typed case must preserve own-world
+  and parent uncertainty, and clean/NotStarted must release both normally.
+- Pair with pure continuation after source refusal: no hook invocation, no new
+  source claim and successful receipt/status progress. Pair with callback hook
+  refusal before a source allocation, binding count or effect observer changes.
+  Retain unwind/abandonment controls through the same wrapper. Component tests
+  which separately push a ticket claim and exercise runtime transfer cannot
+  detect missing production composition and do not replace this joined control.
+
+Context-gate versus target-scope question remains qualified, not a confirmed
+finding. Actual replacement::stage_replacement_inner calls
+CallbackExecution::transferred with successor placement while preserving old
+issuing dependency A; map_source and run_receiver use that mixed context.
+However the replacement target scope begins raw/unleased, and captured/private
+scope retention normally preserves the original source chain. No inspected
+actual source action was shown to target a DIFFERENT selected own-generation
+gate while carrying only A's context. Therefore this activation requests no
+new recipient/parent enclosure prerequisite and no speculative target-gate
+repair. A future concrete target-scope counterexample should retain its actual
+issuer, ownership and operation history before changing applicable authority.
+
+Status: read-only guidance complete; source freeze applies until leaf supplies
+an exact committed repair candidate. No product edits, builds or tests. Only
+this authorized report was updated; whitespace check passes. Awaited producer:
+admission leaf's exact lazy-hook/joined-control checkpoint, followed by reload
+supervisor's exact-candidate review activation and admitted native evidence.
+Next action: cumulative source review of hook timing, once-state and actual END
+custody. Yield without periodic polling.
+
+
+### Adjacent immutable facade compiler producer: confirmed END custody gap
+
+Parent requested a concrete source audit of start capture while the lazy hook
+repair is pending. Exact reviewed source remains 9bb; no WIP acceptance.
+
+Confirmed production chain: resident_workbench.rs::capture_boundary_mode enters
+with_continuation_machine (10189 in 9bb). ForkAgent dispatch calls
+ResidentActorStart::capture_spawn (10314); ActorStartWith/ActorReplaceWith calls
+ResidentActorStart::capture -> capture_decoded (10458 and 10514). Both capture
+owners earn only a LOCAL `_source_claim` and invoke materialize_entry_facades.
+That helper takes &ResidentSession, reads its immutable SessionCompileView,
+and calls surface.materialize (start.rs:524) for actual local exports or
+MaterializedFacade::select_exact_exports (527) for inherited narrowed exports.
+
+Runtime session/facade.rs::ExactExportSurface::materialize (103) invokes
+issue_projection with the certified baseline. MaterializedFacade::select_exact_exports
+(213) invokes issue_projection when the selected exports narrow the original.
+These are actual compiler producers. They do not enter mutable
+PersistentSession::admit_source_work_in, and the immutable SessionCompileView
+does not carry an actual compiler-END claim. The capture function drops its
+local source claim on return, before the enclosing continuation ticket settles
+native END. Consequently an unconfirmed projection compile can lose its source
+obligation, including a bootstrap world's own obligation. A new hook installed
+only at mutation entry points does not cover this producer.
+
+This is the same approved source-claim/native-END failure category, not a
+request to expand force or resource registration. Parent and leaf received
+exact paths. Bounded alternatives are to invoke the SAME scoped hook at actual
+immutable facade compiler issuance through its existing runtime owner, or to
+transfer the real capture claim explicitly to the SAME existing compiler
+ticket. Either must retain normal refusal-before-effects and own-world plus
+external prerequisite uncertainty; another local precheck is insufficient.
+Parent owns the choice. No new authority trait, registry or independent gate
+is implied.
+
+Required joined history: drive actual ActorStart/ForkAgent capture carrying at
+least one real local facade or an inherited facade requiring narrowing, observe
+actual projection compilation, report aggregate native-END Unconfirmed and
+verify original world/generation remains uncertain. Empty rooted sets and
+unchanged inherited selections are separate no-compiler controls, and cannot
+certify coverage of this producer. Pair clean END and cancelled/abandoned
+capture outcomes, preserving actual child preparation/custody ownership.
+
+Status: confirmed source blocker on 9bb and a required coverage condition for
+the pending repair, not an executed regression. Awaited event: reload
+supervisor chooses bounded facade hook/handoff seam, leaf includes it in the
+exact stable lazy-hook repair checkpoint, then explicit exact review activation.
+No code/build/test execution and no periodic polling.
