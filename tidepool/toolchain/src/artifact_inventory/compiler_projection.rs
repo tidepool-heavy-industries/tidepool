@@ -3722,6 +3722,39 @@ mod tests {
     }
 
     #[test]
+    fn native_offer_facts_equality_survives_reversed_live_order() {
+        let entries = decision_affinity_entries();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), entries)
+            .unwrap();
+        let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+        assert!(source.native_offers.len() > 1);
+        let reversed = source
+            .rebuild(
+                source.projection.clone(),
+                source.artifacts.clone(),
+                source.native_offers.iter().rev().cloned(),
+            )
+            .unwrap();
+        assert_ne!(source.native_offers, reversed.native_offers);
+        assert_eq!(source.native_offer_facts, reversed.native_offer_facts);
+        assert_eq!(source.projection, reversed.projection);
+        assert_eq!(source.artifacts, reversed.artifacts);
+        assert_eq!(source.native_availability, reversed.native_availability);
+        assert_eq!(source.selected, reversed.selected);
+        assert_eq!(source.input_decisions, reversed.input_decisions);
+        assert_eq!(source.native_fact_owner, reversed.native_fact_owner);
+        crate::exact_context::take_native_fact_work();
+        assert_eq!(source, reversed);
+        assert_eq!(
+            crate::exact_context::take_native_fact_work(),
+            crate::exact_context::NativeFactWork::default()
+        );
+    }
+
+    #[test]
     fn ordinary_native_fact_successors_encode_only_changed_facts() {
         use crate::exact_context::{take_native_fact_work, NativeFactWork};
         for unrelated in [0, 16, 128] {
