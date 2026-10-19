@@ -205,7 +205,7 @@ class BuckProfileConfiguration(unittest.TestCase):
         }
         namespace = {
             "read_root_config": lambda section, key, default=None: paths.get(key, "/pinned/" + key),
-            "glob": lambda _: [], "JEV_SOURCE_PATHS": [],
+            "glob": lambda _: [], "JEV_SOURCE_PATHS": [], "WORKSPACE_SOURCE_PATHS": [],
         }
         for name in ("NATIVE_LINT_ALLOW", "NATIVE_LINT_WARN", "NATIVE_LINT_DENY", "NATIVE_LINT_FORBID"):
             namespace[name] = []
