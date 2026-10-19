@@ -17159,7 +17159,7 @@ mod tests {
             .source_support(&projection.snapshot_roles().keys().cloned().collect())
             .unwrap();
         assert_eq!(issued.projection(), &projection);
-        let mut narrowed = context.as_ref().clone().rebuild(|facts| {
+        let narrowed = context.as_ref().clone().rebuild(|facts| {
             facts.compiler_support = issued;
             facts.lexical = facts.lexical.replace(lexical.clone()).unwrap();
         });
