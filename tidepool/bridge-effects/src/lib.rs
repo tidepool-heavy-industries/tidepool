@@ -432,14 +432,14 @@ mod context_constructor_tests {
                 policy,
                 force,
             };
-            let encoded = options.to_value(&table).unwrap();
+            let mut encoded = options.to_value(&table).unwrap();
             assert_eq!(RlOptions::from_value(&encoded, &table).unwrap(), options);
-            let HaskellValue::Con(id, mut fields) = encoded else {
+            let HaskellValue::Con(_, fields) = &mut encoded else {
                 panic!("reload options must encode as their declared constructor");
             };
             fields.pop();
             assert!(
-                RlOptions::from_value(&HaskellValue::Con(id, fields), &table).is_err(),
+                RlOptions::from_value(&encoded, &table).is_err(),
                 "the prior options arity cannot silently authorize a new force decision"
             );
         }

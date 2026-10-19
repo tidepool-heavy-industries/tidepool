@@ -16602,6 +16602,7 @@ pub(crate) mod request_tests {
         let session_id = tidepool_repr::SessionId(44_201);
         let (session, _root) = bare_session_at(session_id);
         let context = crate::ActorSessionContext {
+            source_dependency: generation_admission::SourceDependency::Unqualified,
             actor: crate::ActorRef::first(crate::ActorId(1)),
             placement: crate::ActorPlacement {
                 session: session_id,
