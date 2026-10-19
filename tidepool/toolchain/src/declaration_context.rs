@@ -5828,8 +5828,59 @@ impl<'a> ExactRequestIdentity<'a> {
     }
 }
 
+/// The actual preparation owners retained by a world source admission. This
+/// binding alone grants neither source selection nor product authority.
+#[derive(Clone, Debug)]
+pub(crate) struct WorldSourceCompilationBinding {
+    reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
+    segment: Arc<crate::checked_cell::CheckedTypedSegmentPlan>,
+}
+
+impl WorldSourceCompilationBinding {
+    pub(crate) fn new(
+        reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
+        segment: Arc<crate::checked_cell::CheckedTypedSegmentPlan>,
+    ) -> Self {
+        Self {
+            reservation,
+            segment,
+        }
+    }
+}
+
+impl PartialEq for WorldSourceCompilationBinding {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.reservation, &other.reservation)
+            && Arc::ptr_eq(&self.segment, &other.segment)
+    }
+}
+
+impl Eq for WorldSourceCompilationBinding {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SourceCompilationBinding<'a> {
+    Exact(ExactRequestIdentity<'a>),
+    World(WorldSourceCompilationBinding),
+}
+
+impl SourceCompilationBinding<'_> {
+    fn into_owned(self) -> SourceCompilationBinding<'static> {
+        match self {
+            Self::Exact(identity) => SourceCompilationBinding::Exact(identity.into_owned()),
+            Self::World(binding) => SourceCompilationBinding::World(binding),
+        }
+    }
+
+    fn retained_text_bytes(&self) -> usize {
+        match self {
+            Self::Exact(identity) => identity.request_sha256.len(),
+            Self::World(binding) => binding.segment.digest().len(),
+        }
+    }
+}
+
 pub(crate) struct ExactSourceAdmission {
-    request_identity: ExactRequestIdentity<'static>,
+    compilation_binding: SourceCompilationBinding<'static>,
     witness: ExactSourceWitness,
     evidence: Arc<crate::cache::CompletedSourceEvidence>,
     evidence_bytes: Vec<u8>,
@@ -6239,7 +6290,9 @@ impl ExactSourceAdmission {
         &self,
         request: &ExactCompilationRequest,
     ) -> Result<(), CompileError> {
-        if self.request_identity != ExactRequestIdentity::from_request(request) {
+        if self.compilation_binding
+            != SourceCompilationBinding::Exact(ExactRequestIdentity::from_request(request))
+        {
             return Err(failure("completed source has another physical request"));
         }
         Ok(())
@@ -7385,7 +7438,7 @@ impl<'a> ExactReceiptAdmission<'a> {
         )?;
         ProductInputFacts::from_exact(self.physical, self.inputs, self.program, self.groups)
             .admit_source_facts(
-                ExactRequestIdentity::from_request(self.physical),
+                SourceCompilationBinding::Exact(ExactRequestIdentity::from_request(self.physical)),
                 decoded,
                 planned,
                 context,
@@ -7397,7 +7450,7 @@ impl<'a> ExactReceiptAdmission<'a> {
 impl ProductInputFacts<'_> {
     fn admit_source_facts(
         &self,
-        request_identity: ExactRequestIdentity<'_>,
+        compilation_binding: SourceCompilationBinding<'_>,
         decoded: DecodedExactCompilationReceipt,
         planned: Option<&ExactModuleIdentity>,
         context: &ExactDeclarationContext,
@@ -7658,10 +7711,10 @@ impl ProductInputFacts<'_> {
         }
         validation
             .inventory
-            .charge(request_identity.request_sha256.len())
+            .charge(compilation_binding.retained_text_bytes())
             .map_err(|error| compiler_evidence_failure(error.into()))?;
         Ok(ExactSourceAdmission {
-            request_identity: request_identity.into_owned(),
+            compilation_binding: compilation_binding.into_owned(),
             witness: ExactSourceWitness {
                 source_path,
                 source_sha256,
@@ -7697,6 +7750,140 @@ struct ExactReceiptImport {
     module: String,
     boot: bool,
     unit: String,
+}
+
+/// Source facts decoded from the actual preparation's captured output owner.
+/// Semantic admission still requires its issued input and source selections.
+pub(crate) struct DecodedWorldSourceReceipt {
+    binding: WorldSourceCompilationBinding,
+    source: DecodedExactCompilationReceipt,
+    package_imports_path: PathBuf,
+    package_imports: Arc<[u8]>,
+}
+
+impl DecodedWorldSourceReceipt {
+    pub(crate) fn package_imports(&self) -> (&Path, &Arc<[u8]>) {
+        (&self.package_imports_path, &self.package_imports)
+    }
+}
+
+pub(crate) fn decode_world_source_receipt(
+    binding: WorldSourceCompilationBinding,
+    output_root: &Path,
+    receipt_relative: &Path,
+    common_files: &BTreeMap<PathBuf, [u8; 32]>,
+    captured_files: &BTreeMap<PathBuf, crate::compiler_world::WorldOutputFile>,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<DecodedWorldSourceReceipt, CompileError> {
+    use sha2::Digest;
+    if !output_root.is_absolute() {
+        return Err(failure("world source output owner is not absolute"));
+    }
+    let receipt_name = receipt_relative
+        .to_str()
+        .ok_or_else(|| failure("world source receipt name is not UTF-8"))?;
+    let receipt_sha = common_files
+        .get(receipt_relative)
+        .ok_or_else(|| failure("world source receipt is not a named common output"))?;
+    let receipt = captured_world_source_file(
+        receipt_name,
+        *receipt_sha,
+        common_files,
+        captured_files,
+    )?;
+    let limit =
+        crate::certified_products::COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_bytes);
+    let value = operation
+        .decode_value(&receipt, limit)
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    operation
+        .charge_value_copies(&value, 3)
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    let header = row(&value, 10)?;
+    let plan = binding.reservation.plan();
+    let plan_receipt_sha: [u8; 32] = sha2::Sha256::digest(plan.receipt()).into();
+    if string(&header[0])? != "TPCWSOURCE1"
+        || world_source_digest(&header[1])? != *plan.world().logical_id()
+        || world_source_digest(&header[2])? != plan_receipt_sha
+        || world_source_digest(&header[3])? != *binding.reservation.admission_digest()
+        || string(&header[4])? != binding.segment.digest()
+    {
+        return Err(failure("world source receipt belongs to another preparation"));
+    }
+    let resolve = |value: &Value| -> Result<(PathBuf, [u8; 32], Arc<[u8]>), CompileError> {
+        let reference = row(value, 2)?;
+        let name = string(&reference[0])?;
+        let digest = world_source_digest(&reference[1])?;
+        let bytes = captured_world_source_file(name, digest, common_files, captured_files)?;
+        Ok((PathBuf::from(name), digest, bytes))
+    };
+    let (source_relative, source_sha256, source_bytes) = resolve(&header[5])?;
+    let (dependencies_relative, _, evidence_bytes) = resolve(&header[6])?;
+    let (packages_relative, _, package_imports) = resolve(&header[7])?;
+    if dependencies_relative != Path::new("dependencies.json")
+        || packages_relative != Path::new("module-package-imports.cbor")
+        || source_relative == dependencies_relative
+        || source_relative == packages_relative
+    {
+        return Err(failure("world source receipt names another common output"));
+    }
+    operation
+        .charge(source_bytes.len())
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    let source = std::str::from_utf8(&source_bytes).map_err(failure)?.to_owned();
+    let source = decode_compilation_source_payload(
+        output_root.join(source_relative),
+        source_sha256,
+        source,
+        &evidence_bytes,
+        &header[8],
+        &header[9],
+        operation,
+    )?;
+    Ok(DecodedWorldSourceReceipt {
+        binding,
+        source,
+        package_imports_path: output_root.join(packages_relative),
+        package_imports,
+    })
+}
+
+fn world_source_digest(value: &Value) -> Result<[u8; 32], CompileError> {
+    match value {
+        Value::Bytes(bytes) => bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| failure("world source digest has another length")),
+        _ => Err(failure("world source digest is not bytes")),
+    }
+}
+
+fn captured_world_source_file(
+    name: &str,
+    digest: [u8; 32],
+    common_files: &BTreeMap<PathBuf, [u8; 32]>,
+    captured_files: &BTreeMap<PathBuf, crate::compiler_world::WorldOutputFile>,
+) -> Result<Arc<[u8]>, CompileError> {
+    if name.is_empty()
+        || name.contains('\0')
+        || name.split('/').any(|part| matches!(part, "" | "." | ".."))
+    {
+        return Err(failure("world source file reference is not canonical relative"));
+    }
+    let path = Path::new(name);
+    let Some((issued_name, issued_sha)) = common_files.get_key_value(path) else {
+        return Err(failure("world source reference is not a named common output"));
+    };
+    if issued_name.as_os_str() != path.as_os_str() || *issued_sha != digest {
+        return Err(failure("world source reference differs from its named output"));
+    }
+    let file = captured_files
+        .get(path)
+        .ok_or_else(|| failure("world source named output has no captured bytes"))?;
+    if *file.sha256() != digest {
+        return Err(failure("world source captured bytes differ from their named output"));
+    }
+    Ok(Arc::clone(file.bytes()))
 }
 
 #[cfg(test)]
@@ -7780,7 +7967,7 @@ fn decode_exact_compilation_receipt_with_operation(
         source_path,
         source_sha256,
         source,
-        string(&header[7])?.as_bytes().to_vec(),
+        string(&header[7])?.as_bytes(),
         &header[8],
         &header[9],
         operation,
@@ -7793,7 +7980,7 @@ fn decode_compilation_source_payload(
     source_path: PathBuf,
     source_sha256: [u8; 32],
     source: String,
-    evidence_bytes: Vec<u8>,
+    evidence_bytes: &[u8],
     import_rows: &Value,
     source_selection: &Value,
     operation: &tidepool_repr::execution_schema::InventoryOperation,
@@ -7806,6 +7993,7 @@ fn decode_compilation_source_payload(
                 .ok_or_else(|| failure("source evidence accounting overflow"))?,
         )
         .map_err(|error| compiler_evidence_failure(error.into()))?;
+    let evidence_bytes = evidence_bytes.to_vec();
     let evidence: crate::cache::DependencyEvidence =
         serde_json::from_slice(&evidence_bytes).map_err(failure)?;
     if evidence.version != 4 {
@@ -18671,6 +18859,38 @@ mod tests {
         std::fs::write(receipt.parent().unwrap().join("source.hs"), source).unwrap();
         std::fs::write(directory.path().join("A.hs"), b"changed original").unwrap();
         assert!(request.validate_receipt(&receipt, None, &context).is_err());
+    }
+
+    #[test]
+    fn world_source_named_references_refuse_aliases_and_unobserved_bytes() {
+        let named = BTreeMap::from([(PathBuf::from("source.hs"), [7; 32])]);
+        let captured = BTreeMap::new();
+        for alias in [
+            "",
+            "/source.hs",
+            "./source.hs",
+            "a/../source.hs",
+            "a//source.hs",
+            "source.hs/",
+            "source.hs\0",
+        ] {
+            let error = captured_world_source_file(alias, [7; 32], &named, &captured)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("not canonical relative"), "{alias:?}: {error}");
+        }
+        let error = captured_world_source_file("other.hs", [7; 32], &named, &captured)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a named common output"));
+        let error = captured_world_source_file("source.hs", [8; 32], &named, &captured)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("differs from its named output"));
+        let error = captured_world_source_file("source.hs", [7; 32], &named, &captured)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no captured bytes"));
     }
 
     #[test]
