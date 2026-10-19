@@ -612,6 +612,117 @@ fn selected_lookup_authenticates_only_its_route_and_preserves_refusals() {
 }
 
 #[test]
+fn publication_native_descriptor_refuses_old_version_and_missing_map_roots() {
+    // This actual maintained owner supplies immutable descriptor data only.
+    // No decoded fact below is bound to an acquired native view.
+    let support = crate::artifact_inventory::CompilerSourceSupport::empty();
+    let facts = support.native_fact_owner();
+    let store = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&store);
+    let valid_root = writer.materialize_publication_native(facts).unwrap();
+    install(&store, writer.finish().unwrap());
+    assert_eq!(valid_root, facts.commitment());
+    for (cid, bytes) in facts.receipt.frontier.blocks() {
+        assert_eq!(store.get(cid).unwrap().as_deref(), Some(bytes.as_ref()));
+        verify_block(cid, bytes).unwrap();
+    }
+    let descriptor: PublicationNativeDescriptor = read_value(&store, &valid_root).unwrap();
+    assert_eq!(descriptor.version, 2);
+    for root in [
+        &descriptor.roles,
+        &descriptor.offers,
+        &descriptor.native_availability,
+        &descriptor.input_decisions,
+    ] {
+        let bytes = store.get(root.cid()).unwrap().unwrap();
+        verify_block(root.cid(), &bytes).unwrap();
+    }
+    let restored = hydrate_publication_native(&SnapshotHydrator::new(&store), &valid_root).unwrap();
+    assert_eq!(restored.commitment(), valid_root);
+    assert_eq!(restored.roles, facts.roles);
+    assert_eq!(restored.offers, facts.offers);
+    assert_eq!(restored.native_availability, facts.native_availability);
+    assert_eq!(restored.input_decisions, facts.input_decisions);
+
+    #[derive(Clone, Serialize)]
+    struct DescriptorData {
+        version: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        roles: Option<SnapshotMapRoot>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        offers: Option<SnapshotMapRoot>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        native_availability: Option<SnapshotMapRoot>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_decisions: Option<SnapshotMapRoot>,
+    }
+    let valid = DescriptorData {
+        version: 2,
+        roles: Some(descriptor.roles),
+        offers: Some(descriptor.offers),
+        native_availability: Some(descriptor.native_availability),
+        input_decisions: Some(descriptor.input_decisions),
+    };
+    let mut writer = Materializer::new(&store);
+    assert_eq!(writer.materialize_value(&valid).unwrap(), valid_root);
+    install(&store, writer.finish().unwrap());
+    for (label, data) in [
+        (
+            "old version",
+            DescriptorData {
+                version: 1,
+                ..valid.clone()
+            },
+        ),
+        (
+            "roles",
+            DescriptorData {
+                roles: None,
+                ..valid.clone()
+            },
+        ),
+        (
+            "offers",
+            DescriptorData {
+                offers: None,
+                ..valid.clone()
+            },
+        ),
+        (
+            "native_availability",
+            DescriptorData {
+                native_availability: None,
+                ..valid.clone()
+            },
+        ),
+        (
+            "input_decisions",
+            DescriptorData {
+                input_decisions: None,
+                ..valid.clone()
+            },
+        ),
+    ] {
+        let mut writer = Materializer::new(&store);
+        let changed_root = writer.materialize_value(&data).unwrap();
+        install(&store, writer.finish().unwrap());
+        assert_ne!(
+            changed_root, valid_root,
+            "the {label} mutation changes actual bytes"
+        );
+        let bytes = store.get(&changed_root).unwrap().unwrap();
+        verify_block(&changed_root, &bytes).unwrap();
+        assert!(
+            matches!(
+                hydrate_publication_native(&SnapshotHydrator::new(&store), &changed_root),
+                Err(SnapshotError::Malformed(_))
+            ),
+            "the {label} descriptor must fail its format, not CID integrity"
+        );
+    }
+}
+
+#[test]
 fn old_selection_and_context_versions_are_rejected() {
     let store = MemoryBlockstore::new();
     let mut materializer = Materializer::new(&store);
@@ -1012,7 +1123,7 @@ fn normalized_availability_hydration_refuses_broken_structural_references() {
 }
 
 #[test]
-fn context_v5_requires_normalized_availability_root() {
+fn context_v6_requires_normalized_availability_root() {
     #[derive(Serialize)]
     struct MissingAvailability {
         version: u32,
@@ -1031,7 +1142,7 @@ fn context_v5_requires_normalized_availability_root() {
     let missing = ContextRoot(
         writer
             .materialize_value(&MissingAvailability {
-                version: 5,
+                version: 6,
                 producer: [0; 32],
                 selection: valid.selection.root.clone(),
                 roles: valid.roles.root.clone(),
