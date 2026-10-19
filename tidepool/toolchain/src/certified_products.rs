@@ -14905,9 +14905,11 @@ pub(crate) mod tests {
                     }
                 }
                 let public = Arc::new(
-                    ExactDeclarationContext::new(&[], &[], vec![])
-                        .unwrap()
-                        .extend_checked_original_products(producer.sha256(), &[])
+                    crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                        producer.sha256(),
+                        &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+                        crate::artifact_inventory::CompilerInputProjection::default(),
+                    )
                         .unwrap(),
                 );
                 let next = ExactCompileContext::new(public)
@@ -15163,10 +15165,12 @@ pub(crate) mod tests {
         );
         let root = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_checked_original_products(producer.sha256(), &[])
-                .unwrap(),
+            crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                producer.sha256(),
+                &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+                crate::artifact_inventory::CompilerInputProjection::default(),
+            )
+            .unwrap(),
         ))
         .prepare_compilation_with_private_input(root.path(), producer_bytes, None, Some(private))
         .unwrap();
@@ -18518,16 +18522,15 @@ pub(crate) mod tests {
             packages: BTreeMap::new(),
         };
         let context = Arc::new(
-            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_checked_original_products(
-                    crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                        &producer,
-                    )
-                    .sha256(),
-                    &[],
+            crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &producer,
                 )
-                .unwrap(),
+                .sha256(),
+                &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+                crate::artifact_inventory::CompilerInputProjection::default(),
+            )
+            .unwrap(),
         );
         let request = context
             .prepare_compilation(&root.path().join("exact-inputs"), &producer)
@@ -20743,10 +20746,12 @@ None,
         let producer = [3; 32];
         let canonical_producer = CanonicalProducerIdentity::from_producer_bytes(&producer).sha256();
         let baseline = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_checked_original_products(canonical_producer, &[])
-                .unwrap(),
+            crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                canonical_producer,
+                &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+                crate::artifact_inventory::CompilerInputProjection::default(),
+            )
+            .unwrap(),
         );
         let request = baseline
             .prepare_compilation(&directory.path().join("initial-inputs"), &producer)
