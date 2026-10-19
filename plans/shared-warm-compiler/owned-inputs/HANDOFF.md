@@ -185,3 +185,17 @@ Rows owns these bounded repairs. Its next event is the repaired exact candidate
 to supervisor and independent reviewer using status-aware delivery. Required
 follow-up remains production/test compilation, counted controls and a joined
 host-to-worker history once a measured native lane can be admitted.
+
+Repair candidate `6d42df57ad13ea3dc7f90f5c70e6d12963706d3c` closed both earlier
+findings functionally and added actual output-packet concurrency/refusal source
+controls. Supervisor and independent cumulative review then found that its
+same-view wrapper retained the complete predecessor: a V-only selection could
+still pin obsolete V+S backing, and successive overlays retained triangular row
+maps plus a predecessor chain. `REVIEW-rows-6d42df57.md` records the minimal
+histories and required controls. Rows must retain current selected physical
+row/group/graph/scope owners independently of obsolete predecessor rows, using
+the existing materialization owner and persistent sharing. Flattening only to
+the original base is insufficient if that base owns the replaced broad V row.
+No semantic selection change, extra publication snapshot or new registry is
+authorized. This remains a bounded implementation repair; candidate 6d42 is
+unaccepted and unmerged. Reviewer is reserved pending the next exact event.
