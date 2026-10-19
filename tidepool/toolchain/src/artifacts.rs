@@ -10573,7 +10573,19 @@ mod source_proof_pairing_tests {
             assert!(entry.requirements.is_empty());
             let requirements =
                 crate::certified_products::original_native_requirements(product).unwrap();
-            assert!(requirements.artifact_edges.is_empty());
+            for (required_owner, dependency) in &requirements.artifact_edges {
+                assert_eq!(required_owner.unit, product.owner().unit);
+                assert_eq!(required_owner.module, product.owner().module);
+                let crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                    dependent_ordinal,
+                    required_ordinal,
+                } = dependency
+                else {
+                    panic!("independent support retains a nonlocal native binding: {dependency:?}");
+                };
+                assert!(requirements.group_ordinals.contains(dependent_ordinal));
+                assert!(requirements.group_ordinals.contains(required_ordinal));
+            }
             assert!(requirements.retained_packages.is_empty());
             let inventory = crate::artifact_inventory::ArtifactInventory::default();
             let artifacts = inventory
