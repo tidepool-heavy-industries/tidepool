@@ -2779,6 +2779,13 @@ impl PersistentSession {
         source: &super::GenerationArtifactReference,
         original_source: &Arc<RuntimeLexicalScopeLease>,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
+        let transaction = self
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?;
+        if !Arc::ptr_eq(&transaction.source, original_source) {
+            return Err(super::SourceAdmissionError::ForeignTransaction.into());
+        }
         if !self.has_lib() {
             return Err(SessionError::MissingDeclarationLibrary);
         }
@@ -3784,6 +3791,49 @@ impl PersistentSession {
 mod tests {
     use super::*;
     use crate::session::{ModuleEnv, SessionId, SessionLib};
+
+    #[test]
+    fn world_private_admission_requires_the_actual_transaction_original() {
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(984), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let scope_a = session.mint_isolated_scope();
+        let source_a = session.adopt_initial_notebook_scope(scope_a).unwrap();
+        let scope_b = session.mint_isolated_scope();
+        let source_b = session.adopt_initial_notebook_scope(scope_b).unwrap();
+        let reference = super::super::GenerationArtifactReference::capture(b"unopened".to_vec());
+        let scope_count = session.scope_tree().len();
+        let settled = session
+            .with_source_compiler_transaction(
+                source_b.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let foreign =
+                        session.begin_world_private_execution(scope_a, &reference, &source_a);
+                    let matching =
+                        session.begin_world_private_execution(scope_b, &reference, &source_b);
+                    (foreign, matching)
+                },
+            )
+            .unwrap()
+            .into_outcome();
+        assert_eq!(settled.close, crate::CompilerTransactionClose::NotStarted);
+        assert!(matches!(
+            settled.action.0,
+            Err(SessionError::SourceAdmission(
+                super::super::SourceAdmissionError::ForeignTransaction
+            ))
+        ));
+        assert!(
+            matches!(settled.action.1, Err(SessionError::MissingPublishedCompilerWorld(scope))
+            if scope == scope_b)
+        );
+        assert_eq!(session.scope_tree().len(), scope_count);
+    }
 
     #[test]
     fn owner_transfer_guard_preserves_refusal_and_fences_uncertain_or_unwinding_epochs() {
