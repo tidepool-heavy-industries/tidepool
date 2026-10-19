@@ -240,7 +240,16 @@ selected_root owns independent typed namespace implementation in real checkout
 `/srv/swarm/checkouts/tidepool-shared-warm-host-bindings-20261019`, branch
 `feature/shared-warm/host-bindings`, exact base6971cdf53ac54adf9cf44075bfaab771d5721475.
 Its full approved old-profile Warm526 merge is f7a36643e66dcf1c2c10d117aa8f505a85df2200;
-no new CID/profile or native gate is imported. Capture must preserve every visible
+source-accepted consumer ebd3ea9cc9960d0aa3a3c87b7b5602bee3647c91 includes the bounded
+unsupported-source counter repair. No new CID/profile is imported. Its early
+runtime/actor production and cfg-test gate is admitted conditionally14GiB total/
+32GiB growth, but the immediate fresh sample projected86,706,298,880 bytes against
+85,899,345,920 pressure. Configure/Buck/native launch therefore did not start;
+HOST remains0/0 with no new daemon. Exact pending commands and sample are retained
+in host-bindings/typed-bindings-ebd3.json and typed-ebd3-admission-sample.json.
+Campaign/Warm/Reload terminal release is the next admission event; if qualified
+query45f arrives first, switch to that priority after a durable source checkpoint.
+Capture must preserve every visible
 certified occurrence's actual symbol/id/scope/row and all aliases. Generic visible
 stubs require distinct typed UnsupportedBinding before builder/service; LegacyDisk
 missing-proof stays distinct. Source-backed generic mount custody remains required
