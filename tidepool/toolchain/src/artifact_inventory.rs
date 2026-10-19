@@ -13946,10 +13946,10 @@ mod tests {
         let issuers = issuers.into_iter().enumerate().map(|(index, issuer)| {
             if helper.catalog_input_custody().is_some() {
                 assert!(matches!(issue_context(index, &issuer),
-                    Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                    Err(CompileError::ArtifactInventory(error)) if matches!(&error.failure,
                         ArtifactInventoryFailure::MissingDependency { dependent, required, dependency: ArtifactDependency::Interface, .. }
-                        if dependent == helper.descriptor.owner
-                            && required == ExactModuleIdentity {
+                        if dependent == &helper.descriptor.owner
+                            && required == &ExactModuleIdentity {
                                 unit: helper.descriptor.owner.unit.clone(),
                                 module: "Tidepool.Inspection.Tree".into(),
                             })));
