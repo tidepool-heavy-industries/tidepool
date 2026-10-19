@@ -1280,13 +1280,14 @@ def release_compiler_service_source(args) -> Path:
     if prior is not None:
         if any(prior.get(key) != state.get(key) for key in ("service_epoch", "source_id", "profile_id")) or prior.get("complete_retirement_sha256") != sha256(complete_path):
             raise ValueError("compiler package release progress belongs to another retirement")
-        # Recovery may advance states, never replace the sealed acquisition's
-        # root plan, guard, scope or measurement facts.
-        if (any(prior.get(key) != value for key, value in state.items() if key not in ("status", "roots", "retained_root_count"))
+        # Recovery supplies only progress for the sealed owner's exact roots.
+        # Scope, guard, counters and measurements remain acquisition facts.
+        if (prior.get("provider_guard_store_path") != state["provider_guard_store_path"]
                 or [(item.get("path"), item.get("store_path")) for item in prior.get("roots", [])]
                 != [(item["path"], item["store_path"]) for item in state["roots"]]):
             raise ValueError("compiler package release progress differs from its sealed acquisition plan")
-        state = prior
+        state["roots"] = [{**issued, "state": progress.get("state")}
+                          for issued, progress in zip(state["roots"], prior["roots"])]
     roots = state["roots"]
     guard = state["provider_guard_store_path"]
     if sum(item["store_path"] == guard for item in roots) != 1:
