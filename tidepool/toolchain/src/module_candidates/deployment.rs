@@ -726,6 +726,11 @@ impl DeploymentModulePackage {
         roots: &[PathBuf],
         manifests: &[crate::cache::SourceRootManifest],
     ) -> Result<(), ModulePackageError> {
+        if self.records.len() != self.catalog.modules.len() {
+            return Err(ModulePackageError::Format(
+                "unacquired catalog source targets",
+            ));
+        }
         if roots.len() != manifests.len()
             || roots.iter().collect::<BTreeSet<_>>().len() != roots.len()
         {
@@ -1986,6 +1991,18 @@ mod tests {
         package
             .validate_captured_source_lookup(&roots, &manifests(&roots))
             .unwrap();
+        let unacquired = DeploymentModulePackage::read_catalog_under(
+            &fixture.output.join("catalog.json"),
+            &fixture.authority,
+            RootPolicy::Fixture,
+        )
+        .unwrap();
+        assert!(matches!(
+            unacquired.validate_captured_source_lookup(&roots, &manifests(&roots)),
+            Err(ModulePackageError::Format(
+                "unacquired catalog source targets"
+            ))
+        ));
 
         let shadow = tempfile::tempdir().unwrap();
         fs::write(shadow.path().join("Library.hs"), "module Library where\n").unwrap();
