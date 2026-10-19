@@ -25,16 +25,27 @@ incomplete. It is not a matched frozen campaign baseline.
 
 Controlling amendments: demand-service ebb98b3f25 (root2486ea4b94), canonical
 source owner923fd554, required Rust client migration2a67faf29c (root24ec0b).
-Read [RUST-CLIENT-MIGRATION.md](RUST-CLIENT-MIGRATION.md),
+Core ordinary-cell reuse amendment2428b82d96 (rootbb4db16bb9) is controlling: exact
+world-owned compatible dependency/HPT/validity/recovery reuse belongs to the first
+nonempty three-root bind-to-second-use milestone. Only deeper checked-import
+projection remains conditional. Read [RUST-CLIENT-MIGRATION.md](RUST-CLIENT-MIGRATION.md),
 [SERVICE-API.md](SERVICE-API.md) and [CONTRACTS.md](CONTRACTS.md).
 
-Current code6f9 contains the complete reviewed Warm319a history (canonical cold
+Last joined native code6f9 contains the complete reviewed Warm319a history (canonical cold
 producer, retained diagnostics and current reachable-block frontier) and Host345
 actual runtime-to-service query consumer. Independent cumulative receiving review
 accepted b32dff0a→6f9; the resolved world blob equals319a exactly, and Host's old
 world blob equals qualifiedd7 with no unique query change. The existing canonical
 reload foundation247/code6543/productce554 remains integrated. Later reload,
 typed bindings, new crypton profile and ordinary-cell successors are separate.
+
+Current receiving source2428b82d96 adds the full independently reviewed scoped
+reload registration/lifetime foundation9852 (code4c2c) through mergecb489301, then
+the controlling six-doc amendment. This receiving source has not yet compiled.
+The 23-path reload review verified10 evidence refs,25 reports and50 streams;
+22 report passes and three earlier failures remain revision-bound, not a combined
+passing suite. `campaign/r1-receiving/VERIFY.json` retains receiving verification.
+New publisher/pre-ACK, opaque-root and force successors are excluded from this fold.
 
 | Exact source | Joined execution | Limits |
 | --- | --- | --- |
@@ -49,17 +60,21 @@ performance are separate claims.
 
 ## Active frontier and event owners
 
-Ceiling14 includes campaign: five supervisors and eight reserved leaves, at most
-two direct children per area. All gpt-6.1-sol high except owned rows medium.
-Reserved grants survive event-bound yields; no new actors are needed.
+Ceiling15 includes campaign under the root's explicit added implementer grant:
+five supervisors and nine reserved leaves, at most two direct children per area.
+All use gpt-6.1-sol high except owned rows medium. Existing grants survive yields.
+The new `/root/warm_compiler_campaign/warm_workers/world_dependencies` uses
+Sol6.1 high with fork_turns=none, isolated source atcd30 and bounded exact-world
+reuse/backing helpers. Its first source candidatec6babd85 is uncompiled; Warm owns
+review and protocol integration. No additional actors are requested.
 
 | Area | Current result | Next owned action |
 | --- | --- | --- |
-| host_inputs (2 reserved leaves) | Actual345 and joined6f9 source-domain case PASS. Test-only db1 preserves effects row and moves frontend before history; actor cfgtest PASS1local, actual Rooted2 remains1PASS1FAIL because existing for_test authority correctly refuses Complete source without an owned capsule. | Retain SAME actual SourceLayerIssuer, use real resolver/admit/private-execution path and capture already-declared support roots before first query. No guard waiver or ambient fallback. Review then rerun exact Rooted2. Typed ebd3 four-target compile passed; two focused controls still pending. Eviction/zero-budget/cleanup-failure histories and full cell caller migration follow. |
-| owned_inputs (2 reserved leaves) | Package a7c125 foundation folded;2 owner controls/4GHC PASS. Original failed e69573 epoch pins remain UNKNOWN. Exact6f9, protocol88751/receiving0226 and three-root writer3e4 independently source reviewed; none grants new-profile runtime acceptance. | Reviewer confirmed publication-offer domain gap with actual contamination and same-domain Full/Partial witness. Review the owning repair and paired genuine nonempty primary/alias decoder; no native jobs. |
-| warm_workers (1 reserved leaf) | Old-profile319a folded and joined. Protocol024 early join0226→metadata945 configured/rooted crypton and generated owning Cabal metadata. First worker compile failed missing ExecutionSchema.dyn_hi before tests. Bounded schema-specific f9d49 -dynamic-too source repair accepted. | Regenerate owning metadata and retry actual worker/link/test consumers with unchanged pins. Three-root v3 writer3e4 and paired resolver9db remain source-only, excluded from first two-root native branch. Actual Plan→Prepare/output reader/runtime adoption, successful-target private successor and complete primary resolver remain required. |
-| reload (2 reserved leaves) | Actual issuer adoption repairs: both real Form/Jev services, worker/population5, notebook4 and repaired replacement1 passed. Publisher c733 owning5/ownercluster9 passed; its before-ACK advertisement defect was independently confirmed, so source acceptance is superseded at that seam. | PublicationVisible must remain nonoperational until actual ACK; existing targetD fence protects exposed aliases and uncertainty retains exact custody. Actual race sensitivity required. Opaque fresh-root API/callers and typed committed-readiness retention implementing under real preparation/runtime/binding owners. R2 Checking/physical closure continues; force remains refused before preparation. Physical Sleep still fails before resume, no END-loss relay claim. |
-| qualification (1 reserved leaf) | Actual GHC Request permission control passed with accepted and strict exact-A-ordinal refusal branches. Full owning pairing, retained-generation and actual scoped-B histories passed at e47; property/raw fixture failures remain. Narrowed publication contamination is a confirmed product finding. | Existing publication owner must retain exact birth offer/normalized-selection refs through recovery; graph filtering alone cannot distinguish same-domain Full/Partial. Preserve whole-context oracle and historical A/B refusals. Review/repair/count, complete area fold, exact frozen Persona and paired performance afterward. |
+| host_inputs (2 leaves) | Typedebd3 production/cfgtest and two actual focused controls PASS. Source945 uses the SAME actual SourceLayerIssuer and real Complete capsule; actual Rooted2 is1PASS1FAIL on confirmed producer wire-path ordering. Clean source3141 joins945+typedebd3 with reviewed bounded composition repairs; no partial Prepare API. | Retry real Rooted2 with qualified Warm397. SINGLE runtime finalizer/adopter: actual per-item Prepare/output and post-promotion witness into atomic world/bindings publication, then real second use. Warm's actual issuing API is the dependency. Optional retention stress is paused. |
+| owned_inputs (2 leaves) | Package foundationa7c125 remains qualified; old e695 epoch pins UNKNOWN. Exact R1 receiving review accepted; three-root Plan sourcecd30 and certifier mechanical factor21a9 source accepted, no world execution claim. | Parent reviews complete Qualification428b..943a foundation history/evidence. Rows supplied read-only certifier factoring contract; source_lifetime reviews actual ensuing Prepare/birth-owner code. No native jobs. |
+| warm_workers (2 leaves) | Qualified old-profile source-order397 production/cfgtest and actual wire-prefix control1 PASS, strict Haskell unchanged. New-profile workeref352 compiled/linked; affected tests pending. Three-root Plan/clientcd30 and explicit binding-generation successor are source-only. | Parent owns real Rust Prepare/same certifier and successful-target output/private successor; protocol owns nonempty three-root activation and production callsite; world_dependencies owns compatible immutable dependency answers/direct backing without a new cache. Joined ordinary-cell acceptance remains absent. |
+| reload (2 leaves) | Scoped9852 R1 foundation received. Separate f183 publisher/readiness owning5, actor13 and notebook4 PASS; actual pre-ACK advertisement fix9d replaces known c733 defect. Opaque-root07caf source accepted and joined42bd native gate running under Reload observer. | Collect actual actor/host/integration consumers and controls, then full-history upward fold. Actual hosted pre-ACK latch/ACK-loss remains separate. Existing-owner Checking/selective force and reply/display source work continues; first usable candidate may explicitly refuse force, full force remains required later. |
+| qualification (1 leaf) | Separable foundation943a/testedcoded334 has actual Request/native permission, pairing, property/raw refusal and final ownership controls PASS; obsolete Candidate issuer paths deleted. Frozen campaign rerun is unqualified. | Foundation receiving review/fold now, while separate birth-owner repair retains exact immutable offers/normalized rows through actual recovery. Maintain persistent facts; no full offer snapshot/hash hidden at publication. Whole-selection hashing/retained-owner census remain explicit hot-path obligations. |
 
 Area parents own successive implementation, review, repair and folds. Campaign
 reads critical joined consumers, resolves routine shared contracts, runs integrated
@@ -70,7 +85,8 @@ gates and publishes reviewed checkpoints. A source review is not execution.
 Haskell owns the derived compiler world. Rust publishes primary source/notebook
 facts, exact runtime/native provenance and atomic world/bindings associations.
 Read hydration never changes logical world selection. The accepted paired contract
-is `CELL-SUCCESSOR-CONTRACT-8d69.md` in the Host evidence root. The concrete cell
+is `CELL-SUCCESSOR-CONTRACT-8d69.md` in the Host evidence root. Host runtime adoption packet is `host-inputs/cell-world/RUNTIME-SUCCESSOR-ADOPTION-945.md`.
+The concrete cell
 packet is `warm-workers/CELL-WORLD-CONTRACT-a3.md`. Three-root contract
 `warm-workers/protocol/cell/THREE-ROOT-WORLD-CONTRACT-3d1.md`,
 SHA3219b660659193f246dd498ca226a059719d588952fc8acb733642ee26238715,
@@ -104,6 +120,14 @@ conflict remains strict. Exact428b traces availability-only B promotion into
 Original issuance; producer role repair is active, never certificate equality or
 issued-edge rewriting. Three immutable6d3 actor prerequisite failures remain
 separate baseline findings. No matched frozen campaign rerun has passed.
+
+The next complete workflow is a genuine nonempty three-root/import world: first
+actual scalar binding, successful target captured before reusable-target stripping,
+private successor, atomic bindings/world publication, then second ordinary cell
+using that binding with compatible world-owned dependency answers. Measure old
+Rust traversal/encoding/hash/FD work separately from required new-body GHC work.
+Stale exact-base adoption refuses before installing a successor; retain prior
+committed prefix and actual effects, never replay uncertain accepted work.
 
 Required delivery remains ordinary prepareCell/per-item successors, atomic
 publication/same-tip changes, fork/reload/exact recovery, deletion of redundant Rust
