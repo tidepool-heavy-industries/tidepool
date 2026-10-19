@@ -20,7 +20,7 @@ import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import SourceBootFixtureSupport (hasIntResultLiteral, withScratch)
-import System.Directory (copyFile, createDirectory, doesFileExist, getPermissions, setPermissions, listDirectory, Permissions(..))
+import System.Directory (copyFile, createDirectory, doesDirectoryExist, doesFileExist, getFileSize, getPermissions, setPermissions, listDirectory, Permissions(..))
 import System.FilePath ((</>), takeFileName)
 import Test.QuickCheck
 import Tidepool.CompilerProducts
@@ -72,12 +72,16 @@ worldRequestBoundaries = do
 worldMaterializationBoundaries :: IO ()
 worldMaterializationBoundaries = do
   withScratch $ \parent -> do
-    sources <- sourceFixture [("A.hs","module A where\nanswer = 1\n")]
-    materializeWorldSources parent sources Set.empty (const (pure ()))
+    sources <- sourceFixture [("A.hs","module A where\nanswer = 1\n")
+      ,("Nested/B.hs","module Nested.B where\n")]
+    charged <- materializeWorldSources parent sources Set.empty (pure . worldMaterializationCharge)
     child <- onlyChild parent
     bytes <- BS.readFile (parent </> child </> "root-0" </> "A.hs")
     unless (bytes == "module A where\nanswer = 1\n")
       (fail "successful world materialization removed or changed its issued files")
+    -- Independent cold-test filesystem oracle, never a production hit scan.
+    measured <- measureBacking (parent </> child)
+    unless (charged == measured) (fail ("world backing issuance charge differs: " ++ show (charged,measured)))
   withScratch $ \parent -> do
     -- A file/parent collision deterministically fails after the first copy.
     sources <- sourceFixture [("A","copied"),("A/B.hs","module A.B where\n")]
@@ -152,6 +156,15 @@ worldMaterializationBoundaries = do
         [child] -> pure child
         _ -> fail ("expected one owned world directory, got " ++ show children)
     bounded label action = timeout 5000000 action >>= maybe (fail (label ++ " timed out")) pure
+    measureBacking path = do
+      directory <- doesDirectoryExist path
+      if directory then do
+        children <- listDirectory path
+        charges <- mapM (measureBacking . (path </>)) children
+        pure (sum (map fst charges),1 + sum (map snd charges))
+      else do
+        bytes <- getFileSize path
+        pure (bytes,1)
     sourceFixture files = either fail pure (decodeWorldSources
       ("TPCSRC01" <> frame "fixture-generation" <> word32 1 <> word32 (length files)
         <> foldMap (\(path,body) -> frame path <> frame body) files))

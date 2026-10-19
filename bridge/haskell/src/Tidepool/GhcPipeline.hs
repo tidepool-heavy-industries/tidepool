@@ -37,7 +37,7 @@ module Tidepool.GhcPipeline
   , withResidentPipelineSelectedRequests
   , CompilerScope, scopedCompile, scopedCompileCompleted, scopedReadExactScope, scopedRunGhc, scopedParserFlags
   , scopedEnsureWorld, scopedReadHeldWorld, scopedQueryWorld, HeldWorldQueryBinding
-  , materializeWorldSources
+  , materializeWorldSources, worldMaterializationCharge
   , CompletedCompilerResult, completedCompilerResult, completedCompilerRecovery, completedCompilerGuard
   , CompilerScopeRunner, withResidentCompilerScopes
   , CompilerRecoveryCaches(..)
@@ -1337,9 +1337,13 @@ compilerWorldCacheCharge :: CompilerWorldCache -> (Integer,Int)
 compilerWorldCacheCharge (CompilerWorldCache _ _ _ bytes count) = (bytes,count)
 
 compilerWorldCharge :: HeldCompilerWorld -> (Integer,Int)
-compilerWorldCharge (HeldCompilerWorld facts _ (WorldMaterialization _ _ _ _ _ _ copies nodes) _) =
-  let (raw,entries) = worldInputsRetainedCharge facts
+compilerWorldCharge (HeldCompilerWorld facts _ materialized _) =
+  let (copies,nodes) = worldMaterializationCharge materialized
+      (raw,entries) = worldInputsRetainedCharge facts
   in (raw + copies,entries + nodes + 1)
+
+worldMaterializationCharge :: WorldMaterialization -> (Integer,Int)
+worldMaterializationCharge (WorldMaterialization _ _ _ _ _ _ copies nodes) = (copies,nodes)
 
 removeCompilerWorld :: String -> CompilerWorldCache -> CompilerWorldCache
 removeCompilerWorld root cache@(CompilerWorldCache worlds order next bytes count) =
