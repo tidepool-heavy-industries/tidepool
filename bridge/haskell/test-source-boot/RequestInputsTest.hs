@@ -19,7 +19,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
+import System.Directory (canonicalizePath, copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
+import System.Posix.Files (createSymbolicLink)
 import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, hFlush, hGetLine, hPutStrLn, Handle, stderr, utf8, BufferMode(NoBuffering), hGetEncoding, hGetBuffering, hSetEncoding, hSetBuffering, hSetBinaryMode)
 import Foreign.C.String (CString, withCString)
@@ -36,6 +37,14 @@ import System.Timeout (timeout)
 import Test.QuickCheck
 import Test.QuickCheck.Random (mkQCGen)
 import GHC.Driver.Env (HscEnv(..))
+import GHC (getSession)
+import GHC.Data.ShortText qualified as PackageText
+import GHC.Unit.Env (ue_setUnits)
+import GHC.Unit.State (UnitState(..))
+import GHC.Unit.Info (unitImportDirs, unitLibraryDirs, unitLibraryDynDirs, unitIncludeDirs)
+import GHC.Types.Unique.Map (mapUniqMap)
+import GHC.Driver.Env (hsc_units)
+import Control.Monad.IO.Class (liftIO)
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
 import GHC.Unit.Finder.Types (FinderCache(..))
 import GHC.Unit.Module (mkModule, mkModuleName)
@@ -62,9 +71,10 @@ import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
   , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts
-  , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents )
+  , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents
+  , withResidentCompilerScopes, scopedRunGhc )
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
-import Tidepool.PackageWitness (readCompilerPackageBoot, requireObservationPackageEnvironment)
+import Tidepool.PackageWitness (readCompilerPackageBoot, requireObservationPackageEnvironment, captureSupportedPackageProfileWith)
 import Tidepool.ArtifactBytes
 import Tidepool.RequestInputs
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), inputImageDigest, inputKindTag)
@@ -951,6 +961,31 @@ compilerServiceBootBoundaries = bracket
       requireUserError "rooted metadata cannot become an observation"
         "package profile observation cannot inherit compiler service boot fields"
         requireObservationPackageEnvironment
+    mapM_ unsetEnv names
+    -- Observe the real producer, with adversarial raw UnitInfo metadata. This
+    -- proves the qualifier receives the consumed spelling; it does not issue
+    -- a rooted service profile from this test-only metadata alteration.
+    withScratch $ \work -> do
+      createDirectoryIfMissing True (work </> "mutable" </> "subdir")
+      createDirectory (work </> "modules")
+      createSymbolicLink (work </> "mutable" </> "subdir") (work </> "alias")
+      createSymbolicLink (work </> "modules") (work </> "mutable" </> "modules")
+      let raw = work </> "alias" </> ".." </> "modules"
+      target <- canonicalizePath raw
+      unless (raw /= target) (fail "package profile alias control did not change spelling")
+      libdir <- lookupEnv "TIDEPOOL_GHC_LIBDIR" >>= maybe (fail "missing declared GHC libdir") pure
+      withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \scope ->
+        scopedRunGhc scope $ do
+          env <- getSession
+          let replace unit = unit
+                { unitImportDirs=[PackageText.pack raw],unitLibraryDirs=[PackageText.pack raw]
+                , unitLibraryDynDirs=[PackageText.pack raw],unitIncludeDirs=[PackageText.pack raw] }
+              units = (hsc_units env) {unitInfoMap=mapUniqMap replace (unitInfoMap (hsc_units env))}
+              observed = env {hsc_unit_env=ue_setUnits units (hsc_unit_env env)}
+          bytes <- liftIO (captureSupportedPackageProfileWith libdir observed)
+          liftIO $ unless (BS.take 8 bytes == "TPGHC002" && BS8.pack raw `BS.isInfixOf` bytes
+            && not (BS8.pack target `BS.isInfixOf` bytes))
+            (fail "supported package profile erased the raw GHC path before qualification")
   where
     names =
       [ "TIDEPOOL_COMPILER_PACKAGE_PROFILE"

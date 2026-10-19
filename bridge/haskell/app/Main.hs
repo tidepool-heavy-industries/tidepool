@@ -177,7 +177,7 @@ main = do
     then putStrLn "tidepool-extractor-role-v1 worker" >> exitWith ExitSuccess
   else if rawWorkerRequest == ["--print-worker-request-flag"]
     then putStrLn workerRequestFlag >> exitWith ExitSuccess
-  else if rawWorkerRequest == ["--capture-supported-package-profile-v1"]
+  else if rawWorkerRequest == ["--capture-supported-package-profile-v2"]
     then do
       hSetBinaryMode stdout True
       captureSupportedPackageProfile >>= BS.hPut stdout
