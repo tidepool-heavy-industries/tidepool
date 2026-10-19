@@ -19454,6 +19454,7 @@ pub(crate) mod tests {
             WorkerExecutionSource::ExactUnavailable(SourceRecipeUnavailable::NoFreshOriginals);
         let mut expected_owners = BTreeSet::from([prior[0].owner().clone()]);
         let mut first_promoted = None;
+        let mut promoted_support = BTreeMap::new();
         // Current source compilation owns Target only. Fresh is emitted from
         // authenticated retained Core, without a fresh source observation.
         let mut current_evidence = evidence(source);
@@ -19804,35 +19805,36 @@ None,
                 None,
             )
             .is_err());
+            let completed_support = {
+                let inputs = request.compiler_inputs();
+                let entry = Arc::new(
+                    crate::artifact_inventory::ArtifactEntry::original(
+                        canonical_producer,
+                        current.clone(),
+                    )
+                    .unwrap(),
+                );
+                let physical = inputs
+                    .artifacts()
+                    .inventory()
+                    .admit_certified_with_demand(
+                        inputs.artifacts(),
+                        vec![entry],
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                        &issued.source_selection,
+                    )
+                    .unwrap();
+                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                    &issued.source_selection,
+                    &physical,
+                )
+                .unwrap();
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                    .unwrap()
+            };
+            promoted_support.insert(owner.clone(), completed_support.clone());
             context = context
-                .extend_issued_compiler_support(&{
-                    let inputs = request.compiler_inputs();
-                    let entry = Arc::new(
-                        crate::artifact_inventory::ArtifactEntry::original(
-                            canonical_producer,
-                            current.clone(),
-                        )
-                        .unwrap(),
-                    );
-                    let physical = inputs
-                        .artifacts()
-                        .inventory()
-                        .admit_certified_with_demand(
-                            inputs.artifacts(),
-                            vec![entry],
-                            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                            &issued.source_selection,
-                        )
-                        .unwrap();
-                    let output =
-                        crate::declaration_context::OriginalCompilerInputs::from_selection(
-                            &issued.source_selection,
-                            &physical,
-                        )
-                        .unwrap();
-                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                        .unwrap()
-                })
+                .extend_issued_compiler_support(&completed_support)
                 .unwrap();
             prior = context.recovery_products();
         }
@@ -19856,43 +19858,113 @@ None,
             .iter()
             .any(|product| product.owner() == &current_child));
 
-        let make_projection = |products: &[CertifiedRecoveryProduct]| {
-            crate::artifact_inventory::CompilerInputProjection::from_issued_entries(
-                &products
-                    .iter()
-                    .cloned()
-                    .map(|product| {
-                        Arc::new(
-                            crate::artifact_inventory::ArtifactEntry::original(
-                                canonical_producer,
-                                product,
-                            )
-                            .unwrap(),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        };
-        let historical_projection = make_projection(std::slice::from_ref(child)).unwrap();
         let fresh_identity = ExactModuleIdentity {
             unit: historical_child.unit.clone(),
             module: historical_child.module.clone(),
         };
-        let historical_context = context
-            .compiler_input_projection()
-            .interface_only()
-            .merge(&historical_projection)
-            .and_then(|projection| context.clone().recover_fixture_projection(projection))
-            .and_then(|context| {
-                context.extend_lexical_joins(
+        let mut selected_contexts = Vec::new();
+        for product in [child, current] {
+            let emitted = &promoted_support[product.owner()];
+            let entry = Arc::new(
+                crate::artifact_inventory::ArtifactEntry::original(
+                    canonical_producer,
+                    product.clone(),
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                emitted.native_availability().snapshot_facts().unwrap()[&entry.descriptor.id].mode,
+                crate::declaration_context::NativeTransportMode::Full
+            );
+            assert!(emitted
+                .native_offers()
+                .iter()
+                .any(|offer| offer.original() == entry.descriptor.id && offer.is_full()));
+            let projection = context
+                .compiler_input_projection()
+                .interface_only()
+                .merge(
+                    &crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&[
+                        entry.clone(),
+                    ])
+                    .unwrap(),
+                )
+                .unwrap();
+            let catalog =
+                crate::artifact_inventory::NativeDependencyCatalog::from_source(emitted).unwrap();
+            let selected = projection
+                .admit_interfaces_with_native_offers(
+                    context.artifact_view(),
+                    vec![entry.clone()],
+                    emitted.native_offers(),
+                    &catalog,
+                )
+                .unwrap();
+            assert!(selected
+                .capture_graph_selection()
+                .namespace
+                .iter()
+                .any(|binding| binding.artifact == entry.descriptor.id));
+            assert_eq!(
+                projection
+                    .project_metadata(selected.metadata_snapshot())
+                    .unwrap()
+                    .entries[&fresh_identity]
+                    .descriptor
+                    .id,
+                entry.descriptor.id
+            );
+            let support = crate::declaration_context::recover_fixture_compiler_support(
+                projection,
+                selected,
+                emitted.native_offers().iter().cloned(),
+            )
+            .unwrap()
+            .retain_normalized_availability(emitted.native_availability())
+            .unwrap();
+            let selected_context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&support)
+                .unwrap()
+                .extend_lexical_joins(
                     &[],
                     &[ExactLexicalNode {
                         owner: fresh_identity.clone(),
                         imports: vec![],
                     }],
                 )
-            })
-            .unwrap();
+                .unwrap();
+            assert_eq!(
+                selected_context
+                    .compiler_input_projection()
+                    .snapshot_roles()[&fresh_identity]
+                    .original(),
+                Some(entry.descriptor.id)
+            );
+            assert_eq!(
+                selected_context
+                    .compiler_source_support()
+                    .native_availability()
+                    .snapshot_facts()
+                    .unwrap()[&entry.descriptor.id]
+                    .mode,
+                crate::declaration_context::NativeTransportMode::Full
+            );
+            let row = selected_context
+                .compiler_source_support()
+                .native_availability()
+                .rows()
+                .find(|row| row.original_owner() == product.owner())
+                .unwrap();
+            assert!(row.permits(7) && row.permits(11));
+            assert!(selected_context
+                .artifact_view()
+                .selected_native_groups()
+                .is_empty());
+            selected_contexts.push(selected_context);
+        }
+        let historical_context = selected_contexts.remove(0);
+        let current_context = selected_contexts.remove(0);
         let prior_module = SessionModule::lib(Generation(6));
         let prior_planned =
             planned_original_history_tests::issue_planned_original_with_retained_child(
@@ -19913,22 +19985,6 @@ None,
             "the existing A original was issued while the old Fresh version was selected"
         );
         let prior_module_product = prior_planned.certified.recovery_products[0].clone();
-        let current_projection = make_projection(std::slice::from_ref(current)).unwrap();
-        let current_context = context
-            .compiler_input_projection()
-            .interface_only()
-            .merge(&current_projection)
-            .and_then(|projection| context.clone().recover_fixture_projection(projection))
-            .and_then(|context| {
-                context.extend_lexical_joins(
-                    &[],
-                    &[ExactLexicalNode {
-                        owner: fresh_identity.clone(),
-                        imports: vec![],
-                    }],
-                )
-            })
-            .unwrap();
         let completed_prior = prior_planned.completed_output().compiler_inputs();
         let prior_support =
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
