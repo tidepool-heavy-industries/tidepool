@@ -37,7 +37,8 @@ required repair: generic startup errors included worker loss, so they could not
 all mean NotStarted. The complete repaired candidate is `96563ebbb95438e13faba7acf3ac2663d6ed4255`;
 its exact independent source review found no new blocking defect. The narrow
 `804a4d3e2f` successor carries reservation provenance into the producer compiler
-scope; its review and the joined R1 review remain pending. `6978429d8f` is the
+scope; its independent source review also found no new blocking defect. The joined
+R1 review remains pending. `6978429d8f` is the
 narrow force-input source parcel.
 Neither source parcel has passing compilation or test evidence. See
 [the independent review](REVIEW-BASE.md) for findings and untested boundaries.
@@ -57,10 +58,11 @@ an informed worker yields.
   coherent committed R1 candidate plus exact pending checks. The area owner then
   reviews/folds it and requests cumulative independent review.
 - `/root/warm_compiler_campaign/reload/authority_review` is read-only except
-  `REVIEW-BASE.md`. It is reactivated on exact repaired `96563ebbb954` plus `804a4d3e2f` to review
-  the complete base-to-candidate delta, including startup ownership and narrow
-  force input. Awaited event: concrete review verdict. The area owner repairs
-  findings and requests exact rereview, then joins the R1 candidate.
+  `REVIEW-BASE.md`. It reviewed the complete source delta through `804a4d3e2f`
+  and is dormant with its grant reserved. Awaited event: the area owner
+  `followup_task` supplies the exact joined R1 candidate and actual compile/
+  focused-gate evidence, or a concrete source exception requiring review.
+  The area owner repairs findings, requests exact rereview and owns the fold.
 
 Before yielding, retain the exact awaited event, producer/observer, recipient
 and continuation. A terminal producer sends exact base/candidate/evidence/status
