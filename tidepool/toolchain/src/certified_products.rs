@@ -13032,7 +13032,7 @@ pub(crate) mod tests {
                 producer.sha256(),
             )
         };
-        let import = |product: &CertifiedRecoveryProduct, ordinal| {
+        let import = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct, ordinal| {
             let mut binder =
                 testing::identity(&product.owner().module, &format!("entry_{ordinal}"));
             binder.unit = product.owner().unit.clone();
