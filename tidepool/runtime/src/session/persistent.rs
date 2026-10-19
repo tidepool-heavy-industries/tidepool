@@ -1651,7 +1651,11 @@ impl PersistentSession {
             tip: lib.scope_tip(scope),
             bindings: self.bindings.scope_witness(&self.scopes, scope)?,
             compiler_inputs: self.compiler_input_revision,
-            public_epoch: self.public_visibility_epochs.get(&scope).copied().unwrap_or(0),
+            public_epoch: self
+                .public_visibility_epochs
+                .get(&scope)
+                .copied()
+                .unwrap_or(0),
         })
     }
 
@@ -4315,12 +4319,15 @@ mod checkpoint_scope_tests {
     fn inspection_key_reads_only_publication_facts_before_view_capture() {
         for count in [1, 10, 100] {
             let root = tempfile::tempdir().unwrap();
-            let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+            let recovery =
+                crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
             let mut session = publication_session(&recovery, root.path(), 417);
             let scope = session.mint_isolated_scope();
             for index in 0..count {
                 let entry = super::super::prepared::tests::rooted_publication_fixture(
-                    &mut session, &format!("value{index}"), 900 + index,
+                    &mut session,
+                    &format!("value{index}"),
+                    900 + index,
                 );
                 session.bind_in(scope, entry).unwrap();
             }
@@ -4329,12 +4336,17 @@ mod checkpoint_scope_tests {
             for _ in 0..100 {
                 assert!(session.compile_view_key_in(scope).as_ref() == Some(&key));
             }
-            assert!(session.compile_views.lock().is_empty(), "key reads must not prepare a view");
+            assert!(
+                session.compile_views.lock().is_empty(),
+                "key reads must not prepare a view"
+            );
             assert_eq!(session.compile_view_bytes_hashed.load(Ordering::Relaxed), 0);
             let prepared = session.scoped_compile_view_in(scope).unwrap();
             assert!(prepared.key.as_ref() == Some(&key));
-            assert!(session.compile_view_bytes_hashed.load(Ordering::Relaxed) > 0,
-                "the ordinary view path must calibrate the work observation");
+            assert!(
+                session.compile_view_bytes_hashed.load(Ordering::Relaxed) > 0,
+                "the ordinary view path must calibrate the work observation"
+            );
             eprintln!("inspection fact key retained_values={count} repeated_reads=100 prepared_views=0 hashed_bytes=0");
         }
     }
@@ -4347,32 +4359,37 @@ mod checkpoint_scope_tests {
         let scope = session.mint_isolated_scope();
         let initial = session.compile_view_key_in(scope).unwrap();
         let tip = session.lib().scope_tip(scope);
-        let entry = super::super::prepared::tests::rooted_publication_fixture(
-            &mut session, "value", 1010,
-        );
+        let entry =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 1010);
         session.bind_in(scope, entry).unwrap();
         let bound = session.compile_view_key_in(scope).unwrap();
         assert!(bound != initial);
         assert_eq!(session.lib().scope_tip(scope), tip);
         let child = session.mint_scope(scope).unwrap();
         let inherited = session.compile_view_key_in(child).unwrap();
-        let entry = super::super::prepared::tests::rooted_publication_fixture(
-            &mut session, "value", 1011,
-        );
+        let entry =
+            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 1011);
         session.bind_in(scope, entry).unwrap();
         let shadowed = session.compile_view_key_in(scope).unwrap();
         assert!(shadowed != bound);
-        assert!(session.compile_view_key_in(child).as_ref() == Some(&inherited),
-            "a captured child retains its original binding world");
+        assert!(
+            session.compile_view_key_in(child).as_ref() == Some(&inherited),
+            "a captured child retains its original binding world"
+        );
         let sibling = session.mint_isolated_scope();
         let entry = super::super::prepared::tests::rooted_publication_fixture(
-            &mut session, "unrelated", 1012,
+            &mut session,
+            "unrelated",
+            1012,
         );
         session.bind_in(sibling, entry).unwrap();
         assert!(session.compile_view_key_in(scope).as_ref() == Some(&shadowed));
         session.set_catalog_selection(Default::default());
         let catalog = session.compile_view_key_in(scope).unwrap();
-        assert!(catalog != shadowed, "catalog replacement invalidates even a same-tip world");
+        assert!(
+            catalog != shadowed,
+            "catalog replacement invalidates even a same-tip world"
+        );
         session.mark_stub_generation(Generation(1013));
         let stub = session.compile_view_key_in(scope).unwrap();
         assert!(stub != catalog);
