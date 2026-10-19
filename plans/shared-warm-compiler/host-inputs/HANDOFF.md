@@ -10,8 +10,8 @@ is prerequisite source, not a campaign result. No host deployment is authorized.
 | Native identity | Model / effort | Checkout / branch | State and outcome |
 | --- | --- | --- | --- |
 | `/root/warm_compiler_campaign/host_inputs` | Sol high | area checkout above | supervising issuer, admission and publication consumers |
-| `/root/warm_compiler_campaign/host_inputs/selected_root` | `gpt-6.1-sol` / high, fresh | `tidepool-shared-warm-selected-root-20261019`, `feature/shared-warm/selected-root` | running; bounded selected-interface lookup successor, base `9dbc0e18a2e05dfa1e7726af27fd598bc4886f2c` |
-| `/root/warm_compiler_campaign/host_inputs/selection_oracle` | `gpt-6.1-sol` / high, fresh | read-only area source | settled after cumulative review; reserved for exact successor review |
+| `/root/warm_compiler_campaign/host_inputs/selected_root` | `gpt-6.1-sol` / high, fresh | `tidepool-shared-warm-selected-root-20261019`, `feature/shared-warm/selected-root` | running; actual root/transition constructor and consumer design at `08feadc4` |
+| `/root/warm_compiler_campaign/host_inputs/selection_oracle` | `gpt-6.1-sol` / high, fresh | read-only area source | running; independent adversarial root/transition design review |
 
 Two descendant grants retained; no deeper descendants permitted. Starts,
 reviewer settlement/reactivation and repaired candidate review were reported to
@@ -39,6 +39,14 @@ reviewed concrete issuance contract.
   compilation and execution remain pending. Receipts:
   `/srv/swarm/evidence/inanna/shared-warm-host-inputs-20261019/oracle/cumulative-review-9dbc.txt`
   and `lazy-seal-and-repair-review.txt` in the same directory.
+- Selected-query successor `9dbc0e18..c31f92ee` is merged in area
+  `08feadc4ea5de330b6ab00b10399b8a65d4bb7ae`. Prepared value support no longer
+  captures a full selected metadata map: exact Val verification borrows its
+  admitted interface, and lexical membership uses a distinct-owner set. The
+  actual source-support owner still carries Original roles and exact edges.
+  Independent exact and cumulative source review found no code defect:
+  `selected-query-review-c31f.txt` and `cumulative-review-08fe.txt` in the oracle
+  evidence directory above. Compilation/test execution remains 0/0.
 - Accepted C2 amendment: campaign `e2bd2611102566085d0c573568d820a50ed62fb3`,
   inspected directly. The selected row's exact binding and admitted payload is
   its home witness: canonical finalization, checked Val certificate or accepted
@@ -79,7 +87,7 @@ This is an in-progress source-backed inventory; unlisted paths remain unqualifie
 | Fresh value-interface append | `CompilerSourceSupport::admit_value_interfaces` / selected interface queries | persistent selected rows implemented and source-reviewed; actual counted clone bound and native controls pending |
 | Retained value input capture | `artifacts::checked_value_context` -> `ExactDeclarationContext::extend_retained_value_artifacts` -> `prepare_compilation` | per-value support merges, lexical union, producer and final normalization |
 | Ordered support admission | `ProgramSourceSupportState::admit_program_support_inner` -> next item request | selected metadata maps, inventory descriptors, lexical graph reconstruction |
-| Contextual sealing | `PreparedCellProgram::seal` -> `PreparedValueSourceSupport::new` -> each `retain_output` | lazy first-value preparation implemented; lexical/import/implementation and selected metadata folds remain for consuming cells; selected metadata deletion successor running |
+| Contextual sealing | `PreparedCellProgram::seal` -> `PreparedValueSourceSupport::new` -> each `retain_output` | lazy first-value preparation and selected metadata deletion implemented/source-reviewed; lexical/import/implementation folds remain for consuming cells |
 | Value publication / capture | `CheckedValueArtifact::capture_output` retains support and templates / next checked-value context | must carry exact completed per-item support; physical row ownership belongs to owned-inputs |
 | Declaration public restaging | `capture_declaration_target` -> `extend_admitted_surface` -> join certification | lexical expansion and root `sort` / `dedup`; stale validation and reservation semantics remain mandatory |
 | Resident declaration commit | `prepare_resident_declaration` -> `commit_prepared_declaration` | coherent existing scope tip already carries `ScopedCompilerContext`; extend this owner rather than actor-current registry |
@@ -105,6 +113,8 @@ swarm-build bash scripts/buck2-run.sh targets -c remote.enabled=false //tidepool
 swarm-build just build //tidepool/toolchain:tidepool_toolchain //tidepool/toolchain:tidepool_toolchain_unit_tests_binary
 swarm-build just test-lib tidepool-toolchain --exact artifact_inventory::compiler_projection::tests::value_publication_forks_share_unchanged_selected_rows --expected-count 1
 swarm-build just test-lib tidepool-toolchain --exact artifact_inventory::compiler_projection::tests::fresh_value_append_preserves_native_permissions_and_exact_execution_roots --expected-count 1
+swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::prepared_value_source_support_borrows_selected_rows_and_refuses_dormant_owners --expected-count 1
+swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::retained_value_source_surface_preserves_selected_support_and_refuses_hidden_owners --expected-count 1
 swarm-build just test-lib tidepool-toolchain --exact declaration_context::native_availability_tests::direct_native_advertisement_follows_canonical_binding_and_keeps_historical_permissions --expected-count 1
 swarm-build just test-lib tidepool-toolchain --exact declaration_context::native_availability_tests::private_transport_refuses_selected_dependency_product_and_interface_conflicts --expected-count 1
 swarm-build just test-lib tidepool-runtime --exact session::turn::tests::prepared_cell_seals_after_parent_runtime_drops_and_projection_end_settles --expected-count 1
@@ -117,26 +127,49 @@ executed count exists for campaign changes yet.
 
 ## Next actions
 
-Waiting for `selected_root` to deliver its exact base `9dbc0e18..candidate`
-successor: remove the full stored selected metadata map in
-`PreparedValueSourceSupport` and query its existing exact admitted rows at
-`retain_output` / `retain_surface`. Reserved methods are the struct and `new`,
-`retain_output`, `retain_surface`, plus instrumentation only in
-`compiler_metadata_snapshot`. Physical materialization symbols remain with the
-owned-inputs area. Test/counter controls must preserve bad Val/unowned output
-refusal, distinct lexical membership, source Original selection and custody.
-An ordinary constructor trace span will support joined zero-construction
-declaration-only / first-value mixed-cell checks; those are not executed yet.
+The two leaves now own a concrete root/transition constructor and consumer
+proposal, before code. Reuse the existing `Arc<DeclarationContextOwner>` for
+the complete baseline context: support identity alone omits producer, lexical,
+template and original-instance facts. Effective private/protected selection
+remains with `RequestCompilerInputs.source_support`; runtime paired value/alias
+visibility and current admission remain separate. Do not add a second identity
+registry or wrap support just to mint an owner.
 
-On arrival, area supervisor reviews directly, reactivates `selection_oracle`
-for exact independent review, routes bounded repairs and folds the full history.
-Send source-reviewed checkpoints to the campaign owner. No periodic polling or
-wake loop: when dependency-bound, retain this waiting state and yield. The result
+Actual ordered cursor lag must be repaired at its issuing boundary:
+`admit_program_support` prepares `continued.inputs` before it publishes source
+support, then `admit_program_value` extends that newer context while storing the
+older request. A value-only proof cannot certify the whole next input change.
+Certify/adopt source support first, then compose an operation-local value
+transition holding exact old/new owners. Persistent roots must not hold a strong
+predecessor chain. Even value-only additions can change `HomePresence`, so native
+group equality does not by itself permit reusing Package absence conclusions.
+The custody-owner collision query in `prepare_value_interface_append` still
+scans all acquired payloads; a persistent acquisition membership index belongs
+to `ViewLease`, distinct from the selected-home census. Its fields are reserved
+with owned-inputs; no implementation started yet.
+
+Physical collaboration: rejected an unconditional materialization-frontier
+refresh after each value because it would add a full closure/metadata scan.
+Rows owner instead promotes the exact produced leaf before the existing
+`retain_output` / `source_support` physical projection, and host bindings before
+`select_value_interface`. No compiler-projection helper is needed. Physical
+candidate `3716265d` is owned and reviewed by owned-inputs, not folded here.
+Native-offer/prototype retention remains separately observable; no required
+owner may be erased merely to make a lifetime assertion pass.
+
+An ordinary `exact.value_source_support.prepare` constructor trace span supports
+future zero-construction declaration-only / first-value mixed-cell checks; those
+are not executed yet. On concrete root/transition proposal arrival the area
+arbitrates with campaign/warm/physical owners, assigns the minimal accepted
+production bridge, obtains independent exact review, repairs and folds full
+history. No periodic polling or wake loop: when dependency-bound, retain this
+waiting state and yield. The result
 producer checks recipient state and uses `followup_task` for a completed/idle
 non-root parent, with exact candidate, evidence and next action; `send_message`
 suffices only while the recipient is running.
 
-Broad 01 selected transitions and 02/03 P1/P4/publication migration still need
-the compiled issuing contract, complete negative dependency controls and joined
-production evidence. Preserve remaining warm folds and resource blockers
-explicitly; source review does not make this area integration-ready or qualified.
+Broad 02/03 P1/P4/publication migration still needs the compiled issuing contract,
+complete negative dependency controls and joined production evidence. Independent
+source design/constructor implementation for 01 remains authorized despite the
+native disk gate. Preserve remaining warm folds and resource blockers explicitly;
+source review does not make this area integration-ready or qualified.
