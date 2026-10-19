@@ -63,7 +63,9 @@ library tidepool-execution-schema
     text
   default-language: GHC2024
   default-extensions: OverloadedStrings
-  ghc-options:      -Wall -Werror=missing-fields
+  -- Internal-worker Template Haskell also reads dynamic interfaces from this
+  -- separately compiled package, including during its static-PIC build.
+  ghc-options:      -Wall -Werror=missing-fields -dynamic-too
 
 -- Shared compiler implementation for the production worker and GHC-dependent
 -- tests. Pure execution encoding has its own internal library above.
