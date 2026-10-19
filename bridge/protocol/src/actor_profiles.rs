@@ -479,7 +479,7 @@ pub const EFFECTS: &[NominalEffect] = &[
     nominal!(
         RuntimeInfo,
         EffectRuntimeInfo,
-        26,
+        27,
         40,
         39,
         "Tidepool.Effects.Core"
