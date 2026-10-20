@@ -11,6 +11,7 @@ module Tidepool.CompilerProducts
   , writeCertifiedProductsKeepingWithOriginals
   , StagedOriginalProducts, stagedOriginalEntryOrdinal, stagedFinalizedArtifacts, stagedOriginalOutputFiles
   , stagedOriginalBinders, withPriorStagedOriginalProducts, newPreparedOriginalInterfaceArtifactsWithPrior
+  , retainTypeInterfaceCaptures
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, writeCertifiedSegmentItemProductsWithInputs
   , stagedDeclarationInputReferences
   , publishStagedOriginalProducts, retainStagedProgramProducts
@@ -253,8 +254,29 @@ stagedOriginalOutputFiles :: StagedOriginalProducts -> [(FilePath,String)]
 stagedOriginalOutputFiles (StagedOriginalProducts _ certificate bytes outputs _) =
   (certificate,shaHex bytes) : freshOutputSealFacts outputs
 
-stagedOriginalInterfaces :: StagedOriginalProducts -> Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
-stagedOriginalInterfaces (StagedOriginalProducts _ _ _ _ interfaces) = interfaces
+-- This index retains type bytes, not native group or original authority.
+-- Those remain in the same stage's certified TargetCertificationContext.
+stagedTypeInterfaces :: StagedOriginalProducts -> Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
+stagedTypeInterfaces (StagedOriginalProducts _ _ _ _ interfaces) = interfaces
+
+-- A relocated view may borrow the already-issued type capture. Preserve its
+-- descriptor and compare semantic requirements and owned bytes, rather than
+-- treating the new packet's output directory as a new implementation.
+retainTypeInterfaceCaptures
+  :: Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
+  -> Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
+  -> Either String (Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes))
+retainTypeInterfaceCaptures previous additions = do
+  forM_ (Map.toAscList additions) $ \(key,(artifact,body)) -> do
+    unless (key == (exactUnit artifact,exactModule artifact)
+        && exactSha256 artifact == artifactSha256 body)
+      (Left "type interface capture differs from its owner or body seal")
+    forM_ (Map.lookup key previous) $ \(old,oldBody) ->
+      unless ((exactUnit old,exactModule old,exactSha256 old,exactRequirements old)
+          == (exactUnit artifact,exactModule artifact,exactSha256 artifact,exactRequirements artifact)
+          && oldBody == body)
+        (Left "type interface capture conflicts with its retained owner")
+  pure (Map.union previous additions)
 
 data PreparedProductContext = PreparedProductContext
   { preparedProductInventory :: PreparedModuleProducts
@@ -690,13 +712,11 @@ newPreparedOriginalInterfaceArtifactsWithPrior
   -> FilePath -> IO OriginalInterfaceArtifacts
 newPreparedOriginalInterfaceArtifactsWithPrior prepared worldInputs prior directory = do
   let worldInterfaces = maybe [] worldCellTypeInterfaces worldInputs
-      previous = maybe Map.empty stagedOriginalInterfaces prior
+      previous = maybe Map.empty stagedTypeInterfaces prior
       current = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,body)) | (artifact,body) <- worldInterfaces]
-      retained = Map.union current previous
-  unless (all (\(artifact,body) -> Map.lookup (exactUnit artifact,exactModule artifact) retained == Just (artifact,body)
-      && exactSha256 artifact == artifactSha256 body) worldInterfaces
-      && not (or (Map.elems (Map.intersectionWith (/=) current previous))))
-    (fail "prior original interface captures conflict")
+  unless (all (\(artifact,body) -> Map.lookup (exactUnit artifact,exactModule artifact) current == Just (artifact,body)) worldInterfaces)
+    (fail "current type interface captures conflict")
+  retained <- either fail pure (retainTypeInterfaceCaptures previous current)
   let readRetained artifact = case Map.lookup (exactUnit artifact,exactModule artifact) retained of
         Just (selected,body) | selected == artifact -> pure body
         _ -> readOrdinary artifact
@@ -734,13 +754,12 @@ writeCertifiedSegmentProducts
   -> PreparedProductContext -> IO StagedOriginalProducts
 writeCertifiedSegmentProducts includes originals directory prepared context = do
   (certified,bytes,outputs) <- writeCertifiedProducts SegmentOriginalFacts True includes originals directory prepared (Just context) []
-  let previous = maybe Map.empty stagedOriginalInterfaces (preparedPriorOriginalProducts context)
+  let previous = maybe Map.empty stagedTypeInterfaces (preparedPriorOriginalProducts context)
       current = Map.fromList [(key,(artifact,localFinalizedInterfaceBody proof))
         | (key,proof) <- Map.toAscList (finalizedLocalAdmissions (certifiedFinalizedArtifacts certified))
         , let (artifact,_,_) = localFinalizedInterface proof]
-  unless (not (or (Map.elems (Map.intersectionWith (/=) current previous))))
-    (fail "a prior original was replaced by another finalized capture")
-  pure (StagedOriginalProducts certified (directory </> "certified-products.cbor") bytes outputs (Map.union current previous))
+  retained <- either fail pure (retainTypeInterfaceCaptures previous current)
+  pure (StagedOriginalProducts certified (directory </> "certified-products.cbor") bytes outputs retained)
 
 writeCertifiedSegmentItemProducts
   :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> WireProgram -> IO FilePath

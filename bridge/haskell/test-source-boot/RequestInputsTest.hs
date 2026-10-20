@@ -113,7 +113,7 @@ import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodec
 import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer, issueCodecFixturePacket)
 import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming, TaskAttempt(..), newTimingRequestIdentity)
 import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor, runCompilerTasksWithAttempt)
-import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse)
+import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse, retainTypeInterfaceCaptures)
 import Tidepool.PreparedStg (newPreparedBodyCache, pmModule, pmIdentityResolver)
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.SessionArtifacts (prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment
@@ -1666,9 +1666,13 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
             reference <- case ready of
               ExactInputsReady _ realization -> pure realization
               other -> fail ("real preparation could not acquire its captured world: " ++ show other)
+            -- The component template uses session/dialect.rs:EVAL_PRAGMAS.
+            -- Its explicit Prelude import supplies this small template's
+            -- lexical base under the shipped NoImplicitPrelude dialect.
             let template = unlines
-                  ["{-# LANGUAGE DataKinds, QuasiQuotes #-}","{{CELL_PRAGMAS}}","module CellCheck where"
-                  ,"import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
+                  ["{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
+                  ,"{{CELL_PRAGMAS}}","module CellCheck where"
+                  ,"import Prelude","import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
                   ,"__tidepoolInEffectRow :: Eff '[] value -> Eff '[] value"
                   ,"__tidepoolInEffectRow = id"
                   ,"{{CELL_DECLS}}"
@@ -3028,4 +3032,25 @@ freshOutputSealSetLaws = withScratch $ \work -> do
     Right _ -> fail "seal union accepted conflicting content for one path"
   _ <- either fail pure (appendFreshOutputSeals emptyFreshOutputSeals first)
   _ <- either fail pure (appendFreshOutputSeals second emptyFreshOutputSeals)
-  pure ()
+  -- TYPE custody and output ownership have distinct identities: moving an
+  -- unchanged type interface preserves its issued descriptor, while an output
+  -- path still refuses a changed body above. Neither comparison grants native
+  -- implementation authority.
+  let body = captureArtifactBytes firstBytes
+      artifact = ExactIfaceArtifact "main" "CapturedType" firstPath (artifactSha256 body)
+        [("main","RequiredType")]
+      previous = Map.singleton ("main","CapturedType") (artifact,body)
+      relocated = artifact {exactPath=secondPath}
+      additions value = Map.singleton ("main","CapturedType") value
+      requireConflict value = case retainTypeInterfaceCaptures previous (additions value) of
+        Left _ -> pure ()
+        Right _ -> fail "retained TYPE custody accepted a changed owner, body, seal or requirement"
+  kept <- either fail pure (retainTypeInterfaceCaptures previous (additions (relocated,body)))
+  unless (kept == previous) (fail "TYPE relocation replaced the already-issued descriptor")
+  let different = captureArtifactBytes conflictingBytes
+  requireConflict (relocated {exactSha256=artifactSha256 different},different)
+  requireConflict (relocated {exactSha256=artifactSha256 different},body)
+  requireConflict (relocated {exactRequirements=[]},body)
+  requireConflict (relocated {exactModule="ForeignType"},body)
+  fresh <- either fail pure (retainTypeInterfaceCaptures Map.empty (additions (artifact,body)))
+  unless (fresh == previous) (fail "fresh TYPE custody lost its actual issued capture")
