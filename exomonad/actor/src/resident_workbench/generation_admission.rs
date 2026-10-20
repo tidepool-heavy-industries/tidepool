@@ -3214,9 +3214,8 @@ mod tests {
         decision: &Arc<tidepool_runtime::session::PublicationDecision>,
     ) {
         use super::super::{
-            ActorGenerationCommit, ActorGenerationPublicationSettlement,
-            ActorGenerationRetirementCutoff, ActorGenerationRetirementPreparationOutcome,
-            InstalledToolsAvailability,
+            ActorGenerationCommit, ActorGenerationRetirementCutoff,
+            ActorGenerationRetirementPreparationOutcome, InstalledToolsAvailability,
         };
         let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
         let (prepared, driver) = preparation.into_parts();
