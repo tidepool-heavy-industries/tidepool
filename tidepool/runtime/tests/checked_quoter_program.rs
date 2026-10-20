@@ -17,7 +17,7 @@ use tidepool_runtime::session::{
 };
 use tidepool_testing::effect_surface::TestEffectSurface;
 use tidepool_toolchain::artifact_inventory::{ArtifactDependency, ArtifactInventoryFailure};
-use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+use tidepool_toolchain::checked_cell::CellRecipe;
 use tidepool_toolchain::CompileError;
 
 #[test]
@@ -51,25 +51,26 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         ]));
         let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
-        let specification = Arc::new(CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: source.into(),
-            template_source: template.clone(),
-            turn_templates: templates
-                .iter()
-                .map(|template| {
-                    let selector = match template.kind {
-                        TemplateSelector::Decl => "decl",
-                        TemplateSelector::Bind => "bind",
-                        TemplateSelector::BindDiscard => "binddiscard",
-                        TemplateSelector::Expr => "expr",
-                    };
-                    (selector.into(), template.source.clone())
-                })
-                .collect(),
-            injected_modules: view.injected_module_names(),
-            reserved_declaration_modules: Vec::new(),
-        });
+        let specification = Arc::new(
+            CellRecipe::new(
+                source.to_string(),
+                template.clone(),
+                templates
+                    .iter()
+                    .map(|template| {
+                        let selector = match template.kind {
+                            TemplateSelector::Decl => "decl",
+                            TemplateSelector::Bind => "bind",
+                            TemplateSelector::BindDiscard => "binddiscard",
+                            TemplateSelector::Expr => "expr",
+                        };
+                        (selector.into(), template.source.clone())
+                    })
+                    .collect(),
+                view.injected_module_names(),
+            )
+            .unwrap(),
+        );
         let mut roots = effects.include_paths().to_vec();
         roots.insert(0, root.path().to_path_buf());
         let include = view.include_paths(&roots);

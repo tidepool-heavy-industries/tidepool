@@ -1120,7 +1120,7 @@ mod tests {
         ));
         use std::sync::Arc;
         use tidepool_runtime::session::{turn, TemplateSelector};
-        use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+        use tidepool_toolchain::checked_cell::CellRecipe;
         let execution = Arc::new(grandchild.begin_private_execution(scope).unwrap());
         let private_scope = execution.private_scope();
         assert!(matches!(
@@ -1143,24 +1143,29 @@ mod tests {
             "'[]",
             &imports,
         );
-        let specification = Arc::new(CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: "mixedAnswer <- pure (case (Inherited 20, Local 22) of (Inherited x, Local y) -> x + y)".into(),
-            template_source: tidepool_runtime::session::resident_cell_check_template(
-                effects.preamble(), "'[]", &imports,
+        let specification = Arc::new(CellRecipe::new(
+            "mixedAnswer <- pure (case (Inherited 20, Local 22) of (Inherited x, Local y) -> x + y)"
+                .to_string(),
+            tidepool_runtime::session::resident_cell_check_template(
+                effects.preamble(),
+                "'[]",
+                &imports,
             ),
-            turn_templates: templates.iter().map(|template| {
-                let kind = match template.kind {
-                    TemplateSelector::Decl => "decl",
-                    TemplateSelector::Bind => "bind",
-                    TemplateSelector::BindDiscard => "binddiscard",
-                    TemplateSelector::Expr => "expr",
-                };
-                (kind.into(), template.source.clone())
-            }).collect(),
-            injected_modules: Vec::new(),
-            reserved_declaration_modules: Vec::new(),
-        });
+            templates
+                .iter()
+                .map(|template| {
+                    let kind = match template.kind {
+                        TemplateSelector::Decl => "decl",
+                        TemplateSelector::Bind => "bind",
+                        TemplateSelector::BindDiscard => "binddiscard",
+                        TemplateSelector::Expr => "expr",
+                    };
+                    (kind.to_owned(), template.source.clone())
+                })
+                .collect(),
+            Vec::new(),
+        )
+        .unwrap());
         let includes = view.include_paths(effects.include_paths());
         let plan = tidepool_testing::with_settlement(|settlement| {
             tidepool_toolchain::artifacts::parse_cell_plan(

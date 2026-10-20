@@ -23,7 +23,7 @@ use tidepool_toolchain::artifacts::{
 };
 use tidepool_toolchain::certified_products::{PendingCertifiedGroup, PendingImportOwner};
 #[cfg(test)]
-use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+use tidepool_toolchain::checked_cell::CellRecipe;
 use tidepool_toolchain::checked_cell::{ExactCheckedCell, ExactCheckedItem, ExactCompiledItem};
 use tidepool_toolchain::extract_module_name;
 use tidepool_toolchain::recovery_artifacts::CertifiedRecoveryProduct;
@@ -3294,14 +3294,10 @@ fn prepare_cell_program_admitted_inner(
         })?;
     let view = admission.view().map_err(finite_failure)?;
     let recipe = planned.plan().specification();
-    tracing::Span::current().record("cell_bytes", recipe.cell_source.len());
-    let mut specification = recipe.as_ref().clone();
-    specification.admission_digest = admission.digest();
-    specification.reserved_declaration_modules = admission
-        .reserved_generations()
-        .iter()
-        .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
-        .collect();
+    tracing::Span::current().record("cell_bytes", recipe.cell_source().len());
+    // The admission owner issued this request once, before sharing the
+    // admission. Compilation only reads it; there is no relabelling step.
+    let request = Arc::clone(admission.checked_request().map_err(finite_failure)?);
     let scratch = Arc::new(compiler_scratch_directory()?);
     if !tidepool_extract_cmd::retain_compiler_input_directory(scratch.clone()) {
         return Err(CompileError::ExtractFailed(
@@ -3312,8 +3308,8 @@ fn prepare_cell_program_admitted_inner(
     let cell_path = scratch.path().join("cell.txt");
     let template_path = scratch.path().join("CellCheckTemplate.hs");
     let output_path = scratch.path().join("cell.cbor");
-    std::fs::write(&cell_path, &recipe.cell_source)?;
-    std::fs::write(&template_path, &recipe.template_source)?;
+    std::fs::write(&cell_path, recipe.cell_source())?;
+    std::fs::write(&template_path, recipe.template_source())?;
     let mut command = extract_cmd()?;
     command
         .input(&cell_path)
@@ -3326,7 +3322,7 @@ fn prepare_cell_program_admitted_inner(
         .inject_vals(view.injected_module_names());
     command.session_incarnation(view.session().0.to_string());
 
-    for (index, (kind, source)) in recipe.turn_templates.iter().enumerate() {
+    for (index, (kind, source)) in recipe.turn_templates().iter().enumerate() {
         let path = scratch.path().join(format!("checked-template-{index}.hs"));
         std::fs::write(&path, source)?;
         command.turn_template(kind, &path);
@@ -3350,7 +3346,7 @@ fn prepare_cell_program_admitted_inner(
         admission.include_paths().map_err(finite_failure)?,
         scratch.path(),
         view.exact_compile_context(),
-        specification,
+        request,
         admission
             .interfaces()
             .map_err(finite_failure)?
@@ -3435,7 +3431,7 @@ fn prepare_cell_program_admitted_inner(
     admission_timing.advance("decode_cell_out");
     let mut checked = decode_cell_out(
         program.checked_cell().observations(),
-        &recipe.cell_source,
+        recipe.cell_source(),
         admission.initial_value_generation().0,
         "",
     )?;
@@ -6443,17 +6439,21 @@ mod tests {
                 resident_cell_check_template(effects.preamble(), effects.row(), &imports);
             let templates =
                 resident_workbench_templates(effects.preamble(), effects.row(), &imports);
-            let specification = CheckedCellSpecification {
-                admission_digest: [0; 32],
-                cell_source: source.into(),
-                template_source: template.clone(),
-                turn_templates: templates
+            let specification = CellRecipe::new(
+                source.to_string(),
+                template.clone(),
+                templates
                     .iter()
-                    .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                    .map(|template| {
+                        (
+                            template.kind.wire_name().to_string(),
+                            template.source.clone(),
+                        )
+                    })
                     .collect(),
-                injected_modules: view.injected_module_names(),
-                reserved_declaration_modules: Vec::new(),
-            };
+                view.injected_module_names(),
+            )
+            .unwrap();
             let mut roots = effects.include_paths().to_vec();
             roots.insert(0, root.to_owned());
             if let Some(first) = first_include {
@@ -6833,6 +6833,23 @@ mod tests {
         assert_eq!(cell.checked.items.len(), 4);
         assert_eq!(cell.program.items().len(), 4);
         assert_eq!(fixture.resident.val_gen().0, initial + 3);
+        // The admission owner issued one request for the plan's own recipe.
+        // `fixture.execute` installs through `begin_cell_program`, which
+        // compares this exact digest and declaration inventory before the
+        // program can run.
+        let issued = cell.admission.checked_request().unwrap();
+        assert_eq!(issued.admission_digest(), cell.admission.digest());
+        assert_eq!(
+            issued.recipe().specification_digest(),
+            cell.admission.specification_digest().unwrap()
+        );
+        let reserved = cell
+            .admission
+            .reserved_generations()
+            .iter()
+            .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
+            .collect::<Vec<_>>();
+        assert_eq!(issued.reserved_declaration_modules(), reserved.as_slice());
         let reservation = cell.admission.plan_reservation().unwrap().unwrap();
         let observations = reservation
             .items()
@@ -7120,14 +7137,22 @@ mod tests {
         let fixture = CheckedHomeFixture::new();
         let scratch = tempfile::tempdir().unwrap();
         let endpoint = extract_cmd().unwrap().bind().unwrap();
-        let specification = CheckedCellSpecification {
-            admission_digest: [3; 32],
-            cell_source: "let alias = home".into(),
-            template_source: "module Next where".into(),
-            turn_templates: vec![],
-            injected_modules: vec![fixture.home.owner().module_name()],
-            reserved_declaration_modules: vec![],
-        };
+        let specification = Arc::new(
+            tidepool_toolchain::checked_cell::CheckedCellRequest::issue(
+                Arc::new(
+                    CellRecipe::new(
+                        "let alias = home".to_string(),
+                        "module Next where".to_string(),
+                        vec![],
+                        vec![fixture.home.owner().module_name()],
+                    )
+                    .unwrap(),
+                ),
+                tidepool_toolchain::checked_cell::AdmissionDigest::finalize([3; 32]).unwrap(),
+                vec![],
+            )
+            .unwrap(),
+        );
         let error = ModuleCandidateOffer::select_checked_cell(
             endpoint.identity().producer_bytes(),
             fixture.effects.include_paths(),
@@ -7187,17 +7212,21 @@ mod tests {
             effects.row(),
             &imports,
         );
-        let specification = CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: "let value = RootChoice.value".into(),
-            template_source: template,
-            turn_templates: templates
+        let specification = CellRecipe::new(
+            "let value = RootChoice.value".to_string(),
+            template,
+            templates
                 .iter()
-                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .map(|template| {
+                    (
+                        template.kind.wire_name().to_string(),
+                        template.source.clone(),
+                    )
+                })
                 .collect(),
-            injected_modules: view.injected_module_names(),
-            reserved_declaration_modules: vec![],
-        };
+            view.injected_module_names(),
+        )
+        .unwrap();
         let mut roots = effects.include_paths().to_vec();
         roots.insert(0, root.path().to_owned());
         let include = view.include_paths(&roots);
@@ -7300,21 +7329,25 @@ mod tests {
             effects.row(),
             &imports,
         );
-        let specification = CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: "let value = RootChoice.value".into(),
-            template_source: crate::session::resident_cell_check_template(
+        let specification = CellRecipe::new(
+            "let value = RootChoice.value".to_string(),
+            crate::session::resident_cell_check_template(
                 effects.preamble(),
                 effects.row(),
                 &imports,
             ),
-            turn_templates: templates
+            templates
                 .iter()
-                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .map(|template| {
+                    (
+                        template.kind.wire_name().to_string(),
+                        template.source.clone(),
+                    )
+                })
                 .collect(),
-            injected_modules: view.injected_module_names(),
-            reserved_declaration_modules: vec![],
-        };
+            view.injected_module_names(),
+        )
+        .unwrap();
         let original_include = view.include_paths(
             &[
                 vec![original_root.clone()],
@@ -8200,17 +8233,21 @@ mod tests {
         let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
         let source = "let tiny = CheckedTiny.tinyValue";
-        let specification = CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: source.into(),
-            template_source: template.clone(),
-            turn_templates: templates
+        let specification = CellRecipe::new(
+            source.to_string(),
+            template.clone(),
+            templates
                 .iter()
-                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .map(|template| {
+                    (
+                        template.kind.wire_name().to_string(),
+                        template.source.clone(),
+                    )
+                })
                 .collect(),
-            injected_modules: view.injected_module_names(),
-            reserved_declaration_modules: Vec::new(),
-        };
+            view.injected_module_names(),
+        )
+        .unwrap();
         let mut roots = effects.include_paths().to_vec();
         roots.insert(0, root.path().to_owned());
         let include = view.include_paths(&roots);
@@ -8290,17 +8327,21 @@ mod tests {
             let templates =
                 resident_workbench_templates(effects.preamble(), effects.row(), &imports);
             let source = "let tiny = CheckedTiny.tinyValue";
-            let specification = CheckedCellSpecification {
-                admission_digest: [0; 32],
-                cell_source: source.into(),
-                template_source: template.clone(),
-                turn_templates: templates
+            let specification = CellRecipe::new(
+                source.to_string(),
+                template.clone(),
+                templates
                     .iter()
-                    .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                    .map(|template| {
+                        (
+                            template.kind.wire_name().to_string(),
+                            template.source.clone(),
+                        )
+                    })
                     .collect(),
-                injected_modules: view.injected_module_names(),
-                reserved_declaration_modules: Vec::new(),
-            };
+                view.injected_module_names(),
+            )
+            .unwrap();
             let mut roots = effects.include_paths().to_vec();
             roots.insert(0, root.path().to_owned());
             let admitted_include = view.include_paths(&roots);
@@ -8438,14 +8479,13 @@ mod tests {
                 &view.turn_imports(&SourceImports::new()),
             );
             let source = "data RetainedLeaseDeclaration = RetainedLeaseDeclaration";
-            let specification = CheckedCellSpecification {
-                admission_digest: [0; 32],
-                cell_source: source.into(),
-                template_source: template.clone(),
-                turn_templates: Vec::new(),
-                injected_modules: view.injected_module_names(),
-                reserved_declaration_modules: Vec::new(),
-            };
+            let specification = CellRecipe::new(
+                source.to_string(),
+                template.clone(),
+                Vec::new(),
+                view.injected_module_names(),
+            )
+            .unwrap();
             let include_paths = view.include_paths(effects.include_paths());
             let admission = match &execution {
                 Some(execution) => session.admit_planned_cell_for_execution(
@@ -8595,17 +8635,21 @@ mod tests {
             &expected_declaration.module_name(),
         );
         let source = source.as_str();
-        let specification = CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: source.into(),
-            template_source: template.clone(),
-            turn_templates: templates
+        let specification = CellRecipe::new(
+            source.to_string(),
+            template.clone(),
+            templates
                 .iter()
-                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .map(|template| {
+                    (
+                        template.kind.wire_name().to_string(),
+                        template.source.clone(),
+                    )
+                })
                 .collect(),
-            injected_modules: view.injected_module_names(),
-            reserved_declaration_modules: vec![],
-        };
+            view.injected_module_names(),
+        )
+        .unwrap();
         let admitted_include = view.include_paths(effects.include_paths());
         let admission = session
             .admit_planned_cell_for_execution(
@@ -9268,17 +9312,21 @@ mod tests {
             .all(|result| matches!(result, InspectionResult::Type { .. })));
         let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
-        let admission_specification = CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: "let result = makeResult (41 :: Int)".into(),
-            template_source: template.clone(),
-            turn_templates: templates
+        let admission_specification = CellRecipe::new(
+            "let result = makeResult (41 :: Int)".to_string(),
+            template.clone(),
+            templates
                 .iter()
-                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .map(|template| {
+                    (
+                        template.kind.wire_name().to_string(),
+                        template.source.clone(),
+                    )
+                })
                 .collect(),
-            injected_modules: injected.clone(),
-            reserved_declaration_modules: Vec::new(),
-        };
+            injected.clone(),
+        )
+        .unwrap();
         let binding_execution = Arc::new(session.begin_private_execution(public).unwrap());
         let binding_scope = binding_execution.private_scope();
         let admission = session
@@ -9302,6 +9350,25 @@ mod tests {
                 None,
             )
             .unwrap();
+        // The admission owner issued exactly one request for the plan's own
+        // recipe, with the finalized digest and the reserved declaration
+        // inventory. The consumer path reads it; it cannot relabel it.
+        let issued = admission.checked_request().unwrap();
+        assert_eq!(issued.admission_digest(), admission.digest());
+        assert_eq!(
+            issued.recipe().specification_digest(),
+            admission_specification.specification_digest()
+        );
+        let reserved = admission
+            .reserved_generations()
+            .iter()
+            .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            issued.reserved_declaration_modules(),
+            reserved.as_slice(),
+            "the issued request names the admission's exact declaration owners"
+        );
         let (checked, program) = tidepool_testing::with_settlement(|settlement| {
             compile_cell_program_admitted(admission.clone(), settlement)
         })
@@ -9310,6 +9377,10 @@ mod tests {
         assert_eq!(checked.items.len(), 1);
         let item = checked.checked_item(0).unwrap();
         assert_eq!(item.admission_digest(), admission.digest());
+        assert_eq!(
+            item.reserved_declaration_modules(),
+            issued.reserved_declaration_modules()
+        );
         assert_eq!(item.source(), checked.items[0].source);
         assert_eq!(item.signatures().len(), 1);
         assert!(item
@@ -9379,17 +9450,21 @@ mod tests {
         edited_check.items[0].source = "let result = makeResult (0 :: Int)".into();
         assert!(edited_check.checked_item(0).is_err());
         let expression_source = "makeResult (42 :: Int)";
-        let expression_specification = CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: expression_source.into(),
-            template_source: template.clone(),
-            turn_templates: templates
+        let expression_specification = CellRecipe::new(
+            expression_source.to_string(),
+            template.clone(),
+            templates
                 .iter()
-                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .map(|template| {
+                    (
+                        template.kind.wire_name().to_string(),
+                        template.source.clone(),
+                    )
+                })
                 .collect(),
-            injected_modules: injected.clone(),
-            reserved_declaration_modules: Vec::new(),
-        };
+            injected.clone(),
+        )
+        .unwrap();
         let expression_execution = Arc::new(session.begin_private_execution(public).unwrap());
         let expression_scope = expression_execution.private_scope();
         let expression_admission = session
@@ -9454,11 +9529,17 @@ mod tests {
         assert!(!original_path.exists());
         assert!(view.is_current_for(&session.compile_view_in(public).unwrap()));
         let before_refusal = session.public_visibility_snapshot_in(public).unwrap();
-        let mut hidden_specification = admission_specification.clone();
-        hidden_specification.cell_source = format!(
+        let hidden_cell_source = format!(
             "import qualified {} as HiddenOriginal\nlet leaked = HiddenOriginal.answer (41 :: Int)",
             original.product().owner().module
         );
+        let hidden_specification = CellRecipe::new(
+            hidden_cell_source,
+            admission_specification.template_source().to_string(),
+            admission_specification.turn_templates().to_vec(),
+            admission_specification.injected_modules().to_vec(),
+        )
+        .unwrap();
         let hidden_execution = Arc::new(session.begin_private_execution(public).unwrap());
         let hidden_scope = hidden_execution.private_scope();
         let hidden_plan = tidepool_testing::with_settlement(|settlement| {
@@ -11250,7 +11331,7 @@ mod compiler_packet_replay {
     use serde::Deserialize;
     use sha2::{Digest, Sha256};
     use tidepool_codegen::scope::ScopeId;
-    use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+    use tidepool_toolchain::checked_cell::CellRecipe;
 
     use super::{compile_cell_program_admitted, TemplateSelector, TurnTemplate};
     use crate::session::{
@@ -11360,22 +11441,23 @@ mod compiler_packet_replay {
                 source: template.file.source(),
             })
             .collect::<Vec<_>>();
-        let specification = Arc::new(CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: inputs.cell.source(),
-            template_source: inputs.template.source(),
-            turn_templates: templates
-                .iter()
-                .map(|template| {
-                    (
-                        template.kind.wire_name().to_owned(),
-                        template.source.clone(),
-                    )
-                })
-                .collect(),
-            injected_modules: Vec::new(),
-            reserved_declaration_modules: Vec::new(),
-        });
+        let specification = Arc::new(
+            CellRecipe::new(
+                inputs.cell.source(),
+                inputs.template.source(),
+                templates
+                    .iter()
+                    .map(|template| {
+                        (
+                            template.kind.wire_name().to_owned(),
+                            template.source.clone(),
+                        )
+                    })
+                    .collect(),
+                Vec::new(),
+            )
+            .unwrap(),
+        );
         let plan = tidepool_testing::with_settlement(|settlement| {
             tidepool_toolchain::artifacts::parse_cell_plan(
                 specification.clone(),

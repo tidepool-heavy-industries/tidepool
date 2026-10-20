@@ -1287,6 +1287,20 @@ pub(crate) struct NativeAvailabilitySnapshotFacts {
     pub(crate) contributions: imbl::OrdMap<[u8; 32], NativeContributionSnapshotFacts>,
 }
 
+impl NativeAvailabilitySnapshotFacts {
+    /// Canonical identity of one row's permission facts. Rows with equal
+    /// facts share this identity regardless of `Arc` identity.
+    pub(crate) fn identity(&self) -> Result<[u8; 32], CompileError> {
+        use sha2::{Digest, Sha256};
+        let bytes = fvm_ipld_encoding::to_vec(self)
+            .map_err(|error| failure(format!("native availability identity: {error}")))?;
+        let mut digest = Sha256::new();
+        digest.update(b"Tidepool native availability row v1\0");
+        digest.update(bytes);
+        Ok(digest.finalize().into())
+    }
+}
+
 /// Issuer-bound input availability, independent of output visibility and roles.
 /// Only native selection issuance constructs a nonempty component; clones retain its
 /// exact payload owners and opaque availability handles. The second persistent root
@@ -1409,7 +1423,7 @@ impl NativeDemandBudget<'_> {
 impl RequestNativeAvailability {
     /// Derive immutable facts only at a real row construction or mutation. The
     /// acquisition/permission owner remains the row, never these durable facts.
-    fn row_snapshot_facts(
+    pub(crate) fn row_snapshot_facts(
         row: &NativeTransportAvailability,
     ) -> Result<NativeAvailabilitySnapshotFacts, CompileError> {
         Ok(NativeAvailabilitySnapshotFacts {
@@ -1508,6 +1522,10 @@ impl RequestNativeAvailability {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn issued_row(&self, id: ArtifactId) -> Option<&Arc<NativeTransportAvailability>> {
+        self.0.get(&id)
     }
 
     pub(crate) fn rows(&self) -> impl Iterator<Item = &Arc<NativeTransportAvailability>> {
@@ -2020,7 +2038,80 @@ pub(crate) struct DemandNativeInputs {
     cold: Arc<RequestCompilerInputs>,
     demand: crate::artifact_inventory::DemandCompilerProjection,
     native_selection: NativeInputSelection,
+    permission_delta: IssuedNativePermissionDelta,
     work: DemandNativeInputsWork,
+}
+
+/// The exact rows one demand owner narrowed from its own acquired cold
+/// availability. The basis pointer prevents pairing this delta with another
+/// compiler owner; the old/new fact identities make each entry exact.
+pub(crate) struct IssuedNativePermissionDelta {
+    basis: Arc<RequestCompilerInputs>,
+    changed: BTreeMap<
+        ArtifactId,
+        (
+            NativeAvailabilitySnapshotFacts,
+            NativeAvailabilitySnapshotFacts,
+        ),
+    >,
+}
+
+impl IssuedNativePermissionDelta {
+    fn issue(
+        basis: Arc<RequestCompilerInputs>,
+        changed: BTreeMap<
+            ArtifactId,
+            (
+                NativeAvailabilitySnapshotFacts,
+                NativeAvailabilitySnapshotFacts,
+            ),
+        >,
+    ) -> Self {
+        Self { basis, changed }
+    }
+
+    /// A delta admits only the exact row facts its owner issued, only against
+    /// the same cold source support that owner projected.
+    pub(crate) fn admits(
+        &self,
+        source: &Arc<crate::artifact_inventory::CompilerSourceSupport>,
+        id: ArtifactId,
+        old: &NativeAvailabilitySnapshotFacts,
+        new: &NativeAvailabilitySnapshotFacts,
+    ) -> bool {
+        Arc::ptr_eq(&self.basis.source_support, source)
+            && self
+                .changed
+                .get(&id)
+                .is_some_and(|issued| issued.0 == *old && issued.1 == *new)
+    }
+}
+
+/// Executable payload rows remain paired with the exact scoped choices that
+/// admitted them. Pending group payloads alone do not carry those choices.
+pub(crate) struct DemandCertifiedGroups {
+    basis: Arc<RequestCompilerInputs>,
+    groups: Vec<PendingCertifiedGroup>,
+    bindings: BTreeMap<NativeGroupKey, crate::artifact_inventory::NativeGroupBinding>,
+}
+
+impl DemandCertifiedGroups {
+    pub(crate) fn belongs_to_source(
+        &self,
+        source: &Arc<crate::artifact_inventory::CompilerSourceSupport>,
+    ) -> bool {
+        Arc::ptr_eq(&self.basis.source_support, source)
+    }
+
+    pub(crate) fn groups(&self) -> &[PendingCertifiedGroup] {
+        &self.groups
+    }
+
+    pub(crate) fn bindings(
+        &self,
+    ) -> &BTreeMap<NativeGroupKey, crate::artifact_inventory::NativeGroupBinding> {
+        &self.bindings
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2054,6 +2145,268 @@ impl DemandNativeInputs {
 
     pub(crate) fn work(&self) -> DemandNativeInputsWork {
         self.work
+    }
+
+    pub(crate) fn semantic_source_support(
+        &self,
+        groups: &DemandCertifiedGroups,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Arc<crate::artifact_inventory::CompilerSourceSupport>, CompileError> {
+        self.cold.source_support.project_demanded_inputs(
+            &self.demand,
+            &self.native_selection.availability,
+            &self.permission_delta,
+            groups,
+            operation,
+        )
+    }
+
+    /// Authenticate only the input groups named by this completion, through
+    /// their existing scoped offers. Receipt names restrict issued permission;
+    /// they do not issue an original or choose a historical carrier by name.
+    pub(crate) fn certify_receipt_groups(
+        &self,
+        receipt: &crate::certified_products::CertifiedReceipt,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<DemandCertifiedGroups, CompileError> {
+        use crate::certified_products::{ProductOrigin, ReceiptImportOwner};
+        let operation = validation.inventory.clone();
+        let budget = NativeDemandBudget(Some(&operation));
+        let mut produced = BTreeSet::new();
+        for module in &receipt.modules {
+            budget.checkpoint()?;
+            if module.origin != ProductOrigin::Cached
+                && !produced.contains(&(&module.unit, &module.module))
+            {
+                budget.reserve::<((&String, &String), [usize; 4])>(1)?;
+                produced.insert((&module.unit, &module.module));
+            }
+        }
+        let mut roots = BTreeMap::new();
+        let mut proofs = BTreeMap::new();
+        for global in receipt
+            .modules
+            .iter()
+            .flat_map(|module| &module.groups)
+            .flat_map(|group| &group.globals)
+            .chain(receipt.targets.values().flatten())
+        {
+            budget.checkpoint()?;
+            let ReceiptImportOwner::Source {
+                unit,
+                module,
+                module_version,
+                original_ordinal,
+                ..
+            } = &global.owner
+            else {
+                continue;
+            };
+            // Newly produced modules receive their group authority from the
+            // same complete product certifier, after source admission.
+            if module_version.is_none() && produced.contains(&(unit, module)) {
+                continue;
+            }
+            // The shared choice owner also constructs one temporary owner key.
+            budget.strings(unit.len().saturating_add(module.len()).saturating_mul(2))?;
+            let owner = identity(unit, module);
+            let role = self
+                .demand
+                .projection()
+                .snapshot_roles()
+                .get(&owner)
+                .ok_or_else(|| failure("receipt native group lacks its demanded compiler role"))?;
+            let id = role
+                .original()
+                .or_else(|| self.native_selection.advertised.0.get(&owner).copied())
+                .ok_or_else(|| failure("receipt native group lacks its issued body choice"))?;
+            let row = self
+                .native_selection
+                .availability
+                .0
+                .get(&id)
+                .ok_or_else(|| failure("receipt native group lacks its issued row"))?;
+            let native_owner = row.original_owner();
+            if native_owner.unit != *unit
+                || native_owner.module != *module
+                || module_version.as_ref() != Some(&native_owner.module_version)
+            {
+                return Err(failure(
+                    "receipt native group differs from its issued owner or permission",
+                ));
+            }
+            let key = NativeGroupKey {
+                artifact: id,
+                original_ordinal: *original_ordinal,
+            };
+            let mut candidates = BTreeSet::new();
+            for contribution in row.contributions.iter() {
+                budget.checkpoint()?;
+                for binding in contribution.groups(key) {
+                    budget.checkpoint()?;
+                    if !candidates.contains(&binding) {
+                        budget
+                            .reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(
+                                1,
+                            )?;
+                        candidates.insert(binding);
+                    }
+                }
+            }
+            // Share the existing input-decision policy with the target issuer.
+            // The exact cold choice is consulted even when availability is empty.
+            let candidates = crate::certified_products::select_input_native_group_candidates(
+                &self.cold.source_support,
+                key,
+                role.interface(),
+                native_owner,
+                &owner,
+                candidates,
+            )
+            .map_err(compiler_evidence_failure)?;
+            if !row.permits(*original_ordinal) {
+                return Err(failure(
+                    "receipt native group exceeds its issued permission",
+                ));
+            }
+            let mut candidates = candidates.into_iter();
+            let binding = candidates
+                .next()
+                .ok_or_else(|| failure("receipt native group lacks its scoped contribution"))?;
+            if candidates.next().is_some() {
+                return Err(failure("receipt native group has ambiguous scoped issuers"));
+            }
+            if let Some(previous) = roots.get(&key) {
+                if *previous != binding {
+                    return Err(failure("receipt native group changed its scoped issuer"));
+                }
+            } else {
+                let proof = row
+                    .contributions
+                    .iter()
+                    .find(|proof| proof.contains_group(binding))
+                    .ok_or_else(|| failure("receipt native decision lacks its contribution"))?;
+                budget.reserve::<(
+                    NativeGroupKey,
+                    crate::artifact_inventory::NativeGroupBinding,
+                    [usize; 4],
+                )>(1)?;
+                budget.reserve::<(
+                    NativeGroupKey,
+                    Arc<crate::artifact_inventory::NativeOfferContribution>,
+                    [usize; 4],
+                )>(1)?;
+                roots.insert(key, binding);
+                proofs.insert(key, Arc::clone(proof));
+            }
+        }
+        let mut selected = BTreeSet::new();
+        let mut bindings = BTreeMap::new();
+        let mut available = BTreeMap::new();
+        for (key, binding) in roots {
+            budget.checkpoint()?;
+            budget.reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(1)?;
+            let root = BTreeSet::from([binding]);
+            let (closure, _) = proofs[&key].for_groups_with_operation(&root, &operation)?;
+            for id in closure.originals() {
+                budget.checkpoint()?;
+                let row = self
+                    .native_selection
+                    .availability
+                    .0
+                    .get(id)
+                    .ok_or_else(|| {
+                        failure("receipt group closure lacks its issued dependency row")
+                    })?;
+                let ArtifactPayload::Original(product) = &row.original.payload else {
+                    return Err(failure("receipt group closure is not an original"));
+                };
+                if !available.contains_key(id) {
+                    budget.reserve::<(ArtifactId, &CertifiedRecoveryProduct, [usize; 4])>(1)?;
+                    available.insert(*id, product);
+                }
+                for group in closure.original_groups(*id) {
+                    budget.checkpoint()?;
+                    let required = NativeGroupKey {
+                        artifact: *id,
+                        original_ordinal: group.original_ordinal,
+                    };
+                    // A parent's immutable carrier cannot widen the receiving
+                    // request's separately normalized dependency permission.
+                    if !row.permits(group.original_ordinal)
+                        || !row
+                            .contributions
+                            .iter()
+                            .any(|proof| proof.contains_group(group))
+                    {
+                        return Err(failure(
+                            "receipt group closure exceeds its issued dependency permission",
+                        ));
+                    }
+                    if !selected.contains(&required) {
+                        budget.reserve::<(NativeGroupKey, [usize; 4])>(1)?;
+                        budget.reserve::<(
+                            NativeGroupKey,
+                            crate::artifact_inventory::NativeGroupBinding,
+                            [usize; 4],
+                        )>(1)?;
+                        selected.insert(required);
+                        bindings.insert(required, group);
+                    } else if bindings.get(&required) != Some(&group) {
+                        return Err(failure(
+                            "receipt closures require competing scoped native bindings",
+                        ));
+                    }
+                }
+            }
+        }
+        // The empty slice is only an absent reuse memo. This existing issuer
+        // returns every selected authenticated group as the final authority.
+        let groups = certify_selected_owned_products_in_context_with_validation(
+            &available,
+            &[],
+            &selected,
+            validation,
+        )
+        .map_err(compiler_evidence_failure)?;
+        // Certified rows are the authority for executable bindings. The
+        // closure map above only carries the exact issuing scope for each
+        // selected key, so it may neither add an unbacked binding nor lose a
+        // certified group.
+        let mut artifacts_by_owner = BTreeMap::new();
+        for (id, product) in &available {
+            artifacts_by_owner.insert(product.owner(), *id);
+        }
+        let mut certified_keys = BTreeSet::new();
+        for group in &groups {
+            budget.checkpoint()?;
+            let artifact = artifacts_by_owner
+                .get(group.owner())
+                .copied()
+                .ok_or_else(|| failure("certified receipt group lost its issued original"))?;
+            let key = NativeGroupKey {
+                artifact,
+                original_ordinal: group.group().original_ordinal(),
+            };
+            if !certified_keys.insert(key) {
+                return Err(failure("certified receipt group was issued twice"));
+            }
+        }
+        if certified_keys.len() != bindings.len()
+            || bindings
+                .keys()
+                .any(|key| !certified_keys.contains(key))
+        {
+            return Err(failure(
+                "certified receipt groups and executable bindings disagree",
+            ));
+        }
+        bindings.retain(|key, _| certified_keys.contains(key));
+        Ok(DemandCertifiedGroups {
+            basis: Arc::clone(&self.cold),
+            groups,
+            bindings,
+        })
     }
 }
 
@@ -2184,6 +2537,21 @@ impl RequestCompilerInputs {
             )?;
         }
         availability.validate_role_coverage(demand.projection())?;
+        let mut changed = BTreeMap::new();
+        for row in availability.rows() {
+            let id = row.original.descriptor.id;
+            let previous = self
+                .native_selection
+                .availability
+                .issued_row(id)
+                .ok_or_else(|| failure("demanded native row was never issued"))?;
+            let old_facts = RequestNativeAvailability::row_snapshot_facts(previous)?;
+            let new_facts = RequestNativeAvailability::row_snapshot_facts(row)?;
+            if old_facts != new_facts {
+                changed.insert(id, (old_facts, new_facts));
+            }
+        }
+        let permission_delta = IssuedNativePermissionDelta::issue(Arc::clone(self), changed);
         Ok(DemandNativeInputs {
             cold: Arc::clone(self),
             demand,
@@ -2191,6 +2559,7 @@ impl RequestCompilerInputs {
                 availability,
                 advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
             },
+            permission_delta,
             work,
         })
     }
@@ -6169,12 +6538,14 @@ pub(crate) struct WorldSourceCompilationBinding {
 }
 
 impl WorldSourceCompilationBinding {
+    /// Retain the exact reservation and prepared segment carried by one issued
+    /// checked program. Raw preparation completion is not accepted here.
     pub(crate) fn from_output(
-        output: &crate::compiler_world::WorldCellOutputAdmission,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
         segment_index: usize,
     ) -> Result<Self, CompileError> {
         use sha2::Digest;
-        let segment = output
+        let segment = program
             .segments()
             .get(segment_index)
             .ok_or_else(|| failure("world source binding has no actual prepared segment"))?;
@@ -6182,9 +6553,9 @@ impl WorldSourceCompilationBinding {
         if hex(&segment_sha256) != segment.digest() {
             return Err(failure("world source segment digest is not canonical"));
         }
-        let plan = output.reservation().plan();
-        output
-            .validation
+        let plan = program.reservation().plan();
+        program
+            .validation()
             .inventory
             .charge(
                 plan.receipt()
@@ -6198,11 +6569,11 @@ impl WorldSourceCompilationBinding {
         context.update(b"Tidepool world source compilation context v1\0");
         context.update(plan.world().logical_id());
         context.update(plan_receipt_sha256);
-        context.update(output.reservation().admission_digest());
+        context.update(program.reservation().admission_digest());
         context.update(segment_sha256);
         context.update(plan.producer_sha256());
         Ok(Self {
-            reservation: Arc::clone(output.reservation()),
+            reservation: Arc::clone(program.reservation()),
             segment: Arc::clone(segment),
             plan_receipt_sha256,
             product_context_sha256: context.finalize().into(),
@@ -6214,6 +6585,39 @@ impl PartialEq for WorldSourceCompilationBinding {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.reservation, &other.reservation)
             && Arc::ptr_eq(&self.segment, &other.segment)
+    }
+}
+
+/// Content identity of the world compilation a demanded product belongs to.
+/// It carries no reservation, segment or checked-output authority; those stay
+/// with the checked program that issued the binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorldCompilationIdentity {
+    plan_receipt_sha256: [u8; 32],
+    product_context_sha256: [u8; 32],
+    segment_digest: String,
+}
+
+impl WorldCompilationIdentity {
+    fn from_binding(binding: &WorldSourceCompilationBinding) -> Self {
+        Self {
+            plan_receipt_sha256: binding.plan_receipt_sha256,
+            product_context_sha256: binding.product_context_sha256,
+            segment_digest: binding.segment.digest().to_owned(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        plan_receipt_sha256: [u8; 32],
+        product_context_sha256: [u8; 32],
+        segment_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            plan_receipt_sha256,
+            product_context_sha256,
+            segment_digest: segment_digest.into(),
+        }
     }
 }
 
@@ -6387,11 +6791,12 @@ impl ExactProgramSegmentAdmission {
 }
 
 /// Borrowed issued facts needed by output certification. This view performs no
-/// input selection, physical materialization or authority issuance.
-#[derive(Clone, Copy)]
+/// input selection, physical materialization or authority issuance. The
+/// source support is owned so a demanded world owner can carry its projected
+/// support without referring back to the cold issuer.
+#[derive(Clone)]
 pub(crate) struct ProductCompilerInputs<'a> {
-    projection: &'a CompilerInputProjection,
-    source_support: &'a Arc<crate::artifact_inventory::CompilerSourceSupport>,
+    source_support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     pub(crate) metadata: &'a CompilerArtifactMetadata,
     native_selection: &'a NativeInputSelection,
     original_sources: &'a crate::certified_products::RetainedOriginalSources,
@@ -6400,46 +6805,47 @@ pub(crate) struct ProductCompilerInputs<'a> {
 impl<'a> ProductCompilerInputs<'a> {
     pub(crate) fn from_exact(inputs: &'a RequestCompilerInputs) -> Self {
         Self {
-            projection: inputs.source_support.projection(),
-            source_support: &inputs.source_support,
+            source_support: Arc::clone(&inputs.source_support),
             metadata: &inputs.metadata,
             native_selection: &inputs.native_selection,
             original_sources: &inputs.original_sources,
         }
     }
 
-    fn from_world(
+    /// Carry the semantic support a demanded owner projected from its own
+    /// acquired bindings. This is not a cold fallback: the caller must supply
+    /// the exact `semantic_source_support` owner, and only immutable
+    /// original-source custody travels from the cold continuation.
+    fn from_semantic_support(
         inputs: &'a DemandNativeInputs,
+        support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
         original_sources: &'a crate::certified_products::RetainedOriginalSources,
     ) -> Self {
         Self {
-            projection: inputs.demand.projection(),
+            source_support: support,
             metadata: inputs.demand.metadata(),
             native_selection: &inputs.native_selection,
-            // Continuation custody stays with the cold issuer. Selected roles
-            // and native permissions come only from the closed demand above.
-            source_support: &inputs.cold.source_support,
             original_sources,
         }
     }
 
     pub(crate) fn compiler_source_support(
         &self,
-    ) -> &'a crate::artifact_inventory::CompilerSourceSupport {
-        self.source_support
+    ) -> &crate::artifact_inventory::CompilerSourceSupport {
+        &self.source_support
     }
 
     pub(crate) fn shared_compiler_source_support(
         &self,
     ) -> Arc<crate::artifact_inventory::CompilerSourceSupport> {
-        Arc::clone(self.source_support)
+        Arc::clone(&self.source_support)
     }
 
-    pub(crate) fn projection(&self) -> &'a CompilerInputProjection {
-        self.projection
+    pub(crate) fn projection(&self) -> &CompilerInputProjection {
+        self.source_support.projection()
     }
 
-    pub(crate) fn artifacts(&self) -> &'a ArtifactView {
+    pub(crate) fn artifacts(&self) -> &ArtifactView {
         self.source_support.artifacts()
     }
 
@@ -6503,12 +6909,140 @@ impl<'a> ProductInputFacts<'a> {
             producer: request.producer_sha256,
         }
     }
+
+    /// Collect the facts a demanded world owner supplies. `support` is the
+    /// projected semantic owner from `semantic_source_support`; the cold
+    /// continuation contributes only its immutable original-source custody.
+    pub(crate) fn from_demand(
+        context: &'a Arc<ExactDeclarationContext>,
+        demand: &'a DemandNativeInputs,
+        groups: &'a DemandCertifiedGroups,
+        support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
+        checked_values: &'a crate::checked_cell::CheckedValueImportAuthority,
+    ) -> Self {
+        static EMPTY_SELECTED_SUPPORT: BTreeSet<ExactModuleIdentity> = BTreeSet::new();
+        Self {
+            context,
+            compiler: ProductCompilerInputs::from_semantic_support(
+                demand,
+                support,
+                &demand.cold().original_sources,
+            ),
+            groups: groups.groups(),
+            // A world cell has no program-level source continuation. Its
+            // checked value imports are the output owner's demanded rows.
+            source_lexical: &[],
+            program_support: None,
+            source_selected_support: &EMPTY_SELECTED_SUPPORT,
+            source_search_include: None,
+            scaffold_imports: &[],
+            checked_values,
+            producer: context.owner.facts.producer,
+        }
+    }
+}
+
+/// Toolchain-local World input owner produced by the demand chain
+/// (`demand_primary_inputs` -> `certify_receipt_groups` ->
+/// `semantic_source_support` -> `select_acquired_compiler_bindings`).
+///
+/// Constructed, unadopted: the Host admission that supplies a certified
+/// receipt and consumes the resulting product is not yet in this tree.
+pub(crate) struct DemandedWorldCompilerInputs<'a> {
+    demand: DemandNativeInputs,
+    groups: DemandCertifiedGroups,
+    support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
+    binding: WorldCompilationIdentity,
+    context: &'a Arc<ExactDeclarationContext>,
+    checked_values: crate::checked_cell::CheckedValueImportAuthority,
+}
+
+impl<'a> DemandedWorldCompilerInputs<'a> {
+    /// Assemble the world product from the exact demand owner, its certified
+    /// groups and the semantic support it projected. The binding is content
+    /// identity only; the checked program remains the source of authority.
+    pub(crate) fn from_demand(
+        demand: DemandNativeInputs,
+        groups: DemandCertifiedGroups,
+        support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
+        binding: WorldCompilationIdentity,
+        context: &'a Arc<ExactDeclarationContext>,
+        checked_values: crate::checked_cell::CheckedValueImportAuthority,
+    ) -> Self {
+        Self {
+            demand,
+            groups,
+            support,
+            binding,
+            context,
+            checked_values,
+        }
+    }
+
+    pub(crate) fn demand(&self) -> &DemandNativeInputs {
+        &self.demand
+    }
+
+    pub(crate) fn groups(&self) -> &DemandCertifiedGroups {
+        &self.groups
+    }
+
+    pub(crate) fn compilation_binding(&self) -> ProductCompilationBinding<'_> {
+        ProductCompilationBinding::World(&self.binding)
+    }
+
+    pub(crate) fn context(&self) -> &'a Arc<ExactDeclarationContext> {
+        self.context
+    }
+
+    pub(crate) fn checked_values(&self) -> &crate::checked_cell::CheckedValueImportAuthority {
+        &self.checked_values
+    }
+
+    pub(crate) fn is_world_compilation(&self) -> bool {
+        matches!(
+            self.compilation_binding(),
+            ProductCompilationBinding::World(_)
+        )
+    }
+
+    pub(crate) fn compiler_inputs(&self) -> ProductCompilerInputs<'_> {
+        ProductCompilerInputs::from_semantic_support(
+            &self.demand,
+            Arc::clone(&self.support),
+            &self.demand.cold().original_sources,
+        )
+    }
+
+    /// Build the world product facts exactly once for certification. `groups`
+    /// and the projected support are the only executable input authority.
+    fn facts(&self) -> ProductInputFacts<'_> {
+        ProductInputFacts::from_demand(
+            self.context,
+            &self.demand,
+            &self.groups,
+            Arc::clone(&self.support),
+            &self.checked_values,
+        )
+    }
+
+    pub(crate) fn certified_selection(
+        &self,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<crate::certified_products::CertifiedSourceSelection, CompileError> {
+        let facts = self.facts();
+        crate::certified_products::CertifiedSourceSelection::from_product_compiler_inputs(
+            &facts.compiler,
+            operation,
+        )
+        .map_err(compiler_evidence_failure)
+    }
 }
 
 #[derive(Clone, Copy)]
-enum ProductCompilationBinding<'a> {
+pub(crate) enum ProductCompilationBinding<'a> {
     Exact(&'a ExactCompilationRequest),
-    World(&'a WorldSourceCompilationBinding),
+    World(&'a WorldCompilationIdentity),
 }
 
 /// A legacy exact request identity cannot describe a world preparation.
@@ -6816,7 +7350,7 @@ impl<'a> ExactProductAdmission<'a> {
     }
 
     pub(crate) fn compiler_inputs(&self) -> ProductCompilerInputs<'a> {
-        self.facts.compiler
+        self.facts.compiler.clone()
     }
     pub(crate) fn context(&self) -> &'a Arc<ExactDeclarationContext> {
         self.facts.context
@@ -8020,7 +8554,10 @@ impl ProductInputFacts<'_> {
         }
         let is_selected = |unit: &str, module: &str| {
             selected.contains(&(unit, module))
-                || (world && context.source_lexical_node(&identity(unit, module)).is_some())
+                || (world
+                    && context
+                        .source_lexical_node(&identity(unit, module))
+                        .is_some())
         };
         let source_selection_roots = edges
             .iter()
@@ -8267,7 +8804,7 @@ struct ExactReceiptImport {
 /// Source facts decoded from the actual preparation's captured output owner.
 /// Semantic admission still requires its issued input and source selections.
 pub(crate) struct DecodedWorldSourceReceipt<'a> {
-    output: &'a crate::compiler_world::WorldCellOutputAdmission,
+    program: &'a crate::compiler_world::CheckedWorldCellProgram,
     aliases: Vec<PathBuf>,
     binding: WorldSourceCompilationBinding,
     source: DecodedExactCompilationReceipt,
@@ -8275,15 +8812,15 @@ pub(crate) struct DecodedWorldSourceReceipt<'a> {
     package_imports: Arc<[u8]>,
 }
 
-impl DecodedWorldSourceReceipt<'_> {
+impl<'a> DecodedWorldSourceReceipt<'a> {
     /// Clamp untrusted completed-source demand to this preparation's cold
     /// primary issuer. This is not source, group or instance admission.
     pub(crate) fn demand_primary_inputs(&self) -> Result<DemandNativeInputs, CompileError> {
-        let operation = self.output.validation.inventory.as_ref();
+        let operation = self.program.validation().inventory.as_ref();
         let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
             result.map_err(|error| compiler_evidence_failure(error.into()))
         };
-        let cold = self.output.primary_compiler_inputs();
+        let cold = self.program.primary_compiler_inputs();
         let roles = cold.source_support.projection().snapshot_roles();
         let mut roots = BTreeSet::new();
         let mut native_roots = BTreeSet::new();
@@ -8300,7 +8837,9 @@ impl DecodedWorldSourceReceipt<'_> {
             crate::host_work::checkpoint()?;
             charge(operation.charge(1))?;
             if !roles.contains_key(&claim.owner) {
-                return Err(failure("world source claim lacks its primary compiler role"));
+                return Err(failure(
+                    "world source claim lacks its primary compiler role",
+                ));
             }
             insert(&mut roots, &claim.owner)?;
             insert(&mut native_roots, &claim.owner)?;
@@ -8315,7 +8854,7 @@ impl DecodedWorldSourceReceipt<'_> {
                 excluded.insert(owner);
             }
         }
-        for row in &self.output.demanded_rows {
+        for row in self.program.demanded_rows() {
             crate::host_work::checkpoint()?;
             charge(operation.charge(1))?;
             let interface = row.certified_interface().interface();
@@ -8365,7 +8904,36 @@ impl DecodedWorldSourceReceipt<'_> {
     pub(crate) fn source_path_domain(
         &self,
     ) -> Result<crate::compiler_world::WorldSourcePathDomain<'_>, CompileError> {
-        self.output.source_path_domain(&self.aliases)
+        self.program.source_path_domain(&self.aliases)
+    }
+
+    /// Run the demanded-input chain for this world source and retain the
+    /// toolchain-local product inputs. Cold custody is never bound as
+    /// semantic support: roles, native rows, home census and artifacts come
+    /// from the projected demand owner.
+    ///
+    /// Constructed, unadopted: the Host admission that supplies the certified
+    /// receipt and consumes the product is not yet in this tree.
+    pub(crate) fn demanded_product_inputs(
+        &'a self,
+        receipt: &crate::certified_products::CertifiedReceipt,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<DemandedWorldCompilerInputs<'a>, CompileError> {
+        let operation = self.program.validation().inventory.as_ref();
+        let demand = self.demand_primary_inputs()?;
+        let groups = demand.certify_receipt_groups(receipt, validation)?;
+        let support = demand.semantic_source_support(&groups, operation)?;
+        let checked_values =
+            crate::checked_cell::CheckedValueImportAuthority::from_world_output(self.program)?;
+        let context = self.program.primary_context();
+        Ok(DemandedWorldCompilerInputs::from_demand(
+            demand,
+            groups,
+            support,
+            WorldCompilationIdentity::from_binding(&self.binding),
+            context,
+            checked_values,
+        ))
     }
 
     pub(crate) fn package_imports(&self) -> (&Path, &Arc<[u8]>) {
@@ -8374,18 +8942,15 @@ impl DecodedWorldSourceReceipt<'_> {
 }
 
 pub(crate) fn decode_world_source_receipt<'a>(
-    output: &'a crate::compiler_world::WorldCellOutputAdmission,
+    program: &'a crate::compiler_world::CheckedWorldCellProgram,
     segment_index: usize,
     receipt_relative: &Path,
-    operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<DecodedWorldSourceReceipt<'a>, CompileError> {
-    if !std::ptr::eq(operation, output.validation.inventory.as_ref()) {
-        return Err(failure("world source receipt has another inventory operation"));
-    }
-    let binding = WorldSourceCompilationBinding::from_output(output, segment_index)?;
-    let output_root = output.directory.path();
-    let common_files = &output.common_files;
-    let captured_files = &output.captured_files;
+    let operation = program.validation().inventory.as_ref();
+    let binding = WorldSourceCompilationBinding::from_output(program, segment_index)?;
+    let output_root = program.directory().path();
+    let common_files = program.common_files();
+    let captured_files = program.captured_files();
     if !output_root.is_absolute() {
         return Err(failure("world source output owner is not absolute"));
     }
@@ -8395,12 +8960,8 @@ pub(crate) fn decode_world_source_receipt<'a>(
     let receipt_sha = common_files
         .get(receipt_relative)
         .ok_or_else(|| failure("world source receipt is not a named common output"))?;
-    let receipt = captured_world_source_file(
-        receipt_name,
-        *receipt_sha,
-        common_files,
-        captured_files,
-    )?;
+    let receipt =
+        captured_world_source_file(receipt_name, *receipt_sha, common_files, captured_files)?;
     let limit =
         crate::certified_products::COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_bytes);
     let value = operation
@@ -8416,7 +8977,9 @@ pub(crate) fn decode_world_source_receipt<'a>(
         || world_source_digest(&header[3])? != *binding.reservation.admission_digest()
         || string(&header[4])? != binding.segment.digest()
     {
-        return Err(failure("world source receipt belongs to another preparation"));
+        return Err(failure(
+            "world source receipt belongs to another preparation",
+        ));
     }
     let aliases = decode_world_source_aliases(&header[10], operation)?;
     let resolve = |value: &Value| -> Result<(PathBuf, [u8; 32], Arc<[u8]>), CompileError> {
@@ -8439,7 +9002,9 @@ pub(crate) fn decode_world_source_receipt<'a>(
     operation
         .charge(source_bytes.len())
         .map_err(|error| compiler_evidence_failure(error.into()))?;
-    let source = std::str::from_utf8(&source_bytes).map_err(failure)?.to_owned();
+    let source = std::str::from_utf8(&source_bytes)
+        .map_err(failure)?
+        .to_owned();
     let source = decode_compilation_source_payload(
         output_root.join(source_relative),
         source_sha256,
@@ -8450,7 +9015,7 @@ pub(crate) fn decode_world_source_receipt<'a>(
         operation,
     )?;
     Ok(DecodedWorldSourceReceipt {
-        output,
+        program,
         aliases,
         binding,
         source,
@@ -8510,20 +9075,28 @@ fn captured_world_source_file(
         || name.contains('\0')
         || name.split('/').any(|part| matches!(part, "" | "." | ".."))
     {
-        return Err(failure("world source file reference is not canonical relative"));
+        return Err(failure(
+            "world source file reference is not canonical relative",
+        ));
     }
     let path = Path::new(name);
     let Some((issued_name, issued_sha)) = common_files.get_key_value(path) else {
-        return Err(failure("world source reference is not a named common output"));
+        return Err(failure(
+            "world source reference is not a named common output",
+        ));
     };
     if issued_name.as_os_str() != path.as_os_str() || *issued_sha != digest {
-        return Err(failure("world source reference differs from its named output"));
+        return Err(failure(
+            "world source reference differs from its named output",
+        ));
     }
     let file = captured_files
         .get(path)
         .ok_or_else(|| failure("world source named output has no captured bytes"))?;
     if *file.sha256() != digest {
-        return Err(failure("world source captured bytes differ from their named output"));
+        return Err(failure(
+            "world source captured bytes differ from their named output",
+        ));
     }
     Ok(Arc::clone(file.bytes()))
 }
@@ -18151,11 +18724,53 @@ mod tests {
                         .unwrap()
                 })
                 .collect::<Vec<_>>();
-            recover_fixture_compiler_support(projection, support.artifacts().clone(), offers)
-                .unwrap()
+            assert!(offers.iter().all(|offer| !offer.is_full()));
+            let support = recover_fixture_compiler_support(
+                projection.clone(),
+                support.artifacts().clone(),
+                offers,
+            )
+            .unwrap();
+            assert!(
+                support
+                    .native_availability()
+                    .validate_role_coverage(&projection)
+                    .is_err(),
+                "recorded roles plus offer custody alone cannot issue normalized permissions"
+            );
+            let rows = RequestNativeAvailability::issue_checked(
+                &projection,
+                support.artifacts(),
+                support.native_offers(),
+            )
+            .unwrap();
+            support.retain_normalized_availability(&rows).unwrap()
         } else {
             support
         };
+        support
+            .native_availability()
+            .validate_role_coverage(&projection)
+            .unwrap();
+        for row in support.native_availability().rows() {
+            assert_eq!(
+                row.mode == NativeTransportMode::Full,
+                matches!(
+                    demand,
+                    crate::artifact_inventory::NativeArtifactDemand::AllGroups
+                ) && !partial,
+                "cold fixture must retain its actual Full/partial/empty permission mode"
+            );
+            if matches!(
+                demand,
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces
+            ) {
+                assert!(
+                    row.issued_ordinals().is_empty(),
+                    "type-only graph issues an explicit empty row"
+                );
+            }
+        }
         let context = ExactDeclarationContext::from_authenticated_execution_support(
             producer,
             support,
@@ -18178,6 +18793,305 @@ mod tests {
                 .compiler_inputs(&context, None)
                 .unwrap(),
         )
+    }
+
+    #[test]
+    fn receipt_group_demand_uses_issued_closure_and_refuses_empty_permission() {
+        use crate::artifact_inventory::NativeArtifactDemand;
+        use crate::certified_products::{
+            AcceptedGlobal, CertifiedReceipt, FinalizationEnvelope, ReceiptImportOwner,
+            WorkerExecutionSource,
+        };
+        use tidepool_repr::execution_schema::RuntimeRep;
+        let root = identity("fixture", "DemandParent");
+        let roots = BTreeSet::from([root.clone()]);
+        for mode in [
+            NativeArtifactDemand::AllGroups,
+            NativeArtifactDemand::ScopeInterfaces,
+        ] {
+            let cold = demanded_native_fixture(32, mode, false);
+            let mut validation = PackageInterfaceValidation::default();
+            let demand = cold
+                .source_support
+                .demanded_compiler_projection(
+                    &cold.metadata.retained,
+                    &roots,
+                    &validation.inventory,
+                )
+                .unwrap();
+            let selected = cold
+                .demanded_native_inputs(demand, &roots, &validation.inventory)
+                .unwrap();
+            let id = cold.projection().snapshot_roles()[&root]
+                .original()
+                .unwrap();
+            let row = &cold.native_selection.availability.0[&id];
+            let ArtifactPayload::Original(product) = &row.original.payload else {
+                unreachable!()
+            };
+            let group = crate::certified_products::original_available_groups(product)
+                .unwrap()
+                .find(|group| group.original_ordinal() == 7)
+                .unwrap();
+            let binder = group.binders().iter().next().unwrap().clone();
+            // This is untrusted group-demand DATA, not a source/product receipt
+            // admission. The actual existing group issuer supplies the proof.
+            let mut receipt = CertifiedReceipt {
+                modules: Vec::new(),
+                targets: BTreeMap::from([(
+                    "target".into(),
+                    vec![AcceptedGlobal {
+                        identity: binder.clone(),
+                        rep: RuntimeRep::LiftedRef,
+                        entry_signature: None,
+                        required_evaluated: false,
+                        owner: ReceiptImportOwner::Source {
+                            unit: product.owner().unit.clone(),
+                            module: product.owner().module.clone(),
+                            module_version: Some(product.owner().module_version.clone()),
+                            original_ordinal: 7,
+                            binder,
+                        },
+                    }],
+                )]),
+                packages: BTreeMap::new(),
+                finalization: FinalizationEnvelope {
+                    profile: "group-demand-data".into(),
+                    home_units: BTreeSet::new(),
+                    modules: BTreeMap::new(),
+                    value_interfaces: BTreeMap::new(),
+                },
+                source_recipe: WorkerExecutionSource::Ordinary,
+            };
+            let result = selected.certify_receipt_groups(&receipt, &mut validation);
+            if matches!(mode, NativeArtifactDemand::ScopeInterfaces) {
+                assert!(
+                    result.is_err(),
+                    "type custody cannot select an executable group"
+                );
+                continue;
+            }
+            let groups = result.unwrap();
+            assert_eq!(
+                groups
+                    .groups()
+                    .iter()
+                    .map(|group| (
+                        group.owner().module.as_str(),
+                        group.group().original_ordinal()
+                    ))
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([("DemandParent", 7), ("DemandChild", 9)])
+            );
+            let ReceiptImportOwner::Source { module_version, .. } =
+                &mut receipt.targets.get_mut("target").unwrap()[0].owner
+            else {
+                unreachable!()
+            };
+            module_version.as_mut().unwrap().0[0] ^= 1;
+            assert!(selected
+                .certify_receipt_groups(&receipt, &mut validation)
+                .is_err());
+        }
+    }
+
+    /// Untrusted group-demand DATA for the `DemandParent`/`DemandChild`
+    /// fixture. The existing group issuer still supplies every proof.
+    fn demand_group_receipt_fixture(
+        cold: &RequestCompilerInputs,
+        root: &ExactModuleIdentity,
+    ) -> crate::certified_products::CertifiedReceipt {
+        use crate::certified_products::{
+            AcceptedGlobal, CertifiedReceipt, FinalizationEnvelope, ReceiptImportOwner,
+            WorkerExecutionSource,
+        };
+        use tidepool_repr::execution_schema::RuntimeRep;
+        let id = cold.projection().snapshot_roles()[root]
+            .original()
+            .unwrap();
+        let row = &cold.native_selection.availability.0[&id];
+        let ArtifactPayload::Original(product) = &row.original.payload else {
+            unreachable!()
+        };
+        let group = crate::certified_products::original_available_groups(product)
+            .unwrap()
+            .find(|group| group.original_ordinal() == 7)
+            .unwrap();
+        let binder = group.binders().iter().next().unwrap().clone();
+        CertifiedReceipt {
+            modules: Vec::new(),
+            targets: BTreeMap::from([(
+                "target".into(),
+                vec![AcceptedGlobal {
+                    identity: binder.clone(),
+                    rep: RuntimeRep::LiftedRef,
+                    entry_signature: None,
+                    required_evaluated: false,
+                    owner: ReceiptImportOwner::Source {
+                        unit: product.owner().unit.clone(),
+                        module: product.owner().module.clone(),
+                        module_version: Some(product.owner().module_version.clone()),
+                        original_ordinal: 7,
+                        binder,
+                    },
+                }],
+            )]),
+            packages: BTreeMap::new(),
+            finalization: FinalizationEnvelope {
+                profile: "group-demand-data".into(),
+                home_units: BTreeSet::new(),
+                modules: BTreeMap::new(),
+                value_interfaces: BTreeMap::new(),
+            },
+            source_recipe: WorkerExecutionSource::Ordinary,
+        }
+    }
+
+    #[test]
+    fn demanded_world_facts_bind_certified_groups_and_refuse_narrowed_rows() {
+        use crate::artifact_inventory::NativeArtifactDemand;
+        use crate::certified_products::CertificationError;
+        use tidepool_repr::execution_schema::InventoryOperation;
+        let root = identity("fixture", "DemandParent");
+        let roots = BTreeSet::from([root.clone()]);
+        let cold = demanded_native_fixture(32, NativeArtifactDemand::AllGroups, false);
+        let operation = InventoryOperation::new(Default::default());
+        let mut validation = PackageInterfaceValidation::default();
+        let demand = cold
+            .source_support
+            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .unwrap();
+        let mut selected = cold
+            .demanded_native_inputs(demand, &roots, &operation)
+            .unwrap();
+        let receipt = demand_group_receipt_fixture(&cold, &root);
+        let groups = selected
+            .certify_receipt_groups(&receipt, &mut validation)
+            .unwrap();
+
+        // R4: certified rows, not the closure map, are the executable binding
+        // authority. Every certified group has exactly one keyed binding whose
+        // artifact and ordinal agree with that row.
+        assert_eq!(groups.groups().len(), groups.bindings().len());
+        assert_eq!(groups.groups().len(), 2);
+        // Key the closed availability map by the certified product owner, the
+        // same key the certifier and the binding map use.
+        let mut artifacts_by_owner = BTreeMap::new();
+        for (id, row) in cold.native_selection.availability.0.iter() {
+            if let ArtifactPayload::Original(product) = &row.original.payload {
+                artifacts_by_owner.insert(product.owner().clone(), *id);
+            }
+        }
+        for group in groups.groups() {
+            let key = crate::artifact_inventory::NativeGroupKey {
+                artifact: artifacts_by_owner[group.owner()],
+                original_ordinal: group.group().original_ordinal(),
+            };
+            let binding = groups.bindings()[&key];
+            assert_eq!(binding.binding.artifact(), key.artifact);
+            assert_eq!(binding.original_ordinal, key.original_ordinal);
+        }
+
+        // R8: `for_compiler_roots` restricts every dependency row to the
+        // demanded groups, so the demand owner itself must issue the exact
+        // changed-row facts. Its issued delta admits only those rows.
+        assert!(
+            !selected.permission_delta.changed.is_empty(),
+            "the narrowed demand must issue at least one changed native row"
+        );
+        let support = selected
+            .semantic_source_support(&groups, &operation)
+            .expect("the demand owner issues its own narrowed-row delta");
+
+        // The same narrowed rows are refused when the demand owner has issued
+        // no delta for them: echoed facts alone are not permission.
+        let demand = cold
+            .source_support
+            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .unwrap();
+        let mut unissued = cold
+            .demanded_native_inputs(demand, &roots, &operation)
+            .unwrap();
+        unissued.permission_delta =
+            IssuedNativePermissionDelta::issue(Arc::clone(&cold), BTreeMap::new());
+        let refused = unissued
+            .semantic_source_support(&groups, &operation)
+            .expect_err("an unissued narrowed row must not certify");
+        match refused {
+            CompileError::CompilerEvidence(error) => match *error {
+                CertificationError::ChangedNativePermissionRequiresIssuance { id, old, new } => {
+                    assert_ne!(old, new, "{id:?} reported equal permission facts");
+                    assert!(
+                        cold.native_selection.availability.0.contains_key(&id),
+                        "{id:?} is not an issued native row"
+                    );
+                }
+                other => panic!("expected the typed changed-row refusal, got {other:?}"),
+            },
+            other => panic!("expected compiler evidence, got {other:?}"),
+        }
+
+        // R8: a pointer-distinct but semantically equal native row is the same
+        // permission. A genuinely changed row carries a different fact
+        // identity; it is never accepted by pointer equality alone.
+        let parent_id = cold.projection().snapshot_roles()[&root]
+            .original()
+            .unwrap();
+        let original_availability = selected.native_selection.availability.clone();
+        let old = Arc::clone(&original_availability.0[&parent_id]);
+        assert_eq!(
+            RequestNativeAvailability::row_snapshot_facts(&old)
+                .unwrap()
+                .identity()
+                .unwrap(),
+            RequestNativeAvailability::row_snapshot_facts(&Arc::new((*old).clone()))
+                .unwrap()
+                .identity()
+                .unwrap(),
+            "a pointer-distinct equal row carries the same permission facts"
+        );
+
+        // A changed row must not keep the issued permission identity.
+        let mut changed_row = (*old).clone();
+        changed_row.mode = match changed_row.mode {
+            NativeTransportMode::Full => NativeTransportMode::IssuedGroups,
+            NativeTransportMode::IssuedGroups => NativeTransportMode::Full,
+        };
+        assert_ne!(
+            RequestNativeAvailability::row_snapshot_facts(&old)
+                .unwrap()
+                .identity()
+                .unwrap(),
+            RequestNativeAvailability::row_snapshot_facts(&Arc::new(changed_row))
+                .unwrap()
+                .identity()
+                .unwrap(),
+            "a changed row must not share the issued permission identity"
+        );
+        selected.native_selection.availability = original_availability;
+
+        // The accepted support produces the real World product: a World
+        // compilation binding, not an exact request identity, and its
+        // compiler inputs come from the issued delta path.
+        let context = Arc::new(ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap());
+        let binding = WorldCompilationIdentity::fixture([1; 32], [2; 32], "world-segment");
+        let world = DemandedWorldCompilerInputs::from_demand(
+            selected,
+            groups,
+            support,
+            binding,
+            &context,
+            crate::checked_cell::CheckedValueImportAuthority::default(),
+        );
+        assert!(world.is_world_compilation());
+        assert!(matches!(
+            world.compilation_binding(),
+            ProductCompilationBinding::World(_)
+        ));
+        assert!(Arc::ptr_eq(world.demand().cold(), &cold));
+        world
+            .certified_selection(&operation)
+            .expect("the accepted world product selects its certified inputs");
     }
 
     #[test]
@@ -21443,11 +22357,9 @@ mod tests {
         });
         assert!(decode_world_source_aliases(&aliases, &exhausted).is_err());
         assert!(decode_world_source_aliases(&Value::Null, &operation).is_err());
-        assert!(decode_world_source_aliases(
-            &Value::Array(vec![Value::Null]),
-            &operation,
-        )
-        .is_err());
+        assert!(
+            decode_world_source_aliases(&Value::Array(vec![Value::Null]), &operation,).is_err()
+        );
     }
 
     #[test]
@@ -21466,7 +22378,10 @@ mod tests {
             let error = captured_world_source_file(alias, [7; 32], &named, &captured)
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("not canonical relative"), "{alias:?}: {error}");
+            assert!(
+                error.contains("not canonical relative"),
+                "{alias:?}: {error}"
+            );
         }
         let error = captured_world_source_file("other.hs", [7; 32], &named, &captured)
             .unwrap_err()

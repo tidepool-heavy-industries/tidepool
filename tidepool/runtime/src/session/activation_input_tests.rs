@@ -968,7 +968,7 @@ fn try_check_fixture_cell(
     declaration_count: usize,
 ) -> Result<CheckedFixtureCell, turn::CellCheckFailure> {
     use crate::session::TemplateSelector;
-    use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+    use tidepool_toolchain::checked_cell::CellRecipe;
 
     let scope = resident.run_context().lexical_scope;
     let view = resident
@@ -989,25 +989,26 @@ fn try_check_fixture_cell(
     };
     let template = resident_cell_check_template(&preamble, &recipe.row, &imports);
     let templates = resident_workbench_templates(&recipe.preamble, &recipe.row, &imports);
-    let specification = Arc::new(CheckedCellSpecification {
-        admission_digest: [0; 32],
-        cell_source: source.into(),
-        template_source: template.clone(),
-        turn_templates: templates
-            .iter()
-            .map(|template| {
-                let kind = match template.kind {
-                    TemplateSelector::Decl => "decl",
-                    TemplateSelector::Bind => "bind",
-                    TemplateSelector::BindDiscard => "binddiscard",
-                    TemplateSelector::Expr => "expr",
-                };
-                (kind.into(), template.source.clone())
-            })
-            .collect(),
-        injected_modules: view.injected_module_names(),
-        reserved_declaration_modules: Vec::new(),
-    });
+    let specification = Arc::new(
+        CellRecipe::new(
+            source.to_string(),
+            template.clone(),
+            templates
+                .iter()
+                .map(|template| {
+                    let kind = match template.kind {
+                        TemplateSelector::Decl => "decl",
+                        TemplateSelector::Bind => "bind",
+                        TemplateSelector::BindDiscard => "binddiscard",
+                        TemplateSelector::Expr => "expr",
+                    };
+                    (kind.to_owned(), template.source.clone())
+                })
+                .collect(),
+            view.injected_module_names(),
+        )
+        .unwrap(),
+    );
     let includes = view.include_paths(&recipe.include);
     let admission = source_action(resident, |resident, settlement| {
         let plan = tidepool_toolchain::artifacts::parse_cell_plan(
@@ -1232,7 +1233,7 @@ fn original_value_probe(
 
 fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixture) {
     use crate::session::TemplateSelector;
-    use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+    use tidepool_toolchain::checked_cell::CellRecipe;
 
     let execution = begin_fixture_execution(resident);
     let scope = execution.private_scope();
@@ -1249,45 +1250,45 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
     let templates =
         resident_workbench_templates(&fixture.recipe.preamble, &fixture.recipe.row, &imports);
     let source = "let ordinaryValue = (42 :: Int)";
-    let specification = Arc::new(CheckedCellSpecification {
-        admission_digest: [0; 32],
-        cell_source: source.into(),
-        template_source: template.clone(),
-        turn_templates: templates
-            .iter()
-            .map(|template| {
-                let kind = match template.kind {
-                    TemplateSelector::Decl => "decl",
-                    TemplateSelector::Bind => "bind",
-                    TemplateSelector::BindDiscard => "binddiscard",
-                    TemplateSelector::Expr => "expr",
-                };
-                (kind.into(), template.source.clone())
-            })
-            .collect(),
-        injected_modules: view.injected_module_names(),
-        reserved_declaration_modules: Vec::new(),
-    });
+    let specification = Arc::new(
+        CellRecipe::new(
+            source.to_string(),
+            template.clone(),
+            templates
+                .iter()
+                .map(|template| {
+                    let kind = match template.kind {
+                        TemplateSelector::Decl => "decl",
+                        TemplateSelector::Bind => "bind",
+                        TemplateSelector::BindDiscard => "binddiscard",
+                        TemplateSelector::Expr => "expr",
+                    };
+                    (kind.to_owned(), template.source.clone())
+                })
+                .collect(),
+            view.injected_module_names(),
+        )
+        .unwrap(),
+    );
     let includes = view.include_paths(&fixture.recipe.include);
-    let admission = source_action(resident, |resident, settlement| {
-        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+    let admission = resident
+        .admit_planned_cell_for_execution(
+            execution.clone(),
+            tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    specification.clone(),
+                    &includes,
+                    settlement,
+                )
+            })
+            .unwrap(),
             specification.clone(),
-            &includes,
-            settlement,
+            specification.specification_digest(),
+            fixture.recipe.digest(),
+            includes,
+            None,
         )
         .unwrap();
-        resident
-            .admit_planned_cell_for_execution(
-                execution.clone(),
-                plan,
-                specification.clone(),
-                specification.specification_digest(),
-                fixture.recipe.digest(),
-                includes,
-                None,
-            )
-            .unwrap()
-    });
     let (checked, program) = tidepool_testing::with_settlement(|settlement| {
         turn::compile_cell_program_admitted(admission.clone(), settlement)
     })

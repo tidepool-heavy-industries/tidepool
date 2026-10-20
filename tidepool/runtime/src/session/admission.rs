@@ -189,7 +189,26 @@ enum PrivateExecutionCompilerBasis {
     World {
         published: Arc<super::inspection::InspectionWorldAssociation>,
         private_key: super::persistent::CompileViewKey,
+        source: Arc<super::GenerationArtifactReference>,
+        original_source: Arc<RuntimeLexicalScopeLease>,
+        admitted: PublicVisibilitySnapshot,
+        admitted_context:
+            Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+        admitted_public_view: [u8; 32],
     },
+}
+
+/// Exact facts captured when a private execution borrows a published World.
+/// Cloning them preserves the SAME admitted association and source Arcs; none
+/// of these facts reconstruct a compiler view or issue execution authority.
+pub(super) struct WorldExecutionAdmissionFacts {
+    pub(super) published: Arc<super::inspection::InspectionWorldAssociation>,
+    pub(super) source: Arc<super::GenerationArtifactReference>,
+    pub(super) original_source: Arc<RuntimeLexicalScopeLease>,
+    pub(super) admitted: PublicVisibilitySnapshot,
+    pub(super) admitted_context:
+        Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+    pub(super) admitted_public_view: [u8; 32],
 }
 
 pub(super) struct CertifiedPrivateValueWrite {
@@ -556,10 +575,35 @@ impl PrivateExecutionAdmission {
             PrivateExecutionCompilerBasis::World {
                 published,
                 private_key,
+                ..
             } => Ok((&published.world, private_key)),
             PrivateExecutionCompilerBasis::Finite { .. } => Err(
                 SessionError::MissingPublishedCompilerWorld(self.public_scope),
             ),
+        }
+    }
+
+    /// The exact published association, source selection and admitted public
+    /// base for a World private execution. Finite execution has no World facts.
+    pub(super) fn world_execution_facts(&self) -> Option<WorldExecutionAdmissionFacts> {
+        match &self.compiler_basis {
+            PrivateExecutionCompilerBasis::World {
+                published,
+                source,
+                original_source,
+                admitted,
+                admitted_context,
+                admitted_public_view,
+                ..
+            } => Some(WorldExecutionAdmissionFacts {
+                published: published.clone(),
+                source: source.clone(),
+                original_source: original_source.clone(),
+                admitted: admitted.clone(),
+                admitted_context: admitted_context.clone(),
+                admitted_public_view: *admitted_public_view,
+            }),
+            PrivateExecutionCompilerBasis::Finite { .. } => None,
         }
     }
     pub fn binding_tip(&self) -> BindingTipId {
@@ -585,7 +629,7 @@ pub struct RuntimeCellAdmission {
     reserved_generations: Vec<Generation>,
     initial_value_generation: Generation,
     compiler_basis: RuntimeCellCompilerBasis,
-    digest: [u8; 32],
+    digest: tidepool_toolchain::checked_cell::AdmissionDigest,
 }
 
 enum RuntimeCellCompilerBasis {
@@ -593,6 +637,16 @@ enum RuntimeCellCompilerBasis {
     World {
         reservation: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation>,
         private_key: super::persistent::CompileViewKey,
+        /// The exact active source transaction lease admitted with the
+        /// published World. It is original A; the cell's retained scope is a
+        /// separately captured target B. Warm's pending checked-program
+        /// capability must consume this lease, so it is retained here rather
+        /// than reconstructed from the private execution.
+        #[allow(
+            dead_code,
+            reason = "retained for Warm's pending SAME-certified checked World CellProgram capability"
+        )]
+        original_source: Arc<RuntimeLexicalScopeLease>,
     },
 }
 
@@ -619,6 +673,9 @@ pub(super) struct RuntimeFiniteCellInputs {
     specification_digest: [u8; 32],
     authority_digest: [u8; 32],
     include_paths: Vec<PathBuf>,
+    /// The one issued request for this admission's exact recipe. A consumer
+    /// can read it but cannot relabel it with another admission digest.
+    checked_request: Option<Arc<tidepool_toolchain::checked_cell::CheckedCellRequest>>,
 }
 
 /// One runtime-issued execution purpose. Component controls can capture an
@@ -1484,6 +1541,19 @@ impl CheckedTurnCompletion {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        let world = self.prefix.admission.world_reservation().is_some();
+        if world {
+            let private = self
+                .prefix
+                .admission
+                .private_execution()
+                .ok_or(SessionError::StaleStagedDeclaration)?;
+            if private.private_scope() != self.scope
+                || self.execution.item().index() != state.snapshot.compiler_prefix.next_item()
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+        }
         let compiler_prefix = state
             .snapshot
             .compiler_prefix
@@ -1521,6 +1591,16 @@ impl CheckedTurnCompletion {
         } else {
             None
         };
+        if world {
+            // The item's checked prefix, accepted binder identities and native
+            // delta are validated above, but installing the private successor
+            // requires Warm's item-inseparable World capability. Refuse before
+            // advancing the snapshot or clearing the in-flight reservation so
+            // later items cannot build on an unsealed predecessor.
+            return Err(SessionError::WorldCellSuccessorCapabilityMissing {
+                ordinal: self.execution.item().index(),
+            });
+        }
         settle_checked_snapshot(
             session,
             &mut state,
@@ -1746,6 +1826,7 @@ impl std::fmt::Debug for RuntimeCellAdmission {
             RuntimeCellCompilerBasis::World {
                 reservation,
                 private_key,
+                ..
             } => {
                 debug
                     .field("world_reservation", reservation)
@@ -1911,7 +1992,17 @@ impl RuntimeCellAdmission {
         Ok(&self.finite_inputs()?.interfaces)
     }
     pub fn digest(&self) -> [u8; 32] {
-        self.digest
+        self.digest.bytes()
+    }
+    /// The issued checked-cell request for this admission's exact recipe.
+    /// Issued once, before the admission was shared; consumers read it only.
+    pub fn checked_request(
+        &self,
+    ) -> Result<&Arc<tidepool_toolchain::checked_cell::CheckedCellRequest>, SessionError> {
+        self.finite_inputs()?
+            .checked_request
+            .as_ref()
+            .ok_or(SessionError::StaleStagedDeclaration)
     }
     pub fn specification_digest(&self) -> Result<[u8; 32], SessionError> {
         Ok(self.finite_inputs()?.specification_digest)
@@ -2059,6 +2150,15 @@ impl PersistentSession {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let snapshot = state.snapshot.clone();
+        // Finite planned-item admission has no projection of a held World
+        // reservation. Report the missing per-item successor capability rather
+        // than the generic finite-input refusal, so the seam names what Warm
+        // must issue instead of looking like caller misuse.
+        if prefix.admission.world_reservation().is_some() {
+            return Err(SessionError::WorldCellSuccessorCapabilityMissing {
+                ordinal: item.index(),
+            });
+        }
         let planned_row = prefix
             .admission
             .plan_reservation()?
@@ -2151,6 +2251,13 @@ impl PersistentSession {
         let original_source = item
             .planned_declaration_source()
             .ok_or(SessionError::StaleStagedDeclaration)?;
+        // A World declaration item settles through the same missing per-item
+        // successor capability; the finite planned-row lookup cannot supply it.
+        if prefix.admission.world_reservation().is_some() {
+            return Err(SessionError::WorldCellSuccessorCapabilityMissing {
+                ordinal: item.index(),
+            });
+        }
         let generation = prefix
             .admission
             .plan_reservation()?
@@ -2535,6 +2642,12 @@ impl PersistentSession {
         if !admission.has_execution_purpose() {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        // A World execution cannot borrow the finite checked-program route.
+        // The SAME certifier must issue a checked World CellProgram capability
+        // tied to the reservation, logical world and item generation.
+        if admission.world_reservation().is_some() {
+            return Err(SessionError::WorldCellCheckedProgramCapabilityMissing);
+        }
         let finite = admission.finite_inputs()?;
         let planned = admission
             .plan_reservation()?
@@ -2583,6 +2696,9 @@ impl PersistentSession {
         first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
         program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
     ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
+        if admission.world_reservation().is_some() {
+            return Err(SessionError::WorldCellCheckedProgramCapabilityMissing);
+        }
         let finite = admission.finite_inputs()?;
         if !admission.belongs_to(self)
             || first_item.admission_digest() != admission.digest()
@@ -2799,13 +2915,31 @@ impl PersistentSession {
             })
             .cloned()
             .ok_or(SessionError::MissingPublishedCompilerWorld(public_scope))?;
-        self.begin_private_execution_with_world(public_scope, Some(published))
+        let admitted = self
+            .public_visibility_snapshot_in(public_scope)
+            .ok_or(SessionError::DeadScope(public_scope))?;
+        let admitted_context = self.lib().current_exact_context_in(public_scope);
+        let admitted_public_view = self
+            .compile_view_digest_in(public_scope)
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let source = published.base.source.clone();
+        self.begin_private_execution_with_world(
+            public_scope,
+            Some(WorldExecutionAdmissionFacts {
+                published,
+                source,
+                original_source: original_source.clone(),
+                admitted,
+                admitted_context,
+                admitted_public_view,
+            }),
+        )
     }
 
     fn begin_private_execution_with_world(
         &mut self,
         public_scope: ScopeId,
-        published: Option<Arc<super::inspection::InspectionWorldAssociation>>,
+        world: Option<WorldExecutionAdmissionFacts>,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
         self.admit_source_work_in(public_scope)?;
 
@@ -2817,7 +2951,7 @@ impl PersistentSession {
             .durable_public_scopes
             .iter()
             .find_map(|(owner, scope)| (*scope == public_scope).then(|| owner.clone()));
-        let admitted = if published.is_none() {
+        let admitted = if world.is_none() {
             Some(
                 self.public_visibility_snapshot_in(public_scope)
                     .ok_or(SessionError::DeadScope(public_scope))?,
@@ -2840,12 +2974,17 @@ impl PersistentSession {
             private_scope
         };
         let scope_lease = self.prepared_lexical_scope_lease(private_scope)?;
-        let compiler_basis = match published {
-            Some(published) => PrivateExecutionCompilerBasis::World {
-                published,
+        let compiler_basis = match world {
+            Some(world) => PrivateExecutionCompilerBasis::World {
+                published: world.published,
                 private_key: self
                     .compile_view_key_in(private_scope)
                     .ok_or(SessionError::StaleStagedDeclaration)?,
+                source: world.source,
+                original_source: world.original_source,
+                admitted: world.admitted,
+                admitted_context: world.admitted_context,
+                admitted_public_view: world.admitted_public_view,
             },
             None => PrivateExecutionCompilerBasis::Finite {
                 view: self
@@ -3186,9 +3325,7 @@ impl PersistentSession {
         let view =
             view.with_request_inventory(view.injected_values().to_vec(), initial_value_generation);
         let planned = plan.map(|plan| {
-            use super::planned_cell::{
-                RuntimeCellPlanReservation, RuntimePlannedCellItem, RuntimePlannedCellSlot as Slot,
-            };
+            use super::planned_cell::{RuntimePlannedCellItem, RuntimePlannedCellSlot as Slot};
             use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
             let mut declarations = reserved_generations.iter().copied();
             let mut next_value = initial_value_generation.0;
@@ -3248,11 +3385,7 @@ impl PersistentSession {
                     slot,
                 });
             }
-            Arc::new(RuntimeCellPlanReservation {
-                plan,
-                items: planned_items,
-                digest: [0; 32],
-            })
+            (plan, planned_items)
         });
         let mut digest = blake3::Hasher::new();
         let mut frame = |bytes: &[u8]| {
@@ -3292,11 +3425,11 @@ impl PersistentSession {
         for generation in &reserved_generations {
             frame(&generation.0.to_le_bytes());
         }
-        if let Some(planned) = &planned {
+        if let Some((plan, items)) = &planned {
             frame(b"TidepoolRuntimeOrderedCell1");
-            frame(&planned.plan_digest());
-            frame(&planned.producer_sha256());
-            for item in planned.items() {
+            frame(&plan.digest());
+            frame(&plan.producer_sha256());
+            for item in items {
                 frame(&(item.index() as u64).to_le_bytes());
                 frame(&[item.kind() as u8]);
                 for generation in [item.declaration_generation(), item.value_generation()] {
@@ -3334,12 +3467,33 @@ impl PersistentSession {
         }
         purpose.frame_authorization(&mut frame);
         compile_inputs.frame_authorization(&mut frame);
-        let digest = *digest.finalize().as_bytes();
-        let planned = planned.map(|mut planned| {
-            Arc::get_mut(&mut planned)
-                .expect("fresh ordered reservation has one owner")
-                .digest = digest;
-            planned
+        let digest = tidepool_toolchain::checked_cell::AdmissionDigest::finalize(
+            *digest.finalize().as_bytes(),
+        )
+        .map_err(SessionError::Compile)?;
+        let checked_request = match &planned {
+            Some((plan, _)) => {
+                let reserved = reserved_generations
+                    .iter()
+                    .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
+                    .collect::<Vec<_>>();
+                Some(Arc::new(
+                    tidepool_toolchain::checked_cell::CheckedCellRequest::issue(
+                        Arc::clone(plan.specification()),
+                        digest,
+                        reserved,
+                    )
+                    .map_err(SessionError::Compile)?,
+                ))
+            }
+            None => None,
+        };
+        let planned = planned.map(|(plan, items)| {
+            Arc::new(super::planned_cell::RuntimeCellPlanReservation {
+                plan,
+                items,
+                digest: digest.bytes(),
+            })
         });
         let prepared = Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
@@ -3367,6 +3521,7 @@ impl PersistentSession {
                 specification_digest,
                 authority_digest,
                 include_paths,
+                checked_request,
             }),
             digest,
         });
@@ -3635,6 +3790,26 @@ impl PersistentSession {
             });
         }
         self.admit_source_work_in(scope)?;
+        // Keep the SAME admitted original-A lease Arc that the published base
+        // validated against. target B is retained separately on the cell
+        // admission's `_retained_scope`; neither substitutes for the other.
+        let original_source = self
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?
+            .source
+            .clone();
+        let admitted_original_source = match &execution.compiler_basis {
+            PrivateExecutionCompilerBasis::World { published, .. } => {
+                &published.base.original_source
+            }
+            PrivateExecutionCompilerBasis::Finite { .. } => {
+                return Err(SessionError::WorldCellRequiresServicePreparation)
+            }
+        };
+        if !Arc::ptr_eq(&original_source, admitted_original_source) {
+            return Err(super::SourceAdmissionError::ForeignTransaction.into());
+        }
         let store = self.held_admission_store()?;
         let private_key = private_key.clone();
         let declaration_count = plan
@@ -3729,38 +3904,28 @@ impl PersistentSession {
             slots.push(slot);
         }
         self.validate_new_binding_ids(expected_bindings.iter().flatten().map(|(_, id)| *id))?;
-        let mut digest = blake3::Hasher::new();
-        let mut frame = |bytes: &[u8]| {
-            digest.update(&(bytes.len() as u64).to_le_bytes());
-            digest.update(bytes);
-        };
-        frame(b"TidepoolRuntimeWorldCellAdmission1");
-        frame(self.admission_owner().identity.as_bytes());
-        frame(&self.admission_owner().epoch().to_le_bytes());
-        frame(&execution.session().0.to_le_bytes());
-        frame(&scope.0.to_le_bytes());
-        frame(plan.world().logical_id());
-        frame(plan.producer_sha256());
-        frame(plan.digest());
-        for (slot, bindings) in slots.iter().zip(&expected_bindings) {
-            let (kind, generation) = match slot {
-                Slot::Prologue { declaration } => (0, *declaration),
-                Slot::Declaration { declaration } => (1, *declaration),
-                Slot::Bind { value } => (2, *value),
-                Slot::Expression { .. } => unreachable!("expressions refused before reservation"),
-            };
-            frame(&[kind]);
-            frame(&generation.to_le_bytes());
-            frame(&(bindings.len() as u64).to_le_bytes());
-            for (name, id) in bindings {
-                frame(name.as_bytes());
-                frame(&id.raw().to_le_bytes());
-            }
-        }
         let purpose = RuntimeCellPurpose::PrivateExecution(execution.clone());
-        purpose.frame_authorization(&mut frame);
-        let digest = *digest.finalize().as_bytes();
-        let reservation = plan.reserve(digest, slots, expected_bindings)?;
+        let mut authorization = Vec::new();
+        purpose.frame_authorization(&mut |bytes| authorization.push(bytes.to_vec()));
+        let transaction = self
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?;
+        let subject =
+            tidepool_toolchain::cell_plan::WorldCellAdmissionSubject::for_source_transaction(
+                transaction.origin(),
+                *self.admission_owner().identity.as_bytes(),
+                self.admission_owner().epoch(),
+                execution.session().0,
+                scope.0,
+                authorization,
+            )?;
+        let token = plan.issue_admission_token(subject, slots, expected_bindings)?;
+        let reservation = plan.reserve(token)?;
+        let digest = tidepool_toolchain::checked_cell::AdmissionDigest::finalize(
+            *reservation.admission_digest(),
+        )
+        .map_err(SessionError::Compile)?;
         Ok(Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
@@ -3774,6 +3939,7 @@ impl PersistentSession {
             compiler_basis: RuntimeCellCompilerBasis::World {
                 reservation,
                 private_key,
+                original_source,
             },
             digest,
         }))

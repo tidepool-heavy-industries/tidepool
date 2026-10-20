@@ -67,6 +67,21 @@ pub struct FinalExecutionIntent {
     source_keys: Vec<SourceLeaseKey>,
     head_replacements: Vec<DeclarationHeadReplacement>,
     _completed_values: Vec<super::admission::CertifiedPrivateValueProof>,
+    /// Exact published World basis for a World execution. Finite executions
+    /// have no World intent and never synthesize one.
+    world: Option<WorldExecutionIntent>,
+}
+
+/// The exact published World association and admitted source facts a final
+/// publication must revalidate before installing anything. Cloning shares the
+/// same association, source and lease Arcs; it issues no compiler authority.
+#[derive(Clone)]
+pub(super) struct WorldExecutionIntent {
+    pub(super) association: Arc<super::inspection::InspectionWorldAssociation>,
+    pub(super) source: Arc<super::GenerationArtifactReference>,
+    pub(super) original_source: Arc<super::RuntimeLexicalScopeLease>,
+    pub(super) target: Arc<super::RuntimeLexicalScopeLease>,
+    pub(super) public_view: [u8; 32],
 }
 
 /// Name-winning publication is separate from an exact withdrawal. A runtime
@@ -459,6 +474,30 @@ impl FinalExecutionIntent {
     pub fn private_scope(&self) -> ScopeId {
         self.private.scope
     }
+    pub(super) fn admitted_scope(&self) -> ScopeId {
+        self.admitted.scope
+    }
+    pub(super) fn admitted_context(&self) -> Option<&Arc<ExactDeclarationContext>> {
+        self.admitted_context.as_ref()
+    }
+    pub(super) fn private_snapshot(&self) -> &PublicVisibilitySnapshot {
+        &self.private
+    }
+    pub(super) fn private_view_digest(&self) -> [u8; 32] {
+        self.private_view
+    }
+    pub(super) fn library(&self) -> uuid::Uuid {
+        self.library
+    }
+    pub(super) fn world(&self) -> Option<&WorldExecutionIntent> {
+        self.world.as_ref()
+    }
+    pub(super) fn owner_matches(
+        &self,
+        owner: &Arc<super::admission::RuntimeAdmissionOwner>,
+    ) -> bool {
+        self.owner_stamp.matches(owner)
+    }
 }
 
 impl PersistentSession {
@@ -496,12 +535,26 @@ impl PersistentSession {
             return Err(SessionError::StaleStagedDeclaration);
         }
         if let Some(intent) = admission.final_intent.get() {
+            let world_facts = admission.world_execution_facts();
             if self
                 .public_visibility_snapshot_in(admission.private_scope())
                 .as_ref()
                 != Some(&intent.private)
                 || intent.library != self.lib().compile_view_identity
                 || self.compile_view_digest_in(intent.private.scope) != Some(intent.private_view)
+                || match (intent.world.as_ref(), world_facts.as_ref()) {
+                    (Some(world), Some(facts)) => {
+                        !Arc::ptr_eq(&world.association, &facts.published)
+                            || !Arc::ptr_eq(&world.source, &facts.source)
+                            || !Arc::ptr_eq(&world.original_source, &facts.original_source)
+                            || !Arc::ptr_eq(&world.target, &facts.published.base.target)
+                            || world.public_view != facts.admitted_public_view
+                            || intent.admitted != facts.admitted
+                            || intent.admitted_context != facts.admitted_context
+                    }
+                    (None, None) => false,
+                    _ => true,
+                }
             {
                 return Err(SessionError::StaleStagedDeclaration);
             }
@@ -539,15 +592,31 @@ impl PersistentSession {
             }
             return Ok(intent.clone());
         }
+        let world_facts = admission.world_execution_facts();
+        let world = world_facts.as_ref().map(|facts| WorldExecutionIntent {
+            association: facts.published.clone(),
+            source: facts.source.clone(),
+            original_source: facts.original_source.clone(),
+            target: facts.published.base.target.clone(),
+            public_view: facts.admitted_public_view,
+        });
+        let (admitted, admitted_context) = match world_facts.as_ref() {
+            Some(facts) => (facts.admitted.clone(), facts.admitted_context.clone()),
+            None => (
+                admission.admitted_public()?.clone(),
+                admission.view()?.exact_declaration_context().cloned(),
+            ),
+        };
         let intent = self.freeze_execution_intent_from_snapshot(
-            admission.admitted_public()?,
-            admission.view()?.exact_declaration_context().cloned(),
+            &admitted,
+            admitted_context,
             admission.private_scope(),
             write_ids,
             source_keys,
             Some(admission.scope_lease.clone()),
             admission.durable_owner.clone(),
             completed_values,
+            world,
         )?;
         assert!(
             admission.final_intent.set(intent.clone()).is_ok(),
@@ -569,6 +638,7 @@ impl PersistentSession {
             SessionVarId,
             super::admission::CertifiedPrivateValueWrite,
         >,
+        world: Option<WorldExecutionIntent>,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         if private_scope == admitted.scope || !self.scope_tree().is_live(private_scope) {
             return Err(SessionError::DeadScope(private_scope));
@@ -718,6 +788,7 @@ impl PersistentSession {
             write_ids,
             source_keys,
             head_replacements,
+            world,
         }))
     }
 
@@ -871,6 +942,7 @@ impl PersistentSession {
             None,
             Some(owner.clone()),
             &std::collections::HashMap::new(),
+            None,
         )?;
         self.restage_declaration_publication(owner, intent)
     }

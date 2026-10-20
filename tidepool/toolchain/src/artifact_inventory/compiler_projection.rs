@@ -1035,6 +1035,186 @@ impl CompilerSourceSupport {
             .expect("closed source support owns maintained native facts")
     }
 
+    /// Derive a semantic owner from the same acquired cold roles, rows and
+    /// exact executable choices. The cold owner is not retained as a parent.
+    pub(crate) fn project_demanded_inputs(
+        self: &Arc<Self>,
+        demand: &DemandCompilerProjection,
+        availability: &crate::declaration_context::RequestNativeAvailability,
+        issued_delta: &crate::declaration_context::IssuedNativePermissionDelta,
+        groups: &crate::declaration_context::DemandCertifiedGroups,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Arc<Self>, CompileError> {
+        if !Arc::ptr_eq(self, demand.source_support()) || !groups.belongs_to_source(self) {
+            return Err(failure(
+                "demanded semantic inputs have another acquired source owner",
+            ));
+        }
+        let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
+            result.map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))
+        };
+        let mut keys = crate::exact_context::PublicationNativeMapKeys {
+            roles: BTreeSet::new(),
+            offers: BTreeSet::new(),
+            native_availability: BTreeSet::new(),
+            input_decisions: BTreeSet::new(),
+        };
+        let mut namespace = BTreeMap::new();
+        let mut selected = imbl::OrdMap::new();
+        for (owner, role) in demand.projection().snapshot_roles() {
+            crate::host_work::checkpoint()?;
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::DemandSemanticRoleVisit,
+                1,
+            );
+            charge(operation.charge(1))?;
+            let row = self
+                .selected
+                .get(owner)
+                .ok_or_else(|| failure("demanded semantic role lost its acquired bindings"))?;
+            if row.interface.0.artifact != role.interface()
+                || row.original.as_ref().map(|(binding, _)| binding.artifact) != role.original()
+            {
+                return Err(failure(
+                    "demanded semantic role differs from its acquired bindings",
+                ));
+            }
+            charge(
+                operation.reserve::<(ExactModuleIdentity, ResolvedCompilerRole, [usize; 4])>(1),
+            )?;
+            charge(operation.charge(owner.unit.len().saturating_add(owner.module.len())))?;
+            selected.insert(owner.clone(), row.clone());
+            charge(operation.reserve::<(ExactModuleIdentity, [usize; 4])>(1))?;
+            charge(operation.charge(owner.unit.len().saturating_add(owner.module.len())))?;
+            keys.roles.insert(owner.clone());
+            for (binding, _) in std::iter::once(&row.interface).chain(row.original.iter()) {
+                if namespace
+                    .get(&binding.artifact)
+                    .is_some_and(|prior| prior != binding)
+                {
+                    return Err(failure(
+                        "demanded semantic namespace has competing acquired bindings",
+                    ));
+                }
+                if !namespace.contains_key(&binding.artifact) {
+                    charge(operation.reserve::<(ArtifactId, ArtifactBinding, [usize; 4])>(1))?;
+                    namespace.insert(binding.artifact, *binding);
+                }
+            }
+            // Preserve the exact issued choice domain, including an issued
+            // empty domain. Absence remains absence; narrowing grants no choice.
+            if matches!(
+                self.input_decisions.for_role(owner, role),
+                InputNativeDecision::IssuedChoices(_)
+            ) {
+                charge(operation.reserve::<(ExactModuleIdentity, [usize; 4])>(1))?;
+                charge(operation.charge(owner.unit.len().saturating_add(owner.module.len())))?;
+                keys.input_decisions.insert(owner.clone());
+            }
+        }
+        let mut offers = BTreeMap::new();
+        for row in availability.rows() {
+            crate::host_work::checkpoint()?;
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::DemandNativeAvailabilityVisit,
+                1,
+            );
+            charge(operation.charge(1))?;
+            let id = row.original_artifact_id();
+            let old = self
+                .native_availability
+                .issued_row(id)
+                .ok_or_else(|| failure("demanded native row has no issued permission"))?;
+            if !Arc::ptr_eq(old, row) {
+                // A pointer-distinct row with equal permission facts is the
+                // same permission. Only a genuinely narrowed or changed row
+                // needs its own bounded issuance; reusing the broader cold
+                // leaf would change authority.
+                let old_facts =
+                    crate::declaration_context::RequestNativeAvailability::row_snapshot_facts(old)?;
+                let new_facts =
+                    crate::declaration_context::RequestNativeAvailability::row_snapshot_facts(row)?;
+                let (old_id, new_id) = (old_facts.identity()?, new_facts.identity()?);
+                if old_id != new_id && !issued_delta.admits(self, id, &old_facts, &new_facts) {
+                    // Rows narrowed by this demand owner are admitted only by
+                    // the exact delta it issued for them. A raw narrower row,
+                    // another owner's delta or an unissued fact identity is a
+                    // typed refusal, never a permission.
+                    return Err(CompileError::CompilerEvidence(Box::new(
+                        crate::certified_products::CertificationError::ChangedNativePermissionRequiresIssuance {
+                            id,
+                            old: old_id,
+                            new: new_id,
+                        },
+                    )));
+                }
+            }
+            charge(operation.reserve::<(ArtifactId, [usize; 4])>(1))?;
+            keys.native_availability.insert(id);
+            for offer in row.offers() {
+                let id = offer.snapshot_identity()?;
+                if !offers.contains_key(&id) {
+                    charge(operation.reserve::<([u8; 32], IssuedNativeOffer, [usize; 4])>(1))?;
+                    charge(operation.reserve::<([u8; 32], [usize; 4])>(1))?;
+                    keys.offers.insert(id);
+                    offers.insert(id, offer.clone());
+                }
+            }
+        }
+        // Executable bindings are derived from certified rows during
+        // certification, so this loop and `groups()` describe one authority.
+        if groups.groups().len() != groups.bindings().len() {
+            return Err(failure(
+                "demanded certified groups lost their executable bindings",
+            ));
+        }
+        for (key, binding) in groups.bindings() {
+            crate::host_work::checkpoint()?;
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::DemandNativeGroupVisit,
+                1,
+            );
+            charge(operation.charge(1))?;
+            let row = availability
+                .issued_row(key.artifact)
+                .ok_or_else(|| failure("demanded semantic group lost its issued row"))?;
+            if row
+                .dependency_support(*key, row.original_owner())
+                .is_none_or(|support| !support.groups().any(|candidate| candidate == *binding))
+            {
+                return Err(failure(
+                    "demanded semantic group differs from its exact issued choice",
+                ));
+            }
+        }
+        let (facts, _) = self
+            .native_fact_owner()
+            .project(keys, operation)
+            .map_err(|error| failure(&format!("demanded native fact projection: {error}")))?;
+        let artifacts = self.artifacts.select_acquired_compiler_bindings(
+            &namespace,
+            groups.bindings(),
+            operation,
+        )?;
+        charge(operation.reserve::<IssuedNativeOffer>(offers.len()))?;
+        Ok(Arc::new(Self {
+            projection: demand.projection().clone(),
+            artifacts,
+            native_offers: offers.into_values().collect::<Vec<_>>().into(),
+            native_availability: availability.clone(),
+            input_decisions: IssuedInputNativeDecisions {
+                facts: facts.input_decisions.clone(),
+            },
+            native_offer_facts: facts.offers.clone(),
+            native_fact_owner: Some(facts),
+            // The home census belongs to the demanded rows, not to cold
+            // custody or units merely mentioned by another retained row.
+            selected: Arc::new(AdmittedCompilerRoles::from_admitted(
+                selected.into_iter().collect(),
+            )),
+        }))
+    }
+
     #[tracing::instrument(
         target = "exomonad_harness::timing", name = "exact.compiler_support.new",
         level = "debug", skip_all, fields(inclusive = true, role_count = projection.roles.len())

@@ -946,6 +946,9 @@ impl PersistentSession {
         ),
         PreparedRuntimeError,
     > {
+        let plan = target
+            .source_plan()
+            .ok_or(PreparedRuntimeError::MissingSourceDomainPlan)?;
         self.admit_source_work_in(scope)?;
 
         if !self.scopes.is_live(scope) {
@@ -958,8 +961,7 @@ impl PersistentSession {
                 .iter()
                 .flat_map(|selected| selected.image().constructor_declarations()),
         )?;
-        let qualified = target.source_plan().is_some();
-        let inherited = if let Some(plan) = target.source_plan() {
+        let inherited = {
             let current = self
                 .bindings
                 .scope_snapshot(&self.scopes, scope)
@@ -969,43 +971,6 @@ impl PersistentSession {
             }
             // The exact scoped snapshot binds the privately issued selection.
             plan.selection.inherited().clone()
-        } else {
-            #[cfg(not(test))]
-            {
-                return Err(PreparedRuntimeError::SourceScopeAdmission);
-            }
-            #[cfg(test)]
-            {
-                let mut inherited = BTreeMap::new();
-                let mut anchors = HashMap::new();
-                for lease in self
-                    .bindings
-                    .selected_source_instances_in(&self.scopes, scope)
-                {
-                    let group = (lease.owner().clone(), lease.original_ordinal());
-                    if anchors
-                        .insert(group.clone(), lease.instance())
-                        .is_some_and(|old| old != lease.instance())
-                    {
-                        return Err(PreparedRuntimeError::AmbiguousSourceGroup {
-                            owner: group.0,
-                            ordinal: group.1,
-                        });
-                    }
-                    let key = tidepool_codegen::prepared_program::ScopedSourceBinder {
-                        domain: tidepool_codegen::prepared_program::SourceInstanceDomain::single(),
-                        source: lease.binder().clone(),
-                    };
-                    if inherited.insert(key.clone(), lease.clone()).is_some_and(
-                        |old: SourceInstanceLease| {
-                            old.instance() != lease.instance() || old.handle() != lease.handle()
-                        },
-                    ) {
-                        return Err(PreparedRuntimeError::AmbiguousSourceInstance(key.source));
-                    }
-                }
-                inherited
-            }
         };
         let mut exact_external = HashMap::new();
         let retained = std::cell::OnceCell::new();
@@ -1060,19 +1025,14 @@ impl PersistentSession {
             &self.bindings,
         )?;
         let tokens = std::mem::take(&mut staged.leases);
-        let admitted = if qualified {
-            engine
-                .admit_source_instances(
-                    &mut self.bindings,
-                    &self.scopes,
-                    scope,
-                    std::mem::take(&mut staged.domain_leases),
-                )
-                .map_err(|_| tokens.clone())
-        } else {
-            self.bindings
-                .register_source_install_in(&self.scopes, scope, tokens.clone())
-        };
+        let admitted = engine
+            .admit_source_instances(
+                &mut self.bindings,
+                &self.scopes,
+                scope,
+                std::mem::take(&mut staged.domain_leases),
+            )
+            .map_err(|_| tokens.clone());
         match admitted {
             Ok(keys) => {
                 let engine = bootstrap
@@ -3633,12 +3593,78 @@ impl PersistentSession {
             || current.semantic.public_view != old.semantic.public_view
         {
             if let super::PublicationIntent::Final(intent) = &old.intent {
+                if intent.world().is_some() {
+                    return Ok(super::PublicationAttempt::Settled(
+                        PublicManifestCommit::Refused {
+                            error: Box::new(SessionError::WorldCellPublicationBaseStale),
+                        },
+                    ));
+                }
                 return Ok(super::PublicationAttempt::Rebase(intent.clone()));
+            }
+        }
+        if let super::PublicationIntent::Final(intent) = &old.intent {
+            if intent.world().is_some() && !self.world_execution_base_is_current(intent) {
+                return Ok(super::PublicationAttempt::Settled(
+                    PublicManifestCommit::Refused {
+                        error: Box::new(SessionError::WorldCellPublicationBaseStale),
+                    },
+                ));
             }
         }
         current.intent = old.intent.clone();
         *certified.base_mut() = current;
         Ok(super::PublicationAttempt::RestageMetadata(certified))
+    }
+
+    /// Exact World premises for installing a final binding/world pair. This is
+    /// an observation of the SAME published association and admitted Arcs, not
+    /// an issuer: it never reconstructs a compiler world or a public view.
+    fn world_execution_base_is_current(
+        &self,
+        intent: &super::FinalExecutionIntent,
+    ) -> bool {
+        let Some(world) = intent.world() else {
+            return true;
+        };
+        if !intent.owner_matches(self.admission_owner())
+            || !self.scopes.is_live(intent.admitted_scope())
+            || !self.scopes.is_live(intent.private_scope())
+        {
+            return false;
+        }
+        let Some(lib) = self.lib.as_ref() else {
+            return false;
+        };
+        if lib.compile_view_identity != intent.library()
+            || self
+                .public_visibility_snapshot_in(intent.private_scope())
+                .as_ref()
+                != Some(intent.private_snapshot())
+            || self.compile_view_digest_in(intent.private_scope())
+                != Some(intent.private_view_digest())
+            || self
+                .public_visibility_snapshot_in(intent.admitted_scope())
+                .as_ref()
+                != Some(intent.admitted_public())
+            || lib.current_exact_context_in(intent.admitted_scope()).as_ref()
+                != intent.admitted_context()
+            || self.compile_view_digest_in(intent.admitted_scope()) != Some(world.public_view)
+        {
+            return false;
+        }
+        let live = lib
+            .tips
+            .get(&intent.admitted_scope())
+            .and_then(|state| state.inspection_world.as_ref());
+        if !live.is_some_and(|association| Arc::ptr_eq(association, &world.association)) {
+            return false;
+        }
+        self.inspection_world_base_is_current(
+            &world.association.base,
+            &world.source,
+            &world.original_source,
+        )
     }
 
     /// Admit the frontend's short control claim only after exact native preflight.
@@ -3666,6 +3692,22 @@ impl PersistentSession {
             .lib
             .as_ref()
             .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let world_execution = match &ticket.intent {
+            super::PublicationIntent::Final(intent) if intent.world().is_some() => {
+                Some(intent.clone())
+            }
+            _ => None,
+        };
+        if world_execution
+            .as_ref()
+            .is_some_and(|intent| !self.world_execution_base_is_current(intent))
+        {
+            return Ok(super::PublicationAttempt::Settled(
+                PublicManifestCommit::Refused {
+                    error: Box::new(SessionError::WorldCellPublicationBaseStale),
+                },
+            ));
+        }
         if matches!(
             ticket.intent,
             super::PublicationIntent::HostBindings(
@@ -3703,7 +3745,13 @@ impl PersistentSession {
         {
             return Ok(match &ticket.intent {
                 super::PublicationIntent::Final(intent) => {
-                    super::PublicationAttempt::Rebase(intent.clone())
+                    if intent.world().is_some() {
+                        super::PublicationAttempt::Settled(PublicManifestCommit::Refused {
+                            error: Box::new(SessionError::WorldCellPublicationBaseStale),
+                        })
+                    } else {
+                        super::PublicationAttempt::Rebase(intent.clone())
+                    }
                 }
                 super::PublicationIntent::HostBindings(_) => {
                     super::PublicationAttempt::RestageMetadata(ticket.certified)
@@ -3754,6 +3802,16 @@ impl PersistentSession {
             .bindings
             .prepare_binding_publication_removals(prepared, &declared_names)
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        // The final promotion witness must be taken from the SAME prepared
+        // promotion that would commit. It is only meaningful after removals.
+        let world_promotion_witness = world_execution
+            .as_ref()
+            .map(|_| {
+                self.bindings
+                    .prepared_promotion_scope_witness(self.scope_tree(), &prepared)
+                    .map_err(SessionError::InvalidPublicBindingPromotion)
+            })
+            .transpose()?;
         self.public_visibility_epochs
             .try_reserve(1)
             .map_err(|error| SessionError::RecoveryManifest {
@@ -3769,6 +3827,28 @@ impl PersistentSession {
                     .prepare_resident_declaration(public_scope, declaration)
             })
             .transpose()?;
+        if let (Some(intent), Some(_witness)) = (&world_execution, world_promotion_witness) {
+            // Final compare after every fallible preparation and effect, before
+            // any claim or install. A stale base refuses without replay and
+            // preserves the executed effects and private prefix.
+            if !self.world_execution_base_is_current(intent) {
+                return Ok(super::PublicationAttempt::Settled(
+                    PublicManifestCommit::Refused {
+                        error: Box::new(SessionError::WorldCellPublicationBaseStale),
+                    },
+                ));
+            }
+            // The binding promotion and its exact post-removal scope witness
+            // are prepared, but installing the matching World association
+            // requires Warm's SAME final promotion product. The Host must not
+            // synthesize that product from raw receipts. Drop the prepared
+            // promotion without claiming or committing.
+            return Ok(super::PublicationAttempt::Settled(
+                PublicManifestCommit::Refused {
+                    error: Box::new(SessionError::WorldCellFinalPromotionCapabilityMissing),
+                },
+            ));
+        }
         let Some(claim) = claim() else {
             return Ok(super::PublicationAttempt::Settled(
                 PublicManifestCommit::Cancelled,
@@ -3784,6 +3864,10 @@ impl PersistentSession {
             .as_mut()
             .expect("preflight library")
             .publish_staged_public_manifest_unchecked(ticket, declaration, |_| {
+                // A World publication must commit its final association in
+                // this SAME callback, next to the binding promotion, using the
+                // SAME prepared promotion and scope witness. The finite path
+                // below cannot install a World pair and never runs for one.
                 bindings.commit_exact_binding_promotion(prepared);
                 public_visibility_epochs.insert(public_scope, next_epoch);
             });
@@ -5484,7 +5568,12 @@ mod checkpoint_scope_tests {
             .resolve_certification_in(scope, &prepared, &TurnCertification::default())
             .unwrap();
         assert!(resolved.groups.is_empty());
-        let target = CertifiedTargetImage::compile(prepared, &ImageRegistry::new()).unwrap();
+        let target = CertifiedTargetImage::compile_with_plan(
+            prepared,
+            &ImageRegistry::new(),
+            resolved.source_plan.clone(),
+        )
+        .unwrap();
         let (program, keys) = session
             .install_certified_turn_in(
                 scope,
@@ -6372,7 +6461,9 @@ mod checkpoint_scope_tests {
             .unwrap();
         assert_eq!(resolved.target_owners, vec![expected]);
         let registry = ImageRegistry::new();
-        let target = CertifiedTargetImage::compile(prepared.clone(), &registry).unwrap();
+        let target =
+            CertifiedTargetImage::compile_with_plan(prepared.clone(), &registry, resolved.source_plan.clone())
+                .unwrap();
         let (program, keys) = session
             .install_certified_turn_in(
                 ScopeId::ROOT,
@@ -7443,6 +7534,77 @@ mod checkpoint_scope_tests {
         assert!(
             matches!(session.adopt_initial_notebook_scope(scope), Err(SessionError::DeadScope(id)) if id == scope)
         );
+    }
+
+    #[test]
+    fn certified_install_refuses_plan_less_target_before_source_work() {
+        use tidepool_repr::execution_schema::testing;
+        let registry = ImageRegistry::new();
+        let mut session = PersistentSession::new(None, 1024 * 1024);
+        let scope = session.mint_isolated_scope();
+        let target = CertifiedTargetImage::compile(
+            testing::prepare(testing::wire_program()).unwrap(),
+            &registry,
+        )
+        .unwrap();
+        let refused = session.install_certified_turn_in(
+            scope,
+            &target.fixture_constructor_metadata(),
+            target,
+            &[],
+            &BTreeMap::new(),
+            Vec::new(),
+            &[],
+        );
+        assert!(matches!(
+            refused,
+            Err(PreparedRuntimeError::MissingSourceDomainPlan)
+        ));
+        assert!(session.residency().is_none());
+        assert!(session
+            .bindings()
+            .source_instances_in(session.scope_tree(), scope)
+            .is_empty());
+    }
+
+    #[test]
+    fn certified_install_with_plan_reaches_the_source_transaction_seam() {
+        use tidepool_repr::execution_schema::testing;
+        let registry = ImageRegistry::new();
+        let mut session = PersistentSession::new(None, 1024 * 1024);
+        let scope = session.mint_isolated_scope();
+        let plan = ResolvedSourceDomainPlan::fixture(
+            BTreeMap::new(),
+            session
+                .bindings()
+                .source_domain_selection_in(session.scope_tree(), scope)
+                .unwrap(),
+            session
+                .bindings()
+                .scope_snapshot(session.scope_tree(), scope)
+                .unwrap(),
+        );
+        let target = CertifiedTargetImage::compile_with_plan(
+            testing::prepare(testing::wire_program()).unwrap(),
+            &registry,
+            plan,
+        )
+        .unwrap();
+        let refused = session.install_certified_turn_in(
+            scope,
+            &target.fixture_constructor_metadata(),
+            target,
+            &[],
+            &BTreeMap::new(),
+            Vec::new(),
+            &[],
+        );
+        assert!(matches!(
+            refused,
+            Err(PreparedRuntimeError::SourceAdmission(
+                super::super::SourceAdmissionError::MissingTransaction
+            ))
+        ));
     }
 }
 

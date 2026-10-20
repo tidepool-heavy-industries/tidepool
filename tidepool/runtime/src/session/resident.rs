@@ -9639,7 +9639,7 @@ mod authored_publication_tests {
         };
         use std::os::unix::fs::PermissionsExt;
         use tidepool_testing::effect_surface::TestEffectSurface;
-        use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+        use tidepool_toolchain::checked_cell::CellRecipe;
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
         let effects = TestEffectSurface::minimal(&[]).unwrap();
@@ -9655,11 +9655,10 @@ mod authored_publication_tests {
         let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
         let source = include_str!("fixtures/checked-interface-publication.hs");
-        let specification = CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: source.into(),
-            template_source: template.clone(),
-            turn_templates: templates
+        let specification = CellRecipe::new(
+            source.to_string(),
+            template.clone(),
+            templates
                 .iter()
                 .map(|template| {
                     let kind = match template.kind {
@@ -9668,12 +9667,12 @@ mod authored_publication_tests {
                         crate::session::TemplateSelector::BindDiscard => "binddiscard",
                         crate::session::TemplateSelector::Expr => "expr",
                     };
-                    (kind.into(), template.source.clone())
+                    (kind.to_owned(), template.source.clone())
                 })
                 .collect(),
-            injected_modules: view.injected_module_names(),
-            reserved_declaration_modules: vec![],
-        };
+            view.injected_module_names(),
+        )
+        .unwrap();
         let admission = state
             .admit_planned_cell_for_execution(
                 execution.clone(),
@@ -10464,7 +10463,7 @@ mod authored_publication_tests {
             PublicManifestCommit, RecoveryPublicOwner, RecoveryRunAuthority,
             RecoverySuccessorAuthority, SourceImports, TemplateSelector,
         };
-        use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+        use tidepool_toolchain::checked_cell::CellRecipe;
         use tracing_subscriber::prelude::*;
 
         struct Successor {
@@ -10557,15 +10556,10 @@ mod authored_publication_tests {
         let view = original.compile_view_in(source.scope()).unwrap();
         let imports = view.turn_imports(&SourceImports::new());
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
-        let specification = CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: "_ <- pure ()".into(),
-            template_source: resident_cell_check_template(
-                effects.preamble(),
-                effects.row(),
-                &imports,
-            ),
-            turn_templates: templates
+        let specification = CellRecipe::new(
+            "_ <- pure ()".to_string(),
+            resident_cell_check_template(effects.preamble(), effects.row(), &imports),
+            templates
                 .iter()
                 .map(|template| {
                     let kind = match template.kind {
@@ -10574,12 +10568,12 @@ mod authored_publication_tests {
                         TemplateSelector::BindDiscard => "binddiscard",
                         TemplateSelector::Expr => "expr",
                     };
-                    (kind.into(), template.source.clone())
+                    (kind.to_owned(), template.source.clone())
                 })
                 .collect(),
-            injected_modules: view.injected_module_names(),
-            reserved_declaration_modules: Vec::new(),
-        };
+            view.injected_module_names(),
+        )
+        .unwrap();
         let includes = view.include_paths(effects.include_paths());
         let admitted = original
             .with_source_compiler_transaction(
@@ -12157,7 +12151,7 @@ mod authored_publication_tests {
             resident_cell_check_template, resident_workbench_templates, TurnResult,
         };
         use tidepool_testing::effect_surface::TestEffectSurface;
-        use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+        use tidepool_toolchain::checked_cell::CellRecipe;
 
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
@@ -12188,11 +12182,10 @@ mod authored_publication_tests {
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
         let source = "let page = (42 :: Int)";
         let injected = view.injected_module_names();
-        let specification = CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: source.into(),
-            template_source: template.clone(),
-            turn_templates: templates
+        let specification = CellRecipe::new(
+            source.to_string(),
+            template.clone(),
+            templates
                 .iter()
                 .map(|template| {
                     let kind = match template.kind {
@@ -12201,12 +12194,12 @@ mod authored_publication_tests {
                         TemplateSelector::BindDiscard => "binddiscard",
                         TemplateSelector::Expr => "expr",
                     };
-                    (kind.into(), template.source.clone())
+                    (kind.to_owned(), template.source.clone())
                 })
                 .collect(),
-            injected_modules: injected.clone(),
-            reserved_declaration_modules: Vec::new(),
-        };
+            injected.clone(),
+        )
+        .unwrap();
         let includes = view.include_paths(effects.include_paths());
         let admission = session
             .admit_planned_cell_for_execution(

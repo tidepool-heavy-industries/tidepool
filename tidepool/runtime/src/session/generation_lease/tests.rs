@@ -390,7 +390,7 @@ fn recovery_attachment_refuses_an_already_issued_ephemeral_value() {
 fn inherited_mixed_cell_keeps_its_reserved_value_identity_and_burns_crash_staging() {
     use crate::session::turn::{compile_cell_program_admitted, TemplateSelector};
     use crate::session::workbench::{resident_cell_check_template, resident_workbench_templates};
-    use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+    use tidepool_toolchain::checked_cell::CellRecipe;
 
     tidepool_testing::eval_harness::require_extract();
     let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
@@ -406,25 +406,26 @@ fn inherited_mixed_cell_keeps_its_reserved_value_identity_and_burns_crash_stagin
     let execution = Arc::new(session.begin_private_execution(ScopeId::ROOT).unwrap());
     let view = session.compile_view_for_execution(&execution).unwrap();
     let imports = view.turn_imports(&crate::session::SourceImports::new());
-    let specification = Arc::new(CheckedCellSpecification {
-        admission_digest: [0; 32],
-        cell_source: include_str!("../fixtures/shared_allocation_cell.hs").into(),
-        template_source: resident_cell_check_template(effects.preamble(), effects.row(), &imports),
-        turn_templates: resident_workbench_templates(effects.preamble(), effects.row(), &imports)
-            .iter()
-            .map(|template| {
-                let kind = match template.kind {
-                    TemplateSelector::Decl => "decl",
-                    TemplateSelector::Bind => "bind",
-                    TemplateSelector::BindDiscard => "binddiscard",
-                    TemplateSelector::Expr => "expr",
-                };
-                (kind.into(), template.source.clone())
-            })
-            .collect(),
-        injected_modules: view.injected_module_names(),
-        reserved_declaration_modules: Vec::new(),
-    });
+    let specification = Arc::new(
+        CellRecipe::new(
+            include_str!("../fixtures/shared_allocation_cell.hs"),
+            resident_cell_check_template(effects.preamble(), effects.row(), &imports),
+            resident_workbench_templates(effects.preamble(), effects.row(), &imports)
+                .iter()
+                .map(|template| {
+                    let kind = match template.kind {
+                        TemplateSelector::Decl => "decl",
+                        TemplateSelector::Bind => "bind",
+                        TemplateSelector::BindDiscard => "binddiscard",
+                        TemplateSelector::Expr => "expr",
+                    };
+                    (kind.to_owned(), template.source.clone())
+                })
+                .collect(),
+            view.injected_module_names(),
+        )
+        .unwrap(),
+    );
     let include = view.include_paths(effects.include_paths());
     let plan = tidepool_testing::with_settlement(|settlement| {
         tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include, settlement)
@@ -646,7 +647,7 @@ fn fenced_run_refuses_value_only_cell_and_private_scope_activation() {
 fn fenced_run_refuses_prepared_item_admission_and_native_start() {
     use crate::session::turn::{compile_cell_program_admitted, TemplateSelector};
     use crate::session::workbench::{resident_cell_check_template, resident_workbench_templates};
-    use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+    use tidepool_toolchain::checked_cell::CellRecipe;
 
     tidepool_testing::eval_harness::require_extract();
     let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
@@ -664,33 +665,26 @@ fn fenced_run_refuses_prepared_item_admission_and_native_start() {
         let execution = Arc::new(session.begin_private_execution(public).unwrap());
         let view = session.compile_view_for_execution(&execution).unwrap();
         let imports = view.turn_imports(&crate::session::SourceImports::new());
-        let specification = Arc::new(CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: source.into(),
-            template_source: resident_cell_check_template(
-                effects.preamble(),
-                effects.row(),
-                &imports,
-            ),
-            turn_templates: resident_workbench_templates(
-                effects.preamble(),
-                effects.row(),
-                &imports,
+        let specification = Arc::new(
+            CellRecipe::new(
+                source.to_string(),
+                resident_cell_check_template(effects.preamble(), effects.row(), &imports),
+                resident_workbench_templates(effects.preamble(), effects.row(), &imports)
+                    .iter()
+                    .map(|template| {
+                        let kind = match template.kind {
+                            TemplateSelector::Decl => "decl",
+                            TemplateSelector::Bind => "bind",
+                            TemplateSelector::BindDiscard => "binddiscard",
+                            TemplateSelector::Expr => "expr",
+                        };
+                        (kind.to_owned(), template.source.clone())
+                    })
+                    .collect(),
+                view.injected_module_names(),
             )
-            .iter()
-            .map(|template| {
-                let kind = match template.kind {
-                    TemplateSelector::Decl => "decl",
-                    TemplateSelector::Bind => "bind",
-                    TemplateSelector::BindDiscard => "binddiscard",
-                    TemplateSelector::Expr => "expr",
-                };
-                (kind.into(), template.source.clone())
-            })
-            .collect(),
-            injected_modules: view.injected_module_names(),
-            reserved_declaration_modules: Vec::new(),
-        });
+            .unwrap(),
+        );
         let include = view.include_paths(effects.include_paths());
         let plan = tidepool_testing::with_settlement(|settlement| {
             tidepool_toolchain::artifacts::parse_cell_plan(
@@ -777,7 +771,7 @@ fn fenced_run_refuses_prepared_item_admission_and_native_start() {
 fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor() {
     use crate::session::turn::compile_cell_program_admitted;
     use crate::session::workbench::resident_cell_check_template;
-    use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+    use tidepool_toolchain::checked_cell::CellRecipe;
 
     tidepool_testing::eval_harness::require_extract();
     let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
@@ -800,14 +794,15 @@ fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor
     let private = execution.private_scope();
     let view = session.compile_view_for_execution(&execution).unwrap();
     let imports = view.turn_imports(&crate::session::SourceImports::new());
-    let specification = Arc::new(CheckedCellSpecification {
-        admission_digest: [0; 32],
-        cell_source: "preparedLeaseDeclaration :: Int\npreparedLeaseDeclaration = 42".into(),
-        template_source: resident_cell_check_template(effects.preamble(), effects.row(), &imports),
-        turn_templates: Vec::new(),
-        injected_modules: view.injected_module_names(),
-        reserved_declaration_modules: Vec::new(),
-    });
+    let specification = Arc::new(
+        CellRecipe::new(
+            "preparedLeaseDeclaration :: Int\npreparedLeaseDeclaration = 42".to_string(),
+            resident_cell_check_template(effects.preamble(), effects.row(), &imports),
+            Vec::new(),
+            view.injected_module_names(),
+        )
+        .unwrap(),
+    );
     let include = view.include_paths(effects.include_paths());
     let plan = tidepool_testing::with_settlement(|settlement| {
         tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include, settlement)

@@ -7438,6 +7438,173 @@ impl ArtifactView {
         ))
     }
 
+    /// Select the already acquired compiler bindings and exact group choices.
+    /// Payloads retain their immutable bytes; old transport caches are optional
+    /// and do not become parents of this new semantic owner.
+    pub(crate) fn select_acquired_compiler_bindings(
+        &self,
+        namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
+        groups: &BTreeMap<NativeGroupKey, NativeGroupBinding>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Self, CompileError> {
+        let budget = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
+            result.map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))
+        };
+        budget(
+            operation.reserve::<InventoryNodeKey>(namespace.len().saturating_add(groups.len())),
+        )?;
+        let roots = namespace
+            .values()
+            .copied()
+            .map(InventoryNodeKey::Artifact)
+            .chain(groups.values().copied().map(InventoryNodeKey::Group))
+            .collect::<Vec<_>>();
+        // Membership comes from this owner's acquired bindings and their
+        // retained closure, never from a separately captured cold read
+        // projection. A fresh acquisition must still support demand from its
+        // own roots and custody.
+        let owned = self
+            .lease
+            .selection
+            .retained_nodes()
+            .map_err(|_| failure("acquired compiler bindings lost their exact selection"))?;
+        for root in &roots {
+            crate::host_work::checkpoint()?;
+            budget(operation.charge(1))?;
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::InputProjectionBindingVisit,
+                1,
+            );
+            if !owned.contains(root) {
+                return Err(failure(
+                    "selected compiler binding is outside its acquired view",
+                ));
+            }
+        }
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let (nodes, closure) =
+            admitted_closure_with_operation(&state, roots.iter().copied(), Some(operation))?;
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::InputProjectionClosureNode,
+            closure.nodes as u64,
+        );
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::InputProjectionClosureEdge,
+            closure.edges as u64,
+        );
+        let mut selection = ExactSelectionSnapshot::default();
+        let mut pending = Vec::new();
+        let root_nodes = roots.iter().copied().collect::<BTreeSet<_>>();
+        for root in &roots {
+            budget(operation.reserve::<(InventoryNodeKey, (), [usize; 4])>(1))?;
+            selection.roots.insert(*root, ());
+            budget(operation.reserve::<ArtifactSelectionId>(1))?;
+            pending.push(root.selection());
+        }
+        // Every artifact the demanded closure retains but does not name as an
+        // executable root stays non-executable custody of this view.
+        for node in &nodes {
+            if let InventoryNodeKey::Artifact(binding) = node {
+                if !root_nodes.contains(node) {
+                    budget(operation.reserve::<ArtifactBindingNode>(1))?;
+                    selection
+                        .custody_roots
+                        .insert(ArtifactBindingNode::Artifact(*binding), ());
+                }
+            }
+        }
+        for (id, binding) in namespace {
+            if *id != binding.artifact {
+                return Err(failure(
+                    "selected compiler namespace key differs from its acquired binding",
+                ));
+            }
+            budget(operation.reserve::<(ArtifactId, ArtifactBinding, [usize; 4])>(1))?;
+            selection.namespace.insert(*id, *binding);
+        }
+        // Atomic scope proofs can retain more than the selected node closure.
+        // Visit and charge that proof ancestry explicitly, without scanning the
+        // old view's unrelated scopes or payload table.
+        while let Some(scope) = pending.pop() {
+            crate::host_work::checkpoint()?;
+            budget(operation.charge(1))?;
+            if selection.scopes.contains_key(&scope) {
+                continue;
+            }
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::InputProjectionProofVisit,
+                1,
+            );
+            let proof = self.lease.selection.scopes.get(&scope).ok_or_else(|| {
+                failure("selected compiler binding lost its acquired scope proof")
+            })?;
+            budget(operation.reserve::<(
+                ArtifactSelectionId,
+                crate::exact_context::ImmutableScopeProofRef,
+                [usize; 4],
+            )>(1))?;
+            for (_, target, _) in &proof.proof().dependencies {
+                budget(operation.charge(1))?;
+                crate::host_work::record_host_work(
+                    crate::host_work::HostWorkCounter::InputProjectionProofEdgeVisit,
+                    1,
+                );
+                if target.selection() != scope {
+                    budget(operation.reserve::<ArtifactSelectionId>(1))?;
+                    pending.push(target.selection());
+                }
+            }
+            selection.scopes.insert(scope, proof.clone());
+        }
+        let mut payloads = BTreeMap::new();
+        let mut introduced = BTreeSet::new();
+        for node in nodes {
+            crate::host_work::checkpoint()?;
+            budget(operation.charge(1))?;
+            let id = node.artifact();
+            if payloads.contains_key(&id) {
+                continue;
+            }
+            let entry =
+                self.lease.payloads.get(&id).ok_or_else(|| {
+                    failure("selected compiler binding lost its acquired payload")
+                })?;
+            budget(operation.reserve::<(ArtifactId, Arc<ArtifactEntry>, [usize; 8])>(2))?;
+            budget(
+                operation.charge(
+                    entry
+                        .descriptor
+                        .owner
+                        .unit
+                        .len()
+                        .saturating_add(entry.descriptor.owner.module.len()),
+                ),
+            )?;
+            payloads.insert(id, Arc::clone(entry));
+            introduced.insert(id);
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::ArtifactMetadataRowVisit,
+                1,
+            );
+        }
+        drop(state);
+        let draft = ViewDraft {
+            roots,
+            selection: Arc::new(selection),
+            inventory: self.lease.inventory.clone(),
+            parents: Vec::new(),
+            issuing_payloads: payloads,
+            materialization_parents: Vec::new(),
+            materialization: Mutex::new(BTreeMap::new()),
+        };
+        // Transfer physical payload and materialization custody for exactly
+        // these demanded nodes, as `select_issued` does for an issued graph.
+        // Cold-only custody is filtered out by the retained closure.
+        let mut retained = Self::from_custody(ViewLease::from_issued_draft(draft, introduced));
+        retained = self.retain_projected_materializations(retained)?;
+        Ok(retained)
+    }
+
     /// Reopen an issuer's immutable selection inside subsequently grown custody.
     /// Additional available artifacts and demanded groups cannot change it.
     pub(crate) fn select_issued(
@@ -8602,6 +8769,112 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn acquired_compiler_bindings_serve_a_fresh_view_without_cold_projection() {
+        use crate::host_work::{HostWorkCounter, HostWorkObservation};
+        use tidepool_repr::execution_schema::InventoryOperation;
+        let inventory = ArtifactInventory::default();
+        let seed = Arc::new(entry("Seed", &["Required"]));
+        let required = Arc::new(entry("Required", &[]));
+        let unrelated = Arc::new(entry("Unrelated", &[]));
+        let seed_id = seed.descriptor.id;
+        let required_id = required.descriptor.id;
+        let unrelated_id = unrelated.descriptor.id;
+        let cold = inventory
+            .admit_shared(&inventory.empty_view(), vec![seed, required, unrelated])
+            .unwrap();
+        assert!(
+            cold.reads.read_projection.get().is_none(),
+            "the fixture must start without a captured cold projection"
+        );
+        let mut namespace = cold.namespace();
+        namespace.retain(|id, _| *id == seed_id);
+        let roots = namespace
+            .values()
+            .copied()
+            .map(InventoryNodeKey::Artifact)
+            .collect::<Vec<_>>();
+        let groups = BTreeMap::new();
+        let operation = InventoryOperation::new(Default::default());
+        let observation = HostWorkObservation::new();
+        let selected = observation
+            .scope(|| {
+                cold.select_acquired_compiler_bindings(&namespace, &groups, &operation)
+            })
+            .unwrap();
+
+        // R7: demand must not require or capture a cold read projection, and
+        // the demanded view's own projection must be its acquired closure.
+        assert!(
+            cold.reads.read_projection.get().is_none(),
+            "demand captured the cold projection it must not depend on"
+        );
+        let demanded_projection = {
+            let state = selected.lease.inventory.0.lock().expect("inventory lock");
+            selected.read_projection(&state).nodes.clone()
+        };
+        let mut expected_projection = imbl::OrdSet::new();
+        for root in selected.roots() {
+            expected_projection.insert(*root);
+        }
+        for node in selected.custody_roots() {
+            expected_projection.insert(*node);
+        }
+        assert_eq!(
+            demanded_projection, expected_projection,
+            "the demanded view projects its own closure, not the cold history"
+        );
+        assert!(
+            !demanded_projection
+                .iter()
+                .any(|node| node.artifact() == unrelated_id),
+            "a cold-only artifact must not leak into the demanded projection"
+        );
+        assert!(operation.work_usage().unwrap().0 > 0);
+
+        // R9: the closure work actually performed is recorded, and matches the
+        // demanded closure rather than the cold view's unrelated history.
+        let (nodes, closure) = {
+            let state = cold.lease.inventory.0.lock().expect("inventory lock");
+            admitted_closure_with_operation(&state, roots.iter().copied(), None).unwrap()
+        };
+        let counts = observation.snapshot();
+        assert_eq!(
+            counts.get(HostWorkCounter::InputProjectionClosureNode),
+            closure.nodes as u64
+        );
+        assert_eq!(
+            counts.get(HostWorkCounter::InputProjectionClosureEdge),
+            closure.edges as u64
+        );
+        assert_eq!(
+            counts.get(HostWorkCounter::InputProjectionBindingVisit),
+            roots.len() as u64
+        );
+        assert!(counts.get(HostWorkCounter::InputProjectionProofVisit) >= 1);
+        assert_eq!(nodes.len(), 2, "the demanded closure is Seed + Required");
+
+        // R6: the demanded closure owns payloads, while cold-only payloads and
+        // closure-only artifacts stay out of the executable roots.
+        assert_eq!(selected.roots().len(), 1);
+        assert_eq!(selected.roots()[0].artifact(), seed_id);
+        assert_eq!(selected.custody_roots().len(), 1);
+        assert_eq!(selected.custody_roots()[0].artifact(), required_id);
+        assert!(Arc::ptr_eq(
+            &selected.lease.payloads[&seed_id],
+            &cold.lease.payloads[&seed_id]
+        ));
+        assert!(Arc::ptr_eq(
+            &selected.lease.payloads[&required_id],
+            &cold.lease.payloads[&required_id]
+        ));
+        assert!(!selected.lease.payloads.contains_key(&unrelated_id));
+        assert!(!selected
+            .custody_roots()
+            .iter()
+            .any(|node| node.artifact() == unrelated_id));
     }
 
     #[test]

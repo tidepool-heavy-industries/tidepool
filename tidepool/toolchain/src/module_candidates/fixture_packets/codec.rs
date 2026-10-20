@@ -772,11 +772,30 @@ fn input_facts(root: &Path, proof: &Path, evidence_path: &Path) {
     write_facts(root, "input_facts", &facts);
 }
 
+fn fixture_request(
+    cell_source: &str,
+    template_source: &str,
+    injected_modules: Vec<String>,
+) -> crate::checked_cell::CheckedCellRequest {
+    crate::checked_cell::CheckedCellRequest::issue(
+        Arc::new(
+            crate::checked_cell::CellRecipe::new(
+                cell_source,
+                template_source,
+                vec![],
+                injected_modules,
+            )
+            .expect("fixture recipe"),
+        ),
+        crate::checked_cell::AdmissionDigest::finalize([0xaa; 32]).expect("fixture admission"),
+        vec![],
+    )
+    .expect("fixture checked request")
+}
+
 fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Option<NativeBytes>) {
     use crate::artifacts::checked_search_authorization;
-    use crate::checked_cell::{
-        encode_item_authorization, CheckedCellSpecification, CheckedItemKind, ItemAuthorization,
-    };
+    use crate::checked_cell::{encode_item_authorization, CheckedItemKind, ItemAuthorization};
     let signature = signature.map(|bytes| {
         crate::checked_cell::fixture_checked_signature(&bytes.0).expect("owner signature decoder")
     });
@@ -788,14 +807,7 @@ fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Opti
             );
             crate::artifacts::encode_cell_authorization(
                 crate::checked_cell::CheckedCellManifestPurpose::Authored,
-                &CheckedCellSpecification {
-                    admission_digest: [0xaa; 32],
-                    cell_source: "codec cell".into(),
-                    template_source: "codec template".into(),
-                    turn_templates: vec![],
-                    injected_modules: vec![],
-                    reserved_declaration_modules: vec![],
-                },
+                &fixture_request("codec cell", "codec template", vec![]),
                 Value::Array(vec![]),
                 &crate::declaration_context::SelectedTemplateImports::default(),
             )
@@ -855,14 +867,7 @@ fn cell_purpose(root: &Path, includes: &[PathBuf], values: Vec<ValueInterfaceInp
     );
     let body = crate::artifacts::encode_cell_authorization(
         crate::checked_cell::CheckedCellManifestPurpose::Authored,
-        &crate::checked_cell::CheckedCellSpecification {
-            admission_digest: [0xaa; 32],
-            cell_source: "codec cell".into(),
-            template_source: "codec template".into(),
-            turn_templates: vec![],
-            injected_modules,
-            reserved_declaration_modules: vec![],
-        },
+        &fixture_request("codec cell", "codec template", injected_modules),
         baseline,
         &crate::declaration_context::SelectedTemplateImports::default(),
     )

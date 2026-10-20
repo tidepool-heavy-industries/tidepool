@@ -338,6 +338,8 @@ pub enum PreparedRuntimeError {
     UnreachableCertifiedGroup,
     #[error("certified source installation targeted a closed or conflicting lexical scope")]
     SourceScopeAdmission,
+    #[error("certified installation requires a resolved source-domain plan")]
+    MissingSourceDomainPlan,
     #[error("lexical scope has multiple mutable instances for certified source {0:?}")]
     AmbiguousSourceInstance(SourceBinder),
     #[error("lexical scope has multiple mutable instances for certified group {owner:?} ordinal {ordinal}")]
@@ -550,6 +552,7 @@ impl PreparedRuntimeError {
             | Self::ConflictingSettledConstructors
             | Self::UnreachableCertifiedGroup
             | Self::SourceScopeAdmission
+            | Self::MissingSourceDomainPlan
             | Self::AmbiguousSourceInstance(_)
             | Self::AmbiguousSourceGroup { .. }
             | Self::InvalidCertifiedSourceOwner(_)
@@ -604,6 +607,7 @@ impl PreparedRuntimeError {
             | Self::ConflictingSettledConstructors
             | Self::UnreachableCertifiedGroup
             | Self::SourceScopeAdmission
+            | Self::MissingSourceDomainPlan
             | Self::AmbiguousSourceInstance(_)
             | Self::AmbiguousSourceGroup { .. }
             | Self::InvalidCertifiedSourceOwner(_)
@@ -1257,6 +1261,9 @@ impl CertifiedTargetImage {
         self.image.constructor_declarations()
     }
 
+    /// Image-level test constructor. It carries no resolved source-domain
+    /// plan, so admission refuses it with `MissingSourceDomainPlan` rather
+    /// than reconstructing source authority from live bindings.
     #[cfg(test)]
     pub(crate) fn compile(
         prepared: PreparedProgram,
@@ -1266,14 +1273,32 @@ impl CertifiedTargetImage {
             prepared,
             registry,
             CertifiedTargetPackageInterfaces::default(),
+            None,
+        )
+    }
+
+    /// Test constructor for a target admitted under an already resolved
+    /// certified turn: the image carries that turn's source-domain plan.
+    #[cfg(test)]
+    pub(crate) fn compile_with_plan(
+        prepared: PreparedProgram,
+        registry: &ImageRegistry,
+        source_plan: super::persistent::ResolvedSourceDomainPlan,
+    ) -> Result<Self, CompileError> {
+        Self::compile_certified(
+            prepared,
+            registry,
+            CertifiedTargetPackageInterfaces::default(),
+            Some(source_plan),
         )
     }
 
     #[cfg(test)]
-    pub(crate) fn compile_certified(
+    fn compile_certified(
         prepared: PreparedProgram,
         registry: &ImageRegistry,
         package_interfaces: CertifiedTargetPackageInterfaces,
+        source_plan: Option<super::persistent::ResolvedSourceDomainPlan>,
     ) -> Result<Self, CompileError> {
         let image = registry.get_or_compile_prepared(&prepared, || {
             CompiledProgram::compile_prepared_definitions(&prepared).map(Arc::new)
@@ -1288,7 +1313,7 @@ impl CertifiedTargetImage {
             image,
             package_interfaces,
             package_literals,
-            source_plan: None,
+            source_plan,
         })
     }
 
@@ -8384,13 +8409,16 @@ pub(super) mod tests {
                 required_generation: None,
             });
         }
-        let target = CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry)
-            .unwrap()
-            .with_source_plan(super::super::persistent::ResolvedSourceDomainPlan::fixture(
+        let target = CertifiedTargetImage::compile_with_plan(
+            testing::prepare(wire).unwrap(),
+            &registry,
+            super::super::persistent::ResolvedSourceDomainPlan::fixture(
                 target_sources,
                 selection,
                 snapshot,
-            ));
+            ),
+        )
+        .unwrap();
         let demanded = target.compile_scoped_demanded(selected, &registry).unwrap();
         let owners = roots
             .iter()
@@ -8423,13 +8451,25 @@ pub(super) mod tests {
         );
         assert_eq!(session.residency().unwrap().programs, 3);
         assert_eq!(session.prepared_mut().unwrap().code_export_count(), 0);
+        let dead_plan = super::super::persistent::ResolvedSourceDomainPlan::fixture(
+            BTreeMap::new(),
+            session
+                .bindings()
+                .source_domain_selection_in(session.scope_tree(), scope)
+                .unwrap(),
+            session
+                .bindings()
+                .scope_snapshot(session.scope_tree(), scope)
+                .unwrap(),
+        );
         assert!(matches!(
             session.install_certified_turn_in(
                 tidepool_codegen::scope::ScopeId(u64::MAX),
                 &DataConTable::new(),
-                CertifiedTargetImage::compile(
+                CertifiedTargetImage::compile_with_plan(
                     testing::prepare(testing::wire_program()).unwrap(),
                     &registry,
+                    dead_plan,
                 )
                 .unwrap(),
                 &[],
@@ -8676,13 +8716,16 @@ pub(super) mod tests {
                 required_evaluated: false,
                 required_generation: None,
             });
-            let target = CertifiedTargetImage::compile(testing::prepare(wire).unwrap(), &registry)
-                .unwrap()
-                .with_source_plan(super::super::persistent::ResolvedSourceDomainPlan::fixture(
+            let target = CertifiedTargetImage::compile_with_plan(
+                testing::prepare(wire).unwrap(),
+                &registry,
+                super::super::persistent::ResolvedSourceDomainPlan::fixture(
                     roots,
                     selected.clone(),
                     snapshot,
-                ));
+                ),
+            )
+            .unwrap();
             let demanded = target.compile_scoped_demanded(groups, &registry).unwrap();
             (
                 target,

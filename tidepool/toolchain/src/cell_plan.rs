@@ -2,12 +2,13 @@
 //! items and compiler inputs; they confer no checked types or live values.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 
-use crate::checked_cell::CheckedCellSpecification;
+use crate::checked_cell::CellRecipe;
 use crate::CompileError;
 
 const RECEIPT_LIMIT: u64 = 8 << 20;
@@ -111,7 +112,7 @@ impl ParsedCellPlanItem {
 /// Runtime reservations retain this plan before authoritative checking.
 #[derive(Debug)]
 pub struct ParsedCellPlan {
-    specification: Arc<CheckedCellSpecification>,
+    specification: Arc<CellRecipe>,
     include_paths: Vec<PathBuf>,
     producer_sha256: [u8; 32],
     items: Vec<ParsedCellPlanItem>,
@@ -123,7 +124,7 @@ pub struct ParsedCellPlan {
 impl ParsedCellPlan {
     /// Immutable source recipe bound by the parser receipt and retained by
     /// runtime admission. Consumers derive compiler requests from this owner.
-    pub fn specification(&self) -> &Arc<CheckedCellSpecification> {
+    pub fn specification(&self) -> &Arc<CellRecipe> {
         &self.specification
     }
 
@@ -134,7 +135,7 @@ impl ParsedCellPlan {
         &self.include_paths
     }
     pub fn injected_modules(&self) -> &[String] {
-        &self.specification.injected_modules
+        self.specification.injected_modules()
     }
     pub fn items(&self) -> &[ParsedCellPlanItem] {
         &self.items
@@ -164,6 +165,23 @@ pub struct CompilerWorldCellPlan {
     receipt: Arc<[u8]>,
     observations: Arc<[u8]>,
     digest: [u8; 32],
+    allocation: Arc<()>,
+    issued: AdmissionIssueGate,
+}
+
+/// One-shot issuance for a live parser plan. A plan validates its requested
+/// slots first, then claims this gate exactly once, so one plan authorises one
+/// execution and one generation range.
+#[derive(Debug, Default)]
+struct AdmissionIssueGate(AtomicBool);
+
+impl AdmissionIssueGate {
+    fn claim(&self) -> Result<(), CompileError> {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| failure("world cell plan already issued its admission token"))
+    }
 }
 
 impl CompilerWorldCellPlan {
@@ -207,39 +225,251 @@ pub struct CompilerWorldCellReservation {
     expected_bindings: Arc<[Vec<(String, tidepool_repr::SessionVarId)>]>,
 }
 
+/// The exact runtime facts one source-admission owner binds to a world parser
+/// plan. Callers supply facts; the plan owner derives the admission digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldCellAdmissionSubject {
+    owner_identity: [u8; 16],
+    owner_epoch: u64,
+    session: u64,
+    scope: u64,
+    authorization: Arc<[Arc<[u8]>]>,
+}
+
+impl WorldCellAdmissionSubject {
+    /// Frame the source-admission owner's identity, epoch and authorization
+    /// facts inside the compiler transaction that owner actually issued.
+    /// Holding that transaction's origin is the issuing capability: code
+    /// outside the owner's active transaction cannot construct a subject, and
+    /// a subject never carries a digest.
+    pub fn for_source_transaction(
+        origin: &tidepool_extract_cmd::CompilerTransactionOrigin,
+        owner_identity: [u8; 16],
+        owner_epoch: u64,
+        session: u64,
+        scope: u64,
+        authorization: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Result<Self, CompileError> {
+        if tidepool_extract_cmd::CompilerTransactionOrigin::current().as_ref() != Some(origin) {
+            return Err(failure(
+                "world cell admission requires its issuing source transaction",
+            ));
+        }
+        Self::new(owner_identity, owner_epoch, session, scope, authorization)
+    }
+
+    pub(crate) fn new(
+        owner_identity: [u8; 16],
+        owner_epoch: u64,
+        session: u64,
+        scope: u64,
+        authorization: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Result<Self, CompileError> {
+        if owner_identity == [0; 16] {
+            return Err(failure("world cell admission has no issuing source owner"));
+        }
+        Ok(Self {
+            owner_identity,
+            owner_epoch,
+            session,
+            scope,
+            authorization: authorization
+                .into_iter()
+                .map(Arc::from)
+                .collect::<Vec<_>>()
+                .into(),
+        })
+    }
+}
+
+/// Issued only by the parser plan's owner after it validates the exact slots
+/// and binders. A token is bound to the one parser-plan allocation that
+/// admitted the receipt and is consumed by `CompilerWorldCellPlan::reserve`;
+/// a digest, a foreign allocation's token or a caller-built value is not
+/// admission.
+#[derive(Debug)]
+pub struct WorldCellAdmissionToken {
+    allocation: Arc<()>,
+    admission_digest: [u8; 32],
+    slots: Arc<[crate::checked_cell::CheckedPlannedCellSlot]>,
+    expected_bindings: Arc<[Vec<(String, tidepool_repr::SessionVarId)>]>,
+}
+
+/// Derive one admission token from an already admitted parser plan. The
+/// allocation witness names the plan that will accept it, and slot kinds,
+/// generations and binders are validated before the token exists.
+fn issue_world_cell_admission(
+    world: &[u8; 32],
+    producer_sha256: &[u8; 32],
+    plan_digest: &[u8; 32],
+    allocation: &Arc<()>,
+    items: &[ParsedCellPlanItem],
+    subject: WorldCellAdmissionSubject,
+    slots: Vec<crate::checked_cell::CheckedPlannedCellSlot>,
+    expected_bindings: Vec<Vec<(String, tidepool_repr::SessionVarId)>>,
+) -> Result<WorldCellAdmissionToken, CompileError> {
+    let admission_digest = world_cell_admission_digest(
+        world,
+        producer_sha256,
+        plan_digest,
+        &subject,
+        &slots,
+        &expected_bindings,
+    );
+    if admission_digest == [0; 32] {
+        return Err(failure("issued world cell admission is empty"));
+    }
+    validate_world_cell_reservations(items, &slots, &expected_bindings)?;
+    Ok(WorldCellAdmissionToken {
+        allocation: Arc::clone(allocation),
+        admission_digest,
+        slots: slots.into(),
+        expected_bindings: expected_bindings.into(),
+    })
+}
+
+/// Consume a token against the plan allocation named by its issuer. This is
+/// the only path that yields reservation expectations; an unissued or foreign
+/// token has no matching allocation witness.
+fn consume_world_cell_admission(
+    allocation: &Arc<()>,
+    token: WorldCellAdmissionToken,
+) -> Result<
+    (
+        Arc<[crate::checked_cell::CheckedPlannedCellSlot]>,
+        Arc<[Vec<(String, tidepool_repr::SessionVarId)>]>,
+        [u8; 32],
+    ),
+    CompileError,
+> {
+    if !Arc::ptr_eq(allocation, &token.allocation) {
+        return Err(failure(
+            "world cell admission token belongs to another plan",
+        ));
+    }
+    Ok((token.slots, token.expected_bindings, token.admission_digest))
+}
+
+/// Validate the requested reservations, then claim the plan's single issue
+/// and derive the token. Validation runs before the claim so a refused issue
+/// leaves the plan unburned; `CompilerWorldCellPlan::issue_admission_token`
+/// is the only production caller.
+fn claim_and_issue_world_cell_admission(
+    issued: &AdmissionIssueGate,
+    world_logical_id: &[u8; 32],
+    producer_sha256: &[u8; 32],
+    plan_digest: &[u8; 32],
+    allocation: &Arc<()>,
+    items: &[ParsedCellPlanItem],
+    subject: WorldCellAdmissionSubject,
+    slots: Vec<crate::checked_cell::CheckedPlannedCellSlot>,
+    expected_bindings: Vec<Vec<(String, tidepool_repr::SessionVarId)>>,
+) -> Result<WorldCellAdmissionToken, CompileError> {
+    validate_world_cell_reservations(items, &slots, &expected_bindings)?;
+    issued.claim()?;
+    issue_world_cell_admission(
+        world_logical_id,
+        producer_sha256,
+        plan_digest,
+        allocation,
+        items,
+        subject,
+        slots,
+        expected_bindings,
+    )
+}
+
 impl CompilerWorldCellPlan {
-    pub fn reserve(
+    /// Issue the one admission token for this exact plan. Slot kinds,
+    /// generations and binders are validated first, so a refused issue does
+    /// not burn the plan; only a valid request can claim the plan's single
+    /// issue. A second issue on the same live plan is refused, so one plan
+    /// authorises at most one execution and one generation range.
+    pub fn issue_admission_token(
         self: &Arc<Self>,
-        admission_digest: [u8; 32],
+        subject: WorldCellAdmissionSubject,
         slots: Vec<crate::checked_cell::CheckedPlannedCellSlot>,
         expected_bindings: Vec<Vec<(String, tidepool_repr::SessionVarId)>>,
-    ) -> Result<Arc<CompilerWorldCellReservation>, CompileError> {
-        validate_world_cell_reservations(
+    ) -> Result<WorldCellAdmissionToken, CompileError> {
+        claim_and_issue_world_cell_admission(
+            &self.issued,
+            self.world().logical_id(),
+            self.producer_sha256(),
+            self.digest(),
+            &self.allocation,
             &self.items,
-            admission_digest,
-            &slots,
-            &expected_bindings,
-        )?;
+            subject,
+            slots,
+            expected_bindings,
+        )
+    }
+
+    /// Consume one token issued for this exact plan allocation.
+    pub fn reserve(
+        self: &Arc<Self>,
+        token: WorldCellAdmissionToken,
+    ) -> Result<Arc<CompilerWorldCellReservation>, CompileError> {
+        let (slots, expected_bindings, admission_digest) =
+            consume_world_cell_admission(&self.allocation, token)?;
         Ok(Arc::new(CompilerWorldCellReservation {
             plan: Arc::clone(self),
             admission_digest,
-            slots: slots.into(),
-            expected_bindings: expected_bindings.into(),
+            slots,
+            expected_bindings,
         }))
     }
 }
 
+fn world_cell_admission_digest(
+    world_logical_id: &[u8; 32],
+    producer_sha256: &[u8; 32],
+    plan_digest: &[u8; 32],
+    subject: &WorldCellAdmissionSubject,
+    slots: &[crate::checked_cell::CheckedPlannedCellSlot],
+    expected_bindings: &[Vec<(String, tidepool_repr::SessionVarId)>],
+) -> [u8; 32] {
+    use crate::checked_cell::CheckedPlannedCellSlot as Slot;
+    let mut digest = blake3::Hasher::new();
+    let mut frame = |bytes: &[u8]| {
+        digest.update(&(bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    };
+    frame(b"TidepoolRuntimeWorldCellAdmission1");
+    frame(&subject.owner_identity);
+    frame(&subject.owner_epoch.to_le_bytes());
+    frame(&subject.session.to_le_bytes());
+    frame(&subject.scope.to_le_bytes());
+    frame(world_logical_id);
+    frame(producer_sha256);
+    frame(plan_digest);
+    for (slot, bindings) in slots.iter().zip(expected_bindings) {
+        let (kind, generation) = match slot {
+            Slot::Prologue { declaration } => (0, *declaration),
+            Slot::Declaration { declaration } => (1, *declaration),
+            Slot::Bind { value } => (2, *value),
+            Slot::Expression { capture, .. } => (3, *capture),
+        };
+        frame(&[kind]);
+        frame(&generation.to_le_bytes());
+        frame(&(bindings.len() as u64).to_le_bytes());
+        for (name, id) in bindings {
+            frame(name.as_bytes());
+            frame(&id.raw().to_le_bytes());
+        }
+    }
+    for authorization in subject.authorization.iter() {
+        frame(authorization);
+    }
+    *digest.finalize().as_bytes()
+}
+
 fn validate_world_cell_reservations(
     items: &[ParsedCellPlanItem],
-    admission_digest: [u8; 32],
     slots: &[crate::checked_cell::CheckedPlannedCellSlot],
     expected_bindings: &[Vec<(String, tidepool_repr::SessionVarId)>],
 ) -> Result<(), CompileError> {
     use crate::checked_cell::CheckedPlannedCellSlot as Slot;
-    if admission_digest == [0; 32]
-        || slots.len() != items.len()
-        || expected_bindings.len() != items.len()
-    {
+    if slots.len() != items.len() || expected_bindings.len() != items.len() {
         return Err(failure("world cell reservation differs from parser plan"));
     }
     let mut generations = std::collections::HashSet::new();
@@ -321,6 +551,8 @@ pub(crate) fn admit_world_plan(
         observations: facts.observations,
         receipt: receipt.into(),
         digest: facts.digest,
+        allocation: facts.allocation,
+        issued: AdmissionIssueGate::default(),
     }))
 }
 
@@ -328,6 +560,7 @@ struct WorldParserFacts {
     items: Vec<ParsedCellPlanItem>,
     observations: Arc<[u8]>,
     digest: [u8; 32],
+    allocation: Arc<()>,
 }
 
 fn admit_world_parser_receipt(
@@ -377,19 +610,20 @@ fn admit_world_parser_receipt(
         items,
         observations: observations.clone().into(),
         digest: digest.finalize().into(),
+        allocation: Arc::new(()),
     })
 }
 
 pub(crate) fn parse(
-    specification: Arc<CheckedCellSpecification>,
+    specification: Arc<CellRecipe>,
     include_paths: &[PathBuf],
     settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<Arc<ParsedCellPlan>, CompileError> {
-    if specification.cell_source.len() > (2 << 20)
-        || specification.template_source.len() > (2 << 20)
-        || specification.turn_templates.len() > 256
+    if specification.cell_source().len() > (2 << 20)
+        || specification.template_source().len() > (2 << 20)
+        || specification.turn_templates().len() > 256
         || specification
-            .turn_templates
+            .turn_templates()
             .iter()
             .any(|(_, source)| source.len() > (2 << 20))
     {
@@ -402,16 +636,13 @@ pub(crate) fn parse(
     {
         return Err(CellPlanInputRejection::SearchRoot.error());
     }
-    if !specification.reserved_declaration_modules.is_empty() {
-        return Err(CellPlanInputRejection::ReservedOwners.error());
-    }
-    if specification.injected_modules.len() > 4096
+    if specification.injected_modules().len() > 4096
         || specification
-            .injected_modules
+            .injected_modules()
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .len()
-            != specification.injected_modules.len()
+            != specification.injected_modules().len()
     {
         return Err(CellPlanInputRejection::InjectedInventory.error());
     }
@@ -419,8 +650,8 @@ pub(crate) fn parse(
     let source = scratch.path().join("cell.txt");
     let template = scratch.path().join("cell-template.hs");
     let output = scratch.path().join("cell-plan.cbor");
-    std::fs::write(&source, &specification.cell_source)?;
-    std::fs::write(&template, &specification.template_source)?;
+    std::fs::write(&source, specification.cell_source())?;
+    std::fs::write(&template, specification.template_source())?;
     let mut command =
         tidepool_extract_cmd::ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
     command
@@ -429,8 +660,8 @@ pub(crate) fn parse(
         .cell_template(&template)
         .cell_out(&output)
         .includes(include_paths)
-        .inject_vals(&specification.injected_modules);
-    for (index, (kind, source)) in specification.turn_templates.iter().enumerate() {
+        .inject_vals(specification.injected_modules());
+    for (index, (kind, source)) in specification.turn_templates().iter().enumerate() {
         let path = scratch.path().join(format!("turn-template-{index}.hs"));
         std::fs::write(&path, source)?;
         command.turn_template(kind, &path);
@@ -453,7 +684,7 @@ pub(crate) fn parse(
 }
 
 fn admit(
-    specification: Arc<CheckedCellSpecification>,
+    specification: Arc<CellRecipe>,
     include_paths: &[PathBuf],
     producer: &[u8; 32],
     receipt: Vec<u8>,
@@ -461,16 +692,17 @@ fn admit(
     let root = decode(&receipt)?;
     let fields = crate::checked_cell::row(&root, 8)?;
     if text(&fields[0])? != "TPCELLPLAN3"
-        || text(&fields[1])? != crate::checked_cell::hash(specification.cell_source.as_bytes())
-        || text(&fields[2])? != crate::checked_cell::hash(specification.template_source.as_bytes())
+        || text(&fields[1])? != crate::checked_cell::hash(specification.cell_source().as_bytes())
+        || text(&fields[2])?
+            != crate::checked_cell::hash(specification.template_source().as_bytes())
     {
         return Err(failure("source or template differs from parser receipt"));
     }
     let templates = list(&fields[3], 256)?;
-    if templates.len() != specification.turn_templates.len() {
+    if templates.len() != specification.turn_templates().len() {
         return Err(failure("parser template count"));
     }
-    for (row, (kind, source)) in templates.iter().zip(&specification.turn_templates) {
+    for (row, (kind, source)) in templates.iter().zip(specification.turn_templates()) {
         let row = crate::checked_cell::row(row, 2)?;
         if text(&row[0])? != kind || text(&row[1])? != crate::checked_cell::hash(source.as_bytes())
         {
@@ -483,7 +715,7 @@ fn admit(
             .iter()
             .zip(include_paths)
             .any(|(expected, actual)| Some(expected.as_str()) != actual.to_str())
-        || texts(&fields[5], 4096)? != specification.injected_modules
+        || texts(&fields[5], 4096)? != specification.injected_modules()
     {
         return Err(failure("parser search inputs or injected inventory"));
     }
@@ -688,22 +920,23 @@ mod tests {
         ciborium::ser::into_writer(value, &mut bytes).unwrap();
         bytes
     }
-    fn fixture() -> (Arc<CheckedCellSpecification>, Vec<PathBuf>, Value) {
-        let specification = Arc::new(CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: "let owned = (42 :: Int)".into(),
-            template_source: "compiler-template".into(),
-            turn_templates: vec![("bind".into(), "turn-template".into())],
-            injected_modules: vec!["Tidepool.Session.Val.G7".into()],
-            reserved_declaration_modules: Vec::new(),
-        });
+    fn fixture() -> (Arc<CellRecipe>, Vec<PathBuf>, Value) {
+        let specification = Arc::new(
+            CellRecipe::new(
+                "let owned = (42 :: Int)",
+                "compiler-template",
+                vec![("bind".to_string(), "turn-template".to_string())],
+                vec!["Tidepool.Session.Val.G7".to_string()],
+            )
+            .unwrap(),
+        );
         let a = |values: Vec<Value>| Value::Array(values);
         let t = |value: &str| Value::Text(value.into());
         let span = a(vec![1.into(), 1.into(), 1.into(), 23.into()]);
         let item = a(vec![
             span.clone(),
             t("bind"),
-            t(&specification.cell_source),
+            t(specification.cell_source()),
             a(vec![a(vec![t("owned")]), a(vec![])]),
             a(vec![a(vec![0.into(), span, t("bind")])]),
             Value::Bool(false),
@@ -722,10 +955,10 @@ mod tests {
         let receipt = a(vec![
             t("TPCELLPLAN3"),
             t(&crate::checked_cell::hash(
-                specification.cell_source.as_bytes(),
+                specification.cell_source().as_bytes(),
             )),
             t(&crate::checked_cell::hash(
-                specification.template_source.as_bytes(),
+                specification.template_source().as_bytes(),
             )),
             a(vec![a(vec![
                 t("bind"),
@@ -764,7 +997,6 @@ mod tests {
         let bindings = vec![("x".into(), tidepool_repr::SessionVarId::from_extract(91))];
         assert!(validate_world_cell_reservations(
             &[declaration, value],
-            [3; 32],
             &[
                 Slot::Declaration { declaration: 1 },
                 Slot::Bind { value: 1 }
@@ -777,7 +1009,6 @@ mod tests {
                 item(ParsedCellPlanKind::Prologue, ""),
                 item(ParsedCellPlanKind::Declaration, "")
             ],
-            [3; 32],
             &[
                 Slot::Prologue { declaration: 1 },
                 Slot::Declaration { declaration: 1 }
@@ -790,7 +1021,6 @@ mod tests {
                 item(ParsedCellPlanKind::Bind, "x"),
                 item(ParsedCellPlanKind::Expression, "")
             ],
-            [3; 32],
             &[
                 Slot::Bind { value: 1 },
                 Slot::Expression {
@@ -806,18 +1036,25 @@ mod tests {
         .is_err());
     }
 
-    #[test]
-    fn world_parser_receipt_binds_world_canonical_producer_and_authored_recipe() {
+    /// The world identity and parser facts `admit_world_plan` would retain
+    /// for the `fixture()` recipe. The held `CompilerWorld` wrapper adds only
+    /// `logical_id()` and a fresh issue gate.
+    fn world_plan_fixture() -> (
+        tidepool_extract_cmd::WorldCellRecipe,
+        [u8; 32],
+        [u8; 32],
+        Value,
+    ) {
         let (specification, _, legacy) = fixture();
         let recipe = tidepool_extract_cmd::WorldCellRecipe {
-            source: specification.cell_source.clone(),
-            template: specification.template_source.clone(),
-            turn_templates: specification.turn_templates.clone(),
+            source: specification.cell_source().to_owned(),
+            template: specification.template_source().to_owned(),
+            turn_templates: specification.turn_templates().to_vec(),
         };
         let producer =
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&[1; 32])
                 .sha256();
-        let world = [9; 32];
+        let world: [u8; 32] = [9; 32];
         let hash = |bytes: &[u8]| Value::Bytes(Sha256::digest(bytes).to_vec());
         let fields = legacy.as_array().unwrap();
         let receipt = Value::Array(vec![
@@ -838,6 +1075,13 @@ mod tests {
             fields[6].clone(),
             fields[7].clone(),
         ]);
+        (recipe, world, producer, receipt)
+    }
+
+    #[test]
+    fn world_parser_receipt_binds_world_canonical_producer_and_authored_recipe() {
+        let (recipe, world, producer, receipt) = world_plan_fixture();
+        let (_, _, legacy) = fixture();
         let admitted =
             admit_world_parser_receipt(&world, &recipe, producer, &encoded(&receipt)).unwrap();
         assert_eq!(admitted.items[0].binders(), ["owned"]);
@@ -850,46 +1094,95 @@ mod tests {
         )];
         assert!(validate_world_cell_reservations(
             &admitted.items,
-            [3; 32],
             &[Slot::Bind { value: 7 }],
             &[binding.clone()]
         )
         .is_ok());
         assert!(validate_world_cell_reservations(
             &admitted.items,
-            [0; 32],
-            &[Slot::Bind { value: 7 }],
-            &[binding.clone()]
-        )
-        .is_err());
-        assert!(validate_world_cell_reservations(
-            &admitted.items,
-            [3; 32],
             &[Slot::Bind { value: 0 }],
             &[binding.clone()]
         )
         .is_err());
         assert!(validate_world_cell_reservations(
             &admitted.items,
-            [3; 32],
             &[Slot::Declaration { declaration: 7 }],
             &[binding.clone()]
         )
         .is_err());
         assert!(validate_world_cell_reservations(
             &admitted.items,
-            [3; 32],
             &[Slot::Bind { value: 7 }],
             &[vec![("other".into(), binding[0].1)]]
         )
         .is_err());
         assert!(validate_world_cell_reservations(
             &admitted.items,
-            [3; 32],
             &[Slot::Bind { value: 7 }],
             &[Vec::new()]
         )
         .is_err());
+
+        // The admission digest is derived from the owner facts, never chosen
+        // by the caller. An owner-less subject is refused, and a different
+        // source-admission owner produces a different authorization digest.
+        let subject = |owner: [u8; 16]| {
+            WorldCellAdmissionSubject::new(
+                owner,
+                3,
+                4,
+                5,
+                [b"TidepoolPrivateExecutionAdmission1".to_vec()],
+            )
+            .unwrap()
+        };
+        let slots = [Slot::Bind { value: 7 }];
+        let bindings = [binding.clone()];
+        let digest = world_cell_admission_digest(
+            &world,
+            &producer,
+            &admitted.digest,
+            &subject([7; 16]),
+            &slots,
+            &bindings,
+        );
+        assert_ne!(digest, [0; 32]);
+        assert_ne!(
+            digest,
+            world_cell_admission_digest(
+                &world,
+                &producer,
+                &admitted.digest,
+                &subject([8; 16]),
+                &slots,
+                &bindings,
+            )
+        );
+        assert!(
+            WorldCellAdmissionSubject::new([0; 16], 3, 4, 5, std::iter::empty::<Vec<u8>>(),)
+                .is_err()
+        );
+
+        // A reservation exists only by consuming a token the plan owner
+        // issued for this exact plan allocation. There is no constructor for
+        // an unissued token and no raw-digest entry point; a token issued by
+        // another plan allocation is refused.
+        let token = issue_world_cell_admission(
+            &world,
+            &producer,
+            &admitted.digest,
+            &admitted.allocation,
+            &admitted.items,
+            subject([7; 16]),
+            slots.to_vec(),
+            bindings.to_vec(),
+        )
+        .expect("the plan owner issues admission for its own exact slots");
+        let (reserved_slots, reserved_bindings, admission_digest) =
+            consume_world_cell_admission(&admitted.allocation, token).unwrap();
+        assert_ne!(admission_digest, [0; 32]);
+        assert_eq!(reserved_slots.as_ref(), slots.as_slice());
+        assert_eq!(reserved_bindings.as_ref(), bindings.as_slice());
 
         assert!(admit_world_parser_receipt(&world, &recipe, [1; 32], &encoded(&receipt)).is_err());
         assert!(
@@ -910,7 +1203,116 @@ mod tests {
         let other =
             admit_world_parser_receipt(&world, &recipe, other_producer, &encoded(&other)).unwrap();
         assert_ne!(admitted.digest, other.digest);
+        // Authority is the plan allocation, not the echoed digest or the
+        // subject facts: a token issued by the other plan cannot reserve this
+        // one even though both name the same slots and owner.
+        let foreign = issue_world_cell_admission(
+            &world,
+            &other_producer,
+            &other.digest,
+            &other.allocation,
+            &other.items,
+            subject([7; 16]),
+            slots.to_vec(),
+            bindings.to_vec(),
+        )
+        .unwrap();
+        assert!(consume_world_cell_admission(&admitted.allocation, foreign).is_err());
+        // Re-admitting the same receipt and producer yields a plan with the
+        // same echoed digest but a distinct allocation. Because the token is
+        // bound to the allocation, the equal digest does not transfer
+        // authority to the derived plan.
+        let derived =
+            admit_world_parser_receipt(&world, &recipe, producer, &encoded(&receipt)).unwrap();
+        assert_eq!(derived.digest, admitted.digest);
+        assert!(!Arc::ptr_eq(&derived.allocation, &admitted.allocation));
+        let token = issue_world_cell_admission(
+            &world,
+            &producer,
+            &admitted.digest,
+            &admitted.allocation,
+            &admitted.items,
+            subject([7; 16]),
+            slots.to_vec(),
+            bindings.to_vec(),
+        )
+        .unwrap();
+        assert!(consume_world_cell_admission(&derived.allocation, token).is_err());
         assert!(admit_world_parser_receipt(&world, &recipe, producer, &encoded(&legacy)).is_err());
+    }
+
+    #[test]
+    fn live_plan_issues_its_admission_token_once() {
+        let (recipe, world, producer, receipt) = world_plan_fixture();
+        let admitted =
+            admit_world_parser_receipt(&world, &recipe, producer, &encoded(&receipt)).unwrap();
+        use crate::checked_cell::CheckedPlannedCellSlot as Slot;
+        let subject = |owner: [u8; 16]| {
+            WorldCellAdmissionSubject::new(
+                owner,
+                3,
+                4,
+                5,
+                [b"TidepoolPrivateExecutionAdmission1".to_vec()],
+            )
+            .unwrap()
+        };
+        let bindings = || {
+            vec![vec![(
+                "owned".to_string(),
+                tidepool_repr::SessionVarId::from_extract(91),
+            )]]
+        };
+        let issue = |gate: &AdmissionIssueGate| {
+            claim_and_issue_world_cell_admission(
+                gate,
+                &world,
+                &producer,
+                &admitted.digest,
+                &admitted.allocation,
+                &admitted.items,
+                subject([7; 16]),
+                vec![Slot::Bind { value: 7 }],
+                bindings(),
+            )
+        };
+        let issued = AdmissionIssueGate::default();
+        assert!(issue(&issued).is_ok());
+        // The same live plan refuses a second, independently well-formed token:
+        // one plan authorises one execution and one generation range.
+        assert!(issue(&issued).is_err());
+        // A refused request does not burn a plan, because validation runs
+        // before the claim.
+        let unburned = AdmissionIssueGate::default();
+        assert!(claim_and_issue_world_cell_admission(
+            &unburned,
+            &world,
+            &producer,
+            &admitted.digest,
+            &admitted.allocation,
+            &admitted.items,
+            subject([7; 16]),
+            vec![Slot::Bind { value: 0 }],
+            bindings(),
+        )
+        .is_err());
+        assert!(issue(&unburned).is_ok());
+        // A fresh admission of the same receipt has its own allocation and
+        // gate, exactly as `admit_world_plan` constructs it, and still issues.
+        let fresh =
+            admit_world_parser_receipt(&world, &recipe, producer, &encoded(&receipt)).unwrap();
+        assert!(claim_and_issue_world_cell_admission(
+            &AdmissionIssueGate::default(),
+            &world,
+            &producer,
+            &fresh.digest,
+            &fresh.allocation,
+            &fresh.items,
+            subject([7; 16]),
+            vec![Slot::Bind { value: 7 }],
+            bindings(),
+        )
+        .is_ok());
     }
 
     #[test]

@@ -1378,17 +1378,21 @@ where
     let imports = view.turn_imports(template_imports);
     let template = resident_cell_check_template(preamble, effects.row(), &imports);
     let templates = resident_workbench_templates(preamble, effects.row(), &imports);
-    let specification = CheckedCellSpecification {
-        admission_digest: [0; 32],
-        cell_source: source.into(),
-        template_source: template.clone(),
-        turn_templates: templates
+    let specification = CellRecipe::new(
+        source.to_string(),
+        template.clone(),
+        templates
             .iter()
-            .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+            .map(|template| {
+                (
+                    template.kind.wire_name().to_string(),
+                    template.source.clone(),
+                )
+            })
             .collect(),
-        injected_modules: view.injected_module_names(),
-        reserved_declaration_modules: Vec::new(),
-    };
+        view.injected_module_names(),
+    )
+    .unwrap();
     let admitted_include = view.include_paths(effects.include_paths());
     let plan = measured(
         resident,
