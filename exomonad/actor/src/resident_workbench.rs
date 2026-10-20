@@ -19669,8 +19669,15 @@ pub(crate) mod request_tests {
                 if correct {
                     assert!(matches!(result, Ok(ResidentWorkbenchStep::Committed { .. })), "actual input must execute");
                 } else {
-                    let Err(ResidentActorWorkbenchError::Delivered(error)) = result else { panic!("wrong payload oracle must fail in execution") };
-                    assert!(error.is_language_failure(), "{error:?}");
+                    // This item executes directly; no effect response has been
+                    // delivered. Its authored exception is an ordinary rejection.
+                    let rejection = match result {
+                        Ok(ResidentWorkbenchStep::Rejected(rejection)) => rejection,
+                        Ok(step) => panic!("wrong payload must reject: {}", describe_step(&step)),
+                        Err(error) => panic!("wrong payload must reject, not fail infrastructure: {error:?}"),
+                    };
+                    assert!(rejection.output.starts_with("<cell item 1>: runtime error: "), "{rejection:?}");
+                    assert!(rejection.output.contains("wrong actual JSON input"), "{rejection:?}");
                 }
                 frontend.access.with_machine(context.clone(), move |session, context, _| {
                     let scope = context.placement.lexical_scope;
