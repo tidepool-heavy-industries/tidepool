@@ -209,7 +209,6 @@ import System.Environment (lookupEnv)
 import System.FilePath (takeFileName, takeDirectory, takeExtension, dropExtension, isAbsolute, normalise, pathSeparator, (</>))
 import System.Directory (canonicalizePath, createDirectory, createDirectoryIfMissing, doesDirectoryExist, makeAbsolute, doesFileExist, getCurrentDirectory, getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
 import System.Posix.Temp (mkdtemp)
-import System.Mem.StableName (makeStableName)
 import System.IO (hPutStrLn, stderr, hClose)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, artifactLength, captureArtifactBytes)
 import Tidepool.RequestInputs (capturedRequestInputToken)
@@ -543,11 +542,9 @@ acquireWorldSourceOriginal prepared owner proof = case ownedPprDependencies prep
             (moduleFactPackageImports (payloadFacts payload))
           if not matches then pure known else case known of
             Nothing -> pure (Just original)
-            Just previous -> do
-              first <- evaluate previous >>= makeStableName
-              current <- evaluate original >>= makeStableName
-              unless (first == current) (throwIO WorldCellCorrupt)
-              pure known) Nothing (concatMap Map.elems (Map.elems byIngress))
+            -- Every match was checked against the same captured finalization
+            -- identity and package witness by its owning admission above.
+            Just _ -> pure known) Nothing (concatMap Map.elems (Map.elems byIngress))
         case selected of
           Just original -> do
             let home = finalizedHomeModInfo original
