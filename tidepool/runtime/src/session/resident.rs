@@ -4582,10 +4582,6 @@ where
         self.state.restage_publication_metadata(certified)
     }
 
-    /// Admit one compiler-certified target and its demanded source closure
-    /// against a single scope snapshot under this session's machine checkout.
-    /// The persistent registrar owns every new source root before the target
-    /// can be run; failed registration rolls the native batch back.
     fn install_prepared_with_sources(
         &mut self,
         prepared: tidepool_repr::execution_schema::PreparedProgram,
@@ -4600,6 +4596,10 @@ where
             .install_prepared_with_sources(prepared, Some(metadata), &retained_sources)
     }
 
+    /// Admit one compiler-certified target and its demanded source closure
+    /// against a single scope snapshot under this session's machine checkout.
+    /// The persistent registrar owns every new source root before the target
+    /// can be run; failed registration rolls the native batch back.
     fn install_certified_turn_in(
         &mut self,
         scope: ScopeId,
