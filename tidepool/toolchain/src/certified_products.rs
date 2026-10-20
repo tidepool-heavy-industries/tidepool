@@ -19385,7 +19385,7 @@ pub(crate) mod tests {
         ));
         let projection =
             CompilerInputProjection::from_issued_entries(&[r_entry.clone(), g_interface]).unwrap();
-        let validation = PackageInterfaceValidation::default();
+        let mut validation = PackageInterfaceValidation::default();
         let requirements =
             NativeOriginalRequirement::for_projection(&projection, &physical, &[]).unwrap();
         assert_eq!(requirements.len(), 1);
