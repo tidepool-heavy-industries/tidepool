@@ -1914,16 +1914,9 @@ writeWorldCellAdmissionPacketWithSources
 writeWorldCellAdmissionPacketWithSources handles work producer profile parcelBytes extraSources = do
   (primary,association,base,durable,contextBlocks,lexical) <- worldParcel parcelBytes
   acquisition <- sealWorldParcel handles (TList durable)
-  (emptyPrimary,_,emptyBase,_,emptyBlocks,_) <- fixture "world-context-blocks" [TBytes producer] >>= worldParcel
-  unless (null emptyBase) (fail "empty world context published primary rows")
-  emptyBody <- maybe (fail "empty Context root is absent") pure (lookup emptyPrimary emptyBlocks)
-  emptyTerm <- decode emptyBody
-  emptyBinding <- case emptyTerm of
-    TMap fields -> case lookup (TString "roles") fields of
-      Just (TTagged 42 (TBytes bytes)) | not (BS.null bytes),BS.head bytes == 0 -> pure (BS.tail bytes)
-      _ -> fail "empty Materializer context omitted its empty map"
-    _ -> fail "empty Materializer Context descriptor changed"
-  pairs <- reachable [primary,association,emptyBinding,lexical] (contextBlocks ++ emptyBlocks)
+  (_,emptyBinding,emptyBase,_,emptyBlocks,_) <- fixture "world-context-blocks" [TBytes producer] >>= worldParcel
+  unless (null emptyBase) (fail "empty compiler primary fixture published rows")
+  pairs <- reachable [association,emptyBinding,lexical] (contextBlocks ++ emptyBlocks)
   captured <- forM ["CacheEven.hs","CacheEven.hs-boot","CacheOdd.hs","CacheEntry.hs"] $ \name -> do
     body <- BS.readFile ("test-source-boot/fixtures" </> name)
     pure (BS8.pack name,body)
@@ -1939,11 +1932,11 @@ writeWorldCellAdmissionPacketWithSources handles work producer profile parcelByt
       text = TString . T.pack
       blocks values = TList [TList [TBytes cid,TBytes body] | (cid,body) <- values]
       visibility root = encode (TList [TString "TPCWBIND4",TInt 0,TBytes root])
-      restoration = encode (TList [TString "TPCWREST",TInt 4,TBytes primary,TBytes (SHA.hash sources)
+      restoration = encode (TList [TString "TPCWREST",TInt 5,TBytes primary,TBytes (SHA.hash sources)
         ,TBytes producer,TBytes profile,TInt 0,TBytes association,TBytes emptyBinding,TBytes lexical])
-      packet = TList [TString "TPCWORLD",TInt 4,TBytes restoration,text sourcePath,TBytes producer
+      packet = TList [TString "TPCWORLD",TInt 5,TBytes restoration,text sourcePath,TBytes producer
         ,TBytes profile,TList [TList base,TList []],acquisition,TBytes (visibility emptyBinding)
-        ,TBytes primary,blocks pairs]
+        ,TBytes association,blocks pairs]
   BS.writeFile sourcePath sources
   let path = work </> "world-admission.cbor"
   BS.writeFile path (encode packet)
@@ -1971,7 +1964,7 @@ writeWorldCellAdmissionPacketWithSources handles work producer profile parcelByt
               _ -> fail "world fixture omitted its block array"
             pure (primary,association,rows,durable,blocks,lexical)
       _ -> fail "world fixture needs actual Context/association roots, rows, owned bytes and blocks"
-    sealWorldParcel owners (TList [TString "TPCWORLDFIXTUREBYTES1",TList arenas,TList images]) = do
+    sealWorldParcel owners (TList [TString "TPCWORLDFIXTUREBYTES2",TList arenas,TList images]) = do
       live <- forM arenas $ \entry -> case entry of
         TList [TString path,extent] -> do
           amount <- unsigned extent
