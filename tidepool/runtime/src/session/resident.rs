@@ -910,7 +910,9 @@ impl HostCarrier {
 
     pub fn session_root(&self) -> Result<&Path, ResidentError> {
         match &self.origin {
-            HostCarrierOrigin::Checked { admission, .. } => Ok(admission.snapshot().session_root()),
+            HostCarrierOrigin::Checked { admission, .. } => {
+                Ok(admission.snapshot().session_root())
+            }
             HostCarrierOrigin::Interface { admission, .. } => Ok(&admission.session_root),
             HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
         }
@@ -1653,21 +1655,17 @@ impl<E: std::fmt::Display> std::fmt::Display for RendererProductionFailure<E> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Compile(error) => write!(formatter, "{error}"),
-            Self::CloseUnconfirmed {
-                close,
-                action_error,
-            } => {
-                write!(formatter, "compiler close is unconfirmed: {close:?}")?;
+            Self::CloseUnconfirmed { close, action_error } => {
+                write!(
+                    formatter,
+                    "compiler close is unconfirmed: {close:?}"
+                )?;
                 if let Some(error) = action_error {
                     write!(formatter, "; primary action failed: {error}")?;
                 }
                 Ok(())
             }
-            Self::Publication {
-                error,
-                close,
-                action_error,
-            } => {
+            Self::Publication { error, close, action_error } => {
                 write!(
                     formatter,
                     "compiler publication failed: {error}; close: {close:?}"
@@ -2664,7 +2662,10 @@ fn refuse_generic_activation_preview_install(
     if certification.is_some_and(|certification| {
         matches!(certification.purpose(), TurnPurpose::ActivationPreview(_))
     }) {
-        return Err(SessionError::SourceAdmission(super::SourceAdmissionError::Unqualified).into());
+        return Err(SessionError::SourceAdmission(
+            super::SourceAdmissionError::Unqualified,
+        )
+        .into());
     }
     Ok(())
 }
@@ -3773,10 +3774,9 @@ where
         prepared: &super::PreparedNotebookGeneration,
         source: &Arc<super::RuntimeLexicalScopeLease>,
     ) -> Result<super::AdmittedInspectionWorld, SessionError> {
-        self.state
-            .capture_notebook_generation_world(prepared, source, |id| {
-                self.hidden_host_bindings.contains_key(&id)
-            })
+        self.state.capture_notebook_generation_world(prepared, source, |id| {
+            self.hidden_host_bindings.contains_key(&id)
+        })
     }
 
     pub fn commit_notebook_generation_with_world(
@@ -3786,8 +3786,7 @@ where
         source: &super::RuntimeSourcePublicationView,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.state
-            .commit_notebook_generation_with_world(prepared, publication, source, on_visible)
+        self.state.commit_notebook_generation_with_world(prepared, publication, source, on_visible)
     }
 
     pub fn commit_notebook_generation_with_world_continuing(
@@ -3797,12 +3796,7 @@ where
         source: &super::RuntimeSourcePublicationView,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.state.commit_notebook_generation_with_world_continuing(
-            prepared,
-            publication,
-            source,
-            on_visible,
-        )
+        self.state.commit_notebook_generation_with_world_continuing(prepared, publication, source, on_visible)
     }
 
     pub fn commit_notebook_generation(
@@ -3979,8 +3973,7 @@ where
         expected: HostBindingType,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
-        self.state
-            .admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
+        self.state.admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
     }
 
     /// Admit one compiler-issued binder reserved for a native host payload.
@@ -5817,7 +5810,14 @@ where
         self.state
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        self.mount_compiled_binding_prepared(scope, binder, gen, custody, None, settlement)
+        self.mount_compiled_binding_prepared(
+            scope,
+            binder,
+            gen,
+            custody,
+            None,
+            settlement,
+        )
     }
 
     /// Build and mount a compiler-typed JSON value without putting the
@@ -6387,7 +6387,15 @@ where
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
-        self.mount_host_value_with_interface_in(scope, binder, gen, code, None, build, settlement)
+        self.mount_host_value_with_interface_in(
+            scope,
+            binder,
+            gen,
+            code,
+            None,
+            build,
+            settlement,
+        )
     }
 
     fn mount_host_value_with_interface_in(
@@ -6419,8 +6427,9 @@ where
                 .state
                 .resolve_certification_in(scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let (target, demanded) =
-                super::prepared::ScopedTargetImage::compile_scoped(prepared, &resolved, &registry)?;
+            let (target, demanded) = super::prepared::ScopedTargetImage::compile_scoped(
+                prepared, &resolved, &registry,
+            )?;
             self.install_certified_turn_in(
                 scope,
                 &table,
@@ -7458,7 +7467,9 @@ where
         let (program, source_keys) = if let Some(resolved) = resolved {
             let (target, demanded) = match images {
                 TurnImageAcquisition::Ready { bundle } => {
-                    super::prepared::ScopedTargetImage::lookup_scoped(prepared, &resolved, bundle)?
+                    super::prepared::ScopedTargetImage::lookup_scoped(
+                        prepared, &resolved, bundle,
+                    )?
                 }
                 TurnImageAcquisition::Compile => {
                     let registry = self.state.certified_image_registry();
@@ -9514,7 +9525,10 @@ mod authored_publication_tests {
         })
         .unwrap();
         let first = checked.checked_item(0).unwrap();
-        let prefix = state.begin_cell_program(program).unwrap().unwrap();
+        let prefix = state
+            .begin_cell_program(program)
+            .unwrap()
+            .unwrap();
         let mut resident = TestSession::from_persistent_for_test(frunk::HNil, EmptyOutput, state);
         resident
             .set_run_context(SessionRunContext {
@@ -10035,9 +10049,7 @@ mod authored_publication_tests {
                     "explicit A retirement is not evidence of B END"
                 );
                 assert!(matches!(
-                    target_weak
-                        .upgrade()
-                        .map(|lease| target_fence.reopen(&lease)),
+                    target_weak.upgrade().map(|lease| target_fence.reopen(&lease)),
                     Some(Err(super::super::SourceAdmissionError::Unconfirmed { .. }))
                 ));
                 recipient.state.retire_scope(target_scope);
@@ -11794,7 +11806,10 @@ mod authored_publication_tests {
         })
         .unwrap();
         let item = checked.checked_item(0).unwrap();
-        let prefix = session.begin_cell_program(program).unwrap().unwrap();
+        let prefix = session
+            .begin_cell_program(program)
+            .unwrap()
+            .unwrap();
         let item_admission = session.admit_checked_item(prefix.clone(), item).unwrap();
         let generation = item_admission.generation();
         let TurnResult::Bind {
