@@ -23938,6 +23938,7 @@ pub(crate) mod request_tests {
             crate::CompilerPreparationClient, Option<crate::ActorPersistencePolicy>,
             Option<PublicationFailureControl>,
         )| quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(client, persistence, control)));
+        assert_eq!(observed["quoted_fixture"], std::mem::size_of::<usize>());
         observed.insert(
             "prepare_initial_generation",
             output_size(
@@ -24660,7 +24661,19 @@ pub(crate) mod request_tests {
         assert!(target.runtime_lease().admit_source().is_err());
     }
 
-    async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+    fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+        preparation_client: crate::CompilerPreparationClient,
+        generation_replacement: Option<crate::ActorPersistencePolicy>,
+        publication_failure: Option<PublicationFailureControl>,
+    ) -> impl std::future::Future<Output = ()> {
+        Box::pin(run_quoted_generation_fixture(
+            preparation_client,
+            generation_replacement,
+            publication_failure,
+        ))
+    }
+
+    async fn run_quoted_generation_fixture(
         preparation_client: crate::CompilerPreparationClient,
         generation_replacement: Option<crate::ActorPersistencePolicy>,
         publication_failure: Option<PublicationFailureControl>,
