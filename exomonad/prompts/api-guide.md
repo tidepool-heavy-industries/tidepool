@@ -288,8 +288,8 @@ the exact binding count in `refsObserved` and may truncate `refs` at
 a lower bound. Enumerating a public module's exports is deliberately absent
 from this surface until the non-compiling world query is wired. A no-match
 result covers the attempted query; it does not establish that the capability
-is absent. Inspect close candidates, qualify the name, or browse its owning
-module.
+is absent. Inspect close candidates, qualify the name, or query the owning
+module with `info`.
 
 ```haskell source=introspection
 import qualified Tidepool.Introspection as Introspection
@@ -297,6 +297,12 @@ detail <- Introspection.info
   (Introspection.NameQuery Introspection.CurrentScope Introspection.ValueName "readFile")
 display detail
 ```
+
+The fence above is the compiled `info` example. The five shipped verbs are
+compiled in the `IntrospectionFrontDoor` prepared fixture. The toolchain
+prepared-fixture test executes the fixture's `result` entry, so this is
+artifact execution evidence, not a published fence; the `frontDoor` function
+itself is compiled but not invoked.
 
 Effect names are not module names:
 

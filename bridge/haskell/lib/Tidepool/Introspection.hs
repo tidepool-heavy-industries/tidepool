@@ -17,6 +17,16 @@ module Tidepool.Introspection
   , ClassMethodInfo (..)
   , DeclarationInfo (..)
   , IdentifierInfo (..)
+  , NameRefList (..)
+  , FitAvailability (..)
+  , Fit (..)
+  , ExpressionType (..)
+  , TypeMatchQuality (..)
+  , TypeMatch (..)
+  , TypeMatches (..)
+  , DiagnosticSpan (..)
+  , DiagnosticSeverity (..)
+  , Diagnostic (..)
   , QueryError (..)
   , here
   , inModule
@@ -24,6 +34,11 @@ module Tidepool.Introspection
   , info
   , typeOf
   , constructors
+  , currentScopeView
+  , scopeBindings
+  , rowFit
+  , typeOfExpression
+  , typeSearch
   ) where
 
 import Data.Text (Text)
