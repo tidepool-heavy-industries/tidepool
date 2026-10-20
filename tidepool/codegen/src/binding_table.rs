@@ -95,6 +95,7 @@ pub enum BindingPromotionError {
     MissingOrForeignSourceInstance,
     ConflictingSourceOrigin,
     MissingSourceDomain,
+    MissingAuthoredBindingSupport,
     UnverifiableSourceSelection,
     StaleOrForeignDeclarationPreparation,
     LeaseCountExhausted,
@@ -108,10 +109,7 @@ struct BindingPromotionPlan {
     writes: Vec<(BindingName, SessionVarId)>,
     retained: HashSet<SessionVarId>,
     source_instances: HashSet<SourceLeaseKey>,
-    source_origins: HashMap<
-        tidepool_repr::execution_schema::CachedHomeOwner,
-        crate::prepared_program::SourceInstanceDomain,
-    >,
+    source_origins: HashMap<tidepool_repr::execution_schema::CachedHomeOwner, AuthoredSourceOrigin>,
     source_domains: HashMap<crate::prepared_program::SourceInstanceDomain, SourceDomainRecord>,
     next_tip: Option<u64>,
 }
@@ -122,10 +120,14 @@ struct BindingPromotionPlan {
 pub struct PreparedBindingPromotion {
     plan: BindingPromotionPlan,
     names: PreparedNameChanges,
+    custody: PreparedBindingCustody,
+    selection: SourceSelectionView,
+}
+
+struct PreparedBindingCustody {
     added: Vec<(SessionVarId, usize)>,
     added_sources: Vec<(SourceLeaseKey, usize)>,
     membership: PreparedMembership,
-    selection: SourceSelectionView,
     new_promoted: Option<HashSet<SessionVarId>>,
     new_promoted_sources: Option<HashSet<SourceLeaseKey>>,
 }
@@ -160,6 +162,7 @@ impl<'a> PreparedPromotionProjection<'a> {
 
 pub struct PreparedSourceOwnerOrigin {
     scope: ScopeId,
+    owner: tidepool_repr::execution_schema::CachedHomeOwner,
     selection: SourceSelectionView,
     baseline: DeclarationPreparationBaseline,
 }
@@ -170,6 +173,8 @@ pub struct PreparedDeclarationBindingChanges {
     names: PreparedNameChanges,
     observations: Vec<SessionVarId>,
     baseline: DeclarationPreparationBaseline,
+    custody: Option<PreparedBindingCustody>,
+    support: Option<Arc<FrozenDeclarationBindingSupport>>,
 }
 
 /// An observation of this table instance and its exact preparation revision.
@@ -270,10 +275,34 @@ struct PreparedMembership {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SourceDomainRecord {
     selected: HashTrieSetSync<SourceLeaseKey>,
-    authored: HashTrieMapSync<
-        tidepool_repr::execution_schema::CachedHomeOwner,
-        crate::prepared_program::SourceInstanceDomain,
-    >,
+    authored:
+        HashTrieMapSync<tidepool_repr::execution_schema::CachedHomeOwner, AuthoredSourceOrigin>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthoredSourceOrigin {
+    domain: crate::prepared_program::SourceInstanceDomain,
+    support: Option<Arc<FrozenDeclarationBindingSupport>>,
+}
+
+/// Immutable runtime dependency meaning issued with one authored declaration.
+/// IDs are physical binding identities; there are no lease or resource links.
+#[derive(Debug, PartialEq, Eq)]
+struct FrozenDeclarationBindingSupport {
+    roots: HashTrieSetSync<SessionVarId>,
+    retained: HashTrieSetSync<SessionVarId>,
+}
+
+impl PreparedSourceOwnerOrigin {
+    fn binding_support(&self) -> Option<&Arc<FrozenDeclarationBindingSupport>> {
+        self.selection
+            .domains
+            .get(&self.selection.current)?
+            .authored
+            .get(&self.owner)?
+            .support
+            .as_ref()
+    }
 }
 
 impl SourceDomainRecord {
@@ -334,7 +363,7 @@ impl SourceSelectionView {
                 .domains
                 .get(&domain)
                 .ok_or(BindingPromotionError::MissingSourceDomain)?;
-            pending.extend(record.authored.values().copied());
+            pending.extend(record.authored.values().map(|origin| origin.domain));
         }
         let remap: HashMap<_, _> = reachable
             .iter()
@@ -355,7 +384,15 @@ impl SourceSelectionView {
                     authored: original
                         .authored
                         .iter()
-                        .map(|(owner, target)| (owner.clone(), remap[target]))
+                        .map(|(owner, origin)| {
+                            (
+                                owner.clone(),
+                                AuthoredSourceOrigin {
+                                    domain: remap[&origin.domain],
+                                    support: origin.support.clone(),
+                                },
+                            )
+                        })
                         .collect(),
                 };
                 (remap[&old], record)
@@ -863,10 +900,19 @@ impl BindingTable {
         {
             return Err(BindingPromotionError::StaleOrForeignDeclarationPreparation);
         }
+        match (
+            origin.and_then(PreparedSourceOwnerOrigin::binding_support),
+            &changes.support,
+        ) {
+            (None, None) => {}
+            (Some(original), Some(support)) if Arc::ptr_eq(original, support) => {}
+            _ => return Err(BindingPromotionError::StaleOrForeignDeclarationPreparation),
+        }
         let advances = changes
             .observations
             .len()
             .checked_add(usize::from(origin.is_some()))
+            .and_then(|n| n.checked_add(usize::from(changes.custody.is_some())))
             .and_then(|n| n.checked_add(changes.names.changes))
             .ok_or(BindingPromotionError::MutationWitnessExhausted {
                 revision: self.revision,
@@ -884,6 +930,8 @@ impl BindingTable {
         let mut removed_by_owner: HashMap<ScopeId, (usize, u64)> = HashMap::new();
         let mut revision = self.revision + u64::from(origin.is_some());
         let origin_revision = revision;
+        revision += u64::from(changes.custody.is_some());
+        let custody_revision = revision;
         for id in &changes.observations {
             let observation = self
                 .observations
@@ -908,16 +956,23 @@ impl BindingTable {
             if origin.is_some() && *owner == scope {
                 *owner_revision = origin_revision;
             }
+            if changes.custody.is_some() && *owner == scope {
+                *owner_revision = custody_revision;
+            }
             if removed.0 != 0 {
-                *owner_revision =
-                    if self.has_revision_scope(*owner) || (origin.is_some() && *owner == scope) {
-                        removed.1
-                    } else {
-                        0
-                    };
+                *owner_revision = if self.has_revision_scope(*owner)
+                    || ((origin.is_some() || changes.custody.is_some()) && *owner == scope)
+                {
+                    removed.1
+                } else {
+                    0
+                };
             }
             if *owner == scope && changes.names.changes != 0 {
-                *owner_revision = if self.has_revision_scope(scope) || origin.is_some() {
+                *owner_revision = if self.has_revision_scope(scope)
+                    || origin.is_some()
+                    || changes.custody.is_some()
+                {
                     final_revision
                 } else {
                     0
@@ -1074,6 +1129,12 @@ impl BindingTable {
                     .iter()
                     .flat_map(|owner| self.promoted.get(owner).into_iter().flat_map(HashSet::iter))
                     .copied(),
+            )
+            .chain(
+                changes
+                    .and_then(|changes| changes.custody.as_ref())
+                    .into_iter()
+                    .flat_map(|custody| custody.added.iter().map(|(id, _)| *id)),
             )
             .collect();
         dependencies.sort_by_key(|id| id.raw());
@@ -1809,7 +1870,7 @@ impl BindingTable {
             view.domains
                 .values()
                 .flat_map(|record| record.authored.values())
-                .copied(),
+                .map(|origin| origin.domain),
             entries,
         )
         .is_err()
@@ -2112,7 +2173,7 @@ impl BindingTable {
                         record
                             .authored
                             .iter()
-                            .map(|(owner, target)| (owner.clone(), *target))
+                            .map(|(owner, origin)| (owner.clone(), origin.domain))
                             .collect(),
                     )
                 })
@@ -2141,7 +2202,7 @@ impl BindingTable {
             view.domains
                 .values()
                 .flat_map(|record| record.authored.values())
-                .copied(),
+                .map(|origin| origin.domain),
             entries,
         )
         .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)
@@ -2193,7 +2254,7 @@ impl BindingTable {
             .ok_or(BindingPromotionError::MissingSourceDomain)?
             .authored
             .get(&owner)
-            .is_some_and(|domain| *domain != view.current)
+            .is_some_and(|origin| origin.domain != view.current)
         {
             return Err(BindingPromotionError::ConflictingSourceOrigin);
         }
@@ -2203,12 +2264,21 @@ impl BindingTable {
             .get(&selection.current)
             .cloned()
             .expect("origin domain admitted");
-        record.authored.insert_mut(owner, selection.current);
+        if !record.authored.contains_key(&owner) {
+            record.authored.insert_mut(
+                owner.clone(),
+                AuthoredSourceOrigin {
+                    domain: selection.current,
+                    support: None,
+                },
+            );
+        }
         selection.domains.insert_mut(selection.current, record);
         self.source_selection.reserve(1);
         self.scope_revisions.reserve(1);
         Ok(PreparedSourceOwnerOrigin {
             scope,
+            owner,
             selection,
             baseline: self.declaration_preparation_baseline(),
         })
@@ -2494,8 +2564,8 @@ impl BindingTable {
             .get(&selection.current)
             .cloned()
             .expect("current source domain admitted");
-        for (owner, domain) in &plan.source_origins {
-            record.authored.insert_mut(owner.clone(), *domain);
+        for (owner, origin) in &plan.source_origins {
+            record.authored.insert_mut(owner.clone(), origin.clone());
         }
         selection.domains.insert_mut(selection.current, record);
 
@@ -2571,12 +2641,14 @@ impl BindingTable {
         Ok(PreparedBindingPromotion {
             plan,
             names,
-            added,
-            added_sources,
-            membership,
+            custody: PreparedBindingCustody {
+                added,
+                added_sources,
+                membership,
+                new_promoted,
+                new_promoted_sources,
+            },
             selection,
-            new_promoted,
-            new_promoted_sources,
         })
     }
 
@@ -2745,13 +2817,108 @@ impl BindingTable {
             names,
             observations,
             baseline: self.declaration_preparation_baseline(),
+            custody: None,
+            support: None,
         })
+    }
+
+    /// Retain the declaration's exact runtime dependencies without publishing
+    /// their names. The runtime resolves these identities from the same checked
+    /// declaration before entering this owner. Custody follows the existing
+    /// scoped promotion lifetime, including ordinary scope drain; lexical
+    /// retraction alone does not release an already retained native dependency.
+    pub fn prepare_declaration_binding_changes_with_custody_in(
+        &mut self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        origin: &mut PreparedSourceOwnerOrigin,
+        captured: &[VarId],
+        removed_names: &[String],
+        retained_ids: &[SessionVarId],
+    ) -> Result<PreparedDeclarationBindingChanges, BindingPromotionError> {
+        if origin.scope != scope || !self.matches_declaration_preparation(&origin.baseline) {
+            return Err(BindingPromotionError::StaleOrForeignDeclarationPreparation);
+        }
+        if !tree.is_live(scope) {
+            return Err(BindingPromotionError::MissingOrForeignBinding);
+        }
+        let tip = self.tips.get(&scope);
+        let owners = if tip.is_some() {
+            vec![scope]
+        } else {
+            tree.lookup_chain(scope)
+        };
+        for id in retained_ids {
+            let entry = self
+                .live
+                .get(id)
+                .ok_or(BindingPromotionError::MissingOrForeignBinding)?;
+            if !owners.contains(&entry.scope)
+                && !tip.is_some_and(|tip| tip.retained.contains(id))
+                && !owners
+                    .iter()
+                    .any(|owner| self.promoted.get(owner).is_some_and(|ids| ids.contains(id)))
+            {
+                return Err(BindingPromotionError::MissingOrForeignBinding);
+            }
+        }
+        let roots = retained_ids.iter().copied().collect::<HashTrieSetSync<_>>();
+        let support = if let Some(previous) = origin.binding_support() {
+            if previous.roots != roots {
+                return Err(BindingPromotionError::ConflictingSourceOrigin);
+            }
+            // This owner already issued its immutable captured meaning. A
+            // later mutable observation graph cannot rewrite that evidence.
+            previous.clone()
+        } else {
+            Arc::new(FrozenDeclarationBindingSupport {
+                roots,
+                retained: self
+                    .dependency_closure(retained_ids.iter().copied())
+                    .into_iter()
+                    .collect(),
+            })
+        };
+        let retained = support.retained.iter().copied().collect::<HashSet<_>>();
+        if retained.iter().any(|id| !self.live.contains_key(id)) {
+            return Err(BindingPromotionError::MissingOrForeignBinding);
+        }
+        let custody = if retained.iter().all(|id| {
+            self.promoted
+                .get(&scope)
+                .is_some_and(|ids| ids.contains(id))
+        }) {
+            None
+        } else {
+            let mut plan = self.binding_promotion_plan(scope, scope, &[])?;
+            plan.retained = retained;
+            Some(self.prepare_promotion_install(plan, &[])?.custody)
+        };
+        let mut changes =
+            self.prepare_declaration_binding_changes_in(scope, captured, removed_names)?;
+        changes.custody = custody;
+        changes.support = Some(support.clone());
+        // Publish the local prepared meaning only after every fallible check.
+        // The owning table remains unchanged until this same origin commits.
+        let mut record = origin.selection.domains[&origin.selection.current].clone();
+        let mut authored = record.authored[&origin.owner].clone();
+        authored.support = Some(support);
+        record.authored.insert_mut(origin.owner.clone(), authored);
+        origin
+            .selection
+            .domains
+            .insert_mut(origin.selection.current, record);
+        Ok(changes)
     }
 
     pub fn commit_declaration_binding_changes(
         &mut self,
         prepared: PreparedDeclarationBindingChanges,
     ) {
+        if let Some(custody) = prepared.custody {
+            self.install_binding_custody(prepared.names.scope, custody);
+            self.changed(prepared.names.scope);
+        }
         for id in prepared.observations {
             self.remove_observation(id);
         }
@@ -2849,11 +3016,6 @@ impl BindingTable {
         {
             return Err(BindingPromotionError::MissingOrForeignBinding);
         }
-        // Authored full-body custody keeps exact hidden values and their
-        // observation dependencies without adding names to the visible writes.
-        prepared
-            .retained
-            .extend(self.dependency_closure(binding_dependencies.iter().copied()));
         let source_view = self
             .source_selection
             .get(&source)
@@ -2868,10 +3030,30 @@ impl BindingTable {
                 current
                     .authored
                     .get(owner)
-                    .copied()
+                    .map(|origin| origin.domain)
                     .ok_or(BindingPromotionError::MissingSourceDomain)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut frozen_bindings = HashSet::new();
+        for owner in accepted_owners {
+            let support = current.authored[owner]
+                .support
+                .as_ref()
+                .ok_or(BindingPromotionError::MissingAuthoredBindingSupport)?;
+            frozen_bindings.extend(support.retained.iter().copied());
+        }
+        if binding_dependencies
+            .iter()
+            .any(|id| !frozen_bindings.contains(id))
+            || frozen_bindings
+                .iter()
+                .any(|id| !reachable.contains(id) || !self.live.contains_key(id))
+        {
+            return Err(BindingPromotionError::MissingOrForeignBinding);
+        }
+        // This is the immutable captured closure. A later observation update
+        // must neither retract it nor widen it to another runtime binding.
+        prepared.retained.extend(frozen_bindings);
         let target_view = self.source_selection.get(&target);
         let target_record = target_view.and_then(|view| view.domains.get(&view.current));
         if accepted_owners
@@ -2898,9 +3080,9 @@ impl BindingTable {
             }
         }
         for owner in accepted_owners {
-            prepared
-                .source_origins
-                .insert(owner.clone(), remap[&current.authored[owner]]);
+            let mut origin = current.authored[owner].clone();
+            origin.domain = remap[&origin.domain];
+            prepared.source_origins.insert(owner.clone(), origin);
         }
         prepared.source_domains = records;
         prepared.next_tip = Some(next_tip);
@@ -2914,14 +3096,27 @@ impl BindingTable {
         let PreparedBindingPromotion {
             plan,
             names,
+            custody,
+            selection,
+        } = prepared;
+        let target = plan.target;
+        self.install_binding_custody(target, custody);
+        self.source_selection.insert(target, selection);
+        if let Some(next_tip) = plan.next_tip {
+            self.next_tip = next_tip;
+        }
+        self.install_name_changes(names);
+        self.changed_by(target, revision_advances);
+    }
+
+    fn install_binding_custody(&mut self, target: ScopeId, custody: PreparedBindingCustody) {
+        let PreparedBindingCustody {
             added,
             added_sources,
             membership,
-            selection,
             new_promoted,
             new_promoted_sources,
-        } = prepared;
-        let target = plan.target;
+        } = custody;
         if let Some(new) = new_promoted {
             self.promoted.insert(target, new);
         } else {
@@ -2965,12 +3160,6 @@ impl BindingTable {
             existing.added_bindings.extend(membership.added_bindings);
             existing.added_sources.extend(membership.added_sources);
         }
-        self.source_selection.insert(target, selection);
-        if let Some(next_tip) = plan.next_tip {
-            self.next_tip = next_tip;
-        }
-        self.install_name_changes(names);
-        self.changed_by(target, revision_advances);
     }
 
     /// Publish an alias of an existing root through the ordinary scoped name
@@ -3251,8 +3440,8 @@ impl BindingTable {
             for key in previous_current.selected.iter() {
                 record.selected.insert_mut(key.clone());
             }
-            for (owner, domain) in previous_current.authored.iter() {
-                record.authored.insert_mut(owner.clone(), *domain);
+            for (owner, origin) in previous_current.authored.iter() {
+                record.authored.insert_mut(owner.clone(), origin.clone());
             }
             for (domain, record) in previous.domains.iter() {
                 selected.domains.insert_mut(*domain, record.clone());
@@ -3338,6 +3527,12 @@ impl BindingTable {
         origin: &PreparedSourceOwnerOrigin,
         changes: &PreparedDeclarationBindingChanges,
     ) -> Result<PreparedDetachedBindingScope, BindingPromotionError> {
+        // This older two-scope operation reserves child lease counts from the
+        // current table. A pending same-scope custody install has different
+        // prospective counts and must not share that independent reservation.
+        if changes.custody.is_some() {
+            return Err(BindingPromotionError::UnverifiableSourceSelection);
+        }
         if !tree.is_live(parent)
             || !tree.is_live(child)
             || parent == child

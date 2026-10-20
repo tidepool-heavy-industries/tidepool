@@ -30,6 +30,530 @@ fn declaration_owner(version: u8) -> CachedHomeOwner {
 }
 
 #[test]
+fn declaration_hidden_custody_survives_guard_retirement_and_publication_without_names() {
+    let mut tree = ScopeTree::new();
+    let private = tree.mint_isolated();
+    let public = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let dependency = table.bind_in(private, entry("dependency", 200)).unwrap();
+    let input = table.bind_in(private, entry("hidden_input", 201)).unwrap();
+    table.save_observation(dependency, &[], 10);
+    table.save_observation(input, &[dependency.var()], 10);
+    let guard = table.acquire_leases([input]);
+    let before = table.scope_witness(&tree, private).unwrap();
+    let owner = declaration_owner(1);
+    let mut origin = table
+        .prepare_source_owner_origin_in(&tree, private, owner.clone())
+        .unwrap();
+    let changes = table
+        .prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            private,
+            &mut origin,
+            &[input.var()],
+            &["hidden_input".into()],
+            &[input],
+        )
+        .unwrap();
+    let projected = table
+        .prepared_declaration_projection(&tree, Some(&origin), &changes)
+        .unwrap();
+    let witness = projected.scope_witness().clone();
+    assert!(projected
+        .visible_changes()
+        .all(|(_, entry)| entry.is_none()));
+    assert_eq!(table.scope_witness(&tree, private), Some(before));
+    assert_eq!(table.lease_count(input), 1);
+    let snapshot = table
+        .prepared_scope_snapshot_in(&tree, private, Some(&origin), Some(&changes))
+        .unwrap();
+    without_allocations(|| {
+        table.commit_source_owner_origin(origin);
+        table.commit_declaration_binding_changes(changes);
+    });
+    assert_eq!(table.scope_witness(&tree, private), Some(witness));
+    assert_eq!(table.scope_snapshot(&tree, private), Ok(snapshot));
+    assert_eq!(table.lease_count(input), 2);
+    assert_eq!(table.lease_count(dependency), 2);
+    assert!(table.resolve_in(&tree, private, "hidden_input").is_none());
+    assert!(table.retire_owner(input).is_none());
+    assert!(table.release_leases(guard).is_empty());
+    assert_eq!(table.lease_count(input), 1);
+    assert_eq!(table.lease_count(dependency), 1);
+    // Repeating an authored origin keeps the same frozen support and scoped
+    // lease. Recommitting the origin still has its ordinary revision advance.
+    let mut origin = table
+        .prepare_source_owner_origin_in(&tree, private, owner.clone())
+        .unwrap();
+    let changes = table
+        .prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            private,
+            &mut origin,
+            &[],
+            &["missing_declaration".into()],
+            &[input],
+        )
+        .unwrap();
+    let before = table.scope_witness(&tree, private).unwrap();
+    let projected = table
+        .prepared_declaration_projection(&tree, Some(&origin), &changes)
+        .unwrap()
+        .scope_witness()
+        .clone();
+    assert_ne!(projected, before);
+    without_allocations(|| {
+        table.commit_source_owner_origin(origin);
+        table.commit_declaration_binding_changes(changes);
+    });
+    assert_eq!(table.scope_witness(&tree, private), Some(projected));
+    assert_eq!(table.lease_count(input), 1);
+    let publication = table
+        .prepare_authored_source_publication_in(
+            &tree,
+            private,
+            public,
+            &[],
+            &[],
+            &[owner],
+            &[input],
+        )
+        .unwrap();
+    without_allocations(|| table.commit_exact_binding_promotion(publication));
+    assert!(table.iter_current_in(&tree, public).is_empty());
+    assert_eq!(table.lease_count(input), 2);
+    table.drain_scope(private);
+    assert!(table.get(input).is_some());
+    assert!(table.get(dependency).is_some());
+    assert_eq!(table.lease_count(input), 1);
+    let released = table.drain_scope(public);
+    assert_eq!(released.len(), 2);
+    assert!(table.get(input).is_none());
+    assert!(table.get(dependency).is_none());
+}
+
+#[test]
+fn declaration_custody_preparation_cancel_foreign_and_overflow_leave_roots_unchanged() {
+    let mut tree = ScopeTree::new();
+    let scope = tree.mint_isolated();
+    let foreign = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let id = table.bind_in(scope, entry("input", 210)).unwrap();
+    let foreign_id = table.bind_in(foreign, entry("input", 211)).unwrap();
+    let before = table.scope_witness(&tree, scope).unwrap();
+    let mut origin = table
+        .prepare_source_owner_origin_in(&tree, scope, declaration_owner(3))
+        .unwrap();
+    let changes = table
+        .prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            scope,
+            &mut origin,
+            &[],
+            &[],
+            &[id],
+        )
+        .unwrap();
+    assert_eq!(table.lease_count(id), 0);
+    let child = tree.mint_isolated();
+    assert!(matches!(
+        table.prepare_seed_detached_scope_for_declaration(&tree, scope, child, &origin, &changes),
+        Err(BindingPromotionError::UnverifiableSourceSelection)
+    ));
+    drop(changes);
+    assert_eq!(table.scope_witness(&tree, scope), Some(before.clone()));
+    for ids in [vec![foreign_id], vec![SessionVarId::from_extract(999)]] {
+        assert!(matches!(
+            table.prepare_declaration_binding_changes_with_custody_in(
+                &tree,
+                scope,
+                &mut origin,
+                &[],
+                &[],
+                &ids,
+            ),
+            Err(BindingPromotionError::MissingOrForeignBinding)
+        ));
+    }
+    assert_eq!(table.scope_witness(&tree, scope), Some(before.clone()));
+    table.leases.insert(id, usize::MAX);
+    assert!(matches!(
+        table.prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            scope,
+            &mut origin,
+            &[],
+            &[],
+            &[id],
+        ),
+        Err(BindingPromotionError::LeaseCountExhausted)
+    ));
+    assert_eq!(table.lease_count(id), usize::MAX);
+    assert_eq!(table.scope_witness(&tree, scope), Some(before));
+    table.leases.remove(&id);
+    table.revision = u64::MAX;
+    let mut origin = table
+        .prepare_source_owner_origin_in(&tree, scope, declaration_owner(3))
+        .unwrap();
+    let changes = table
+        .prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            scope,
+            &mut origin,
+            &[],
+            &[],
+            &[id],
+        )
+        .unwrap();
+    assert!(matches!(
+        table.prepared_declaration_projection(&tree, Some(&origin), &changes),
+        Err(BindingPromotionError::MutationWitnessExhausted { advances: 2, .. })
+    ));
+    assert_eq!(table.lease_count(id), 0);
+    drop(changes);
+    assert!(table.get(id).is_some());
+}
+
+#[test]
+fn declaration_custody_accepts_exact_ancestor_frozen_and_promoted_support() {
+    let mut tree = ScopeTree::new();
+    let ancestor = tree.mint_isolated();
+    let child = tree.mint_child(ancestor).unwrap();
+    let frozen = tree.mint_isolated();
+    let promoted = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let id = table.bind_in(ancestor, entry("input", 220)).unwrap();
+    table.seed_scope(&tree, ancestor, frozen);
+    table
+        .promote_exact_bindings_in(ancestor, promoted, &[id])
+        .unwrap();
+    for scope in [child, frozen, promoted] {
+        let mut origin = table
+            .prepare_source_owner_origin_in(&tree, scope, declaration_owner(scope.0 as u8))
+            .unwrap();
+        let changes = table
+            .prepare_declaration_binding_changes_with_custody_in(
+                &tree,
+                scope,
+                &mut origin,
+                &[],
+                &[],
+                &[id],
+            )
+            .unwrap();
+        let predicted = table
+            .prepared_declaration_projection(&tree, Some(&origin), &changes)
+            .unwrap()
+            .scope_witness()
+            .clone();
+        let snapshot = table
+            .prepared_scope_snapshot_in(&tree, scope, Some(&origin), Some(&changes))
+            .unwrap();
+        without_allocations(|| {
+            table.commit_source_owner_origin(origin);
+            table.commit_declaration_binding_changes(changes);
+        });
+        assert_eq!(table.scope_witness(&tree, scope), Some(predicted));
+        assert_eq!(table.scope_snapshot(&tree, scope), Ok(snapshot));
+    }
+    assert!(table.drain_scope(ancestor).is_empty());
+    assert!(table.get(id).is_some());
+    table.drain_scope(child);
+    table.drain_scope(frozen);
+    assert_eq!(table.drain_scope(promoted).len(), 1);
+    assert!(table.get(id).is_none());
+}
+
+#[test]
+fn declaration_custody_transfer_keeps_captured_edges_after_observation_update() {
+    let mut tree = ScopeTree::new();
+    let private = tree.mint_isolated();
+    let public = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let captured = table.bind_in(private, entry("captured", 230)).unwrap();
+    let later = table.bind_in(private, entry("later", 231)).unwrap();
+    let input = table.bind_in(private, entry("input", 232)).unwrap();
+    table.save_observation(captured, &[], 10);
+    table.save_observation(later, &[], 10);
+    table.save_observation(input, &[captured.var()], 10);
+    let owner = declaration_owner(2);
+    let mut origin = table
+        .prepare_source_owner_origin_in(&tree, private, owner.clone())
+        .unwrap();
+    let changes = table
+        .prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            private,
+            &mut origin,
+            &[input.var()],
+            &[],
+            &[input],
+        )
+        .unwrap();
+    table.commit_source_owner_origin(origin);
+    table.commit_declaration_binding_changes(changes);
+    // Updating mutable observation bookkeeping must not rewrite the already
+    // captured declaration's immutable native dependency meaning.
+    table.save_observation(input, &[later.var()], 10);
+    let publication = table
+        .prepare_authored_source_publication_in(
+            &tree,
+            private,
+            public,
+            &[],
+            &[],
+            &[owner],
+            &[input],
+        )
+        .unwrap();
+    table.commit_exact_binding_promotion(publication);
+    table.retire_owner(input);
+    table.drain_scope(private);
+    assert!(table.get(input).is_some());
+    assert!(table.get(captured).is_some());
+    assert!(table.get(later).is_none());
+    assert_eq!(table.drain_scope(public).len(), 2);
+}
+
+#[test]
+fn declaration_frozen_support_pairs_and_cannot_be_overwritten() {
+    let mut tree = ScopeTree::new();
+    let scope = tree.mint_isolated();
+    let target = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let first = table.bind_in(scope, entry("first", 240)).unwrap();
+    let second = table.bind_in(scope, entry("second", 241)).unwrap();
+    let owner = declaration_owner(10);
+    let mut x = table
+        .prepare_source_owner_origin_in(&tree, scope, owner.clone())
+        .unwrap();
+    let mut y = table
+        .prepare_source_owner_origin_in(&tree, scope, owner.clone())
+        .unwrap();
+    let dx = table
+        .prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            scope,
+            &mut x,
+            &[],
+            &[],
+            &[first],
+        )
+        .unwrap();
+    let dy = table
+        .prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            scope,
+            &mut y,
+            &[],
+            &[],
+            &[second],
+        )
+        .unwrap();
+    let original = x.binding_support().unwrap().clone();
+    for (origin, delta) in [(&x, &dy), (&y, &dx)] {
+        without_allocations(|| {
+            assert!(matches!(
+                table.prepared_declaration_projection(&tree, Some(origin), delta),
+                Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+            ))
+        });
+    }
+    let repeated = table
+        .prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            scope,
+            &mut x,
+            &[],
+            &[],
+            &[first],
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&original, repeated.support.as_ref().unwrap()));
+    assert!(matches!(
+        table.prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            scope,
+            &mut x,
+            &[],
+            &[],
+            &[second]
+        ),
+        Err(BindingPromotionError::ConflictingSourceOrigin)
+    ));
+    assert!(Arc::ptr_eq(&original, x.binding_support().unwrap()));
+    assert_eq!(table.lease_count(first), 0);
+    assert_eq!(table.lease_count(second), 0);
+    without_allocations(|| {
+        table.commit_source_owner_origin(x);
+        table.commit_declaration_binding_changes(dx);
+    });
+    assert!(matches!(
+        table.prepare_authored_source_publication_in(
+            &tree,
+            scope,
+            target,
+            &[],
+            &[],
+            &[owner.clone()],
+            &[second]
+        ),
+        Err(BindingPromotionError::MissingOrForeignBinding)
+    ));
+    let mut same = table
+        .prepare_source_owner_origin_in(&tree, scope, owner)
+        .unwrap();
+    let delta = table
+        .prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            scope,
+            &mut same,
+            &[],
+            &[],
+            &[first],
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&original, delta.support.as_ref().unwrap()));
+    assert!(Arc::ptr_eq(&original, same.binding_support().unwrap()));
+    drop((same, delta, repeated, y, dy));
+    assert_eq!(table.lease_count(first), 1);
+    assert_eq!(table.lease_count(second), 0);
+}
+
+#[test]
+fn declaration_frozen_support_forks_exact_ids_and_excludes_unaccepted_owners() {
+    let mut tree = ScopeTree::new();
+    let source = tree.mint_isolated();
+    let public = tree.mint_isolated();
+    let child = tree.mint_isolated();
+    let later_public = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let selected = table.bind_in(source, entry("selected", 250)).unwrap();
+    let unrelated = table.bind_in(source, entry("unrelated", 251)).unwrap();
+    let owner = declaration_owner(11);
+    let mut issued = None;
+    for (owner, id) in [
+        (owner.clone(), selected),
+        (declaration_owner(12), unrelated),
+    ] {
+        let mut origin = table
+            .prepare_source_owner_origin_in(&tree, source, owner)
+            .unwrap();
+        let changes = table
+            .prepare_declaration_binding_changes_with_custody_in(
+                &tree,
+                source,
+                &mut origin,
+                &[],
+                &[],
+                &[id],
+            )
+            .unwrap();
+        if id == selected {
+            issued = origin.binding_support().cloned();
+        }
+        table.commit_source_owner_origin(origin);
+        table.commit_declaration_binding_changes(changes);
+    }
+    let publication = table
+        .prepare_authored_source_publication_in(
+            &tree,
+            source,
+            public,
+            &[],
+            &[],
+            &[owner.clone()],
+            &[selected],
+        )
+        .unwrap();
+    table.commit_exact_binding_promotion(publication);
+    assert_eq!(table.lease_count(unrelated), 1);
+    table.drain_scope(source);
+    assert!(table.get(unrelated).is_none());
+    assert!(table.get(selected).is_some());
+    table.seed_scope(&tree, public, child);
+    let view = &table.source_selection[&child];
+    let inherited = &view.domains[&view.current].authored[&owner];
+    assert!(Arc::ptr_eq(
+        issued.as_ref().unwrap(),
+        inherited.support.as_ref().unwrap()
+    ));
+    assert_ne!(
+        inherited.domain,
+        table.source_selection[&public].domains[&table.source_selection[&public].current].authored
+            [&owner]
+            .domain
+    );
+    table.drain_scope(public);
+    let publication = table
+        .prepare_authored_source_publication_in(
+            &tree,
+            child,
+            later_public,
+            &[],
+            &[],
+            &[owner],
+            &[selected],
+        )
+        .unwrap();
+    table.commit_exact_binding_promotion(publication);
+    table.drain_scope(child);
+    assert_eq!(table.get(selected).unwrap().id, selected);
+    assert_eq!(table.drain_scope(later_public).len(), 1);
+    assert!(table.get(selected).is_none());
+}
+
+#[test]
+fn declaration_missing_support_is_distinct_from_issued_empty_support() {
+    let mut tree = ScopeTree::new();
+    let source = tree.mint_isolated();
+    let target = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let missing = declaration_owner(13);
+    let origin = table
+        .prepare_source_owner_origin_in(&tree, source, missing.clone())
+        .unwrap();
+    table.commit_source_owner_origin(origin);
+    assert!(matches!(
+        table.prepare_authored_source_publication_in(
+            &tree,
+            source,
+            target,
+            &[],
+            &[],
+            &[missing],
+            &[]
+        ),
+        Err(BindingPromotionError::MissingAuthoredBindingSupport)
+    ));
+    let empty = declaration_owner(14);
+    let mut origin = table
+        .prepare_source_owner_origin_in(&tree, source, empty.clone())
+        .unwrap();
+    let changes = table
+        .prepare_declaration_binding_changes_with_custody_in(
+            &tree,
+            source,
+            &mut origin,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+    assert!(origin.binding_support().unwrap().roots.is_empty());
+    assert!(table
+        .prepared_declaration_projection(&tree, Some(&origin), &changes)
+        .is_ok());
+    table.commit_source_owner_origin(origin);
+    table.commit_declaration_binding_changes(changes);
+    let prepared = table
+        .prepare_authored_source_publication_in(&tree, source, target, &[], &[], &[empty], &[])
+        .unwrap();
+    without_allocations(|| table.commit_exact_binding_promotion(prepared));
+    assert!(table.iter_current_in(&tree, target).is_empty());
+}
+
+#[test]
 fn prepared_declaration_projection_matches_committed_observation_and_name_histories() {
     // Capture sets include target, ancestor and unrelated owners. A target's
     // remaining observer must see the global dependency revision change even
