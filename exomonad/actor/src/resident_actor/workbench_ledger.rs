@@ -36,6 +36,30 @@ impl RetirementDiagnosticEvidence {
         }
     }
 
+    pub(crate) fn unobserved_publication(error: &ResidentActorWorkbenchError) -> Self {
+        Self {
+            detail: error.to_string(),
+            diagnostic: error.failure_diagnostic(),
+            observation:
+                crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Failed {
+                    cause: error.publication_failure_cause(),
+                    execution: error.execution_failure_kind(),
+                    requires_recovery: true,
+                },
+            retirement: None,
+        }
+    }
+
+    pub(crate) fn nonstart(detail: String) -> Self {
+        Self {
+            detail,
+            diagnostic: None,
+            observation:
+                crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: None,
+        }
+    }
+
     pub(crate) fn from_refusal(
         refusal: &crate::resident_workbench::ActorGenerationPublicationRefusal,
     ) -> Self {
@@ -49,7 +73,7 @@ impl RetirementDiagnosticEvidence {
         Some(Self::from_outcome(outcome, observation))
     }
 
-    fn from_outcome(
+    pub(crate) fn from_outcome(
         outcome: &Result<
             crate::resident_workbench::ActorGenerationCommit,
             ResidentActorWorkbenchError,

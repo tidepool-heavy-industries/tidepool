@@ -3378,7 +3378,7 @@ mod tests {
         let target_fence = (control
             == crate::local_actor::run_control::GenerationRetirementNativeControl::ReservationTargetClosed)
             .then(|| target.fence().unwrap());
-        let preparation = publisher.into_retirement_preparation(
+        let preparation = publisher.into_publication_preparation(
             prepared,
             publication.clone(),
             super::super::ActorGenerationPublication::Terminal,

@@ -2088,7 +2088,7 @@ enum RecordedPublicationBody {
     },
 }
 
-enum PublicationOwnerSettlement {
+pub(crate) enum PublicationOwnerSettlement {
     Pending,
     Confirming,
     Confirmed,
@@ -2115,8 +2115,13 @@ impl ActorGenerationPublicationOwner {
         })
     }
 
-    pub(crate) fn record_body(&mut self, body: ActorGenerationPublicationBodyResult) {
-        assert!(self.body.is_none(), "publication body is delivered once");
+    pub(crate) fn record_body(
+        &mut self,
+        body: ActorGenerationPublicationBodyResult,
+    ) -> Result<(), ActorGenerationPublicationBodyResult> {
+        if self.body.is_some() || self.prepared.is_some() {
+            return Err(body);
+        }
         self.body = Some(match body {
             ActorGenerationPublicationBodyResult::Observed {
                 outcome:
@@ -2153,6 +2158,7 @@ impl ActorGenerationPublicationOwner {
                 }
             }
         });
+        Ok(())
     }
 
     pub(crate) fn return_unstarted(
@@ -2187,6 +2193,13 @@ impl ActorGenerationPublicationOwner {
                 ))
     }
 
+    pub(crate) fn unobserved_primary(&self) -> Option<&ResidentActorWorkbenchError> {
+        match &self.body {
+            Some(RecordedPublicationBody::Unobserved { primary }) => Some(primary),
+            _ => None,
+        }
+    }
+
     pub(crate) fn diagnostic_outcome(
         &self,
     ) -> Option<(
@@ -2199,15 +2212,15 @@ impl ActorGenerationPublicationOwner {
         publication_failure_observation(outcome).map(|observation| (outcome.as_ref(), observation))
     }
 
-    pub(crate) fn confirm(&mut self) -> bool {
+    pub(crate) fn confirm(&mut self) -> &PublicationOwnerSettlement {
         if !matches!(self.settlement, PublicationOwnerSettlement::Pending) {
-            return matches!(self.settlement, PublicationOwnerSettlement::Confirmed);
+            return &self.settlement;
         }
         if !matches!(
             self.body.as_ref(),
             Some(RecordedPublicationBody::Visible { .. })
         ) {
-            return false;
+            return &self.settlement;
         }
         // Record before entering callbacks. Unwind leaves both the exact guard
         // and its consumed fence phase in the original serial owner.
@@ -2216,7 +2229,7 @@ impl ActorGenerationPublicationOwner {
             Ok(()) => PublicationOwnerSettlement::Confirmed,
             Err(error) => PublicationOwnerSettlement::Failed(error),
         };
-        matches!(self.settlement, PublicationOwnerSettlement::Confirmed)
+        &self.settlement
     }
 
     pub(crate) fn confirmed_generation(&self) -> Option<(&Arc<ActorGeneration>, bool)> {
@@ -2235,9 +2248,9 @@ impl ActorGenerationPublicationOwner {
     pub(crate) fn refuse_retirement(
         &mut self,
         original: &mut generation_admission::GenerationRetirementFence,
-    ) -> bool {
+    ) -> &PublicationOwnerSettlement {
         if !matches!(self.settlement, PublicationOwnerSettlement::Pending) {
-            return matches!(self.settlement, PublicationOwnerSettlement::Restored);
+            return &self.settlement;
         }
         let known_unpublished = match &self.body {
             Some(RecordedPublicationBody::Failure { outcome, .. }) => {
@@ -2250,14 +2263,14 @@ impl ActorGenerationPublicationOwner {
             None => self.prepared.is_some(),
         };
         if !known_unpublished {
-            return false;
+            return &self.settlement;
         }
         self.settlement = PublicationOwnerSettlement::Restoring;
         self.settlement = match self.guard.refuse_retirement(original) {
             Ok(()) => PublicationOwnerSettlement::Restored,
             Err(error) => PublicationOwnerSettlement::Failed(error),
         };
-        matches!(self.settlement, PublicationOwnerSettlement::Restored)
+        &self.settlement
     }
 }
 
@@ -2465,9 +2478,9 @@ impl Drop for PublicationDisposalProbe {
 
 type GenerationPublicationAction = Box<
     dyn FnOnce(
-            ReservedActorGeneration,
+            ActorGenerationPublicationBody,
         )
-            -> futures_util::future::BoxFuture<'static, ActorGenerationPublicationSettlement>
+            -> futures_util::future::BoxFuture<'static, ActorGenerationPublicationBodyResult>
         + Send,
 >;
 
@@ -2492,6 +2505,10 @@ pub(crate) enum ActorGenerationRetirementPreparationOutcome {
 }
 
 impl ActorGenerationRetirementPreparation {
+    pub(crate) fn is_initial(&self) -> bool {
+        matches!(self.prepared.expected, ActorRequestSnapshot::Bootstrap(_))
+    }
+
     pub(crate) fn actor(&self) -> crate::ActorRef {
         self.prepared.candidate.context.actor
     }
@@ -2560,15 +2577,15 @@ pub(crate) struct ActorGenerationPublicationDriver {
 impl ActorGenerationPublicationDriver {
     pub(crate) async fn run(
         self,
-        reserved: ReservedActorGeneration,
-    ) -> Result<ActorGenerationPublicationSettlement, (ReservedActorGeneration, Self)> {
+        body: ActorGenerationPublicationBody,
+    ) -> Result<ActorGenerationPublicationBodyResult, (ActorGenerationPublicationBody, Self)> {
         if !self
             .candidate
-            .ptr_eq(&Arc::downgrade(&reserved.prepared.candidate))
+            .ptr_eq(&Arc::downgrade(&body.prepared.candidate))
         {
-            return Err((reserved, self));
+            return Err((body, self));
         }
-        Ok((self.publish)(reserved).await)
+        Ok((self.publish)(body).await)
     }
 }
 
@@ -3504,7 +3521,7 @@ where
         self
     }
 
-    pub(crate) fn into_retirement_preparation(
+    pub(crate) fn into_publication_preparation(
         self,
         prepared: PreparedActorGeneration,
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
@@ -3527,9 +3544,7 @@ where
                                     candidate,
                                     publish: Box::new(move |reserved| {
                                         Box::pin(async move {
-                                            self.run_publication_body(reserved)
-                                                .await
-                                                .for_retirement()
+                                            self.run_publication_execution(reserved).await
                                         })
                                     }),
                                 },
@@ -8124,6 +8139,11 @@ fn admit_explicit_effects(
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
+    #[error("initial publication: {source}")]
+    InitialPublication {
+        source: Box<crate::local_actor::run_control::InitialGenerationPublicationError>,
+    },
+
     #[error(transparent)]
     SourceAdmission(#[from] generation_admission::GenerationAdmissionError),
     #[error("operation diagnostic handoff refused: {0}")]
@@ -8302,7 +8322,7 @@ pub enum ResidentActorWorkbenchError {
 }
 
 impl ResidentActorWorkbenchError {
-    fn publication_failure_cause(&self) -> ActorPublicationFailureCause {
+    pub(crate) fn publication_failure_cause(&self) -> ActorPublicationFailureCause {
         use ActorPublicationFailureCause as Cause;
         match self {
             Self::SourceAdmission(source) => Cause::SourceAdmission(source.clone()),
@@ -8351,6 +8371,7 @@ impl ResidentActorWorkbenchError {
             Self::InspectionWorldRejected(reason) => Cause::InspectionWorldRejected(*reason),
             Self::CompletedResultObservation { .. } => Cause::CompletedResultObservation,
             Self::UnavailableInterpreterSupport { .. } => Cause::InterpreterSupport,
+            Self::InitialPublication { .. } => Cause::PublicationSettlement,
             Self::ActorProtocol(_) => Cause::ActorProtocol,
             Self::PublicOwner(_) => Cause::PublicOwner,
             Self::Kernel(_) => Cause::Kernel,
@@ -8464,6 +8485,10 @@ impl ResidentActorWorkbenchError {
     pub fn requires_recovery(&self) -> bool {
         match self {
             Self::PublicationSettlement { .. } => true,
+            Self::InitialPublication { source } => matches!(source.as_ref(),
+                crate::local_actor::run_control::InitialGenerationPublicationError::OwnerLost |
+                crate::local_actor::run_control::InitialGenerationPublicationError::Unconfirmed |
+                crate::local_actor::run_control::InitialGenerationPublicationError::NotificationRefused),
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.requires_recovery(),
             Self::PreparationAdmission(source) => source.requires_recovery(),
@@ -23758,7 +23783,7 @@ pub(crate) mod request_tests {
             output_size(
                 |(publisher, reserved): (
                     ActorGenerationPublicationDriver,
-                    ReservedActorGeneration,
+                    ActorGenerationPublicationBody,
                 )| { publisher.run(reserved) },
             ),
         );
@@ -23962,7 +23987,7 @@ pub(crate) mod request_tests {
             state.clone(),
             ActorPublicationOwner::Preparation(terminal.client()),
         );
-        let preparation = publisher.into_retirement_preparation(
+        let preparation = publisher.into_publication_preparation(
             prepared,
             tidepool_runtime::session::PublicationDecision::new(),
             ActorGenerationPublication::Terminal,
@@ -23979,7 +24004,9 @@ pub(crate) mod request_tests {
         else {
             panic!("the actual publisher reserves before checkout")
         };
-        let publication = publisher.run(reserved);
+        let mut publication_owner = reserved.into_publication_owner();
+        let body = publication_owner.take_body().unwrap();
+        let publication = publisher.run(body);
         tokio::pin!(publication);
         assert!(futures_util::poll!(publication.as_mut()).is_pending());
         assert!(
@@ -23995,39 +24022,28 @@ pub(crate) mod request_tests {
             Ok(settlement) => settlement,
             Err(_) => panic!("the actual reservation matches its publisher"),
         };
-        let ActorGenerationPublicationSettlement::Settled(outcome) = &settlement else {
+        let ActorGenerationPublicationBodyResult::Unobserved { primary } = &settlement else {
             panic!("unobserved checkout cannot grant source restoration")
         };
-        let error = match outcome.as_ref() {
-            Err(error) => error,
-            Ok(_) => panic!("retired checkout cannot publish"),
-        };
-        assert!(error.requires_recovery());
-        assert!(
-            matches!(&error, ResidentActorWorkbenchError::PublicationSettlement { failure }
-            if matches!(failure.outcome.as_ref(), Err(ResidentActorWorkbenchError::Checkout(_)))
-                && matches!(failure.settlement, PublicationSettlementError::BodyUnobserved))
-        );
-        let (_, observed) = settlement.diagnostic_outcome().unwrap();
-        assert!(matches!(
-            observed,
-            ActorGenerationPublicationRefusalObservation::Failed {
-                cause: ActorPublicationFailureCause::Checkout,
-                requires_recovery: true,
-                ..
-            }
-        ));
-        assert!(
-            crate::resident_actor::RetirementDiagnosticEvidence::from_settlement(&settlement)
-                .is_some()
-        );
-        assert!(error
+        assert!(matches!(primary, ResidentActorWorkbenchError::Checkout(_)));
+        assert!(primary
             .to_string()
             .contains("publication checkout control retired the actual owner"));
-        assert!(
-            matches!(&state.0.lock().availability, InstalledToolsAvailability::PublicationUnavailable(attempt) if attempt.target.same_prepared(&target))
-        );
+        assert!(publication_owner.record_body(settlement).is_ok());
+        assert!(matches!(
+            publication_owner.confirm(),
+            PublicationOwnerSettlement::Pending
+        ));
+        assert!(publication_owner.confirmed_generation().is_none());
+        assert!(matches!(&state.0.lock().availability,
+            InstalledToolsAvailability::PublicationInProgress(attempt) if attempt.target.same_prepared(&target)));
         assert_eq!(parent_fence.pending_claims(), 1);
+        assert_eq!(parent_fence.unconfirmed_claims(), 0);
+        // The retained owner holds the exact claim while recovery remains
+        // unresolved. Only losing that actual owner marks it unconfirmed.
+        drop(publication_owner);
+        assert!(matches!(&state.0.lock().availability,
+            InstalledToolsAvailability::PublicationUnavailable(attempt) if attempt.target.same_prepared(&target)));
         assert_eq!(parent_fence.unconfirmed_claims(), 1);
         drop(held_session);
     }
@@ -24047,7 +24063,7 @@ pub(crate) mod request_tests {
                     state.clone(),
                     ActorPublicationOwner::Preparation(preparation.client()),
                 )
-                .into_retirement_preparation(
+                .into_publication_preparation(
                     prepared,
                     tidepool_runtime::session::PublicationDecision::new(),
                     ActorGenerationPublication::Terminal,
