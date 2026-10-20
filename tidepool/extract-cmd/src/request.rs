@@ -797,6 +797,12 @@ impl ExtractRequest {
         self.execution_grant = grant;
     }
 
+    pub(crate) fn requires_native_demand(&self) -> bool {
+        self.fields
+            .iter()
+            .any(|field| matches!(field, Field::WorldCellPrepare(_)))
+    }
+
     pub(crate) fn is_exact_inputs(&self) -> bool {
         self.fields
             .iter()

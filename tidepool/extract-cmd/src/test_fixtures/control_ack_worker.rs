@@ -21,7 +21,7 @@ fn main() {
             .env("TIDEPOOL_EXTRACT_WORKER", worker)
             .args(std::env::args_os().skip(1))
             .exec();
-        panic!("actual frontend exec failed: {error}");
+        panic!("actual frontend exec failed: {}", error);
     }
     let phase = std::fs::read(directory.join("phase")).unwrap()[0];
     if std::env::args().any(|arg| arg == "--print-worker-request-flag") {
@@ -70,12 +70,22 @@ fn main() {
             if command == [0] {
                 break;
             }
-            assert_eq!(command, [1]);
+            let native = command == [6];
+            assert!(native || command == [1]);
+            let mut context = [0; 144];
+            if native {
+                input.read_exact(&mut context).unwrap();
+                assert_eq!(&context[..8], b"TPNDX001");
+            }
             let _cwd = frame(&mut input);
             let mut argc = [0; 4];
             input.read_exact(&mut argc).unwrap();
             for _ in 0..u32::from_le_bytes(argc) {
                 let _ = frame(&mut input);
+            }
+            if native {
+                native_exchange(directory, phase, &context, &mut input, &mut output);
+                continue;
             }
             if first_worker && phase == 18 {
                 std::fs::write(directory.join("stalled"), b"request").unwrap();
@@ -156,7 +166,7 @@ fn direct_endpoint(directory: &std::path::Path, phase: u8) {
             return;
         }
     } else {
-        assert_eq!(&prefix, b"TPDTR002");
+        assert_eq!(&prefix, b"TPDTR003");
     }
     if phase == 4 {
         stall(b"begin");
@@ -190,12 +200,26 @@ fn direct_endpoint(directory: &std::path::Path, phase: u8) {
             }
             return;
         }
-        assert_eq!(command, [1]);
+        let native = command == [6];
+        assert!(native || command == [1]);
+        let mut context = [0; 144];
+        if native {
+            input.read_exact(&mut context).unwrap();
+        }
         let _cwd = frame(&mut input);
         let mut argc = [0; 4];
         input.read_exact(&mut argc).unwrap();
         for _ in 0..u32::from_le_bytes(argc) {
             let _ = frame(&mut input);
+        }
+        if native {
+            output.write_all(&[4]).unwrap();
+            output.write_all(&context).unwrap();
+            output.write_all(&0u64.to_le_bytes()).unwrap();
+            output.write_all(&1u64.to_le_bytes()).unwrap();
+            output.write_all(&0u32.to_le_bytes()).unwrap();
+            output.flush().unwrap();
+            stall(b"reply-not-read");
         }
         if phase == 14 {
             return;
@@ -211,4 +235,80 @@ fn direct_endpoint(directory: &std::path::Path, phase: u8) {
         output.write_all(&0u32.to_le_bytes()).unwrap();
         output.flush().unwrap();
     }
+}
+
+// Transport fixture: no compiler products or semantic authority are issued.
+fn native_exchange(
+    directory: &std::path::Path,
+    phase: u8,
+    context: &[u8; 144],
+    input: &mut impl Read,
+    output: &mut impl Write,
+) {
+    let rounds = if phase == 20 { 2 } else { 1 };
+    for sequence in 1..=rounds {
+        let stage = if sequence == 1 { 0u64 } else { 7u64 };
+        let sequence = sequence as u64;
+        output.write_all(&[4]).unwrap();
+        let mut observed = *context;
+        if phase == 22 {
+            observed[40] ^= 1;
+        }
+        output.write_all(&observed).unwrap();
+        output.write_all(&stage.to_le_bytes()).unwrap();
+        output.write_all(&sequence.to_le_bytes()).unwrap();
+        if phase == 21 {
+            output.write_all(&100u32.to_le_bytes()).unwrap();
+            output.flush().unwrap();
+            std::process::exit(0);
+        }
+        let payload = format!("selected-stage-{stage}");
+        output
+            .write_all(&(payload.len() as u32).to_le_bytes())
+            .unwrap();
+        output.write_all(payload.as_bytes()).unwrap();
+        if phase == 25 {
+            output.write_all(&[0]).unwrap();
+        }
+        output.flush().unwrap();
+        std::fs::write(directory.join("demand-written"), sequence.to_le_bytes()).unwrap();
+        let mut reply = [0; 162];
+        input.read_exact(&mut reply).unwrap();
+        assert_eq!(reply[0], 5);
+        assert_eq!(&reply[1..145], context);
+        assert_eq!(&reply[145..153], &stage.to_le_bytes());
+        assert_eq!(&reply[153..161], &sequence.to_le_bytes());
+        let body = frame(input);
+        std::fs::write(directory.join(format!("reply-{sequence}")), &body).unwrap();
+        if reply[161] == 1 {
+            output.write_all(&[0]).unwrap();
+            output.write_all(&1i32.to_le_bytes()).unwrap();
+            output.write_all(&0u32.to_le_bytes()).unwrap();
+            output.write_all(&0u32.to_le_bytes()).unwrap();
+            output.flush().unwrap();
+            return;
+        }
+        assert_eq!(body, format!("resolved-{stage}").as_bytes());
+        if phase == 23 {
+            output.write_all(&[4]).unwrap();
+            output.write_all(context).unwrap();
+            output.write_all(&stage.to_le_bytes()).unwrap();
+            output.write_all(&sequence.to_le_bytes()).unwrap();
+            output.write_all(&0u32.to_le_bytes()).unwrap();
+            output.flush().unwrap();
+            let mut never = [0];
+            input.read_exact(&mut never).unwrap();
+        }
+    }
+    output
+        .write_all(&[if phase == 24 { 2 } else { 0 }])
+        .unwrap();
+    output.write_all(&0i32.to_le_bytes()).unwrap();
+    let result = b"native-complete";
+    output
+        .write_all(&(result.len() as u32).to_le_bytes())
+        .unwrap();
+    output.write_all(result).unwrap();
+    output.write_all(&0u32.to_le_bytes()).unwrap();
+    output.flush().unwrap();
 }
