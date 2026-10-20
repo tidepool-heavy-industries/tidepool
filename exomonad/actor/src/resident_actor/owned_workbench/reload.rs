@@ -99,7 +99,7 @@ where
             {
                 Ok(SrReloadOutcome::ReloadCancelled(report.previous))
             }
-            ActorGenerationCommit::Refused(detail) => Err(SourceError::SourceUnavailable(detail)),
+            ActorGenerationCommit::Refused(detail) => Err(SourceError::SourceUnavailable(detail.to_string())),
             ActorGenerationCommit::Unconfirmed(detail) => Ok(
                 SrReloadOutcome::ReloadPublicationUnconfirmed(report.candidate, detail),
             ),
