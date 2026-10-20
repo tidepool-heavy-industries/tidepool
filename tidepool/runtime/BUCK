@@ -820,11 +820,13 @@ tidepool_rust_test_cases(
         "session::admission::tests::selected_native_imports_keep_exact_scoped_roots_and_refuse_sibling_only_values",
         "session::admission::tests::settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots",
         "session::admission::tests::world_private_admission_requires_the_actual_transaction_original",
+        "session::resident::authored_publication_tests::inspection_key_invalidates_hidden_inherited_binding_projection",
+        "session::resident::authored_publication_tests::never_visible_input_retirement_keeps_hidden_classification_until_last_lease",
     ],
-    expected_count = 6,
+    expected_count = 8,
     jobs = 1,
     timeout = 30,
-    test_rule_timeout_ms = 240000,
+    test_rule_timeout_ms = 300000,
     visibility = ["PUBLIC"],
 )
 
