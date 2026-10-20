@@ -1796,6 +1796,28 @@ tidepool_buildscript_run(
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
+                host_binding_tests = ["session::resident::activation_input_tests::" + name for name in (
+                    "activation_input_reservation_refuses_visible_names_without_recompiling",
+                    "activation_input_committed_binding_owns_interface_and_scope_releases_root_once",
+                    "activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservations",
+                )]
+                host_env, host_resources, host_worker = compiler_service_test_inputs(
+                    package_name, "runtime_host_binding_tests"
+                )
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "runtime_host_binding_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings(host_binding_tests, 8), "    ],",
+                    f"    expected_count = {len(host_binding_tests)},",
+                    "    jobs = 1,", "    timeout = 600,",
+                    f"    test_rule_timeout_ms = {(len(host_binding_tests) * 600 + 60) * 1000},",
+                    '    case_compiler_modes = {' + ", ".join(
+                        json.dumps(test) + ': "owned-resident"' for test in host_binding_tests
+                    ) + "},",
+                    runtime_arguments(host_env, host_resources, host_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
             if package_name == "exomonad-actor":
                 for world_target, world_tests in [
                     ("actor_compiler_world_queries_test", [

@@ -19626,6 +19626,13 @@ pub(crate) mod request_tests {
     #[tokio::test]
     #[ignore = "requires the dedicated rooted compiler-world service execution group"]
     async fn private_world_cell_json_operand_survives_plan_end_and_preparation() {
+        if std::env::var_os("RUST_LOG").is_some() {
+            let _ = tracing_subscriber::fmt()
+                .json()
+                .with_ansi(false)
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .try_init();
+        }
         with_test_compiler_owner(|client| async move {
             let fixture = RootedWorldInputTest::new(client, 7).await;
             for (used, correct) in [(false, true), (true, true), (true, false)] {
@@ -19662,8 +19669,15 @@ pub(crate) mod request_tests {
                 if correct {
                     assert!(matches!(result, Ok(ResidentWorkbenchStep::Committed { .. })), "actual input must execute");
                 } else {
-                    let Err(ResidentActorWorkbenchError::Delivered(error)) = result else { panic!("wrong payload oracle must fail in execution") };
-                    assert!(error.is_language_failure(), "{error:?}");
+                    // This item executes directly; no effect response has been
+                    // delivered. Its authored exception is an ordinary rejection.
+                    let rejection = match result {
+                        Ok(ResidentWorkbenchStep::Rejected(rejection)) => rejection,
+                        Ok(step) => panic!("wrong payload must reject: {}", describe_step(&step)),
+                        Err(error) => panic!("wrong payload must reject, not fail infrastructure: {error:?}"),
+                    };
+                    assert!(rejection.output.starts_with("<cell item 1>: runtime error: "), "{rejection:?}");
+                    assert!(rejection.output.contains("wrong actual JSON input"), "{rejection:?}");
                 }
                 frontend.access.with_machine(context.clone(), move |session, context, _| {
                     let scope = context.placement.lexical_scope;

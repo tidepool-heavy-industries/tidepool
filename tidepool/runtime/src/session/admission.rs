@@ -288,6 +288,30 @@ impl RuntimeHostBindingAdmission {
 }
 
 impl PersistentSession {
+    pub(super) fn validate_fresh_host_binding_in(
+        &self,
+        scope: ScopeId,
+        binding: &str,
+    ) -> Result<(), SessionError> {
+        if !self.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        if self.resolve_in(scope, binding).is_some()
+            || self.has_lib()
+                && self
+                    .lib()
+                    .current_declarations_in(scope)
+                    .iter()
+                    .any(|(item, _)| item.value_names().any(|name| name == binding))
+        {
+            return Err(SessionError::HostBindingNameCollision {
+                scope,
+                binding: binding.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn admit_binding_interface(
         &mut self,
         scope: ScopeId,
@@ -299,6 +323,7 @@ impl PersistentSession {
             return Err(SessionError::DeadScope(scope));
         }
         self.admit_source_work_in(scope)?;
+        self.validate_fresh_host_binding_in(scope, &binding)?;
         let (generation, _) = self.reserve_value_generations(1)?;
         let visibility = self
             .public_visibility_snapshot_in(scope)

@@ -115,6 +115,11 @@ immutable even after heap loss or a killed producer. Recovery store format 3
 establishes this shared fence; declaration-only format 2 is refused without
 migration because its ceiling cannot certify issued value identities.
 
+Host mounts consume their actual thin-interface or checked-carrier reservation
+and require a fresh visible term name before transfer. Installation never
+retracts or recompiles a declaration to make that name available. Checked World
+values use their own admitted private overlay instead.
+
 Notebook generations qualify public recovery ownership independently of actor
 incarnation and declaration allocation. Reload inserts a fresh public owner and
 atomically selects its complete source, installation and prompt references through

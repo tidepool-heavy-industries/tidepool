@@ -564,6 +564,65 @@ impl IssuedOriginalOutput {
     }
 }
 
+/// One newly issued product and its own root proof, before dependency rows
+/// from other products or prior inputs are merged into request availability.
+#[derive(Clone)]
+pub(crate) struct CompletedNativeProductAvailability {
+    row: Arc<NativeTransportAvailability>,
+    own: crate::artifact_inventory::IssuedNativeOffer,
+}
+
+impl std::fmt::Debug for CompletedNativeProductAvailability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompletedNativeProductAvailability")
+            .field("original", &self.own.original())
+            .finish()
+    }
+}
+
+impl CompletedNativeProductAvailability {
+    pub(crate) fn row(&self) -> &Arc<NativeTransportAvailability> {
+        &self.row
+    }
+
+    pub(crate) fn groups(
+        &self,
+        key: NativeGroupKey,
+    ) -> impl Iterator<Item = crate::artifact_inventory::NativeGroupBinding> + '_ {
+        self.own
+            .proof()
+            .into_iter()
+            .flat_map(|proof| proof.selection.snapshot().roots.keys())
+            .filter_map(move |root| match root {
+                crate::artifact_inventory::ArtifactBindingNode::Group(group)
+                    if self.own.original() == key.artifact
+                        && group.binding.artifact() == key.artifact
+                        && group.original_ordinal == key.original_ordinal =>
+                {
+                    Some(*group)
+                }
+                _ => None,
+            })
+    }
+
+    pub(crate) fn support(
+        &self,
+        key: NativeGroupKey,
+        group: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<&crate::artifact_inventory::IssuedNativeOffer> {
+        self.groups(key)
+            .any(|root| root == group)
+            .then_some(&self.own)
+    }
+}
+
+/// Consumed at the producer's completion boundary. Only `inputs` survives it;
+/// current products retain their individual coissued root receipt.
+struct NormalizedOriginalCompilerInputs {
+    inputs: OriginalCompilerInputs,
+    completed: BTreeMap<ArtifactId, Arc<CompletedNativeProductAvailability>>,
+}
+
 impl OriginalCompilerInputs {
     pub(crate) fn native_fact_base(
         &self,
@@ -616,7 +675,8 @@ impl OriginalCompilerInputs {
             selection,
         )?;
         timing.advance("resolve_continuation");
-        let mut issued = Self::from_selection(selection, &physical)?;
+        let normalized = Self::normalize_selection(selection, &physical)?;
+        let mut issued = normalized.inputs;
         timing.advance("receive_and_project_completed_availability");
         let metadata = issued
             .projection
@@ -630,7 +690,7 @@ impl OriginalCompilerInputs {
         )?;
         timing.advance("finish_new_products");
         selection
-            .finish_new_product_availability(&metadata.retained, &native.availability)
+            .finish_new_product_availability(&metadata.retained, &normalized.completed)
             .map_err(compiler_evidence_failure)?;
         timing.finish(true);
         // Keep the exact normalization used to complete this selection. The
@@ -811,6 +871,13 @@ impl OriginalCompilerInputs {
         selection: &crate::certified_products::CertifiedSourceSelection,
         artifacts: &ArtifactView,
     ) -> Result<Self, CompileError> {
+        Ok(Self::normalize_selection(selection, artifacts)?.inputs)
+    }
+
+    fn normalize_selection(
+        selection: &crate::certified_products::CertifiedSourceSelection,
+        artifacts: &ArtifactView,
+    ) -> Result<NormalizedOriginalCompilerInputs, CompileError> {
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "products.native_selection",
             "projection",
@@ -824,6 +891,7 @@ impl OriginalCompilerInputs {
             continuation.availability_rows().iter().cloned(),
         )?;
         let mut native_offers = Vec::new();
+        let mut completed_products = BTreeMap::new();
         for issued in continuation.availability_rows() {
             for offer in issued.offers() {
                 if !native_offers.contains(offer) {
@@ -850,6 +918,22 @@ impl OriginalCompilerInputs {
                 producer,
                 complete,
             )?;
+            for own in &issued.native_offers {
+                let id = own.original();
+                let row = issued
+                    .native_availability
+                    .issued_row(id)
+                    .ok_or_else(|| failure("completed native product lacks its issued row"))?;
+                let receipt = Arc::new(CompletedNativeProductAvailability {
+                    row: Arc::clone(row),
+                    own: own.clone(),
+                });
+                if completed_products.insert(id, receipt).is_some() {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::BindingAmbiguity { artifact: id },
+                    ));
+                }
+            }
             native_availability = native_availability
                 .merge(&issued.native_availability)?
                 .into_rows();
@@ -877,7 +961,7 @@ impl OriginalCompilerInputs {
         timing.advance("preserve_offers");
         let native_offers = preserve_native_offers(&projection, &artifacts, &native_offers)?;
         timing.finish(true);
-        Ok(Self {
+        Ok(NormalizedOriginalCompilerInputs { inputs: Self {
             native_fact_base: selection.native_fact_base().cloned(),
             native_availability,
             demand: OriginalInputDemand::Issued(
@@ -888,7 +972,7 @@ impl OriginalCompilerInputs {
             projection,
             artifacts,
             native_offers,
-        })
+        }, completed: completed_products })
     }
 
     /// Complete native availability from the exact output entries and input
@@ -1166,6 +1250,27 @@ impl<'a> ContinuationNativeInputs<'a> {
 
     pub(crate) fn projection(&self) -> &CompilerInputProjection {
         &self.projection
+    }
+
+    pub(crate) fn original_namespace_pair(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Result<
+        Option<(
+            crate::artifact_inventory::ArtifactBinding,
+            crate::artifact_inventory::ArtifactBinding,
+        )>,
+        CompileError,
+    > {
+        Ok(self
+            .selection
+            .continuation_input(owner)
+            .map_err(compiler_evidence_failure)?
+            .and_then(|(source, _)| source.world_primary_type_row(owner))
+            .and_then(|row| {
+                row.original_binding
+                    .map(|original| (*original, *row.interface_binding))
+            }))
     }
 
     pub(crate) fn availability_rows(&self) -> &[Arc<NativeTransportAvailability>] {
@@ -1716,6 +1821,7 @@ impl RequestNativeAvailability {
     /// Select direct availability roots from effective compiler roles, then keep
     /// their exact dependencies. The demanded path supplies its already issued
     /// direct choices to the same closure/intersection policy below.
+    #[track_caller]
     pub(crate) fn for_compiler_roles(
         &self,
         roles: &CompilerInputProjection,
@@ -1745,6 +1851,7 @@ impl RequestNativeAvailability {
         )
     }
 
+    #[track_caller]
     fn for_compiler_roots(
         &self,
         roles: &CompilerInputProjection,
@@ -1843,6 +1950,12 @@ impl RequestNativeAvailability {
                 admission_failure(ArtifactInventoryFailure::NativeRootOutsideView { artifact: id })
             })?;
             if !has_payload(&id) {
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    artifact = ?id,
+                    owner = ?row.original.descriptor.owner,
+                    direct = direct.contains(&id),
+                    caller = %std::panic::Location::caller(),
+                    "native availability payload check refused");
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeRootOutsideView { artifact: id },
                 ));
@@ -2666,17 +2779,21 @@ impl RequestCompilerInputs {
             self.artifacts(),
             &direct,
             |id| {
-                self.metadata
-                    .retained
-                    .artifacts
-                    .get(id)
-                    .is_some_and(|payload| {
-                        self.native_selection
-                            .availability
-                            .0
-                            .get(id)
-                            .is_some_and(|row| Arc::ptr_eq(payload, &row.original))
-                    })
+                let payload = self.metadata.retained.artifacts.get(id);
+                let row = self.native_selection.availability.0.get(id);
+                let same_payload = payload.zip(row).is_some_and(|(payload, row)| {
+                    Arc::ptr_eq(payload, &row.original)
+                });
+                if !same_payload {
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                        artifact = ?id,
+                        metadata_payload_present = payload.is_some(),
+                        availability_payload_present = row.is_some(),
+                        same_descriptor = payload.zip(row).is_some_and(|(payload, row)|
+                            payload.descriptor == row.original.descriptor),
+                        "demanded native payload identity refused");
+                }
+                same_payload
             },
             budget,
             &mut work,
@@ -9330,12 +9447,6 @@ impl WorldProgramSegment {
     pub(crate) fn source_lexical(&self) -> &[ExactLexicalNode] {
         &self.continuation.program.program_source_lexical
     }
-    pub(crate) fn original_execution_context(
-        &self,
-        inputs: &OriginalCompilerInputs,
-    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-        self.product_admission().original_execution_context(inputs)
-    }
     pub(crate) fn product_admission(&self) -> ExactProductAdmission<'_> {
         ExactProductAdmission {
             compilation_binding: ProductCompilationBinding::World(&self.binding),
@@ -9593,6 +9704,20 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             crate::host_work::checkpoint()?;
             charge(operation.charge(1))?;
             let interface = row.certified_interface().interface();
+            charge(operation.charge(interface.unit().len()))?;
+            charge(operation.charge(interface.module().len()))?;
+            let compiler_owner = identity(interface.unit(), interface.module());
+            if roles.get(&compiler_owner).is_none_or(|role| {
+                role.interface() != row.certified_interface().artifact_id()
+            }) {
+                return Err(failure(
+                    "checked World value interface differs from its primary compiler role",
+                ));
+            }
+            // Checked value types are compiler inputs even when the value is
+            // unused. Keep their issued binding without granting source imports
+            // or adding the value to executable native demand.
+            insert(&mut roots, &compiler_owner)?;
             let owner = (interface.unit(), interface.module());
             if !excluded.contains(&owner) {
                 charge(operation.reserve::<((&str, &str), [usize; 4])>(1))?;
@@ -10469,6 +10594,17 @@ impl ExactDeclarationContext {
         &self,
     ) -> &crate::artifact_inventory::CompilerSourceSupport {
         &self.owner.facts.compiler_support
+    }
+    /// The target's issued graph is executable custody, not additional compiler
+    /// roles or source visibility. Keep the output's compiler owner unchanged.
+    pub(crate) fn retain_native_target_custody(
+        self,
+        target: &crate::artifact_inventory::CertifiedTargetNativeInputs,
+    ) -> Result<Self, CompileError> {
+        let support = self
+            .compiler_source_support()
+            .retain_custody(target.artifacts())?;
+        Ok(self.rebuild(|facts| facts.compiler_support = support))
     }
     pub(crate) fn retain_issued_native_inputs(
         self,

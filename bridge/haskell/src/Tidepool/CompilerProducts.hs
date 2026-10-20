@@ -10,7 +10,7 @@ module Tidepool.CompilerProducts
   , requireOriginalExecutableGlobals
   , writeCertifiedProductsKeepingWithOriginals
   , StagedOriginalProducts, stagedOriginalEntryOrdinal, stagedFinalizedArtifacts, stagedOriginalOutputFiles
-  , stagedOriginalBinders, withPriorStagedOriginalProducts, newPreparedOriginalInterfaceArtifactsWithPrior
+  , stagedOriginalBinders, stagedOriginalPackageDemand, withPriorStagedOriginalProducts, newPreparedOriginalInterfaceArtifactsWithPrior
   , retainTypeInterfaceCaptures, retainedTypeInterfaceBody
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, writeCertifiedSegmentItemProductsWithInputs
   , stagedDeclarationInputReferences
@@ -66,7 +66,7 @@ import System.Info qualified as SystemInfo
 import System.Mem.StableName (makeStableName)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256)
 import Tidepool.CertifiedProducts
-  ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders, certifiedBinderInputClosure
+  ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalPackageDemand
   , encodeCertifiedItemProducts, encodeCertifiedItemProductsWithInputs, readyNativeProductSourceSha256 )
 import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts )
@@ -249,6 +249,14 @@ stagedFinalizedArtifacts (StagedOriginalProducts certified _ _ _ _) = certifiedF
 stagedOriginalBinders :: StagedOriginalProducts -> Set.Set SymbolIdentity
 stagedOriginalBinders (StagedOriginalProducts certified _ _ _ _) =
   maybe Set.empty certifiedContextBinders (certifiedTargetContext certified)
+
+stagedOriginalPackageDemand :: Maybe StagedOriginalProducts -> SymbolIdentity
+  -> Either String (Maybe (Set.Set SymbolIdentity))
+stagedOriginalPackageDemand Nothing _ = Right Nothing
+stagedOriginalPackageDemand (Just (StagedOriginalProducts certified _ _ _ _)) identity = do
+  context <- maybe (Left "prior staged originals lack their certified native context") Right
+    (certifiedTargetContext certified)
+  certifiedOriginalPackageDemand context identity
 
 -- File identities come from actual emitter writes, including the staged
 -- terminal certificate. Callers do not inventory an output directory.

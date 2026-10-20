@@ -120,11 +120,15 @@ fn transitive_oracle(
                     .planned_edges(
                         &state,
                         &selected,
-                        &BTreeSet::from([key]),
+                        &BTreeSet::from([PlannedTarget::NewGroup(key)]),
                         NativeClosureStage::ColdValidation,
+                        &BTreeMap::new(),
+                        &BTreeMap::new(),
                     )?
                     .0[&LogicalNodeKey::Group(key)]
-                    .clone()
+                    .iter()
+                    .map(|(target, edge)| (target.logical(), edge.clone()))
+                    .collect()
             }
         };
         let actual = rows[source]

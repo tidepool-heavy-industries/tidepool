@@ -5,7 +5,7 @@ module Tidepool.CertifiedProducts
   , CertifiedProductKind(..), TargetCertificationContext
   , encodeCertifiedOriginalProducts, encodeCertifiedOriginalProductsWithPrior, encodeCertifiedItemProducts
   , encodeCertifiedItemProductsWithInputs
-  , certifiedContextBinders, certifiedBinderInputClosure
+  , certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalPackageDemand
   , resolvePackageGlobal, homeInterfaceUsageOwners, readyNativeProductSourceSha256 ) where
 
 import Prelude hiding (product)
@@ -95,6 +95,32 @@ certifiedBinderInputClosure context roots = do
     maybe (Left "published runtime binder lacks its certified native group") Right
       (Map.lookup coordinate (targetGroupWitnesses context))
   retainedInputClosure context (concat witnesses)
+
+-- Read the already-certified group topology without reconstructing an outline
+-- or discarding the source owner's version. Unknown native binders fail closed;
+-- unrelated owners can still be handled by the current package selection.
+certifiedOriginalPackageDemand :: TargetCertificationContext -> SymbolIdentity
+  -> Either String (Maybe (Set.Set SymbolIdentity))
+certifiedOriginalPackageDemand context identity = case Map.lookup identity (targetBinderOwners context) of
+  Nothing
+    | (symbolUnit identity,symbolModule identity) `Set.member` targetNativeOwners context ->
+        Left "prior native package demand lacks its certified binder"
+    | otherwise -> Right Nothing
+  Just coordinate -> Just <$> visit Set.empty Set.empty [coordinate]
+  where
+    visit _ packages [] = Right packages
+    visit seen packages (coordinate:pending)
+      | coordinate `Set.member` seen = visit seen packages pending
+      | otherwise = do
+          witnesses <- maybe (Left "prior native package demand lacks its certified group") Right
+            (Map.lookup coordinate (targetGroupWitnesses context))
+          let next = [(unit,name,version,ordinal)
+                | (_,_,_,_,SourceOwner unit name version ordinal) <- witnesses]
+              leaves = Set.fromList [symbol
+                | (symbol,_,_,_,PackageOwner _ _ _ Nothing) <- witnesses]
+          -- Retained values (including retained package values) are complete
+          -- runtime boundaries, not requests to recover their implementation.
+          visit (Set.insert coordinate seen) (Set.union packages leaves) (next ++ pending)
 
 data ProductOrigin = FreshProduct | CachedProduct | RetainedCoreProduct deriving (Eq)
 

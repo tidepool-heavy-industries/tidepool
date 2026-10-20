@@ -131,7 +131,7 @@ import Tidepool.CompilerProducts
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts
-  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs, publishStagedOriginalProducts
+  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs, publishStagedOriginalProducts, stagedOriginalPackageDemand
   , retainStagedProgramProducts, exactProgramProductVersionFromDigest )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts
@@ -211,7 +211,7 @@ import Tidepool.GhcPipeline
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
   , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
-import Tidepool.OriginalProductRoots (reconcileOriginalProducts, unrecoveredExactProducts)
+import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithPrior, reconcileOriginalProducts, unrecoveredExactProducts)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports
   , packageImportRoot, validatePackageImportRoot, withPackageRootObservations
   , packageImportRootWithin, validatePackageImportRootWithin)
@@ -3742,6 +3742,22 @@ originalProjectionProducts = withScratch $ \work -> do
     fail "native package publication changed original package codec bytes"
   let segmentDirectory = captureDirectory </> "segment-originals"
   sharedCertificate <- writeCertifiedSegmentProducts [work] currentInterfaces segmentDirectory paired issuedContext
+  let priorPackages = stagedOriginalPackageDemand (Just sharedCertificate)
+  packages <- either fail (maybe (fail "actual native binder was not in its issued context") pure)
+    (priorPackages known)
+  let direct = [global | global <- currentGlobals,globalIdentity global == known]
+  unless (not (null direct) && requiredOriginalPackageGlobalsWithPrior [] [] [] Set.empty priorPackages direct
+      == Right (Set.toAscList packages)) $
+    fail "direct prior native root lost its certified package closure"
+  case priorPackages (known {symbolOccurrence="unissuedPriorNativeBinder"}) of
+    Left _ -> pure ()
+    Right _ -> fail "known prior native owner accepted an unissued binder"
+  unless (priorPackages (known {symbolUnit="unrelated-unit"}) == Right Nothing) $
+    fail "unrelated owner was classified as a certified native binder"
+  let retained = map (\global -> global {globalRequiredGeneration=Just 99}) direct
+  unless (requiredOriginalPackageGlobalsWithPrior [] [] [] Set.empty
+      (const (Left "retained value crossed its runtime boundary")) retained == Right []) $
+    fail "retained value package demand recovered an implementation"
   sharedBytes <- BS.readFile (segmentDirectory </> "module-products.cbor")
   unless (sharedBytes == emittedInventory) $
     fail "segment original issuance changed the certified native inventory"

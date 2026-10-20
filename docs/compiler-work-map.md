@@ -1,85 +1,71 @@
 # Compiler work and authority map
 
-The service-path update below covers root `8ad438c5bf` and the explicitly named
-area candidates on 2026-10-20. It distinguishes implemented owners from
-receiving work and does not establish release readiness. The subsequent P1–P10
-tables describe the earlier finite path at `8245fa800a`/`c10837d44d`; they remain
-a deletion and consumer-migration inventory, not the current service dataflow.
-Historical qualification observations name their own exact revisions.
-Stage names identify ownership boundaries; their timings are not additive.
-Use [compiler profiling](compiler-profiling.md) for measurement and
+The service map covers root `24d8e0a9607d1a01377214d1a417ee6b324cb2f1`
+and explicitly named receiving candidates on 2026-10-20. A candidate is not part
+of that root merely because its source review or a component check passed.
+The later P1–P10 material describes the earlier finite path at
+`8245fa800a`/`c10837d44d`; it is a historical deletion inventory, not the live
+service dataflow. Stage timings are inclusive and are not additive. Use
+[compiler profiling](compiler-profiling.md) for measurement and
 [property testing](property-testing.md) for independent checks.
 
 ## Service path: current ownership and receiving boundaries
 
-The controlling implementation plan is
-[completion/execution.md](../plans/shared-warm-compiler/completion/execution.md).
-Persistent GHC processes already existed in the baseline. This migration removes
-repeated client reconstruction and duplicate preparation routes; process reuse
-alone is neither its implementation nor evidence of a speedup.
+The controlling documents are the [completion plan](../plans/shared-warm-compiler/completion/plan.md)
+and [implementation reset](../plans/shared-warm-compiler/completion/implementation-reset.md).
+The [verification ledger](../plans/shared-warm-compiler/completion/tests/verification-ledger.md)
+owns named discovery/notebook commands and their pending execution gates.
+Persistent GHC processes already existed in the baseline. The intended change
+removes repeated reconstruction and competing resident routes; process reuse
+alone proves neither completion nor a speedup.
 
-| Boundary | Current owner and carried fact | Open receiving work |
+| Boundary | Root owner and carried facts | Receiving work and qualification limit |
 | --- | --- | --- |
-| Runtime admission | Runtime captures actual source A, target B, reservation and current compiler-world association. Compiler identity does not replace source or execution authority. | Ordinary syntax, original source/target separation and joined cancellation controls must all use this owner. |
-| Compiler preparation | The service retains the parsed operation and its actual world. Ordered stages carry their own checked prefixes; matching outer END is required before executable sealing. | PREP5/protocol 27 producer `b3909545ec` and scoped query consumer `e1a1af0c0b` compile separately. Joined execution is pending; earlier PREP4 results do not qualify this pair. |
-| Finalized interfaces and original products | GHC owns completed interfaces/Core; `CompilerProducts` owns original-product admission. A finalized-module inventory is broader than fresh implementation selection. | Preserve fresh source, selected canonical SOURCE, retained staged Original and TYPE-only custody distinctly. Do not make every finalized interface a newly issued original or compare relocated paths as implementation identities. |
-| Native selection and installation | The resolver selects exact issued bindings or positively completed current groups. `ScopedTargetImage` carries its demanded images. Native source causes follow the actual selected binding; byte equality cannot provide that relationship. | Current support `5bc75aece0` has 3 focused and 18 bundled passes. Compiler receipt `b11b2f6194` and selected-anchor `fe97b03e60` have 1 and 3 focused passes. Runtime historical companions must still come from the same actual prepared-target/settled-cell pair; graph-only/recovered input stays Unwitnessed. |
-| Checked runtime continuation | `CheckedTurnCompletion::install_certified_turn_in` validates the same prefix/item/world before installation and advances only the association's runtime key after successful installation. The world and captured source observations remain the same. | Root `774bec1929`/`3f8b3bb54d` repair the hosted query refusal oracle through actual source admission. The test compiles; its full execution remains pending. No generic key refresh or stale-check bypass is authorized. |
-| Host and renderer preparation | `RuntimeHostPrototypeReceipt` retains its actual purpose-specific owner. Cold World preparation does not require a finite owner. `RequestCompilerInputs` owns both selected support and the metadata that interprets it. | Metadata controls pass 4/4. Actual input `0477b3481b` passes the previous Scientific demand boundary and fails interface certification for an unused operand; root `9b0d4e6d48` separates compiler import selection from runtime demand. Replay remains pending. |
-| Imported value interfaces | `CheckedValueImportAuthority` owns exact checked rows for the stage plus its real operation operand. `SelectedSessionValueOwners::from_checked_imports` projects typed identities directly, with bounded allocation. World segment certification no longer accepts an independent owner list. | Runtime `select_item` still uses only the stage's demanded rows. The real input test must prove unused input is not retained, used input executes, wrong payload fails, and foreign or retired input refuses. |
-| Declaration adoption | The actual declaration origin carries immutable hidden-input custody. Prospective readers validate exact baseline, scope and origin pairing before mutation. Final runtime publication uses the issued final support. | The root joined consumers compile; frozen support has 12 focused passes at `857afe6454`. Actual declaration-history execution on the join remains required. |
-| Queries | The five discovery operations use the held compiler operation; runtime owns view currency. The actor captures its actual request/row/model observation with the scaffold. | Area `1dd53569cf` passes the actual namespace selector. `18b38632fc` adds a real hosted all-five program; `6c29b1c6f4` preserves operational errors in status. Joined execution remains pending. |
-| Reload publication | `RuntimeSourceLeaseClaim::for_publication` retains the actual prerequisite claim. Weak views cannot prolong it. All source gates are acquired in canonical order, then the world and installed state are compared under the actor owner. Confirmation rechecks the same prerequisites; ordinary refusal can restore its own source without clearing external uncertainty. | Root `3f8b3bb54d` compiles and passes 8 runtime plus 10 actor controls. The real reload workflow and durable recovery remain unqualified. |
-| Reload retirement and observation | The same affine attempt retains candidate, source fence and physical cleanup obligations. Compact diagnostic causes retain no World ownership. Real source callbacks survive refusal restoration. | Lifecycle `a8bc364ebf` passes 2 actual worker controls; compact-cause controls pass 5. The operation diagnostic handoff and terminal owner-loss notification must be completed before public/default/force recovery qualification. |
+| Runtime admission | Runtime captures the actual original source, target scope, reservation and compiler World association. Source permission, checked execution provenance and compiler identity remain distinct. | engine_completion and root own the joined used/unused/wrong-payload and crossed/retired input controls. A compiler reply or an uncertain END cannot authorize evaluation or publication. |
+| Held compiler environment | `HeldCompilerWorld` retains immutable input facts and `WorldPreparedModules`; `runHeldWorldSource` shares dependency preparation between closed cell and observation operations. Queries consume transient checked environments before returning. | H/engine owns phase-correct same-World environment and demanded prior-source-body restoration, including SOURCE cycles. R owns the Rust repeated-source-Original guard exposed by mixed reuse. Retained HPT entries alone do not establish a complete usable environment; no whole mutable `TcGblEnv` is retained as query authority. |
+| Parsed operation and settlement | The shared source owner carries the actual parsed/no-quasiquote proof, native TYPE annotation and ordered stage facts. PREP5/protocol 27 preserves stage-local runtime references. Root `e8ad8a0f50` carries admitted item identity through generated source preparation. | Matching source/item/world and outer END are still required before executable sealing. Stage-environment reuse must preserve actual source versus boot graph nodes and same-input change detection. A prior PREP4/component pass does not qualify the joined worker. |
+| Physical products | GHC owns finalized interfaces/Core and the certifier owns their physical source, producer and certificate pairing. Checked compiler imports include unused inputs; runtime demand selects only actual executable references. | The approved five-consumer repair carries the exact binding from the same `IssuedOriginalOutput`; W `f25` is source-only with incomplete tests. Matching canonical bytes are insufficient. Do not reconstruct bindings from broader inventories, union unrelated views or weaken the binding guard. |
+| Native planning | Exact issued bindings, available byte custody and current-product intent are separate facts. Runtime installation consumes the selected native closure, not a whole retained catalog. | N `49e` production/cfg compilation and the same-key control pass; refusal-stage correction remains pending. Historical edges retain exact binding identity, and graph-only recovery cannot manufacture runtime source permission. The ledger keeps these component results separate from actor acceptance. |
+| Host input and renderer preparation | `RuntimeHostPrototypeReceipt` carries the purpose-specific original owner. Request/input TYPE evidence is separate from the live payload and its mount; checked compiler imports retain certificate interfaces even when unused. | Root `24d8` executes unused and used JSON input successfully, then fails the wrong-payload result oracle. Direct initial language rejection and failure after an actual effect-response resume are distinct dispositions; root's bounded oracle repair remains pending execution. Exact cohort counts are in the ledger. |
+| Checked execution and publication | `CheckedTurnCompletion::install_certified_turn_in` preserves the exact prefix/item/world while installing its own native source facts. Items advance a private prefix; successful cell completion promotes public World and bindings together. | A failed/cancelled cell publishes no new cell names; already executed external effects remain. Final native support must come from the same physical-output issuer. Actual declaration, mixed and later-reuse histories remain required on the receiving join. |
+| Queries and status | Actor effects and status use the held-World observation path. The actor carries actual request/row/model observations; runtime owns entry snapshots, pinned-answer validation, source/END checks and final installation. | Actual GHC Name/namespace/operator controls pass at their own revisions. The shared all-five hosted program checks semantic fields, read-only state, discovered `readFile` execution and stale-pin refusal after publication; hosted execution remains open. The separate status race must reach real answer settlement, not fail during initial source parsing. |
+| Source publication | The publication claim and ordered source gates retain the actual prerequisite lease. Confirmation rechecks those prerequisites under the actor owner; ordinary restoration cannot erase external uncertainty. | The same affine source/retirement attempt must serve the actual public/default endpoint. Prior publication component counts do not qualify that endpoint, caller-loss retention or durable recovery. |
+| Reload retirement | The required public endpoint uses the same affine retained retirement core and source fence; candidate, cleanup and continuation obligations remain together. | P owns joined public/default integration and its actual success/refusal/caller-loss controls. DTO codec/presenter passes do not establish runtime ownership. Default evidence is required before early Persona; force/recovery remain mandatory later work. |
+| Remaining finite mutation APIs | Closed Turn/Host installation preserves checked overlays and makes reserved host mounts refuse declaration collisions without finite recompilation. Direct finite definition/staging APIs and their old tests remain. | L's actual World fixture migration advances the three host-binding controls to a checked-source observation mismatch (authored 319 bytes versus rendered 4056). A minimal carry repair is approved; mount behavior remains unqualified. Migrate finite define/stage/retract/query tests through actual producers before deletion; no helper-name exemption. |
 
-The checked-install distinction matters inside a running cell: native source
-registration changes runtime revisions before an authored query runs. Treating
-that expected owner transition as unrelated source drift replaces the world
-under the checked prefix and correctly causes later settlement to refuse.
-The repair carries the same association across its own installation; it does
-not narrow the general revision witness or rewrite old source observations.
+The Root, Haskell, Rust physical-issuer, native-planner and retirement rows above
+are separate receiving boundaries. Their candidates must join before one workflow
+can qualify them together. Carrying a fact across an owner does not permit a
+second reconstruction from broader inventories, another native issuer, or a
+fallback to the historical finite compiler path.
 
-The positive private-input history has progressed past finalized-source,
-metadata-cache and current-Scientific-demand failures. Engine `0477b3481b`
-separates compiler SOURCE claims from native input demand.
-The same decoded physical products and receipt classify
-external references once for both demand and group certification. Unversioned
-current output is certified later by the complete product owner; explicitly
-versioned references remain historical inputs. Cached origin alone does not
-answer whether a body was produced. This classification is demand data, not
-native authority, and cannot skip source, interface or product certification.
+The live cross-owner contract is exact issued-binding preservation. The same
+physical output supplies compiler-input roles, custody, availability and decisions
+through every consumer. Source outcome, operational settlement and diagnostic
+causes are independent observations. Current receipt counts, failing boundaries
+and pending commands belong in the verification ledger; progress to a later
+boundary is not acceptance of a whole history.
 
-The next observed boundary compared captured interfaces against runtime demand:
-an unused real input is still a compiler import. Root `9b0d4e6d48` derives
-certificate selection from the checked import owner itself. Runtime item
-selection stays stage-local, so this change does not select an unused value.
-The actual used/unused/wrong-payload history is the acceptance oracle.
+No matched warm/cold performance comparison or frozen Persona qualification is
+established here. Structural removal of a duplicate parser/issuer, a component
+counter, cached compilation, and an actual runtime speedup are different claims.
+Measure the exact joined bundle with source, compiler profile, workload,
+hydration/planning/product counts, memory and cleanup observations. G2 additionally
+requires actual ordinary/mixed/source-defined cells, private-input controls,
+semantic queries, default reload, selected Persona spec/tools/memory and a bounded
+real DeepSeek multi-turn smoke on that same frozen bundle. Force/recovery and the
+remaining campaign failures are not waived by early Persona delivery.
 
-The complete-offer source-lifetime gap is separate: exact native edges survive,
-but their resolver-issued Current/Historical/SelectedMissing causes were dropped
-when complete availability was issued without target demand. The receiving
-repair carries those causes at issuance, with the full historical selection
-anchor. It must retain only the exact reachable causes, preserve Unwitnessed
-recovery, and avoid reconstructing live source authority from a broader offer.
-
-Evidence is retained under
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/completion/engine/`
-and `/srv/swarm/evidence/inanna/world-json-input-acceptance-20261020/`.
-The latest completed private-input cohort at engine `0477b3481b` executed
-**two cases: one pass and one failure**, build
-`80b86335-ed7c-4597-b10a-58583342e3fe`. The passing crossed/retired
-owner control does not qualify successful input execution. No new matched
-performance comparison or frozen Persona qualification follows.
-
-The hosted query regression's later source-fence assertion is repaired and
-compiled at root `3f8b3bb54d`, but has not yet executed there. Native fixture/model
-checkpoint `68afeddf08` executed 12 controls, with 6 passes and 6 failures.
-Corrected oracles must distinguish continuation from current-product issuance
-and the native offer's private proof from its receiving artifact view. They must
-also distinguish the explicit root frontier from its closed descendants. Source
-review of those corrections is not passing execution evidence.
+Execution manifests retain each result's own revision under
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/completion/engine/`.
+Use those manifests and the verification ledger rather than transferring earlier
+leaf counts onto root or treating partial compilation as executed acceptance.
 
 ## Earlier finite path and deletion inventory
+
+Everything below this heading is the historical finite-path inventory at the
+revisions named above. Its “current” labels describe that snapshot, not the
+service implementation or the receiving candidates.
 
 ```mermaid
 flowchart TD

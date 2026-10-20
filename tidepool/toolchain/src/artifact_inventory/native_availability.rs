@@ -38,6 +38,21 @@ impl<'a> NativeDependencyCatalog<'a> {
         }
     }
 
+    pub(super) fn original_namespace_pair(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Result<Option<(ArtifactBinding, ArtifactBinding)>, CompileError> {
+        match &self.0 {
+            DependencyGrantSource::Request(inputs) => inputs.original_namespace_pair(owner),
+            DependencyGrantSource::Source(source) => {
+                Ok(source.world_primary_type_row(owner).and_then(|row| {
+                    row.original_binding
+                        .map(|original| (*original, *row.interface_binding))
+                }))
+            }
+        }
+    }
+
     pub(crate) fn decision<'b>(&'b self, owner: &ExactModuleIdentity) -> InputNativeDecision<'b> {
         let projection = match &self.0 {
             DependencyGrantSource::Source(source) => source.projection(),
@@ -1061,7 +1076,6 @@ pub(super) fn bind_fresh_product_dependencies(
     entries: &impl ArtifactEntryMap<ArtifactId>,
     fresh: &BTreeSet<NativeGroupKey>,
     catalog: &NativeDependencyCatalog<'_>,
-    required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
 ) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
     let mut acquisition = CertifiedNativeDemandAcquisition {
         entries: BTreeMap::new(),
@@ -1118,16 +1132,15 @@ pub(super) fn bind_fresh_product_dependencies(
         };
         acquisition.bindings.insert(group, resolved);
     }
-    acquisition.retain_dependency_groups(entries, consumed_namespace, required)?;
+    acquisition.validate_dependency_namespace(entries, consumed_namespace)?;
     Ok(acquisition)
 }
 
 impl CertifiedNativeDemandAcquisition {
-    fn retain_dependency_groups(
+    fn validate_dependency_namespace(
         &self,
         entries: &impl ArtifactEntryMap<ArtifactId>,
         consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
-        required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
     ) -> Result<(), CompileError> {
         for binding in self.bindings.values() {
             let closures = match binding {
@@ -1152,13 +1165,6 @@ impl CertifiedNativeDemandAcquisition {
                     .or_else(|| entries.get(&group.binding.artifact()))
                     .ok_or_else(|| failure("acquired native dependency payload missing"))?;
                 validate_consumed_native_namespace(entry, consumed_namespace)?;
-                required
-                    .entry(NativeGroupKey {
-                        artifact: group.binding.artifact(),
-                        original_ordinal: group.original_ordinal,
-                    })
-                    .or_default()
-                    .insert(*group);
             }
         }
         Ok(())
@@ -1769,7 +1775,7 @@ impl CheckedNativeAvailability {
         let advertised = self.advertised_groups(baseline_groups)?;
         let preferred =
             catalog.qualified_availability(projection, namespace, &advertised, &self.offers)?;
-        self.validate_advertised(advertised, &preferred, validation)
+        self.validate_advertised(advertised, &preferred, projection, validation)
     }
 
     fn advertised_groups(
@@ -1801,16 +1807,9 @@ impl CheckedNativeAvailability {
         self,
         advertised: BTreeSet<NativeGroupKey>,
         preferred: &[QualifiedNativeAvailability],
+        projection: &CompilerInputProjection,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
-        let originals = self
-            .entries
-            .iter()
-            .filter_map(|(id, entry)| match &entry.payload {
-                ArtifactPayload::Original(product) => Some((*id, product)),
-                _ => None,
-            })
-            .collect::<BTreeMap<_, _>>();
         let mut qualifications = BTreeMap::new();
         for qualification in preferred {
             if qualifications
@@ -1837,6 +1836,37 @@ impl CheckedNativeAvailability {
                     ));
                 }
             }
+        }
+        // Full validation covers the advertised products and their issued
+        // dependency closures. Other retained bodies are byte custody, not
+        // competing members of this request's original namespace.
+        let mut required_originals = self.roots.clone();
+        required_originals.extend(advertised.iter().map(|key| key.artifact));
+        required_originals.extend(projection.roles().iter().filter_map(|role| role.original()));
+        for qualification in qualifications.values() {
+            required_originals.insert(qualification.original());
+            required_originals.extend(
+                qualification
+                    .groups()
+                    .iter()
+                    .map(|group| group.binding.artifact()),
+            );
+        }
+        let mut originals = BTreeMap::new();
+        for id in required_originals {
+            let entry = self.entries.get(&id).ok_or_else(|| {
+                CompileError::CompilerEvidence(Box::new(
+                    crate::certified_products::CertificationError::MissingRetainedCustody {
+                        artifact: id,
+                    },
+                ))
+            })?;
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeRootNotOriginal { artifact: id },
+                ));
+            };
+            originals.insert(id, product);
         }
         crate::certified_products::validate_available_originals_with_validation(
             &originals,
@@ -3398,14 +3428,19 @@ mod normalized_dependency_tests {
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let selection =
+        let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &artifacts.metadata_snapshot(),
                 &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
             )
             .unwrap();
-        let inputs = OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap();
+        let inputs = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            &artifacts,
+            entries.clone(),
+        )
+        .unwrap();
         let complete = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
         let root_owner = ExactModuleIdentity {
             unit: products[1].owner().unit.clone(),
@@ -3490,8 +3525,7 @@ mod normalized_dependency_tests {
                         );
                         assert!(empty.dependency_support(key, product.owner()).is_none());
                         assert!(
-                            exhaustive_group_supports(empty.rows(), key, product.owner())
-                                .is_empty()
+                            exhaustive_group_supports(empty.rows(), key, product.owner()).is_empty()
                         );
                     }
                 }
@@ -3632,21 +3666,40 @@ mod normalized_dependency_tests {
         };
         let root_pair = raw_pair(expected_root);
         let hidden_pair = raw_pair(expected_hidden);
-        let root_projection =
-            CompilerInputProjection::from_issued_entries(&[entries[&root_id].clone()]).unwrap();
-        let mut selection =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &root_projection,
-                &parent.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        let root_originals = selection
+            .selected_authored_original_closure(
+                inputs.issued_artifacts(),
+                &products[1].owner().unit,
+                &products[1].owner().module,
             )
             .unwrap();
-        selection
-            .finish_new_product_availability(
-                &parent.metadata_snapshot(),
-                complete.native_availability(),
-            )
+        let root_source = complete
+            .certify_original_closure(&root_originals)
+            .unwrap()
+            .source_support(&BTreeSet::from([root_owner.clone()]))
             .unwrap();
+        assert_eq!(root_source.projection().snapshot_roles().len(), 1);
+        assert!(root_source
+            .projection()
+            .snapshot_roles()
+            .contains_key(&root_owner));
+        let root_context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&root_source)
+            .unwrap();
+        let root_request = root_context
+            .capture_world_primary_compiler_inputs(producer.sha256())
+            .unwrap();
+        assert!(root_request
+            .artifacts()
+            .capture_graph_selection()
+            .native_groups
+            .contains(&expected_root));
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            &root_request,
+            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        )
+        .unwrap();
         let canonical = Arc::new(ArtifactEntry::canonical(
             products[0].module_interface().unwrap().clone(),
         ));
@@ -3667,13 +3720,9 @@ mod normalized_dependency_tests {
             .unwrap();
         assert_ne!(receiving.namespace()[&canonical_id], hidden_pair.1);
         assert!(
-            NativeOriginalRequirement::from_issued_group_custody(
-                hidden_id,
-                canonical_id,
-                &receiving
-            )
-            .unwrap()
-            .is_none(),
+            NativeOriginalRequirement::from_issued_group_custody(hidden_id, canonical_id, &receiving)
+                .unwrap()
+                .is_none(),
             "new Full qualification cannot borrow another canonical scope"
         );
         let unrelated = Arc::new(ArtifactEntry::canonical(
@@ -3780,17 +3829,9 @@ mod normalized_dependency_tests {
             let before_consume = state.graph_visits.load(Ordering::Relaxed);
             let namespace = BTreeMap::new();
             for _ in 0..4 {
-                let mut required = BTreeMap::new();
                 acquired
-                    .retain_dependency_groups(&entries, &namespace, &mut required)
+                    .validate_dependency_namespace(&entries, &namespace)
                     .unwrap();
-                assert_eq!(
-                    required[&NativeGroupKey {
-                        artifact: hidden_id,
-                        original_ordinal: 7
-                    }],
-                    [expected_hidden].into_iter().collect::<imbl::OrdSet<_>>()
-                );
             }
             assert_eq!(state.graph_visits.load(Ordering::Relaxed), before_consume);
             drop(state);
@@ -3856,10 +3897,7 @@ mod normalized_dependency_tests {
         let imports = [PendingImportOwner::Source {
             owner: products[0].owner().clone(),
             original_ordinal: 7,
-            binder: tidepool_repr::execution_schema::testing::identity(
-                "NormalizedHidden",
-                "entry_7",
-            ),
+            binder: tidepool_repr::execution_schema::testing::identity("NormalizedHidden", "entry_7"),
         }];
         let before_bound = fixed.observed_binding_state();
         let error = inventory
@@ -3926,17 +3964,16 @@ mod normalized_dependency_tests {
         // Finish the product through the real completion issuer so the
         // selection carries issued availability rather than an unresolved
         // pending requirement.
-        let support = crate::declaration_context::issue_fixture_compiler_support(
-            projection,
-            artifacts.clone(),
+        let completed = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            &artifacts,
+            vec![entry.clone()],
         )
         .unwrap();
-        selection
-            .finish_new_product_availability(
-                &artifacts.metadata_snapshot(),
-                support.native_availability(),
-            )
-            .unwrap();
+        assert!(completed
+            .native_availability()
+            .issued_row(entry.descriptor.id)
+            .is_some());
         (entry, selection)
     }
 
