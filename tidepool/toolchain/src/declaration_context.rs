@@ -6428,6 +6428,16 @@ struct ProgramSourceSupport {
 }
 
 impl ProgramSourceSupport {
+    fn source_original(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Option<&crate::certified_products::CertifiedModuleInterface> {
+        self.compiler_support
+            .implementation_entry(owner)
+            .and_then(canonical_source_interface)
+            .filter(|interface| interface.source_imports().is_some())
+    }
+
     fn append_fragment(
         previous: Option<&Self>,
         incoming: &crate::artifact_inventory::CompilerSourceSupport,
@@ -6998,11 +7008,20 @@ impl<'a> ExactRequestIdentity<'a> {
 pub(crate) struct WorldSourceCompilationBinding {
     reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
     stage: Arc<crate::compiler_world::CheckedWorldCellStage>,
+    primary_context: Arc<ExactDeclarationContext>,
     plan_receipt_sha256: [u8; 32],
     product_context_sha256: [u8; 32],
 }
 
 impl WorldSourceCompilationBinding {
+    fn primary_selects(&self, owner: &ExactModuleIdentity) -> bool {
+        self.primary_context
+            .compiler_source_support()
+            .projection()
+            .snapshot_roles()
+            .contains_key(owner)
+    }
+
     /// Retain the exact reservation and prepared segment carried by one issued
     /// checked program. Raw preparation completion is not accepted here.
     pub(crate) fn from_output(
@@ -7031,6 +7050,7 @@ impl WorldSourceCompilationBinding {
         Ok(Self {
             reservation: Arc::clone(program.reservation()),
             stage: Arc::clone(stage),
+            primary_context: Arc::clone(program.primary_context()),
             plan_receipt_sha256,
             product_context_sha256: context.finalize().into(),
         })
@@ -8981,6 +9001,27 @@ impl<'a> ExactReceiptAdmission<'a> {
 }
 
 impl ProductInputFacts<'_> {
+    /// Only an earlier output of this program may repeat its admitted source.
+    /// Base roles, mounted values and authored declarations keep their separate
+    /// source-less identities even when their interface bytes agree.
+    fn prior_program_source(
+        &self,
+        binding: &WorldSourceCompilationBinding,
+        context: &ExactDeclarationContext,
+        owner: &ExactModuleIdentity,
+    ) -> Option<&crate::certified_products::CertifiedModuleInterface> {
+        if binding.primary_selects(owner) {
+            return None;
+        }
+        let prior = self.program_support?.source_original(owner)?;
+        (context
+            .compiler_source_support()
+            .implementation_entry(owner)
+            .and_then(canonical_source_interface)
+            == Some(prior))
+        .then_some(prior)
+    }
+
     fn admit_source_facts(
         &self,
         compilation_binding: SourceCompilationBinding<'_>,
@@ -9035,14 +9076,21 @@ impl ProductInputFacts<'_> {
             .iter()
             .map(|module| (module.unit.as_str(), module.module.as_str(), module.boot))
             .collect();
-        if source_owners.iter().any(|(unit, module, _)| {
+        if source_owners.iter().any(|(unit, module, boot)| {
             exact_owners.contains(&(*unit, *module))
                 || (world
                     && context
                         .compiler_source_support()
                         .projection()
                         .snapshot_roles()
-                        .contains_key(&identity(unit, module)))
+                        .contains_key(&identity(unit, module))
+                    && (*boot
+                        || match &compilation_binding {
+                            SourceCompilationBinding::World(binding) => self
+                                .prior_program_source(binding, context, &identity(unit, module))
+                                .is_none(),
+                            SourceCompilationBinding::Exact(_) => true,
+                        }))
         }) {
             return Err(failure("fresh module replaced an admitted exact owner"));
         }
@@ -9291,6 +9339,20 @@ impl ProductInputFacts<'_> {
         }
         if seen != source_owners {
             return Err(failure("exact import witness omits a fresh source module"));
+        }
+        if let SourceCompilationBinding::World(binding) = &compilation_binding {
+            for module in &evidence.modules {
+                let owner = identity(&module.unit, &module.module);
+                if let Some(prior) = self.prior_program_source(binding, context, &owner) {
+                    prior
+                        .validate_source_observation(
+                            &evidence,
+                            module,
+                            &exact_source_imports[&owner],
+                        )
+                        .map_err(compiler_evidence_failure)?;
+                }
+            }
         }
         validation
             .inventory
@@ -9639,6 +9701,154 @@ pub(crate) struct WorldStageSourceAdmission {
     pub(crate) source: ExactSourceAdmission,
     pub(crate) text: String,
     pub(crate) aliases: Vec<PathBuf>,
+}
+
+#[cfg(test)]
+pub(crate) fn assert_world_repeated_source_refusals(
+    program: &crate::compiler_world::CheckedWorldCellProgram,
+) {
+    use sha2::Digest;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Observation {
+        Unchanged,
+        ChangedSource,
+        ChangedImport,
+        Boot,
+    }
+    for observation in [
+        Observation::Unchanged,
+        Observation::ChangedSource,
+        Observation::ChangedImport,
+        Observation::Boot,
+    ] {
+        let mut validation =
+            PackageInterfaceValidation::with_inventory(Arc::clone(&program.validation().inventory));
+        let produced = crate::checked_cell::CheckedValueInputs::capture_world_produced_types(
+            program,
+            &mut validation,
+        )
+        .expect("actual produced interfaces");
+        let first = &program.stages()[0];
+        let end = first.ordinals().last().expect("actual first stage") + 1;
+        let stage_produced = produced.for_segment(0..end).unwrap();
+        let mut segment = decode_world_source_receipt(program, 0)
+            .unwrap()
+            .issue_segment_originals(
+                None,
+                Some(&stage_produced),
+                &mut validation,
+                WorldProgramContinuation::begin(program).unwrap(),
+            )
+            .expect("actual first stage admission");
+        let output = IssuedOriginalOutput::from_segment_originals(&segment.originals).unwrap();
+        segment
+            .admit_program_support(program, &output, &stage_produced)
+            .unwrap();
+        for ordinal in first.ordinals() {
+            let crate::checked_cell::CheckedPlannedCellSlot::Bind { value } =
+                &program.reservation().slots()[*ordinal]
+            else {
+                panic!("mixed fixture begins with a real binding");
+            };
+            segment
+                .admit_value_interface(produced.current_interface(*value).unwrap().clone())
+                .unwrap();
+        }
+        let (continuation, first_source) = segment.finish();
+        let mut next = decode_world_source_receipt(program, 1).unwrap();
+        let repeated = next
+            .source
+            .evidence
+            .modules
+            .iter()
+            .position(|module| {
+                continuation
+                    .program
+                    .program_support
+                    .as_ref()
+                    .unwrap()
+                    .source_original(&identity(&module.unit, &module.module))
+                    .is_some()
+            })
+            .expect("actual mixed history repeats source support");
+        assert!(next.source.evidence.modules.iter().any(|module| {
+            module.product == crate::cache::ProductAvailability::Ready
+                && first_source.source.evidence.modules.iter().any(|prior| {
+                    prior.unit == module.unit
+                        && prior.module == module.module
+                        && prior.product == crate::cache::ProductAvailability::InterfaceOnly
+                })
+        }));
+        let changed = tempfile::tempdir().unwrap();
+        let module = &mut next.source.evidence.modules[repeated];
+        match observation {
+            Observation::Unchanged => {}
+            Observation::ChangedSource => {
+                let mut bytes = std::fs::read(&module.source).unwrap();
+                bytes.extend_from_slice(b"\n-- changed source observation\n");
+                let path = changed.path().join("Changed.hs");
+                std::fs::write(&path, &bytes).unwrap();
+                module.source = path.clone();
+                next.source
+                    .evidence
+                    .sources
+                    .push(crate::cache::SourceEvidence {
+                        path,
+                        sha256: hex(&sha2::Sha256::digest(&bytes)),
+                    });
+            }
+            Observation::ChangedImport => {
+                let imported = module
+                    .imports
+                    .iter_mut()
+                    .find(|edge| edge.selected.is_none())
+                    .expect("actual support imports a package");
+                imported.qualifier =
+                    crate::cache::ImportQualifier::OtherUnit("foreign-package".into());
+                next.source
+                    .evidence
+                    .resolutions
+                    .push(crate::cache::ResolutionEvidence {
+                        qualifier: imported.qualifier.clone(),
+                        module: imported.module.clone(),
+                        boot: imported.boot,
+                        selected: None,
+                        candidates: vec![],
+                    });
+            }
+            Observation::Boot => {
+                module.boot = true;
+                module.product = crate::cache::ProductAvailability::Boot;
+                next.source
+                    .edges
+                    .iter_mut()
+                    .find(|edge| {
+                        edge.owner.unit == module.unit && edge.owner.module == module.module
+                    })
+                    .unwrap()
+                    .boot = true;
+            }
+        }
+        next.source.evidence_bytes = serde_json::to_vec(&next.source.evidence).unwrap();
+        let stage_produced = produced.for_segment(1..1).unwrap();
+        let result = next.issue_segment_originals(
+            None,
+            Some(&stage_produced),
+            &mut validation,
+            continuation,
+        );
+        match (observation, result) {
+            (Observation::Unchanged, Ok(_)) => {}
+            (Observation::ChangedSource | Observation::ChangedImport,
+                Err(CompileError::CompilerEvidence(error))) if matches!(error.as_ref(),
+                    crate::certified_products::CertificationError::Mismatch("same-program source original changed")) => {}
+            (Observation::Boot, Err(CompileError::ExtractFailed(detail))) if detail ==
+                "exact declaration context: fresh module replaced an admitted exact owner" => {}
+            (observation, Err(error)) => panic!("{observation:?}: unexpected refusal: {error:?}"),
+            (observation, Ok(_)) => panic!("{observation:?}: altered source was admitted"),
+        }
+    }
 }
 
 impl<'a> DecodedWorldSourceReceipt<'a> {
