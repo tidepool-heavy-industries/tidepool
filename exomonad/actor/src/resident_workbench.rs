@@ -21857,6 +21857,26 @@ pub(crate) mod request_tests {
                 public_selection.public_root()
             );
             assert_eq!(initial_originals[0].revision(), public_selection.revision());
+            if initial_originals[0].context().semantic_sha256()
+                != public_selection.context().semantic_sha256()
+            {
+                let installed = initial_originals[0].context().snapshot();
+                let issued = public_selection.context().snapshot();
+                let installed_roles = serde_json::to_value(installed.compiler_roles()).unwrap();
+                let issued_roles = serde_json::to_value(issued.compiler_roles()).unwrap();
+                eprintln!("quoted initial original context comparison: producer={} lexical={} roles={} graph={} dependencies={}",
+                    installed.producer_sha256() == issued.producer_sha256(),
+                    installed.lexical() == issued.lexical(),
+                    installed_roles == issued_roles,
+                    installed.graph_selection().unwrap() == issued.graph_selection().unwrap(),
+                    installed.binding_dependencies().unwrap() == issued.binding_dependencies().unwrap());
+                eprintln!("installed source roles: {installed_roles}\nissued source roles: {issued_roles}");
+                eprintln!(
+                    "installed source graph: {:?}\nissued source graph: {:?}",
+                    installed.graph_selection().unwrap(),
+                    issued.graph_selection().unwrap()
+                );
+            }
             assert_eq!(
                 initial_originals[0].context().semantic_sha256(),
                 public_selection.context().semantic_sha256(),
