@@ -1,5 +1,11 @@
 # Campaign backend handoff
 
+> **Superseded (2026-10-19).** This handoff predates the integration join.
+> Current state: `/srv/swarm/checkouts/tidepool-join-final-20261019`, branch
+> `integration/compiler-query-warm-final`, code tip `92fa518105`; see
+> [mid-plan-notes/MILESTONE.md](mid-plan-notes/MILESTONE.md). The checkout and
+> product OIDs below are historical.
+
 **READY_FOR_BACKEND_HANDOFF.** The canonical continuation is [TAKEOVER.md](TAKEOVER.md),
 with current [STATUS.md](STATUS.md). All five supervisors and nine leaves have indexed
 clean source/checkpoint/evidence records. No implementation or native job remains.

@@ -97,12 +97,27 @@ drawing any second-cell conclusion.
 
 - No branch yet; investigation in progress.
 - `actor_host::documentation_tests::published_introspection_example_returns_structured_declaration`
-  was last observed red at `36827d80a7` (0 passed / 1 failed, exit 1) and at
-  handlers `5eb2b3dbed`; it has not been run at the join tip.
-- Observed failure: the example returns `rejected` because
-  `Tidepool.Session.Lib.G4` requires `Tidepool.Effects.Core`, which is
-  unavailable (ordinal 4192 vs 4205 in the retained observation).
-- Earlier forensic: `reviews/A1C-FORENSIC.md`.
+  is **red at the join tip** (`fc73e0e652`, code `92fa518105`): 1 selected /
+  1 executed / 0 passed / 1 failed, exit 1
+  (`final-join/logs/15-a1c-tip-fc73e0e652.log`). Earlier reds: `36827d80a7` and
+  handlers `5eb2b3dbed`.
+- The workbench fails before any Haskell helper runs:
+  `ExactModuleIdentity { unit: "main", module: "Tidepool.Session.Lib.G4" }`
+  requires unavailable
+  `ExactModuleIdentity { unit: "main", module: "Tidepool.Effects.Core" }`
+  through `NativeGroup { dependent_ordinal: 4, required_ordinal: 4174 }`.
+  The Haskell probe script has never been observed to execute.
+- Ordinals are fixture-local and unstable across bases (earlier observation:
+  4192 vs 4205); do not treat them as identity.
+- Do not use the concurrent scratch-tree trace: that investigation ran in
+  `tidepool-front-door-rebase-20261019` with local `native_availability.rs`
+  edits and fails as `InputNoCompatibleCandidate { candidate_count: 0 }`
+  instead. Different base, different refusal.
+- Open question: why `Tidepool.Effects.Core` is absent from the inventory.
+  A link to the Batch A #8 capability gap (`aee5881d9c` removed the candidate
+  native authority issuer) is plausible and unproven.
+- Detail: `reviews/A1C-TIP-FINDING.md`; earlier forensic:
+  `reviews/A1C-FORENSIC.md`.
 
 ## Test/oracle repairs
 

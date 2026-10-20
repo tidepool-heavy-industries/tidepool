@@ -10,9 +10,11 @@ campaign. Evidence lives outside Git under
 - Checkout: `/srv/swarm/checkouts/tidepool-join-final-20261019`
 - Branch: `integration/compiler-query-warm-final`
 - **Code tip: `92fa518105`** (Batch A merge)
-- Documentation-only commits follow it: `75476fb97b` (these notes) and
-  `e5e86803e5` (guide and plan anchor corrections). Treat `92fa518105` as the
-  OID for any code or test claim.
+- Documentation-only commits follow it: `75476fb97b` (these notes),
+  `e5e86803e5` (guide and plan anchor corrections) and `fc73e0e652` (a
+  fact-check rewrite of these notes, plus current-state banners on the
+  superseded `README`, `STATUS`, `TAKEOVER` and `HANDOFF` pages). Treat
+  `92fa518105` as the OID for any code or test claim.
 
 The join contains, in first-parent order: `1df404b22f` (handlers/moduleExports
 cut), merge `630f6e5d35` (native product anchor), merge `961cc99a2a` (d5 reopen
@@ -22,7 +24,7 @@ image), `f908e58302`, `f13005b0b7`, `f87bfb59af` (restored source-transaction
 accessor), `5767157d54` (five-verb correction), `e34183b852` then reverted by
 `1b37c01049` (unproven install telemetry), `76b557305e` (bounded acceptance
 stack), `a4aa30a0a2` (front-door merge), `92fa518105` (Batch A merge),
-`75476fb97b` and `e5e86803e5` (documentation).
+`75476fb97b`, `e5e86803e5` and `fc73e0e652` (documentation).
 
 The warm unified base had two conflicts, resolved per
 `reviews/MERGE-PREFLIGHT.md`: `source_admission.rs` takes the d5 side, and
@@ -71,6 +73,9 @@ not retained in the log; counts come from the libtest summary printed there.
 | `10-dispatch-75476fb97b.log` | `75476fb97b` | query dispatch selector | 1 selected / 1 executed / 1 passed |
 | `11-persona-75476fb97b.log` | `75476fb97b` | persona successor selector | 1 selected / 1 executed / 1 passed |
 | `12-toolchain-full-75476fb97b.log` | `75476fb97b` | full `tidepool-toolchain` unit suite | 1116 selected / 1086 executed / 1054 passed / 32 failed / 30 ignored, exit 1 |
+| `13-doc-fence-fc73e0e652.log` | `fc73e0e652` | `actor_host::documentation_tests::published_notebook_sources_match_authored_fixtures` | 1 selected / 1 executed / 1 passed, 41 ignored |
+| `14-tip-reruns-fc73e0e652.log` | `fc73e0e652` | query dispatch, then front-door prepared fixture | dispatch 1 selected / 1 executed / 1 passed, 3 ignored; front-door 1 selected / 1 executed / 1 passed, 0 ignored |
+| `15-a1c-tip-fc73e0e652.log` | `fc73e0e652` | `actor_host::documentation_tests::published_introspection_example_returns_structured_declaration` | 1 selected / 1 executed / 0 passed / 1 failed, exit 1 |
 
 The full toolchain run improves on the recorded trunk baseline
 (1029 passed / 44 failed / 30 ignored): +25 passed, -12 failed, same ignored.
@@ -82,14 +87,19 @@ It is not green. `final-join/TOOLCHAIN-SWEEP.md` classifies the 32 failures as
 - Full `exomonad-host`, `exomonad-actor` and `tidepool-runtime` unit suites were
   not executed at the join; host and actor test binaries were linked as a side
   effect of the named selectors. No runtime unit-test link is retained.
-- `A1c` (`published_introspection_example_returns_structured_declaration`) was
-  not run at this tip. Its last retained run is red at `36827d80a7` (0 passed /
-  1 failed, exit 1) and also red at handlers `5eb2b3dbed`.
+- `A1c` (`published_introspection_example_returns_structured_declaration`) is
+  red at this tip: 0 passed / 1 failed, exit 1 (`15-*`). The workbench refuses
+  before the Haskell probe runs, because `Tidepool.Session.Lib.G4`'s native
+  group 4 requires an unavailable `Tidepool.Effects.Core`. Details and the
+  divergent scratch-tree trace are in `OPEN-PARCELS.md` and
+  `reviews/A1C-TIP-FINDING.md`.
 - The 44-name trunk-red ledger was not rerun on the join as a ledger; the full
   toolchain run supersedes it with 32 failures at this OID.
 - No frozen release bundle was assembled or qualified, and no packaged
   end-to-end persona run was performed.
-- The front-door fixture was not rerun after `a4aa30a0a2`.
+- The front-door fixture passes at `fc73e0e652` (`14-*`), but it still executes
+  `result = pure 43`, not `frontDoor`; the five-helper composition remains
+  typechecked only (acceptance row `S20` is still open).
 - Build timings are not a speedup measurement; the first join attempt was 99%
   cached, not cold.
 
@@ -98,6 +108,6 @@ It is not green. `final-join/TOOLCHAIN-SWEEP.md` classifies the 32 failures as
 The code at `92fa518105` builds, the five-verb surface is consistent across
 protocol, generated bridge, Haskell helpers, prompts and fixture, and the named
 selectors pass. The toolchain suite is 32 red, the second-cell off-checkout
-case is red by design after removing a false fact, A1c is red as last observed,
-and five repair parcels are blocked in review. This is a coherent integration
-state, not a release.
+case is red by design after removing a false fact, A1c is red at this tip on an
+unavailable native dependency, and five repair parcels are blocked in review.
+This is a coherent integration state, not a release.

@@ -7,7 +7,9 @@ commits should follow `92fa518105`.
 ## Read in this order
 
 1. `plans/shared-warm-compiler/README.md` and `STATUS.md` for the campaign
-   boundary.
+   boundary and history. Both now open with a current-state banner: everything
+   below the banner is the earlier backend handoff, with its own checkout,
+   branch and product OIDs.
 2. `plans/shared-warm-compiler/mid-plan-notes/MILESTONE.md` for what landed and
    what was executed, with the exact OIDs.
 3. `plans/shared-warm-compiler/mid-plan-notes/OPEN-PARCELS.md` for unmerged
@@ -22,14 +24,20 @@ commits should follow `92fa518105`.
 
 ## State you are inheriting
 
-- Branch `integration/compiler-query-warm-final`; code tip `92fa518105`.
-- It builds. Three distinct selectors pass in five executions: query dispatch
-  (`04`, `10`), persona successor (`05`, `11`), and the front-door prepared
-  fixture (`07`, at `a4aa30a0a2`). The schema check (`03`) is analysis-time and
-  predates the front-door merge; it is not a counted case.
+- Branch `integration/compiler-query-warm-final`; code tip `92fa518105`,
+  documentation tip `fc73e0e652`.
+- It builds. Three distinct selectors pass in six executions: query dispatch
+  (`04`, `10`, and `14` at the docs tip), persona successor (`05`, `11`), and
+  the front-door prepared fixture (`07` at `a4aa30a0a2`, `14` at the docs tip).
+  The schema check (`03`) is analysis-time and predates the front-door merge; it
+  is not a counted case.
 - The full `tidepool-toolchain` suite at `75476fb97b` records 1054 passed /
   32 failed / 30 ignored (exit 1), better than the trunk baseline of
   1029/44/30 but not green.
+- `A1c` is red at the tip: the workbench refuses with
+  `ExactModuleIdentity { Tidepool.Session.Lib.G4 } requires unavailable
+  ExactModuleIdentity { Tidepool.Effects.Core } through NativeGroup { 4, 4174 }`
+  before the Haskell probe executes (`15-*`).
 - Five repair parcels are committed but unmerged. Their reviews are split:
   Batch A merged, root E deferred, Batch B and C blocked, custody request
   changes, reload blocked.
@@ -48,8 +56,11 @@ commits should follow `92fa518105`.
    oracles first.
 4. Custody b2: which layer owns multi-group, one-carrier availability? The
    review places it in `declaration_context.rs::normalize_issued_contributions`.
-5. A1c: rerun the selector at the join tip before diagnosing further. The last
-   retained red is at `36827d80a7`, and the join already contains later fixes.
+5. A1c: it is red at the join tip (`15-*`), so the question is no longer
+   whether the join fixes it. Decide whether the missing `Tidepool.Effects.Core`
+   is the Batch A #8 candidate-issuer gap, or whether the published example
+   needs its own fixture dependency declaration. Do not reuse the scratch-tree
+   `InputNoCompatibleCandidate` trace: that tree is a different base.
 
 ## Working rules that already apply
 
@@ -66,8 +77,9 @@ commits should follow `92fa518105`.
 
 ## Suggested first tranche
 
-1. Rerun A1c at the join tip; it is the only model-facing documentation test
-   known to be red, but the join may already fix it.
+1. Diagnose A1c's missing `Tidepool.Effects.Core` at the join tip; it is the
+   only model-facing documentation test known to be red, and its Haskell probe
+   has never been observed to execute.
 2. Rerun the 44-name trunk-red ledger at the join tip and reconcile it with the
    32 failures in `TOOLCHAIN-SWEEP.md`.
 3. Land the Batch A residue that is still open (#9, #17, #18) and decide #7/#8.

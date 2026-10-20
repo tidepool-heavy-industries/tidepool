@@ -1,5 +1,14 @@
 # Shared warm compiler: delivery plan
 
+> **Current state (2026-10-19).** The material below this banner is the
+> campaign-era delivery plan. The work has since advanced to
+> `/srv/swarm/checkouts/tidepool-join-final-20261019`, branch
+> `integration/compiler-query-warm-final`, code tip `92fa518105`. Read
+> [mid-plan-notes/MILESTONE.md](mid-plan-notes/MILESTONE.md) for what landed and
+> what was actually executed, and [mid-plan-notes/OPEN-PARCELS.md](mid-plan-notes/OPEN-PARCELS.md)
+> for unmerged parcels. Checkout paths, branch names and product OIDs below are
+> historical.
+
 Current user boundary: all existing workers reached **READY_FOR_BACKEND_HANDOFF**.
 Read [TAKEOVER.md](TAKEOVER.md) and [STATUS.md](STATUS.md) before resuming.
 The feature remains incomplete; this explicit natural-boundary backend transition

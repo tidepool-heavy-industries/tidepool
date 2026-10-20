@@ -1,5 +1,12 @@
 # Shared warm compiler — backend handoff
 
+> **Superseded (2026-10-19).** This page records the earlier backend handoff.
+> The current state is the integration join at
+> `/srv/swarm/checkouts/tidepool-join-final-20261019`, branch
+> `integration/compiler-query-warm-final`, code tip `92fa518105`; see
+> [mid-plan-notes/MILESTONE.md](mid-plan-notes/MILESTONE.md). The checkout,
+> branch and product OIDs below are historical.
+
 **READY_FOR_BACKEND_HANDOFF.** All five supervisors and nine leaves reached clean,
 durable natural boundaries. No implementation worker, native command or verification
 job remains active. The user requested transition to a fresh backend before the whole
