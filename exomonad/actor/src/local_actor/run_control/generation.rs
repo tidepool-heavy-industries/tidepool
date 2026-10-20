@@ -225,6 +225,30 @@ impl GenerationRetirementDiagnostic {
         Self::write_projected(owner, handoff)
     }
 
+    fn record_settlement(&mut self, settlement: &ActorGenerationPublicationSettlement) {
+        let Self::Operation { owner, handoff } = self else {
+            return;
+        };
+        if matches!(handoff, RetirementDiagnosticHandoff::Unprojected) {
+            let Some(evidence) =
+                crate::resident_actor::RetirementDiagnosticEvidence::from_settlement(settlement)
+            else {
+                return;
+            };
+            *handoff = RetirementDiagnosticHandoff::Projected {
+                evidence: Arc::new(evidence),
+                refusals: Vec::new(),
+            };
+        }
+        Self::write_projected(owner, handoff);
+    }
+
+    fn retry_projected(&mut self) {
+        if let Self::Operation { owner, handoff } = self {
+            Self::write_projected(owner, handoff);
+        }
+    }
+
     fn operation_id(&self) -> Option<&tidepool_runtime::session::WorkbenchOperationId> {
         match self {
             Self::Operation { owner, .. } => Some(owner.operation()),
@@ -508,14 +532,15 @@ impl GenerationRetirementCore {
                     outcome,
                     nonstart,
                     diagnostic_refusals,
-                    ..
+                    diagnostic,
                 } => metadata.receipt(
                     State::ReloadAReopened,
                     Vec::new(),
                     Some(cause(
                         Cause::ReloadPublicationFailed,
-                        format!(
-                            "candidate publication was refused: {outcome:?}; nonstart={nonstart:?}"
+                        diagnostic.as_ref().map_or_else(
+                            || format!("candidate publication was refused: {outcome:?}; nonstart={nonstart:?}"),
+                            |recorded| recorded.detail().to_owned(),
                         ),
                     )),
                     diagnostic_refusals
@@ -554,9 +579,6 @@ impl GenerationRetirementCore {
                         let mut pending = receipt.as_ref().clone();
                         pending.secondary.push(cause(Cause::ReloadAcknowledgementUnconfirmed, "original source is restored; operation evidence or reservation settlement remains pending".into()));
                         return Arc::new(pending);
-                    }
-                    GenerationUnstartedProgress::PublicationNotQualified(receipt) => {
-                        return receipt.clone()
                     }
                     GenerationUnstartedProgress::SettlementFailed { receipt, error } => {
                         let mut failed = receipt.as_ref().clone();
@@ -758,7 +780,6 @@ enum GenerationUnstartedProgress {
     ReadyForPublication,
     DispatchRefused(GenerationPublicationDispatchFailure),
     ProjectionRefused(GenerationRetirementProjectionRefusal),
-    PublicationNotQualified(Arc<tidepool_bridge_effects::RlRetirementReceipt>),
     Refusing {
         receipt: tidepool_bridge_effects::RlRetirementReceipt,
     },
@@ -783,6 +804,9 @@ enum GenerationPublicationCustody {
         receiver: oneshot::Receiver<preparation::PublicationDelivery>,
         terminal: Arc<std::sync::OnceLock<preparation::PublicationTerminalObservation>>,
     },
+    // Install the actual affine settlement before diagnostic projection can
+    // allocate, render an error, or enter its existing operation journal.
+    Received(ActorGenerationPublicationSettlement),
     NotStarted {
         reserved: ReservedActorGeneration,
         reason: preparation::PublicationNonStart,
@@ -816,6 +840,7 @@ enum GenerationPublicationAuthorization {
     CancelledComponent,
 }
 
+#[derive(Debug)]
 pub(super) enum GenerationPublicationDispatchFailure {
     Unavailable,
     AttemptChanged,
@@ -884,6 +909,22 @@ enum GenerationRetirementProjectionRefusal {
 }
 
 impl GenerationRetirementCapture {
+    /// Called only after this attempt has restored A. The slot owns each
+    /// queued delivery and prevents replay of an already redispatched ordinal.
+    fn resume_deferred_sources(&self) {
+        use crate::resident_actor::source_slots::SourceRegistrationDependency;
+        let GenerationRetirementWork::Observed(work) = &self.work else {
+            return;
+        };
+        for registration in &work.source_registrations {
+            if registration.observation().dependency == SourceRegistrationDependency::Dependent {
+                // Failure remains typed and observable on this SAME slot. It
+                // neither grants publication authority nor settles cleanup.
+                registration.resume_deferred();
+            }
+        }
+    }
+
     fn blockers(
         &self,
     ) -> Result<Vec<tidepool_bridge_effects::RlBlocker>, GenerationRetirementProjectionRefusal>
@@ -989,6 +1030,28 @@ impl GenerationRetirementCapture {
                         ),
                     };
                     blockers.push(Blocker::ReloadResourceBlocker(resource, reason));
+                }
+                for registration in &work.source_registrations {
+                    use crate::resident_actor::source_slots::{
+                        SourceRegistrationDependency as Dependency,
+                        SourceRegistrationState as State,
+                    };
+                    let observed = registration.observation();
+                    if matches!(observed.state, State::Closed { .. }) {
+                        continue;
+                    }
+                    let reason = match observed.dependency {
+                        Dependency::Independent => continue,
+                        Dependency::Dependent => Reason::ReloadActiveDependentWork,
+                        Dependency::Unclassified => Reason::ReloadUnclassifiedWork,
+                    };
+                    blockers.push(Blocker::ReloadResourceBlocker(
+                        Resource::ReloadSourceBindingResource(
+                            retirement_actor_identity(observed.identity.actor)?,
+                            observed.identity.slot.to_string(),
+                        ),
+                        reason,
+                    ));
                 }
                 for route in &work.routes {
                     use crate::request::routes::GenerationRouteDependency;
@@ -1178,15 +1241,7 @@ impl GenerationPublicationCustody {
                 reason,
                 settlement_error: None,
             },
-            preparation::PublicationDelivery::Settled(
-                ActorGenerationPublicationSettlement::Unpublished(refusal),
-            ) => Self::Unpublished {
-                refusal,
-                settlement_error: None,
-            },
-            preparation::PublicationDelivery::Settled(
-                ActorGenerationPublicationSettlement::Settled(outcome),
-            ) => Self::Settled(outcome),
+            preparation::PublicationDelivery::Settled(settlement) => Self::Received(settlement),
         };
     }
 
@@ -1196,6 +1251,26 @@ impl GenerationPublicationCustody {
         diagnostic: &mut GenerationRetirementDiagnostic,
     ) -> Option<GenerationRetirementCompletion> {
         self.observe();
+        if let Self::Received(settlement) = self {
+            // The same actual settlement remains in the core across projection
+            // and journal writes, including panic or loss of the live owner.
+            diagnostic.record_settlement(settlement);
+            let Self::Received(settlement) =
+                std::mem::replace(self, Self::ProducerLostAfterExecute)
+            else {
+                unreachable!()
+            };
+            *self = match settlement {
+                ActorGenerationPublicationSettlement::Unpublished(refusal) => Self::Unpublished {
+                    refusal,
+                    settlement_error: None,
+                },
+                ActorGenerationPublicationSettlement::Settled(outcome) => Self::Settled(outcome),
+            };
+        }
+        // Failed writes keep the same evidence Arc and full primary custody;
+        // retrying a write never recreates a settlement or executes its body.
+        diagnostic.retry_projected();
         let fence = match cutoff {
             GenerationRetirementCutoffPhase::Captured { fence, .. } => fence,
             _ => return None,
@@ -1259,6 +1334,11 @@ impl GenerationPublicationCustody {
             }
             _ => None,
         };
+        if matches!(self, Self::SourceRestoredPending(_)) {
+            if let GenerationRetirementCutoffPhase::Captured { capture, .. } = cutoff {
+                capture.resume_deferred_sources();
+            }
+        }
         completion.or_else(|| self.record_source_restored(diagnostic))
     }
 
@@ -1431,6 +1511,9 @@ fn reconcile_unstarted(
     let GenerationUnstartedProgress::SourcesRestored { evidence, .. } = progress else {
         return None;
     };
+    if let GenerationRetirementCutoffPhase::Captured { capture, .. } = cutoff {
+        capture.resume_deferred_sources();
+    }
     let recorded = diagnostic.record_default(evidence)?;
     let old = std::mem::replace(publication, GenerationUnstartedPublication::Consuming);
     let GenerationUnstartedPublication::Available(reserved) = old else {
@@ -2267,17 +2350,8 @@ impl RunState {
         })();
         *progress = match projected {
             Err(refusal) => GenerationUnstartedProgress::ProjectionRefused(refusal),
-            Ok(mut receipt) if receipt.blockers.is_empty() => {
-                // An empty census does not enable the unqualified publication
-                // consumer. Retain the same reservation/fence for reconciliation.
-                receipt.state = RlRetirementState::ReloadRetirementFenced(
-                    RlRetirementStage::ReloadSourcePublication,
-                );
-                receipt.primary = Some(RlCause {
-                    kind: RlCauseKind::ReloadPublicationFailed,
-                    detail: "generation publication is unavailable".into(),
-                });
-                GenerationUnstartedProgress::PublicationNotQualified(Arc::new(receipt))
+            Ok(receipt) if receipt.blockers.is_empty() => {
+                GenerationUnstartedProgress::ReadyForPublication
             }
             Ok(receipt) => GenerationUnstartedProgress::Refusing { receipt },
         };
