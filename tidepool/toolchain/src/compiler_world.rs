@@ -547,12 +547,100 @@ pub enum WorldDeclarationSelection {
     Recovered(Arc<crate::declaration_join::RecoveredDeclarationTip>),
 }
 
+/// Descriptive profile of a protected compiler observation, never execution authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorldObservationProfile {
+    Workbench,
+    HostCarrier,
+}
+
+/// Source-independent declarations issued by the actor's common source producer.
+/// Native request types retain their original checked-signature representation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldObservationScaffold {
+    profile: WorldObservationProfile,
+    fragment: Arc<str>,
+    static_imports: Arc<[String]>,
+    request_types: Option<(
+        crate::declaration_join::RequestHelperRecipe,
+        Arc<crate::checked_cell::RequestTypeSignatures>,
+    )>,
+    metadata_bytes: u64,
+}
+
+impl WorldObservationScaffold {
+    pub fn new(
+        profile: WorldObservationProfile,
+        fragment: Arc<str>,
+        static_imports: Vec<String>,
+        request_types: Option<(
+            crate::declaration_join::RequestHelperRecipe,
+            Arc<crate::checked_cell::RequestTypeSignatures>,
+        )>,
+    ) -> Result<Self, CompileError> {
+        if fragment.is_empty() || fragment.contains('\0') {
+            return Err(source_failure("invalid protected observation fragment"));
+        }
+        for import in &static_imports {
+            if import.is_empty() || import.contains(['\0', '\n']) {
+                return Err(source_failure("invalid protected observation import"));
+            }
+        }
+        let allowance = capture_allowance()?;
+        let input_bytes =
+            static_imports
+                .iter()
+                .try_fold(fragment.len() as u64, |total, import| {
+                    total
+                        .checked_add(import.len() as u64)
+                        .ok_or_else(source_size_failure)
+                })?;
+        if input_bytes > allowance {
+            return Err(binding_capture_refusal(input_bytes, allowance));
+        }
+        let mut scaffold = Self {
+            profile,
+            fragment,
+            static_imports: static_imports.into(),
+            request_types,
+            metadata_bytes: 0,
+        };
+        let bytes = world_bytes(&scaffold.value())?.len() as u64;
+        if bytes > allowance {
+            return Err(binding_capture_refusal(bytes, allowance));
+        }
+        scaffold.metadata_bytes = bytes;
+        Ok(scaffold)
+    }
+
+    fn value(&self) -> ciborium::value::Value {
+        world_array(vec![
+            match self.profile {
+                WorldObservationProfile::Workbench => 0u64,
+                WorldObservationProfile::HostCarrier => 1u64,
+            }
+            .into(),
+            world_text(self.fragment.as_ref()),
+            world_array(self.static_imports.iter().map(world_text).collect()),
+            self.request_types.as_ref().map_or(
+                ciborium::value::Value::Null,
+                |(recipe, signatures)| {
+                    world_array(vec![
+                        world_text(recipe.as_str()),
+                        signatures.authorization_value(),
+                    ])
+                },
+            ),
+        ])
+    }
+}
 /// Source syntax selected by the runtime's captured publication. Runtime grants
 /// remain in the admission that owns this description.
 #[derive(Clone, Debug)]
 pub struct CompilerWorldLexicalSurface {
     import_specs: Arc<[String]>,
     declaration: Option<WorldDeclarationSelection>,
+    observation: Option<Arc<WorldObservationScaffold>>,
     metadata_bytes: u64,
 }
 
@@ -598,8 +686,32 @@ impl CompilerWorldLexicalSurface {
         Ok(Self {
             import_specs: import_specs.into(),
             declaration,
+            observation: None,
             metadata_bytes: bytes,
         })
+    }
+
+    fn with_observation(
+        mut self,
+        observation: Option<Arc<WorldObservationScaffold>>,
+    ) -> Result<Self, CompileError> {
+        let old = self
+            .observation
+            .as_ref()
+            .map_or(0, |fact| fact.metadata_bytes);
+        let new = observation.as_ref().map_or(0, |fact| fact.metadata_bytes);
+        let bytes = self
+            .metadata_bytes
+            .checked_sub(old)
+            .and_then(|bytes| bytes.checked_add(new))
+            .ok_or_else(source_size_failure)?;
+        let allowance = capture_allowance()?;
+        if bytes > allowance {
+            return Err(binding_capture_refusal(bytes, allowance));
+        }
+        self.observation = observation;
+        self.metadata_bytes = bytes;
+        Ok(self)
     }
 
     fn materialize<BS: fvm_ipld_blockstore::Blockstore>(
@@ -620,12 +732,13 @@ impl CompilerWorldLexicalSurface {
                         crate::checked_cell::hash(join.interface_bytes()),
                         join.exports(),
                     ),
-                    WorldDeclarationSelection::Recovered(tip) => (
-                        tip.root().clone(),
-                        None,
-                        tip.interface_sha256().to_owned(),
-                        tip.exports(),
-                    ),
+                    WorldDeclarationSelection::Recovered(tip) => {
+                        let roles = tip.context().compiler_source_support().projection().snapshot_roles();
+                        let interface = roles.get(tip.root()).ok_or_else(|| {
+                            source_failure("recovered declaration facade lacks its issuing primary role")
+                        })?.interface();
+                        (tip.root().clone(), Some(interface), tip.interface_sha256().to_owned(), tip.exports())
+                    },
                 };
                 let roles = primary
                     .compiler_source_support()
@@ -668,9 +781,10 @@ impl CompilerWorldLexicalSurface {
             }
         };
         let lexical = world_array(vec![
-            world_text("TPCWLEX1"),
+            world_text("TPCWLEX2"),
             world_array(self.import_specs.iter().map(world_text).collect()),
             declaration,
+            self.observation.as_ref().map_or(ciborium::value::Value::Null, |scaffold| scaffold.value()),
         ]);
         let root = materializer
             .materialize_value(&lexical)
@@ -1022,6 +1136,98 @@ impl CompilerWorld {
     pub fn restoration(&self) -> &Arc<CompilerWorldRestoration> {
         &self.restoration
     }
+
+    /// Change only the descriptive compiler scaffold, sharing the existing
+    /// source capture, primary associations and binding custody. A changed
+    /// lexical product does not inherit a checked cell's execution position.
+    pub fn with_observation_scaffold(
+        self: &Arc<Self>,
+        observation: Option<Arc<WorldObservationScaffold>>,
+    ) -> Result<Arc<Self>, CompileError> {
+        let prior = &self.restoration;
+        if prior.inputs.lexical.observation == observation {
+            return Ok(self.clone());
+        }
+        let mut inputs = prior.inputs.clone();
+        inputs.lexical = inputs.lexical.clone().with_observation(observation)?;
+        let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
+        inputs.directory = directory.clone();
+        let mut materializer = Materializer::new(&prior.primary_blocks);
+        let lexical_root = inputs
+            .lexical
+            .materialize(&inputs.primary_context, &mut materializer)?;
+        let staged = materializer
+            .finish()
+            .map_err(|error| source_failure(error.to_string()))?;
+        let changed_blocks = staged
+            .blocks()
+            .iter()
+            .map(|(cid, bytes)| world_array(vec![world_blob(cid.to_bytes()), world_blob(bytes)]))
+            .collect();
+        let (roots, primary_blocks) = prior
+            .primary_blocks
+            .replace_semantic_roots(
+                &staged,
+                SemanticRoots {
+                    primary: *prior.primary_root.cid(),
+                    associations: *prior.primary_associations.root().cid(),
+                    bindings: *prior.bindings.root().cid(),
+                    lexical: lexical_root,
+                },
+            )
+            .map_err(|error| source_failure(error.to_string()))?;
+        let product = world_restoration_product(
+            &roots,
+            inputs.sources.seal(),
+            &prior.producer,
+            &prior.profile,
+            inputs.bindings.query_scope,
+        )?;
+        let logical_id = world_digest(&product);
+        let acquisition =
+            crate::declaration_context::original_inputs::OriginalInputArenaTable::default()
+                .acquisition(Vec::new())?;
+        let descriptor = directory.path().join("observation.cbor");
+        std::fs::write(
+            &descriptor,
+            world_bytes(&world_array(vec![
+                world_text("TPCWSUCC4"),
+                world_blob(&product),
+                world_array(changed_blocks),
+                world_array(Vec::new()),
+                world_array(Vec::new()),
+                acquisition,
+            ]))?,
+        )?;
+        let restoration = Arc::new(CompilerWorldRestoration {
+            logical_id,
+            inputs,
+            product: product.into(),
+            primary_root: prior.primary_root.clone(),
+            primary_blocks,
+            primary_associations: prior.primary_associations.clone(),
+            primary_compiler_inputs: prior.primary_compiler_inputs.clone(),
+            bindings: prior.bindings.clone(),
+            binding_rows: prior.binding_rows.clone(),
+            lexical_root,
+            producer: prior.producer,
+            profile: prior.profile,
+            descriptor,
+            input_files: Default::default(),
+            successor: Some(WorldSuccessorAcquisition {
+                predecessor: *self.logical_id(),
+                realization: self.realization.clone(),
+                files: Vec::new(),
+                cold: Mutex::new(None),
+            }),
+        });
+        Ok(Arc::new(Self {
+            restoration,
+            realization: Arc::new(Mutex::new(None)),
+            position: None,
+        }))
+    }
+
 }
 
 impl crate::checked_cell::CellProgram {
@@ -4598,6 +4804,88 @@ mod identity_tests {
         assert_ne!(root(&["Data.List"]), root(&["qualified Data.List as L"]));
         assert_ne!(root(&["Data.List hiding (map)"]), root(&["Data.List"]));
         assert_ne!(root(&["Data.List", "Data.Maybe"]), root(&["Data.Maybe", "Data.List"]));
+    }
+
+    #[test]
+    fn observation_lexical_fact_binds_profile_fragment_and_ordered_imports() {
+        let primary = ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap();
+        let root = |observation: Option<Arc<WorldObservationScaffold>>| {
+            let store = MemoryBlockstore::new();
+            let mut materializer = Materializer::new(&store);
+            CompilerWorldLexicalSurface::from_publication(Vec::new(), None)
+                .unwrap()
+                .with_observation(observation)
+                .unwrap()
+                .materialize(&primary, &mut materializer)
+                .unwrap()
+        };
+        let fact = |profile, fragment: &str, imports: &[&str]| {
+            Arc::new(
+                WorldObservationScaffold::new(
+                    profile,
+                    Arc::from(fragment),
+                    imports.iter().map(|spec| (*spec).to_owned()).collect(),
+                    None,
+                )
+                .unwrap(),
+            )
+        };
+        let workbench = || {
+            fact(
+                WorldObservationProfile::Workbench,
+                "type ActorEffects = '[]",
+                &["Data.List", "Data.Maybe"],
+            )
+        };
+        let original = root(Some(workbench()));
+        assert_eq!(original, root(Some(workbench())));
+        assert_ne!(original, root(None));
+        assert_ne!(
+            original,
+            root(Some(fact(
+                WorldObservationProfile::HostCarrier,
+                "type ActorEffects = '[]",
+                &["Data.List", "Data.Maybe"]
+            )))
+        );
+        assert_ne!(
+            original,
+            root(Some(fact(
+                WorldObservationProfile::Workbench,
+                "type ActorEffects = '[Introspection]",
+                &["Data.List", "Data.Maybe"]
+            )))
+        );
+        assert_ne!(
+            original,
+            root(Some(fact(
+                WorldObservationProfile::Workbench,
+                "type ActorEffects = '[]",
+                &["Data.Maybe", "Data.List"]
+            )))
+        );
+    }
+
+    #[test]
+    fn observation_lexical_fact_rejects_malformed_protected_source_fields() {
+        for (fragment, imports) in [
+            ("", vec![]),
+            ("a\0b", vec![]),
+            (
+                "type R = '[]",
+                vec!["Data.List\nimport Data.Maybe".to_owned()],
+            ),
+        ] {
+            assert!(
+                WorldObservationScaffold::new(
+                    WorldObservationProfile::Workbench,
+                    Arc::from(fragment),
+                    imports,
+                    None
+                )
+                .is_err()
+            );
+        }
     }
 
     fn captured_sources(body: &[u8], origin: &[u8]) -> CapturedCompilerSources {
