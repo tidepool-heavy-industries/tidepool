@@ -859,7 +859,7 @@ mod tests {
     fn native_carrier_refusal_retains_exact_identity_in_failure_cause() {
         use crate::artifact_inventory::{
             ArtifactBinding, ArtifactId, ArtifactSelectionId, NativeAdmissionRefusal,
-            NativeAdmissionSource, NativeGroupKey,
+            NativeGroupKey,
         };
         let selected = ArtifactBinding {
             artifact: ArtifactId([3; 32]),
@@ -867,11 +867,9 @@ mod tests {
         };
         let canonical = ArtifactId([5; 32]);
         let reason = NativeAdmissionRefusal::InputNoCompatibleCandidate {
-            source: NativeAdmissionSource::CertifiedSelection,
             selected_original: Some(selected),
             canonical,
             selected_canonical: None,
-            candidate_count: 2,
         };
         let error = crate::artifact_inventory::native_admission_failure(
             NativeGroupKey {

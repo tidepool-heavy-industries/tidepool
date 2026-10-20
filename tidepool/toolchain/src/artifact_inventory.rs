@@ -1334,12 +1334,11 @@ pub enum NativeAdmissionRefusal {
     InputIssuedSupportMissing {
         candidate: NativeGroupBinding,
     },
+    /// The issued choice conflicts with the receiving Original or canonical binding.
     InputNoCompatibleCandidate {
-        source: NativeAdmissionSource,
         selected_original: Option<ArtifactBinding>,
         canonical: ArtifactId,
         selected_canonical: Option<ArtifactBinding>,
-        candidate_count: usize,
     },
     /// The root has no recorded input decision for this exact role. An absent
     /// choice never permits selecting a retained candidate.
@@ -1374,28 +1373,9 @@ pub enum NativeAdmissionRefusal {
         parent: NativeGroupKey,
         required_ordinal: u32,
     },
-    /// The parent's recorded edge does not resolve to this exact child.
-    HistoricalTargetMismatch {
-        parent: NativeGroupKey,
-        expected: NativeGroupBinding,
-    },
-    /// The parent's labeled edge has no issued exact child.
-    HistoricalTargetMissing {
-        parent: NativeGroupKey,
-        required_ordinal: u32,
-    },
-    /// The parent's labeled edge has competing exact children.
-    HistoricalTargetAmbiguous {
-        parent: NativeGroupKey,
-        required_ordinal: u32,
-    },
     /// The demanded child belongs to another native owner than the edge names.
     HistoricalOwnerMismatch {
         parent: NativeGroupKey,
-    },
-    /// The recorded child has no exact carrier for the demanded artifact.
-    HistoricalCarrierMismatch {
-        child: NativeGroupBinding,
     },
     /// No physical completion, exact entry, or continuation evidence issued
     /// this current-product group.
@@ -1408,13 +1388,6 @@ pub enum NativeAdmissionRefusal {
         original: ArtifactId,
         original_ordinal: u32,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NativeAdmissionSource {
-    CertifiedSelection,
-    NativeDependencyCatalog,
 }
 
 pub struct ArtifactInventoryError {

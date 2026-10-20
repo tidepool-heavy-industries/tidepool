@@ -23520,8 +23520,7 @@ None,
                         } if artifact == expected_missing)
                     && matches!(&error.native_refusal,
                         Some(crate::artifact_inventory::NativeAdmissionRefusal::InputNoCompatibleCandidate {
-                            source: crate::artifact_inventory::NativeAdmissionSource::CertifiedSelection,
-                            selected_original, canonical, selected_canonical, candidate_count: 1,
+                            selected_original, canonical, selected_canonical,
                         }) if *selected_original == raw_binding(expected_missing)
                             && selected_original.is_some()
                             && *canonical == expected_canonical
