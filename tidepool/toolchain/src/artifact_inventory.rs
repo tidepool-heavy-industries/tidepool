@@ -11092,25 +11092,39 @@ mod tests {
             let inputs = context
                 .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
                 .unwrap();
-            let mut selection =
+            let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     &inputs,
                     &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
                 )
                 .unwrap();
-            let inventory = inputs.artifacts().inventory();
-            if explicit {
-                let requirement =
-                    NativeOriginalRequirement::from_selected_view(id, left.artifacts())
+            let (inputs, selection) = if explicit {
+                let closure = selection
+                    .selected_original_closure(inputs.artifacts())
+                    .unwrap();
+                let selected = inputs
+                    .compiler_source_support()
+                    .certify_original_closure(&closure)
+                    .unwrap();
+                let context =
+                    crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
                         .unwrap()
+                        .extend_issued_compiler_support(&selected)
                         .unwrap();
-                selection
-                    .with_new_product_dependencies(
-                        &inputs.artifacts().metadata_snapshot(),
-                        &[requirement],
+                let inputs = context
+                    .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
+                    .unwrap();
+                let selection =
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                        &inputs,
+                        &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
                     )
                     .unwrap();
-            }
+                (inputs, selection)
+            } else {
+                (inputs, selection)
+            };
+            let inventory = inputs.artifacts().inventory();
             let mut fixed = inventory
                 .bind_segment(inputs.artifacts(), vec![], &selection)
                 .unwrap();
@@ -14423,6 +14437,43 @@ mod tests {
             receipt
                 .with_new_product_dependencies(&retained.artifacts().metadata_snapshot(), &facts)
                 .unwrap();
+            let ArtifactPayload::Original(root_product) = &root.payload else {
+                unreachable!()
+            };
+            let ArtifactPayload::Original(child_product) = &child.payload else {
+                unreachable!()
+            };
+            assert_eq!(
+                receipt
+                    .physical_current_original(root_product.owner())
+                    .unwrap(),
+                Some(root.descriptor.id)
+            );
+            assert_eq!(
+                receipt
+                    .physical_current_original(child_product.owner())
+                    .unwrap(),
+                child_reusable.then_some(child.descriptor.id)
+            );
+            let child_entry = Arc::new(child.clone());
+            let current_child = receipt
+                .current_product(
+                    NativeGroupKey {
+                        artifact: child.descriptor.id,
+                        original_ordinal: 7,
+                    },
+                    &child_entry,
+                )
+                .unwrap();
+            assert_eq!(current_child.is_some(), child_reusable);
+            if let Some(current_child) = current_child {
+                // This current child carries its prior own binding. The other
+                // branch consumes a historical child through private proof only.
+                assert_eq!(
+                    native_availability::verified_current_product(&current_child).unwrap(),
+                    Some(historical_child)
+                );
+            }
             for (joined, projected) in [
                 retained.clone(),
                 types
