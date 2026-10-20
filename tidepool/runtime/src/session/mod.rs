@@ -81,8 +81,9 @@ pub use dialect::{
 };
 
 pub use inspection::{
-    finish_admitted_world_inspection, run_admitted_inspections, run_admitted_world_inspection,
-    run_inspections, AdmittedInspectionInputs, AdmittedInspectionWorld, ClassMethodInfo,
+    finish_admitted_compiler_world, finish_admitted_world_inspection, run_admitted_compiler_world,
+    run_admitted_inspections, run_admitted_world_inspection, run_inspections,
+    AdmittedInspectionInputs, AdmittedInspectionWorld, ClassMethodInfo, CompletedCompilerWorld,
     CompletedInspectionWorld, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,
     IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery,
     InspectionRequest, InspectionResult, NameNamespace, NameQuery, NameScope, QueryError,

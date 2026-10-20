@@ -2183,10 +2183,14 @@ pub struct CheckedWorldCellItem {
     symbol: tidepool_repr::execution_schema::SymbolIdentity,
     manifest: BTreeMap<PathBuf, [u8; 32]>,
     binders: Vec<crate::checked_cell::WorldItemBinder>,
-    signatures: Vec<crate::checked_cell::ExactCheckedSignature>,
+    checked: crate::checked_cell::CheckedItem,
 }
 
 impl CheckedWorldCellItem {
+    pub(crate) fn checked_item_observation(&self) -> &crate::checked_cell::CheckedItem {
+        &self.checked
+    }
+
     pub fn ordinal(&self) -> usize {
         self.ordinal
     }
@@ -2216,7 +2220,7 @@ impl CheckedWorldCellItem {
     }
 
     pub(crate) fn signatures(&self) -> &[crate::checked_cell::ExactCheckedSignature] {
-        &self.signatures
+        self.checked.signatures()
     }
 
     pub(crate) fn manifest(&self) -> &BTreeMap<PathBuf, [u8; 32]> {
@@ -2226,7 +2230,7 @@ impl CheckedWorldCellItem {
 
 /// The SAME-certified checked World CellProgram. It can only be issued from
 /// one physical `WorldCellOutputAdmission`; a raw completion or a decoded
-/// receipt is not authority. It binds the reservation, logical world, distinct
+/// receipt is not authority. It binds the reservation, logical world, labeled
 /// original/target selections, producer and issuing transaction origin,
 /// per-item generations and the exact output certificate.
 // boundary: see CELL-PREPARATION-BOUNDARY.md
@@ -2241,6 +2245,10 @@ pub struct CheckedWorldCellProgram {
 }
 
 impl CheckedWorldCellProgram {
+    pub(crate) fn observations(&self) -> &Arc<[u8]> {
+        &self.output.observations
+    }
+
     pub fn reservation(&self) -> &Arc<crate::cell_plan::CompilerWorldCellReservation> {
         &self.output.reservation
     }
@@ -2353,11 +2361,8 @@ impl CheckedWorldCellProgram {
         origin: &tidepool_extract_cmd::CompilerTransactionOrigin,
         producer_identity: [u8; 32],
     ) -> Result<Self, CompileError> {
-        if original == target {
-            return Err(source_failure(
-                "world cell original and target selections are not distinct",
-            ));
-        }
+        // These labeled descriptions may agree. Runtime admission retains and
+        // checks the actual original transaction and receiving placement.
         if output.origin != *origin {
             return Err(source_failure(
                 "world cell preparation belongs to another compiler transaction",
@@ -2392,11 +2397,26 @@ impl CheckedWorldCellProgram {
                 "world cell preparation does not cover every reserved slot",
             ));
         }
+        let checked_items = crate::checked_cell::admit_world_checked_items(
+            &output.observations,
+            reservation,
+            &output.segments,
+            &output.item_proofs,
+            &output.validation.inventory,
+        )?;
+        // TODO(engine V): carry these same checked items and captured products
+        // through World original-execution/typed-entry assembly into
+        // PreparedCheckedItemOutput. SegmentCursor's finite request continuation
+        // and CellProgram's finite ParsedCellPlan are not World evidence. Keep
+        // refusal until those owners receive the World reservation; executable
+        // sealing still requires finish_cell_program_admitted's matching END
+        // and HostAdmissionCancellation. No reread or finite request substitute.
         let mut items = Vec::with_capacity(output.item_proofs.len());
-        for (ordinal, (proof, slot)) in output
+        for (ordinal, ((proof, slot), checked)) in output
             .item_proofs
             .iter()
             .zip(reservation.slots())
+            .zip(checked_items)
             .enumerate()
         {
             if proof.index() != ordinal
@@ -2421,7 +2441,7 @@ impl CheckedWorldCellProgram {
                 symbol: proof.symbol().clone(),
                 manifest: proof.manifest().clone(),
                 binders: proof.binders().to_vec(),
-                signatures: proof.signatures().to_vec(),
+                checked,
             });
         }
         let logical = WorldCellLogicalIdentity {
@@ -2512,7 +2532,7 @@ fn world_cell_output_certificate(
                 crate::checked_cell::WorldItemBinderTier::RetainOpaque => 1,
             }]);
         }
-        for signature in &item.signatures {
+        for signature in item.signatures() {
             frame(signature.key().as_bytes());
             frame(signature.presentation().as_bytes());
             for name in signature.names() {

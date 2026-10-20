@@ -10116,6 +10116,12 @@ where
         owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
     ) -> Result<ExecutionPrivateScope, ResidentActorWorkbenchError> {
+        if !owner.matches_context(&context) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "private admission requires its original public owner".into(),
+            ));
+        }
+        self.ensure_compiler_world(context.clone()).await?;
         self.access
             .with_compiler_machine(context, move |session, context, _, _| {
                 let public_scope = context.placement.lexical_scope;
@@ -10148,6 +10154,81 @@ where
                     decision,
                     admission,
                 })
+            })
+            .await
+    }
+
+    /// Capture under checkout, acquire under compiler ownership, then install
+    /// against the same public/source base before admitting private execution.
+    async fn ensure_compiler_world(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let source = public_module_query_source(&context.source_layer)
+            .map_err(|_| ActorCompileViewError::UnownedSourceLayer)?;
+        let capture_source = source.clone();
+        let admitted = self
+            .access
+            .with_compiler_machine(context.clone(), move |session, context, _, _| {
+                let evidence = capture_source.generation_evidence().ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "compiler world lacks retained source evidence".into(),
+                    )
+                })?;
+                let original = context.source_dependency().source_lease()?;
+                session
+                    .capture_inspection_world_in(
+                        context.placement.lexical_scope,
+                        &evidence.reference,
+                        &original,
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await?;
+        let work = crate::capabilities::CompilerOwnerScope::current().and_then(|scope| {
+            scope
+                .with_source_dependency(context.source_dependency())
+                .admit_work()
+        })?;
+        let dependency = context.source_dependency().clone();
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(work.control()));
+        let completed = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+            let settled = work.run_source_compiler_phase(
+                &dependency,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                |owner, _| tidepool_runtime::session::run_admitted_compiler_world(owner, admitted, || {
+                    source.capture_compiler_sources().map_err(|error| match error {
+                        crate::SourceInspectionError::Unavailable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnavailable(detail),
+                        crate::SourceInspectionError::Unreadable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnreadable(detail),
+                    })
+                }),
+            ).map_err(ResidentActorWorkbenchError::from)?;
+            tidepool_runtime::session::finish_admitted_compiler_world(settled)
+                .map_err(ResidentActorWorkbenchError::WorldInspection)
+        })).await.map_err(ResidentActorWorkbenchError::Join)??;
+        cancel_on_drop.0 = None;
+        self.access
+            .with_compiler_machine(context, move |session, context, _, _| {
+                let source = public_module_query_source(&context.source_layer)
+                    .map_err(|_| ActorCompileViewError::UnownedSourceLayer)?;
+                let evidence = source.generation_evidence().ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "compiler world lost retained source evidence".into(),
+                    )
+                })?;
+                let original = context.source_dependency().source_lease()?;
+                if !session.install_compiler_world_if_current(
+                    &completed,
+                    &evidence.reference,
+                    &original,
+                ) {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "compiler world base changed before private admission".into(),
+                    ));
+                }
+                Ok(())
             })
             .await
     }
@@ -17787,7 +17868,7 @@ pub(crate) mod request_tests {
             assert_eq!(home_module.module, "GHC.Internal.Maybe");
             assert!(matches!(&home_module.origin, WorldModuleOrigin::Home { root: 0, path, source_sha256 }
                 if path == "GHC/Internal/Maybe.hs" && source_sha256 == expected_home.sha256()));
-            assert_eq!(direct.defining_module(), Some(home_module));
+            assert_eq!(direct.defining_module(), Some(&home_module));
             assert_ne!(defining.unit, home_module.unit);
             assert!(matches!(direct.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info)))
                 if info.identifier.name == "Just"));

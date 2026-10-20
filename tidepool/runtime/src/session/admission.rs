@@ -9,7 +9,6 @@ use tidepool_codegen::binding_table::{BindingTipId, SourceLeaseKey};
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::execution_schema::{ImportOwner, SymbolIdentity};
 use tidepool_repr::Generation;
-use tidepool_toolchain::CompileError;
 
 use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, SessionError};
 
@@ -661,15 +660,8 @@ enum RuntimeCellCompilerBasis {
     World {
         reservation: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation>,
         private_key: super::persistent::CompileViewKey,
-        /// The exact active source transaction lease admitted with the
-        /// published World. It is original A; the cell's retained scope is a
-        /// separately captured target B. Warm's pending checked-program
-        /// capability must consume this lease, so it is retained here rather
-        /// than reconstructed from the private execution.
-        #[allow(
-            dead_code,
-            reason = "retained for Warm's pending SAME-certified checked World CellProgram capability"
-        )]
+        /// Original A from the issuing source transaction; the cell's retained
+        /// scope is the separately captured receiving target B.
         original_source: Arc<RuntimeLexicalScopeLease>,
     },
 }
@@ -1862,6 +1854,28 @@ impl std::fmt::Debug for RuntimeCellAdmission {
 }
 
 impl RuntimeCellAdmission {
+    pub(super) fn original_source_lease(
+        &self,
+    ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
+        match &self.compiler_basis {
+            RuntimeCellCompilerBasis::World { original_source, .. } => Ok(original_source.clone()),
+            RuntimeCellCompilerBasis::Finite(_) => Err(SessionError::WorldCellRequiresServicePreparation),
+        }
+    }
+
+    pub(super) fn admit_compiler_preparation(
+        &self,
+        source: &super::RuntimeSourceCompilerTransaction,
+    ) -> Result<(), super::SourceAdmissionError> {
+        if let RuntimeCellCompilerBasis::World { original_source, .. } = &self.compiler_basis {
+            let actual = source.admitted_original_source()?;
+            if !Arc::ptr_eq(&actual, original_source) {
+                return Err(super::SourceAdmissionError::ForeignTransaction);
+            }
+        }
+        source.admit(Some(self.source_lease()))
+    }
+
     pub fn source_lease(&self) -> Arc<RuntimeLexicalScopeLease> {
         self._retained_scope.clone()
     }
@@ -2928,74 +2942,6 @@ impl PersistentSession {
             .map(|association| association.base.source.clone())
             .ok_or(SessionError::MissingPublishedCompilerWorld(public_scope))?;
         self.begin_world_private_execution(public_scope, &source, &original_source)
-    }
-
-    // boundary: see CELL-PREPARATION-BOUNDARY.md
-    /// Begin private execution by acquiring the published world cold through
-    /// the same source/compiler owner the inspection path uses. The caller
-    /// supplies the production source capture; the runtime opens the world,
-    /// installs the association at the public tip, and then takes the ordinary
-    /// published-world front door.
-    ///
-    /// This is the first-cell path: the tip has no `inspection_world` until a
-    /// world is opened or an introspection query installs one.
-    pub fn begin_cold_private_execution(
-        &mut self,
-        public_scope: ScopeId,
-        source: &super::GenerationArtifactReference,
-        capture_sources: impl FnOnce() -> Result<
-            Option<Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
-            super::inspection::WorldInspectionError,
-        >,
-    ) -> Result<PrivateExecutionAdmission, super::inspection::WorldInspectionError> {
-        let original_source = self
-            .source_transaction
-            .as_ref()
-            .ok_or(super::SourceAdmissionError::MissingTransaction)
-            .map_err(|error| super::inspection::WorldInspectionError::Runtime(error.into()))?
-            .source
-            .clone();
-        let admitted = self
-            .capture_inspection_world_in(public_scope, source, &original_source, |_| false)
-            .map_err(|error| super::inspection::WorldInspectionError::Runtime(error.into()))?;
-        if let super::inspection::InspectionWorldInputs::Cold { primary, bindings } = admitted.inputs
-        {
-            let sources = capture_sources()?
-                .ok_or(super::inspection::WorldInspectionError::UnsupportedSource)?;
-            if sources.origin() != admitted.base.source.bytes() {
-                return Err(super::inspection::WorldInspectionError::SourceUnavailable(
-                    "cold sources differ from the admitted source owner".into(),
-                ));
-            }
-            let cold = tidepool_toolchain::artifacts::ModuleCandidateOffer::compiler_world_inputs(
-                primary, bindings, sources,
-            )?;
-            let command = tidepool_extract_cmd::ExtractCmd::new()
-                .map_err(|error| CompileError::Io(error.into()))?;
-            let endpoint = tidepool_toolchain::toolchain::AdmittedCompilerEndpoint::from_bound(
-                command
-                    .bind()
-                    .map_err(|error| CompileError::Io(crate::extract_spawn_error(error.source)))?,
-            )
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-            let world = tidepool_toolchain::compiler_world::open_world(cold, &endpoint)?;
-            if !self.inspection_world_base_is_current(&admitted.base, source, &original_source) {
-                return Err(super::inspection::WorldInspectionError::SourceUnavailable(
-                    "compiler world base changed during cold acquisition".into(),
-                ));
-            }
-            let association = Arc::new(super::inspection::InspectionWorldAssociation {
-                base: admitted.base,
-                world,
-            });
-            self.lib_mut()
-                .tips
-                .entry(public_scope)
-                .or_default()
-                .inspection_world = Some(association);
-        }
-        self.begin_private_execution(public_scope)
-            .map_err(|error| super::inspection::WorldInspectionError::Runtime(error.into()))
     }
 
     /// Borrow the published world only for the actual requesting source and

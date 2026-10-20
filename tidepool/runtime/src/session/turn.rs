@@ -3112,7 +3112,7 @@ pub fn prepare_cell_program_admitted(
     admission: Arc<super::RuntimeCellAdmission>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
-    source.admit(Some(admission.source_lease()))?;
+    admission.admit_compiler_preparation(source)?;
     prepare_cell_program_admitted_inner(
         admission,
         #[cfg(test)]

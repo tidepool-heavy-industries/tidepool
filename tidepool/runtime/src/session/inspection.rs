@@ -626,6 +626,115 @@ pub struct CompletedInspectionWorld {
     pub(super) cancellation: crate::HostAdmissionCancellation,
 }
 
+/// A compiler world acquired for one captured runtime base, without a query.
+/// Its source relationship stays owned by the runtime throughout compiler END.
+pub struct PreparedCompilerWorld {
+    association: std::sync::Arc<InspectionWorldAssociation>,
+    origin: crate::CompilerTransactionOrigin,
+}
+
+/// Only the matching settled compiler owner can issue an installable world.
+pub struct CompletedCompilerWorld {
+    pub(super) association: std::sync::Arc<InspectionWorldAssociation>,
+    pub(super) cancellation: crate::HostAdmissionCancellation,
+}
+
+pub fn run_admitted_compiler_world(
+    owner: &super::RuntimeSourceCompilerTransaction,
+    admitted: AdmittedInspectionWorld,
+    capture_sources: impl FnOnce() -> Result<
+        Option<std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+        WorldInspectionError,
+    >,
+) -> Result<PreparedCompilerWorld, WorldInspectionError> {
+    if !std::sync::Arc::ptr_eq(&owner.source, &admitted.base.original_source) {
+        return Err(
+            crate::RuntimeError::from(super::SourceAdmissionError::ForeignTransaction).into(),
+        );
+    }
+    owner
+        .admit(Some(admitted.base.target.clone()))
+        .map_err(crate::RuntimeError::from)?;
+    let origin = crate::CompilerTransactionOrigin::current().ok_or(
+        CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
+    )?;
+    let cold = admitted.needs_source_capture();
+    let world = acquire_compiler_world(admitted.inputs, &admitted.base, capture_sources)?;
+    tracing::debug!(
+        target: "exomonad_harness::timing",
+        cold,
+        logical_world = ?world.logical_id(),
+        source_sha256 = ?admitted.base.source.sha256(),
+        scope = ?admitted.base.scope,
+        operation = ?origin,
+        "compiler world acquired for private execution"
+    );
+    Ok(PreparedCompilerWorld {
+        association: std::sync::Arc::new(InspectionWorldAssociation {
+            base: admitted.base,
+            world,
+        }),
+        origin,
+    })
+}
+
+pub fn finish_admitted_compiler_world(
+    settled: crate::CompilerTransactionSettled<Result<PreparedCompilerWorld, WorldInspectionError>>,
+) -> Result<CompletedCompilerWorld, WorldInspectionError> {
+    let (prepared, cancellation) = finish_world_operation(settled, |prepared| &prepared.origin)?;
+    Ok(CompletedCompilerWorld { association: prepared.association, cancellation })
+}
+
+fn finish_world_operation<T>(
+    settled: crate::CompilerTransactionSettled<Result<T, WorldInspectionError>>,
+    origin: impl Fn(&T) -> &crate::CompilerTransactionOrigin,
+) -> Result<(T, crate::HostAdmissionCancellation), WorldInspectionError> {
+    let same_owner = settled.action().as_ref().is_ok_and(|prepared| settled.belongs_to(origin(prepared)));
+    let cancellation = settled.host_admission_cancellation().cloned();
+    let outcome = settled.into_outcome();
+    if !matches!(outcome.close, crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted) {
+        return Err(WorldInspectionError::CompilerClose { primary: outcome.action.err().map(Box::new), close: outcome.close });
+    }
+    let prepared = outcome.action?;
+    if !same_owner {
+        return Err(CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::DifferentOwner).into());
+    }
+    let cancellation = cancellation.ok_or(CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner))?;
+    cancellation.checkpoint().map_err(CompileError::from)?;
+    Ok((prepared, cancellation))
+}
+
+fn acquire_compiler_world(
+    inputs: InspectionWorldInputs,
+    base: &InspectionWorldBase,
+    capture_sources: impl FnOnce() -> Result<
+        Option<std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+        WorldInspectionError,
+    >,
+) -> Result<std::sync::Arc<tidepool_toolchain::compiler_world::CompilerWorld>, WorldInspectionError>
+{
+    match inputs {
+        InspectionWorldInputs::Published(world) => Ok(world),
+        InspectionWorldInputs::Cold { primary, bindings } => {
+            let sources = capture_sources()?.ok_or(WorldInspectionError::UnsupportedSource)?;
+            if sources.origin() != base.source.bytes() {
+                return Err(invalid("cold sources differ from the admitted source owner").into());
+            }
+            let cold = tidepool_toolchain::artifacts::ModuleCandidateOffer::compiler_world_inputs(
+                primary, bindings, sources,
+            )?;
+            let command = ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
+            let endpoint = tidepool_toolchain::toolchain::AdmittedCompilerEndpoint::from_bound(
+                command.bind().map_err(map_spawn)?,
+            )
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            Ok(tidepool_toolchain::compiler_world::open_world(
+                cold, &endpoint,
+            )?)
+        }
+    }
+}
+
 /// One enumeration answer is emitted as a single guest value. Keep the
 /// returned identifiers bounded and report the observed count beside the
 /// applied limit so truncation is visible rather than mistaken for the scope.
@@ -756,36 +865,8 @@ pub fn finish_admitted_world_inspection(
         Result<PreparedInspectionWorld, WorldInspectionError>,
     >,
 ) -> Result<CompletedInspectionWorld, WorldInspectionError> {
-    let same_owner = settled
-        .action()
-        .as_ref()
-        .is_ok_and(|completed| settled.belongs_to(&completed.origin));
-    let cancellation = settled.host_admission_cancellation().cloned();
-    let outcome = settled.into_outcome();
-    if !matches!(
-        outcome.close,
-        crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted
-    ) {
-        return Err(WorldInspectionError::CompilerClose {
-            primary: outcome.action.err().map(Box::new),
-            close: outcome.close,
-        });
-    }
-    let prepared = outcome.action?;
-    if !same_owner {
-        return Err(CompileError::CompilerPublication(
-            crate::CompilerTransactionPublicationError::DifferentOwner,
-        )
-        .into());
-    }
-    let cancellation = cancellation.ok_or(CompileError::CompilerPublication(
-        crate::CompilerTransactionPublicationError::MissingOwner,
-    ))?;
-    cancellation.checkpoint().map_err(CompileError::from)?;
-    Ok(CompletedInspectionWorld {
-        prepared,
-        cancellation,
-    })
+    let (prepared, cancellation) = finish_world_operation(settled, |prepared| &prepared.origin)?;
+    Ok(CompletedInspectionWorld { prepared, cancellation })
 }
 
 /// Run one public-module observation without constructing query source or
@@ -854,23 +935,8 @@ fn run_admitted_world_inspection_inner(
         InspectionWorldInputs::Published(world) => Some(*world.logical_id()),
         InspectionWorldInputs::Cold { .. } => None,
     };
-    let result = match admitted.inputs {
-        InspectionWorldInputs::Published(world) => {
-            compiler_world::query_public_module(&endpoint()?, &world, question.clone())?
-        }
-        InspectionWorldInputs::Cold { primary, bindings } => {
-            let sources = capture_sources()?.ok_or(WorldInspectionError::UnsupportedSource)?;
-            if sources.origin() != admitted.base.source.bytes() {
-                return Err(invalid("cold sources differ from the admitted source owner").into());
-            }
-            let cold = tidepool_toolchain::artifacts::ModuleCandidateOffer::compiler_world_inputs(
-                primary, bindings, sources,
-            )?;
-            let endpoint = endpoint()?;
-            let world = compiler_world::open_world(cold, &endpoint)?;
-            compiler_world::query_public_module(&endpoint, &world, question.clone())?
-        }
-    };
+    let world = acquire_compiler_world(admitted.inputs, &admitted.base, capture_sources)?;
+    let result = compiler_world::query_public_module(&endpoint()?, &world, question.clone())?;
     if expected_world.is_some_and(|expected| &expected != result.world().logical_id()) {
         return Err(invalid("world query returned a different logical world").into());
     }
