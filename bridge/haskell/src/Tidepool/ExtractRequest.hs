@@ -238,7 +238,7 @@ encodeEnsureExactInputsOutcomeWithin budget outcome = case outcome of
   where
     residencyFrame WorldRetainedAtAdmission = Just (BS.singleton 0)
     residencyFrame (WorldActiveOnly (WorldStorageAllowanceExceeded required limit))
-      | all (\n -> n >= 0 && n <= toInteger (maxBound :: Word64)) [required,limit] =
+      | required > limit && all (\n -> n >= 0 && n <= toInteger (maxBound :: Word64)) [required,limit] =
           Just (BS.singleton 1 <> putU64 (fromInteger required) <> putU64 (fromInteger limit))
       | otherwise = Nothing
     referenceFrame remaining reference

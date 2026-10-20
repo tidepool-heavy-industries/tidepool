@@ -101,12 +101,16 @@ impl EnsureExactInputsOutcome {
                 }
                 let residency = match decoder.byte()? {
                     0 => WorldResidency::RetainedAtAdmission,
-                    1 => WorldResidency::ActiveOnly(
-                        WorldNonRetentionReason::StorageAllowanceExceeded {
-                            required_bytes: decoder.u64()?,
-                            limit_bytes: decoder.u64()?,
-                        },
-                    ),
+                    1 => {
+                        let required_bytes = decoder.u64()?;
+                        let limit_bytes = decoder.u64()?;
+                        if required_bytes <= limit_bytes {
+                            return Err(ProtocolError::InvalidExactInputs);
+                        }
+                        WorldResidency::ActiveOnly(WorldNonRetentionReason::StorageAllowanceExceeded {
+                            required_bytes, limit_bytes,
+                        })
+                    },
                     _ => return Err(ProtocolError::InvalidExactInputs),
                 };
                 decoder.finish()?;
@@ -3768,6 +3772,15 @@ mod tests {
             "545045584f3030310200",
         ] {
             assert!(EnsureExactInputsOutcome::decode(&unhex(hex).unwrap()).is_err());
+        }
+        for (required, limit) in [(0u64, 0u64), (128, 128), (127, 128)] {
+            let mut frame = b"TPEXO003\0".to_vec();
+            push_frame(&mut frame, OsStr::new(&"a".repeat(64)));
+            push_frame(&mut frame, OsStr::new("realized"));
+            frame.push(1);
+            frame.extend_from_slice(&required.to_le_bytes());
+            frame.extend_from_slice(&limit.to_le_bytes());
+            assert_eq!(EnsureExactInputsOutcome::decode(&frame), Err(ProtocolError::InvalidExactInputs));
         }
         for reference in ["", "realized\0other"] {
             let mut bytes = b"TPEXO003\0".to_vec();
