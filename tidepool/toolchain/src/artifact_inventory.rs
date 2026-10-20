@@ -11001,7 +11001,15 @@ mod tests {
                     &selection, &view,
                 )
                 .unwrap();
-                supports.push(CompilerSourceSupport::close_complete_output(&output).unwrap());
+                let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
+                supports.push(
+                    completed
+                        .close_request(
+                            None,
+                            &crate::declaration_context::ProtectedScaffoldRequirements::default(),
+                        )
+                        .unwrap(),
+                );
             }
             let left = &supports[0];
             let right = &supports[1];
@@ -11042,6 +11050,12 @@ mod tests {
             assert_eq!(
                 left.artifacts().namespace()[&canonical],
                 right.artifacts().namespace()[&canonical]
+            );
+            assert!(
+                matches!(left.merge(right), Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                    if artifact == id)),
+                "two actually issued competing choices must refuse"
             );
             let peer = right.for_source_owners(&BTreeSet::new()).unwrap();
             let chosen = left.merge(&peer).unwrap();
