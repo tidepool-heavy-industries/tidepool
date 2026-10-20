@@ -903,14 +903,10 @@ pub fn prepare_world_cell_program(
         )?;
         if original {
             let planned = segment.planned_declaration(&program, stage)?;
-            let view = segment
-                .originals
-                .authored_artifacts()
-                .map_err(compiler_evidence_failure)?
-                .clone();
-            let selection = segment.originals.source_selection().clone();
-            let context =
-                segment.admit_program_support(&program, &view, &stage_produced, &selection)?;
+            let output = crate::declaration_context::IssuedOriginalOutput::from_segment_originals(
+                &segment.originals,
+            )?;
+            let context = segment.admit_program_support(&program, &output, &stage_produced)?;
             item_contexts.insert(
                 first,
                 crate::checked_cell::CellProgramItemContext {
@@ -1061,9 +1057,8 @@ pub fn prepare_world_cell_program(
                 };
                 let mut context = segment.admit_program_support(
                     &program,
-                    products.artifact_view(),
+                    products.planned_original_output()?,
                     &produced,
-                    products.source_selection(),
                 )?;
                 if !item.binders().is_empty() {
                     context = segment
