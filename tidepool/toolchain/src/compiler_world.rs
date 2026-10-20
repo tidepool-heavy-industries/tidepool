@@ -1475,14 +1475,18 @@ impl crate::checked_cell::CellProgram {
                 "declaration successor has a foreign checked prefix",
             ));
         }
-        let owner = authored.product().owner();
+        let product_owner = authored.product().owner();
+        let owner = crate::declaration_join::ExactModuleIdentity {
+            unit: product_owner.unit.clone(),
+            module: product_owner.module.clone(),
+        };
         let expected = authored
             .compiler_source_support()
-            .world_primary_type_row(owner)
+            .world_primary_type_row(&owner)
             .ok_or_else(|| source_failure("authored item lacks its issued primary binding"))?;
         let actual = projection_context
             .compiler_source_support()
-            .world_primary_type_row(owner)
+            .world_primary_type_row(&owner)
             .ok_or_else(|| {
                 source_failure("declaration projection omits the actual authored owner")
             })?;
@@ -5040,7 +5044,7 @@ fn admit_world_stage_inputs(
             reference: input,
             source,
         };
-        bindings.insert(selected.session_var());
+        bindings.insert(selected.session_var().raw());
         if let Some(row) = selected.checked_row() {
             operation
                 .charge(64)
@@ -5066,7 +5070,10 @@ fn admit_world_stage_inputs(
         outputs: decoded.outputs,
         selected_inputs,
         demanded_rows: rows.into_values().collect(),
-        demanded_session_bindings: bindings.into_iter().collect(),
+        demanded_session_bindings: bindings
+            .into_iter()
+            .map(tidepool_repr::SessionVarId::from_extract)
+            .collect(),
     }))
 }
 
@@ -5436,7 +5443,9 @@ fn admit_world_preparation_response(
                     .reserve::<(String, Arc<CheckedValueArtifact>)>(stage.demanded_rows().len())
             })
             .map_err(|e| CompileError::CompilerEvidence(Box::new(e.into())))?;
-        demanded_session_bindings.extend(stage.demanded_session_bindings().iter().copied());
+        demanded_session_bindings.extend(
+            stage.demanded_session_bindings().iter().map(|id| id.raw()),
+        );
         for row in stage.demanded_rows() {
             validation
                 .inventory
@@ -5491,7 +5500,10 @@ fn admit_world_preparation_response(
         stages,
         item_proofs,
         demanded_rows: demanded.into_values().collect(),
-        demanded_session_bindings: demanded_session_bindings.into_iter().collect(),
+        demanded_session_bindings: demanded_session_bindings
+            .into_iter()
+            .map(tidepool_repr::SessionVarId::from_extract)
+            .collect(),
     }))
 }
 
