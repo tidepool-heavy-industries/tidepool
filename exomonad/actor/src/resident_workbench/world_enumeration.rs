@@ -121,9 +121,9 @@ where
                 ) {
                     Ok(current) => current,
                     Err(error) => {
-                        return Ok(ScopeBindingsSnapshot::Refused(QueryError::Unsupported(
-                            error.to_string(),
-                        )))
+                        return Ok(ScopeBindingsSnapshot::Refused(
+                            unobserved_inspection_source(error)?,
+                        ))
                     }
                 };
                 if let Some(expected) = pinned_scope_moved(expected, &current) {
@@ -181,9 +181,9 @@ where
                                 }
                             }
                             Ok(_) => ScopeBindingsOutcome::Names(answer, current),
-                            Err(error) => ScopeBindingsOutcome::Error(QueryError::Unsupported(
-                                error.to_string(),
-                            )),
+                            Err(error) => ScopeBindingsOutcome::Error(
+                                unobserved_inspection_source(error)?,
+                            ),
                         }
                     }
                 };
@@ -205,6 +205,36 @@ mod tests {
             generation,
             fingerprint: fingerprint.into(),
         }
+    }
+
+    #[test]
+    fn scope_observation_refuses_only_unobserved_source_identity() {
+        assert!(matches!(
+            unobserved_inspection_source(ResidentActorWorkbenchError::CompileView(
+                ActorCompileViewError::UnobservedSourceIdentity,
+            )),
+            Ok(QueryError::Unsupported(_)),
+        ));
+        let scope = ScopeId::ROOT;
+        assert!(matches!(
+            unobserved_inspection_source(ResidentActorWorkbenchError::Resident(
+                ResidentError::Session(tidepool_runtime::session::SessionError::DeadScope(scope)),
+            )),
+            Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                tidepool_runtime::session::SessionError::DeadScope(actual),
+            ))) if actual == scope,
+        ));
+        assert!(matches!(
+            unobserved_inspection_source(ResidentActorWorkbenchError::Compile(CompileError::Io(
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            ))),
+            Err(ResidentActorWorkbenchError::Compile(CompileError::Io(error)))
+                if error.kind() == std::io::ErrorKind::PermissionDenied,
+        ));
+        assert!(matches!(
+            unobserved_inspection_source(ResidentActorWorkbenchError::InvocationCancelled),
+            Err(ResidentActorWorkbenchError::InvocationCancelled),
+        ));
     }
 
     #[test]
