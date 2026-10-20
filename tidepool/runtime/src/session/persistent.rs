@@ -5091,7 +5091,7 @@ mod checkpoint_scope_tests {
         let original_source = session.adopt_initial_notebook_scope(scope).unwrap();
         let settled = session
             .with_source_compiler_transaction(
-                original_source.clone(),
+                original_source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -5126,7 +5126,12 @@ mod checkpoint_scope_tests {
         let source = super::super::GenerationArtifactReference::capture(b"binding source".to_vec());
         let observation = HostWorkObservation::new();
         let refused = observation.scope(|| {
-            session.capture_inspection_world_in(scope, &source, &original_source, |_| false)
+            session.capture_inspection_world_in(
+                scope,
+                &source,
+                original_source.original_source(),
+                |_| false,
+            )
         });
         match refused {
             Err(SessionError::UnsupportedCompilerWorldBinding {
@@ -5160,11 +5165,13 @@ mod checkpoint_scope_tests {
             }
         }
         assert!(matches!(
-            session.capture_inspection_world_in(scope, &source, &original_source, |id| id == stub_id),
+            session.capture_inspection_world_in(scope, &source, original_source.original_source(), |id| id == stub_id),
             Err(SessionError::MissingRetainedValueInterface(module)) if module == legacy_module
         ));
         let hidden = session
-            .capture_inspection_world_in(scope, &source, &original_source, |_| true)
+            .capture_inspection_world_in(scope, &source, original_source.original_source(), |_| {
+                true
+            })
             .unwrap();
         assert!(
             hidden.needs_source_capture(),
@@ -5187,7 +5194,7 @@ mod checkpoint_scope_tests {
         let source =
             super::super::GenerationArtifactReference::capture(b"captured source".to_vec());
         let admitted = session
-            .capture_inspection_world_in(scope, &source, &original, |_| false)
+            .capture_inspection_world_in(scope, &source, original.original_source(), |_| false)
             .unwrap();
         let captured = std::cell::Cell::new(false);
         let settled = foreign
@@ -5217,7 +5224,7 @@ mod checkpoint_scope_tests {
             ))
         ));
         let admitted = session
-            .capture_inspection_world_in(scope, &source, &original, |_| false)
+            .capture_inspection_world_in(scope, &source, original.original_source(), |_| false)
             .unwrap();
         let settled = original
             .with_source_compiler_transaction(
@@ -5302,7 +5309,12 @@ mod checkpoint_scope_tests {
             .unwrap(),
         );
         let admitted = session
-            .capture_inspection_world_in(target_scope, &reference, &original, |_| false)
+            .capture_inspection_world_in(
+                target_scope,
+                &reference,
+                original.original_source(),
+                |_| false,
+            )
             .unwrap();
         let settled = original
             .with_source_compiler_transaction(
@@ -5400,26 +5412,32 @@ mod checkpoint_scope_tests {
         let original_source = session.adopt_initial_notebook_scope(scope).unwrap();
         let source = super::super::GenerationArtifactReference::capture(b"source A".to_vec());
         let admitted = session
-            .capture_inspection_world_in(scope, &source, &original_source, |_| false)
+            .capture_inspection_world_in(scope, &source, original_source.original_source(), |_| {
+                false
+            })
             .unwrap();
         assert!(admitted.needs_source_capture());
         assert!(session.inspection_world_base_is_current(
             &admitted.base,
             &source,
-            &original_source
+            original_source.original_source()
         ));
         let other_source = super::super::GenerationArtifactReference::capture(b"source B".to_vec());
         assert!(!session.inspection_world_base_is_current(
             &admitted.base,
             &other_source,
-            &original_source
+            original_source.original_source()
         ));
         let other = publication_session(&recovery, root.path(), 421);
-        assert!(!other.inspection_world_base_is_current(&admitted.base, &source, &original_source));
+        assert!(!other.inspection_world_base_is_current(
+            &admitted.base,
+            &source,
+            original_source.original_source()
+        ));
         let tip = session.lib().scope_tip(scope);
         let settled = session
             .with_source_compiler_transaction(
-                original_source.clone(),
+                original_source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -5441,14 +5459,24 @@ mod checkpoint_scope_tests {
         assert!(!session.inspection_world_base_is_current(
             &admitted.base,
             &source,
-            &original_source
+            original_source.original_source()
         ));
         let fresh = session
-            .capture_inspection_world_in(scope, &source, &original_source, |_| true)
+            .capture_inspection_world_in(scope, &source, original_source.original_source(), |_| {
+                true
+            })
             .unwrap();
-        assert!(session.inspection_world_base_is_current(&fresh.base, &source, &original_source));
+        assert!(session.inspection_world_base_is_current(
+            &fresh.base,
+            &source,
+            original_source.original_source()
+        ));
         session.retire_scope(scope);
-        assert!(!session.inspection_world_base_is_current(&fresh.base, &source, &original_source));
+        assert!(!session.inspection_world_base_is_current(
+            &fresh.base,
+            &source,
+            original_source.original_source()
+        ));
     }
 
     #[test]
@@ -5586,7 +5614,7 @@ mod checkpoint_scope_tests {
             let source = session.adopt_initial_notebook_scope(scope).unwrap();
             let settled = session
                 .with_source_compiler_transaction(
-                    source.clone(),
+                    source.original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -5676,7 +5704,7 @@ mod checkpoint_scope_tests {
         let tip = session.lib().scope_tip(scope);
         let settled = session
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -5701,7 +5729,7 @@ mod checkpoint_scope_tests {
         let inherited = session.compile_view_key_in(child).unwrap();
         let settled = session
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -5729,7 +5757,7 @@ mod checkpoint_scope_tests {
         let sibling_source = session.adopt_initial_notebook_scope(sibling).unwrap();
         let settled = session
             .with_source_compiler_transaction(
-                sibling_source.clone(),
+                sibling_source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -5782,7 +5810,7 @@ mod checkpoint_scope_tests {
     ) -> T {
         let settled = session
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,

@@ -5103,7 +5103,7 @@ mod tests {
     ) -> T {
         let settled = session
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -5172,12 +5172,33 @@ mod tests {
         drop(lease);
         session.reap_admission_leases();
         original.with_open_target(&target, || ()).unwrap();
+        let run = || {
+            original.with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, _| owner.admit(Some(target.clone())),
+            )
+        };
+        let admitted = run().unwrap().into_outcome();
+        assert_eq!(admitted.close, crate::CompilerTransactionClose::NotStarted);
+        admitted.action.unwrap();
+        let _fence = original.source_admission().fence().unwrap();
+        assert!(matches!(
+            run().unwrap().into_outcome().action,
+            Err(super::super::SourceAdmissionError::Closed { .. })
+        ));
         let retired = session.retire_scope(scope);
         assert_eq!(retired.scopes_retired, 0);
         assert_eq!(retired.bindings_retired, 0);
         assert_eq!(retired.roots_released, 0);
         assert!(matches!(
             original.with_open_target(&target, || ()),
+            Err(super::super::SourceAdmissionError::StaleSourceLease)
+        ));
+        assert!(matches!(
+            run(),
             Err(super::super::SourceAdmissionError::StaleSourceLease)
         ));
         target
@@ -5218,6 +5239,43 @@ mod tests {
     }
 
     #[test]
+    fn token_only_transaction_adds_source_prerequisite_without_a_lexical_parent() {
+        let mut session = PersistentSession::new(None, 1024);
+        let original_lease = session.mint_isolated_scope_with_lease().unwrap();
+        let original_scope = original_lease.scope();
+        let original = original_lease.original_source().clone();
+        let settled = session
+            .with_source_compiler_transaction(
+                original.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| session.mint_isolated_scope_with_lease(),
+            )
+            .unwrap()
+            .into_outcome();
+        assert_eq!(settled.close, crate::CompilerTransactionClose::NotStarted);
+        let target = settled.action.unwrap();
+        assert!(target.prerequisites().is_empty());
+        assert!(target
+            .original_source()
+            .prerequisites
+            .iter()
+            .any(|source| Arc::ptr_eq(source, &original)));
+        drop(original_lease);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(original_scope));
+        target.validate_lexical_issuer().unwrap();
+        target.with_open_source_admission(|| ()).unwrap();
+        let fence = original.source_admission().fence().unwrap();
+        assert!(target.with_open_source_admission(|| ()).is_err());
+        target.validate_lexical_issuer().unwrap();
+        fence.reopen(&original).unwrap();
+        target.with_open_source_admission(|| ()).unwrap();
+    }
+
+    #[test]
     fn world_private_admission_requires_the_actual_transaction_original() {
         let root = tempfile::tempdir().unwrap();
         let lib =
@@ -5231,16 +5289,22 @@ mod tests {
         let scope_count = session.scope_tree().len();
         let settled = session
             .with_source_compiler_transaction(
-                source_b.clone(),
+                source_b.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
                 |_| {},
                 |session, _| {
-                    let foreign =
-                        session.begin_world_private_execution(scope_a, &reference, &source_a);
-                    let matching =
-                        session.begin_world_private_execution(scope_b, &reference, &source_b);
+                    let foreign = session.begin_world_private_execution(
+                        scope_a,
+                        &reference,
+                        source_a.original_source(),
+                    );
+                    let matching = session.begin_world_private_execution(
+                        scope_b,
+                        &reference,
+                        source_b.original_source(),
+                    );
                     (foreign, matching)
                 },
             )
