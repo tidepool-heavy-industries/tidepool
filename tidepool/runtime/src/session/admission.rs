@@ -186,7 +186,7 @@ struct PrivateExecutionCompilerBasis {
     published: Arc<super::inspection::InspectionWorldAssociation>,
     private_key: super::persistent::CompileViewKey,
     source: Arc<super::GenerationArtifactReference>,
-    original_source: Arc<RuntimeLexicalScopeLease>,
+    original_source: Arc<RuntimeOriginalSource>,
     public_target: Arc<RuntimeLexicalScopeLease>,
     admitted: PublicVisibilitySnapshot,
     admitted_context: Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
@@ -198,7 +198,7 @@ struct PrivateExecutionCompilerBasis {
 pub(super) struct WorldExecutionAdmissionFacts {
     pub(super) published: Arc<super::inspection::InspectionWorldAssociation>,
     pub(super) source: Arc<super::GenerationArtifactReference>,
-    pub(super) original_source: Arc<RuntimeLexicalScopeLease>,
+    pub(super) original_source: Arc<RuntimeOriginalSource>,
     pub(super) public_target: Arc<RuntimeLexicalScopeLease>,
     pub(super) admitted: PublicVisibilitySnapshot,
     pub(super) admitted_context:
@@ -686,7 +686,7 @@ impl PrivateExecutionAdmission {
     /// Original source A captured with the published world. The private
     /// placement's lease is target B and stays separately reachable through
     /// [`Self::retained_lexical_scope`].
-    pub fn original_source(&self) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
+    pub fn original_source(&self) -> Result<Arc<RuntimeOriginalSource>, SessionError> {
         Ok(self.compiler_basis.original_source.clone())
     }
 
@@ -737,7 +737,7 @@ enum RuntimeCellCompilerBasis {
         source: Arc<super::GenerationArtifactReference>,
         /// Original A from the issuing source transaction; the cell's retained
         /// scope is the separately captured receiving target B.
-        original_source: Arc<RuntimeLexicalScopeLease>,
+        original_source: Arc<RuntimeOriginalSource>,
     },
 }
 
@@ -807,7 +807,7 @@ pub(super) struct RuntimeAdmissionOwner {
     retired: parking_lot::Mutex<Vec<RuntimeAdmissionRelease>>,
     lexical_leases: parking_lot::Mutex<BTreeMap<ScopeId, RuntimeLexicalScopeRecord>>,
     session_live: std::sync::atomic::AtomicBool,
-    uncertain_scopes: std::sync::Weak<parking_lot::Mutex<Vec<Arc<RuntimeLexicalScopeLease>>>>,
+    uncertain_scopes: std::sync::Weak<parking_lot::Mutex<RuntimeUnconfirmedSourceCustody>>,
 }
 
 struct RuntimeLexicalScopeRecord {
@@ -820,6 +820,13 @@ struct RuntimeLexicalScopeRecord {
     // The actual canonical lease owns strong prerequisites. Keeping them
     // strong in the issuer's own record would form owner→lease→owner cycles.
     prerequisites: Vec<std::sync::Weak<RuntimeLexicalScopeLease>>,
+    source_prerequisites: Vec<std::sync::Weak<RuntimeOriginalSource>>,
+}
+
+#[derive(Default)]
+pub(super) struct RuntimeUnconfirmedSourceCustody {
+    pub(super) originals: Vec<Arc<RuntimeOriginalSource>>,
+    pub(super) targets: Vec<Arc<RuntimeLexicalScopeLease>>,
 }
 
 enum RuntimeAdmissionRelease {
@@ -940,6 +947,41 @@ impl RuntimeOriginalSource {
         Ok(result)
     }
 
+    pub fn retain_unconfirmed_source_custody(self: &Arc<Self>) {
+        for prerequisite in &self.prerequisites {
+            prerequisite.retain_unconfirmed_source_custody();
+        }
+        let Some(custody) = self.owner.uncertain_scopes.upgrade() else {
+            return;
+        };
+        let _issuance = self.owner.source_issuance.read();
+        let canonical = self
+            .owner
+            .session_live
+            .load(std::sync::atomic::Ordering::Acquire)
+            && self
+                .owner
+                .lexical_leases
+                .lock()
+                .get(&self.scope)
+                .is_some_and(|record| {
+                    record
+                        .original_source
+                        .as_ref()
+                        .and_then(std::sync::Weak::upgrade)
+                        .is_some_and(|source| Arc::ptr_eq(&source, self))
+                });
+        let mut held = custody.lock();
+        if canonical
+            && !held
+                .originals
+                .iter()
+                .any(|source| Arc::ptr_eq(source, self))
+        {
+            held.originals.push(self.clone());
+        }
+    }
+
     pub fn with_open_target<T>(
         self: &Arc<Self>,
         target: &Arc<RuntimeLexicalScopeLease>,
@@ -962,6 +1004,14 @@ impl RuntimeOriginalSource {
                 sources.iter().map(|source| source.source_admission()),
                 action,
             )
+        })
+    }
+
+    pub fn admit_source(
+        self: &Arc<Self>,
+    ) -> Result<super::RuntimeSourceLeaseClaim, super::SourceAdmissionError> {
+        Self::with_sources_and_targets([self.clone()], [], |sources, targets| {
+            super::RuntimeSourceLeaseClaim::admit(sources, targets)
         })
     }
 
@@ -1026,7 +1076,7 @@ impl RuntimeAdmissionOwner {
         self.epoch.load(std::sync::atomic::Ordering::Acquire)
     }
     pub(super) fn new(
-        uncertain_scopes: &Arc<parking_lot::Mutex<Vec<Arc<RuntimeLexicalScopeLease>>>>,
+        uncertain_scopes: &Arc<parking_lot::Mutex<RuntimeUnconfirmedSourceCustody>>,
     ) -> Self {
         Self {
             identity: uuid::Uuid::new_v4(),
@@ -1110,12 +1160,12 @@ impl RuntimeLexicalScopeLease {
                 })
     }
 
-    pub fn validate_source_issuer(&self) -> Result<(), super::SourceAdmissionError> {
+    pub fn validate_lexical_issuer(&self) -> Result<(), super::SourceAdmissionError> {
         let _issuance = self.owner.source_issuance.read();
         self.validate_local_source_issuer()?;
         drop(_issuance);
         for prerequisite in &self.prerequisites {
-            prerequisite.validate_source_issuer()?;
+            prerequisite.validate_lexical_issuer()?;
         }
         Ok(())
     }
@@ -1150,8 +1200,8 @@ impl RuntimeLexicalScopeLease {
     pub fn admit_source(
         self: &Arc<Self>,
     ) -> Result<super::RuntimeSourceLeaseClaim, super::SourceAdmissionError> {
-        Self::with_source_leases([self.clone()], |leases| {
-            super::RuntimeSourceLeaseClaim::admit(leases)
+        RuntimeOriginalSource::with_sources_and_targets([], [self.clone()], |sources, leases| {
+            super::RuntimeSourceLeaseClaim::admit(sources, leases)
         })
     }
 
@@ -1167,8 +1217,10 @@ impl RuntimeLexicalScopeLease {
         };
         let _issuance = self.owner.source_issuance.read();
         let mut held = custody.lock();
-        if self.has_live_canonical_custody() && !held.iter().any(|lease| Arc::ptr_eq(lease, self)) {
-            held.push(self.clone());
+        if self.has_live_canonical_custody()
+            && !held.targets.iter().any(|lease| Arc::ptr_eq(lease, self))
+        {
+            held.targets.push(self.clone());
         }
     }
 
@@ -1699,9 +1751,7 @@ impl RuntimeCheckedPrefix {
         self.settled.checkpoint()?;
         session.validate_lexical_scope_lease(scope, &self.admission._retained_scope)?;
         if self.admission.world_reservation().is_some() {
-            self.admission
-                .original_source_lease()?
-                .validate_source_issuer()?;
+            self.admission.original_source()?.validate_source_issuer()?;
         }
         let store = session.held_admission_store()?;
         let mut state = self.state.lock();
@@ -1837,7 +1887,7 @@ impl CheckedTurnCompletion {
         if self.prefix.admission.world_reservation().is_some() {
             self.prefix
                 .admission
-                .original_source_lease()?
+                .original_source()?
                 .validate_source_issuer()?;
         }
         let mut state = self.prefix.state.lock();
@@ -2285,19 +2335,22 @@ impl RuntimeCellAdmission {
         &self,
         action: impl FnOnce() -> T,
     ) -> Result<T, super::SourceAdmissionError> {
-        let mut roots = vec![self._retained_scope.clone()];
-        if let RuntimeCellCompilerBasis::World {
-            original_source, ..
-        } = &self.compiler_basis
-        {
-            roots.push(original_source.clone());
-        }
-        RuntimeLexicalScopeLease::with_source_leases(roots, |leases| {
-            super::RuntimeSourceAdmission::with_open_admissions(
-                leases.iter().map(|lease| lease.source_admission()),
-                action,
-            )
-        })
+        let originals = match &self.compiler_basis {
+            RuntimeCellCompilerBasis::World {
+                original_source, ..
+            } => Some(original_source.clone()),
+            RuntimeCellCompilerBasis::Finite(_) => None,
+        };
+        RuntimeOriginalSource::with_sources_and_targets(
+            originals,
+            [self._retained_scope.clone()],
+            |sources, _| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    sources.iter().map(|source| source.source_admission()),
+                    action,
+                )
+            },
+        )
     }
 
     pub(super) fn world_source_reference(
@@ -2311,9 +2364,7 @@ impl RuntimeCellAdmission {
         }
     }
 
-    pub(super) fn original_source_lease(
-        &self,
-    ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
+    pub(super) fn original_source(&self) -> Result<Arc<RuntimeOriginalSource>, SessionError> {
         match &self.compiler_basis {
             RuntimeCellCompilerBasis::World {
                 original_source, ..
@@ -2635,7 +2686,7 @@ impl PersistentSession {
         if prefix.admission.world_reservation().is_some() {
             prefix
                 .admission
-                .original_source_lease()?
+                .original_source()?
                 .validate_source_issuer()?;
         }
         let store = self.held_admission_store()?;
@@ -2931,12 +2982,7 @@ impl PersistentSession {
         &self,
         scope: ScopeId,
     ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
-        self.prepared_lexical_scope_lease_with_source(
-            scope,
-            self.source_transaction
-                .as_ref()
-                .map(|owner| owner.source.clone()),
-        )
+        self.prepared_lexical_scope_lease_with_source(scope, None)
     }
 
     pub(super) fn prepared_lexical_scope_lease_with_source(
@@ -2948,7 +2994,7 @@ impl PersistentSession {
             return Err(SessionError::DeadScope(scope));
         }
         if let Some(prerequisite) = &prerequisite {
-            prerequisite.validate_source_issuer()?;
+            prerequisite.validate_lexical_issuer()?;
         }
         let mut leases = self.admission_owner().lexical_leases.lock();
         if let Some(existing) = leases.get(&scope).and_then(|record| record.lease.as_ref()) {
@@ -2957,7 +3003,7 @@ impl PersistentSession {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
             drop(leases);
-            lease.validate_source_issuer()?;
+            lease.validate_lexical_issuer()?;
             return Ok(lease);
         }
         let owns_source_admission = leases
@@ -2986,6 +3032,29 @@ impl PersistentSession {
                         .map(|lease| lease.source_admission().clone()),
                 )
             });
+        let mut source_prerequisites = match leases.get(&scope) {
+            Some(record) => record
+                .source_prerequisites
+                .iter()
+                .map(|source| {
+                    source
+                        .upgrade()
+                        .ok_or(super::SourceAdmissionError::StaleSourceLease)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            None => prerequisites
+                .iter()
+                .map(|lease| lease.original_source.clone())
+                .collect(),
+        };
+        if let Some(transaction) = &self.source_transaction {
+            if !source_prerequisites
+                .iter()
+                .any(|source| Arc::ptr_eq(source, &transaction.source))
+            {
+                source_prerequisites.push(transaction.source.clone());
+            }
+        }
         let owner_epoch = self.admission_owner().epoch();
         let original_source = match leases
             .get(&scope)
@@ -2999,10 +3068,7 @@ impl PersistentSession {
                 owner_epoch,
                 scope,
                 source_admission: source_admission.clone(),
-                prerequisites: prerequisites
-                    .iter()
-                    .map(|lease| lease.original_source.clone())
-                    .collect(),
+                prerequisites: source_prerequisites,
             }),
         };
         let lease = Arc::new(RuntimeLexicalScopeLease {
@@ -3022,11 +3088,17 @@ impl PersistentSession {
                 original_source: Some(Arc::downgrade(&lease.original_source)),
                 owns_source_admission,
                 prerequisites: lease.prerequisites.iter().map(Arc::downgrade).collect(),
+                source_prerequisites: lease
+                    .original_source
+                    .prerequisites
+                    .iter()
+                    .map(Arc::downgrade)
+                    .collect(),
                 source_admission,
             },
         );
         drop(leases);
-        lease.validate_source_issuer()?;
+        lease.validate_lexical_issuer()?;
         Ok(lease)
     }
 
@@ -3052,7 +3124,7 @@ impl PersistentSession {
         prerequisite: Option<Arc<RuntimeLexicalScopeLease>>,
     ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
         if let Some(prerequisite) = &prerequisite {
-            prerequisite.validate_source_issuer()?;
+            prerequisite.validate_lexical_issuer()?;
         }
         // An unleased captured scope has custody provenance, but has not yet
         // selected its own executable world. Only initial notebook adoption
@@ -3088,18 +3160,26 @@ impl PersistentSession {
                     Some(lease) => vec![lease.clone()],
                     None => record.prerequisites.clone(),
                 };
-                (record.source_admission.clone(), prerequisites)
+                (
+                    record.source_admission.clone(),
+                    prerequisites,
+                    match &record.original_source {
+                        Some(source) => vec![source.clone()],
+                        None => record.source_prerequisites.clone(),
+                    },
+                )
             })
         }
         .or_else(|| {
             self.source_transaction.as_ref().map(|owner| {
                 (
                     owner.source.source_admission().clone(),
+                    Vec::new(),
                     vec![Arc::downgrade(&owner.source)],
                 )
             })
         });
-        if let Some((source_admission, prerequisites)) = inherited {
+        if let Some((source_admission, prerequisites, source_prerequisites)) = inherited {
             self.admission_owner().lexical_leases.lock().insert(
                 target,
                 RuntimeLexicalScopeRecord {
@@ -3110,6 +3190,7 @@ impl PersistentSession {
                     owns_source_admission: false,
                     source_admission,
                     prerequisites,
+                    source_prerequisites,
                 },
             );
         }
@@ -3127,14 +3208,23 @@ impl PersistentSession {
             let mut held = self.uncertain_source_scopes.lock();
             let mut released = Vec::new();
             let mut index = 0;
-            while index < held.len() {
-                if held[index].scope == scope {
-                    released.push(held.swap_remove(index));
+            while index < held.targets.len() {
+                if held.targets[index].scope == scope {
+                    released.push(held.targets.swap_remove(index));
                 } else {
                     index += 1;
                 }
             }
-            released
+            let mut original_released = Vec::new();
+            let mut index = 0;
+            while index < held.originals.len() {
+                if held.originals[index].scope == scope {
+                    original_released.push(held.originals.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            (released, original_released)
         };
         drop(released);
     }
@@ -3182,7 +3272,7 @@ impl PersistentSession {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
-        lease.validate_source_issuer()?;
+        lease.validate_lexical_issuer()?;
         Ok(())
     }
     pub fn mint_scope_from_lease(
@@ -3634,7 +3724,7 @@ impl PersistentSession {
         &mut self,
         public_scope: ScopeId,
         source: &super::GenerationArtifactReference,
-        original_source: &Arc<RuntimeLexicalScopeLease>,
+        original_source: &Arc<RuntimeOriginalSource>,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
         let transaction = self
             .source_transaction
@@ -3743,15 +3833,12 @@ impl PersistentSession {
         // Detached runtime placement borrows the SAME published compiler World.
         // A different runtime scope does not invent a compiler product or ID.
         let facts = prepared.world_execution_facts();
-        RuntimeLexicalScopeLease::with_source_leases(
-            [
-                facts.original_source.clone(),
-                prepared.scope_lease.clone(),
-                facts.public_target.clone(),
-            ],
-            |leases| {
+        RuntimeOriginalSource::with_sources_and_targets(
+            [facts.original_source.clone()],
+            [prepared.scope_lease.clone(), facts.public_target.clone()],
+            |sources, _| {
                 super::RuntimeSourceAdmission::with_open_admissions(
-                    leases.iter().map(|lease| lease.source_admission()),
+                    sources.iter().map(|source| source.source_admission()),
                     || {
                         if !Arc::ptr_eq(&prepared.owner, self.admission_owner())
                             || prepared.owner_epoch != self.admission_owner().epoch()
@@ -3777,7 +3864,7 @@ impl PersistentSession {
                                 epoch: prepared.owner_epoch,
                                 source: facts.source.clone(),
                                 original_source:
-                                    super::inspection::InspectionWorldLeaseObservation::new(
+                                    super::inspection::InspectionWorldSourceObservation::new(
                                         &facts.original_source,
                                     ),
                                 target: super::inspection::InspectionWorldLeaseObservation::new(
@@ -4388,11 +4475,12 @@ impl PersistentSession {
         let source = admission.world_source_reference()?.clone();
         let original_source = original_source.clone();
         let target = admission._retained_scope.clone();
-        RuntimeLexicalScopeLease::with_source_leases(
-            [original_source.clone(), target.clone()],
-            |leases| {
+        RuntimeOriginalSource::with_sources_and_targets(
+            [original_source.clone()],
+            [target.clone()],
+            |sources, _| {
                 super::RuntimeSourceAdmission::with_open_admissions(
-                    leases.iter().map(|lease| lease.source_admission()),
+                    sources.iter().map(|source| source.source_admission()),
                     || {
                         if !admission.belongs_to(self)
                             || admission.scope != scope
@@ -4421,7 +4509,7 @@ impl PersistentSession {
                                 epoch: self.admission_owner().epoch(),
                                 source: source.clone(),
                                 original_source:
-                                    super::inspection::InspectionWorldLeaseObservation::new(
+                                    super::inspection::InspectionWorldSourceObservation::new(
                                         &original_source,
                                     ),
                                 target: super::inspection::InspectionWorldLeaseObservation::new(
@@ -4810,7 +4898,7 @@ impl PersistentSession {
         plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
         purpose: RuntimeCellPurpose,
         retained_scope: Arc<RuntimeLexicalScopeLease>,
-        original_source: Arc<RuntimeLexicalScopeLease>,
+        original_source: Arc<RuntimeOriginalSource>,
         source: Arc<super::GenerationArtifactReference>,
         session: super::SessionId,
         private_key: super::persistent::CompileViewKey,
@@ -5118,10 +5206,15 @@ mod tests {
         session.reap_admission_leases();
         assert!(!session.scope_tree().is_live(parent));
         assert!(!session.scope_tree().is_live(child));
-        assert!(child_lease.validate_source_issuer().is_err());
+        assert!(child_lease.validate_lexical_issuer().is_err());
         assert!(child_source.with_open_target(&child_lease, || ()).is_err());
         child_source.with_open_target(&target, || ()).unwrap();
         assert!(session.adopt_initial_notebook_scope(child).is_err());
+        child_source.with_open_target(&target, || ()).unwrap();
+        let retired = session.retire_scope(child);
+        assert_eq!(retired.scopes_retired, 0);
+        assert_eq!(retired.roots_released, 0);
+        assert!(child_source.with_open_target(&target, || ()).is_err());
     }
 
     #[test]
