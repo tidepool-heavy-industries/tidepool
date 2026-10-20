@@ -615,11 +615,11 @@ impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
     fn deref(&self) -> &Self::Target { &self.target }
 }
 
-impl ResolvedNativeSourceTarget<'_> {
+impl<'a> ResolvedNativeSourceTarget<'a> {
     pub(crate) fn group(
         &self,
         binding: NativeGroupBinding,
-    ) -> Result<&crate::certified_products::PendingCertifiedGroup, CompileError> {
+    ) -> Result<&'a crate::certified_products::PendingCertifiedGroup, CompileError> {
         self.groups.get(binding).ok_or_else(|| {
             failure("selected native binding lacks its exact certified product")
         })
