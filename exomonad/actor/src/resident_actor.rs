@@ -5474,7 +5474,9 @@ where
         // request releases its lease.
         self.actor_program_snapshot = None;
         self.actor_callback_execution = None;
-        self.installed_tools.clear();
+        // Retire the shared state for both installation and reply custody even
+        // when an otherwise idle external policy retained it.
+        drop(self.installed_tools.drain_retired());
     }
 
     /// The workbench a cell or tool call should run against right
@@ -8572,6 +8574,7 @@ where
             }
             self.check_application_readiness(kernel, context).await?;
             let mut installation_error = None;
+            let mut reply_retired = false;
             let publication = completion.publish_if_current(|| {
                 kernel.retained_exit().claim_before_shutdown(|| {
                     if let Some(installation) = installation {
@@ -8580,7 +8583,10 @@ where
                             return false;
                         }
                     }
-                    self.installed_tools.publish_reply(reply_activation);
+                    if !self.installed_tools.publish_reply(reply_activation) {
+                        reply_retired = true;
+                        return false;
+                    }
                     self.assignment_base = assignment_base;
                     self.outstanding_interactive = Some(OutstandingInteractive::new(
                         &request,
@@ -8634,6 +8640,11 @@ where
             match publication {
                 Ok(claim) => {
                     claim.map_err(ResidentActorWorkbenchError::RetiredBeforeAdmission)?;
+                    if reply_retired {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "actor retired before reply activation installation".into(),
+                        ));
+                    }
                     if let Some(error) = installation_error {
                         return Err(error);
                     }

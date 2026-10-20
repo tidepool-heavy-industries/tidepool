@@ -1935,12 +1935,21 @@ struct ActorPublicationAttempt {
     target: generation_admission::GenerationDependency,
 }
 
+/// The one exclusive authority reserved for a publication attempt. A bootstrap
+/// world publication owns its fence and prerequisite; every other attempt owns
+/// the target's source fence and optional prerequisite claim directly.
+enum PublicationAuthority {
+    World(generation_admission::WorldPublication),
+    TargetFence {
+        fence: tidepool_runtime::session::RuntimeSourceFence,
+        prerequisite: Option<tidepool_runtime::session::RuntimeSourceLeaseClaim>,
+    },
+}
+
 struct ActorPublicationGuard {
     state: Arc<InstalledToolsState>,
     attempt: Arc<ActorPublicationAttempt>,
-    world: Option<generation_admission::WorldPublication>,
-    target_fence: Option<tidepool_runtime::session::RuntimeSourceFence>,
-    target_prerequisite: Option<tidepool_runtime::session::RuntimeSourceLeaseClaim>,
+    authority: Option<PublicationAuthority>,
     decision: Arc<tidepool_runtime::session::PublicationDecision>,
     owner: ActorPublicationOwner,
     settled: bool,
@@ -1981,31 +1990,28 @@ impl ActorPublicationGuard {
         owner: ActorPublicationOwner,
     ) -> Result<Option<Self>, ResidentActorWorkbenchError> {
         target.runtime_lease().validate_source_issuer()?;
-        let world = match (&expected, source) {
+        let authority = match (&expected, source) {
             (
                 ActorRequestSnapshot::Bootstrap(_),
                 generation_admission::SourceDependency::World(world),
-            ) => Some(world.begin_publication(&target)?),
-            _ => None,
-        };
-        let target_prerequisite = if world.is_none() {
-            target
-                .prerequisite()
-                .as_ref()
-                .map(|parent| parent.runtime_lease().admit_source())
-                .transpose()?
-        } else {
-            None
-        };
-        let target_fence = if world.is_none() {
-            let fence = target.runtime_admission().fence_if_idle()?;
-            Some(fence)
-        } else {
-            None
+            ) => PublicationAuthority::World(world.begin_publication(&target)?),
+            _ => {
+                let prerequisite = target
+                    .prerequisite()
+                    .as_ref()
+                    .map(|parent| parent.runtime_lease().admit_source())
+                    .transpose()?;
+                let fence = target.runtime_admission().fence_if_idle()?;
+                PublicationAuthority::TargetFence {
+                    fence,
+                    prerequisite,
+                }
+            }
         };
         let attempt = Arc::new(ActorPublicationAttempt { expected, target });
         let same = {
-            let mut current = state.0.lock();
+            let mut record = state.0.lock();
+            let current = &mut record.availability;
             let same = match (&*current, &attempt.expected) {
                 (
                     InstalledToolsAvailability::Generation(active),
@@ -2025,16 +2031,13 @@ impl ActorPublicationGuard {
         if !same {
             // No selected owner remains to authorize restoration. Abandoned
             // candidate fences remain closed; custody is retained separately.
-            drop(world);
-            drop(target_fence);
+            drop(authority);
             return Ok(None);
         }
         Ok(Some(Self {
             state,
             attempt,
-            world,
-            target_fence,
-            target_prerequisite,
+            authority: Some(authority),
             decision,
             owner,
             settled: false,
@@ -2074,14 +2077,18 @@ impl ActorPublicationGuard {
         ActorPublicationVisibility {
             state: self.state.clone(),
             attempt: self.attempt.clone(),
-            world: self.world.as_ref().map(|world| world.visibility()),
+            world: match &self.authority {
+                Some(PublicationAuthority::World(world)) => Some(world.visibility()),
+                Some(PublicationAuthority::TargetFence { .. }) | None => None,
+            },
         }
     }
 
     fn refused(mut self) {
         let restore = |reopen: tidepool_runtime::session::RuntimeSourceReopen<'_>| {
             self.owner.with_live_source_settlement(|| {
-                let mut current = self.state.0.lock();
+                let mut record = self.state.0.lock();
+                let current = &mut record.availability;
                 if !matches!(&*current, InstalledToolsAvailability::PublicationInProgress(attempt) if Arc::ptr_eq(attempt, &self.attempt)) {
                     return Err(());
                 }
@@ -2096,22 +2103,19 @@ impl ActorPublicationGuard {
                 Ok(())
             }).unwrap_or(Err(()))
         };
-        self.settled = if let Some(world) = self.world.take() {
-            world.refused_when(restore)
-        } else {
-            self.target_fence
-                .take()
-                .expect("publication target fence")
-                .reopen_with(self.attempt.target.runtime_lease(), restore)
-                .is_ok_and(|result| result.is_ok())
-        };
+        self.settled = self
+            .authority
+            .take()
+            .expect("one publication authority")
+            .refused_when(&self.attempt.target, restore);
     }
 
     fn confirmed(mut self) -> bool {
         let promote = |reopen: tidepool_runtime::session::RuntimeSourceReopen<'_>| {
             self.owner
                 .with_live_source_settlement(|| {
-                    let mut current = self.state.0.lock();
+                    let mut record = self.state.0.lock();
+                    let current = &mut record.availability;
                     let selected = match &*current {
                         InstalledToolsAvailability::PublicationVisible {
                             attempt,
@@ -2136,15 +2140,11 @@ impl ActorPublicationGuard {
                 })
                 .unwrap_or(Err(()))
         };
-        let confirmed = if let Some(world) = self.world.take() {
-            world.confirmed_when(promote)
-        } else {
-            self.target_fence
-                .take()
-                .expect("publication target fence")
-                .reopen_with(self.attempt.target.runtime_lease(), promote)
-                .is_ok_and(|result| result.is_ok())
-        };
+        let confirmed = self
+            .authority
+            .take()
+            .expect("one publication authority")
+            .confirmed_when(&self.attempt.target, promote);
         self.settled = confirmed;
         confirmed
     }
@@ -2159,7 +2159,8 @@ impl Drop for ActorPublicationGuard {
         let state = self.state.clone();
         let attempt = self.attempt.clone();
         let mark_installed = || {
-            let mut current = state.0.lock();
+            let mut record = state.0.lock();
+            let current = &mut record.availability;
             match &*current {
                 InstalledToolsAvailability::PublicationInProgress(issued)
                     if Arc::ptr_eq(issued, &attempt) =>
@@ -2181,13 +2182,17 @@ impl Drop for ActorPublicationGuard {
                 _ => {}
             }
         };
-        if let Some(world) = &mut self.world {
-            world.unavailable(mark_installed);
-        } else {
-            mark_installed();
-        }
-        if let Some(claim) = self.target_prerequisite.take() {
-            claim.retain_unconfirmed();
+        if let Some(mut authority) = self.authority.take() {
+            authority.unavailable(mark_installed);
+            if let PublicationAuthority::TargetFence {
+                prerequisite: authority_prerequisite,
+                ..
+            } = &mut authority
+            {
+                if let Some(claim) = authority_prerequisite.take() {
+                    claim.retain_unconfirmed();
+                }
+            }
         }
         // WorldPublication drops prerequisite claims only after both locks unlock.
     }
@@ -2195,14 +2200,15 @@ impl Drop for ActorPublicationGuard {
 
 impl ActorPublicationVisibility {
     fn is_current(&self) -> bool {
-        matches!(&*self.state.0.lock(), InstalledToolsAvailability::PublicationInProgress(attempt) if Arc::ptr_eq(attempt, &self.attempt))
+        matches!(&self.state.0.lock().availability, InstalledToolsAvailability::PublicationInProgress(attempt) if Arc::ptr_eq(attempt, &self.attempt))
     }
 
     fn install(&self, generation: Arc<ActorGeneration>) -> bool {
         if let Some(world) = &self.world {
             return world.install(&self.state, &self.attempt, generation);
         }
-        let mut current = self.state.0.lock();
+        let mut record = self.state.0.lock();
+        let current = &mut record.availability;
         let live = generation.dependency().same_prepared(&self.attempt.target)
             && Arc::ptr_eq(&generation.scope, self.attempt.target.runtime_lease())
             && matches!(&*current, InstalledToolsAvailability::PublicationInProgress(attempt) if Arc::ptr_eq(attempt, &self.attempt));
@@ -2221,7 +2227,8 @@ impl ActorPublicationVisibility {
     }
 
     fn retain_unconfirmed(&self, candidate: &mut Option<InitialPublicationCandidate>) {
-        let mut current = self.state.0.lock();
+        let mut record = self.state.0.lock();
+        let current = &mut record.availability;
         let exact = match &*current {
             InstalledToolsAvailability::PublicationInProgress(attempt)
             | InstalledToolsAvailability::PublicationUnavailable(attempt) => {
@@ -2243,7 +2250,60 @@ impl ActorPublicationVisibility {
             ActorRequestSnapshot::Bootstrap(previous) => Some(previous),
             _ => None,
         };
-        retain_unconfirmed_generation(&mut current, previous, candidate);
+        retain_unconfirmed_generation(current, previous, candidate);
+    }
+}
+
+impl PublicationAuthority {
+    fn unavailable(&mut self, mark_installed: impl FnOnce()) {
+        match self {
+            Self::World(world) => world.unavailable(mark_installed),
+            Self::TargetFence { .. } => mark_installed(),
+        }
+    }
+
+    fn refused_when(
+        self,
+        target: &generation_admission::GenerationDependency,
+        restore: impl for<'a> FnOnce(
+            tidepool_runtime::session::RuntimeSourceReopen<'a>,
+        ) -> Result<(), ()>,
+    ) -> bool {
+        match self {
+            Self::World(world) => world.refused_when(restore),
+            Self::TargetFence {
+                fence,
+                prerequisite,
+            } => {
+                let refused = fence
+                    .reopen_with(target.runtime_lease(), restore)
+                    .is_ok_and(|result| result.is_ok());
+                drop(prerequisite);
+                refused
+            }
+        }
+    }
+
+    fn confirmed_when(
+        self,
+        target: &generation_admission::GenerationDependency,
+        promote: impl for<'a> FnOnce(
+            tidepool_runtime::session::RuntimeSourceReopen<'a>,
+        ) -> Result<(), ()>,
+    ) -> bool {
+        match self {
+            Self::World(world) => world.confirmed_when(promote),
+            Self::TargetFence {
+                fence,
+                prerequisite,
+            } => {
+                let confirmed = fence
+                    .reopen_with(target.runtime_lease(), promote)
+                    .is_ok_and(|result| result.is_ok());
+                drop(prerequisite);
+                confirmed
+            }
+        }
     }
 }
 
@@ -2453,15 +2513,27 @@ impl ActorRequestSnapshot {
 /// The actor's single current installation. Requests clone an immutable lease;
 /// spec reload replaces the paired source and handlers at source visibility.
 #[derive(Default)]
-pub(crate) struct InstalledToolsState(
-    Mutex<InstalledToolsAvailability>,
-    Mutex<Option<Arc<crate::RequestReplyActivation>>>,
-);
+pub(crate) struct InstalledToolsState(Mutex<InstalledToolsRecord>);
+
+#[derive(Default)]
+struct InstalledToolsRecord {
+    availability: InstalledToolsAvailability,
+    reply: Option<Arc<crate::RequestReplyActivation>>,
+}
+
+/// Custody removed by one terminal drain. Dropping it releases the installation
+/// and reply owners after the state lock has been released.
+pub(crate) struct InstalledToolsDrain {
+    _availability: InstalledToolsAvailability,
+    _reply: Option<Arc<crate::RequestReplyActivation>>,
+}
 
 #[derive(Default)]
 enum InstalledToolsAvailability {
     #[default]
     Empty,
+    /// No later publication may install into a retired actor's state.
+    Retired,
     Available(InstalledToolLease),
     Generation(Arc<ActorGeneration>),
     GenerationUnavailable(Arc<ActorGeneration>),
@@ -2486,6 +2558,7 @@ impl InstalledToolsAvailability {
             Self::Available(lease) => Some(lease),
             Self::Generation(generation) => Some(&generation.installation),
             Self::Empty
+            | Self::Retired
             | Self::GenerationUnavailable(_)
             | Self::InitialPublicationUnconfirmed(_)
             | Self::PublicationInProgress(_)
@@ -2505,6 +2578,8 @@ pub(crate) enum BootstrapExpectation<'a> {
 pub(crate) enum BootstrapInstallationError {
     #[error("bootstrap installation changed before publication")]
     Changed,
+    #[error("bootstrap cannot install into a retired actor")]
+    Retired,
     #[error("bootstrap cannot replace a published generation")]
     PublishedGeneration,
     #[error("bootstrap cannot replace an unconfirmed generation")]
@@ -2520,7 +2595,7 @@ impl InstalledToolsState {
         observe: impl FnOnce() -> T,
     ) -> Option<T> {
         let state = self.0.lock();
-        match &*state {
+        match &state.availability {
             InstalledToolsAvailability::Generation(current) if Arc::ptr_eq(current, expected) => {
                 Some(observe())
             }
@@ -2528,15 +2603,27 @@ impl InstalledToolsState {
         }
     }
     pub(crate) fn active_reply(&self) -> Option<Arc<crate::RequestReplyActivation>> {
-        self.1.lock().clone()
+        self.0.lock().reply.clone()
     }
-    pub(crate) fn publish_reply(&self, reply: Option<Arc<crate::RequestReplyActivation>>) {
-        *self.1.lock() = reply;
+    /// A retired actor accepts no new reply custody. Existing holders keep their
+    /// own clones; clearing an absent reply remains a no-op success.
+    pub(crate) fn publish_reply(
+        &self,
+        reply: Option<Arc<crate::RequestReplyActivation>>,
+    ) -> bool {
+        let mut state = self.0.lock();
+        if matches!(state.availability, InstalledToolsAvailability::Retired) {
+            return reply.is_none();
+        }
+        state.reply = reply;
+        true
     }
 
     pub(crate) fn observe(&self) -> InstalledToolsObservation {
-        match &*self.0.lock() {
-            InstalledToolsAvailability::Empty => InstalledToolsObservation::Empty,
+        match &self.0.lock().availability {
+            InstalledToolsAvailability::Empty | InstalledToolsAvailability::Retired => {
+                InstalledToolsObservation::Empty
+            }
             InstalledToolsAvailability::Available(lease) => {
                 InstalledToolsObservation::Available(lease.tools_arc())
             }
@@ -2562,7 +2649,7 @@ impl InstalledToolsState {
     }
 
     pub(crate) fn current(&self) -> Option<InstalledToolLease> {
-        self.0.lock().available().cloned()
+        self.0.lock().availability.available().cloned()
     }
 
     pub(crate) fn snapshot_for_call(
@@ -2576,16 +2663,18 @@ impl InstalledToolsState {
                 diagnostic: None,
             })
         };
-        match &*self.0.lock() {
+        match &self.0.lock().availability {
             InstalledToolsAvailability::Available(lease) => {
                 Ok(ActorRequestSnapshot::Bootstrap(lease.clone()))
             }
             InstalledToolsAvailability::Generation(generation) => {
                 Ok(ActorRequestSnapshot::Generation(generation.clone()))
             }
-            InstalledToolsAvailability::Empty => Err(crate::ResidentToolError::Unavailable(
-                "actor has no installed endpoint snapshot".into(),
-            )),
+            InstalledToolsAvailability::Empty | InstalledToolsAvailability::Retired => {
+                Err(crate::ResidentToolError::Unavailable(
+                    "actor has no installed endpoint snapshot".into(),
+                ))
+            }
             InstalledToolsAvailability::GenerationUnavailable(generation) => {
                 Err(unavailable(generation.context.actor))
             }
@@ -2608,8 +2697,11 @@ impl InstalledToolsState {
         expected: BootstrapExpectation<'_>,
         lease: InstalledToolLease,
     ) -> Result<(), BootstrapInstallationError> {
-        let mut current = self.0.lock();
-        match (&*current, expected) {
+        let mut state = self.0.lock();
+        match (&state.availability, expected) {
+            (InstalledToolsAvailability::Retired, _) => {
+                return Err(BootstrapInstallationError::Retired)
+            }
             (InstalledToolsAvailability::Generation(_), _) => {
                 return Err(BootstrapInstallationError::PublishedGeneration)
             }
@@ -2630,7 +2722,7 @@ impl InstalledToolsState {
             ) if active.same_installation(expected) && active.actor() == lease.actor() => {}
             _ => return Err(BootstrapInstallationError::Changed),
         }
-        *current = InstalledToolsAvailability::Available(lease);
+        state.availability = InstalledToolsAvailability::Available(lease);
         Ok(())
     }
 
@@ -2653,8 +2745,9 @@ impl InstalledToolsState {
         expected: &InstalledToolLease,
         tools: Arc<ResidentWorkbenchTools>,
     ) -> Result<(), SpecReplacementError> {
-        let mut current = self.0.lock();
-        let active = current
+        let mut state = self.0.lock();
+        let active = state
+            .availability
             .available()
             .ok_or(SpecReplacementError::Unavailable)?;
         if active.actor() != expected.actor()
@@ -2673,7 +2766,7 @@ impl InstalledToolsState {
         let mut replacement =
             InstalledToolLease::new(expected.actor(), expected.source().clone(), Some(tools));
         replacement.dependency = active.dependency.clone();
-        *current = match &*current {
+        let published = match &state.availability {
             InstalledToolsAvailability::Generation(generation) => {
                 InstalledToolsAvailability::Generation(Arc::new(ActorGeneration {
                     id: generation.id,
@@ -2688,11 +2781,26 @@ impl InstalledToolsState {
             }
             _ => InstalledToolsAvailability::Available(replacement),
         };
+        state.availability = published;
         Ok(())
     }
 
-    pub(crate) fn clear(&self) {
-        *self.0.lock() = InstalledToolsAvailability::Empty;
+    /// One terminal transition for both state-owned slots. The returned owners
+    /// are dropped by the caller after the lock is released.
+    pub(crate) fn drain_retired(&self) -> InstalledToolsDrain {
+        let mut state = self.0.lock();
+        let availability =
+            std::mem::replace(&mut state.availability, InstalledToolsAvailability::Retired);
+        let reply = state.reply.take();
+        InstalledToolsDrain {
+            _availability: availability,
+            _reply: reply,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_retired(&self) -> bool {
+        matches!(self.0.lock().availability, InstalledToolsAvailability::Retired)
     }
 }
 
@@ -5971,6 +6079,134 @@ fn activation_compile_diagnostic(
     diagnostic
 }
 
+fn resident_prepared_failure_kind(
+    error: &ResidentError,
+) -> Option<tidepool_runtime::session::PreparedFailureKind> {
+    match error {
+        ResidentError::Prepared(error)
+        | ResidentError::Run(tidepool_runtime::RuntimeError::Prepared(error)) => {
+            Some(error.kind())
+        }
+        ResidentError::ActivationInputConsumed { source, .. }
+        | ResidentError::ActivationMountCommitted { source, .. } => {
+            resident_prepared_failure_kind(source)
+        }
+        _ => None,
+    }
+}
+
+fn activation_renderer_failure_kind(
+    failure: &tidepool_runtime::session::turn::ActivationRendererFailure,
+) -> Option<tidepool_runtime::session::PreparedFailureKind> {
+    use tidepool_runtime::session::turn::ActivationRendererFailure;
+    match failure {
+        ActivationRendererFailure::Frontend(_) => None,
+        ActivationRendererFailure::Admission(error) => resident_prepared_failure_kind(error),
+        ActivationRendererFailure::Native(error) => Some(error.kind()),
+    }
+}
+
+fn activation_renderer_failure_is_presentation_failure(
+    failure: &tidepool_runtime::session::turn::ActivationRendererFailure,
+) -> bool {
+    use tidepool_runtime::session::turn::ActivationRendererFailure;
+    match failure {
+        ActivationRendererFailure::Frontend(failure) => {
+            classify_compile(&failure.error).class == FailureClass::UserHaskell
+        }
+        ActivationRendererFailure::Admission(error) => {
+            error.is_language_failure() || error.is_observation_budget_exhausted()
+        }
+        ActivationRendererFailure::Native(_) => false,
+    }
+}
+
+fn activation_renderer_failure_is_budget_exhausted(
+    failure: &tidepool_runtime::session::turn::ActivationRendererFailure,
+) -> bool {
+    use tidepool_runtime::session::turn::ActivationRendererFailure;
+    match failure {
+        ActivationRendererFailure::Frontend(_) | ActivationRendererFailure::Native(_) => false,
+        ActivationRendererFailure::Admission(error) => error.is_observation_budget_exhausted(),
+    }
+}
+
+fn resident_error_diagnostic(
+    error: &ResidentError,
+) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
+    match error {
+        ResidentError::Session(error) => Some(tidepool_runtime::failclass::classify_session(error)),
+        ResidentError::Run(error) => Some(tidepool_runtime::failclass::classify(error)),
+        ResidentError::Prepared(error) => Some(tidepool_runtime::failclass::classify_prepared(error)),
+        _ => None,
+    }
+}
+
+fn activation_renderer_failure_diagnostic(
+    failure: &tidepool_runtime::session::turn::ActivationRendererFailure,
+) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
+    use tidepool_runtime::session::turn::ActivationRendererFailure;
+    match failure {
+        ActivationRendererFailure::Frontend(failure) => {
+            Some(activation_compile_diagnostic(&failure.error))
+        }
+        ActivationRendererFailure::Admission(error) => resident_error_diagnostic(error),
+        ActivationRendererFailure::Native(error) => {
+            Some(tidepool_runtime::failclass::classify_prepared(error))
+        }
+    }
+}
+
+/// Preserve a renderer action failure together with its independent close or
+/// publication obligation. The secondary infrastructure fact owns the
+/// envelope's class/cause so callers cannot mistake the pair for an ordinary
+/// language refusal.
+fn renderer_production_diagnostic(
+    failure: &tidepool_runtime::session::RendererProductionFailure<
+        tidepool_runtime::session::turn::ActivationRendererFailure,
+    >,
+) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
+    use tidepool_runtime::session::RendererProductionFailure;
+    let primary = match failure {
+        RendererProductionFailure::Compile(error) => {
+            return activation_renderer_failure_diagnostic(error)
+        }
+        RendererProductionFailure::CloseUnconfirmed { action_error, .. }
+        | RendererProductionFailure::Publication { action_error, .. } => {
+            action_error.as_ref().and_then(activation_renderer_failure_diagnostic)
+        }
+    };
+    let mut secondary = match failure {
+        RendererProductionFailure::CloseUnconfirmed { close, .. } => {
+            let mut envelope = tidepool_toolchain::failclass::FailureEnvelope::new(
+                FailureClass::Infra,
+                tidepool_toolchain::failclass::Phase::Compile,
+                format!("compiler close is unconfirmed: {close:?}"),
+            );
+            envelope.cause = Some(
+                tidepool_toolchain::failclass::CompileFailureCause::CompilerCloseUnconfirmed,
+            );
+            envelope
+        }
+        RendererProductionFailure::Publication { error, close, .. } => {
+            let mut envelope =
+                classify_compile(&CompileError::from(*error));
+            envelope.message = format!(
+                "compiler publication failed: {error}; close: {close:?}"
+            );
+            envelope
+        }
+        RendererProductionFailure::Compile(_) => unreachable!("handled above"),
+    };
+    if let Some(primary) = primary {
+        secondary.message = format!(
+            "primary action failed: {}\n{}",
+            primary.message, secondary.message
+        );
+    }
+    Some(secondary)
+}
+
 fn admit_explicit_effects(
     requested: Vec<crate::ActorEffectKey>,
     support: &[exomonad_tool::ToolEffectKey],
@@ -6078,6 +6314,15 @@ pub enum ResidentActorWorkbenchError {
         #[source]
         error: CompileError,
     },
+    /// Native renderer production failed with a primary action error and/or a
+    /// secondary close/publication obligation. Both facts remain visible to
+    /// recovery and presentation; this is not ordinary compile evidence.
+    #[error("activation renderer production failed: {failure}")]
+    RendererProduction {
+        failure: tidepool_runtime::session::RendererProductionFailure<
+            tidepool_runtime::session::turn::ActivationRendererFailure,
+        >,
+    },
     #[error("could not mount the typed completion input: {0}")]
     InputMount(String),
     #[error("activation binding {binding:?} committed before preview failure: {source}")]
@@ -6132,24 +6377,26 @@ impl ResidentActorWorkbenchError {
     pub(crate) fn execution_failure_kind(
         &self,
     ) -> Option<tidepool_runtime::session::PreparedFailureKind> {
-        fn resident_kind(
-            error: &ResidentError,
-        ) -> Option<tidepool_runtime::session::PreparedFailureKind> {
-            match error {
-                ResidentError::Prepared(error)
-                | ResidentError::Run(tidepool_runtime::RuntimeError::Prepared(error)) => {
-                    Some(error.kind())
-                }
-                ResidentError::ActivationInputConsumed { source, .. }
-                | ResidentError::ActivationMountCommitted { source, .. } => resident_kind(source),
-                _ => None,
-            }
-        }
         match self {
             Self::InvocationCancelled => {
                 Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
             }
-            Self::Resident(error) | Self::Delivered(error) => resident_kind(error),
+            Self::Resident(error) | Self::Delivered(error) => {
+                resident_prepared_failure_kind(error)
+            }
+            Self::RendererProduction { failure } => match failure {
+                tidepool_runtime::session::RendererProductionFailure::Compile(error) => {
+                    activation_renderer_failure_kind(error)
+                }
+                tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed {
+                    action_error,
+                    ..
+                }
+                | tidepool_runtime::session::RendererProductionFailure::Publication {
+                    action_error,
+                    ..
+                } => action_error.as_ref().and_then(activation_renderer_failure_kind),
+            },
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.execution_failure_kind(),
             Self::PreparationAdmission(source) => source.execution_failure_kind(),
@@ -6163,6 +6410,11 @@ impl ResidentActorWorkbenchError {
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.requires_recovery(),
             Self::PreparationAdmission(source) => source.requires_recovery(),
+            Self::RendererProduction { failure } => matches!(
+                failure,
+                tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { .. }
+                    | tidepool_runtime::session::RendererProductionFailure::Publication { .. }
+            ),
             Self::Resident(ResidentError::Session(
                 tidepool_runtime::session::SessionError::RecoveryStore(error),
             ))
@@ -6196,6 +6448,7 @@ impl ResidentActorWorkbenchError {
             Self::Compile(error) => Some(activation_compile_diagnostic(error)),
             Self::CellCheck(failure) => Some(activation_compile_diagnostic(&failure.error)),
             Self::InputCompilation { error, .. } => Some(activation_compile_diagnostic(error)),
+            Self::RendererProduction { failure } => renderer_production_diagnostic(failure),
             Self::CompileInfrastructure(diagnostic) => Some(diagnostic.clone()),
             Self::Kernel(error) => error.diagnostic.clone(),
             Self::Resident(ResidentError::Session(error))
@@ -6220,6 +6473,13 @@ impl ResidentActorWorkbenchError {
             Self::Resident(error) | Self::Delivered(error) => {
                 error.is_language_failure() || error.is_observation_budget_exhausted()
             }
+            Self::RendererProduction { failure } => match failure {
+                tidepool_runtime::session::RendererProductionFailure::Compile(error) => {
+                    activation_renderer_failure_is_presentation_failure(error)
+                }
+                tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { .. }
+                | tidepool_runtime::session::RendererProductionFailure::Publication { .. } => false,
+            },
             _ => false,
         }
     }
@@ -6235,6 +6495,13 @@ impl ResidentActorWorkbenchError {
             Self::Resident(error) | Self::Delivered(error) => {
                 error.is_observation_budget_exhausted()
             }
+            Self::RendererProduction { failure } => match failure {
+                tidepool_runtime::session::RendererProductionFailure::Compile(error) => {
+                    activation_renderer_failure_is_budget_exhausted(error)
+                }
+                tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { .. }
+                | tidepool_runtime::session::RendererProductionFailure::Publication { .. } => false,
+            },
             _ => false,
         }
     }
@@ -7909,10 +8176,13 @@ where
             match renderer_access {
                 tidepool_runtime::session::RendererAccess::Ready(renderer) => break Ok(renderer),
                 tidepool_runtime::session::RendererAccess::CloseUnconfirmed => {
-                    break Err(CompileError::ExtractFailed(
-                        "shared activation renderer compiler close is unconfirmed".into(),
-                    )
-                    .into());
+                    break Err(tidepool_runtime::session::RendererProductionFailure::Compile(
+                        tidepool_runtime::session::turn::ActivationRendererFailure::from(
+                            CompileError::ExtractFailed(
+                                "shared activation renderer compiler close is unconfirmed".into(),
+                            ),
+                        ),
+                    ));
                 }
                 tidepool_runtime::session::RendererAccess::Wait(waiter) => {
                     #[cfg(test)]
@@ -7946,7 +8216,9 @@ where
                                 if let Some(observer) = &producer_observer {
                                     observer(ActivationPublicationObservation::RendererProducer)
                                         .map_err(|error| {
-                                            CompileError::ExtractFailed(error.to_string())
+                                            tidepool_runtime::session::turn::ActivationRendererFailure::from(
+                                                CompileError::ExtractFailed(error.to_string()),
+                                            )
                                         })?;
                                 }
                                 tidepool_runtime::session::turn::compile_activation_renderer(
@@ -7957,21 +8229,25 @@ where
                             });
                             // The affine compiler ticket has closed before Ready or
                             // Empty is published, even if the async waiter vanished.
-                            let result = result.map_err(|error| tidepool_runtime::session::turn::ActivationRendererFailure::from(tidepool_runtime::session::PreparedRuntimeError::from(error)))?;
-                            let settled = producer.settle_native(result).map_err(|failure| match failure {
-                                tidepool_runtime::session::RendererProductionFailure::Compile(error) => error,
-                                tidepool_runtime::session::RendererProductionFailure::Publication { error, action_error, .. } => {
-                                    action_error.unwrap_or_else(|| CompileError::from(error).into())
-                                }
-                                tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { close, action_error } => {
-                                    action_error.unwrap_or_else(|| CompileError::ExtractFailed(format!("activation renderer compiler close is unconfirmed: {close:?}")).into())
-                                }
-                            });
+                            let result = result.map_err(|error| {
+                                tidepool_runtime::session::RendererProductionFailure::Compile(
+                                    tidepool_runtime::session::turn::ActivationRendererFailure::from(
+                                        tidepool_runtime::session::PreparedRuntimeError::from(error),
+                                    ),
+                                )
+                            })?;
+                            let settled = producer.settle_native(result);
                             #[cfg(test)]
                             if settled.is_ok() {
                                 if let Some(observer) = producer_observer {
                                     observer(ActivationPublicationObservation::RendererSealed)
-                                        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+                                        .map_err(|error| {
+                                            tidepool_runtime::session::RendererProductionFailure::Compile(
+                                                tidepool_runtime::session::turn::ActivationRendererFailure::from(
+                                                    CompileError::ExtractFailed(error.to_string()),
+                                                ),
+                                            )
+                                        })?;
                                 }
                             }
                             settled
@@ -8014,12 +8290,16 @@ where
                         return Err(committed(ResidentActorWorkbenchError::Resident(error.into())));
                     }
                 },
-                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) if matches!(failure.error, CompileError::Diagnostics(_)) => {
+                Err(tidepool_runtime::session::RendererProductionFailure::Compile(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure))) if matches!(failure.error, CompileError::Diagnostics(_)) => {
                     return Ok((ActivationPreviewOutcome::Unavailable(ActivationPreviewUnavailable::Language), input_binding, admission));
                 }
-                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) => return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error })),
-                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Native(error)) => return Err(committed(ResidentActorWorkbenchError::Resident(error.into()))),
-                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Admission(error)) => return Err(committed(ResidentActorWorkbenchError::Resident(error))),
+                Err(tidepool_runtime::session::RendererProductionFailure::Compile(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure))) => return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error })),
+                Err(tidepool_runtime::session::RendererProductionFailure::Compile(tidepool_runtime::session::turn::ActivationRendererFailure::Native(error))) => return Err(committed(ResidentActorWorkbenchError::Resident(error.into()))),
+                Err(tidepool_runtime::session::RendererProductionFailure::Compile(tidepool_runtime::session::turn::ActivationRendererFailure::Admission(error))) => return Err(committed(ResidentActorWorkbenchError::Resident(error))),
+                Err(failure @ (tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { .. }
+                    | tidepool_runtime::session::RendererProductionFailure::Publication { .. })) => {
+                    return Err(committed(ResidentActorWorkbenchError::RendererProduction { failure }));
+                }
             };
                 let preview = match session.run_activation_preview(compiled, settlement) {
                     Ok(
@@ -20953,7 +21233,7 @@ pub(crate) mod request_tests {
                 )
                 .await
                 .unwrap();
-            *state.0.lock() =
+            state.0.lock().availability =
                 InstalledToolsAvailability::GenerationUnavailable(replacement.clone());
             assert!(
                 state.current_generation().is_none(),
@@ -20971,10 +21251,10 @@ pub(crate) mod request_tests {
                 Err(BootstrapInstallationError::UnconfirmedGeneration)
             );
             assert!(
-                matches!(&*state.0.lock(), InstalledToolsAvailability::GenerationUnavailable(retained)
+                matches!(&state.0.lock().availability, InstalledToolsAvailability::GenerationUnavailable(retained)
                 if Arc::ptr_eq(retained, &replacement))
             );
-            state.clear();
+            drop(state.drain_retired());
             let revision = recovery
                 .store
                 .read_domain(domain)
@@ -21139,7 +21419,7 @@ pub(crate) mod request_tests {
                 })
                 .await
                 .unwrap();
-            state.clear();
+            drop(state.drain_retired());
             drop(candidate);
             wait_for_explicit_installation_cleanup(
                 &workbench,
@@ -21693,7 +21973,7 @@ pub(crate) mod request_tests {
             let later_last = state.current().unwrap().select("last_probe").unwrap();
             assert_eq!(pinned.lease().tools().unwrap().install, 1);
             assert_eq!(later.lease().tools().unwrap().install, 2);
-            state.clear();
+            drop(state.drain_retired());
             assert!(matches!(state.snapshot_for_call(), Err(crate::ResidentToolError::Unavailable(_))));
             for (selected, expected_output) in [
                 (pinned, "retained notebook value"),
@@ -21751,7 +22031,7 @@ pub(crate) mod request_tests {
                     "expected {expected_output:?}: {output}"
                 );
             }
-            state.clear();
+            drop(state.drain_retired());
             assert!(matches!(
                 state.snapshot_for_call(),
                 Err(crate::ResidentToolError::Unavailable(_))
@@ -22061,7 +22341,7 @@ pub(crate) mod request_tests {
                 1,
                 "accepted original installation survives replacement"
             );
-            state.clear();
+            drop(state.drain_retired());
             assert!(matches!(
                 state.replace_explicit(&expected, second),
                 Err(SpecReplacementError::Unavailable)

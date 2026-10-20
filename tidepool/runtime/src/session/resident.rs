@@ -1555,6 +1555,7 @@ impl<T> PreparedRenderer<T> {
     }
 }
 
+#[derive(Debug)]
 pub enum RendererProductionFailure<E> {
     Compile(E),
     CloseUnconfirmed {
@@ -1566,6 +1567,34 @@ pub enum RendererProductionFailure<E> {
         close: crate::CompilerTransactionClose,
         action_error: Option<E>,
     },
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for RendererProductionFailure<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Compile(error) => write!(formatter, "{error}"),
+            Self::CloseUnconfirmed { close, action_error } => {
+                write!(
+                    formatter,
+                    "compiler close is unconfirmed: {close:?}"
+                )?;
+                if let Some(error) = action_error {
+                    write!(formatter, "; primary action failed: {error}")?;
+                }
+                Ok(())
+            }
+            Self::Publication { error, close, action_error } => {
+                write!(
+                    formatter,
+                    "compiler publication failed: {error}; close: {close:?}"
+                )?;
+                if let Some(error) = action_error {
+                    write!(formatter, "; primary action failed: {error}")?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Move this affine lease into the compiler's blocking owner. Publish or drop

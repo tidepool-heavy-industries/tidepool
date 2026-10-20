@@ -725,6 +725,50 @@ fn reply_definition_retains_original_source_across_registration_and_recipient_tr
     assert_eq!(fence.pending_claims(), 0);
 }
 
+#[test]
+fn terminal_drain_removes_reply_custody_and_refuses_republication() {
+    use crate::resident_workbench::{
+        BootstrapExpectation, BootstrapInstallationError, InstalledToolsState,
+    };
+
+    let registry = RequestRegistry::default();
+    let owner = ActorRef::first(crate::ActorId(105));
+    let recipient = ActorRef::first(crate::ActorId(106));
+    let request = registry.reserve_for_operation(owner, recipient, "reply drain".into(), true, None);
+    let (_fixture, definition) = capture_reply_tool_request(&registry, owner, request);
+    let lease =
+        crate::InstalledToolLease::new(owner, crate::CheckpointSourceLayer::default(), None);
+    let activation = || {
+        Arc::new(crate::RequestReplyActivation::custody_only(
+            owner,
+            request,
+            lease.clone(),
+            definition.clone(),
+        ))
+    };
+    let state = InstalledToolsState::default();
+    state
+        .install_bootstrap(BootstrapExpectation::Empty, lease.clone())
+        .unwrap();
+    assert!(state.publish_reply(Some(activation())));
+    assert!(state.active_reply().is_some());
+    drop(state.drain_retired());
+    assert!(
+        state.active_reply().is_none(),
+        "one terminal drain removes the reply-activation slot"
+    );
+    assert!(
+        !state.publish_reply(Some(activation())),
+        "a retired actor accepts no later reply custody"
+    );
+    assert!(state.active_reply().is_none());
+    assert_eq!(
+        state.install_bootstrap(BootstrapExpectation::Empty, lease),
+        Err(BootstrapInstallationError::Retired)
+    );
+    assert!(state.snapshot_for_call().is_err());
+}
+
 pub(crate) fn complete_reply(
     registry: &RequestRegistry,
     claim: RequestReplyClaim,

@@ -101,6 +101,27 @@ impl RequestReplyActivation {
             host_attachment: Default::default(),
         })
     }
+    /// Test-only custody witness: retain the exact activation owner without
+    /// compiling a callable endpoint for tests that observe slot drainage.
+    #[cfg(test)]
+    pub(crate) fn custody_only(
+        actor: crate::ActorRef,
+        request: crate::RequestId,
+        lease: crate::InstalledToolLease,
+        definition: Arc<ReplyToolDefinition>,
+    ) -> Self {
+        let schema = definition.schema();
+        Self {
+            actor,
+            request,
+            lease,
+            definition,
+            schema,
+            declarations: Arc::from([]),
+            settled: false.into(),
+            host_attachment: Default::default(),
+        }
+    }
     /// One immutable host adapter value shared by all provider snapshots of this
     /// activation. It carries no native reply authority and is not recovered.
     pub fn host_attachment<T: std::any::Any + Send + Sync>(

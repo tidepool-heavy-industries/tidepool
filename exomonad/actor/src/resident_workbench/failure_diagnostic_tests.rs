@@ -171,3 +171,79 @@ fn preflight_infrastructure_failure_keeps_compiler_class_and_cause() {
         .to_string()
         .starts_with("resident workbench compiler infrastructure failed:"));
 }
+
+#[test]
+fn renderer_production_keeps_action_and_unconfirmed_close_together() {
+    use tidepool_runtime::session::turn::ActivationRendererFailure;
+    use tidepool_runtime::session::RendererProductionFailure;
+
+    let close = tidepool_runtime::CompilerTransactionClose::Unconfirmed(
+        tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+            tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest,
+            tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                disconnect: None,
+            },
+        ),
+    );
+    let error = ResidentActorWorkbenchError::RendererProduction {
+        failure: RendererProductionFailure::CloseUnconfirmed {
+            close: close.clone(),
+            action_error: Some(ActivationRendererFailure::from(
+                CompileError::ExtractFailed("primary renderer action".into()),
+            )),
+        },
+    };
+    let ResidentActorWorkbenchError::RendererProduction {
+        failure:
+            RendererProductionFailure::CloseUnconfirmed {
+                close: retained_close,
+                action_error: Some(ActivationRendererFailure::Frontend(primary)),
+            },
+    } = &error
+    else {
+        panic!("compound renderer failure lost its typed action and close facts")
+    };
+    assert_eq!(retained_close, &close);
+    assert!(matches!(
+        &primary.error,
+        CompileError::ExtractFailed(detail) if detail == "primary renderer action"
+    ));
+    let diagnostic = error
+        .failure_diagnostic()
+        .expect("compound renderer failure retains infrastructure evidence");
+    assert_eq!(diagnostic.class, FailureClass::Infra);
+    assert_eq!(
+        diagnostic.cause,
+        Some(tidepool_toolchain::failclass::CompileFailureCause::CompilerCloseUnconfirmed)
+    );
+    assert!(diagnostic.message.contains("primary renderer action"));
+    assert!(diagnostic.message.contains("compiler close is unconfirmed"));
+    assert!(error.to_string().contains("primary renderer action"));
+    assert!(!error.is_tool_presentation_failure());
+    assert!(error.requires_recovery());
+}
+
+#[test]
+fn renderer_production_keeps_action_and_publication_refusal_together() {
+    use tidepool_runtime::session::turn::ActivationRendererFailure;
+    use tidepool_runtime::session::RendererProductionFailure;
+
+    let error = ResidentActorWorkbenchError::RendererProduction {
+        failure: RendererProductionFailure::Publication {
+            error: tidepool_runtime::CompilerTransactionPublicationError::DifferentOwner,
+            close: tidepool_runtime::CompilerTransactionClose::NotStarted,
+            action_error: Some(ActivationRendererFailure::from(
+                CompileError::ExtractFailed("primary renderer action".into()),
+            )),
+        },
+    };
+    let diagnostic = error
+        .failure_diagnostic()
+        .expect("compound renderer failure retains infrastructure evidence");
+    assert_eq!(diagnostic.class, FailureClass::Infra);
+    assert!(diagnostic.message.contains("primary renderer action"));
+    assert!(diagnostic.message.contains("compiler publication failed"));
+    assert!(error.to_string().contains("primary renderer action"));
+    assert!(!error.is_tool_presentation_failure());
+    assert!(error.requires_recovery());
+}
