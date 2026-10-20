@@ -512,9 +512,51 @@ impl TargetNativeInputs {
         groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
     ) -> Result<CertifiedTargetNativeInputs, CompileError> {
         if !groups.matches_view(self.artifacts()) {
-            return Err(failure("native group products belong to another target acquisition"));
+            return Err(failure(
+                "native group products belong to another target acquisition",
+            ));
         }
-        Ok(CertifiedTargetNativeInputs { target: self, groups })
+        let mut links = Vec::with_capacity(self.imports().len());
+        let mut needs_retained_owner = false;
+        for import in self.imports() {
+            crate::host_work::checkpoint()?;
+            use crate::certified_products::{PendingImportOwner, SelectedNativeImport};
+            match import {
+                PendingImportOwner::Source { owner, original_ordinal, binder } => {
+                    // These roots were chosen by this target's admission. A
+                    // historical descendant cannot supply a direct root slot.
+                    let mut matches = self.admitted.selection.roots.iter().filter_map(|binding| {
+                        let row = groups.get(*binding)?;
+                        (row.owner() == owner && binding.original_ordinal == *original_ordinal)
+                            .then_some((*binding, row))
+                    });
+                    let (binding, row) = matches.next()
+                        .ok_or_else(|| failure("target source slot lacks its exact admitted root"))?;
+                    if matches.next().is_some() {
+                        return Err(failure("target source slot has competing admitted roots"));
+                    }
+                    let value = row.group().exported_values()
+                        .find_map(|(identity, value)| (identity == binder).then_some(value))
+                        .ok_or_else(|| failure("target source slot lacks its authenticated export"))?;
+                    links.push(SelectedNativeImport::Source { binding, value });
+                }
+                PendingImportOwner::Package { binder, interface_digest, .. } => {
+                    links.push(SelectedNativeImport::Package {
+                        identity: binder.clone(), interface_digest: *interface_digest,
+                    });
+                }
+                PendingImportOwner::Retained { .. } | PendingImportOwner::RetainedPackage { .. } => {
+                    needs_retained_owner = true;
+                }
+            }
+        }
+        Ok(CertifiedTargetNativeInputs {
+            target: self,
+            groups,
+            links: if needs_retained_owner { TargetNativeLinks::RetainedInputs } else {
+                TargetNativeLinks::Immutable(links.into())
+            },
+        })
     }
 
     pub(crate) fn artifacts(&self) -> &ArtifactView {
@@ -615,6 +657,13 @@ impl TargetNativeInputs {
 pub(crate) struct CertifiedTargetNativeInputs {
     target: TargetNativeInputs,
     groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
+    links: TargetNativeLinks,
+}
+
+#[derive(Debug)]
+enum TargetNativeLinks {
+    Immutable(Arc<[crate::certified_products::SelectedNativeImport]>),
+    RetainedInputs,
 }
 
 impl std::ops::Deref for CertifiedTargetNativeInputs {
@@ -635,6 +684,7 @@ impl CertifiedTargetNativeInputs {
         Ok(ResolvedNativeSourceTarget {
             target: self.target.resolve()?,
             groups: &self.groups,
+            links: &self.links,
         })
     }
 }
@@ -643,6 +693,7 @@ impl CertifiedTargetNativeInputs {
 pub(crate) struct ResolvedNativeSourceTarget<'a> {
     target: ResolvedNativeTarget<'a>,
     groups: &'a crate::declaration_context::CertifiedArtifactGroupBindings,
+    links: &'a TargetNativeLinks,
 }
 
 impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
@@ -651,6 +702,31 @@ impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
 }
 
 impl<'a> ResolvedNativeSourceTarget<'a> {
+    pub(crate) fn target_link_requirements(
+        &self,
+    ) -> Result<&'a [crate::certified_products::SelectedNativeImport], CompileError> {
+        match self.links {
+            TargetNativeLinks::Immutable(links) => Ok(links),
+            TargetNativeLinks::RetainedInputs => Err(failure(
+                "closed target requires actual retained input ownership",
+            )),
+        }
+    }
+
+    pub(crate) fn group_imports(
+        &self,
+        binding: NativeGroupBinding,
+    ) -> Result<&'a [crate::certified_products::SelectedNativeImport], CompileError> {
+        if !self.target.groups().contains(&binding) {
+            return Err(failure(
+                "native source links are outside their resolved target",
+            ));
+        }
+        self.groups
+            .imports(binding)
+            .ok_or_else(|| failure("selected native binding lacks its ordered import links"))
+    }
+
     pub(crate) fn group(
         &self,
         binding: NativeGroupBinding,
@@ -658,9 +734,9 @@ impl<'a> ResolvedNativeSourceTarget<'a> {
         if !self.target.groups().contains(&binding) {
             return Err(failure("native source row is outside its resolved target"));
         }
-        self.groups.get(binding).ok_or_else(|| {
-            failure("selected native binding lacks its exact certified product")
-        })
+        self.groups
+            .get(binding)
+            .ok_or_else(|| failure("selected native binding lacks its exact certified product"))
     }
 }
 
@@ -5722,6 +5798,73 @@ fn original_group_children_in_scope(
     Ok(children)
 }
 
+fn original_group_retained_binding_in_scope(
+    state: &InventoryState,
+    payloads: &imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+    owned: &imbl::OrdSet<InventoryNodeKey>,
+    group: NativeGroupBinding,
+    identity: &tidepool_repr::execution_schema::SymbolIdentity,
+    generation: u64,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<ArtifactBinding, CompileError> {
+    let source = InventoryNodeKey::Group(group);
+    if !owned.contains(&source) {
+        return Err(failure(
+            "retained import parent is outside its exact selection",
+        ));
+    }
+    let mut selected = None;
+    for (target, edge) in state.outgoing(source) {
+        crate::host_work::checkpoint()?;
+        operation
+            .charge(1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let ArtifactDependency::NativeBinding {
+            dependent_ordinal,
+            generation: required_generation,
+            namespace,
+            occurrence,
+            record_parent,
+        } = edge
+        else {
+            continue;
+        };
+        if *dependent_ordinal != group.original_ordinal
+            || *required_generation != generation
+            || namespace != &identity.namespace
+            || occurrence != &identity.occurrence
+            || record_parent != &identity.record_parent
+        {
+            continue;
+        }
+        let InventoryNodeKey::Artifact(binding) = target else {
+            return Err(failure("retained import edge lacks artifact binding"));
+        };
+        let entry = payloads
+            .get(&binding.artifact)
+            .ok_or_else(|| failure("retained import lacks payload custody"))?;
+        if entry.descriptor.owner.unit != identity.unit
+            || entry.descriptor.owner.module != identity.module
+        {
+            continue;
+        }
+        if !owned.contains(&target) {
+            return Err(failure(
+                "retained import edge is outside its exact selection",
+            ));
+        }
+        if selected.is_some_and(|previous| previous != binding) {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::BindingAmbiguity {
+                    artifact: binding.artifact,
+                },
+            ));
+        }
+        selected = Some(binding);
+    }
+    selected.ok_or_else(|| failure("selected retained import lacks its exact binding edge"))
+}
+
 #[derive(Default)]
 struct NativeRequirementCollector {
     bindings: BTreeSet<NativeBindingRequirement>,
@@ -6444,6 +6587,19 @@ fn admitted_closure_with_operation(
     roots: impl Iterator<Item = InventoryNodeKey>,
     operation: Option<&tidepool_repr::execution_schema::InventoryOperation>,
 ) -> Result<(imbl::OrdSet<InventoryNodeKey>, NativeClosureWork), CompileError> {
+    admitted_closure_observing(state, roots, operation, |_, _, _| Ok(()))
+}
+
+fn admitted_closure_observing(
+    state: &InventoryState,
+    roots: impl Iterator<Item = InventoryNodeKey>,
+    operation: Option<&tidepool_repr::execution_schema::InventoryOperation>,
+    mut observe: impl FnMut(
+        InventoryNodeKey,
+        InventoryNodeKey,
+        &ArtifactDependency,
+    ) -> Result<(), CompileError>,
+) -> Result<(imbl::OrdSet<InventoryNodeKey>, NativeClosureWork), CompileError> {
     let reserve_pending = || -> Result<(), CompileError> {
         if let Some(operation) = operation {
             // Two slots cover Vec capacity growth before each push.
@@ -6481,7 +6637,8 @@ fn admitted_closure_with_operation(
         seen.insert(id);
         work.nodes += 1;
         state.graph_visits.fetch_add(1, Ordering::Relaxed);
-        for (target, _) in state.outgoing(id) {
+        for (target, label) in state.outgoing(id) {
+            observe(id, target, label)?;
             if let Some(operation) = operation {
                 crate::host_work::checkpoint()?;
                 operation
@@ -7493,6 +7650,25 @@ impl ArtifactView {
         original_group_children_in_scope(&state, self.selected_nodes(&state), group, operation)
     }
 
+    pub(crate) fn original_group_retained_binding(
+        &self,
+        group: NativeGroupBinding,
+        identity: &tidepool_repr::execution_schema::SymbolIdentity,
+        generation: u64,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<ArtifactBinding, CompileError> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        original_group_retained_binding_in_scope(
+            &state,
+            &self.lease.payloads,
+            self.selected_nodes(&state),
+            group,
+            identity,
+            generation,
+            operation,
+        )
+    }
+
     pub(crate) fn contains_issued_native_group(&self, group: NativeGroupBinding) -> bool {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         self.read_projection(&state)
@@ -8147,7 +8323,7 @@ impl ArtifactView {
     pub(crate) fn select_acquired_compiler_bindings(
         &self,
         namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
-        groups: &BTreeMap<NativeGroupKey, NativeGroupBinding>,
+        groups: impl ExactSizeIterator<Item = NativeGroupBinding>,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Self, CompileError> {
         let budget = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
@@ -8160,7 +8336,7 @@ impl ArtifactView {
             .values()
             .copied()
             .map(InventoryNodeKey::Artifact)
-            .chain(groups.values().copied().map(InventoryNodeKey::Group))
+            .chain(groups.map(InventoryNodeKey::Group))
             .collect::<Vec<_>>();
         // Membership comes from this owner's acquired bindings and their
         // retained closure, never from a separately captured cold read
@@ -9523,11 +9699,17 @@ mod tests {
             .copied()
             .map(InventoryNodeKey::Artifact)
             .collect::<Vec<_>>();
-        let groups = BTreeMap::new();
+        let groups = BTreeSet::new();
         let operation = InventoryOperation::new(Default::default());
         let observation = HostWorkObservation::new();
         let selected = observation
-            .scope(|| cold.select_acquired_compiler_bindings(&namespace, &groups, &operation))
+            .scope(|| {
+                cold.select_acquired_compiler_bindings(
+                    &namespace,
+                    groups.iter().copied(),
+                    &operation,
+                )
+            })
             .unwrap();
 
         // R7: demand must not require or capture a cold read projection, and

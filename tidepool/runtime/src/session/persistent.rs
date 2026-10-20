@@ -19,8 +19,8 @@ use tidepool_codegen::binding_table::{
 };
 use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
 use tidepool_codegen::prepared_program::{
-    ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId,
-    ResidencyCounts, SourceBinder, SourceGroupOutline, SourceInstanceLease,
+    ImageRegistry, InheritedSourceDemand, PendingGroupInventory, ProgramId, ResidencyCounts,
+    SourceBinder, SourceGroupOutline, SourceInstanceLease,
 };
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
@@ -1760,20 +1760,7 @@ impl PersistentSession {
     /// binding instead of recompiling a body it does not have.
     #[must_use]
     pub fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {
-        let mut retained = self.binding_index.prepared_retained();
-        if let Some(engine) = self.machine.as_ref() {
-            // Package tops the machine already carries compiled code for.
-            // A value binding wins any collision: the binding store's own
-            // generation is what a turn that reads `x` must link against.
-            let bound: std::collections::BTreeSet<&SymbolIdentity> =
-                retained.iter().map(|(identity, _)| identity).collect();
-            let exported: Vec<(SymbolIdentity, u64)> = engine
-                .protected_code_export_retentions()
-                .filter(|(identity, _)| !bound.contains(identity))
-                .collect();
-            retained.extend(exported);
-        }
-        retained
+        self.binding_index.prepared_retained()
     }
 
     /// How many package tops this session's machine can hand a later turn
@@ -2515,7 +2502,7 @@ impl PersistentSession {
         &mut self,
         staged: super::StagedDeclaration,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
-        self.adopt_staged_declaration_prepared(staged, None, |_, _, _, _, _| {
+        self.adopt_staged_declaration_prepared(staged, |_, _, _, _, _| {
             Ok(|_: &mut super::SessionLib| {})
         })
     }
@@ -2535,7 +2522,6 @@ impl PersistentSession {
         let mut successor = None;
         let committed = self.adopt_staged_declaration_prepared(
             staged,
-            None,
             |session, staged, origin, changes, next_epoch| {
                 let origin = origin.ok_or(SessionError::StaleStagedDeclaration)?;
                 let (view, visibility, retained) =
@@ -2563,7 +2549,6 @@ impl PersistentSession {
         &mut self,
         staged: super::StagedDeclaration,
         prior: &super::PublicVisibilitySnapshot,
-        retained_ids: &[SessionVarId],
         prepare: impl FnOnce(
             CompileViewKey,
             super::PublicVisibilitySnapshot,
@@ -2572,7 +2557,6 @@ impl PersistentSession {
     ) -> Result<DeclarationPlaneCommit, SessionError> {
         self.adopt_staged_declaration_prepared(
             staged,
-            Some(retained_ids),
             |session, staged, origin, changes, next_epoch| {
                 let scope = staged.scope();
                 if prior.scope != scope
@@ -2647,7 +2631,6 @@ impl PersistentSession {
     fn adopt_staged_declaration_prepared<A: FnOnce(&mut super::SessionLib)>(
         &mut self,
         staged: super::StagedDeclaration,
-        retained_ids: Option<&[SessionVarId]>,
         prepare: impl FnOnce(
             &mut Self,
             &super::StagedDeclaration,
@@ -2694,24 +2677,20 @@ impl PersistentSession {
             })
             .transpose()
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        let legacy_retained;
-        let retained_ids = match retained_ids {
-            Some(ids) => ids,
-            None => {
-                legacy_retained = staged
-                    .certified_authored
-                    .as_ref()
-                    .map(|certificate| {
-                        let requirements = certificate
-                            .projection
-                            .receipt()
-                            .native_binding_custody_requirements()?;
-                        self.resolve_native_binding_custody(scope, &requirements)
-                    })
-                    .transpose()?;
-                legacy_retained.as_deref().unwrap_or(&[])
-            }
-        };
+        // The accepted native body owns its complete retained-value closure,
+        // including hidden dependencies that Haskell did not directly observe.
+        let retained = staged
+            .certified_authored
+            .as_ref()
+            .map(|certificate| {
+                let requirements = certificate
+                    .projection
+                    .receipt()
+                    .native_binding_custody_requirements()?;
+                self.resolve_native_binding_custody(scope, &requirements)
+            })
+            .transpose()?;
+        let retained_ids = retained.as_deref().unwrap_or(&[]);
         let binding_changes = match source_origin.as_mut() {
             Some(origin) => self
                 .bindings
@@ -3754,10 +3733,13 @@ impl PersistentSession {
 
     /// Admit bootstrap only against the exact already published actor surface.
     pub fn begin_durable_public_bootstrap(
-        &self,
+        &mut self,
         owner: RecoveryPublicOwner,
         scope: ScopeId,
     ) -> Result<DurablePublicBootstrap, SessionError> {
+        self.validate_durable_public_admission(&owner, scope)?;
+        let store = self.lib().held_recovery_store()?;
+        self.reserve_admitted_machine_incarnation(store.as_ref())?;
         let initial = self.validate_durable_public_admission(&owner, scope)?;
         let lib = self.lib();
         let state = lib.durable_graph.as_ref().expect("validated graph");
@@ -6515,6 +6497,100 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
+    fn durable_bootstrap_reserves_lazy_machine_before_first_installation() {
+        let root = tempfile::tempdir().unwrap();
+        let mut lib = SessionLib::open(
+            tidepool_repr::SessionId(929),
+            root.path().join("session"),
+            super::super::ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_isolated_scope();
+        let source = session.adopt_initial_notebook_scope(public).unwrap();
+        let owner = public_owner("root/lazy-bootstrap");
+        assert!(matches!(
+            session
+                .initialize_durable_public_scope(owner.clone(), public)
+                .unwrap(),
+            PublicManifestCommit::Durable
+        ));
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(public)
+                .unwrap()
+                .machine_incarnation,
+            None
+        );
+        assert!(session
+            .begin_durable_public_bootstrap(public_owner("root/foreign-bootstrap"), public)
+            .is_err());
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(public)
+                .unwrap()
+                .machine_incarnation,
+            None,
+            "refused owners cannot reserve this runtime's machine identity"
+        );
+
+        let first = session
+            .begin_durable_public_bootstrap(owner.clone(), public)
+            .unwrap();
+        let second = session
+            .begin_durable_public_bootstrap(owner, public)
+            .unwrap();
+        let incarnation = first.initial.machine_incarnation;
+        assert!(incarnation.is_some());
+        assert_eq!(second.initial.machine_incarnation, incarnation);
+        assert!(session.prepared_mut().is_none());
+
+        let installed = session
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let binding = super::super::prepared::tests::rooted_publication_fixture(
+                        session,
+                        "firstInstallation",
+                        929,
+                    );
+                    session.bind_in(public, binding)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            installed.close(),
+            &crate::CompilerTransactionClose::NotStarted
+        );
+        installed.into_outcome().action.unwrap();
+        session.advance_public_visibility(public);
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(public)
+                .unwrap()
+                .machine_incarnation,
+            incarnation
+        );
+        assert!(matches!(
+            session.publish_durable_public_bootstrap(first).unwrap(),
+            PublicManifestCommit::Durable
+        ));
+        assert!(matches!(
+            session.publish_durable_public_bootstrap(second),
+            Err(SessionError::WrongPublicManifestTicket)
+        ));
+        drop(session);
+        drop(source);
+    }
+
+    #[test]
     fn durable_bootstrap_publishes_native_visibility_before_private_admission() {
         use super::super::prepared::tests::install_selected_source_fixture;
         let root = tempfile::tempdir().unwrap();
@@ -7253,7 +7329,7 @@ mod checkpoint_scope_tests {
                     &target.fixture_constructor_metadata(),
                     target,
                     &evidence,
-                        &inherited,
+                    &inherited,
                     &|_| None,
                 )
                 .unwrap()

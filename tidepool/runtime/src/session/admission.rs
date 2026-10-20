@@ -7,7 +7,9 @@ use std::sync::{Arc, OnceLock};
 
 use tidepool_codegen::binding_table::{BindingTipId, SourceLeaseKey};
 use tidepool_codegen::scope::ScopeId;
-use tidepool_repr::execution_schema::{ImportOwner, SymbolIdentity};
+#[cfg(test)]
+use tidepool_repr::execution_schema::ImportOwner;
+use tidepool_repr::execution_schema::SymbolIdentity;
 use tidepool_repr::Generation;
 
 use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, SessionError};
@@ -2213,11 +2215,7 @@ impl CheckedTurnCompletion {
         Ok(true)
     }
 
-    pub(crate) fn settle(
-        &self,
-        session: &mut PersistentSession,
-        program: tidepool_codegen::prepared_program::ProgramId,
-    ) -> Result<(), SessionError> {
+    pub(crate) fn settle(&self, session: &mut PersistentSession) -> Result<(), SessionError> {
         session.validate_lexical_scope_lease(self.scope, &self.prefix.admission._retained_scope)?;
         if self.prefix.admission.world_reservation().is_some() {
             self.prefix
@@ -2254,9 +2252,6 @@ impl CheckedTurnCompletion {
         let native = session.capture_checked_native_delta(
             self.scope,
             self.execution.generation(),
-            Some(program),
-            &state.native_index,
-            self.execution.target_definition_identities(),
             self.execution.bound_binder_identities(),
         )?;
         let completed_values = if let Some(private) = self.prefix.admission.private_execution() {
@@ -2978,6 +2973,20 @@ impl PersistentSession {
         self.lib().held_recovery_store()
     }
 
+    // Tickets issued before the first native installation must name the same
+    // machine lifetime that installation adopts, without allocating an engine.
+    pub(super) fn reserve_admitted_machine_incarnation(
+        &mut self,
+        store: Option<&super::recovery_store::RunRecoveryStore>,
+    ) -> Result<(), SessionError> {
+        let admission = store
+            .map(|store| store.begin_native_transition())
+            .transpose()
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+        self.ensure_machine_incarnation();
+        super::complete_native_transition(admission)
+    }
+
     pub(super) fn capture_value_interfaces(
         &self,
         view: &super::SessionCompileView,
@@ -3347,10 +3356,11 @@ impl PersistentSession {
             let retained = prior._retained_scope.clone();
             let owner = self.admission_owner().clone();
             let epoch = owner.epoch();
+            // Direct stage observations are checked independently. Lifetime
+            // roots come from the accepted join's full native body closure.
             let selected = item
                 .world_selected_runtime_inputs()
                 .ok_or(SessionError::StaleStagedDeclaration)?;
-            let mut retained_ids = std::collections::HashSet::new();
             for input in selected.inputs() {
                 let entry = self
                     .bindings()
@@ -3370,14 +3380,10 @@ impl PersistentSession {
                 {
                     return Err(SessionError::StaleStagedDeclaration);
                 }
-                retained_ids.insert(entry.id);
             }
-            let mut retained_ids = retained_ids.into_iter().collect::<Vec<_>>();
-            retained_ids.sort_by_key(|id| id.raw());
             return self.adopt_staged_declaration_with_world_activation(
                 staged,
                 &prior.visibility,
-                &retained_ids,
                 |key, visibility, delta| {
                     let successor = prefix.program.declaration_item_successor(
                         &predecessor,
@@ -4631,15 +4637,7 @@ impl PersistentSession {
         // The lazy machine has one reserved lifetime identity before any
         // compiler offer captures it. Bootstrap adopts this identity rather
         // than invalidating another independently admitted private cell.
-        {
-            let admission = store
-                .as_ref()
-                .map(|store| store.begin_native_transition())
-                .transpose()
-                .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-            self.ensure_machine_incarnation();
-            super::complete_native_transition(admission)?;
-        }
+        self.reserve_admitted_machine_incarnation(store.as_ref())?;
         let visibility = self
             .public_visibility_snapshot_in(scope)
             .ok_or(SessionError::DeadScope(scope))?;
@@ -4921,7 +4919,6 @@ impl PersistentSession {
             return Err(SessionError::DeadScope(scope));
         }
         let mut entries = std::collections::BTreeSet::new();
-        let mut bound = std::collections::BTreeSet::new();
         let mut owners = std::collections::BTreeMap::new();
         let mut hash = blake3::Hasher::new();
         hash.update(b"TidepoolAdmittedNativeImports1");
@@ -4951,25 +4948,6 @@ impl PersistentSession {
                 (entry.value.identity.clone(), entry.module.gen.0),
                 handle.raw().0,
             );
-            bound.insert(entry.value.identity.clone());
-        }
-        if let Some(engine) = self.prepared() {
-            for (identity, generation) in engine.protected_code_export_retentions() {
-                if bound.contains(&identity) {
-                    continue;
-                }
-                let Some(ImportOwner::CodeExport { root_id, .. }) =
-                    engine.retained_code_export_owner(&identity, generation)
-                else {
-                    return Err(SessionError::StaleStagedDeclaration);
-                };
-                hash.update(b"code-export");
-                hash.update(&generation.to_le_bytes());
-                hash.update(&root_id.to_le_bytes());
-                frame_native_identity(&mut hash, &identity);
-                owners.insert((identity.clone(), generation), root_id);
-                entries.insert((identity, generation));
-            }
         }
         Ok(AdmittedNativeImports {
             entries: entries.into_iter().collect(),
@@ -5093,30 +5071,19 @@ impl PersistentSession {
         }
         let mut owners = BTreeMap::new();
         for (identity, generation) in required {
-            let root = if let Some(entry) = self.bindings().resolve_exact_prepared_in(
-                self.scope_tree(),
-                scope,
-                identity,
-                generation,
-            ) {
-                let handle = entry.value.handle;
-                if self
-                    .prepared()
-                    .and_then(|engine| engine.prepared_handle_of(handle.raw()))
-                    != Some(handle)
-                {
-                    return Err(SessionError::StaleStagedDeclaration);
-                }
-                handle.raw().0
-            } else {
-                match self
-                    .prepared()
-                    .and_then(|engine| engine.retained_code_export_owner(identity, generation))
-                {
-                    Some(ImportOwner::CodeExport { root_id, .. }) => root_id,
-                    _ => return Err(SessionError::StaleStagedDeclaration),
-                }
-            };
+            let entry = self
+                .bindings()
+                .resolve_exact_prepared_in(self.scope_tree(), scope, identity, generation)
+                .ok_or(SessionError::StaleStagedDeclaration)?;
+            let handle = entry.value.handle;
+            if self
+                .prepared()
+                .and_then(|engine| engine.prepared_handle_of(handle.raw()))
+                != Some(handle)
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+            let root = handle.raw().0;
             let key = (identity.clone(), generation);
             if owners.insert(key, root).is_some_and(|old| old != root) {
                 return Err(SessionError::StaleStagedDeclaration);
@@ -5140,9 +5107,6 @@ impl PersistentSession {
         &self,
         scope: ScopeId,
         generation: u64,
-        program: Option<tidepool_codegen::prepared_program::ProgramId>,
-        known_owners: &CheckedNativeIndex,
-        definitions: impl Iterator<Item = &'a SymbolIdentity>,
         bound_rows: impl Iterator<Item = (&'a str, u64)>,
     ) -> Result<CapturedNativeDelta, SessionError> {
         if !self.scope_tree().is_live(scope) {
@@ -5152,22 +5116,6 @@ impl PersistentSession {
             .prepared()
             .ok_or(SessionError::StaleStagedDeclaration)?;
         let mut imports = std::collections::BTreeMap::new();
-        // Only exact definitions of this sealed target may join the ledger.
-        // Optional native exports can be absent from a successful installation.
-        for identity in definitions {
-            if let Some(ImportOwner::CodeExport { root_id, .. }) =
-                engine.retained_code_export_owner(identity, 0)
-            {
-                let from_this_install = program.is_some_and(|program| {
-                    engine
-                        .retained_code_export_owner_installed_by(identity, program)
-                        .is_some()
-                });
-                if from_this_install || known_owners.get(&(identity.clone(), 0)) == Some(&root_id) {
-                    imports.insert((identity.clone(), 0), root_id);
-                }
-            }
-        }
         let mut bindings = Vec::new();
         for (name, id) in bound_rows {
             let id = tidepool_repr::SessionVarId::from_extract(id);
@@ -6468,9 +6416,24 @@ mod tests {
         });
     }
 
+    fn bind_native_delta_fixture(
+        session: &mut PersistentSession,
+        name: &str,
+        generation: u64,
+    ) -> SymbolIdentity {
+        let mut entry =
+            crate::session::prepared::tests::rooted_publication_fixture(session, name, generation);
+        entry.value.identity.module = entry.module.module_name();
+        entry.value.identity.namespace = "value".into();
+        entry.value.identity.occurrence = entry.name.0.clone();
+        let identity = entry.value.identity.clone();
+        session.bind_in(ScopeId::ROOT, entry).unwrap();
+        identity
+    }
+
     #[test]
     fn settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots() {
-        use tidepool_repr::execution_schema::{testing, Group};
+        use tidepool_repr::execution_schema::testing;
         let mut session = PersistentSession::new(None, 1024 * 1024);
         let source = session.mint_notebook_scope_with_lease(None).unwrap();
         native_source_action(&mut session, &source, |session| {
@@ -6481,27 +6444,16 @@ mod tests {
             );
             let mut index = CheckedNativeIndex::new(baseline.clone());
             let ambient_identity = testing::identity("Fixture", "entry");
-            let ambient = session
+            session
                 .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
                 .unwrap();
-            let mut own_wire = testing::wire_program();
-            let own_identity = testing::identity("Own", "entry");
-            let Group::NonRecursive(top) = &mut own_wire.bindings[0] else {
-                unreachable!()
-            };
-            top.identity = own_identity.clone();
-            let own = session
-                .install_prepared(testing::prepare(own_wire).unwrap(), None)
-                .unwrap();
+            assert!(matches!(
+                session.capture_selected_native_imports(ScopeId::ROOT, [(&ambient_identity, 0)]),
+                Err(SessionError::StaleStagedDeclaration)
+            ));
+            let own_identity = bind_native_delta_fixture(session, "answer", 924);
             let delta = session
-                .capture_checked_native_delta(
-                    ScopeId::ROOT,
-                    0,
-                    Some(own),
-                    &index,
-                    [&ambient_identity, &own_identity].into_iter(),
-                    [].into_iter(),
-                )
+                .capture_checked_native_delta(ScopeId::ROOT, 924, [("answer", 924)].into_iter())
                 .unwrap();
             assert_eq!(delta.imports.len(), 1);
             assert_eq!(delta.imports[0].identity, own_identity);
@@ -6515,177 +6467,105 @@ mod tests {
             assert!(ledger
                 .imports()
                 .any(|(identity, _)| identity == &own_identity));
-
-            // A target spelling an ambient definition does not acquire its CAF.
-            let repeated = session
-                .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
-                .unwrap();
-            assert_ne!(ambient, repeated);
             let absent = session
-                .capture_checked_native_delta(
-                    ScopeId::ROOT,
-                    0,
-                    Some(repeated),
-                    &index,
-                    [&ambient_identity].into_iter(),
-                    [].into_iter(),
-                )
+                .capture_checked_native_delta(ScopeId::ROOT, 924, [].into_iter())
                 .unwrap();
             assert!(absent.imports.is_empty());
-            let next = session
-                .capture_checked_native_delta(
-                    ScopeId::ROOT,
-                    0,
-                    Some(repeated),
-                    &index,
-                    [&own_identity].into_iter(),
-                    [].into_iter(),
-                )
-                .unwrap();
-            let (unchanged, added) = ledger.append(next, &index).unwrap();
+            assert!(absent.bindings.is_empty());
+            let (unchanged, added) = ledger.append(absent, &index).unwrap();
             assert!(added.is_empty());
             assert!(Arc::ptr_eq(
                 ledger.tail.as_ref().unwrap(),
                 unchanged.tail.as_ref().unwrap()
             ));
             assert!(Arc::ptr_eq(&ledger.base, &baseline));
+            assert!(matches!(
+                session.capture_checked_native_delta(
+                    ScopeId::ROOT,
+                    925,
+                    [("answer", 924)].into_iter()
+                ),
+                Err(SessionError::StaleStagedDeclaration)
+            ));
         });
     }
 
     #[test]
     fn checked_native_index_shares_live_baseline_and_keeps_exact_delta_owners() {
-        use tidepool_repr::execution_schema::{testing, Group};
         let mut session = PersistentSession::new(None, 1024 * 1024);
-        let package_identity = testing::identity("Fixture", "entry");
-        session
-            .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
-            .unwrap();
-        assert!(!session
-            .capture_admitted_native_imports(ScopeId::ROOT)
-            .unwrap()
-            .entries
-            .contains(&(package_identity.clone(), 0)));
-        let (certified, _) =
-            crate::session::prepared::tests::certified_package_export_fixture([61; 32]);
-        *session.prepared_mut().unwrap() = certified;
-        let mut value = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "answer",
-            924,
-        );
-        value.value.identity.module = value.module.module_name();
-        value.value.identity.namespace = "value".into();
-        value.value.identity.occurrence = value.name.0.clone();
-        let value_identity = value.value.identity.clone();
-        session.bind_in(ScopeId::ROOT, value).unwrap();
-        let baseline = Arc::new(
-            session
-                .capture_admitted_native_imports(ScopeId::ROOT)
-                .unwrap(),
-        );
-        let retained = Arc::downgrade(&baseline);
-        let mut index = CheckedNativeIndex::new(baseline.clone());
-        let ledger = CheckedNativeImports::base(baseline.clone());
-        assert!(Arc::ptr_eq(&index.base, &ledger.base));
-        assert!(index.added.is_empty());
-        assert!(index.get(&(package_identity.clone(), 0)).is_some());
-        assert!(index.get(&(package_identity.clone(), 1)).is_none());
-        assert!(index.get(&(value_identity.clone(), 924)).is_some());
-        assert!(index.get(&(value_identity.clone(), 925)).is_none());
-        let mut foreign_package = package_identity.clone();
-        foreign_package.unit.push_str("-foreign");
-        assert!(index.get(&(foreign_package.clone(), 0)).is_none());
-
-        // Runtime capture may reuse an exact baseline package export; neither
-        // a different package nor a wrong value generation acquires its root.
-        let reused = session
-            .capture_checked_native_delta(
-                ScopeId::ROOT,
-                924,
-                None,
-                &index,
-                [&package_identity, &foreign_package].into_iter(),
-                [("answer", 924)].into_iter(),
-            )
-            .unwrap();
-        assert_eq!(reused.imports.len(), 2);
-        let (unchanged, added) = ledger.append(reused, &index).unwrap();
-        assert!(added.is_empty());
-        assert!(unchanged.tail.as_ref().unwrap().imports.is_empty());
-        assert_eq!(unchanged.tail.as_ref().unwrap().bindings.len(), 1);
-        assert!(session
-            .capture_checked_native_delta(
-                ScopeId::ROOT,
-                925,
-                None,
-                &index,
-                [].into_iter(),
-                [("answer", 924)].into_iter(),
-            )
-            .is_err());
-        for ((identity, generation), root) in &baseline.owners {
-            assert!(ledger
+        let source = session.mint_notebook_scope_with_lease(None).unwrap();
+        native_source_action(&mut session, &source, |session| {
+            let value_identity = bind_native_delta_fixture(session, "answer", 924);
+            let baseline = Arc::new(
+                session
+                    .capture_admitted_native_imports(ScopeId::ROOT)
+                    .unwrap(),
+            );
+            let retained = Arc::downgrade(&baseline);
+            let mut index = CheckedNativeIndex::new(baseline.clone());
+            let ledger = CheckedNativeImports::base(baseline.clone());
+            assert!(Arc::ptr_eq(&index.base, &ledger.base));
+            assert!(index.added.is_empty());
+            assert!(index.get(&(value_identity.clone(), 924)).is_some());
+            assert!(index.get(&(value_identity.clone(), 925)).is_none());
+            let mut foreign_value = value_identity.clone();
+            foreign_value.unit.push_str("-foreign");
+            assert!(index.get(&(foreign_value, 924)).is_none());
+            let reused = session
+                .capture_checked_native_delta(ScopeId::ROOT, 924, [("answer", 924)].into_iter())
+                .unwrap();
+            assert_eq!(reused.imports.len(), 1);
+            let (unchanged, added) = ledger.append(reused, &index).unwrap();
+            assert!(added.is_empty());
+            assert!(unchanged.tail.as_ref().unwrap().imports.is_empty());
+            assert_eq!(unchanged.tail.as_ref().unwrap().bindings.len(), 1);
+            for ((identity, generation), root) in &baseline.owners {
+                assert!(ledger
+                    .append(
+                        CapturedNativeDelta {
+                            imports: vec![SettledNativeImport {
+                                identity: identity.clone(),
+                                generation: *generation,
+                                root_id: root + 1,
+                            }],
+                            bindings: Vec::new(),
+                        },
+                        &index
+                    )
+                    .is_err());
+            }
+            let own_identity = bind_native_delta_fixture(session, "later", 925);
+            let delta = session
+                .capture_checked_native_delta(ScopeId::ROOT, 925, [("later", 925)].into_iter())
+                .unwrap();
+            assert_eq!(delta.imports.len(), 1);
+            let root = delta.imports[0].root_id;
+            let (settled, added) = ledger.append(delta, &index).unwrap();
+            index.extend(added);
+            assert_eq!(index.added.len(), 1);
+            assert_eq!(index.get(&(own_identity.clone(), 925)), Some(&root));
+            assert!(baseline.owners.get(&(own_identity.clone(), 925)).is_none());
+            assert!(settled
                 .append(
                     CapturedNativeDelta {
                         imports: vec![SettledNativeImport {
-                            identity: identity.clone(),
-                            generation: *generation,
+                            identity: own_identity,
+                            generation: 925,
                             root_id: root + 1,
                         }],
                         bindings: Vec::new(),
                     },
-                    &index,
+                    &index
                 )
                 .is_err());
-        }
-
-        // Only the later real installation enters the mutable suffix.
-        let mut wire = testing::wire_program();
-        let own_identity = testing::identity("Later", "entry");
-        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
-            unreachable!()
-        };
-        top.identity = own_identity.clone();
-        let program = session
-            .install_prepared(testing::prepare(wire).unwrap(), None)
-            .unwrap();
-        let delta = session
-            .capture_checked_native_delta(
-                ScopeId::ROOT,
-                0,
-                Some(program),
-                &index,
-                [&own_identity].into_iter(),
-                [].into_iter(),
-            )
-            .unwrap();
-        assert_eq!(delta.imports.len(), 1);
-        let root = delta.imports[0].root_id;
-        let (settled, added) = ledger.append(delta, &index).unwrap();
-        index.extend(added);
-        assert_eq!(index.added.len(), 1);
-        assert_eq!(index.get(&(own_identity.clone(), 0)), Some(&root));
-        assert!(baseline.owners.get(&(own_identity.clone(), 0)).is_none());
-        assert!(settled
-            .append(
-                CapturedNativeDelta {
-                    imports: vec![SettledNativeImport {
-                        identity: own_identity,
-                        generation: 0,
-                        root_id: root + 1,
-                    }],
-                    bindings: Vec::new(),
-                },
-                &index,
-            )
-            .is_err());
-        drop(baseline);
-        drop(ledger);
-        drop(unchanged);
-        drop(settled);
-        assert!(retained.upgrade().is_some());
-        drop(index);
-        assert!(retained.upgrade().is_none());
+            drop(baseline);
+            drop(ledger);
+            drop(unchanged);
+            drop(settled);
+            assert!(retained.upgrade().is_some());
+            drop(index);
+            assert!(retained.upgrade().is_none());
+        });
     }
 
     #[test]

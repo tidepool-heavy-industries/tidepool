@@ -8203,7 +8203,6 @@ where
                 ))?;
         let origin =
             CapturedSourceOrigin::capture(transaction).map_err(SessionError::SourceAdmission)?;
-        self.set_image_registry(Arc::clone(source_entry.image_registry()));
         let installation_scope = self.state.mint_isolated_scope_with_lease()?;
         let entry = self.prepare_startup_entry_in(
             StartupInput::Closed {
@@ -8228,7 +8227,7 @@ where
         if self.state.public_visibility_snapshot_in(scope).is_none() {
             return Err(PreparedRuntimeError::SourceScopeAdmission.into());
         }
-        let (admission, compile_identity) = match input {
+        let (admission, compile_identity, native) = match input {
             StartupInput::Closed { entry, origin } => {
                 let code = entry.compiled().code();
                 let proof = code
@@ -8241,6 +8240,7 @@ where
                 let resolved = self
                     .state
                     .resolve_closed_source_entry_in(scope, entry, origin)?;
+                let native = entry.retained_native_images(&resolved)?;
                 (
                     AdmittedTurnCode {
                         code,
@@ -8248,11 +8248,13 @@ where
                         resolved: Some(resolved),
                     },
                     identity,
+                    Some(native),
                 )
             }
             StartupInput::Ordinary { code, identity } => (
                 self.admit_turn_code_in(scope, code, TurnInstallationAdmission::Compilation)?,
                 identity,
+                None,
             ),
         };
         let provenance = self.provenance_for(&admission)?;
@@ -8261,8 +8263,16 @@ where
             source_keys,
             provenance,
             _inputs: _installed_inputs,
-        } =
-            self.install_admitted_turn(admission, TurnImageAcquisition::Compile, provenance, None)?;
+        } = self.install_admitted_turn(
+            admission,
+            native
+                .as_ref()
+                .map_or(TurnImageAcquisition::Compile, |bundle| {
+                    TurnImageAcquisition::Ready { bundle }
+                }),
+            provenance,
+            None,
+        )?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)
@@ -8515,7 +8525,7 @@ where
             ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
         ) {
             if let Some(checked) = checked {
-                checked.settle(&mut self.state, program)?;
+                checked.settle(&mut self.state)?;
             }
         }
         Ok(outcome)
@@ -12912,6 +12922,7 @@ mod authored_publication_tests {
             assemble_expression_module, run_turn, ExpressionLift, TemplateSelector, TurnRequest,
             TurnResult, TurnTemplate,
         };
+        use tidepool_codegen::prepared_program::CompiledProgram;
         use tidepool_testing::effect_surface::TestEffectSurface;
         tidepool_testing::eval_harness::require_extract();
         let effects = TestEffectSurface::minimal(&[tidepool_mcp::agent_tools_decl()]).unwrap();
@@ -12960,6 +12971,7 @@ mod authored_publication_tests {
             Arc::new(ImageRegistry::new()),
         )
         .unwrap();
+        let prepared_images = CompiledProgram::successful_image_compilations();
         let lib =
             SessionLib::open(SessionId(995), root.path(), ModuleEnv::standalone_default()).unwrap();
         let mut session =
@@ -13117,6 +13129,11 @@ mod authored_publication_tests {
         session.settle_dropped_custody();
         let entry = prepare(&mut session);
         let sites = entry.entry.provenance.original_sources.sites.len();
+        assert_eq!(
+            CompiledProgram::successful_image_compilations(),
+            prepared_images,
+            "fresh installations consume the entry's held native images"
+        );
         assert!(
             sites > 0,
             "actual effect site must exercise closed-source origin issuance"

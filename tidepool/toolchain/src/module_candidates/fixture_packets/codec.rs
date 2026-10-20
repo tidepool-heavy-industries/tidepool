@@ -511,6 +511,13 @@ impl From<&SymbolIdentity> for IdentityFact {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum ImportOwnerFact {
+    OriginalBinding {
+        unit: String,
+        module: String,
+        interface: crate::artifact_inventory::ArtifactBinding,
+        original: crate::artifact_inventory::ArtifactBinding,
+        binder: IdentityFact,
+    },
     Source {
         unit: String,
         module: String,
@@ -540,6 +547,19 @@ impl From<&crate::certified_products::ReceiptImportOwner> for ImportOwnerFact {
     fn from(owner: &crate::certified_products::ReceiptImportOwner) -> Self {
         use crate::certified_products::ReceiptImportOwner;
         match owner {
+            ReceiptImportOwner::OriginalBinding {
+                unit,
+                module,
+                interface,
+                original,
+                binder,
+            } => Self::OriginalBinding {
+                unit: unit.clone(),
+                module: module.clone(),
+                interface: *interface,
+                original: *original,
+                binder: binder.into(),
+            },
             ReceiptImportOwner::Source {
                 unit,
                 module,

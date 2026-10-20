@@ -6,6 +6,9 @@ decision. They do not issue a staged Reload report or qualify automatic Reload.
 All publication controls first initialize their actual public/source owner and
 consume each installation's own bootstrap ticket. Fault injection happens at
 the selected generation publication boundary, after that shared preparation.
+Shared prepared-code identity is distinct from the separately issued dispatch
+custody and installation lease. These checks do not replace runtime site-origin
+or mutable-state isolation histories.
 
 | Existing control | Contract it exercises |
 | --- | --- |

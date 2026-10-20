@@ -26,7 +26,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::time::Instant;
 
 use tidepool_repr::execution_schema::{
-    CertifiedGroup, CertifiedGroupCode, LinkedProgram, PreparedProgram,
+    CertifiedGroup, CertifiedGroupCode, LinkedProgram, PackageGroupCode, PreparedProgram,
 };
 
 use super::CompiledProgram;
@@ -61,6 +61,11 @@ enum ImageKey {
     Program(PreparedProgram),
     LiteralProgram(
         PreparedProgram,
+        super::package_literals::GroupPackageLiterals,
+    ),
+    PackageGroup(PackageGroupCode),
+    LiteralPackageGroup(
+        PackageGroupCode,
         super::package_literals::GroupPackageLiterals,
     ),
     Group(CertifiedGroupCode, super::HostEntries),
@@ -193,6 +198,8 @@ impl<'a> Observation<'a> {
             ImageKey::LiteralProgram(..) => "literal_program",
             ImageKey::Group(..) => "group",
             ImageKey::LiteralGroup(..) => "literal_group",
+            ImageKey::PackageGroup(..) => "package_group",
+            ImageKey::LiteralPackageGroup(..) => "literal_package_group",
         };
         Self {
             registry,
@@ -201,7 +208,10 @@ impl<'a> Observation<'a> {
             domain,
             group: match key {
                 ImageKey::Group(group, _) | ImageKey::LiteralGroup(group, _, _) => Some(group),
-                ImageKey::Program(_) | ImageKey::LiteralProgram(..) => None,
+                ImageKey::Program(_)
+                | ImageKey::LiteralProgram(..)
+                | ImageKey::PackageGroup(..)
+                | ImageKey::LiteralPackageGroup(..) => None,
             },
             started: Instant::now(),
             start_ns: monotonic_ns(),
@@ -565,6 +575,20 @@ impl ImageRegistry {
         self.get_or_compile_key(ImageKey::group(group, literals, host_entries), compile)
     }
 
+    pub(super) fn get_or_compile_literal_package_group<E>(
+        &self,
+        group: &PackageGroupCode,
+        literals: &super::package_literals::GroupPackageLiterals,
+        compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
+    ) -> Result<Arc<CompiledProgram>, E> {
+        let key = if literals.iter().next().is_none() {
+            ImageKey::PackageGroup(group.clone())
+        } else {
+            ImageKey::LiteralPackageGroup(group.clone(), literals.clone())
+        };
+        self.get_or_compile_key(key, compile)
+    }
+
     fn get_or_compile_key<E>(
         &self,
         key: ImageKey,
@@ -693,6 +717,310 @@ mod tests {
     use tidepool_repr::execution_schema::{
         link_program, testing, Atom, ExprFrame, MachineImports, ScalarLiteral,
     };
+
+    fn package_owner() -> tidepool_repr::execution_schema::PackageCodeOwner {
+        tidepool_repr::execution_schema::PackageCodeOwner {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            compiler_sha256: [1; 32],
+            profile_sha256: [2; 32],
+            interface_sha256: [3; 32],
+            defining_version_sha256: [4; 32],
+        }
+    }
+
+    fn package_code(
+        wire: tidepool_repr::execution_schema::WireProgram,
+        ordinal: u32,
+    ) -> PackageGroupCode {
+        PackageGroupCode::admit(
+            package_owner(),
+            testing::projected_group(wire, ordinal).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn prepare_package(code: &PackageGroupCode, registry: &ImageRegistry) -> Arc<CompiledProgram> {
+        CompiledProgram::prepare_package_group_code(
+            code,
+            &[],
+            &Default::default(),
+            &Default::default(),
+            registry,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn package_images_reuse_across_subset_ordinals_without_home_authority() {
+        use tidepool_repr::execution_schema::{Group, HeapRhs};
+        let registry = ImageRegistry::new();
+        // A singleton Bytes group would issue source literal authority on the
+        // HOME path. PACKAGE compilation must preserve its separate domain.
+        let wire = |bytes: &[u8]| {
+            let mut wire = testing::wire_program();
+            let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            top.binding.rhs = HeapRhs::Bytes(bytes.to_vec());
+            wire.expressions.nodes.clear();
+            wire
+        };
+        let code = package_code(wire(b"literal"), 11);
+        let first = prepare_package(&code, &registry);
+        let reordered = prepare_package(&package_code(wire(b"literal"), 93), &registry);
+        assert!(Arc::ptr_eq(&first, &reordered));
+        assert!(first.entries.is_empty());
+        assert!(first.certified_source.is_none());
+        assert!(first.source_literal_producer.is_none());
+        assert!(first.source_literals().is_empty());
+        assert!(!Arc::ptr_eq(
+            &first,
+            &prepare_package(&package_code(wire(b"other"), 11), &registry)
+        ));
+        for field in 0..4 {
+            let mut owner = package_owner();
+            match field {
+                0 => owner.compiler_sha256 = [9; 32],
+                1 => owner.profile_sha256 = [9; 32],
+                2 => owner.interface_sha256 = [9; 32],
+                _ => owner.defining_version_sha256 = [9; 32],
+            }
+            let different = PackageGroupCode::admit(
+                owner,
+                testing::projected_group(wire(b"literal"), 11).unwrap(),
+            )
+            .unwrap();
+            assert!(!Arc::ptr_eq(
+                &first,
+                &prepare_package(&different, &registry)
+            ));
+        }
+        let weak = Arc::downgrade(&first);
+        drop(first);
+        drop(reordered);
+        assert!(
+            weak.upgrade().is_none(),
+            "registry retains no package image"
+        );
+        assert!(prepare_package(&code, &registry).certified_source.is_none());
+    }
+
+    #[test]
+    fn package_image_keys_keep_selected_literal_storage_and_refuse_missing_owners() {
+        use super::super::{package_literals::PackageLiteral, LiteralOwner};
+        use tidepool_repr::execution_schema::{
+            GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep,
+            TopBinding, ValueId, ValueRef,
+        };
+        let registry = ImageRegistry::new();
+        let literal = testing::identity("Bytes", "literal");
+        let mut consumer = testing::wire_program();
+        consumer.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+        consumer.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        consumer.globals.push(GlobalDecl {
+            identity: literal.clone(),
+            rep: RuntimeRep::Address,
+            entry_signature: None,
+            required_evaluated: true,
+            required_generation: None,
+        });
+        let code = package_code(consumer, 5);
+        let owner = [Some(LiteralOwner::Package {
+            unit: literal.unit.clone(),
+            module: literal.module.clone(),
+            binder: literal.clone(),
+            interface_digest: [7; 32],
+        })];
+        let tokens = |bytes: &[u8]| -> std::collections::BTreeMap<_, PackageLiteral> {
+            let mut wire = testing::wire_program();
+            wire.bindings.push(Group::NonRecursive(TopBinding {
+                identity: literal.clone(),
+                binding: HeapBinding {
+                    id: ValueId(1),
+                    rhs: HeapRhs::Bytes(bytes.to_vec()),
+                },
+            }));
+            let target =
+                CompiledProgram::compile_prepared_definitions(&testing::prepare(wire).unwrap())
+                    .unwrap();
+            target.package_literals(|unit, module| {
+                (unit == "fixture" && module == "Bytes").then_some([7; 32])
+            })
+        };
+        let prepare = |tokens: &std::collections::BTreeMap<_, PackageLiteral>| {
+            CompiledProgram::prepare_package_group_code(
+                &code,
+                &owner,
+                tokens,
+                &Default::default(),
+                &registry,
+            )
+            .unwrap()
+        };
+        let first_tokens = tokens(b"first");
+        let first = prepare(&first_tokens);
+        assert_eq!(first.import_is_literal(GlobalId(0)), Some(true));
+        assert!(Arc::ptr_eq(&first, &prepare(&first_tokens)));
+        assert!(!Arc::ptr_eq(&first, &prepare(&tokens(b"second"))));
+        let before = registry.misses();
+        assert!(matches!(
+            CompiledProgram::prepare_package_group_code(
+                &code,
+                &[],
+                &first_tokens,
+                &Default::default(),
+                &registry,
+            ),
+            Err(super::super::CompileError::LiteralImportCount {
+                globals: 1,
+                owners: 0
+            })
+        ));
+        let wrong_owner = [Some(LiteralOwner::Package {
+            unit: literal.unit.clone(),
+            module: literal.module.clone(),
+            binder: literal.clone(),
+            interface_digest: [8; 32],
+        })];
+        assert!(matches!(CompiledProgram::prepare_package_group_code(
+            &code, &wrong_owner, &first_tokens, &Default::default(), &registry,
+        ), Err(super::super::CompileError::PackageLiteralContract(binder)) if *binder == literal));
+        assert_eq!(
+            registry.misses(),
+            before,
+            "literal refusal precedes cache admission"
+        );
+        assert!(first.certified_source.is_none());
+        assert!(first.source_literals().is_empty());
+    }
+
+    #[test]
+    fn package_definitions_install_independent_instances_and_execute_through_batch_imports() {
+        use super::super::{BatchImport, BatchProgram, PreparedCallOptions, PreparedResult};
+        use crate::suspension::RealmId;
+        use tidepool_repr::execution_schema::{
+            GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep,
+            SignatureId, TopBinding, UpdatePolicy, ValueId, ValueRef,
+        };
+        let registry = ImageRegistry::new();
+        let mut package = testing::wire_program();
+        package.signatures.push(package.signatures[0].clone());
+        package.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        package
+            .expressions
+            .nodes
+            .push(package.expressions.nodes[0].clone());
+        package.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]);
+        let Group::NonRecursive(top) = &mut package.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        package.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("Fixture", "result"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(1),
+                    parameters: vec![],
+                    captures: vec![],
+                    body: 1,
+                },
+            },
+        }));
+        let image = prepare_package(&package_code(package, 3), &registry);
+        let mut consumer = testing::wire_program();
+        consumer.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        consumer.globals.push(GlobalDecl {
+            identity: testing::identity("Fixture", "entry"),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: Some(SignatureId(0)),
+            required_evaluated: false,
+            required_generation: None,
+        });
+        consumer.expressions.nodes[0] = ExprFrame::Enter {
+            callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+            signature: SignatureId(0),
+        };
+        let target = Arc::new(
+            CompiledProgram::compile_prepared_definitions(&testing::prepare(consumer).unwrap())
+                .unwrap(),
+        );
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let install = |machine: &mut PreparedMachine<'_>| {
+            machine
+                .install_shared_batch(vec![
+                    BatchProgram {
+                        image: target.clone(),
+                        imports: vec![BatchImport::Source {
+                            group: 1,
+                            binding: ValueId(0),
+                        }],
+                    },
+                    BatchProgram {
+                        image: image.clone(),
+                        imports: vec![],
+                    },
+                ])
+                .unwrap()
+        };
+        let first = install(&mut machine);
+        let second = install(&mut machine);
+        assert_ne!(first[1], second[1]);
+        let left = machine.retain_top(first[1], ValueId(0)).unwrap();
+        let right = machine.retain_top(second[1], ValueId(0)).unwrap();
+        assert_ne!(
+            machine.handle_current_pointer(left),
+            machine.handle_current_pointer(right),
+            "shared native code must use distinct instance closures"
+        );
+        let target_roots =
+            [first[0], second[0]].map(|target| machine.retain_top(target, ValueId(0)).unwrap());
+        assert!(!machine.handle_is_evaluated(left).unwrap());
+        assert!(!machine.handle_is_evaluated(right).unwrap());
+        let call = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: true,
+        };
+        for (index, ids) in [first, second].iter().enumerate() {
+            let expected = machine.retain_top(ids[1], ValueId(1)).unwrap();
+            let result = machine
+                .run_entry_retained(ids[0], ValueId(0), &[], call, RealmId::ROOT)
+                .unwrap();
+            let [PreparedResult::Managed(returned)] = result.values.as_slice() else {
+                panic!("package CAF returns its own instance's result function");
+            };
+            assert_eq!(
+                machine.handle_current_pointer(*returned),
+                machine.handle_current_pointer(expected)
+            );
+            assert!(machine.handle_is_evaluated(left).unwrap());
+            assert_eq!(
+                machine.handle_is_evaluated(right).unwrap(),
+                index == 1,
+                "forcing the first instance must leave the second CAF unevaluated"
+            );
+            assert!(machine.release(*returned));
+            assert!(machine.release(expected));
+        }
+        for root in target_roots {
+            assert!(machine.release(root));
+        }
+        assert!(machine.release(left));
+        assert!(machine.release(right));
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().programs, 0);
+    }
 
     fn program() -> LinkedProgram {
         program_returning(42)

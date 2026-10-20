@@ -1171,9 +1171,41 @@ impl ProjectedGroup {
         DefinitionsView::from(self.definitions.as_ref())
     }
 
+    fn validate_code_owner(&self, unit: &str, module: &str) -> Result<(), ParseError> {
+        if unit.is_empty() || module.is_empty() {
+            return Err(ParseError::InvalidReference(
+                "empty group code owner".into(),
+            ));
+        }
+        let tops: Vec<_> = self
+            .definitions
+            .bindings
+            .iter()
+            .flat_map(|binding| match binding {
+                Group::NonRecursive(top) => std::slice::from_ref(top),
+                Group::Recursive(tops) => tops.as_slice(),
+            })
+            .map(|top| &top.identity)
+            .collect();
+        let unique: std::collections::BTreeSet<_> = tops.iter().copied().collect();
+        if unique.len() != tops.len()
+            || tops.len() < self.binders.len()
+            || tops[tops.len() - self.binders.len()..] != self.binders.iter().collect::<Vec<_>>()
+            || self
+                .binders
+                .iter()
+                .any(|binder| binder.unit != unit || binder.module != module)
+        {
+            return Err(ParseError::InvalidReference(
+                "group binder inventory differs from its definitions or owner".into(),
+            ));
+        }
+        Ok(())
+    }
+
     // Certified admission proves that exported binders form this exact suffix.
     // Locate its first slice from group lengths, then visit each export once.
-    fn exported_values(&self) -> impl Iterator<Item = (&SymbolIdentity, ValueId)> {
+    pub fn exported_values(&self) -> impl Iterator<Item = (&SymbolIdentity, ValueId)> {
         let bindings = &self.definitions.bindings;
         let mut remaining = self.binders.len();
         let mut first = bindings.len();
@@ -1251,37 +1283,68 @@ pub struct CertifiedGroupCode {
     group: ProjectedGroup,
 }
 
+/// Immutable identity of one package module's compiler product. These facts
+/// identify code; callers authenticate the product before selecting it for use.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PackageCodeOwner {
+    pub unit: String,
+    pub module: String,
+    pub compiler_sha256: [u8; 32],
+    pub profile_sha256: [u8; 32],
+    pub interface_sha256: [u8; 32],
+    pub defining_version_sha256: [u8; 32],
+}
+
+/// Entry-free package definitions without HOME source or literal authority.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PackageGroupCode {
+    owner: Arc<PackageCodeOwner>,
+    group: ProjectedGroup,
+}
+
+impl PackageGroupCode {
+    /// Validate the structural owner and export inventory. Product
+    /// authentication and dependency selection belong to the package issuer.
+    pub fn admit(owner: PackageCodeOwner, mut group: ProjectedGroup) -> Result<Self, ParseError> {
+        group.validate_code_owner(&owner.unit, &owner.module)?;
+        if group
+            .globals()
+            .iter()
+            .any(|global| global.required_generation.is_some())
+        {
+            return Err(ParseError::InvalidReference(
+                "package group cannot capture machine-local import generations".into(),
+            ));
+        }
+        // A package subset can renumber groups without changing their code.
+        group.original_ordinal = 0;
+        Ok(Self {
+            owner: Arc::new(owner),
+            group,
+        })
+    }
+
+    pub fn owner(&self) -> &PackageCodeOwner {
+        &self.owner
+    }
+    pub fn binders(&self) -> &[SymbolIdentity] {
+        self.group.binders()
+    }
+    pub fn globals(&self) -> &[GlobalDecl] {
+        self.group.globals()
+    }
+    pub fn definitions(&self) -> DefinitionsView<'_> {
+        self.group.definitions()
+    }
+    pub fn exported_values(&self) -> impl Iterator<Item = (&SymbolIdentity, ValueId)> {
+        self.group.exported_values()
+    }
+}
+
 impl CertifiedGroupCode {
     /// Validate immutable source identity without resolving installation imports.
     pub fn admit(owner: CachedHomeOwner, group: ProjectedGroup) -> Result<Self, ParseError> {
-        if owner.unit.is_empty() || owner.module.is_empty() {
-            return Err(ParseError::InvalidReference(
-                "empty cached home owner".into(),
-            ));
-        }
-        let tops: Vec<_> = group
-            .definitions
-            .bindings
-            .iter()
-            .flat_map(|binding| match binding {
-                Group::NonRecursive(top) => std::slice::from_ref(top),
-                Group::Recursive(tops) => tops.as_slice(),
-            })
-            .map(|top| &top.identity)
-            .collect();
-        let unique: std::collections::BTreeSet<_> = tops.iter().copied().collect();
-        if unique.len() != tops.len()
-            || tops.len() < group.binders.len()
-            || tops[tops.len() - group.binders.len()..] != group.binders.iter().collect::<Vec<_>>()
-            || group
-                .binders
-                .iter()
-                .any(|binder| binder.unit != owner.unit || binder.module != owner.module)
-        {
-            return Err(ParseError::InvalidReference(
-                "cached group binder inventory differs from its definitions".into(),
-            ));
-        }
+        group.validate_code_owner(&owner.unit, &owner.module)?;
         Ok(Self {
             owner: Arc::new(owner),
             group,
@@ -1584,6 +1647,19 @@ impl InventoryOperation {
             .lock()
             .map_err(|_| ParseError::LimitExceeded("accounting owner"))?;
         codec::decode_value(bytes, limits, &mut *budget)
+    }
+
+    /// Parse a neutral group using this operation's cumulative admission budget.
+    pub fn parse_projected_group(
+        &self,
+        bytes: &[u8],
+        requirements: &ProgramRequirements,
+    ) -> Result<ProjectedGroup, ParseError> {
+        let mut budget = self
+            .budget
+            .lock()
+            .map_err(|_| ParseError::LimitExceeded("accounting owner"))?;
+        parse_projected_group_with_budget(bytes, requirements, self.limits.program, &mut budget)
     }
 
     pub fn parse_module_products(
@@ -1980,6 +2056,132 @@ mod certified_exports_tests {
         group.binders =
             SharedContent::new(expected.iter().map(|(binder, _)| binder.clone()).collect());
         (group, expected)
+    }
+
+    fn package_owner() -> PackageCodeOwner {
+        PackageCodeOwner {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            compiler_sha256: [1; 32],
+            profile_sha256: [2; 32],
+            interface_sha256: [3; 32],
+            defining_version_sha256: [4; 32],
+        }
+    }
+
+    #[test]
+    fn package_code_identity_excludes_selection_ordinal_and_keeps_exact_product() {
+        use std::hash::{Hash, Hasher};
+        let group = || testing::wire_program();
+        let first = PackageGroupCode::admit(
+            package_owner(),
+            testing::projected_group(group(), 11).unwrap(),
+        )
+        .unwrap();
+        let reordered = PackageGroupCode::admit(
+            package_owner(),
+            testing::projected_group(group(), 93).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first, reordered);
+        let hash = |code: &PackageGroupCode| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            code.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(&first), hash(&reordered));
+        assert_eq!(first.binders(), &[testing::identity("Fixture", "entry")]);
+        assert!(first.globals().is_empty());
+        for field in 0..4 {
+            let mut owner = package_owner();
+            match field {
+                0 => owner.compiler_sha256 = [9; 32],
+                1 => owner.profile_sha256 = [9; 32],
+                2 => owner.interface_sha256 = [9; 32],
+                _ => owner.defining_version_sha256 = [9; 32],
+            }
+            let different =
+                PackageGroupCode::admit(owner, testing::projected_group(group(), 11).unwrap())
+                    .unwrap();
+            assert_ne!(first, different);
+        }
+        let mut changed = group();
+        changed.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
+            bits: 64,
+            bytes: 43_i64.to_be_bytes().to_vec(),
+        })]);
+        assert_ne!(
+            first,
+            PackageGroupCode::admit(
+                package_owner(),
+                testing::projected_group(changed, 11).unwrap(),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn package_code_refuses_machine_local_generation_contracts() {
+        let mut wire = testing::wire_program();
+        wire.globals.push(GlobalDecl {
+            identity: testing::identity("Dependency", "imported"),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let valid = PackageGroupCode::admit(
+            package_owner(),
+            testing::projected_group(wire.clone(), 0).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(valid.globals().len(), 1);
+        wire.globals[0].required_generation = Some(7);
+        let captured = testing::projected_group(wire, 0).unwrap();
+        assert!(matches!(
+            PackageGroupCode::admit(package_owner(), captured),
+            Err(ParseError::InvalidReference(_))
+        ));
+    }
+
+    #[test]
+    fn package_code_refuses_foreign_empty_and_malformed_owner_inventory() {
+        let (group, expected) = fixture(3);
+        PackageGroupCode::admit(package_owner(), group.clone()).unwrap();
+        for owner in [
+            PackageCodeOwner {
+                unit: String::new(),
+                ..package_owner()
+            },
+            PackageCodeOwner {
+                module: "Foreign".into(),
+                ..package_owner()
+            },
+        ] {
+            assert!(matches!(
+                PackageGroupCode::admit(owner, group.clone()),
+                Err(ParseError::InvalidReference(_))
+            ));
+        }
+        for binders in [
+            vec![testing::identity("Fixture", "missing")],
+            expected
+                .iter()
+                .rev()
+                .map(|(binder, _)| binder.clone())
+                .collect(),
+            vec![expected[2].0.clone(), expected[2].0.clone()],
+            vec![testing::identity("Helpers", "helper0")],
+        ] {
+            let malformed = ProjectedGroup {
+                binders: SharedContent::new(binders),
+                ..group.clone()
+            };
+            assert!(matches!(
+                PackageGroupCode::admit(package_owner(), malformed),
+                Err(ParseError::InvalidReference(_))
+            ));
+        }
     }
 
     #[test]

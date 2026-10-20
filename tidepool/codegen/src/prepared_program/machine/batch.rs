@@ -257,36 +257,14 @@ impl PreparedMachine<'_> {
             .checked_add(count)
             .ok_or_else(|| runtime_error_without_machine(RuntimeError::HeapOverflow))?;
 
-        let mut candidates = Vec::with_capacity(batch.len());
-        for item in batch {
-            let instance = InstanceImage::new(&item.image)?;
-            let roots = RootWords::new(item.image.root_words)?;
-            let environment = Box::new(InstallationEnvironment {
-                roots: roots.as_mut_ptr(),
-                descriptors: instance.descriptor_words.as_ptr(),
-            });
-            let heap_extent = heap_top_extent(&instance.heap_top_specs)?;
-            candidates.push(Candidate {
-                image: item.image,
-                instance,
-                roots,
-                environment,
-                imports: item.imports,
-                heap_extent,
-                sites: BTreeMap::new(),
-            });
-        }
-
         let mut requested = HashSet::new();
         for request in &requests {
             if !requested.insert((request.group, request.binding)) {
                 return Err(ExecutionError::Invariant("duplicate source lease request"));
             }
-            let candidate = candidates
-                .get(request.group)
-                .ok_or(ExecutionError::Invariant(
-                    "source lease selects absent batch group",
-                ))?;
+            let candidate = batch.get(request.group).ok_or(ExecutionError::Invariant(
+                "source lease selects absent batch group",
+            ))?;
             let export = candidate
                 .image
                 .top_exports
@@ -307,11 +285,11 @@ impl PreparedMachine<'_> {
             }
         }
 
-        // Validate the entire import graph and external handle shapes while
-        // this machine still has no candidate descriptors or roots. A source
-        // top must be the exact identity and representation the global names.
+        // Validate the entire import graph and external handle shapes before
+        // allocating instance state. A source top must have the exact identity
+        // and representation the global names.
         let mut external = Vec::new();
-        for (index, candidate) in candidates.iter().enumerate() {
+        for (index, candidate) in batch.iter().enumerate() {
             if candidate.imports.len() != candidate.image.import_slots.len() {
                 return Err(ExecutionError::Invariant(
                     "batch import count differs from image",
@@ -326,7 +304,7 @@ impl PreparedMachine<'_> {
             {
                 match origin {
                     BatchImport::Source { group, binding } => {
-                        let target = candidates
+                        let target = batch
                             .get(*group)
                             .ok_or(ExecutionError::UnknownPreparedHandle)?;
                         let export = target
@@ -446,6 +424,52 @@ impl PreparedMachine<'_> {
             }
         }
 
+        let mut staged_interner = self.interner.clone();
+        for candidate in &batch {
+            staged_interner
+                .check_absorb(&candidate.image.interned_constructors)
+                .map_err(|conflict| match conflict {
+                    super::super::interner::AbsorbConflict::Identity { existing, incoming } => {
+                        ExecutionError::DescriptorShape {
+                            identity: Box::new(incoming.identity.clone()),
+                            existing_field_reps: existing.field_reps.clone(),
+                            incoming_field_reps: incoming.field_reps.clone(),
+                        }
+                    }
+                    super::super::interner::AbsorbConflict::HostId {
+                        host_id,
+                        identity,
+                        existing,
+                    } => ExecutionError::HostIdConflict {
+                        host_id,
+                        identity,
+                        existing,
+                    },
+                })?;
+            staged_interner.commit_absorb(&candidate.image.interned_constructors);
+            staged_interner.commit_externals(&candidate.image.externals);
+        }
+
+        let mut candidates = Vec::with_capacity(batch.len());
+        for item in batch {
+            let instance = InstanceImage::new(&item.image)?;
+            let roots = RootWords::new(item.image.root_words)?;
+            let environment = Box::new(InstallationEnvironment {
+                roots: roots.as_mut_ptr(),
+                descriptors: instance.descriptor_words.as_ptr(),
+            });
+            let heap_extent = heap_top_extent(&instance.heap_top_specs)?;
+            candidates.push(Candidate {
+                image: item.image,
+                instance,
+                roots,
+                environment,
+                imports: item.imports,
+                heap_extent,
+                sites: BTreeMap::new(),
+            });
+        }
+
         // Follow only this batch's admitted import graph. Source-group tops
         // conservatively inherit their group's exact imported site tokens.
         for &(index, slot, handle) in &external {
@@ -492,32 +516,6 @@ impl PreparedMachine<'_> {
             if !changed {
                 break;
             }
-        }
-
-        let mut staged_interner = self.interner.clone();
-        for candidate in &candidates {
-            staged_interner
-                .check_absorb(&candidate.image.interned_constructors)
-                .map_err(|conflict| match conflict {
-                    super::super::interner::AbsorbConflict::Identity { existing, incoming } => {
-                        ExecutionError::DescriptorShape {
-                            identity: Box::new(incoming.identity.clone()),
-                            existing_field_reps: existing.field_reps.clone(),
-                            incoming_field_reps: incoming.field_reps.clone(),
-                        }
-                    }
-                    super::super::interner::AbsorbConflict::HostId {
-                        host_id,
-                        identity,
-                        existing,
-                    } => ExecutionError::HostIdConflict {
-                        host_id,
-                        identity,
-                        existing,
-                    },
-                })?;
-            staged_interner.commit_absorb(&candidate.image.interned_constructors);
-            staged_interner.commit_externals(&candidate.image.externals);
         }
 
         let heap_reserve = candidates.iter().try_fold(0usize, |total, candidate| {
