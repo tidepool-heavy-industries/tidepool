@@ -20584,6 +20584,12 @@ pub(crate) mod request_tests {
             .with_compilation_authority(
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
             );
+        if publication_failure.is_some() {
+            workbench_runner_for_test(&workbench)
+                .adopt_final_source_scope(context.clone())
+                .await
+                .unwrap();
+        }
         let warmed = if generation_replacement.is_some() {
             source
                 .prepare_source_toolset(
