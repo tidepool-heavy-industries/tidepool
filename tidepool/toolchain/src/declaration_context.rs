@@ -13414,11 +13414,19 @@ pub(crate) fn validate_artifact_view_groups_with_validation(
 
 /// Certified physical groups stay paired with the exact bindings selected by
 /// the same view. Independent scoped edges may share one physical group row.
-#[derive(Debug)]
 pub(crate) struct CertifiedArtifactGroupBindings {
     view: crate::artifact_inventory::NativeGroupViewStamp,
     groups: Arc<[PendingCertifiedGroup]>,
     bindings: BTreeMap<crate::artifact_inventory::NativeGroupBinding, usize>,
+}
+
+impl std::fmt::Debug for CertifiedArtifactGroupBindings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CertifiedArtifactGroupBindings")
+            .field("groups", &self.groups.len())
+            .field("bindings", &self.bindings.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl CertifiedArtifactGroupBindings {
