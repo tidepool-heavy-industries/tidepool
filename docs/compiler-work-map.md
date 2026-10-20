@@ -1,14 +1,58 @@
 # Compiler work and authority map
 
-Production workflow map checked at `8245fa800aec17fd7fd37fbe64cd4a35aa3efcde`;
-campaign qualification observations below use base
-`5b74c2f1fe010c5c343e0c6f331d54328fbd5090` and their named joined revision.
-The later source changes below were inspected at campaign `c10837d44d`;
-qualification records their actual consumers separately from the demand-service
-amendment. Proposed world/resolver owners are not existing production facts.
+The service-path update below was inspected at root `e27921de24` and joined
+engine `7ae7d2741d` on 2026-10-20. It distinguishes implemented owners from
+receiving work and does not establish release readiness. The subsequent P1–P10
+tables describe the earlier finite path at `8245fa800a`/`c10837d44d`; they remain
+a deletion and consumer-migration inventory, not the current service dataflow.
+Historical qualification observations name their own exact revisions.
 Stage names identify ownership boundaries; their timings are not additive.
 Use [compiler profiling](compiler-profiling.md) for measurement and
 [property testing](property-testing.md) for independent checks.
+
+## Service path: current ownership and receiving boundaries
+
+The controlling implementation plan is
+[completion/execution.md](../plans/shared-warm-compiler/completion/execution.md).
+Persistent GHC processes already existed in the baseline. This migration removes
+repeated client reconstruction and duplicate preparation routes; process reuse
+alone is neither its implementation nor evidence of a speedup.
+
+| Boundary | Current owner and carried fact | Open receiving work |
+| --- | --- | --- |
+| Runtime admission | Runtime captures actual source A, target B, reservation and current compiler-world association. Compiler identity does not replace source or execution authority. | Ordinary syntax, original source/target separation and joined cancellation controls must all use this owner. |
+| Compiler preparation | The service retains the parsed operation and its actual world. Ordered stages carry their own checked prefixes; matching outer END is required before executable sealing. | Paired PREP5 stage inputs and protocol 27 queries are being compiled on area branches. They are not part of the earlier PREP4 execution evidence. |
+| Finalized interfaces and original products | GHC owns completed interfaces/Core; `CompilerProducts` owns original-product admission. A finalized-module inventory is broader than fresh implementation selection. | Preserve fresh source, selected canonical SOURCE, retained staged Original and TYPE-only custody distinctly. Do not make every finalized interface a newly issued original or compare relocated paths as implementation identities. |
+| Native selection and installation | The existing resolver selects exact issued bindings or positively completed current groups. Installation retains each program's actual acquired source support. | Keep support on its selected causal edge, including implicit historical dependencies. A live export may outlast its declaring native program; that lifetime is under investigation. |
+| Checked runtime continuation | `CheckedTurnCompletion::install_certified_turn_in` validates the same prefix/item/world before installation and advances only the association's runtime key after successful installation. The world and captured source observations remain the same. | Root `e27921de24` has independent source review; joined compilation and the real in-cell query replay remain pending. No generic key refresh or stale-check bypass is authorized. |
+| Host and renderer preparation | `RuntimeHostPrototypeReceipt` retains a purpose-specific actual finite owner or World source/reservation. Cold World host preparation no longer asks for a finite-only accessor. | Joined `7ae7d2741d` compiles. Its private-input test passes the lifetime/refusal case; the positive case reaches a later Haskell finalization failure. |
+| Declaration adoption | The actual declaration origin carries immutable hidden-input custody. Prospective readers validate exact baseline, scope and origin pairing before mutation. | Source-reviewed shared validation and precommit owned projections still need joined execution. Final publication must consume one same-owner declaration/context/import product, not reconstruct a namespace from inventories. |
+| Queries and reload | Queries use the held compiler operation; runtime owns view currency. Reload keeps publication guard, source fences and settlement with their actual attempt. | All-five scoped queries, final physical recapture/stop, force and recovery remain unqualified. An absent receipt does not establish either failure or successful cleanup. |
+
+The checked-install distinction matters inside a running cell: native source
+registration changes runtime revisions before an authored query runs. Treating
+that expected owner transition as unrelated source drift replaces the world
+under the checked prefix and correctly causes later settlement to refuse.
+The repair carries the same association across its own installation; it does
+not narrow the general revision witness or rewrite old source observations.
+
+Finalization has two receiving counterexamples: a positive private-input history
+reports `MissingFinalizedSource` for `Tidepool.Aeson.Scientific`, and a mixed
+history rejects an unchanged interface repeated under another stage path.
+The first owner's precise source role is still being measured; selected World
+SOURCE receipts alone are not yet proven to explain it. A repair must account
+for actual compiler-issued roles and executable demand, with genuine conflicting
+originals still refused. Filtering unexplained rows away is not an admission rule.
+
+Evidence is retained under
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/completion/engine/`
+and `/srv/swarm/evidence/inanna/world-json-input-acceptance-20261020/`.
+The current actual private-input cohort executed **two cases: one pass and one
+failure**, build `c8fc8e2a-2d57-43b7-99e1-2d6f3b15d0a5`. The passing crossed/retired
+owner control does not qualify successful input execution. No new matched
+performance comparison or frozen Persona qualification follows.
+
+## Earlier finite path and deletion inventory
 
 ```mermaid
 flowchart TD
