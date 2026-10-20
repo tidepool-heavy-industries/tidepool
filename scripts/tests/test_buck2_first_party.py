@@ -1096,6 +1096,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                                'tidepool_rust_test_cases')
         self.assertEqual(retirement['binary'], group['binary'])
         self.assertEqual(retirement['exact_tests'], [
+            'resident_workbench::request_tests::actual_retirement_reservation_refuses_foreign_target_before_cutoff',
             'resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate',
             'resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic',
             'resident_workbench::request_tests::actual_retirement_owner_loss_before_send_keeps_original_open',
@@ -1108,7 +1109,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             'resident_workbench::request_tests::actual_retirement_native_recovery_consumes_same_linked_publication_result',
             'resident_workbench::request_tests::actual_unstarted_retirement_settlement_rejects_crossed_receipts_and_partial_reopen',
         ])
-        self.assertEqual(retirement['expected_count'], 11)
+        self.assertEqual(retirement['expected_count'], 12)
         self.assertTrue(retirement['ignored'])
         self.assertEqual(retirement['case_compiler_modes'], {
             name: 'owned-resident' for name in retirement['exact_tests']
@@ -1152,6 +1153,19 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(capture['case_compiler_modes'], {
             name: 'owned-resident' for name in capture['exact_tests']
         })
+        reservation = self.rule('exomonad/actor', 'actor_generation_retirement_reservation_tests',
+                                'tidepool_rust_test_cases')
+        self.assertEqual(reservation['binary'], retirement['binary'])
+        self.assertEqual(reservation['exact_tests'], [
+            'resident_workbench::request_tests::actual_retirement_reservation_refuses_foreign_target_before_cutoff',
+        ])
+        self.assertEqual(reservation['expected_count'], 1)
+        self.assertTrue(reservation['ignored'])
+        self.assertEqual(reservation['case_compiler_modes'], {
+            name: 'owned-resident' for name in reservation['exact_tests']
+        })
+        self.assertEqual(reservation['resource_env'], rooted['resource_env'])
+        self.assertEqual(reservation['resources'], rooted['resources'])
         publication = self.rule('exomonad/actor', 'actor_world_declaration_publication_test',
                                 'tidepool_rust_test_cases')
         self.assertEqual(publication['binary'], rooted['binary'])

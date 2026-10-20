@@ -3929,6 +3929,7 @@ mod retirement_retention_tests {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GenerationRetirementNativeControl {
+    ReservationTargetClosed,
     PublicationBodyRefusal,
     WorkerLiveRefusal,
     WorkerNativeLossAfterBody,

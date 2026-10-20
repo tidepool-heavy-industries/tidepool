@@ -3375,6 +3375,9 @@ mod tests {
             .generation()
             .unwrap()
             .clone();
+        let target_fence = (control
+            == crate::local_actor::run_control::GenerationRetirementNativeControl::ReservationTargetClosed)
+            .then(|| target.fence().unwrap());
         let preparation = publisher.into_retirement_preparation(
             prepared,
             publication.clone(),
@@ -3395,6 +3398,17 @@ mod tests {
             .await;
             directory
                 .assert_retirement_owner_loss_without_attempt(directory_task)
+                .await;
+        } else if let Some(target_fence) = target_fence {
+            directory
+                .assert_generation_retirement_reservation_failed(
+                    directory_task,
+                    preparation,
+                    state,
+                    expected,
+                    publication,
+                    target_fence,
+                )
                 .await;
         } else {
             directory

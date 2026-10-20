@@ -23449,6 +23449,19 @@ pub(crate) mod request_tests {
 
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "requires the dedicated rooted generation retirement execution group"]
+    async fn actual_retirement_reservation_refuses_foreign_target_before_cutoff() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::RetirementNativeOwnerLoss(
+                    crate::local_actor::run_control::GenerationRetirementNativeControl::ReservationTargetClosed,
+                )),
+            ).await;
+        }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted generation retirement execution group"]
     async fn actual_retirement_owner_loss_after_reservation_retains_frozen_candidate() {
         with_test_compiler_owner(|client| async move {
             quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(

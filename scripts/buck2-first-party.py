@@ -1867,6 +1867,7 @@ tidepool_buildscript_run(
                     package_name, "activation_renderer_terminal_tests"
                 )
                 retirement_tests = [
+                    "resident_workbench::request_tests::actual_retirement_reservation_refuses_foreign_target_before_cutoff",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_before_send_keeps_original_open",
@@ -1927,6 +1928,18 @@ tidepool_buildscript_run(
                     "    expected_count = 1,", "    ignored = True,",
                     "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
                     '    case_compiler_modes = {' + json.dumps(capture_control) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+                reservation_control = "resident_workbench::request_tests::actual_retirement_reservation_refuses_foreign_target_before_cutoff"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_retirement_reservation_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([reservation_control], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(reservation_control) + ': "owned-resident"},',
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
