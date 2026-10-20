@@ -102,6 +102,12 @@ original source and the receiving authority where consumed, including gate-only
 revocation. Rechecking B alone is insufficient. Preview binding's Open admission
 must enclose the transition, not merely precede it.
 
+Compare the expected original and held World before earning source or target
+claims or invoking admission hooks. Use the existing source owner's
+`admit_original(expected, target)` operation; reading an admitted original and
+then comparing it is too late. A crossed-owner refusal must leave both owners'
+claim counts and hooks unchanged, as well as publishing no native output.
+
 `WorldSourceSelection` and the toolchain's source/subject records can be
 descriptive transport data. A `CompilerTransactionOrigin` comparison proves the
 transport operation, not the actor/source/grant facts a caller placed beside it.
@@ -156,6 +162,21 @@ row/interface identities; none may fabricate a World identity. Runtime execution
 still requires the matching opaque write, source and target admission. Descriptive
 wire fields alone grant no access.
 
+The runtime-owned operand retains the actual execution, checked input proof and
+binding lease. Its opaque parser plan keeps that same operand across parser END;
+the later preparation must export the operand's retained files again through its
+own request. An FD borrowed by the parser is not a durable reference for the next
+operation. Native admission consumes this closed pair and revalidates the actual
+mounted write before reserving identities. A plain compiler plan cannot enter
+the runtime admission route.
+
+Physical custody and logical mount ownership remain distinct. Dropping the host
+input owner schedules its ordinary retirement; a retained compiler plan can keep
+bytes alive without authorizing another use of the retired mount. Both the held
+owner positive case and the retired owner refusal need actual lifecycle controls.
+Activation input has its own mounted/preview owner; it must derive from that
+owner, not an arbitrary `Input`/`SessionInput` flag on the host-write constructor.
+
 ### Ordered full-language stages
 
 The existing `HeldWorldCellAdmission` owns the operation phase, executor and
@@ -169,6 +190,11 @@ Each completion is paired with its exact stage and global reserved ordinals.
 Only actual prior stage products can extend the next prefix; a final environment
 cannot stand in for every earlier prefix. Generated-instance retries reuse the
 same pre-stage facts and existing retry owner.
+
+Compilation consumes the stage rendered by that admitted owner. Do not accept a
+caller-supplied source path, purpose or text independently of the plan. The
+existing generated-instance retry operation derives the permitted omission from
+the same pre-stage facts; a failed attempt never advances the prefix.
 
 The source owner captures and parses the module once, retaining byte identity,
 effective flags and quote-free evidence. A typed executable wrapper additionally
@@ -188,6 +214,27 @@ any authored effect executes. A later stage error discards the private prepared
 prefix; it cannot expose a partially admitted program. Tests must exercise the
 shipped template, genuine declarations/imports, later-stage failure and exact
 earlier-prefix isolation.
+
+### Compiler availability and executable demand
+
+Every retained helper RHS needs valid compiler names and types, including a
+helper not reachable from the selected executable root. Keep those compiler
+references intact. Derive runtime obligations separately from the actual emitted
+root and its certified native dependency closure, including transitive references
+through earlier declaration stages.
+
+Execution may select a subset of the whole cell's already-issued references.
+Retain each selected reference's original origin, variable, scope, generation and
+seal. A symbol/generation key is a correlation key, not authority; incompatible
+references must still refuse. Do not reattribute an earlier captured reference
+to a later consumer or infer native demand from the whole helper inventory.
+
+An authored stage's Lib certificate proves that stage's exports and closure.
+It does not prove a cumulative lexical facade. Use the existing authenticated
+declaration-join issuer for cumulative publication and advance the runtime World
+from the actual join and name delta. Never relabel the stage output or reconstruct
+a finite compile view to fill the gap. Count and measure any remaining cumulative
+join work as its owner's optimization obligation.
 
 ## 4. Same physical output through the existing executable issuer
 
