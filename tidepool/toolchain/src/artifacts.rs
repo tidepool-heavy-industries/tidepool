@@ -3414,8 +3414,8 @@ impl NativeTurnOutput {
     pub fn metadata_bytes(&self) -> &[u8] {
         &self.output.metadata
     }
-    pub fn products(&self) -> Option<&SealedTurnProducts> {
-        self.output.products.as_deref()
+    pub fn products(&self) -> Option<&Arc<SealedTurnProducts>> {
+        self.output.products.as_ref()
     }
     pub fn source(&self) -> &str {
         &self.output.source
@@ -3461,10 +3461,11 @@ impl SealedOriginalEvidence {
         target: &crate::artifact_inventory::CertifiedTargetNativeInputs,
     ) -> Result<Self, CompileError> {
         let context = admission.original_execution_context(output.compiler_inputs())?;
-        let execution = Arc::new(
-            Arc::unwrap_or_clone(context).retain_native_target_custody(target)?,
-        );
-        target.resolve()?.ensure_original_execution_custody(&execution)?;
+        let execution =
+            Arc::new(Arc::unwrap_or_clone(context).retain_native_target_custody(target)?);
+        target
+            .resolve()?
+            .ensure_original_execution_custody(&execution)?;
         Ok(Self::Exact { output, execution })
     }
 

@@ -298,7 +298,7 @@ impl ProductionEntryOutput {
     pub fn warnings(&self) -> &MetaWarnings {
         &self.warnings
     }
-    pub fn products(&self) -> &SealedTurnProducts {
+    pub fn products(&self) -> &Arc<SealedTurnProducts> {
         &self.products
     }
     pub fn source(&self) -> &str {

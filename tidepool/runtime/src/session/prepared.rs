@@ -1218,9 +1218,21 @@ impl PreparedSourceEntry {
             .certification
             .as_ref()
             .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
-        let proof = certification
-            .ordinary_original()
+        let output = certification
+            .original_output
+            .as_ref()
             .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
+        let proof = output
+            .original_compile_input
+            .as_ref()
+            .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
+        // This is the issuing input allocation, not content or image identity.
+        if !certification
+            .ordinary_original()
+            .is_some_and(|original| Arc::ptr_eq(original, proof))
+        {
+            return Err(super::resident::ResidentError::UnsealedStartupEntry);
+        }
         if !proof.matches_bundle(
             &compiled.prepared(),
             &certification.groups,

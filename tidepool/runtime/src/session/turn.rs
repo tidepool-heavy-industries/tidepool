@@ -1659,6 +1659,9 @@ pub struct CompiledTurn {
 
 #[derive(Clone, Debug)]
 pub struct TurnCertification {
+    /// Retain the actual output's selecting owner. Group summaries cannot
+    /// reconstruct its exact target roots or ordered dependency choices.
+    pub(super) original_output: Option<Arc<tidepool_toolchain::artifacts::SealedTurnProducts>>,
     pub(crate) artifact_view: tidepool_toolchain::artifact_inventory::ArtifactView,
     pub groups: Arc<[PendingCertifiedGroup]>,
     pub target_owners: Vec<PendingImportOwner>,
@@ -1812,6 +1815,7 @@ impl TurnPurpose {
 impl Default for TurnCertification {
     fn default() -> Self {
         Self {
+            original_output: None,
             artifact_view: tidepool_toolchain::artifact_inventory::ArtifactInventory::default()
                 .empty_view(),
             groups: Arc::from([]),
@@ -2005,6 +2009,7 @@ impl CompiledTurn {
         let products = item.native_products().ok_or_else(missing)?;
         let execution = item.native().ok_or_else(missing)?;
         let certification = TurnCertification {
+            original_output: None,
             artifact_view: products.artifact_view().clone(),
             groups: products.certified_groups.clone(),
             target_owners: products.pending_imports().to_vec(),
@@ -2791,11 +2796,9 @@ pub fn bind_activation_renderer(
     }
     // A revoked original lease can never execute this preview. Refuse before
     // claiming the affine admission so the refusal cannot strand it bound.
-    admission
-        .with_open_sources(|| ())
-        .map_err(|error| {
-            super::ResidentError::Session(crate::session::SessionError::SourceAdmission(error))
-        })?;
+    admission.with_open_sources(|| ()).map_err(|error| {
+        super::ResidentError::Session(crate::session::SessionError::SourceAdmission(error))
+    })?;
     let renderer = match renderer {
         super::SharedActivationRenderer::Renderable(renderer)
         | super::SharedActivationRenderer::Opaque(renderer) => renderer.clone(),
@@ -3531,7 +3534,8 @@ fn prepare_cell_program_admitted_inner(
             ))
         })?;
         let program = tidepool_toolchain::artifacts::prepare_world_cell_program(output.clone())?;
-        admission.prepare_declaration_projections(program.checked_cell(), settlement)
+        admission
+            .prepare_declaration_projections(program.checked_cell(), settlement)
             .map_err(CellCheckFailure::from)?;
         let mut checked = decode_cell_out(
             program.checked_cell().observations(),
@@ -3707,7 +3711,8 @@ fn prepare_cell_program_admitted_inner(
     checked.warnings = report.diagnostics;
     admission_timing.finish(true);
     drop(admission_span);
-    admission.prepare_declaration_projections(program.checked_cell(), settlement)
+    admission
+        .prepare_declaration_projections(program.checked_cell(), settlement)
         .map_err(CellCheckFailure::from)?;
     checked.authority = Some(program.checked_cell().clone());
     checked.admission = Some(admission.clone());
@@ -5042,7 +5047,7 @@ fn compiled_native_output(
     warnings: &MetaWarnings,
     asks: Vec<YieldSite>,
     prepared: Arc<PreparedProgram>,
-    products: Option<&tidepool_toolchain::artifacts::SealedTurnProducts>,
+    products: Option<&Arc<tidepool_toolchain::artifacts::SealedTurnProducts>>,
     admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
 ) -> Result<CompiledTurn, CompileError> {
     let mut compiled =
@@ -5050,6 +5055,7 @@ fn compiled_native_output(
     compiled.certification = products
         .map(|products| -> Result<_, CompileError> {
             Ok(TurnCertification {
+                original_output: Some(Arc::clone(products)),
                 artifact_view: products.artifact_view().clone(),
                 groups: products.certified_groups.clone(),
                 target_owners: products.pending_imports().to_vec(),
@@ -5171,7 +5177,8 @@ fn read_compiled_turn(
         wrapped_source,
         &prepared,
         PREPARED_SCAFFOLD_TARGET,
-    )?;
+    )?
+    .map(Arc::new);
 
     compiled_native_output(
         &table,
@@ -7058,7 +7065,10 @@ mod tests {
             let admitted = self
                 .resident
                 .with_source_compiler_transaction(
-                    self.execution.retained_lexical_scope().original_source().clone(),
+                    self.execution
+                        .retained_lexical_scope()
+                        .original_source()
+                        .clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -8340,18 +8350,38 @@ mod tests {
             .unwrap(),
         );
         let includes = view.include_paths(effects.include_paths());
-        let admitted = resident.with_source_compiler_transaction(
-            source.original_source().clone(),
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            crate::CompilerTransactionCancellation::new(), None, |_| {},
-            |resident, settlement| {
-                let plan = tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &includes, settlement)?;
-                resident.admit_host_carrier_cell_in(
-                    scope, plan, specification.clone(), specification.specification_digest(),
-                    [1;32], includes, "carrier".to_owned(), HostBindingType::TEXT, None,
-                ).map_err(|error| CompileError::ExtractFailed(error.to_string()))
-            },
-        ).unwrap().into_outcome().action.unwrap();
+        let admitted = resident
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |resident, settlement| {
+                    let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+                        specification.clone(),
+                        &includes,
+                        settlement,
+                    )?;
+                    resident
+                        .admit_host_carrier_cell_in(
+                            scope,
+                            plan,
+                            specification.clone(),
+                            specification.specification_digest(),
+                            [1; 32],
+                            includes,
+                            "carrier".to_owned(),
+                            HostBindingType::TEXT,
+                            None,
+                        )
+                        .map_err(|error| CompileError::ExtractFailed(error.to_string()))
+                },
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
         let outcome = admitted
             .source_lease()
@@ -10991,11 +11021,20 @@ mod tests {
             r#"{"verdicts":[{"kind":"decl","binders":["PublishedPattern"],"items":[["EPattern","PublishedPattern"]]}]}"#,
             1,
         ).unwrap();
-        let expected = ExportItem::Pattern { name: "PublishedPattern".into() };
+        let expected = ExportItem::Pattern {
+            name: "PublishedPattern".into(),
+        };
         assert_eq!(classified[0].items, vec![expected.clone()]);
-        let value = CborValue::Array(vec![CborValue::Text("EPattern".into()), CborValue::Text("PublishedPattern".into())]);
+        let value = CborValue::Array(vec![
+            CborValue::Text("EPattern".into()),
+            CborValue::Text("PublishedPattern".into()),
+        ]);
         assert_eq!(decode_export_item(&value).unwrap(), expected);
-        let extra = CborValue::Array(vec![CborValue::Text("EPattern".into()), CborValue::Text("PublishedPattern".into()), CborValue::Null]);
+        let extra = CborValue::Array(vec![
+            CborValue::Text("EPattern".into()),
+            CborValue::Text("PublishedPattern".into()),
+            CborValue::Null,
+        ]);
         assert!(decode_export_item(&extra).is_err());
     }
 
