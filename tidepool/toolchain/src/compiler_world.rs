@@ -1033,6 +1033,89 @@ impl CompilerWorld {
         self.project_bindings(target_scope, changes, None)
     }
 
+    /// Extend the held primary with only canonical TYPE roles selected by
+    /// the original signature owners. Native choices and lexical source
+    /// authority remain with the existing primary owner.
+    pub fn with_type_interfaces(
+        self: &Arc<Self>,
+        contexts: &[Arc<ExactDeclarationContext>],
+    ) -> Result<Arc<Self>, CompileError> {
+        let prior = &self.restoration;
+        let advance = prior.primary_compiler_inputs.with_type_interfaces(contexts)?;
+        if advance.changed_owners.is_empty() {
+            return Ok(self.clone());
+        }
+        let mut inputs = prior.inputs.clone();
+        inputs.primary_context = advance.context;
+        let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
+        inputs.directory = directory.clone();
+        let mut rows = WorldColdRows {
+            producer: prior.producer, files: BTreeMap::new(), images: BTreeMap::new(),
+            rows: BTreeMap::new(), arenas: Default::default(), diagnostics: None,
+        };
+        let mut materializer = Materializer::new(&prior.primary_blocks);
+        let primary_root = materializer.materialize_context(
+            Some(&prior.primary_root), &inputs.primary_context.snapshot(),
+        ).map_err(|error| source_failure(error.to_string()))?;
+        let mut association_facts = prior.primary_associations.facts().clone();
+        let mut primary_changes = Vec::new();
+        let mut remaining_raw = capture_allowance()?;
+        let support = advance.inputs.compiler_source_support();
+        for (ordinal, owner) in advance.changed_owners.iter().enumerate() {
+            let selected = support.world_primary_type_row(owner)
+                .ok_or_else(|| source_failure("TYPE delta omits its issued primary row"))?;
+            if selected.original_binding.is_some() {
+                return Err(source_failure("TYPE delta cannot select an implementation"));
+            }
+            let (row, fact) = materialize_primary_type_row(
+                selected.owner, selected.interface_binding, selected.original_binding,
+                selected.entry, &prior.producer, directory.path(), ordinal,
+                &mut rows, &mut materializer, &mut remaining_raw,
+            )?;
+            if association_facts.insert(*selected.transport_binding, fact)
+                .is_some_and(|old| old != fact)
+            {
+                return Err(source_failure("TYPE delta changes an existing exact primary association"));
+            }
+            primary_changes.push(world_array(vec![
+                world_text(owner.unit.clone()), world_text(owner.module.clone()), row,
+            ]));
+        }
+        let primary_associations = materializer.materialize_map(
+            Some(&prior.primary_associations), &association_facts,
+        ).map_err(|error| source_failure(error.to_string()))?;
+        let staged = materializer.finish().map_err(|error| source_failure(error.to_string()))?;
+        let changed_blocks = staged.blocks().iter().map(|(cid, bytes)| {
+            world_array(vec![world_blob(cid.to_bytes()), world_blob(bytes)])
+        }).collect();
+        let (roots, primary_blocks) = prior.primary_blocks.replace_semantic_roots(&staged,
+            SemanticRoots { primary: *primary_root.root().cid(),
+                associations: *primary_associations.root().cid(),
+                bindings: *prior.bindings.root().cid(), lexical: prior.lexical_root })
+            .map_err(|error| source_failure(error.to_string()))?;
+        let product = world_restoration_product(&roots, inputs.sources.seal(), &prior.producer,
+            &prior.profile, inputs.bindings.query_scope)?;
+        let logical_id = world_digest(&product);
+        let files: Vec<_> = rows.files.into_values().collect();
+        let acquisition = rows.arenas.acquisition(rows.images.into_values().collect())?;
+        let descriptor = directory.path().join("successor.cbor");
+        std::fs::write(&descriptor, world_bytes(&world_array(vec![
+            world_text("TPCWSUCC4"), world_blob(&product), world_array(changed_blocks),
+            world_array(primary_changes), world_array(Vec::new()), acquisition,
+        ]))?)?;
+        let restoration = Arc::new(CompilerWorldRestoration {
+            logical_id, inputs, product: product.into(), primary_root,
+            primary_blocks, primary_associations,
+            primary_compiler_inputs: advance.inputs, bindings: prior.bindings.clone(),
+            binding_rows: prior.binding_rows.clone(), lexical_root: prior.lexical_root,
+            producer: prior.producer, profile: prior.profile, descriptor,
+            input_files: files.iter().cloned().collect(),
+            successor: Some(WorldSuccessorAcquisition { predecessor: *self.logical_id(),
+                realization: self.realization.clone(), files, cold: Mutex::new(None) }),
+        });
+        Ok(Arc::new(Self { restoration, realization: Arc::new(Mutex::new(None)), position: None }))
+    }
+
     fn project_bindings(
         self: &Arc<Self>,
         query_scope: u64,
