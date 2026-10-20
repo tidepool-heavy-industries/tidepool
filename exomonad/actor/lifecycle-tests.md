@@ -3,6 +3,9 @@
 The quoted-generation fixture prepares genuine compiler products. Its retirement
 component controls use unavailable resident inventory and an explicit component
 decision. They do not issue a staged Reload report or qualify automatic Reload.
+All publication controls first initialize their actual public/source owner and
+consume each installation's own bootstrap ticket. Fault injection happens at
+the selected generation publication boundary, after that shared preparation.
 
 | Existing control | Contract it exercises |
 | --- | --- |

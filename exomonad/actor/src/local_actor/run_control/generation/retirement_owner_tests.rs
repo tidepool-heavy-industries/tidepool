@@ -534,12 +534,16 @@ impl RunControlClient {
         })
         .await
         .unwrap();
-        assert!(matches!(
-            terminal.get(),
-            Some(preparation::PublicationTerminalObservation::Completed {
-                outcome: preparation::PublicationOutcomeObservation::Visible,
-            })
-        ));
+        assert!(
+            matches!(
+                terminal.get(),
+                Some(preparation::PublicationTerminalObservation::Completed {
+                    outcome: preparation::PublicationOutcomeObservation::Visible,
+                })
+            ),
+            "expected actual Visible body before delivery loss, observed {:?}",
+            terminal.get()
+        );
         // This round trip drains the worker completion without supplying its lost body result.
         assert_eq!(
             self.resolve(actor).await.unwrap().unwrap().identity(),
