@@ -898,6 +898,21 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     return env, sorted(set(resources)), worker
 
 
+def compiler_service_test_inputs(package_name, target_name):
+    env, resources, worker = test_runtime_inputs(package_name, target_name, unit=True)
+    # The Rooted service owns its Nix library closure. Generic finite test
+    # loader paths must not enter that service's environment.
+    env.pop("LD_LIBRARY_PATH", None)
+    env.pop("TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES", None)
+    deployment = "//build/package:compiler_service_deployment"
+    env["TIDEPOOL_COMPILER_DEPLOYMENT"] = "$(location " + deployment + ")/compiler-deployment.json"
+    env["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = "$(location " + deployment + ")/compiler-service-source.bin"
+    resources = [resource for resource in resources
+                 if resource not in {"//build/package:compiler_deployment",
+                                     "//build/package:tidepool_extract_runtime_libraries"}]
+    return env, resources + [deployment], worker
+
+
 # Single-path execution inputs must be resolved and forwarded by the native
 # runner as declared resources. LD_LIBRARY_PATH here names one declared
 # runtime-libraries directory; scalar controls stay in ordinary env.
@@ -1720,25 +1735,35 @@ tidepool_buildscript_run(
                         "resident_workbench::request_tests::durable_sleep_binding_observes_real_retraction_request_and_clean_end",
                     ]) + "},"] if package_name == "exomonad-actor" else []),
                 '    visibility = ["PUBLIC"],', ")", ""]))
+            if package_name == "tidepool-runtime":
+                world_tests = [
+                    "session::resident::activation_input_tests::resident_parcel_preserves_original_authenticated_request_across_sessions",
+                    "session::turn::tests::checked_declaration_cancellation_after_reservation_preserves_prefix",
+                ]
+                world_env, world_resources, world_worker = compiler_service_test_inputs(
+                    package_name, "runtime_world_owner_controls"
+                )
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "runtime_world_owner_controls",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings(world_tests, 8), "    ],",
+                    f"    expected_count = {len(world_tests)},",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1260000,",
+                    '    case_compiler_modes = {' + ", ".join(
+                        json.dumps(test) + ': "owned-resident"' for test in world_tests
+                    ) + "},",
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
             if package_name == "exomonad-actor":
                 world_tests = [
                     "resident_workbench::request_tests::public_module_world_hot_queries_skip_retained_history_preparation",
                     "resident_workbench::request_tests::public_module_world_retains_source_domain_and_invalidates_runtime_base",
                 ]
-                world_env, world_resources, world_worker = test_runtime_inputs(
-                    package_name, "actor_compiler_world_queries_test", unit=True
+                world_env, world_resources, world_worker = compiler_service_test_inputs(
+                    package_name, "actor_compiler_world_queries_test"
                 )
-                # The Rooted service owns its Nix library closure. Generic finite
-                # test loader paths must not enter that service's environment.
-                world_env.pop("LD_LIBRARY_PATH", None)
-                world_env.pop("TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES", None)
-                deployment = "//build/package:compiler_service_deployment"
-                world_env["TIDEPOOL_COMPILER_DEPLOYMENT"] = "$(location " + deployment + ")/compiler-deployment.json"
-                world_env["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = "$(location " + deployment + ")/compiler-service-source.bin"
-                world_resources = [resource for resource in world_resources
-                                   if resource not in {"//build/package:compiler_deployment",
-                                                       "//build/package:tidepool_extract_runtime_libraries"}]
-                world_resources.append(deployment)
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",
                     '    name = "actor_compiler_world_queries_test",',
@@ -1755,18 +1780,9 @@ tidepool_buildscript_run(
         NATIVE_TARGETS[package_name]["libraries"][library["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("" if shared else "_binary"), "test": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("_all" if shared else "")})
         if package_name == "tidepool-toolchain":
             world_case = "artifacts::module_product_tests::real_world_output_seals_native_items_after_its_matching_compiler_end"
-            world_env, world_resources, world_worker = test_runtime_inputs(
-                package_name, "toolchain_world_native_seal_test", unit=True
+            world_env, world_resources, world_worker = compiler_service_test_inputs(
+                package_name, "toolchain_world_native_seal_test"
             )
-            world_env.pop("LD_LIBRARY_PATH", None)
-            world_env.pop("TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES", None)
-            deployment = "//build/package:compiler_service_deployment"
-            world_env["TIDEPOOL_COMPILER_DEPLOYMENT"] = "$(location " + deployment + ")/compiler-deployment.json"
-            world_env["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = "$(location " + deployment + ")/compiler-service-source.bin"
-            world_resources = [resource for resource in world_resources
-                               if resource not in {"//build/package:compiler_deployment",
-                                                   "//build/package:tidepool_extract_runtime_libraries"}]
-            world_resources.append(deployment)
             rules.append("\n".join([
                 "tidepool_rust_test_cases(",
                 '    name = "toolchain_world_native_seal_test",',
