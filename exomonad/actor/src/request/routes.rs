@@ -39,6 +39,22 @@ pub(crate) enum RouteState {
     Failed(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GenerationRouteDependency {
+    Dependent,
+    Unclassified,
+}
+
+/// Immutable registration evidence. It carries no entry root or cancellation
+/// authority and remains separate from a callback's admitted execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GenerationRouteObservation {
+    pub(crate) owner: ActorRef,
+    pub(crate) watch: WatchId,
+    pub(crate) state: RouteState,
+    pub(crate) dependency: GenerationRouteDependency,
+}
+
 pub(crate) struct WatchRoute {
     owner: LocalActorRef,
     entry: Option<RootCustody>,
@@ -108,6 +124,36 @@ impl WatchRoute {
 }
 
 impl RequestRegistry {
+    pub(crate) fn generation_routes(
+        &self,
+        generation: &crate::resident_workbench::generation_admission::GenerationDependency,
+    ) -> Vec<GenerationRouteObservation> {
+        use crate::resident_workbench::generation_admission::SourceDependency;
+        let state = self.state.lock();
+        let mut observed = Vec::new();
+        for (watch, record) in &state.watches {
+            let Some(route) = record.route.as_ref().filter(|route| route.is_active()) else {
+                continue;
+            };
+            let source = route.execution().source_dependency();
+            let dependency = if matches!(source, SourceDependency::Unqualified) {
+                GenerationRouteDependency::Unclassified
+            } else if source.depends_on(generation) {
+                GenerationRouteDependency::Dependent
+            } else {
+                continue;
+            };
+            observed.push(GenerationRouteObservation {
+                owner: route.owner.identity(),
+                watch: *watch,
+                state: route.state.clone(),
+                dependency,
+            });
+        }
+        observed.sort_unstable_by_key(|route| route.watch);
+        observed
+    }
+
     pub(crate) fn register_watch_route(
         &self,
         owner: ActorRef,

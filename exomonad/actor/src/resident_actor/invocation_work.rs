@@ -12,8 +12,49 @@ pub(crate) struct InvocationWork {
     cleanup_owner: ResourceCleanupOwner,
     scope_id: Option<i64>,
     parent: Weak<InvocationWork>,
+    source:
+        Arc<OnceLock<Option<crate::resident_workbench::generation_admission::SourceDependency>>>,
     state: Mutex<InvocationWorkState>,
     cleanup_lock: tokio::sync::Mutex<()>,
+}
+
+pub(crate) enum InvocationSourceObservation<'a> {
+    Neutral,
+    Unclassified,
+    Source(&'a crate::resident_workbench::generation_admission::SourceDependency),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum InvocationSourceBindingError {
+    #[error(transparent)]
+    Admission(#[from] crate::resident_workbench::generation_admission::GenerationAdmissionError),
+    #[error("a neutral resource owner cannot become a source execution")]
+    NeutralOwner,
+    #[error("the invocation already selected a different source owner")]
+    DifferentSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GenerationInvocationState {
+    Active,
+    SourceUnclassified,
+    CleanupPending,
+    CleanupUnconfirmed(String),
+    Compiler(crate::CompilerWorkClose),
+    Form(String),
+    DisplayPendingProducer(WorkbenchOperationId),
+    DisplayPublication(
+        WorkbenchOperationId,
+        tidepool_runtime::session::WorkbenchDisplayPublication,
+    ),
+}
+
+/// Observation of existing cleanup membership, without stop or source authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GenerationInvocationObservation {
+    pub(crate) actor: ActorRef,
+    pub(crate) reservation: RequestReservationOwner,
+    pub(crate) state: GenerationInvocationState,
 }
 
 /// User work stops before publication; finalizer compiler work has the same
@@ -218,16 +259,134 @@ impl InvocationCleanup {
 }
 
 impl InvocationWork {
-    pub(super) fn new(owner: ActorRef, reservation: RequestReservationOwner) -> Arc<Self> {
+    /// Mixed resource-lifetime custody has no implicit execution source.
+    pub(super) fn new_neutral(owner: ActorRef, reservation: RequestReservationOwner) -> Arc<Self> {
+        let work = Self::new_selecting(owner, reservation);
+        work.source.set(None).expect("new source slot is empty");
+        work
+    }
+
+    pub(super) fn new_source(
+        owner: ActorRef,
+        reservation: RequestReservationOwner,
+        source: crate::resident_workbench::generation_admission::SourceDependency,
+    ) -> Arc<Self> {
+        let work = Self::new_selecting(owner, reservation);
+        work.source
+            .set(Some(source))
+            .expect("new source slot is empty");
+        work
+    }
+
+    /// Selection-pending invocations remain blockers until their actual
+    /// admitted policy supplies provenance. A retained context cannot infer it.
+    pub(super) fn new_selecting(
+        owner: ActorRef,
+        reservation: RequestReservationOwner,
+    ) -> Arc<Self> {
         Arc::new(Self {
             owner,
             cleanup_owner: ResourceCleanupOwner::Invocation(reservation.clone()),
             reservation,
             scope_id: None,
             parent: Weak::new(),
+            source: Arc::new(OnceLock::new()),
             state: Mutex::new(Default::default()),
             cleanup_lock: tokio::sync::Mutex::new(()),
         })
+    }
+
+    pub(super) fn bind_source(
+        &self,
+        source: crate::resident_workbench::generation_admission::SourceDependency,
+    ) -> Result<(), InvocationSourceBindingError> {
+        source
+            .clone()
+            .with_open_admission(|| match self.source.set(Some(source)) {
+                Ok(()) => Ok(()),
+                Err(Some(source)) => match self.source.get() {
+                    Some(Some(selected)) if selected == &source => Ok(()),
+                    Some(None) => Err(InvocationSourceBindingError::NeutralOwner),
+                    _ => Err(InvocationSourceBindingError::DifferentSource),
+                },
+                Err(None) => unreachable!("binding always supplies a selected source"),
+            })?
+    }
+
+    pub(crate) fn source_observation(&self) -> InvocationSourceObservation<'_> {
+        match self.source.get() {
+            Some(Some(source)) => InvocationSourceObservation::Source(source),
+            Some(None) => InvocationSourceObservation::Neutral,
+            None => InvocationSourceObservation::Unclassified,
+        }
+    }
+
+    pub(super) fn generation_observations(
+        &self,
+        dependency: &crate::resident_workbench::generation_admission::GenerationDependency,
+        active_execution: bool,
+    ) -> Vec<GenerationInvocationObservation> {
+        use crate::resident_workbench::generation_admission::SourceDependency;
+        let mut observed = Vec::new();
+        let (scopes, forms, compilers, phase, cleanup) = {
+            let state = self.state.lock();
+            (
+                state.scopes.clone(),
+                state.forms.clone(),
+                state.compilers.clone(),
+                state.phase,
+                state.cleanup.clone(),
+            )
+        };
+        let (dependent, unclassified) = match self.source_observation() {
+            InvocationSourceObservation::Neutral => (false, false),
+            InvocationSourceObservation::Unclassified
+            | InvocationSourceObservation::Source(SourceDependency::Unqualified) => (false, true),
+            InvocationSourceObservation::Source(source) => (source.depends_on(dependency), false),
+        };
+        let mut record = |state| {
+            observed.push(GenerationInvocationObservation {
+                actor: self.owner,
+                reservation: self.reservation.clone(),
+                state,
+            })
+        };
+        if active_execution && (dependent || unclassified) {
+            record(if unclassified {
+                GenerationInvocationState::SourceUnclassified
+            } else {
+                GenerationInvocationState::Active
+            });
+        }
+        if dependent || unclassified {
+            if phase == InvocationWorkPhase::Closing {
+                match cleanup {
+                    None => record(GenerationInvocationState::CleanupPending),
+                    Some(cleanup) => {
+                        if let Some(detail) = cleanup.uncertainty() {
+                            record(GenerationInvocationState::CleanupUnconfirmed(detail));
+                        }
+                    }
+                }
+            }
+            for compiler in compilers {
+                let close = compiler.observation();
+                if !close.is_confirmed() {
+                    record(GenerationInvocationState::Compiler(close));
+                }
+            }
+        }
+        for form in forms {
+            if form.source_dependency().depends_on(dependency) && !form.is_closed() {
+                record(GenerationInvocationState::Form(form.mount.clone()));
+            }
+        }
+        for scope in scopes {
+            // Scope custody alone is inert. Its real producer and form owners
+            // above still contribute their unsettled observations.
+            observed.extend(scope.generation_observations(dependency, false));
+        }
+        observed
     }
 
     /// Bind once under the invocation admission fence. The factory starts no
@@ -290,6 +449,7 @@ impl InvocationWork {
                 cleanup_owner: ResourceCleanupOwner::Scope(token),
                 scope_id: Some(token),
                 parent: Arc::downgrade(self),
+                source: self.source.clone(),
                 state: Mutex::new(Default::default()),
                 cleanup_lock: tokio::sync::Mutex::new(()),
             });
@@ -300,6 +460,10 @@ impl InvocationWork {
 
     pub(super) fn is_owned_by(&self, actor: ActorRef) -> bool {
         self.owner == actor
+    }
+
+    pub(super) fn owner(&self) -> ActorRef {
+        self.owner
     }
 
     pub(super) fn scope_token(&self) -> Option<i64> {

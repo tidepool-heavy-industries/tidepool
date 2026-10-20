@@ -15,7 +15,39 @@ struct DisplayExecutionState {
     operations: Vec<Arc<DisplayOperationSettlement>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum DisplayRetirementObservation {
+    PendingProducer(WorkbenchOperationId),
+    Publication(WorkbenchOperationId, WorkbenchDisplayPublication),
+}
+
 impl DisplayExecutionSettlement {
+    pub(super) fn retirement_observations(&self) -> Vec<DisplayRetirementObservation> {
+        let state = self.state.lock();
+        state
+            .operations
+            .iter()
+            .filter_map(|operation| {
+                match operation.observation() {
+                    Some(
+                        publication @ (WorkbenchDisplayPublication::Pending { .. }
+                        | WorkbenchDisplayPublication::Unconfirmed { .. }),
+                    ) => Some(DisplayRetirementObservation::Publication(
+                        operation.id.clone(),
+                        publication,
+                    )),
+                    Some(_) => None,
+                    // This admitted operation may still attach its packet. The
+                    // terminal owner fences attachment before freezing receipts.
+                    None if !state.frozen => Some(DisplayRetirementObservation::PendingProducer(
+                        operation.id.clone(),
+                    )),
+                    None => None,
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn new(execution: WorkbenchExecutionId) -> Self {
         Self {
             execution,
@@ -393,6 +425,78 @@ impl DisplayReceiptSubmission<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retirement_observation_retains_active_producer_without_payload_until_freeze() {
+        let execution = WorkbenchExecutionId::from_digest([42; 16]);
+        let owner = DisplayExecutionSettlement::new(execution.clone());
+        let id = WorkbenchOperationId {
+            execution,
+            input_unit_index: 0,
+            effect_ordinal: 0,
+        };
+        owner
+            .retain(Arc::new(DisplayOperationSettlement::new(
+                id.clone(),
+                "Console.DisplayWith".into(),
+                WorkbenchOperationDisposition::Committed,
+            )))
+            .unwrap();
+        assert_eq!(
+            owner.retirement_observations(),
+            [DisplayRetirementObservation::PendingProducer(id)]
+        );
+        owner.freeze_receipts(None);
+        assert!(owner.retirement_observations().is_empty());
+    }
+
+    #[test]
+    fn retirement_observation_keeps_pending_acknowledgement_and_excludes_settled_receipt() {
+        let execution = WorkbenchExecutionId::from_digest([43; 16]);
+        let owner = DisplayExecutionSettlement::new(execution.clone());
+        let id = WorkbenchOperationId {
+            execution,
+            input_unit_index: 0,
+            effect_ordinal: 0,
+        };
+        let operation = Arc::new(DisplayOperationSettlement::new(
+            id.clone(),
+            "Console.DisplayWith".into(),
+            WorkbenchOperationDisposition::Committed,
+        ));
+        owner.retain(operation.clone()).unwrap();
+        let mut displays = ActorDisplays::default();
+        let (request, _answer) = displays
+            .stage(
+                ActorRef::first(crate::ActorId(1)),
+                WorkbenchDisplayPage {
+                    identity: (0, 0, 0),
+                    text: "receipt".into(),
+                    expansions: Vec::new(),
+                    unavailable: false,
+                },
+                None,
+                false,
+                8192,
+                Some(id.clone()),
+                None,
+                false,
+            )
+            .unwrap();
+        operation.admit(&request);
+        assert!(
+            matches!(owner.retirement_observations().as_slice(), [DisplayRetirementObservation::Publication(observed, WorkbenchDisplayPublication::Pending { .. })] if observed == &id)
+        );
+        owner.freeze_receipts(None);
+        assert_eq!(owner.retirement_observations().len(), 1);
+        request.answer(DisplayPublicationOutcome::Published(
+            tidepool_runtime::session::ActorOutputReference {
+                run: "retirement-observation".into(),
+                sequence: 1,
+            },
+        ));
+        assert!(owner.retirement_observations().is_empty());
+    }
 
     fn frozen_reply(
         result: &Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,

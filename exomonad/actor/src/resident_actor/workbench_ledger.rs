@@ -93,6 +93,59 @@ pub(super) enum WorkbenchBoundaryRecord {
 }
 
 impl WorkbenchExecutions {
+    pub(super) fn generation_observations(
+        &self,
+        dependency: &crate::resident_workbench::generation_admission::GenerationDependency,
+        coordinator: Option<&Arc<InvocationWork>>,
+    ) -> Vec<invocation_work::GenerationInvocationObservation> {
+        let mut observed = Vec::new();
+        for record in self.0.values() {
+            let Some(work) = &record.invocation_work else {
+                continue;
+            };
+            let active = matches!(record.state, WorkbenchExecutionState::Unconfirmed)
+                && !coordinator.is_some_and(|coordinator| Arc::ptr_eq(work, coordinator));
+            // The exact compiled coordinator only exempts its continuation.
+            // Its compiler and resource cleanup obligations are still observed.
+            observed.extend(work.generation_observations(dependency, active));
+            let source_dependent = match work.source_observation() {
+                invocation_work::InvocationSourceObservation::Neutral => false,
+                invocation_work::InvocationSourceObservation::Unclassified => true,
+                invocation_work::InvocationSourceObservation::Source(source) => {
+                    matches!(
+                    source,
+                    crate::resident_workbench::generation_admission::SourceDependency::Unqualified
+                ) || source.depends_on(dependency)
+                }
+            };
+            if source_dependent {
+                for display in record.display_settlements.retirement_observations() {
+                    let state = match display {
+                        display_settlement::DisplayRetirementObservation::PendingProducer(id) => {
+                            invocation_work::GenerationInvocationState::DisplayPendingProducer(id)
+                        }
+                        display_settlement::DisplayRetirementObservation::Publication(
+                            id,
+                            publication,
+                        ) => invocation_work::GenerationInvocationState::DisplayPublication(
+                            id,
+                            publication,
+                        ),
+                    };
+                    observed.push(invocation_work::GenerationInvocationObservation {
+                        actor: work.owner(),
+                        reservation: work.reservation_owner(),
+                        state,
+                    });
+                }
+            }
+        }
+        for root in &self.1 {
+            observed.extend(root.generation_observations(dependency, false));
+        }
+        observed
+    }
+
     pub(super) fn hosted_operation_references(
         &self,
         after: Option<(bool, &exomonad_tool::OriginalOperation)>,
@@ -243,20 +296,59 @@ impl WorkbenchExecutions {
     }
 
     pub(super) fn actor_scope_root(&mut self, actor: ActorRef) -> Arc<InvocationWork> {
-        self.callback_root(actor, RequestReservationOwner::Scope(0))
+        let reservation = RequestReservationOwner::Scope(0);
+        if let Some(root) = self.1.iter().find(|root| {
+            root.matches(actor, &reservation)
+                && matches!(
+                    root.source_observation(),
+                    invocation_work::InvocationSourceObservation::Neutral
+                )
+        }) {
+            return root.clone();
+        }
+        let root = InvocationWork::new_neutral(actor, reservation);
+        self.1.push(root.clone());
+        root
     }
 
-    pub(super) fn callback_root(
+    pub(super) fn admit_callback_root(
+        journal: &Arc<Mutex<Self>>,
+        actor: ActorRef,
+        reservation: RequestReservationOwner,
+        source: crate::resident_workbench::generation_admission::SourceDependency,
+    ) -> Result<
+        Arc<InvocationWork>,
+        crate::resident_workbench::generation_admission::GenerationAdmissionError,
+    > {
+        source
+            .clone()
+            .with_open_admission(|| journal.lock().callback_root(actor, reservation, source))
+    }
+
+    fn callback_root(
         &mut self,
         actor: ActorRef,
         reservation: RequestReservationOwner,
+        source: crate::resident_workbench::generation_admission::SourceDependency,
     ) -> Arc<InvocationWork> {
-        if let Some(root) = self.1.iter().find(|root| root.matches(actor, &reservation)) {
-            return root.clone();
+        if let Some(root) = self.find_callback_root(actor, &reservation, &source) {
+            return root;
         }
-        let root = InvocationWork::new(actor, reservation);
+        let root = InvocationWork::new_source(actor, reservation, source);
         self.1.push(root.clone());
         root
+    }
+
+    pub(super) fn find_callback_root(
+        &self,
+        actor: ActorRef,
+        reservation: &RequestReservationOwner,
+        source: &crate::resident_workbench::generation_admission::SourceDependency,
+    ) -> Option<Arc<InvocationWork>> {
+        self.1.iter().find(|root| {
+            root.matches(actor, reservation)
+                && matches!(root.source_observation(), invocation_work::InvocationSourceObservation::Source(selected) if selected == source)
+        }).cloned()
     }
 
     pub(super) fn lookup(
@@ -904,7 +996,8 @@ mod tests {
             let publications = fixture.actor.hosted_cell();
             publications.publish_provider_transport(actor, control.clone());
             publications.accept(&control);
-            let work = InvocationWork::new(actor, control.reservation_owner(actor).unwrap());
+            let work =
+                InvocationWork::new_neutral(actor, control.reservation_owner(actor).unwrap());
             {
                 let mut journal = behavior.workbench_executions.lock();
                 journal.begin(&execution, request.clone(), Some(key));

@@ -1193,7 +1193,7 @@ mod tests {
         };
         let context =
             ActorDescriptor::new("remint parent", parent).session_context(fixture.actor.identity());
-        let work = InvocationWork::new(context.actor, RequestReservationOwner::Scope(0));
+        let work = InvocationWork::new_neutral(context.actor, RequestReservationOwner::Scope(0));
         let custody = ChildPlacementCustody::new(placement);
         let startup = custody.startup_guard();
         work.retain_launch_placement(&context, custody.clone())
@@ -1515,7 +1515,7 @@ mod tests {
         let actor = fixture.actor.identity();
         let descriptor = ActorDescriptor::new("abandoned launch", placement);
         let context = descriptor.session_context(actor);
-        let work = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+        let work = InvocationWork::new_neutral(actor, RequestReservationOwner::Scope(0));
         let custody = ChildPlacementCustody::new(placement);
         let startup = custody.startup_guard();
         work.retain_launch_placement(&context, custody.clone())
@@ -1568,7 +1568,7 @@ mod tests {
         fixture.environment.runner = runner;
         let actor = fixture.actor.identity();
         let context = ActorDescriptor::new("transferred launch", placement).session_context(actor);
-        let work = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+        let work = InvocationWork::new_neutral(actor, RequestReservationOwner::Scope(0));
         let custody = ChildPlacementCustody::new(placement);
         let startup = custody.startup_guard();
         work.retain_launch_placement(&context, custody.clone())
@@ -1610,7 +1610,7 @@ mod tests {
             fixture.environment.runner.preparation_source(),
         );
         let context = ActorDescriptor::new("retained launch", placement).session_context(actor);
-        let work = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+        let work = InvocationWork::new_neutral(actor, RequestReservationOwner::Scope(0));
         let scope_owner = work.new_scope().unwrap();
         // A parent that already confirmed cleanup must revisit late custody
         // retained by its closed nested scope.
@@ -1646,7 +1646,7 @@ mod tests {
             let actor = fixture.actor.identity();
             let context =
                 ActorDescriptor::new("concurrent launch", placement).session_context(actor);
-            let work = InvocationWork::new(actor, RequestReservationOwner::Scope(0));
+            let work = InvocationWork::new_neutral(actor, RequestReservationOwner::Scope(0));
             let owner = if nested {
                 work.new_scope().unwrap()
             } else {

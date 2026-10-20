@@ -948,16 +948,6 @@ where
                 .map(tidepool_runtime::session::normalize_workbench_input),
         );
         let execution = request.execution_id().cloned();
-        if let Some(execution) = &execution {
-            self.workbench_executions
-                .lock()
-                .begin(execution, request.clone(), invocation.as_ref());
-            self.workbench_executions.lock().bind_provider_finalization(
-                execution,
-                invocation.as_ref(),
-                control.as_ref(),
-            );
-        }
         let replay_request = execution.as_ref().map(|_| request.clone());
         let reservation_owner = RequestReservationOwner::Workbench {
             execution: execution.unwrap_or_else(|| {
@@ -981,12 +971,45 @@ where
         } else {
             None
         };
-        let invocation_work = InvocationWork::new(context.actor, reservation_owner.clone());
-        self.workbench_executions.lock().retain_invocation_work(
-            invocation_work.clone(),
-            request.execution_id(),
-            invocation.as_ref(),
-        );
+        let admit_work = || {
+            let work = if inspection.is_some() {
+                InvocationWork::new_neutral(context.actor, reservation_owner.clone())
+            } else {
+                InvocationWork::new_source(
+                    context.actor,
+                    reservation_owner.clone(),
+                    context.source_dependency().clone(),
+                )
+            };
+            let mut journal = self.workbench_executions.lock();
+            if let Some(execution) = request.execution_id() {
+                journal.begin(execution, request.clone(), invocation.as_ref());
+                journal.bind_provider_finalization(
+                    execution,
+                    invocation.as_ref(),
+                    control.as_ref(),
+                );
+            }
+            journal.retain_invocation_work(
+                work.clone(),
+                request.execution_id(),
+                invocation.as_ref(),
+            );
+            work
+        };
+        let invocation_work = if inspection.is_some() {
+            admit_work()
+        } else {
+            match context.source_dependency().with_open_admission(admit_work) {
+                Ok(work) => work,
+                Err(error) => {
+                    return terminal_task(Err(Self::tool_invocation_failure(
+                        context.actor,
+                        ResidentActorWorkbenchError::SourceAdmission(error),
+                    )))
+                }
+            }
+        };
         let kind = request
             .tool_call()
             .map(|call| call.name.clone())
