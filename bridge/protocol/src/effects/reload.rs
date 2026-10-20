@@ -117,6 +117,12 @@ fn field(hs_name: &'static str, rust_name: &'static str, ty: HsType) -> RecordFi
 // These receipts are observations issued by lifecycle owners, never stop authority.
 // The additive ReloadRetirement constructor is the wire migration: old consumers
 // refuse that unknown constructor rather than misclassifying partial effects.
+// Every result after retirement capture must use ReloadRetirement, carrying the
+// actual owner-issued outcomes. ReloadPublished, ReloadCancelled,
+// ReloadPublishedWithWarnings and ReloadPublicationUnconfirmed remain temporarily
+// for the host endpoint and its existing test callers. Delete those constructors
+// when that endpoint/caller migration lands; DTO generation alone does not issue
+// lifecycle evidence or qualify the endpoint's execution and recovery behavior.
 fn retirement_types() -> Vec<TypeDef> {
     use HsType::{Int, Named, Text};
     let address = || HsType::Tuple(vec![Int, Int]);
