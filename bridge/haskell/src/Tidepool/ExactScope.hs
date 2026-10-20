@@ -37,13 +37,17 @@ module Tidepool.ExactScope
   , WorldInputFacts, CapturedWorldSources, WorldSourceRoot
   , WorldBinding, WorldBindingRow, worldInputsBindingScope, worldInputsBindings
   , WorldSourceClosureEntry(..)
+  , WorldTypeClosureEntry, readWorldTypeInputs
+  , worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryEvidence
+  , VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs
+  , verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow
   , worldBindingRowInterface, worldBindingCertifiedArtifact, worldBindingCompilerReceipt, worldBindingRowFactCID
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
   , worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty
   , WorldLexicalSurface, WorldDeclarationSurface, worldInputsLexicalSurface
-  , worldLexicalImports, worldLexicalDeclaration, worldDeclarationInterface, worldDeclarationExports
+  , worldLexicalImports, worldLexicalDeclaration, worldDeclarationInterface
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
   , readWorldInputsWithOwner, readWorldSuccessorWithOwner, WorldSuccessorInputs
   , worldSuccessorFacts, worldSuccessorChangedAliases, decodeWorldSources, readWorldStringMap
@@ -86,14 +90,14 @@ import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(.
 import System.IO.Error (isAlreadyExistsError, isUserError)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, hydrateExactScope)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ExtractRequest (PlannedCellSlot(..))
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
 import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, withCapturedRequestInputTokens, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies, editDirectRequestInputBodies)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
-import Tidepool.DeclarationJoin (DeclarationExport(..), decodeDeclarationExports)
+import Tidepool.DeclarationJoin (DeclarationExport(..), decodeDeclarationExports, interfaceExports, normalizeDeclarationExports)
 import Tidepool.CheckedCell
   ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures
   , CellExpressionPlan(..), ExpressionLiftPlan(..), decodeCellExpressionPlan
@@ -2344,47 +2348,163 @@ worldBindingInterfaceArtifact binding =
   let (artifact,_,_) = worldBindingRowInterface (worldBindingRow binding)
   in artifact
 
--- Package authentication reads both the sidecar and its owning interface.
--- Its callback may borrow only those sealed parts of the demanded rows.
-worldPackageInputSeals :: [(ExactIfaceArtifact,FilePath,String)] -> Map.Map FilePath String
-worldPackageInputSeals rows = Map.fromList
-  [(path,sha) | (artifact,packages,packageSha) <- rows
-    , (path,sha) <- [(exactPath artifact,exactSha256 artifact),(packages,packageSha)]]
-
--- Select by submitted occurrences in the already admitted namespace. Only
--- their exact captured rows enter the operation-local type-input owner; no pathname
--- reacquisition or enumeration of the world's passive rows is involved.
-readWorldBindingInputs :: HscEnv -> WorldInputFacts -> [String]
-  -> IO (Either String ([(String,WorldBinding)],[(ExactIfaceArtifact,ArtifactBytes,ArtifactBytes)]))
-readWorldBindingInputs env facts occurrences = do
+-- Select by submitted occurrences in the already admitted namespace. Value
+-- bodies remain undecoded for the checked-value injection owner; only their
+-- demanded primary type closure enters the shared interface decoder here.
+readWorldBindingInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> [String]
+  -> IO (Either String ([(String,WorldBinding)],[(ExactIfaceArtifact,ArtifactBytes,ArtifactBytes)],
+      Map.Map InterfaceOwner WorldTypeClosureEntry))
+readWorldBindingInputs owner env facts occurrences = do
   let selected = [(name,value) | name <- occurrences,Just value <- [Map.lookup name (worldInputsBindings facts)]]
       rows = [worldBindingRowInterface (worldBindingRow value) | (_,value) <- selected]
       key (artifact,_,_) = (exactUnit artifact,exactModule artifact)
       distinct = Map.fromList [(key row,row) | row <- rows]
-      seals = worldPackageInputSeals (Map.elems distinct)
       tokens = worldInputsCustody facts
-      readInput path cap = do
-        sha <- maybe (fail "world value package proof is outside its selected rows") pure (Map.lookup path seals)
-        bytes <- artifactBytes <$> capturedRequestInputToken tokens path sha
-        unless (BS.length bytes <= cap) (fail "world value package proof exceeds its input bound")
-        pure bytes
-  if any (\row -> Map.lookup (key row) distinct /= Just row) rows
-    then pure (Left "world value aliases select conflicting captured interface versions")
-    else do
-      packages <- extendAdmittedPackageImportsWith readInput emptyAdmittedPackageImports
-        (Map.elems distinct)
-      case packages of
+  if length selected /= length occurrences
+    then pure (Left "world value demand contains an unbound occurrence")
+    else if any (\row -> Map.lookup (key row) distinct /= Just row) rows
+      then pure (Left "world value aliases select conflicting captured interface versions")
+      else do
+        typeInputs <- readWorldTypeInputs owner env facts
+          (concatMap (\(artifact,_,_) -> exactRequirements artifact) (Map.elems distinct))
+        case typeInputs of
+          Left reason -> pure (Left reason)
+          Right types -> do
+            packages <- readWorldPackageInputs env facts distinct
+            case packages of
+              Left reason -> pure (Left reason)
+              Right _ -> do
+                captured <- forM (Map.elems distinct) $ \(artifact,path,sha) -> do
+                  body <- capturedRequestInputToken tokens (exactPath artifact) (exactSha256 artifact)
+                  packageBody <- capturedRequestInputToken tokens path sha
+                  pure (artifact,body,packageBody)
+                pure (Right (selected,captured,types))
+
+-- Artifact, decoded compiler identity, admitted role and package facts travel
+-- together. This is type availability, never source or native execution rights.
+data WorldTypeClosureEntry = WorldTypeClosureEntry ScopeInterfaceInput ModIface PackageImportEvidence
+
+worldTypeEntryArtifact :: WorldTypeClosureEntry -> ExactIfaceArtifact
+worldTypeEntryArtifact (WorldTypeClosureEntry (ScopeInterfaceInput (artifact,_,_) _) _ _) = artifact
+
+worldTypeEntryInterface :: WorldTypeClosureEntry -> ModIface
+worldTypeEntryInterface (WorldTypeClosureEntry _ iface _) = iface
+
+worldTypeEntryPackages :: WorldTypeClosureEntry -> PackageImportEvidence
+worldTypeEntryPackages (WorldTypeClosureEntry _ _ packages) = packages
+
+worldTypeEntryEvidence :: WorldTypeClosureEntry -> ExactInterfaceEvidence
+worldTypeEntryEvidence (WorldTypeClosureEntry (ScopeInterfaceInput _ evidence) _ _) = evidence
+
+-- Decode each selected sidecar once. Its immutable token authenticates the
+-- offered seal; the collective package owner checks installed bytes and the
+-- current compiler selection before these facts become available to callers.
+readWorldPackageInputs :: HscEnv -> WorldInputFacts -> Map.Map InterfaceOwner InterfaceRow
+  -> IO (Either String (Map.Map InterfaceOwner PackageImportEvidence))
+readWorldPackageInputs env facts rows = do
+  decoded <- forM (Map.toAscList rows) $ \(key,(artifact,path,sha)) -> do
+    body <- capturedRequestInputToken (worldInputsCustody facts) path sha
+    pure ((,) key <$> decodeCapturedPackageImports artifact (artifactBytes body))
+  case sequence decoded of
+    Left reason -> pure (Left reason)
+    Right pairs -> do
+      let packages = Map.fromList pairs
+          readFacts row = pure $ maybe (Left "world package proof lost its selected owner") Right
+            (Map.lookup (rowOwner row) packages)
+      admitted <- extendAdmittedPackageImportsWithFacts readFacts emptyAdmittedPackageImports (Map.elems rows)
+      case admitted of
         Left reason -> pure (Left reason)
-        Right admitted -> do
-          valid <- validateAdmittedPackageSelection env admitted
-          case valid of
-            Left reason -> pure (Left reason)
-            Right () -> do
-              captured <- forM (Map.elems distinct) $ \(artifact,path,sha) -> do
-                body <- capturedRequestInputToken tokens (exactPath artifact) (exactSha256 artifact)
-                packages <- capturedRequestInputToken tokens path sha
-                pure (artifact,body,packages)
-              pure (Right (selected,captured))
+        Right selection -> do
+          valid <- validateAdmittedPackageSelection env selection
+          pure (packages <$ valid)
+
+-- Only exact Context-selected associations can supply required home types.
+-- Passive custody and other world versions cannot widen this lexical closure.
+readWorldTypeInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> [InterfaceOwner]
+  -> IO (Either String (Map.Map InterfaceOwner WorldTypeClosureEntry))
+readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.empty roots >>= validate of
+  Left reason -> pure (Left reason)
+  Right rows -> do
+    packages <- readWorldPackageInputs env facts
+      (Map.map (\(ScopeInterfaceInput row _) -> row) rows)
+    case packages of
+      Left reason -> pure (Left reason)
+      Right packageFacts -> do
+        RetainedOriginalInputs _ decoder _ _ _ <- readMVar state
+        let artifacts = [artifact | ScopeInterfaceInput (artifact,_,_) _ <- Map.elems rows]
+            readInput artifact = capturedRequestInputToken (worldInputsCustody facts)
+              (exactPath artifact) (exactSha256 artifact)
+        closure <- readCapturedExactIfaceClosureWithCheckedValues decoder readInput env artifacts []
+        pure $ do
+          verified <- closure
+          interfaces <- selectVerifiedExactInterfaces verified artifacts
+          let byOwner = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,iface)) | (artifact,iface) <- interfaces]
+          unless (Map.size byOwner == length interfaces && Map.keysSet byOwner == Map.keysSet rows)
+            (Left "world type closure differs from its selected exact interfaces")
+          Map.traverseWithKey (\key row@(ScopeInterfaceInput (selectedArtifact,_,_) _) -> do
+            (artifact,iface) <- maybe (Left "world type closure lost its decoded interface") Right (Map.lookup key byOwner)
+            unless (artifact == selectedArtifact)
+              (Left "world type interface differs from its selected artifact")
+            evidence <- maybe (Left "world type closure lost its package proof") Right (Map.lookup key packageFacts)
+            pure (WorldTypeClosureEntry row iface evidence)) rows
+  where
+    validate rows = do
+      let seals = Map.map (\(ScopeInterfaceInput (artifact,_,_) _) -> exactSha256 artifact) rows
+      forM_ (Map.elems rows) $ \(ScopeInterfaceInput (artifact,_,_) evidence) -> case evidence of
+        ModuleInterfaceEvidence proof -> unless (canonicalRequirementsSelected seals artifact proof)
+          (Left "world canonical requirements differ from selected exact interfaces")
+        LocalNativeDeclarationEvidence native -> do
+          let requirements = localFinalizedRequirements (localNativeProof native)
+          unless (Map.keysSet requirements == Set.fromList (exactRequirements artifact)
+              && all (\(key,sha) -> Map.lookup key seals == Just sha) (Map.toAscList requirements))
+            (Left "world native declaration requirements differ from selected exact interfaces")
+        LexicalJoinEvidence -> pure ()
+        CheckedValueEvidence -> Left "world primary type closure contains a checked value role"
+      pure rows
+    walk selected [] = Right selected
+    walk selected (key:rest) | Map.member key selected = walk selected rest
+    walk selected (key:rest) = do
+      association <- maybe (Left "demanded type lacks its exact Context association") Right
+        (Map.lookup key (worldPrimarySelected (worldInputsPrimary facts)))
+      let row@(ScopeInterfaceInput (artifact,_,_) evidence) = worldPrimaryRow association
+      unless ((exactUnit artifact,exactModule artifact) == key)
+        (Left "world demanded type has another selected interface owner")
+      case evidence of
+        CheckedValueEvidence -> Left "world primary type closure contains a checked value role"
+        _ -> walk (Map.insert key row selected) (exactRequirements artifact ++ rest)
+
+-- An offered export vector is passive until it has been compared to GHC's
+-- normalized exports from the selected, hydrated exact interface.
+data VerifiedWorldDeclarationSurface = VerifiedWorldDeclarationSurface ExactIfaceArtifact [DeclarationExport]
+
+verifiedWorldDeclarationInterface :: VerifiedWorldDeclarationSurface -> ExactIfaceArtifact
+verifiedWorldDeclarationInterface (VerifiedWorldDeclarationSurface artifact _) = artifact
+
+verifiedWorldDeclarationExports :: VerifiedWorldDeclarationSurface -> [DeclarationExport]
+verifiedWorldDeclarationExports (VerifiedWorldDeclarationSurface _ exports) = exports
+
+hydrateWorldDeclarationInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts
+  -> IO (Either String (HscEnv,Maybe VerifiedWorldDeclarationSurface))
+hydrateWorldDeclarationInputs owner env facts = case worldLexicalDeclaration (worldInputsLexicalSurface facts) of
+  Nothing -> pure (Right (env,Nothing))
+  Just offered -> do
+    let artifact = worldDeclarationInterface offered
+        key = (exactUnit artifact,exactModule artifact)
+    closure <- readWorldTypeInputs owner env facts [key]
+    case closure of
+      Left reason -> pure (Left reason)
+      Right entries -> case Map.lookup key entries of
+        Nothing -> pure (Left "world declaration facade lost its selected exact interface")
+        Just entry | worldTypeEntryArtifact entry /= artifact ->
+          pure (Left "world declaration facade differs from its selected exact interface")
+        Just entry -> do
+          hydrated <- hydrateExactScope env
+            [(worldTypeEntryArtifact value,worldTypeEntryInterface value) | value <- Map.elems entries]
+          actual <- interfaceExports hydrated (worldTypeEntryInterface entry)
+          let exports = normalizeDeclarationExports actual
+          pure $ if exports == normalizeDeclarationExports (worldDeclarationExports offered)
+            then Right (hydrated,Just (VerifiedWorldDeclarationSurface artifact exports))
+            else Left "world declaration exports differ from its selected exact interface"
 
 -- The Context role and acquired binding jointly selected this row at cold
 -- admission. A passive row with the same module name is never a substitute.
@@ -2401,82 +2521,26 @@ worldHasSelectedSource facts key = case Map.lookup key (worldPrimarySelected (wo
 -- Resolve only demanded Context owners and their exact declared type closure.
 -- This is canonical source/type custody; Original/native execution remains a
 -- distinct consumer. No universe inventory or historical base-row scan occurs.
-readWorldSourceInputs :: HscEnv -> WorldInputFacts -> [(String,String)]
-  -> IO (Either String (Map.Map (String,String) WorldSourceClosureEntry))
-readWorldSourceInputs env facts roots = case walk Map.empty roots >>= validate of
-  Left reason -> pure (Left reason)
-  Right rows -> do
-    let custody = worldInputsCustody facts
-        artifacts = [artifact | ScopeInterfaceInput (artifact,_,_) _ <- Map.elems rows]
-        seals = worldPackageInputSeals [row | ScopeInterfaceInput row _ <- Map.elems rows]
-        packageInput path cap = do
-          sha <- maybe (fail "world source package proof is outside demanded Context rows") pure (Map.lookup path seals)
-          bytes <- artifactBytes <$> capturedRequestInputToken custody path sha
-          unless (BS.length bytes <= cap) (fail "world source package proof exceeds its input bound")
-          pure bytes
-        interfaceInput artifact = capturedRequestInputToken custody (exactPath artifact) (exactSha256 artifact)
-    admitted <- extendAdmittedPackageImportsWith packageInput emptyAdmittedPackageImports
-      [row | ScopeInterfaceInput row _ <- Map.elems rows]
-    case admitted of
-      Left reason -> pure (Left reason)
-      Right selection -> do
-        valid <- validateAdmittedPackageSelection env selection
-        case valid of
-          Left reason -> pure (Left reason)
-          Right () -> do
-            decoder <- newRequestIfaceDecoder
-            closure <- readCapturedExactIfaceClosureWithCheckedValues decoder interfaceInput env artifacts []
-            case closure >>= (\verified -> selectVerifiedExactInterfaces verified artifacts) of
-              Left reason -> pure (Left reason)
-              Right interfaces -> do
-                decoded <- forM (Map.toAscList rows) $ \(key,ScopeInterfaceInput (artifact,path,sha) evidence) -> do
-                  bytes <- artifactBytes <$> capturedRequestInputToken custody path sha
-                  pure $ do
-                    packages <- decodeCapturedPackageImports artifact bytes
-                    case evidence of
-                      ModuleInterfaceEvidence proof -> Right (key,(proof,packages))
-                      _ -> Left "demanded Context source lost its canonical proof"
-                pure $ do
-                  pairs <- sequence decoded
-                  let proofs = Map.fromList [(key,proof) | (key,(proof,_)) <- pairs]
-                      packages = Map.fromList [(key,value) | (key,(_,value)) <- pairs]
-                      interfaceByKey = Map.fromList
-                        [((exactUnit artifact,exactModule artifact),(artifact,iface))
-                        | (artifact,iface) <- interfaces]
-                  unless (length interfaces == Map.size interfaceByKey) $
-                    Left "demanded Context closure repeats an exact interface owner"
-                  entries <- forM (Map.toAscList rows) $ \(key,ScopeInterfaceInput (artifact,_,_) _) -> do
-                    proof <- maybe (Left "demanded Context owner lost its canonical proof") Right
-                      (Map.lookup key proofs)
-                    packages' <- maybe (Left "demanded Context owner lost its package evidence") Right
-                      (Map.lookup key packages)
-                    (artifact',iface) <- maybe (Left "demanded Context owner lost its exact interface") Right
-                      (Map.lookup key interfaceByKey)
-                    unless (exactUnit artifact' == exactUnit artifact && exactModule artifact' == exactModule artifact) $
-                      Left "demanded Context interface differs from its selected owner"
-                    pure (key,WorldSourceClosureEntry artifact' proof iface packages')
-                  unless (Map.keysSet interfaceByKey == Set.fromList (map fst entries)) $
-                    Left "demanded Context closure contains an unselected exact interface"
-                  pure (Map.fromList entries)
+readWorldSourceInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> [InterfaceOwner]
+  -> IO (Either String (Map.Map InterfaceOwner WorldSourceClosureEntry,
+      Map.Map InterfaceOwner WorldTypeClosureEntry))
+readWorldSourceInputs owner env facts roots
+  | any (not . worldHasSelectedSource facts) roots =
+      pure (Left "demanded source lacks its exact source Context association")
+  | otherwise = do
+      closure <- readWorldTypeInputs owner env facts roots
+      pure $ do
+        entries <- closure
+        let sources = Map.mapMaybe sourceEntry entries
+        unless (all (`Map.member` sources) roots)
+          (Left "demanded Context source lost its canonical proof")
+        pure (sources,entries)
   where
-    validate rows = do
-      let seals = Map.map (\(ScopeInterfaceInput (artifact,_,_) _) -> exactSha256 artifact) rows
-      forM_ (Map.elems rows) $ \(ScopeInterfaceInput (artifact,_,_) evidence) -> case evidence of
-        ModuleInterfaceEvidence proof -> unless (canonicalRequirementsSelected seals artifact proof)
-          (Left "world canonical requirements differ from selected exact interfaces")
-        _ -> Left "world canonical type closure lacks its admitted source proof"
-      pure rows
-    walk selected [] = Right selected
-    walk selected (key:rest) | Map.member key selected = walk selected rest
-    walk selected (key:rest) = do
-      association <- maybe (Left "demanded source lacks its exact Context association") Right
-        (Map.lookup key (worldPrimarySelected (worldInputsPrimary facts)))
-      let row = worldPrimaryRow association
-      case row of
-        ScopeInterfaceInput (artifact,_,_) (ModuleInterfaceEvidence proof)
-          | (exactUnit artifact,exactModule artifact) == key && isSourceOriginal (canonicalOrigin proof) ->
-              walk (Map.insert key row selected) (exactRequirements artifact ++ rest)
-        _ -> Left "demanded Context type closure requires an unsupported non-source role"
+    sourceEntry entry = case worldTypeEntryEvidence entry of
+      ModuleInterfaceEvidence proof | isSourceOriginal (canonicalOrigin proof) ->
+        Just (WorldSourceClosureEntry (worldTypeEntryArtifact entry) proof
+          (worldTypeEntryInterface entry) (worldTypeEntryPackages entry))
+      _ -> Nothing
 
 -- Conservative backing charge: receiving allowances count every retained
 -- encoded body/path, even when a separate world happens to have equal bytes.
