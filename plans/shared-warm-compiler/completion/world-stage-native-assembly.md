@@ -384,3 +384,135 @@ the ordered fold: build `acb47003-efd8-463c-8cd1-2929556e37f0`, same executed
 Rust SHA as the three controls above. It exercises actual prepared native
 evidence plus the matching compiler END and post-END cancellation refusal.
 Command: `swarm-build just test-native //tidepool/toolchain:toolchain_world_native_seal_test --output-dir /srv/swarm/evidence/inanna/world-stage-ordered-fold-native-20261020 --retain-artifacts`.
+
+
+## Stage decoder and lexical owner follow-up
+
+The source receipt issuer now decodes its own two authenticated named stage
+outputs from the already captured bytes. Callers cannot supply independently
+parsed module products or a certificate from another stage. The old borrowed
+package-output getter and corresponding artifacts-layer parsing were removed;
+no additional read, raw tree or certifier was added. Actual missing/swapped/late
+raw-output replay controls belong to the checked receiver and remain pending.
+
+The existing program-source lexical field now uses ExactLexicalSnapshot.
+Finite replacement retains replacement semantics; World updates append only
+the actual incoming rows. Existing borrowed slice consumers use its explicit
+lazy observation. At 1/32/128 prior rows the append control observes one supplied
+row and one fresh immutable fact; overlapping input observes two supplied rows
+and one fresh fact. Equal and conflicting adjacency, unchanged snapshot sharing
+and independent recomputation remain checked. The unchanged finite import
+history oracle passed with the two lexical controls: 3/3, exit 0, build
+`54e90d13-61fc-4d7e-a87d-07234b364546`, executed Rust SHA
+`42eb1ee2b67808ce3e0b82ac2f3cf2dbead77d0e0cd2bcd8b1d7ef92fac9909a`.
+Evidence: `/srv/swarm/evidence/inanna/world-stage-lexical-field-controls-exact-20261020`.
+The first invocation named the history case incorrectly; counted discovery
+refused that selection before execution. It is not included in the passing
+count. The correct path is
+`declaration_context::tests::program_source_support_history::bounded_artifact_and_original_import_histories_match_set_oracle`.
+
+The actual mixed consumer fixture is being qualified separately. It first
+exposed a missing declared renderer source closure, then a missing canonical
+whole-cell template marker. Both are confirmed fixture setup defects, repaired
+by capturing the real declared facade library bodies and using the maintained
+canonical template shape. Build `10383170-3d3e-4195-8197-e504402ee2c2` compiled
+and reached a producer policy refusal: WorldDownsweepGraph marks captured
+`Tidepool/Aeson/Scientific.hs` as generating code while the admitted flags do
+not. Quasiquotes, Template Haskell, static pointers and external preprocessing
+were all false. The cause is with the Haskell owner; native mixed admission has
+not been reached and no policy is weakened here. Exact stderr is retained at
+`/srv/swarm/evidence/inanna/world-stage-mixed-canonical-template-20261020/171cda3b8d0b174296a588fc09cb6c7cce74ba26a7b587f9b4256a11a719bfa2/artifacts/compiler-transactions/.tmpXGKEj4/compiler.stderr`.
+The original diagnostic files remain present even though the transaction's
+product-file roster excludes its own stderr/report files. An initial hypothesis
+of diagnostic deletion was disproved by direct observation.
+
+## Genuine Original and mixed consumer controls
+
+The two new named targets use the same admitted compiler, captured source owner,
+World recipe and reservation, native issuers, END evidence and cancellation
+control as the existing successful bind target. The declaration-only source
+contains an ADT, a single-method class and its instance. The mixed source binds
+a value, declares an ADT and class instance whose body uses that value, then
+binds the ADT and calls the declared method. The mixed reservation has three
+stages and four execution items. Its assertions distinguish the early item
+context from the later context containing the actual Lib owner. These are
+compiler/native component controls; they do not execute a runtime actor.
+
+The target generator owns their compiler resources and fixture registration.
+The fixture captures the actual declared facade library sources, including the
+renderer, through the existing captured-source constructor. Its template uses
+the canonical effect-row marker and the shipped FlexibleContexts and
+UndecidableInstances extensions. It does not suppress generated renderer work
+or enable Template Haskell.
+
+The earlier Scientific.hs backend refusal was a receiving-base defect: this
+checkout lacked the already reviewed Haskell commit
+`8c9434e4630e47ebcbede4aff5d8fca9cd3ae167`. Receiving it as `b477cf51e3`
+restored the complete quote-free graph backend lowering. No new compiler policy
+change was needed. The following run exposed an auto-display family constraint
+requiring UndecidableInstances; the canonical fixture now supplies that shipped
+extension. The Haskell owner is separately correcting optional auto-display
+generation for minimal recipes that lack it.
+
+The mixed consumer is still red before Rust preparation admission. Run
+`ced2beaa-e60e-4858-b2e0-ab0d8aa18646`, exit 1, reached
+`a prior original was replaced by another finalized capture` in the Haskell
+producer. The actual stage products and interfaces remain under
+`/srv/swarm/evidence/inanna/world-stage-mixed-renderer-types-20261020/171cda3b8d0b174296a588fc09cb6c7cce74ba26a7b587f9b4256a11a719bfa2/artifacts/compiler-transactions/.tmp2524or`.
+The independent observation at
+`/srv/swarm/evidence/inanna/world-stage-prior-finalization-observation-20261020.json`
+establishes that seven retained finalized interface bodies have identical
+SHA-256 hashes across the two stages, while the actual native module-product
+sets differ. It does not establish equality of their entire finalized owners.
+The possible conflation of canonical TYPE admissions, native Originals and
+relocated physical interface aliases is under the compiler-products owner's
+review. Native identity checks remain unchanged.
+
+The independent declaration-only target also remains red before Rust
+preparation admission. Run `c08766f8-3b9e-4244-a298-15ce8f0a3e03`, exit 1,
+compiled and executed one selected case using Rust SHA
+`d55a3d3ef6eb0bc15b35738fa73de294926adda59e95f37c76a662d0d32ca561`.
+It refused native publication for the actual exported binder
+`main / Tidepool.Session.Lib.G21 / value / C:OriginalStageReader`, which lacked
+a certified native owner. The stderr is retained at
+`/srv/swarm/evidence/inanna/world-original-native-seal-20261020/2594a133c5967eaf4c9d9fd193aba077f053226ea0f9347a0642e7087afed50e/artifacts/compiler-transactions/.tmpeQtTd7/compiler.stderr`.
+The single-method dictionary constructor may be structural or erased; that is a
+hypothesis for the owning GHC root classifier. The fixture keeps the class and
+requires an authentic successful declaration packet. No spelling-based skip,
+dummy native group or expected-error acceptance was added.
+
+Actual missing, crossed and later-stage bundle replay controls are supplied by
+the checked receiver owner and will be invoked after matching compiler END.
+They require a genuine completed multi-stage packet, so neither red producer
+run qualifies those controls or the Original native certifier.
+
+## Paired stage demand caller follow-up
+
+The PREP5/worker27 continuation is based on compiled engine source
+`37787bf18f4e35e348bb1e5c3c87e74f5228ef25`. The original native branch remains
+preserved at `96cfa1381b`; the paired continuation branch received only that
+fixture parcel as `4c2a3d91a3`. An attempted ancestry merge encountered duplicate
+cherry-picked history conflicts and was aborted before any resolution. No
+unrelated compiler, runtime or protocol source was rewritten.
+
+Native item selection now captures external selected value owners from the
+same stage's demanded rows. Prior same-cell value interfaces remain selected
+by the existing produced-output ordinal prefix. Source-edge exclusion likewise
+uses the same stage rows plus the exact sealed plan operand as independent
+compiler availability, without changing runtime roots or using the program-wide
+union. This does not generalize compiler availability to every visible BaseWorld
+binding; the compiler-only unused BaseWorld-helper case remains an open boundary.
+
+The mixed fixture additionally requires no preexisting runtime roots and the
+actual first binding as its sole PriorStage runtime root. It checks the exact
+three-stage order, prior-origin coordinates and absence of fabricated checked
+rows for those same-cell inputs. The receiver's assertion-only raw-output replay
+helper runs after matching END, outside the active compiler transaction, once
+on the successful mixed preparation. It changes only cloned packet data and
+requires one positive replay and twelve typed bundle-role refusals.
+
+This caller follow-up is source-only until the affected cfg target and genuine
+mixed native gate execute. The independent actual Some input gate exposed the
+projector's dependence on a lazy cold metadata cache after a coherent TYPE
+delta. The engine owns the separate RequestCompilerInputs boundary repair; no
+metadata fallback or pointer-check removal is included in this caller parcel.

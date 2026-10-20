@@ -526,6 +526,35 @@ impl IssuedOriginalOutput {
         })
     }
 
+    pub(crate) fn from_segment_item(
+        products: &crate::certified_products::CertifiedProducts,
+    ) -> Result<Self, CompileError> {
+        let inputs = products
+            .original_inputs
+            .as_ref()
+            .ok_or_else(|| failure("item lacks its physical compiler prefix owner"))?;
+        Ok(Self {
+            selection: products.source_selection.clone(),
+            artifacts: inputs.issued_artifacts().clone(),
+            inputs: Arc::clone(inputs),
+        })
+    }
+
+    pub(crate) fn from_segment_originals(
+        originals: &crate::certified_products::CertifiedSegmentOriginals,
+    ) -> Result<Self, CompileError> {
+        // The closed authored-stage accessor rejects executable stages.
+        originals
+            .authored_artifacts()
+            .map_err(compiler_evidence_failure)?;
+        let inputs = Arc::clone(originals.physical_inputs());
+        Ok(Self {
+            selection: originals.source_selection().clone(),
+            artifacts: inputs.issued_artifacts().clone(),
+            inputs,
+        })
+    }
+
     pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
         &self.selection
     }
@@ -577,7 +606,7 @@ impl OriginalCompilerInputs {
         selection: &mut crate::certified_products::CertifiedSourceSelection,
         baseline: &ArtifactView,
         entries: Vec<Arc<ArtifactEntry>>,
-    ) -> Result<ArtifactView, CompileError> {
+    ) -> Result<Self, CompileError> {
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "products.segment_native_availability",
             "initial_admission",
@@ -589,7 +618,7 @@ impl OriginalCompilerInputs {
             selection,
         )?;
         timing.advance("resolve_continuation");
-        let issued = Self::from_selection(selection, &physical)?;
+        let mut issued = Self::from_selection(selection, &physical)?;
         timing.advance("receive_and_project_completed_availability");
         let metadata = issued
             .projection
@@ -606,9 +635,11 @@ impl OriginalCompilerInputs {
             .finish_new_product_availability(&metadata.retained, &native.availability)
             .map_err(compiler_evidence_failure)?;
         timing.finish(true);
-        // Return only physical custody. Continuation decisions belong to a
-        // later input admission against the completed selection.
-        Ok(issued.artifacts)
+        // Keep the exact normalization used to complete this selection. The
+        // physical owner, its input choices and contribution scopes travel
+        // together; item admission must not recreate them from a target view.
+        issued.native_availability = native.availability;
+        Ok(issued)
     }
 
     /// Reuse exact authored availability already carried by the context.
@@ -786,7 +817,7 @@ impl OriginalCompilerInputs {
             "products.native_selection",
             "projection",
         );
-        let projection = selection
+        let mut projection = selection
             .compiler_projection(artifacts)
             .map_err(compiler_evidence_failure)?;
         timing.advance("continuation_rows");
@@ -825,6 +856,7 @@ impl OriginalCompilerInputs {
                 .merge(&issued.native_availability)?
                 .into_rows();
             native_offers.extend(issued.native_offers);
+            projection = issued.projection;
             issued.artifacts
         } else {
             artifacts.clone()
@@ -850,7 +882,11 @@ impl OriginalCompilerInputs {
         Ok(Self {
             native_fact_base: selection.native_fact_base().cloned(),
             native_availability,
-            demand: OriginalInputDemand::Issued(continuation.decisions),
+            demand: OriginalInputDemand::Issued(
+                crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
+                    selection, &projection,
+                )?,
+            ),
             projection,
             artifacts,
             native_offers,
@@ -946,8 +982,12 @@ impl OriginalCompilerInputs {
         Ok(Self {
             native_fact_base: completed.continuation.selection.native_fact_base().cloned(),
             native_availability,
-            demand: OriginalInputDemand::RolePolicy,
-            projection,
+            demand: OriginalInputDemand::Issued(
+                crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
+                    completed.continuation.selection, &effective,
+                )?,
+            ),
+            projection: effective,
             artifacts,
             native_offers,
         })
@@ -1035,7 +1075,7 @@ impl OriginalCompilerInputs {
 pub(crate) struct RequestCompilerInputs {
     // Retained availability outlives the transport subset consumed by this request.
     source_support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
-    pub(crate) metadata: CompilerArtifactMetadata,
+    metadata: CompilerArtifactMetadata,
     native_selection: NativeInputSelection,
     original_sources: Arc<crate::certified_products::RetainedOriginalSources>,
     // Only cold World-primary capture sets this owner. A generic request may
@@ -1699,6 +1739,7 @@ impl RequestNativeAvailability {
     /// Select direct availability roots from effective compiler roles, then keep
     /// their exact dependencies. The demanded path supplies its already issued
     /// direct choices to the same closure/intersection policy below.
+    #[track_caller]
     pub(crate) fn for_compiler_roles(
         &self,
         roles: &CompilerInputProjection,
@@ -1728,6 +1769,7 @@ impl RequestNativeAvailability {
         )
     }
 
+    #[track_caller]
     fn for_compiler_roots(
         &self,
         roles: &CompilerInputProjection,
@@ -1826,6 +1868,12 @@ impl RequestNativeAvailability {
                 admission_failure(ArtifactInventoryFailure::NativeRootOutsideView { artifact: id })
             })?;
             if !has_payload(&id) {
+                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                    artifact = ?id,
+                    owner = ?row.original.descriptor.owner,
+                    direct = direct.contains(&id),
+                    caller = %std::panic::Location::caller(),
+                    "native availability payload check refused");
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeRootOutsideView { artifact: id },
                 ));
@@ -2178,6 +2226,82 @@ pub(crate) enum DemandNativeInputsError {
     Compiler(#[from] CompileError),
 }
 
+/// External source references from the same decoded physical output. This is
+/// demand data only: the complete product certifier still authenticates every
+/// current body, source proof and interface before issuing native authority.
+struct ReceiptNativeInputDemand<'a> {
+    sources: Vec<ExternalSourceGlobal<'a>>,
+}
+
+struct ExternalSourceGlobal<'a> {
+    unit: &'a str,
+    module: &'a str,
+    module_version: Option<&'a tidepool_repr::execution_schema::ModuleVersion>,
+    original_ordinal: u32,
+}
+
+impl<'a> ReceiptNativeInputDemand<'a> {
+    fn from_products(
+        receipt: &'a crate::certified_products::CertifiedReceipt,
+        products: &crate::certified_products::ParsedModuleProducts,
+    ) -> Result<Self, CompileError> {
+        use crate::certified_products::ReceiptImportOwner;
+        let budget = NativeDemandBudget(Some(products.operation()));
+        let mut current = BTreeSet::new();
+        for product in products.products() {
+            budget.checkpoint()?;
+            budget.reserve::<((&str, &str), [usize; 4])>(1)?;
+            if !current.insert((product.unit.as_str(), product.module.as_str())) {
+                return Err(failure("duplicate current native output owner"));
+            }
+        }
+        let mut observed = BTreeSet::new();
+        for module in &receipt.modules {
+            budget.checkpoint()?;
+            budget.reserve::<((&str, &str), [usize; 4])>(1)?;
+            if !observed.insert((module.unit.as_str(), module.module.as_str())) {
+                return Err(failure("duplicate native receipt owner"));
+            }
+        }
+        if !current.is_subset(&observed) {
+            return Err(failure("current native output lacks its receipt owner"));
+        }
+        let mut sources = Vec::new();
+        for global in receipt
+            .modules
+            .iter()
+            .flat_map(|module| &module.groups)
+            .flat_map(|group| &group.globals)
+            .chain(receipt.targets.values().flatten())
+        {
+            budget.checkpoint()?;
+            let ReceiptImportOwner::Source {
+                unit,
+                module,
+                module_version,
+                original_ordinal,
+                ..
+            } = &global.owner
+            else {
+                continue;
+            };
+            // Even when this output also defines the same module, an explicit
+            // version names a historical input and retains its issued choice.
+            if module_version.is_none() && current.contains(&(unit.as_str(), module.as_str())) {
+                continue;
+            }
+            budget.reserve::<ExternalSourceGlobal<'_>>(1)?;
+            sources.push(ExternalSourceGlobal {
+                unit,
+                module,
+                module_version: module_version.as_ref(),
+                original_ordinal: *original_ordinal,
+            });
+        }
+        Ok(Self { sources })
+    }
+}
+
 impl DemandNativeInputs {
     pub(crate) fn cold(&self) -> &Arc<RequestCompilerInputs> {
         &self.cold
@@ -2216,49 +2340,23 @@ impl DemandNativeInputs {
     /// Authenticate only the input groups named by this completion, through
     /// their existing scoped offers. Receipt names restrict issued permission;
     /// they do not issue an original or choose a historical carrier by name.
-    pub(crate) fn certify_receipt_groups(
+    fn certify_receipt_groups(
         &self,
-        receipt: &crate::certified_products::CertifiedReceipt,
+        inputs: &ReceiptNativeInputDemand<'_>,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<DemandCertifiedGroups, CompileError> {
-        use crate::certified_products::{ProductOrigin, ReceiptImportOwner};
         let operation = validation.inventory.clone();
         let budget = NativeDemandBudget(Some(&operation));
-        let mut produced = BTreeSet::new();
-        for module in &receipt.modules {
-            budget.checkpoint()?;
-            if module.origin != ProductOrigin::Cached
-                && !produced.contains(&(&module.unit, &module.module))
-            {
-                budget.reserve::<((&String, &String), [usize; 4])>(1)?;
-                produced.insert((&module.unit, &module.module));
-            }
-        }
         let mut roots = BTreeMap::new();
         let mut proofs = BTreeMap::new();
-        for global in receipt
-            .modules
-            .iter()
-            .flat_map(|module| &module.groups)
-            .flat_map(|group| &group.globals)
-            .chain(receipt.targets.values().flatten())
-        {
+        for global in &inputs.sources {
             budget.checkpoint()?;
-            let ReceiptImportOwner::Source {
+            let ExternalSourceGlobal {
                 unit,
                 module,
                 module_version,
                 original_ordinal,
-                ..
-            } = &global.owner
-            else {
-                continue;
-            };
-            // Newly produced modules receive their group authority from the
-            // same complete product certifier, after source admission.
-            if module_version.is_none() && produced.contains(&(unit, module)) {
-                continue;
-            }
+            } = global;
             // The shared choice owner also constructs one temporary owner key.
             budget.strings(unit.len().saturating_add(module.len()).saturating_mul(2))?;
             let owner = identity(unit, module);
@@ -2281,7 +2379,7 @@ impl DemandNativeInputs {
             let native_owner = row.original_owner();
             if native_owner.unit != *unit
                 || native_owner.module != *module
-                || module_version.as_ref() != Some(&native_owner.module_version)
+                || *module_version != Some(&native_owner.module_version)
             {
                 return Err(failure(
                     "receipt native group differs from its issued owner or permission",
@@ -2564,17 +2662,21 @@ impl RequestCompilerInputs {
             self.artifacts(),
             &direct,
             |id| {
-                self.metadata
-                    .retained
-                    .artifacts
-                    .get(id)
-                    .is_some_and(|payload| {
-                        self.native_selection
-                            .availability
-                            .0
-                            .get(id)
-                            .is_some_and(|row| Arc::ptr_eq(payload, &row.original))
-                    })
+                let payload = self.metadata.retained.artifacts.get(id);
+                let row = self.native_selection.availability.0.get(id);
+                let same_payload = payload.zip(row).is_some_and(|(payload, row)| {
+                    Arc::ptr_eq(payload, &row.original)
+                });
+                if !same_payload {
+                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                        artifact = ?id,
+                        metadata_payload_present = payload.is_some(),
+                        availability_payload_present = row.is_some(),
+                        same_descriptor = payload.zip(row).is_some_and(|(payload, row)|
+                            payload.descriptor == row.original.descriptor),
+                        "demanded native payload identity refused");
+                }
+                same_payload
             },
             budget,
             &mut work,
@@ -3207,6 +3309,10 @@ impl RequestCompilerInputs {
             original_sources: Arc::clone(&self.original_sources),
             world_primary_context: Some(context),
         }))
+    }
+
+    pub(crate) fn metadata(&self) -> &CompilerArtifactMetadata {
+        &self.metadata
     }
 
     pub(crate) fn shared_compiler_source_support(
@@ -5894,7 +6000,7 @@ pub(crate) struct ExactCompilationRequest {
 #[derive(Clone, Default)]
 struct ProgramSourceSupportState {
     program_support: Option<ProgramSourceSupport>,
-    program_source_lexical: Vec<ExactLexicalNode>,
+    program_source_lexical: crate::exact_context::ExactLexicalSnapshot,
     source_selected_support: BTreeSet<ExactModuleIdentity>,
 }
 
@@ -6098,7 +6204,7 @@ impl ProgramSourceSupportState {
                 .into_iter()
                 .filter(|(owner, _)| fresh_owners.contains(owner)),
         )?;
-        self.program_source_lexical = program_source_lexical;
+        self.program_source_lexical = self.program_source_lexical.replace(program_source_lexical)?;
         self.program_support = Some(program_support);
         self.source_selected_support
             .extend(selected_originals.into_keys());
@@ -7242,7 +7348,8 @@ impl<'a> ProductInputFacts<'a> {
             ),
             groups: groups.groups(),
             // A world cell has no program-level source continuation. Its
-            // checked value imports are the output owner's demanded rows.
+            // checked imports also retain an unused operation input's interface;
+            // executable demand remains with the checked stage.
             source_lexical: &[],
             program_support: None,
             source_selected_support: &EMPTY_SELECTED_SUPPORT,
@@ -9198,13 +9305,25 @@ pub(crate) struct WorldProgramContinuation {
 }
 
 impl WorldProgramContinuation {
-    pub(crate) fn begin(program: &crate::compiler_world::CheckedWorldCellProgram) -> Self {
-        Self {
-            context: Arc::clone(program.primary_context()),
-            inputs: Arc::clone(program.primary_compiler_inputs()),
+    pub(crate) fn begin(
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+    ) -> Result<Self, CompileError> {
+        let mut context = Arc::clone(program.primary_context());
+        let mut inputs = Arc::clone(program.primary_compiler_inputs());
+        if let Some(operand) = program.reservation().plan().operand() {
+            let operand_types = Arc::new(ExactDeclarationContext::checked_value_interface_context(
+                operand.checked_row(),
+            )?);
+            let extended = inputs.with_type_interfaces(&[operand_types])?;
+            context = extended.context;
+            inputs = extended.inputs;
+        }
+        Ok(Self {
+            context,
+            inputs,
             program: ProgramSourceSupportState::default(),
             private_input: None,
-        }
+        })
     }
 }
 
@@ -9237,7 +9356,7 @@ impl WorldProgramSegment {
         let originals = selection
             .selected_authored_original_closure(view, &owner.unit, &owner.module)
             .map_err(compiler_evidence_failure)?;
-        let output = IssuedOriginalOutput::issue(selection.clone(), view.clone())?;
+        let output = IssuedOriginalOutput::from_segment_originals(&self.originals)?;
         let certificate = crate::declaration_join::certify_world_stage_planned_declaration(
             program,
             stage,
@@ -9290,17 +9409,15 @@ impl WorldProgramSegment {
     pub(crate) fn admit_program_support(
         &mut self,
         program: &crate::compiler_world::CheckedWorldCellProgram,
-        support: &ArtifactView,
+        output: &IssuedOriginalOutput,
         produced: &crate::checked_cell::ProducedValueTypeInterfaces,
-        selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let fragment = crate::artifact_inventory::CompilerSourceSupport::world_stage_fragment(
             program,
             &self.stage,
             &self.source,
             &self.source_text,
-            selection,
-            support,
+            output,
         )?;
         let context = &self.continuation.context;
         let imports = self.source.home_imports()?;
@@ -9422,21 +9539,11 @@ impl WorldProgramSegment {
                             .expect("validated generated owner")
             }),
         )?);
-        for node in lexical {
-            match self
-                .continuation
-                .program
-                .program_source_lexical
-                .iter()
-                .find(|old| old.owner == node.owner)
-            {
-                Some(old) if old != &node => {
-                    return Err(failure("program support changed its selected source graph"))
-                }
-                Some(_) => {}
-                None => self.continuation.program.program_source_lexical.push(node),
-            }
-        }
+        self.continuation.program.program_source_lexical = self
+            .continuation
+            .program
+            .program_source_lexical
+            .append_issued(lexical)?;
         self.continuation
             .program
             .source_selected_support
@@ -9492,6 +9599,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
     fn demand_inputs(
         &self,
         cold: &Arc<RequestCompilerInputs>,
+        inputs: &ReceiptNativeInputDemand<'_>,
     ) -> Result<DemandNativeInputs, CompileError> {
         let operation = self.program.validation().inventory.as_ref();
         let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
@@ -9518,7 +9626,15 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
                 ));
             }
             insert(&mut roots, &claim.owner)?;
-            insert(&mut native_roots, &claim.owner)?;
+        }
+        for global in &inputs.sources {
+            crate::host_work::checkpoint()?;
+            charge(operation.charge(1))?;
+            charge(operation.charge(global.unit.len()))?;
+            charge(operation.charge(global.module.len()))?;
+            let owner = identity(global.unit, global.module);
+            insert(&mut roots, &owner)?;
+            insert(&mut native_roots, &owner)?;
         }
         let mut excluded = BTreeSet::new();
         for module in &self.source.evidence.modules {
@@ -9530,7 +9646,13 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
                 excluded.insert(owner);
             }
         }
-        for row in self.program.demanded_rows() {
+        for row in self.binding.stage.demanded_rows().iter().chain(
+            self.program
+                .reservation()
+                .plan()
+                .operand()
+                .map(|operand| operand.checked_row()),
+        ) {
             crate::host_work::checkpoint()?;
             charge(operation.charge(1))?;
             let interface = row.certified_interface().interface();
@@ -9565,11 +9687,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
                 }
             }
         }
-        let demand = cold.source_support.demanded_compiler_projection(
-            &cold.metadata.retained,
-            &roots,
-            operation,
-        )?;
+        let demand = cold.demanded_compiler_projection(&roots, operation)?;
         cold.demanded_native_inputs(demand, &native_roots, operation)
             .map_err(|error| match error {
                 DemandNativeInputsError::Compiler(error) => error,
@@ -9578,29 +9696,59 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
     }
 
     /// Issue segment original products from this already-decoded world source
-    /// owner. `raw` and `receipt` must be decoded exactly once from the same
-    /// captured common outputs this receipt names. Cold support, certified
+    /// owner. Its named captured products are decoded here exactly once.
+    /// Prefix support, certified
     /// groups and native permission are projected through the demanded owner;
     /// no `ExactCompilationRequest` or finite baseline is manufactured.
     // boundary: see CELL-PREPARATION-BOUNDARY.md
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn issue_segment_originals(
         self,
-        receipt: crate::certified_products::CertifiedReceipt,
-        raw: crate::certified_products::ParsedModuleProducts,
         candidates: Option<&crate::module_candidates::CandidateSet>,
-        selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
         continuation: WorldProgramContinuation,
     ) -> Result<WorldProgramSegment, CompileError> {
         let program = self.program;
+        let outputs = self.binding.stage.outputs();
+        let stage_root = program.directory().path().join(
+            outputs
+                .source_receipt()
+                .relative()
+                .parent()
+                .ok_or_else(|| failure("World stage source output has no namespace"))?,
+        );
+        validation
+            .record_captured_bytes(&self.package_imports_path, &self.package_imports)
+            .map_err(|error| failure(error.to_string()))?;
+        let raw = crate::certified_products::ParsedModuleProducts::decode_with_operation(
+            crate::checked_cell::world_output_bytes(program, outputs.module_products().relative())?,
+            &self.package_imports,
+            validation.inventory.clone(),
+        )
+        .map_err(compiler_evidence_failure)?;
+        let receipt = crate::certified_products::decode_segment_originals_with_operation(
+            crate::checked_cell::world_output_bytes(
+                program,
+                outputs.certified_products().relative(),
+            )?,
+            &stage_root,
+            &validation.inventory,
+        )
+        .map_err(compiler_evidence_failure)?;
+
         let operation = program.validation().inventory.as_ref();
-        let demand = self.demand_inputs(&continuation.inputs)?;
-        let groups = demand.certify_receipt_groups(&receipt, validation)?;
+        let native_inputs = ReceiptNativeInputDemand::from_products(&receipt, &raw)?;
+        let demand = self.demand_inputs(&continuation.inputs, &native_inputs)?;
+        let groups = demand.certify_receipt_groups(&native_inputs, validation)?;
         let support = demand.semantic_source_support(&groups, operation)?;
-        let checked_values =
-            crate::checked_cell::CheckedValueImportAuthority::from_world_output(program)?;
+        let checked_values = crate::checked_cell::CheckedValueImportAuthority::from_world_stage(
+            program,
+            &self.binding.stage,
+        )?;
+        let selected_values = crate::artifacts::SelectedSessionValueOwners::from_checked_imports(
+            &checked_values,
+            operation,
+        )?;
         let context = &continuation.context;
         let binding = WorldCompilationIdentity::from_binding(&self.binding);
         let inputs = DemandedWorldCompilerInputs::from_demand(
@@ -9651,20 +9799,12 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             raw,
             receipt,
             admission,
-            &program.directory().path().join(
-                self.binding
-                    .stage
-                    .outputs()
-                    .source_receipt()
-                    .relative()
-                    .parent()
-                    .ok_or_else(|| failure("World stage source output has no namespace"))?,
-            ),
+            &stage_root,
             program.producer_identity_bytes(),
             &self.aliases,
             authored.as_ref(),
             candidates,
-            selected_values,
+            &selected_values,
             produced,
             validation,
         )
@@ -9679,10 +9819,6 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             aliases: self.aliases,
             continuation,
         })
-    }
-
-    pub(crate) fn package_imports(&self) -> (&Path, &Arc<[u8]>) {
-        (&self.package_imports_path, &self.package_imports)
     }
 }
 
@@ -10655,6 +10791,40 @@ impl ExactDeclarationContext {
             witnesses,
             signatures,
         )
+    }
+
+    /// The actual checked Val interface and its sealed TYPE requirements,
+    /// without source names, original bodies, or executable group authority.
+    pub(crate) fn checked_value_interface_context(
+        value: &crate::checked_cell::CheckedValueArtifact,
+    ) -> Result<Self, CompileError> {
+        let certified = value.certified_interface();
+        let interface = certified.interface();
+        let producer = interface.toolchain_identity_sha256();
+        if producer == [0; 32] || value.world_issuer().0 != producer {
+            return Err(failure(
+                "checked value TYPE row has another compiler producer",
+            ));
+        }
+        let selected = value.compiler_source_support().selected_interfaces()?;
+        let owner = identity(interface.unit(), interface.module());
+        let row = selected
+            .get(&owner)
+            .ok_or_else(|| failure("checked value TYPE row lacks its issued interface"))?;
+        if row.descriptor.id != certified.artifact_id()
+            || row.descriptor.producer_sha256 != producer
+        {
+            return Err(failure(
+                "checked value TYPE row differs from its certified interface",
+            ));
+        }
+        Ok(Self::from_facts(DeclarationContextFacts {
+            compiler_support: selected.type_interfaces_for_owners(vec![owner])?,
+            producer,
+            lexical: Default::default(),
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            template_imports: None,
+        }))
     }
 
     pub(crate) fn checked_value_type_interfaces(
@@ -13228,34 +13398,12 @@ pub(crate) fn certified_product_artifact_view_inner(
 /// compiler-selected native resolver once. No executable group is demanded.
 pub(crate) fn bind_certified_segment_artifacts_with_validation(
     originals: &crate::certified_products::CertifiedSegmentOriginals,
-    baseline: &ArtifactView,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<crate::artifact_inventory::BoundArtifactSelection, CompileError> {
     if !Arc::ptr_eq(originals.operation(), &validation.inventory) {
         return Err(failure("segment artifacts have another accounting owner"));
     }
-    validation
-        .inventory
-        .reserve::<Arc<ArtifactEntry>>(
-            originals.artifact_entries().len() + originals.value_entries().len(),
-        )
-        .map_err(|error| compiler_evidence_failure(error.into()))?;
-    let entries = originals
-        .artifact_entries()
-        .iter()
-        .chain(originals.value_entries())
-        .cloned()
-        .collect();
-    let offers = originals
-        .source_selection()
-        .issued_native_availability()
-        .flat_map(|availability| availability.offers())
-        .cloned()
-        .collect::<Vec<_>>();
-    let baseline = retain_native_offers(baseline, &offers)?;
-    baseline
-        .inventory()
-        .bind_segment(&baseline, entries, originals.source_selection())
+    originals.bound_artifacts().map_err(compiler_evidence_failure)
 }
 
 /// Each item adds only ordinal-visible values to its admitted prefix, then
@@ -19930,12 +20078,7 @@ mod tests {
             let cold = demanded_native_fixture(32, mode, false);
             let mut validation = PackageInterfaceValidation::default();
             let demand = cold
-                .source_support
-                .demanded_compiler_projection(
-                    &cold.metadata.retained,
-                    &roots,
-                    &validation.inventory,
-                )
+                .demanded_compiler_projection(&roots, &validation.inventory)
                 .unwrap();
             let selected = cold
                 .demanded_native_inputs(demand, &roots, &validation.inventory)
@@ -19981,7 +20124,8 @@ mod tests {
                 },
                 source_recipe: WorkerExecutionSource::Ordinary,
             };
-            let result = selected.certify_receipt_groups(&receipt, &mut validation);
+            let result = selected
+                .certify_receipt_groups(&receipt_input_demand_fixture(&receipt), &mut validation);
             if matches!(mode, NativeArtifactDemand::ScopeInterfaces) {
                 assert!(
                     result.is_err(),
@@ -20008,9 +20152,24 @@ mod tests {
             };
             module_version.as_mut().unwrap().0[0] ^= 1;
             assert!(selected
-                .certify_receipt_groups(&receipt, &mut validation)
+                .certify_receipt_groups(&receipt_input_demand_fixture(&receipt), &mut validation)
                 .is_err());
         }
+    }
+
+    fn receipt_input_demand_fixture(
+        receipt: &crate::certified_products::CertifiedReceipt,
+    ) -> ReceiptNativeInputDemand<'_> {
+        let value = Value::Array(vec![
+            text("TPMOD"),
+            Value::Integer(1.into()),
+            Value::Array(vec![]),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        let products =
+            crate::certified_products::ParsedModuleProducts::decode(&bytes, b"").unwrap();
+        ReceiptNativeInputDemand::from_products(receipt, &products).unwrap()
     }
 
     /// Untrusted group-demand DATA for the `DemandParent`/`DemandChild`
@@ -20064,6 +20223,169 @@ mod tests {
     }
 
     #[test]
+    fn receipt_native_inputs_keep_current_outputs_separate_from_historical_choices() {
+        use crate::certified_products::{
+            AcceptedGlobal, CertifiedModuleReceipt, CertifiedReceipt, FinalizationEnvelope,
+            ParsedModuleProducts, ProductOrigin, ReceiptImportOwner, WorkerExecutionSource,
+        };
+        use tidepool_repr::execution_schema::{InventoryOperation, RuntimeRep};
+        let (context, _) = metadata_fixture();
+        let cold = Arc::new(
+            ProtectedScaffoldRequirements::default()
+                .compiler_inputs(&context, None)
+                .unwrap(),
+        );
+        let owner = identity("fixture", "Joined");
+        let roots = BTreeSet::from([owner.clone()]);
+        // Untrusted decoded physical-output DATA. No source or native product
+        // authority is issued here; the real Some-input history supplies that
+        // producer/consumer gate through the complete product certifier.
+        let output = Value::Array(vec![
+            text("TPMOD"),
+            Value::Integer(1.into()),
+            Value::Array(vec![Value::Array(vec![
+                text("fixture"),
+                text("Joined"),
+                Value::Bytes(vec![1]),
+                Value::Array(vec![]),
+            ])]),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&output, &mut bytes).unwrap();
+        let current = ParsedModuleProducts::decode(&bytes, b"").unwrap();
+        let global = AcceptedGlobal {
+            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                namespace: "value".into(),
+                occurrence: "current".into(),
+                record_parent: None,
+            },
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            owner: ReceiptImportOwner::Source {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                module_version: None,
+                original_ordinal: 0,
+                binder: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: owner.unit.clone(),
+                    module: owner.module.clone(),
+                    namespace: "value".into(),
+                    occurrence: "current".into(),
+                    record_parent: None,
+                },
+            },
+        };
+        for origin in [
+            ProductOrigin::Fresh,
+            ProductOrigin::RetainedCore,
+            ProductOrigin::Cached,
+        ] {
+            let mut receipt = CertifiedReceipt {
+                modules: vec![CertifiedModuleReceipt {
+                    origin,
+                    unit: owner.unit.clone(),
+                    module: owner.module.clone(),
+                    module_version: None,
+                    skinny_iface_sha256: [0; 32],
+                    product_sha256: [0; 32],
+                    source_sha256: [0; 32],
+                    dependency_witness_sha256: [0; 32],
+                    groups: vec![],
+                    interface_requirements: BTreeMap::new(),
+                }],
+                targets: BTreeMap::from([("target".into(), vec![global.clone()])]),
+                packages: BTreeMap::new(),
+                finalization: FinalizationEnvelope {
+                    profile: "native-input-demand-data".into(),
+                    home_units: BTreeSet::new(),
+                    modules: BTreeMap::new(),
+                    value_interfaces: BTreeMap::new(),
+                },
+                source_recipe: WorkerExecutionSource::Ordinary,
+            };
+            let inputs = ReceiptNativeInputDemand::from_products(&receipt, &current).unwrap();
+            assert!(
+                inputs.sources.is_empty(),
+                "actual current output is independent of origin label"
+            );
+            let operation = InventoryOperation::new(Default::default());
+            let demand = cold
+                .demanded_compiler_projection(&roots, &operation)
+                .unwrap();
+            let selected = cold
+                .demanded_native_inputs(demand, &BTreeSet::new(), &operation)
+                .unwrap();
+            assert!(!selected
+                .advertised_native_originals()
+                .0
+                .contains_key(&owner));
+            assert!(selected
+                .native_availability()
+                .0
+                .values()
+                .all(|row| row.original_owner().module != owner.module));
+            assert!(
+                selected
+                    .certify_receipt_groups(&inputs, &mut PackageInterfaceValidation::default())
+                    .unwrap()
+                    .groups()
+                    .is_empty(),
+                "no prior native group was manufactured"
+            );
+            let external = receipt_input_demand_fixture(&receipt);
+            assert_eq!(
+                external.sources.len(),
+                1,
+                "a receipt row without current physical output remains external"
+            );
+            let demand = cold
+                .demanded_compiler_projection(&roots, &operation)
+                .unwrap();
+            assert!(matches!(
+                cold.demanded_native_inputs(demand, &roots, &operation),
+                Err(DemandNativeInputsError::UnadvertisedOwner { .. })
+            ));
+
+            let mut duplicate_receipt = receipt.clone();
+            duplicate_receipt
+                .modules
+                .push(duplicate_receipt.modules[0].clone());
+            assert!(ReceiptNativeInputDemand::from_products(&duplicate_receipt, &current).is_err());
+            let mut mismatched_receipt = receipt.clone();
+            mismatched_receipt.modules[0].module = "MissingCurrentOwner".into();
+            assert!(
+                ReceiptNativeInputDemand::from_products(&mismatched_receipt, &current).is_err()
+            );
+            let mut historical = global.clone();
+            let ReceiptImportOwner::Source { module_version, .. } = &mut historical.owner else {
+                unreachable!()
+            };
+            *module_version = Some(tidepool_repr::execution_schema::ModuleVersion([37; 32]));
+            receipt.targets.get_mut("target").unwrap().push(historical);
+            let mixed = ReceiptNativeInputDemand::from_products(&receipt, &current).unwrap();
+            assert_eq!(
+                mixed.sources.len(),
+                1,
+                "same-module historical choice survives a current output"
+            );
+            assert!(mixed.sources[0].module_version.is_some());
+            assert!(selected
+                .certify_receipt_groups(&mixed, &mut PackageInterfaceValidation::default())
+                .is_err());
+            let demand = cold
+                .demanded_compiler_projection(&roots, &operation)
+                .unwrap();
+            assert!(matches!(
+                cold.demanded_native_inputs(demand, &roots, &operation),
+                Err(DemandNativeInputsError::UnadvertisedOwner { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn demanded_world_facts_bind_certified_groups_and_refuse_narrowed_rows() {
         use crate::artifact_inventory::NativeArtifactDemand;
         use crate::certified_products::CertificationError;
@@ -20074,15 +20396,14 @@ mod tests {
         let operation = InventoryOperation::new(Default::default());
         let mut validation = PackageInterfaceValidation::default();
         let demand = cold
-            .source_support
-            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .demanded_compiler_projection(&roots, &operation)
             .unwrap();
         let mut selected = cold
             .demanded_native_inputs(demand, &roots, &operation)
             .unwrap();
         let receipt = demand_group_receipt_fixture(&cold, &root);
         let groups = selected
-            .certify_receipt_groups(&receipt, &mut validation)
+            .certify_receipt_groups(&receipt_input_demand_fixture(&receipt), &mut validation)
             .unwrap();
 
         // R4: certified rows, not the closure map, are the executable binding
@@ -20122,8 +20443,7 @@ mod tests {
         // The same narrowed rows are refused when the demand owner has issued
         // no delta for them: echoed facts alone are not permission.
         let demand = cold
-            .source_support
-            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .demanded_compiler_projection(&roots, &operation)
             .unwrap();
         let mut unissued = cold
             .demanded_native_inputs(demand, &roots, &operation)
@@ -20225,8 +20545,7 @@ mod tests {
                 let cold = demanded_native_fixture(unrelated, mode, partial);
                 let operation = InventoryOperation::new(Default::default());
                 let demand = cold
-                    .source_support
-                    .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+                    .demanded_compiler_projection(&roots, &operation)
                     .unwrap();
                 NativeOfferContribution::take_group_binding_scope_visits();
                 let selected = cold
@@ -20283,12 +20602,7 @@ mod tests {
                     ..Default::default()
                 });
                 let demand = cold
-                    .source_support
-                    .demanded_compiler_projection(
-                        &cold.metadata.retained,
-                        &BTreeSet::new(),
-                        &empty_operation,
-                    )
+                    .demanded_compiler_projection(&BTreeSet::new(), &empty_operation)
                     .unwrap();
                 let empty = cold
                     .demanded_native_inputs(demand, &BTreeSet::new(), &empty_operation)
@@ -20299,8 +20613,7 @@ mod tests {
                 assert_eq!(empty_operation.work_usage().unwrap(), (0, 0));
 
                 let demand = cold
-                    .source_support
-                    .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+                    .demanded_compiler_projection(&roots, &operation)
                     .unwrap();
                 let exhausted = InventoryOperation::new(InventoryDecodeLimits {
                     max_work: 0,
@@ -20550,8 +20863,7 @@ mod tests {
 
         let roots = BTreeSet::from([parent_owner]);
         let demand = cold
-            .source_support
-            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .demanded_compiler_projection(&roots, &operation)
             .unwrap();
         let other = demanded_native_fixture(0, NativeArtifactDemand::AllGroups, false);
         assert!(matches!(
@@ -20559,8 +20871,7 @@ mod tests {
             Err(DemandNativeInputsError::ForeignBasis)
         ));
         let demand = cold
-            .source_support
-            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .demanded_compiler_projection(&roots, &operation)
             .unwrap();
         assert!(matches!(
             cold.demanded_native_inputs(
@@ -20627,8 +20938,7 @@ mod tests {
             );
             let operation = InventoryOperation::new(Default::default());
             let demand = cold
-                .source_support
-                .demanded_compiler_projection(&cold.metadata.retained, &role_roots, &operation)
+                .demanded_compiler_projection(&role_roots, &operation)
                 .unwrap();
             let dependency_only = cold
                 .demanded_native_inputs(demand, &BTreeSet::from([parent_owner.clone()]), &operation)
@@ -20640,8 +20950,7 @@ mod tests {
                 .0
                 .contains_key(&child_owner));
             let demand = cold
-                .source_support
-                .demanded_compiler_projection(&cold.metadata.retained, &role_roots, &operation)
+                .demanded_compiler_projection(&role_roots, &operation)
                 .unwrap();
             let explicit = cold
                 .demanded_native_inputs(demand, &role_roots, &operation)
@@ -20710,8 +21019,7 @@ mod tests {
             let mut cold = demanded_native_fixture(0, NativeArtifactDemand::AllGroups, false);
             let operation = InventoryOperation::new(Default::default());
             let demand = cold
-                .source_support
-                .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+                .demanded_compiler_projection(&roots, &operation)
                 .unwrap();
             let id = cold.projection().snapshot_roles()[roots.first().unwrap()]
                 .original()
@@ -20743,8 +21051,7 @@ mod tests {
         let roots = BTreeSet::from([identity("fixture", "Joined")]);
         let operation = InventoryOperation::new(Default::default());
         let demand = cold
-            .source_support
-            .demanded_compiler_projection(&cold.metadata.retained, &roots, &operation)
+            .demanded_compiler_projection(&roots, &operation)
             .unwrap();
         assert!(matches!(
             cold.demanded_native_inputs(demand, &roots, &operation),

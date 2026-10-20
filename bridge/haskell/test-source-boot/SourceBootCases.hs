@@ -190,6 +190,9 @@ import Tidepool.ExactHydration
   , captureProtectedTemplateImports, renderProtectedTemplateImports
   , generatedScaffoldRecipeWithProtectedImports
   , generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe )
+import Tidepool.TypedSegment.Source
+  ( prepareModuleDemand, annotateModuleDemand, moduleInputOccurrences, newSegmentDemandScope )
+import Tidepool.ExactHydration (captureGeneratedScaffoldSource)
 import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts, serializeOriginalInterface, ExactContextForkFailure(..))
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts, admittedOriginalProof, admittedOriginalInterface)
@@ -236,7 +239,7 @@ import Tidepool.ExactScope
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, resolveCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, resolveCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, resolveNativeAnnotations, annotateNativeModule, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate, preambleImportMarker)
 import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, defaultParserDynFlags, CellSourcePlan(..))
 import Tidepool.ExecutionSource
@@ -4486,7 +4489,24 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
             liftIO (writeFile target ("module CheckedNativeSignatures where\n" ++ body))
             parseModule (summary { ms_hspp_buf = Nothing, ms_hspp_file = target })
       slot <- parseSlot "__result :: TidepoolActivationInput\n__result = undefined\nwarningProbe = ()\n"
-      native <- liftIO (rewriteHostInputType (crHscEnv checked) 1 signature slot)
+      -- Demand renaming and final checking consume the SAME resolved native
+      -- product. The raw placeholder must fail before that annotation.
+      nativeSlots <- liftIO (resolveNativeAnnotations (crHscEnv checked) Nothing (Just (1,signature)))
+      native <- liftIO (annotateNativeModule nativeSlots slot)
+      source <- liftIO (readFile target)
+      let slotFlags = ms_hspp_opts (pm_mod_summary slot)
+      recipe <- liftIO (generatedCheckingTemplateRecipe slotFlags (CheckedTemplateImports [] [])
+        source source target "CheckedNativeSignatures" >>= either fail pure)
+      captured <- liftIO (captureGeneratedScaffoldSource recipe target >>= either fail pure)
+      demand <- either (fail . show) pure (prepareModuleDemand slotFlags captured)
+      scope <- liftIO (newSegmentDemandScope (crHscEnv checked) (Map.empty :: Map.Map String ()))
+      rawDemand <- liftIO (moduleInputOccurrences (crHscEnv checked) scope demand)
+      liftIO $ unless (case rawDemand of Left _ -> True; _ -> False)
+        (fail "raw native type placeholder unexpectedly passed demand renaming")
+      annotatedDemand <- liftIO (annotateModuleDemand nativeSlots demand)
+      demanded <- liftIO (moduleInputOccurrences (crHscEnv checked) scope annotatedDemand)
+      liftIO $ unless (case demanded of Right [] -> True; _ -> False)
+        (fail "resolved native annotation failed demand renaming")
       let warningSource = nativeParsedModule native
           warningSummary = pm_mod_summary warningSource
           warningNative = native { nativeParsedModule = warningSource

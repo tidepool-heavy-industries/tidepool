@@ -40,6 +40,8 @@ mod failure_sources;
 pub(crate) mod invocation_output;
 mod production_entry;
 mod selected_session_values;
+#[cfg(test)]
+mod world_value_selection_tests;
 pub(crate) use execution_diagnostics::InputArtifactDiagnostics;
 pub use execution_diagnostics::{compiler_scratch_directory, CompilerDiagnosticCapture};
 pub use production_entry::{
@@ -874,16 +876,9 @@ pub fn prepare_world_cell_program(
     let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
         program.validation().inventory.clone(),
     );
-    let names = program
-        .demanded_rows()
-        .iter()
-        .map(|row| row.owner().module_name())
-        .collect::<Vec<_>>();
-    let selected_values =
-        SelectedSessionValueOwners::capture(names.iter().map(std::ffi::OsStr::new))?;
     let produced_outputs =
         checked_cell::CheckedValueInputs::capture_world_produced_types(&program, &mut validation)?;
-    let mut continuation = crate::declaration_context::WorldProgramContinuation::begin(&program);
+    let mut continuation = crate::declaration_context::WorldProgramContinuation::begin(&program)?;
     let mut stage_sources = Vec::new();
     let mut planned_declarations = BTreeMap::new();
     let mut outputs = BTreeMap::new();
@@ -898,59 +893,20 @@ pub fn prepare_world_cell_program(
         let original = stage.identity().original_owner().is_some();
         let stage_produced =
             produced_outputs.for_segment(first..if original { first } else { end })?;
-        let stage_root = root.join(
-            stage
-                .outputs()
-                .source_receipt()
-                .relative()
-                .parent()
-                .ok_or_else(|| {
-                    CompileError::ExtractFailed("World stage source output has no namespace".into())
-                })?,
-        );
         let decoded =
             crate::declaration_context::decode_world_source_receipt(&program, stage.index())?;
-        let (packages_path, packages) = decoded.package_imports();
-        validation
-            .record_captured_bytes(packages_path, packages)
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        let raw = certified_products::ParsedModuleProducts::decode_with_operation(
-            checked_cell::world_output_bytes(
-                &program,
-                stage.outputs().module_products().relative(),
-            )?,
-            packages,
-            validation.inventory.clone(),
-        )
-        .map_err(compiler_evidence_failure)?;
-        let receipt = certified_products::decode_segment_originals_with_operation(
-            checked_cell::world_output_bytes(
-                &program,
-                stage.outputs().certified_products().relative(),
-            )?,
-            &stage_root,
-            &validation.inventory,
-        )
-        .map_err(compiler_evidence_failure)?;
         let mut segment = decoded.issue_segment_originals(
-            receipt,
-            raw,
             None,
-            &selected_values,
             Some(&stage_produced),
             &mut validation,
             continuation,
         )?;
         if original {
             let planned = segment.planned_declaration(&program, stage)?;
-            let view = segment
-                .originals
-                .authored_artifacts()
-                .map_err(compiler_evidence_failure)?
-                .clone();
-            let selection = segment.originals.source_selection().clone();
-            let context =
-                segment.admit_program_support(&program, &view, &stage_produced, &selection)?;
+            let output = crate::declaration_context::IssuedOriginalOutput::from_segment_originals(
+                &segment.originals,
+            )?;
+            let context = segment.admit_program_support(&program, &output, &stage_produced)?;
             item_contexts.insert(
                 first,
                 crate::checked_cell::CellProgramItemContext {
@@ -963,7 +919,6 @@ pub fn prepare_world_cell_program(
             let mut artifacts =
                 crate::declaration_context::bind_certified_segment_artifacts_with_validation(
                     &segment.originals,
-                    segment.artifacts(),
                     &mut validation,
                 )?;
             let mut native_prefix: Option<Arc<SealedTurnProducts>> = None;
@@ -1032,9 +987,9 @@ pub fn prepare_world_cell_program(
                 let (certified, globals, packages) = segment
                     .originals
                     .select_item(
+                        &mut artifacts,
                         item_receipt,
                         &target,
-                        &selected_values,
                         Some(&produced),
                         &mut validation,
                     )
@@ -1071,9 +1026,8 @@ pub fn prepare_world_cell_program(
                     }),
                     &mut validation,
                 )?;
-                let output = crate::declaration_context::IssuedOriginalOutput::issue(
-                    certified.source_selection.clone(),
-                    admitted.target.artifacts().clone(),
+                let output = crate::declaration_context::IssuedOriginalOutput::from_segment_item(
+                    &certified,
                 )?;
                 let execution = segment.original_execution_context(output.compiler_inputs())?;
                 segment.retain_private_output(&output);
@@ -1103,9 +1057,8 @@ pub fn prepare_world_cell_program(
                 };
                 let mut context = segment.admit_program_support(
                     &program,
-                    products.artifact_view(),
+                    products.planned_original_output()?,
                     &produced,
-                    products.source_selection(),
                 )?;
                 if !item.binders().is_empty() {
                     context = segment
@@ -2791,7 +2744,6 @@ impl SelectedModuleCandidateOffer {
                 let artifacts =
                     crate::declaration_context::bind_certified_segment_artifacts_with_validation(
                         source_segment.original_products(physical, &validation.inventory)?,
-                        segment_input.compiler_inputs().artifacts(),
                         &mut validation,
                     )?;
                 segment_timing.advance("initialize_segment_cursor");
@@ -4055,9 +4007,16 @@ fn seal_turn_outputs_with_validation(
             .map_err(compiler_evidence_failure)?;
             let (products, globals, packages) = originals
                 .select_item(
+                    segment_cursor
+                        .as_mut()
+                        .ok_or_else(|| {
+                            CompileError::ExtractFailed(
+                                "segment item lacks its compiler prefix cursor".into(),
+                            )
+                        })?
+                        .selection,
                     item,
                     prepared,
-                    &offer.selected_session_values,
                     Some(produced_types.ok_or_else(|| {
                         CompileError::ExtractFailed(
                             "segment item lacks its checked type selection".into(),
@@ -4218,10 +4177,14 @@ fn seal_turn_outputs_with_validation(
                 inclusive = true,
             )
             .in_scope(|| {
-                crate::declaration_context::IssuedOriginalOutput::issue(
-                    certified.source_selection.clone(),
-                    artifact_view.clone(),
-                )
+                if segment_originals.is_some() {
+                    crate::declaration_context::IssuedOriginalOutput::from_segment_item(&certified)
+                } else {
+                    crate::declaration_context::IssuedOriginalOutput::issue(
+                        certified.source_selection.clone(),
+                        artifact_view.clone(),
+                    )
+                }
             })?;
             let execution = admission.original_execution_context(output.compiler_inputs())?;
             SealedOriginalEvidence::Exact { output, execution }
@@ -6077,6 +6040,7 @@ fn compile_invocation_inner(
                 ));
             }
             certified_products::CertifiedProducts {
+                original_inputs: None,
                 groups: certified_products::IssuedGroupCandidates::empty(),
                 recovery_products: Arc::from([]),
                 module_interfaces: Arc::from([]),
@@ -8518,6 +8482,22 @@ mod module_product_tests {
     #[test]
     #[ignore = "requires the declared rooted compiler service; toolchain_world_native_seal_test owns it"]
     fn real_world_output_seals_native_items_after_its_matching_compiler_end() {
+        assert_real_world_native_history(false, false);
+    }
+
+    #[test]
+    #[ignore = "requires the declared rooted compiler service; toolchain_world_original_seal_test owns it"]
+    fn real_world_original_output_seals_its_actual_native_declaration() {
+        assert_real_world_native_history(false, true);
+    }
+
+    #[test]
+    #[ignore = "requires the declared rooted compiler service; toolchain_world_mixed_seal_test owns it"]
+    fn real_world_mixed_output_retains_prior_native_stages() {
+        assert_real_world_native_history(true, false);
+    }
+
+    fn assert_real_world_native_history(mixed: bool, declaration_only: bool) {
         use crate::cell_plan::WorldCellAdmissionSubject;
         use crate::checked_cell::{CellProgramBasis, CheckedPlannedCellSlot};
         use crate::compiler_world::{
@@ -8546,18 +8526,61 @@ mod module_product_tests {
                     let source_path = root.path().join("Module.hs");
                     std::fs::write(&source_path, "module Module where\n")?;
                     let body = std::fs::read(source_path)?;
+                    let mut roots = vec![CapturedCompilerSourceRoot {
+                        manifest: crate::cache::SourceRootManifest::from_file_digests([(
+                            PathBuf::from("Module.hs"),
+                            blake3::hash(&body).to_hex().to_string(),
+                        )])
+                        .expect("actual captured source manifest"),
+                        bodies: BTreeMap::from([(
+                            PathBuf::from("Module.hs"),
+                            Arc::<[u8]>::from(body),
+                        )]),
+                    }];
+                    if mixed || declaration_only {
+                        let prelude = PathBuf::from(
+                            std::env::var_os("TIDEPOOL_PRELUDE_DIR").ok_or_else(|| {
+                                CompileError::ExtractFailed(
+                                    "missing declared renderer source resource".into(),
+                                )
+                            })?,
+                        );
+                        let mut pending = vec![prelude.clone()];
+                        let mut bodies = BTreeMap::new();
+                        let mut remaining = CapturedCompilerSources::capture_byte_allowance()?;
+                        while let Some(directory) = pending.pop() {
+                            for entry in std::fs::read_dir(directory)? {
+                                let entry = entry?;
+                                let path = entry.path();
+                                if path.is_dir() {
+                                    pending.push(path);
+                                } else if path
+                                    .extension()
+                                    .is_some_and(|extension| extension == "hs")
+                                {
+                                    let body = std::fs::read(&path)?;
+                                    remaining = remaining.checked_sub(body.len() as u64).ok_or_else(||
+                                            CompileError::ExtractFailed("declared renderer source capture exceeds allowance".into()))?;
+                                    bodies.insert(
+                                        path.strip_prefix(&prelude)
+                                            .expect("source under declared root")
+                                            .to_path_buf(),
+                                        Arc::<[u8]>::from(body),
+                                    );
+                                }
+                            }
+                        }
+                        assert!(bodies.contains_key(Path::new("Tidepool/Inspection/Display.hs")));
+                        let manifest = crate::cache::SourceRootManifest::from_file_digests(
+                            bodies.iter().map(|(path, body)| {
+                                (path.clone(), blake3::hash(body).to_hex().to_string())
+                            }),
+                        )
+                        .expect("actual declared renderer source manifest");
+                        roots.push(CapturedCompilerSourceRoot { manifest, bodies });
+                    }
                     let sources = Arc::new(CapturedCompilerSources::from_captured_roots(
-                        vec![CapturedCompilerSourceRoot {
-                            manifest: crate::cache::SourceRootManifest::from_file_digests([(
-                                PathBuf::from("Module.hs"),
-                                blake3::hash(&body).to_hex().to_string(),
-                            )])
-                            .expect("actual captured source manifest"),
-                            bodies: BTreeMap::from([(
-                                PathBuf::from("Module.hs"),
-                                Arc::<[u8]>::from(body),
-                            )]),
-                        }],
+                        roots,
                         Arc::from(&b"native-world-source"[..]),
                         root,
                     )?);
@@ -8576,7 +8599,14 @@ mod module_product_tests {
                         &endpoint,
                         &world,
                         Arc::new(tidepool_extract_cmd::WorldCellRecipe {
-                            source: "let answer = (1 :: Int)".into(),
+                            source: if declaration_only {
+                                include_str!("../tests/fixtures/world-native/DeclarationHistory.hs")
+                            } else if mixed {
+                                include_str!("../tests/fixtures/world-native/MixedHistory.hs")
+                            } else {
+                                "let answer = (1 :: Int)"
+                            }
+                            .into(),
                             template: include_str!(
                                 "../tests/fixtures/world-native/CellTemplate.hs"
                             )
@@ -8585,7 +8615,7 @@ mod module_product_tests {
                         }),
                         None,
                     )?;
-                    assert_eq!(plan.items().len(), 1);
+                    assert_eq!(plan.items().len(), if mixed { 4 } else { 1 });
                     let origin =
                         CompilerTransactionOrigin::current().expect("actual compiler operation");
                     let subject = WorldCellAdmissionSubject::for_source_transaction(
@@ -8596,22 +8626,45 @@ mod module_product_tests {
                         1,
                         [b"compiler-only native output control".to_vec()],
                     )?;
-                    let token = plan.issue_admission_token(
-                        subject,
-                        vec![CheckedPlannedCellSlot::Bind { value: 1 }],
-                        vec![vec![(
-                            "answer".into(),
+                    let value_rows = if declaration_only {
+                        vec![]
+                    } else if mixed {
+                        vec![
+                            (0, 31, "baseStage"),
+                            (2, 33, "answerStage"),
+                            (3, 34, "resultStage"),
+                        ]
+                    } else {
+                        vec![(0, 1, "answer")]
+                    };
+                    let mut binders = vec![Vec::new(); plan.items().len()];
+                    for (index, generation, name) in value_rows {
+                        binders[index].push((
+                            name.into(),
                             tidepool_repr::SessionVarId::from_extract(
                                 tidepool_codegen::prepared_program::session_var_id(
                                     &tidepool_repr::SessionModule::val(tidepool_repr::Generation(
-                                        1,
+                                        generation,
                                     ))
                                     .module_name(),
-                                    "answer",
+                                    name,
                                 ),
                             ),
-                        )]],
-                    )?;
+                        ));
+                    }
+                    let slots = if declaration_only {
+                        vec![CheckedPlannedCellSlot::Declaration { declaration: 21 }]
+                    } else if mixed {
+                        vec![
+                            CheckedPlannedCellSlot::Bind { value: 31 },
+                            CheckedPlannedCellSlot::Declaration { declaration: 32 },
+                            CheckedPlannedCellSlot::Bind { value: 33 },
+                            CheckedPlannedCellSlot::Bind { value: 34 },
+                        ]
+                    } else {
+                        vec![CheckedPlannedCellSlot::Bind { value: 1 }]
+                    };
+                    let token = plan.issue_admission_token(subject, slots, binders)?;
                     let reservation = plan.reserve(token)?;
                     let checked = crate::compiler_world::admit_world_cell_program(
                         &endpoint,
@@ -8642,16 +8695,16 @@ mod module_product_tests {
                     wrong_domain[0] ^= 1;
                     assert!(!identity.matches_source_recipe(&wrong_base, domain));
                     assert!(!identity.matches_source_recipe(base.logical_id(), &wrong_domain));
-                    let prepared = prepare_world_cell_program(checked)?;
-                    Ok::<_, CompileError>((prepared, origin))
+                    let prepared = prepare_world_cell_program(Arc::clone(&checked))?;
+                    Ok::<_, CompileError>((prepared, checked, origin))
                 },
             );
             assert_eq!(observed_close.as_ref(), Some(settled.close()));
             if let Err(error) = settled.action() {
                 panic!(
-                    "actual World native preparation failed: {error:?}; compiler close: {:?}",
-                    settled.close()
-                );
+                        "actual World native preparation failed (mixed={mixed}, declaration_only={declaration_only}, cancel={cancel_after_end}): {error:?}; compiler close: {:?}",
+                        settled.close()
+                    );
             }
             assert!(matches!(
                 settled.close(),
@@ -8661,13 +8714,50 @@ mod module_product_tests {
                 .host_admission_cancellation()
                 .expect("owner-issued post-END admission")
                 .clone();
-            if let Ok((_, origin)) = settled.action() {
+            if let Ok((_, _, origin)) = settled.action() {
                 assert!(settled.belongs_to(origin));
             }
-            let (prepared, _) = settled
+            let (prepared, checked, _) = settled
                 .into_outcome()
                 .action
                 .expect("actual World native preparation");
+            if mixed && !cancel_after_end {
+                use crate::compiler_world::WorldCellRuntimeInputOrigin;
+                assert_eq!(checked.stages().len(), 3);
+                assert_eq!(checked.stages()[0].ordinals(), &[0]);
+                assert_eq!(checked.stages()[1].ordinals(), &[1]);
+                assert_eq!(checked.stages()[2].ordinals(), &[2, 3]);
+                let first = checked.item(0).expect("actual first binding");
+                let [base] = first.binders() else {
+                    panic!("first item captures exactly baseStage");
+                };
+                assert_eq!(base.name(), "baseStage");
+                let base = tidepool_repr::SessionVarId::from_extract(base.varid());
+                let demand = checked.runtime_binding_demand();
+                assert!(demand.existing().is_empty());
+                assert_eq!(demand.prior_stage(), &[base]);
+                assert!(checked.demanded_rows().is_empty());
+                assert!(first.selected_runtime_inputs().inputs().is_empty());
+                for ordinal in [1, 2] {
+                    let inputs = checked
+                        .item(ordinal)
+                        .expect("actual later stage")
+                        .selected_runtime_inputs();
+                    assert!(!inputs.inputs().is_empty());
+                    for input in inputs.inputs() {
+                        assert_eq!(input.session_var(), base);
+                        assert!(input.checked_row().is_none());
+                        assert!(matches!(
+                            input.origin(),
+                            WorldCellRuntimeInputOrigin::PriorStage {
+                                producer: 0,
+                                consumer: 1 | 2,
+                            }
+                        ));
+                    }
+                }
+                checked.assert_captured_stage_output_refusals();
+            }
             if cancel_after_end {
                 cancellation.cancel_host_admission();
                 let Err(CompileError::Io(error)) = prepared.seal(&admission) else {
@@ -8680,11 +8770,71 @@ mod module_product_tests {
                 .seal(&admission)
                 .expect("same actual output after END");
             assert!(matches!(program.basis(), CellProgramBasis::World(_)));
-            assert_eq!(program.items().len(), 1);
+            assert_eq!(program.items().len(), if mixed { 4 } else { 1 });
+            if declaration_only {
+                let item = &program.items()[0];
+                assert!(item.native().is_none());
+                let certificate = item
+                    .checked_item()
+                    .planned_declaration()
+                    .expect("actual authored stage");
+                assert_eq!(
+                    certificate.product().owner().module,
+                    "Tidepool.Session.Lib.G21"
+                );
+                let native = certificate
+                    .product()
+                    .original_native()
+                    .expect("authentic Original native witness");
+                assert!(!native.inventory_facts().native_group_ordinals.is_empty());
+                assert!(certificate
+                    .lexical_exports()
+                    .iter()
+                    .flat_map(|export| std::iter::once(&export.head).chain(export.children.iter()))
+                    .any(|identity| identity.occurrence == "readOriginalStage"));
+                continue;
+            }
+            if mixed {
+                let declaration = &program.items()[1];
+                assert!(declaration.native().is_none());
+                let certificate = declaration
+                    .checked_item()
+                    .planned_declaration()
+                    .expect("actual authored stage certificate");
+                assert_eq!(
+                    certificate.product().owner().module,
+                    "Tidepool.Session.Lib.G32"
+                );
+                assert!(program.items()[2].native().is_some());
+                assert!(program.items()[3].native().is_some());
+                assert!(
+                    program.items()[0]
+                        .compiler_context()
+                        .compiler_source_support()
+                        .projection()
+                        .snapshot_roles()
+                        .keys()
+                        .all(|owner| owner.module != "Tidepool.Session.Lib.G32"),
+                    "early item cannot see later declaration"
+                );
+                assert!(
+                    program.items()[3]
+                        .compiler_context()
+                        .compiler_source_support()
+                        .projection()
+                        .snapshot_roles()
+                        .keys()
+                        .any(|owner| owner.module == "Tidepool.Session.Lib.G32"),
+                    "later item retains its earlier declaration"
+                );
+            }
             let native = program.items()[0]
                 .native()
                 .expect("actual binding native program");
-            assert_eq!(native.item().binders(), &["answer"]);
+            assert_eq!(
+                native.item().binders(),
+                &[if mixed { "baseStage" } else { "answer" }]
+            );
             assert!(native.value_interface().is_some());
             let value = native.value_interface_certificate().unwrap();
             let [signature] = native.item().signatures() else {

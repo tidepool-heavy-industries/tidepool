@@ -18,11 +18,11 @@ use tidepool_toolchain::declaration_join::{
 
 use super::persistent::PersistentSession;
 use super::render::{
-    extend_exports_by_head, AdmittedDeclarationSurface, DeclTurn, JoinedDeclaration,
+    AdmittedDeclarationSurface, DeclTurn, JoinedDeclaration, extend_exports_by_head,
 };
 use super::{
-    recovery, DeclarationSource, PublicManifestBase, PublicVisibilitySnapshot, RecoveryPublicOwner,
-    SessionError, SessionLib, StagedPublicManifest,
+    DeclarationSource, PublicManifestBase, PublicVisibilitySnapshot, RecoveryPublicOwner,
+    SessionError, SessionLib, StagedPublicManifest, recovery,
 };
 
 #[derive(Clone)]
@@ -150,7 +150,7 @@ pub(crate) enum PublicationEvidence {
 }
 
 impl PublicationEvidence {
-    fn receipt(&self) -> &Arc<AcceptedJoin> {
+    pub(super) fn receipt(&self) -> &Arc<AcceptedJoin> {
         match self {
             Self::NewJoin(receipt) => receipt,
             Self::ReusedProjection { projection, .. } => projection.receipt(),
@@ -210,8 +210,6 @@ pub(super) struct PreparedDeclarationPublication {
     pub(super) joined: JoinedDeclaration,
     pub(super) declared_names: Vec<String>,
     pub(super) source_domain_owners: Vec<tidepool_repr::execution_schema::CachedHomeOwner>,
-    pub(super) binding_custody:
-        Vec<tidepool_toolchain::artifact_inventory::NativeBindingRequirement>,
 }
 
 fn invalid_at(path: &Path, detail: impl Into<String>) -> SessionError {
@@ -993,12 +991,15 @@ impl PersistentSession {
             public_context,
             surface,
         } = captured;
-        if intent.world().is_some() {
-            return Err(SessionError::WorldCellDeclarationPublicationCapabilityMissing);
-        }
         self.admit_source_work_in(public.semantic.expected_public.scope)?;
         let reserved = self.lib_mut().reserve_join_for_publication(&mut public)?;
         let expected_public_version = paired_version(&public);
+        // World joins resolve only their owned interfaces and declared packages.
+        let includes = if intent.world().is_some() {
+            Vec::new()
+        } else {
+            self.lib().extra_include.clone()
+        };
         Ok(DeclarationPublicationBase {
             reservation: JoinReservation {
                 generation: reserved,
@@ -1008,7 +1009,7 @@ impl PersistentSession {
             current_public,
             public_context,
             surface,
-            includes: self.lib().extra_include.clone(),
+            includes,
             session_root: self.lib().root.clone(),
             expected_public_version,
         })
@@ -1504,34 +1505,8 @@ impl AcceptedDeclarationPublication {
         turn.items = receipt
             .exports()
             .iter()
-            .map(|export| match export.kind {
-                tidepool_toolchain::declaration_join::DeclarationKind::Value => {
-                    super::ExportItem::Value {
-                        name: export.head.occurrence.clone(),
-                    }
-                }
-                tidepool_toolchain::declaration_join::DeclarationKind::Type => {
-                    super::ExportItem::Type {
-                        name: export.head.occurrence.clone(),
-                        cons: export
-                            .children
-                            .iter()
-                            .map(|child| child.occurrence.clone())
-                            .collect(),
-                    }
-                }
-                tidepool_toolchain::declaration_join::DeclarationKind::Class => {
-                    super::ExportItem::Class {
-                        name: export.head.occurrence.clone(),
-                        methods: export
-                            .children
-                            .iter()
-                            .map(|child| child.occurrence.clone())
-                            .collect(),
-                    }
-                }
-            })
-            .collect();
+            .map(super::ExportItem::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
         let private_owners = base
             .intent
             .writes
@@ -1587,7 +1562,6 @@ impl AcceptedDeclarationPublication {
             .collect();
         let declaration = PreparedDeclarationPublication {
             source_domain_owners,
-            binding_custody,
             generation: base.reservation.generation,
             declared_names,
             joined: JoinedDeclaration {

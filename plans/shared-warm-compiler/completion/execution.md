@@ -1,3 +1,7 @@
+> Superseded execution ordering: use [plan.md](plan.md) and
+> [implementation-reset.md](implementation-reset.md). The assignments below
+> are historical source material, not current authorization or readiness.
+
 # Scaffolding and receiving assignments
 
 Accepted execution plan; implementation starts from `de12466597312787e7eda3230d67857c60df2997`.

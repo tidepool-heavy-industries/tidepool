@@ -5,7 +5,7 @@
 //! Suspension is threadless: a continuation is rooted as data and a later
 //! entry may resume it from a fresh evaluation thread.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -379,6 +379,13 @@ pub struct PersistentSession {
     /// silently compiling the stub's own self-referential body — see
     /// `mount_carrier_in`'s doc comment for why that body must never run.
     retired_stub_sources: Vec<Generation>,
+}
+
+pub(super) struct WorldDeclarationVisibleBinding {
+    pub(super) identity: tidepool_repr::execution_schema::SymbolIdentity,
+    pub(super) id: SessionVarId,
+    pub(super) defining_scope: u64,
+    pub(super) row: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -2026,9 +2033,9 @@ impl PersistentSession {
             && self.compile_view_key_in(base.scope).as_ref() == Some(&base.key)
     }
 
-    pub(super) fn install_inspection_world_if_current(
+    pub(super) fn install_inspection_world_if_current<A>(
         &mut self,
-        completed: &super::inspection::CompletedInspectionWorld,
+        completed: &super::inspection::CompletedInspectionWorld<A>,
         source: &super::GenerationArtifactReference,
         original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> bool {
@@ -2463,12 +2470,14 @@ impl PersistentSession {
         &mut self,
         staged: super::StagedDeclaration,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
-        self.adopt_staged_declaration_prepared(staged, |_, _, _, _, _| Ok(|| {}))
+        self.adopt_staged_declaration_prepared(staged, None, |_, _, _, _, _| {
+            Ok(|_: &mut super::SessionLib| {})
+        })
     }
 
     /// Prepare an exact checked-prefix successor before durable adoption. The
     /// returned activation owns its snapshot and only installs it after COMMIT.
-    pub(super) fn adopt_staged_declaration_with_activation<A: FnOnce()>(
+    pub(super) fn adopt_staged_declaration_with_activation<A: FnOnce(&mut super::SessionLib)>(
         &mut self,
         staged: super::StagedDeclaration,
         prepare: impl FnOnce(
@@ -2481,6 +2490,7 @@ impl PersistentSession {
         let mut successor = None;
         let committed = self.adopt_staged_declaration_prepared(
             staged,
+            None,
             |session, staged, origin, changes, next_epoch| {
                 let origin = origin.ok_or(SessionError::StaleStagedDeclaration)?;
                 let (view, visibility, retained) =
@@ -2500,9 +2510,97 @@ impl PersistentSession {
         committed
     }
 
-    fn adopt_staged_declaration_prepared<A: FnOnce()>(
+    /// Prepare the immutable World and runtime witness from the same binding
+    /// delta that the declaration commit consumes. No compiler view is rebuilt.
+    pub(super) fn adopt_staged_declaration_with_world_activation<
+        A: FnOnce(&mut super::SessionLib),
+    >(
         &mut self,
         staged: super::StagedDeclaration,
+        prior: &super::PublicVisibilitySnapshot,
+        retained_ids: &[SessionVarId],
+        prepare: impl FnOnce(
+            CompileViewKey,
+            super::PublicVisibilitySnapshot,
+            Vec<(String, Option<WorldDeclarationVisibleBinding>)>,
+        ) -> Result<A, SessionError>,
+    ) -> Result<DeclarationPlaneCommit, SessionError> {
+        self.adopt_staged_declaration_prepared(
+            staged,
+            Some(retained_ids),
+            |session, staged, origin, changes, next_epoch| {
+                let scope = staged.scope();
+                if prior.scope != scope
+                    || session.public_visibility_snapshot_in(scope).as_ref() != Some(prior)
+                {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                let projected = session
+                    .bindings
+                    .prepared_declaration_projection(&session.scopes, origin, changes)
+                    .map_err(SessionError::InvalidPublicBindingPromotion)?;
+                let mut key = session
+                    .compile_view_key_in(scope)
+                    .ok_or(SessionError::DeadScope(scope))?;
+                key.tip = staged.generation;
+                key.bindings = projected.scope_witness().clone();
+                key.public_epoch = next_epoch;
+                let delta = projected
+                    .visible_changes()
+                    .map(|(name, entry)| {
+                        let binding = entry
+                            .map(|entry| -> Result<WorldDeclarationVisibleBinding, SessionError> {
+                                let row = session
+                                    .retained_checked_value_artifact(entry.module)
+                                    .ok_or(SessionError::MissingRetainedValueInterface(
+                                        entry.module,
+                                    ))?;
+                                Ok(WorldDeclarationVisibleBinding {
+                                    identity: entry.value.identity.clone(),
+                                    id: entry.id,
+                                    defining_scope: entry.scope.0,
+                                    row: row.clone(),
+                                })
+                            })
+                            .transpose()?;
+                        Ok((name.0.clone(), binding))
+                    })
+                    .collect::<Result<Vec<_>, SessionError>>()?;
+                let mut visibility = prior.clone();
+                visibility.epoch = next_epoch;
+                visibility.declaration_tip = staged.generation;
+                for (name, entry) in &delta {
+                    match (
+                        visibility
+                            .bindings
+                            .binary_search_by(|(existing, _)| existing.cmp(name)),
+                        entry,
+                    ) {
+                        (Ok(index), Some(binding)) => visibility.bindings[index].1 = binding.id,
+                        (Err(index), Some(binding)) => visibility
+                            .bindings
+                            .insert(index, (name.clone(), binding.id)),
+                        (Ok(index), None) => {
+                            visibility.bindings.remove(index);
+                        }
+                        (Err(_), None) => {}
+                    }
+                }
+                // This existing owner validates the prospective source selection
+                // and removed observation edges at the actual join boundary.
+                visibility.source_selection = session
+                    .bindings
+                    .prepared_scope_snapshot_in(&session.scopes, scope, origin, Some(changes))
+                    .map_err(SessionError::InvalidPublicBindingPromotion)?;
+                prepare(key, visibility, delta)
+            },
+        )
+    }
+
+    fn adopt_staged_declaration_prepared<A: FnOnce(&mut super::SessionLib)>(
+        &mut self,
+        staged: super::StagedDeclaration,
+        retained_ids: Option<&[SessionVarId]>,
         prepare: impl FnOnce(
             &mut Self,
             &super::StagedDeclaration,
@@ -2537,7 +2635,7 @@ impl PersistentSession {
             .map(|(id, _)| id.var())
             .collect::<Vec<_>>();
         let items = staged.items().to_vec();
-        let source_origin = staged
+        let mut source_origin = staged
             .certified_authored
             .as_ref()
             .map(|certificate| {
@@ -2549,10 +2647,41 @@ impl PersistentSession {
             })
             .transpose()
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        let binding_changes = self
-            .bindings
-            .prepare_declaration_binding_changes_in(scope, &captured_values, &replaced_names)
-            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let legacy_retained;
+        let retained_ids = match retained_ids {
+            Some(ids) => ids,
+            None => {
+                legacy_retained = staged
+                    .certified_authored
+                    .as_ref()
+                    .map(|certificate| {
+                        let requirements = certificate
+                            .projection
+                            .receipt()
+                            .native_binding_custody_requirements()?;
+                        self.resolve_native_binding_custody(scope, &requirements)
+                    })
+                    .transpose()?;
+                legacy_retained.as_deref().unwrap_or(&[])
+            }
+        };
+        let binding_changes = match source_origin.as_mut() {
+            Some(origin) => self
+                .bindings
+                .prepare_declaration_binding_changes_with_custody_in(
+                    &self.scopes,
+                    scope,
+                    origin,
+                    &captured_values,
+                    &replaced_names,
+                    retained_ids,
+                ),
+            None if retained_ids.is_empty() => self
+                .bindings
+                .prepare_declaration_binding_changes_in(scope, &captured_values, &replaced_names),
+            None => return Err(SessionError::StaleStagedDeclaration),
+        }
+        .map_err(SessionError::InvalidPublicBindingPromotion)?;
         self.public_visibility_epochs
             .try_reserve(1)
             .map_err(|error| SessionError::RecoveryManifest {
@@ -2571,13 +2700,13 @@ impl PersistentSession {
         self.lib
             .as_mut()
             .ok_or(SessionError::StaleStagedDeclaration)?
-            .admit_staged_declaration_in(staged, &visible_values, |generation| {
+            .admit_staged_declaration_in(staged, &visible_values, |lib, generation| {
                 if let Some(source_origin) = source_origin {
                     bindings.commit_source_owner_origin(source_origin);
                 }
                 bindings.commit_declaration_binding_changes(binding_changes);
                 epochs.insert(scope, next_epoch);
-                activate();
+                activate(lib);
                 DeclarationPlaneCommit {
                     generation,
                     module: SessionModule::lib(generation),
@@ -2586,7 +2715,6 @@ impl PersistentSession {
                 }
             })
     }
-
     fn prepare_declaration_successor(
         &mut self,
         staged: &super::StagedDeclaration,
@@ -2620,6 +2748,17 @@ impl PersistentSession {
                 changes,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let entries = self
+            .bindings
+            .prepared_iter_current_in(&self.scopes, scope, Some(origin), changes)
+            .map_err(SessionError::InvalidPublicBindingPromotion)?
+            .into_iter()
+            .map(|(name, entry)| (name, entry.id, entry.module))
+            .collect::<Vec<_>>();
+        let source_selection = self
+            .bindings
+            .prepared_scope_snapshot_in(&self.scopes, scope, Some(origin), Some(changes))
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         self.bindings.commit_prepared_detached_scope(capture);
         let lib = self
             .lib
@@ -2636,10 +2775,6 @@ impl PersistentSession {
         ));
         lib.tips.insert(child, tip);
 
-        let entries = self
-            .bindings
-            .prepared_iter_current_in(&self.scopes, scope, changes)
-            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let mut view = self.build_scoped_compile_view(scope, self.lib());
         let projection = Arc::make_mut(&mut view.projection);
         projection.library = Some(super::view::CompileLibrary::Certified {
@@ -2650,10 +2785,10 @@ impl PersistentSession {
         projection
             .persistent_imports
             .extend(&staged.turn.workbench_imports);
-        projection.visible_values = entries.iter().map(|(_, entry)| entry.module).collect();
+        projection.visible_values = entries.iter().map(|(_, _, module)| *module).collect();
         let mut names = HashMap::<SessionModule, Vec<String>>::new();
-        for (name, entry) in &entries {
-            names.entry(entry.module).or_default().push(name.0.clone());
+        for (name, _, module) in &entries {
+            names.entry(*module).or_default().push(name.0.clone());
         }
         projection.visible_value_names = names.into_iter().collect();
         projection.reachable_values = self
@@ -2667,7 +2802,7 @@ impl PersistentSession {
             .current_items_with_turn(staged.base_tip, &staged.turn);
         projection
             .shadowing
-            .extend(entries.iter().map(|(name, _)| super::ExportItem::Value {
+            .extend(entries.iter().map(|(name, _, _)| super::ExportItem::Value {
                 name: name.0.clone(),
             }));
         view.injected_values = self
@@ -2677,7 +2812,7 @@ impl PersistentSession {
             .collect();
         let mut bindings = entries
             .into_iter()
-            .map(|(name, entry)| (name.0, entry.id))
+            .map(|(name, id, _)| (name.0, id))
             .collect::<Vec<_>>();
         bindings.sort_by(|a, b| a.0.cmp(&b.0));
         let mut source_instances = self
@@ -2686,10 +2821,6 @@ impl PersistentSession {
             .into_iter()
             .collect::<Vec<_>>();
         source_instances.sort();
-        let source_selection = self
-            .bindings
-            .prepared_scope_snapshot_in(&self.scopes, scope, Some(origin), Some(changes))
-            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let visibility = super::PublicVisibilitySnapshot {
             scope,
             epoch: next_epoch,
@@ -4174,10 +4305,6 @@ impl PersistentSession {
         }
         let next_epoch = self.prepare_public_visibility_advance(ticket.public_scope)?;
         let prepared = if let Some(declaration) = &ticket.declaration {
-            let binding_custody = self.resolve_native_binding_custody(
-                ticket.private_scope,
-                &declaration.binding_custody,
-            )?;
             self.bindings.prepare_authored_source_publication_in(
                 &self.scopes,
                 ticket.private_scope,
@@ -4185,7 +4312,6 @@ impl PersistentSession {
                 &ticket.write_ids,
                 &ticket.source_keys,
                 &declaration.source_domain_owners,
-                &binding_custody,
             )
         } else {
             self.bindings.prepare_exact_publication_in(
@@ -4206,12 +4332,28 @@ impl PersistentSession {
             .bindings
             .prepare_binding_publication_removals(prepared, &declared_names)
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        {
+            let projection = self
+                .bindings
+                .prepared_promotion_projection(self.scope_tree(), &prepared)
+                .map_err(SessionError::InvalidPublicBindingPromotion)?;
+            for entry in projection.retained_bindings() {
+                let entry = entry.map_err(SessionError::InvalidPublicBindingPromotion)?;
+                let handle = entry.value.handle;
+                if self
+                    .prepared()
+                    .and_then(|engine| engine.prepared_handle_of(handle.raw()))
+                    != Some(handle)
+                {
+                    return Err(SessionError::InvalidPublicBindingPromotion(
+                        tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
+                    ));
+                }
+            }
+        }
         // The final promotion witness must be taken from the SAME prepared
         // promotion that would commit. It is only meaningful after removals.
         let promoted_world = if let Some(intent) = &world_execution {
-            if ticket.declaration.is_some() {
-                return Err(SessionError::WorldCellDeclarationPublicationCapabilityMissing);
-            }
             let world = intent.world().expect("World execution was selected");
             let public = self
                 .lib()
@@ -4235,10 +4377,34 @@ impl PersistentSession {
             if projection.target_scope() != ticket.public_scope {
                 return Err(SessionError::WorldCellPublicationBaseStale);
             }
+            let declaration = ticket
+                .declaration
+                .as_ref()
+                .map(|declaration| {
+                    if !declaration
+                        .joined
+                        .evidence
+                        .matches_generation(declaration.generation)
+                    {
+                        return Err(SessionError::StaleStagedDeclaration);
+                    }
+                    let mut imports = self.lib().workbench_imports_in(ticket.public_scope);
+                    imports.extend(&declaration.joined.turn.workbench_imports);
+                    public
+                        .world
+                        .prepare_declaration_publication(
+                            declaration.joined.evidence.receipt(),
+                            &declaration.joined.context,
+                            imports.into_specs(),
+                        )
+                        .map_err(SessionError::from)
+                })
+                .transpose()?;
             let successor = public.world.promote_private_bindings(
                 &world.association.world,
                 &world.private.world,
                 ticket.public_scope.0,
+                declaration,
                 projection.visible_changes().map(|(name, entry)| {
                     (
                         name.0.as_str(),
@@ -4255,7 +4421,10 @@ impl PersistentSession {
                     scope: ticket.public_scope,
                     key: CompileViewKey {
                         library: self.lib().compile_view_identity,
-                        tip: self.lib().scope_tip(ticket.public_scope),
+                        tip: ticket.declaration.as_ref().map_or_else(
+                            || self.lib().scope_tip(ticket.public_scope),
+                            |declaration| declaration.generation,
+                        ),
                         bindings,
                         compiler_inputs: self.compiler_input_revision,
                         public_epoch: next_epoch,
@@ -6437,11 +6606,32 @@ mod checkpoint_scope_tests {
         scope: ScopeId,
         owner: CachedHomeOwner,
     ) {
-        let origin = session
+        mint_fixture_origin_with_custody(session, scope, owner, &[]);
+    }
+
+    fn mint_fixture_origin_with_custody(
+        session: &mut PersistentSession,
+        scope: ScopeId,
+        owner: CachedHomeOwner,
+        retained: &[SessionVarId],
+    ) {
+        let mut origin = session
             .bindings
             .prepare_source_owner_origin_in(&session.scopes, scope, owner)
             .unwrap();
+        let changes = session
+            .bindings
+            .prepare_declaration_binding_changes_with_custody_in(
+                &session.scopes,
+                scope,
+                &mut origin,
+                &[],
+                &[],
+                retained,
+            )
+            .unwrap();
         session.bindings.commit_source_owner_origin(origin);
+        session.bindings.commit_declaration_binding_changes(changes);
     }
 
     fn assert_unrelated_certified_turn_admitted(session: &mut PersistentSession, scope: ScopeId) {
@@ -6595,9 +6785,7 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &authored_custody,
-                &[owner],
-                &[],
-            )
+                &[owner])
             .unwrap();
         session
             .bindings
@@ -6662,9 +6850,7 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &keys_a,
-                &[owner.clone()],
-                &[],
-            )
+                &[owner.clone()])
             .unwrap();
         session.bindings.commit_exact_binding_promotion(accepted);
         let before = session.residency().unwrap();
@@ -6676,9 +6862,7 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &keys_b,
-                &[owner],
-                &[],
-            ),
+                &[owner]),
             Err(tidepool_codegen::binding_table::BindingPromotionError::ConflictingSourceOrigin)
         ));
         assert_eq!(session.residency().unwrap(), before);
@@ -6711,7 +6895,6 @@ mod checkpoint_scope_tests {
         let sibling = session.mint_detached_scope(public).unwrap();
         let (target, keys) = install_selected_source_fixture(&mut session, private, "a");
         let owner = selected_sources(&session, private)[0].owner().clone();
-        mint_fixture_origin(&mut session, private, owner.clone());
         let old = rooted_publication_fixture(&mut session, "captured", 826);
         let (old_id, old_handle) = (old.id, old.value.handle);
         let requirement = NativeBindingRequirement {
@@ -6756,19 +6939,26 @@ mod checkpoint_scope_tests {
         assert!(session
             .resolve_native_binding_custody(public, std::slice::from_ref(&requirement))
             .is_err());
+        let mut foreign_origin = session
+            .bindings
+            .prepare_source_owner_origin_in(&session.scopes, private, owner.clone())
+            .unwrap();
         assert!(matches!(
-            session.bindings.prepare_authored_source_publication_in(
-                &session.scopes,
-                private,
-                public,
-                &[shadow_id],
-                &keys,
-                std::slice::from_ref(&owner),
-                &[foreign_id]
-            ),
+            session
+                .bindings
+                .prepare_declaration_binding_changes_with_custody_in(
+                    &session.scopes,
+                    private,
+                    &mut foreign_origin,
+                    &[],
+                    &[],
+                    &[foreign_id],
+                ),
             Err(tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding)
         ));
         assert_eq!(session.bindings.mutation_revision(), before);
+        mint_fixture_origin_with_custody(&mut session, private, owner.clone(), &[old_id]);
+        let publication_revision = session.bindings.mutation_revision();
         let custody = session
             .resolve_native_binding_custody(private, std::slice::from_ref(&requirement))
             .unwrap();
@@ -6782,10 +6972,9 @@ mod checkpoint_scope_tests {
                 &[shadow_id],
                 &keys,
                 &[owner],
-                &custody,
             )
             .unwrap();
-        assert_eq!(session.bindings.mutation_revision(), before);
+        assert_eq!(session.bindings.mutation_revision(), publication_revision);
         session.bindings.commit_exact_binding_promotion(prepared);
         assert_eq!(
             session
@@ -6879,9 +7068,7 @@ mod checkpoint_scope_tests {
                     public,
                     &[],
                     keys,
-                    &[owner],
-                    &[],
-                )
+                    &[owner])
                 .unwrap();
             session.bindings.commit_exact_binding_promotion(publication);
         }
@@ -6961,9 +7148,7 @@ mod checkpoint_scope_tests {
                         public,
                         &[],
                         keys,
-                        &[owner.clone()],
-                        &[],
-                    )
+                        &[owner.clone()])
                     .unwrap();
                 session.bindings.commit_exact_binding_promotion(prepared);
             }

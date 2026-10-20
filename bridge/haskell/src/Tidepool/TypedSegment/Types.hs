@@ -163,6 +163,8 @@ data TypedSegmentFailure
   | AmbiguousCaptureRoot
   | UnprovedFixedUnitRoot
   | UnprovedRootAbstraction
+  | ModuleDemandParseRejected FilePath String
+  | ModuleDemandQuasiQuoteRejected FilePath [String]
   | InputDemandRenameRejected String
   | UnprovedRootContinuation
   | UnprovedItemSequence Int

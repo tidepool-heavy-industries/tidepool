@@ -156,8 +156,9 @@ DELEGATED_ENVIRONMENT = (
     'TIDEPOOL_COMPILE_CACHE_DIR',
     'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS', 'TIDEPOOL_TIMING', 'TIDEPOOL_MEMO_TRACE',
     'TIDEPOOL_TEST_TRACE_PROFILE', 'TIDEPOOL_TIMING_SUMMARY',
+    'RUST_LOG', 'RUST_BACKTRACE',
     'TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS',
-    'TIDEPOOL_CONSTRUCTOR_CUSTODY_DIAGNOSTIC',
+    'TIDEPOOL_CONSTRUCTOR_CUSTODY_DIAGNOSTIC', 'TIDEPOOL_FINALIZED_OWNER_TRACE',
     'TIDEPOOL_TEST_BASH', 'TIDEPOOL_TEST_SLEEP', 'TIDEPOOL_BROWSER_NODE',
     'TIDEPOOL_TEST_SYSTEMD_RUN', 'TIDEPOOL_TEST_SYSTEMCTL',
     'TIDEPOOL_BROWSER_DRIVER', 'EXOMONAD_EMBEDDED_ASSET_ROOT',
@@ -537,7 +538,7 @@ def parse_args(argv, *, require_binary=True):
     parser.add_argument('--service-slice',
                         help='delegated user service slice (default: app.slice)')
     parser.add_argument('--output-dir', type=Path,
-                        help='retain bounded stdout/stderr and outcome records for every test')
+                         help='retain bounded stdout/stderr and outcomes in a fresh or empty directory')
     parser.add_argument('--retain-artifacts', action='store_true',
                         help='preserve per-case artifact roots after passing tests')
     parser.add_argument('--case-compiler-mode', action='append', default=[], metavar='NAME=MODE',
@@ -1738,6 +1739,17 @@ def retain_case_result(directory, name, passed, stdout, stderr, record):
     return passed, stderr
 
 
+def claim_output_directory(directory):
+    if directory.is_symlink():
+        raise OSError(errno.ELOOP, 'output directory is a symlink', str(directory))
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if next(directory.iterdir(), None) is not None:
+        raise FileExistsError(errno.EEXIST, 'output directory is not empty', str(directory))
+    # Keep the claim after interruption, too. Exclusive creation admits only one
+    # concurrent runner even when both observed an empty directory.
+    (directory / '.isolated-libtest-run').mkdir(mode=0o700)
+
+
 def main(argv=None):
     global INTERRUPT_SIGNAL
     options = parse_args(sys.argv[1:] if argv is None else argv)
@@ -1783,6 +1795,13 @@ def main(argv=None):
         if INTERRUPT_SIGNAL is not None:
             print(f'libtest runner interrupted by signal {INTERRUPT_SIGNAL}', file=sys.stderr)
             return 128 + INTERRUPT_SIGNAL
+
+        if options.output_dir is not None:
+            try:
+                claim_output_directory(options.output_dir)
+            except OSError as error:
+                print(f'libtest output admission failed: {error}', file=sys.stderr)
+                return 1
 
         failures = 0
 

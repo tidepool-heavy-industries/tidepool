@@ -58,7 +58,7 @@ pub use request::{
     ExactInputsRequest, ExtractRequest, InspectionNamespace, InspectionScope, PlannedCellSlot,
     PlannedCellSlotRef, ProtocolError, StructuredInspection, SymbolIdentity,
     WorldCellOperandRequest, WorldCellPlanRequest, WorldCellPrepareRequest, WorldCellRecipe,
-    WorldPublicModuleRequest, WorldQueryMode,
+    WorldQueryQuestion, WorldQueryRequest,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.
@@ -893,8 +893,8 @@ impl ExtractCmd {
         Ok(self)
     }
 
-    pub fn world_public_module(&mut self, request: WorldPublicModuleRequest) -> &mut Self {
-        self.request.world_public_module(request);
+    pub fn world_query(&mut self, request: WorldQueryRequest) -> &mut Self {
+        self.request.world_query(request);
         self
     }
 
@@ -995,24 +995,23 @@ mod tests {
         );
 
         let mut query = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
-        query.world_public_module(WorldPublicModuleRequest {
+        query.world_query(WorldQueryRequest {
             world: "a".repeat(64),
             realization: "realized".into(),
-            mode: WorldQueryMode::Type,
-            query: StructuredInspection {
+            question: WorldQueryQuestion::PublicType(StructuredInspection {
                 scope: InspectionScope::PublicModule("Data.List".into()),
                 namespace: InspectionNamespace::Value,
                 name: "map".into(),
                 generation: 1,
                 fingerprint: "display-only".into(),
-            },
+            }),
             output: "answer.bin".into(),
         });
         assert!(ExtractRequest::decode(&query.request_bytes()).is_ok());
         query.inspect_out("other.bin");
         assert_eq!(
             ExtractRequest::decode(&query.request_bytes()).unwrap_err(),
-            ProtocolError::InvalidWorldPublicModule
+            ProtocolError::InvalidWorldQuery
         );
     }
     use std::sync::Mutex;

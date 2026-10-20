@@ -48,18 +48,20 @@ At baseline, three require real GHC and two answer from runtime-held facts:
 |---|---|
 | `currentScopeView` | Entry snapshot of the admitted compile view. `ScopeProvenance` describes that observation; it is not compiler-world authority or a claim that nothing changes before the next request. No GHC query is needed. |
 | `scopeBindings expected` | Published binding identities in one admitted scope, stable sorted/deduplicated refs, exact observed count, emitted limit and provenance. It does not promise the imported GHC reader environment or public-module export enumeration. No compiler request is needed. |
-| `rowFit expected identifier` | Identifier, four-way advisory availability and exact view. For live targets, consume GHC-typed signatures and constraint checks against the actor's admitted effect row. A stale session identity may return a labelled immediate `FitUnknown` snapshot without querying a replacement binding. |
+| `rowFit expected identifier` | Identifier, four-way advisory availability and exact view. For live targets, consume GHC-typed signatures and constraint checks against the actor's admitted effect row. A missing canonical identity returns `FitUnknown` from the actual queried environment; it must not inspect a replacement with the same spelling or browse a module as a fallback. |
 | `typeOfExpression expected source` | Compile/check the probe, return original source, checked type display, advisory availability and exact view. Never evaluate the probe. Invalid source/type constraints produce the actual typed refusal. |
 | `typeSearch expected pattern` | Compile/check the pattern, match visible value identifiers, return usable source spelling, canonical reference, signature, quality, availability, dependency references and provenance. Search is over the actual admitted environment, not a hardcoded catalogue. |
 
-The baseline compiler route is `CompilerQuery::plan` / `resume_compiler_query`
-through `run_admitted_inspections`, the admitted endpoint and `Main.runInspectionMode`
-to `compileBoundRequest CheckedEnvironment`, `runBoundGhc` and `runInspectionGhc`.
-Do not mistake persistent compiler infrastructure for a fresh process per verb.
-After the cell migration, use that service's existing authenticated source/world
-inputs and output owners; do not retain a finite cell frontend to keep probes
-working. Extend the owning service operation if required, rather than creating a
-second compiler or reconstructing broad all-value input closure.
+The implemented compiler-backed effect route is the closed World query operation:
+actual Workbench capture, runtime source admission, held lexical observation,
+checking-only GHC stage, one lower answer decode, exact compiler END, and final
+source/view validation in the checkout that resumes the effect. Public-module
+info/type share the World transport and retain precise module receipts. Scoped
+info/type, rowFit, expression and search use the actual retained observation
+scaffold. No actor effect falls back to the finite inspection batch or a browse
+then filter. See [the context contract](../contracts/WORLD-OBSERVATION-CONTEXT.md)
+for worker-v27 pairing, private input TYPE custody and operand confinement.
+Compilation/local decoder controls are separate from actual hosted acceptance.
 
 `rowFit` is evidence about type/row compatibility, not permission to read a file,
 spawn a process or consume another resource. The Haskell implementation currently
@@ -248,3 +250,12 @@ supply semantic compile-view provenance that remains stable across allocation-on
 reservations and changes with actual private-prefix source/binding facts. Escalate
 if existing owners cannot expose that observation without reconstructing authority;
 do not invent a second query identity or reuse the allocation counter.
+
+
+## Deletion ledger
+
+| Surviving path | Owner and concrete follow-up | Acceptance boundary |
+|---|---|---|
+| `resident_workbench.rs` synchronous status `Bindings` branch → `inspect_actor_batch` → `inspect_compile_view` → runtime `run_admitted_inspections` | D's separately reviewed `fde2a6db47` + `1e9ef6f488` + `e26d6384f6` replace the actor status fallback with asynchronous held-World observation and delete the actor finite helpers. Receive and verify that parcel alongside this query wave; remove the now-unconsumed runtime export separately after checking its remaining consumers. Preserve honest unavailable display and typed operational errors. | This status path supplies no all-five or Persona qualification. Its actual joined race control currently fails at observation parsing before reaching publication/final validation; that failure is an open producer gate, not evidence about the race. |
+
+The obsolete `compiler-query-verbs.hs` / `compiler_query_verbs_decode_dispatch_and_resume` four-Right smoke is deleted, including its fixture catalog/input registrations. Its runtime replacement is the declared `facade_introspection_service_test` semantic hosted program, whose execution remains mandatory and unqualified until run. The shared authored program consumes all five semantic results and the discovered operation, checks genuine canonical absent-name `FitUnknown`, rejects malformed canonical identity with a typed admission refusal, and checks a retained pin after a real publication. The actual GHC selector leaf independently tests namespace/qualification/ambiguity; lower codec tests cover wrong World/question/pin/kind/candidate framing. These local controls do not substitute for the hosted effect loop or invalid-expression/source/closed-owner campaign controls.

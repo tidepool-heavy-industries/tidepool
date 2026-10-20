@@ -9,6 +9,7 @@ import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (intercalate, isPrefixOf)
 import Data.Maybe (isJust)
+import qualified Data.Text as Text
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import GHC
@@ -93,13 +94,13 @@ typedValueAliasControl libdir root prepared = do
     [value] -> pure value
     _ -> fail "typed alias control requires the actual polymorphic identity export"
   symbol <- maybe (fail "typed alias control export has no external owner") pure
-    (nameSymbolIdentity "value" (varName identifier))
+    (nameSymbolIdentity (Text.pack "value") (varName identifier))
   let artifact = ExactIfaceArtifact (unitString (moduleUnit owner)) (moduleNameString (moduleName owner))
         (Session.sessionHiPath (root </> "stage0") session) (shaHex (snd (Session.capturedSessionInterface captured))) required
       interfaces = [(artifact,hm_iface home)]
       requested = [("renamed",symbol,artifact),("synonym",symbol,artifact)]
   (ready,aliases) <- hydrateCompletedValueAliases requested interfaces hydrated >>= either fail pure
-  forM_ [symbol {symbolUnit="different-unit"},symbol {symbolNamespace="var"}] $ \changed -> do
+  forM_ [symbol {symbolUnit=Text.pack "different-unit"},symbol {symbolNamespace=Text.pack "var"}] $ \changed -> do
     rejected <- hydrateCompletedValueAliases [("renamed",changed,artifact)] interfaces hydrated
     case rejected of
       Left _ -> pure ()

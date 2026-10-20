@@ -1217,7 +1217,7 @@ def actor_observation_test_cases(binary):
     return "\n".join(rules)
 
 
-def actor_notebook_contract_test_cases(binary, env, resources, worker):
+def actor_notebook_contract_test_cases(binary):
     """Exercise installed notebook policy, settlement, reload refusal and cleanup."""
     tests = ["resident_local_actor::" + name for name in (
         "completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control",
@@ -1225,13 +1225,17 @@ def actor_notebook_contract_test_cases(binary, env, resources, worker):
         "reload_progress::unavailable_reload_leaves_parked_cells_and_control_independent",
         "reload_uncertainty::unavailable_generation_does_not_recapture_source_or_discard_bindings",
     )]
+    env, resources, worker = compiler_service_test_inputs("exomonad-actor", "actor_notebook_contract_tests")
     return "\n".join([
         "tidepool_rust_test_cases(",
         '    name = "actor_notebook_contract_tests",',
         f"    binary = {json.dumps(':' + binary)},",
         "    exact_tests = [", render_strings(tests, 8), "    ],",
-        f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 600,",
+        f"    expected_count = {len(tests)},", "    ignored = True,", "    jobs = 1,", "    timeout = 600,",
         f"    test_rule_timeout_ms = {(len(tests) * 600 + 60) * 1000},",
+        '    case_compiler_modes = {' + ", ".join(
+            json.dumps(test) + ': "owned-resident"' for test in tests
+        ) + "},",
         runtime_arguments(env, resources, worker),
         '    visibility = ["PUBLIC"],', ")", "",
     ])
@@ -1792,15 +1796,46 @@ tidepool_buildscript_run(
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
+                host_binding_tests = ["session::resident::activation_input_tests::" + name for name in (
+                    "activation_input_reservation_refuses_visible_names_without_recompiling",
+                    "activation_input_committed_binding_owns_interface_and_scope_releases_root_once",
+                    "activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservations",
+                )]
+                host_env, host_resources, host_worker = compiler_service_test_inputs(
+                    package_name, "runtime_host_binding_tests"
+                )
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "runtime_host_binding_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings(host_binding_tests, 8), "    ],",
+                    f"    expected_count = {len(host_binding_tests)},",
+                    "    jobs = 1,", "    timeout = 600,",
+                    f"    test_rule_timeout_ms = {(len(host_binding_tests) * 600 + 60) * 1000},",
+                    '    case_compiler_modes = {' + ", ".join(
+                        json.dumps(test) + ': "owned-resident"' for test in host_binding_tests
+                    ) + "},",
+                    runtime_arguments(host_env, host_resources, host_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
             if package_name == "exomonad-actor":
                 for world_target, world_tests in [
                     ("actor_compiler_world_queries_test", [
                         "resident_workbench::request_tests::public_module_world_hot_queries_skip_retained_history_preparation",
                         "resident_workbench::request_tests::public_module_world_retains_source_domain_and_invalidates_runtime_base",
                     ]),
+                    ("actor_world_status_test", [
+                        "resident_workbench::request_tests::binding_status_rejects_actual_world_answer_after_publication",
+                    ]),
                     ("actor_world_cell_input_test", [
                         "resident_workbench::request_tests::private_world_cell_json_operand_survives_plan_end_and_preparation",
                         "resident_workbench::request_tests::private_world_cell_operand_refuses_crossed_and_retired_owners",
+                    ]),
+                    ("actor_world_declaration_publication_test", [
+                        "resident_workbench::request_tests::world_declaration_publication_retains_operand_after_failed_later_cell",
+                    ]),
+                    ("actor_world_durable_generation_history_test", [
+                        "resident_workbench::request_tests::quoted_source_original_survives_coherent_generation_replacement",
                     ]),
                     ("actor_world_lifetime_test", [
                         "resident_workbench::request_tests::abandoned_private_world_birth_reaps_scope_after_lost_delivery",
@@ -1825,6 +1860,74 @@ tidepool_buildscript_run(
                 renderer_env, renderer_resources, renderer_worker = compiler_service_test_inputs(
                     package_name, "activation_renderer_terminal_tests"
                 )
+                retirement_tests = [
+                    "resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate",
+                    "resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic",
+                    "resident_workbench::request_tests::actual_retirement_owner_loss_before_send_keeps_original_open",
+                    "resident_workbench::request_tests::actual_retirement_queued_owner_loss_keeps_original_open",
+                    "resident_workbench::request_tests::actual_retirement_handler_panic_retains_frozen_candidate",
+                    "resident_workbench::request_tests::actual_retirement_waiter_loss_retains_frozen_candidate",
+                    "resident_workbench::request_tests::actual_retirement_owner_loss_after_capture_retains_guarded_membership",
+                    "resident_workbench::request_tests::actual_retirement_publication_body_refusal_retains_same_guard",
+                    "resident_workbench::request_tests::actual_retirement_linked_publication_worker_settles_cancelled_body",
+                    "resident_workbench::request_tests::actual_retirement_native_recovery_consumes_same_linked_publication_result",
+                ]
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_retirement_owner_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings(retirement_tests, 8), "    ],",
+                    f"    expected_count = {len(retirement_tests)},", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", f"    test_rule_timeout_ms = {(len(retirement_tests) * 600 + 60) * 1000},",
+                    '    case_compiler_modes = {' + ", ".join(
+                        json.dumps(test) + ': "owned-resident"' for test in retirement_tests
+                    ) + "},",
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+                # The full retirement roster is fixed in the runner's arguments;
+                # this component alias selects one genuine publisher history.
+                publication_refusal = "resident_workbench::request_tests::actual_retirement_publication_body_refusal_retains_same_guard"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_publication_refusal_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([publication_refusal], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(publication_refusal) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+                capture_control = "resident_workbench::request_tests::actual_retirement_owner_loss_after_capture_retains_guarded_membership"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_retirement_capture_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([capture_control], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(capture_control) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+                publication_workers = [
+                    "resident_workbench::request_tests::actual_retirement_linked_publication_worker_settles_cancelled_body",
+                    "resident_workbench::request_tests::actual_retirement_native_recovery_consumes_same_linked_publication_result",
+                ]
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_retirement_worker_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings(publication_workers, 8), "    ],",
+                    "    expected_count = 2,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1260000,",
+                    '    case_compiler_modes = {' + ", ".join(
+                        json.dumps(test) + ': "owned-resident"' for test in publication_workers
+                    ) + "},",
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
                 renderer_controls = ["resident_workbench::request_tests::" + name for name in (
                     "renderer_producer_loss_preserves_shared_terminal_cause_for_current_and_later_observers",
                     "renderer_producer_and_waiter_release_machine_checkout",
@@ -1855,7 +1958,10 @@ tidepool_buildscript_run(
         if package_name == "tidepool-toolchain":
             for world_target, world_case in [
                 ("toolchain_world_native_seal_test", "artifacts::module_product_tests::real_world_output_seals_native_items_after_its_matching_compiler_end"),
+                ("toolchain_world_original_seal_test", "artifacts::module_product_tests::real_world_original_output_seals_its_actual_native_declaration"),
+                ("toolchain_world_mixed_seal_test", "artifacts::module_product_tests::real_world_mixed_output_retains_prior_native_stages"),
                 ("toolchain_world_lifetime_test", "artifacts::module_product_tests::real_world_shadow_successors_release_transport_ancestors_before_cold_restore"),
+                ("toolchain_world_value_selection_test", "artifacts::world_value_selection_tests::real_world_value_selection_preserves_physical_owner_and_item_prefix"),
             ]:
                 world_env, world_resources, world_worker = compiler_service_test_inputs(
                     package_name, world_target
@@ -1999,7 +2105,7 @@ tidepool_buildscript_run(
         if package_name == "tidepool-extract-cmd" and target["name"] == "retained_fingerprint":
             NATIVE_TARGETS[package_name]["integration"][target["name"]]["execution_disposition"] = "manual_measurement"
         if package_name == "exomonad-actor" and target["name"] == "actor":
-            rules.append(actor_notebook_contract_test_cases(target["name"] + "_binary", env, resources, worker))
+            rules.append(actor_notebook_contract_test_cases(target["name"] + "_binary"))
     if package_name == "tidepool-extract-cmd":
         rules.append('filegroup(\n    name = "retained_fingerprint_fixtures",\n    srcs = {path[len("tests/fixtures/retained_fingerprint/"):]: path for path in glob(["tests/fixtures/retained_fingerprint/*.hs"])},\n    visibility = ["PUBLIC"],\n)\n')
     if package_name == "tidepool-bignum":

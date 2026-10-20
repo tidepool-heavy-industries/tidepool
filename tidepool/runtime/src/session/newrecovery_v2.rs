@@ -22,7 +22,7 @@ mod snapshots;
 pub(crate) use snapshots::{observe_context_materialization, ContextMaterializationWork};
 pub(crate) use snapshots::{
     PreparedCompilerContext, RecoveryDomainReader, RecoveryGraph, RecoveryPublicSurface,
-    ScopedCompilerContext, StagedCompilerContextPublication, StagedRecoveryManifest,
+    ScopedCompilerContext, StagedCompilerContextPublication,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]

@@ -1822,6 +1822,7 @@ pub(crate) fn admission_failure(failure: ArtifactInventoryFailure) -> CompileErr
         &failure,
         ArtifactInventoryFailure::NativeOfferSelectionConflict { .. }
             | ArtifactInventoryFailure::NativeGroupUnavailable { .. }
+            | ArtifactInventoryFailure::NativeRootOutsideView { .. }
     ) {
         tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
             ?failure, refusal_site = %std::panic::Location::caller(),
@@ -3363,12 +3364,16 @@ fn validate_existing_rows(
 
 /// Private physical-segment custody. It never becomes an item view wholesale.
 /// Namespace and native owner choice are fixed by the compiler's certified roles.
+#[derive(Clone)]
 pub(crate) struct BoundArtifactSelection {
     view: ArtifactView,
-    entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    owners: SelectedOwners,
-    captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
-    materializations: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+    physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+    compiler_prefix: CompilerSourceSupport,
+    produced_prefix: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
+    entries: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+    owners: Arc<SelectedOwners>,
+    captured_facts: Arc<BTreeMap<ArtifactId, ArtifactFactsHandle>>,
+    materializations: Arc<[Arc<crate::declaration_context::RetainedArtifactMaterialization>]>,
     groups: BTreeMap<NativeGroupKey, NativeGroupBinding>,
     native_source: crate::certified_products::CertifiedSourceSelection,
     source_receipts: NativeSourceReceipts,
@@ -3422,6 +3427,60 @@ impl From<native_availability::NativeGroupTarget> for PlannedTarget {
 }
 
 impl BoundArtifactSelection {
+    pub(crate) fn physical_inputs(
+        &self,
+    ) -> &Arc<crate::declaration_context::OriginalCompilerInputs> {
+        &self.physical_inputs
+    }
+
+    pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
+        &self.native_source
+    }
+
+    pub(crate) fn advance_compiler_prefix(
+        &mut self,
+        physical: &Arc<crate::declaration_context::OriginalCompilerInputs>,
+        produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Arc<crate::declaration_context::OriginalCompilerInputs>, CompileError> {
+        if !Arc::ptr_eq(physical, &self.physical_inputs) {
+            return Err(failure(
+                "item compiler cursor belongs to another physical segment",
+            ));
+        }
+        match (&self.produced_prefix, produced) {
+            (None, None) => {}
+            (Some(previous), Some(item)) if item.follows(previous) => {}
+            _ => {
+                return Err(failure(
+                    "item compiler prefix is not the next checked output",
+                ))
+            }
+        }
+        let next = match produced {
+            Some(item) => {
+                operation
+                    .reserve::<Arc<crate::recovery_artifacts::CertifiedValueInterface>>(
+                        item.required().count(),
+                    )
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                let mut values = Vec::new();
+                for value in item.required() {
+                    crate::host_work::checkpoint()?;
+                    values.push(Arc::clone(value));
+                }
+                self.compiler_prefix.admit_value_interfaces(&values)?
+            }
+            None => self.compiler_prefix.clone(),
+        };
+        let inputs = Arc::new(
+            crate::declaration_context::OriginalCompilerInputs::from_issued_support(&next),
+        );
+        self.compiler_prefix = next;
+        self.produced_prefix = produced.cloned();
+        Ok(inputs)
+    }
+
     #[cfg(test)]
     pub(crate) fn observed_binding_state(
         &self,
@@ -3649,21 +3708,37 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<BoundArtifactSelection, CompileError> {
+        if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) {
+            return Err(failure("physical segment belongs to another inventory"));
+        }
         let captured_facts = entries
             .iter()
             .map(|entry| (entry.descriptor.id, entry.facts.clone()))
             .collect();
-        let view = self.admit_certified_with_demand(
-            parent,
-            entries,
-            NativeArtifactDemand::ScopeInterfaces,
-            selection,
-        )?;
+        let mut selection = selection.clone();
+        let physical = Arc::new(
+            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selection,
+                parent,
+                entries,
+            )?,
+        );
+        self.index_admitted_segment(parent, physical, captured_facts, &selection)
+    }
+
+    fn index_admitted_segment(
+        &self,
+        parent: &ArtifactView,
+        physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+        captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+    ) -> Result<BoundArtifactSelection, CompileError> {
+        let view = physical_inputs.issued_artifacts().clone();
         let entries = view
             .entries()
             .into_iter()
             .map(|entry| (entry.descriptor.id, entry))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<imbl::OrdMap<_, _>>();
         let state = self.0.lock().expect("inventory lock");
         let namespace_entries = view
             .namespace()
@@ -3683,12 +3758,26 @@ impl ArtifactInventory {
         drop(state);
         let mut materializations = Vec::new();
         view.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
+        let produced_prefix = selection
+            .produced_types()
+            .map(|outputs| outputs.before_segment());
+        let excluded = selection
+            .produced_types()
+            .into_iter()
+            .flat_map(|outputs| outputs.required())
+            .map(|output| output.artifact_id())
+            .collect();
+        let compiler_prefix = CompilerSourceSupport::close_complete_output(&physical_inputs)?
+            .segment_value_prefix(&excluded)?;
         Ok(BoundArtifactSelection {
             view,
+            physical_inputs,
+            compiler_prefix,
+            produced_prefix,
             entries,
-            owners,
-            captured_facts,
-            materializations,
+            owners: Arc::new(owners),
+            captured_facts: Arc::new(captured_facts),
+            materializations: materializations.into(),
             groups: BTreeMap::new(),
             native_source: selection.clone(),
             source_receipts: NativeSourceReceipts::default(),
@@ -3775,7 +3864,7 @@ impl ArtifactInventory {
                 &allowed_values,
             )
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        let mut materialization_parents = fixed.materializations.clone();
+        let mut materialization_parents = fixed.materializations.to_vec();
         cursor.collect_cached_materializations(&mut materialization_parents)?;
         let mut state = self.0.lock().expect("inventory lock");
         let unbound = demanded
@@ -11311,6 +11400,185 @@ mod tests {
                 assert!(!target.namespace().contains_key(&dependency.artifact));
                 assert!(target.artifact_ids().contains(&dependency.artifact));
             }
+        }
+    }
+
+    #[test]
+    fn bound_target_root_choice_keeps_missing_empty_and_unavailable_distinct() {
+        use crate::certified_products::{
+            CertificationError, CertifiedSourceSelection, InputDecisionRefusal,
+        };
+        use crate::declaration_context::{
+            ExactDeclarationContext, OriginalCompilerInputs, ProtectedScaffoldRequirements,
+        };
+        for physical_choice in [false, true] {
+            let inventory = ArtifactInventory::default();
+            let native = Arc::new(issued_native_groups(
+                "BoundInheritedCarrier",
+                vec![(7, vec![])],
+                &[],
+                &BTreeMap::new(),
+            ));
+            let ArtifactPayload::Original(product) = &native.payload else {
+                unreachable!()
+            };
+            let key = NativeGroupKey {
+                artifact: native.descriptor.id,
+                original_ordinal: 7,
+            };
+            let entries = vec![native.clone(), Arc::new(entry("InheritedLeft", &[]))];
+            let physical = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    entries.clone(),
+                    if physical_choice {
+                        NativeArtifactDemand::AllGroups
+                    } else {
+                        NativeArtifactDemand::ScopeInterfaces
+                    },
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let operation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let mut current = CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &physical.metadata_snapshot(),
+                &operation.inventory,
+            )
+            .unwrap();
+            let initial = OriginalCompilerInputs::from_selection(&current, &physical).unwrap();
+            let unselected = CompilerSourceSupport::close_complete_output(&initial)
+                .unwrap()
+                .close_request(None, &ProtectedScaffoldRequirements::default())
+                .unwrap();
+            assert!(!unselected.native_offers().is_empty());
+            assert!(unselected
+                .native_offers()
+                .iter()
+                .all(|offer| offer.is_full()));
+
+            // Finish and select through the same actual producer before input use.
+            let issued = OriginalCompilerInputs::issue_segment_native_availability(
+                &mut current,
+                &physical,
+                entries,
+            )
+            .unwrap()
+            .issued_artifacts()
+            .clone();
+            let closure = current.selected_original_closure(&issued).unwrap();
+            let expected = closure
+                .native_closure()
+                .capture_graph_selection()
+                .native_groups;
+            assert_eq!(expected.len(), 1);
+            assert_eq!(expected[0].binding.artifact(), key.artifact);
+            assert_eq!(expected[0].original_ordinal, key.original_ordinal);
+            let output = OriginalCompilerInputs::from_selection(&current, &issued).unwrap();
+            let selected = CompilerSourceSupport::close_complete_output(&output)
+                .unwrap()
+                .certify_original_closure(&closure)
+                .unwrap();
+            let context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&selected)
+                .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
+                .unwrap();
+            let selected_receipt =
+                CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory).unwrap();
+            let owner = inputs.artifacts().inventory();
+            let imports = [issued_source(&native, 7)];
+            let mut fixed = owner
+                .bind_segment(inputs.artifacts(), vec![], &selected_receipt)
+                .unwrap();
+            let admitted = owner
+                .admit_bound_target(
+                    &mut fixed,
+                    &owner.empty_view(),
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &selected_receipt,
+                )
+                .unwrap();
+            assert_eq!(
+                admitted.artifacts().capture_graph_selection().native_groups,
+                expected
+            );
+
+            // Current output is not an input continuation, even with Full bodies.
+            assert!(
+                matches!(native_availability::verified_root_choice(&current, key, product.owner(), &native),
+                Err(CompileError::ArtifactInventory(error)) if matches!(&error.native_refusal,
+                    Some(NativeAdmissionRefusal::RootChoiceMissing { owner }) if owner == &native.descriptor.owner))
+            );
+
+            let context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&unselected)
+                .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
+                .unwrap();
+            let receipt =
+                CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory).unwrap();
+            let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap());
+            let InputNativeDecision::IssuedChoices(choices) = inputs
+                .compiler_source_support()
+                .checked_native_input_decision(key.artifact, canonical, product.owner())
+                .unwrap()
+            else {
+                panic!("the request must preserve its issued decision");
+            };
+            let chosen = choices.get(&key.original_ordinal).copied();
+            if physical_choice {
+                assert!(chosen.is_some());
+                assert!(matches!(
+                    receipt.native_group_candidates(key, product.owner()),
+                    Err(CertificationError::InputDecision {
+                        reason: InputDecisionRefusal::UnavailableChosenBinding,
+                        ..
+                    })
+                ));
+            } else {
+                assert!(choices.is_empty());
+            }
+            let owner = inputs.artifacts().inventory();
+            let mut fixed = owner
+                .bind_segment(inputs.artifacts(), vec![], &receipt)
+                .unwrap();
+            let before = fixed.view.capture_graph_selection();
+            let denied = owner
+                .admit_bound_target(
+                    &mut fixed,
+                    &owner.empty_view(),
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &receipt,
+                )
+                .unwrap_err();
+            let CompileError::ArtifactInventory(error) = denied else {
+                panic!("expected typed native root refusal");
+            };
+            assert!(
+                matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 } if artifact == key.artifact)
+            );
+            match (chosen, error.native_refusal) {
+                (
+                    Some(chosen),
+                    Some(NativeAdmissionRefusal::RootChoiceUnavailable { chosen: refused }),
+                ) => assert_eq!(refused, chosen),
+                (
+                    None,
+                    Some(NativeAdmissionRefusal::RootChoiceExplicitEmpty {
+                        owner,
+                        original_ordinal: 7,
+                    }),
+                ) => assert_eq!(owner, native.descriptor.owner),
+                (_, other) => panic!("root refusal lost the issued decision: {other:?}"),
+            }
+            assert_eq!(fixed.view.capture_graph_selection(), before);
         }
     }
 

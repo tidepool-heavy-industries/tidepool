@@ -820,7 +820,7 @@ fn admit_parser_items(
         for value in list(&verdict[1], ITEM_LIMIT)? {
             let row = list(value, 3)?;
             match row {
-                [kind, name] if text(kind)? == "EValue" => {
+                [kind, name] if matches!(text(kind)?, "EValue" | "EPattern") => {
                     text(name)?;
                 }
                 [kind, name, children] if matches!(text(kind)?, "EType" | "EClass") => {

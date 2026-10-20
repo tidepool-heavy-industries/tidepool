@@ -9,14 +9,15 @@ import Control.Monad.IO.Class (liftIO)
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
 import GHC
-import GHC.Tc.Types (TcGblEnv, tcg_rdr_env)
-import GHC.Types.Name (nameOccName)
+import GHC.Tc.Types (TcGblEnv, tcg_rdr_env, tcg_type_env)
+import GHC.Types.TypeEnv (typeEnvIds)
+import GHC.Types.Name (nameOccName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Reader (GlobalRdrEnv, globalRdrEnvElts, greName)
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory)
 import System.FilePath ((</>))
 import System.Process (callProcess, readProcess)
-import Tidepool.ExtractRequest (InspectionRequest (..))
+import Tidepool.ExtractRequest (InspectionRequest (..), StructuredInspection(..), StructuredNameScope(..), StructuredNameNamespace(..), InspectionProvenance(..))
 import Tidepool.Introspection
 
 main :: IO ()
@@ -25,8 +26,89 @@ main = runTests tests
 tests :: TestTree
 tests = testGroup "test"
   [ testCase "compiled introspection searches" scenario,
-    testCase "bounded browse dedupes before the budget" browseScenario
+    testCase "bounded browse dedupes before the budget" browseScenario,
+    testCase "compiled scoped identifier selection" structuredScenario
   ]
+
+-- These identities come from an actual checked GHC module. Duplicate record
+-- fields deliberately have distinct Names with the same public rendering;
+-- repeated qualified imports deliberately reach the same actual Name.
+structuredScenario :: IO ()
+structuredScenario = do
+  root <- (</> "tidepool-introspection-identity-test") <$> getTemporaryDirectory
+  createDirectoryIfMissing True root
+  writeFile (root </> "QualifiedSource.hs") qualifiedFixture
+  let source = root </> "StructuredIdentityFixture.hs"
+  writeFile source (unlines
+    [ "{-# LANGUAGE DuplicateRecordFields #-}"
+    , "module StructuredIdentityFixture where"
+    , "import qualified QualifiedSource as Q"
+    , "import qualified QualifiedSource as R"
+    , "candidatePlain :: a -> a"
+    , "candidatePlain value = value"
+    , "data LeftRecord = LeftRecord { sharedField :: Int }"
+    , "data RightRecord = RightRecord { sharedField :: Bool }"
+    ])
+  libdir <- trim <$> readProcess "ghc" ["--print-libdir"] ""
+  (answers,fieldNames,qualifiedNames) <- withInspectionWork $ \work -> runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags flags {importPaths=root:importPaths flags,hiDir=Just root,objectDir=Just root}
+    target <- guessTarget source Nothing Nothing
+    setTargets [target]
+    loaded <- load LoadAllTargets
+    case loaded of Failed -> liftIO (fail "structured identity fixture did not load"); Succeeded -> pure ()
+    summary <- getModSummary (mkModuleName "StructuredIdentityFixture")
+    typed <- typecheckModule =<< parseModule summary
+    let (checked,_) = tm_internals_ typed
+        reader = tcg_rdr_env checked
+        names occurrence = nub [greName entry | entry <- globalRdrEnvElts reader
+          , occNameString (nameOccName (greName entry)) == occurrence]
+        query namespace name = StructuredInspection StructuredCurrentScope namespace name (InspectionProvenance 17 "checked-identity")
+    value <- case [identifier | identifier <- typeEnvIds (tcg_type_env checked)
+        , occNameString (nameOccName (getName identifier)) == "candidatePlain"] of
+      [identifier] -> pure identifier
+      _ -> liftIO (fail "actual value identity was not unique")
+    environment <- getSession
+    answers <- runWorldInspectionGhc work environment checked reader Map.empty
+      (Map.singleton "candidatePlain" value)
+      [ InspectStructuredInfoOf (query StructuredValueName "Q.onlyQualified")
+      , InspectStructuredTypeOf (query StructuredTypeName "candidatePlain")
+      , InspectStructuredInfoOf (query StructuredValueName "Q.%%")
+      , InspectKeyedAvailability (query StructuredValueName "onlyQualified") "QualifiedSource"
+      , InspectKeyedAvailability (query StructuredFieldName "sharedField") "StructuredIdentityFixture"
+      , InspectStructuredInfoOf (query StructuredAnyName "sharedField")
+      , InspectStructuredInfoOf (query StructuredValueName "R.onlyQualified")
+      , InspectStructuredInfoOf (query StructuredValueName ".")
+      , InspectStructuredInfoOf (query StructuredValueName "Q..%")
+      ]
+    pure (answers,names "sharedField",names "onlyQualified")
+  let publicSpelling name = (moduleNameString . moduleName <$> nameModule_maybe name,occNameString (nameOccName name))
+  unless (length fieldNames == 2 && length (nub fieldNames) == 2
+      && length (nub (map publicSpelling fieldNames)) == 1) $
+    fail "duplicate-field control must retain distinct actual Names with equal public spelling"
+  unless (length qualifiedNames == 1) $
+    fail "repeated imports must reach one actual Name"
+  case answers of
+    [ InspectionStructuredInfo qualified
+      , InspectionStructuredError (StructuredUnknown missing)
+      , InspectionStructuredInfo operator
+      , InspectionRowFit fit Available
+      , InspectionStructuredError (StructuredUnsupported _)
+      , InspectionStructuredError (StructuredAmbiguous _ fields)
+      , InspectionStructuredInfo repeated
+      , InspectionStructuredInfo composition
+      , InspectionStructuredInfo dotted
+      ] | inspectedIdentifier qualified == IdentifierRef "QualifiedSource" "onlyQualified" ValueIdentifier
+          && inspectedIdentifier repeated == inspectedIdentifier qualified
+          && structuredNamespace missing == StructuredTypeName
+          && inspectedIdentifier operator == IdentifierRef "QualifiedSource" "%%" ValueIdentifier
+          && fit == inspectedIdentifier qualified
+          && identifierName (inspectedIdentifier composition) == "."
+          && identifierNamespace (inspectedIdentifier composition) == ValueIdentifier
+          && inspectedIdentifier dotted == IdentifierRef "QualifiedSource" ".%" ValueIdentifier
+          && length fields == 2 && head fields == last fields -> pure ()
+    other -> fail ("structured identity selection lost namespace/alias/ambiguity: " ++ show other)
+  where trim = reverse . dropWhile (`elem` ['\n','\r']) . reverse
 
 scenario :: IO ()
 scenario = do
@@ -314,11 +396,13 @@ fixture =
 qualifiedFixture :: String
 qualifiedFixture =
   unlines
-    [ "module QualifiedSource (onlyQualified, (%%)) where",
+    [ "module QualifiedSource (onlyQualified, (%%), (.%)) where",
       "onlyQualified :: Int -> Bool",
       "onlyQualified = undefined",
       "(%%) :: Int -> Bool",
-      "(%%) = undefined"
+      "(%%) = undefined",
+      "(.%) :: Int -> Bool",
+      "(.%) = undefined"
     ]
 
 ambiguousAFixture :: String

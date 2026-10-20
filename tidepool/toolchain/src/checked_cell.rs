@@ -1538,6 +1538,29 @@ impl ProducedValueTypeInterfaces {
         })
     }
 
+    /// A byte-equal recapture is not a view of this physical output owner.
+    /// Every view preserves the paired immutable entries and lookup; only its
+    /// ordinal selection changes.
+    pub(crate) fn is_item_of(&self, segment: &Self) -> bool {
+        Arc::ptr_eq(&self.lookup, &segment.lookup)
+            && self.selection.0.start.checked_add(1) == Some(self.selection.0.end)
+            && segment.selection.requires(self.selection.0.start)
+    }
+
+    pub(crate) fn before_segment(&self) -> Self {
+        Self {
+            interfaces: Arc::clone(&self.interfaces),
+            lookup: Arc::clone(&self.lookup),
+            selection: ProducedValueTypeSelection(self.selection.0.start..self.selection.0.start),
+        }
+    }
+
+    pub(crate) fn follows(&self, previous: &Self) -> bool {
+        Arc::ptr_eq(&self.lookup, &previous.lookup)
+            && self.selection.0.start == previous.selection.0.end
+            && self.selection.0.start.checked_add(1) == Some(self.selection.0.end)
+    }
+
     pub(crate) fn matches_artifact(
         &self,
         entry: &crate::artifact_inventory::ArtifactEntry,
@@ -2057,13 +2080,31 @@ impl CheckedValueImportAuthority {
     /// checked program owner has already correlated each input reference with
     /// its current occurrence, runtime identity and original issuing row, and
     /// a raw preparation completion cannot reach this constructor.
-    pub(crate) fn from_world_output(
+    pub(crate) fn from_world_stage(
         program: &crate::compiler_world::CheckedWorldCellProgram,
+        stage: &Arc<crate::compiler_world::CheckedWorldCellStage>,
     ) -> Result<Self, CompileError> {
+        if !program
+            .stages()
+            .get(stage.index())
+            .is_some_and(|issued| Arc::ptr_eq(issued, stage))
+        {
+            return Err(failure(
+                "world value imports belong to another prepared stage",
+            ));
+        }
         let operation = program.validation().inventory.as_ref();
         let producer = program.reservation().plan().producer_sha256();
         let mut values = BTreeMap::<String, CapturedValueInterface>::new();
-        for original in program.demanded_rows() {
+        // The operation's actual operand is compiler availability even when
+        // this stage has no runtime demand for it. This does not alter the
+        // stage's selected runtime witnesses or native root custody.
+        let operand = program.reservation().plan().operand();
+        for original in stage
+            .demanded_rows()
+            .iter()
+            .chain(operand.map(|operand| operand.checked_row()))
+        {
             crate::host_work::checkpoint()?;
             operation
                 .charge(1)
@@ -2119,6 +2160,12 @@ impl CheckedValueImportAuthority {
 
     pub(crate) fn owners(&self) -> impl Iterator<Item = (&str, &str)> {
         self.values.keys().map(|module| ("main", module.as_str()))
+    }
+
+    pub(crate) fn value_owners(
+        &self,
+    ) -> impl ExactSizeIterator<Item = tidepool_repr::SessionModule> + '_ {
+        self.values.values().map(|value| value.input().owner)
     }
 
     pub(crate) fn matches_interface(
@@ -4022,6 +4069,19 @@ impl PartialEq for ExactCheckedItem {
 impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
+    pub fn world_selected_runtime_inputs(
+        &self,
+    ) -> Option<crate::compiler_world::WorldCellRuntimeInputs<'_>> {
+        match &self.cell.specification {
+            CheckedCellSpecification::World { program, .. } => Some(
+                program
+                    .item(self.index)
+                    .expect("exact checked World item belongs to its program")
+                    .selected_runtime_inputs(),
+            ),
+            CheckedCellSpecification::Finite(_) => None,
+        }
+    }
     pub fn specification_digest(&self) -> [u8; 32] {
         self.cell.specification.specification_digest()
     }
@@ -4382,13 +4442,6 @@ impl PreparedCheckedItemOutput {
                 || match proof {
                     Some(proof) => !issued.matches_receipt(proof)?,
                     None => false,
-                }
-                || {
-                    timing.advance("original_selected_membership");
-                    !original_execution
-                        .artifact_view()
-                        .selected_native_groups()
-                        .contains(&issued.native_group_key())
                 }
             {
                 return Err(typed_entry_failure());

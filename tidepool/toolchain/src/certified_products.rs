@@ -398,10 +398,12 @@ pub(crate) struct CertifiedProducts {
     pub value_interfaces: Arc<[crate::recovery_artifacts::CertifiedValueInterface]>,
     pub retained_core_products: CertifiedRetainedCoreProducts,
     pub(crate) source_selection: CertifiedSourceSelection,
+    pub(crate) original_inputs: Option<Arc<crate::declaration_context::OriginalCompilerInputs>>,
 }
 
 /// Exact original facts admitted once by the physical segment owner. Captured
-/// value interfaces stay private until that owner's checked item selects them.
+/// input interfaces remain compiler-available; produced interfaces become
+/// available only through their checked item prefix. Neither grants live values.
 pub(crate) struct CertifiedSegmentOriginals {
     raw: ParsedModuleProducts,
     receipt: CertifiedReceipt,
@@ -414,7 +416,12 @@ pub(crate) struct CertifiedSegmentOriginals {
         Arc<crate::artifact_inventory::ArtifactEntry>,
     >,
     original_sources: Arc<AvailableOriginalSources>,
-    authored_artifacts: Option<crate::artifact_inventory::ArtifactView>,
+    admission: SegmentOriginalAdmission,
+}
+
+enum SegmentOriginalAdmission {
+    OriginalOnly(Arc<crate::declaration_context::OriginalCompilerInputs>),
+    Executable(crate::artifact_inventory::BoundArtifactSelection),
 }
 
 impl CertifiedSegmentOriginals {
@@ -463,6 +470,7 @@ impl CertifiedSegmentOriginals {
             produced,
             validation,
         )?;
+        products.source_selection.produced_types = produced.cloned();
         timing.advance("package_availability");
         let mut package_availability =
             inherited_package_witnesses_with_validation(&products.recovery_products, validation)?;
@@ -548,24 +556,62 @@ impl CertifiedSegmentOriginals {
             ));
         }
         timing.advance("native_availability");
-        // Original stages have no target view. Keep this same physical issuer
-        // for their authored closure; executable items use their bound cursor.
-        let physical =
+        validation.inventory.reserve::<Arc<crate::artifact_inventory::ArtifactEntry>>(
+            artifact_entries.len() + value_entries.len(),
+        )?;
+        let entries = artifact_entries
+            .iter()
+            .chain(&value_entries)
+            .cloned()
+            .collect();
+        let admitted = if authored.is_some() {
             crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
                 &mut products.source_selection,
                 compiler_inputs.artifacts(),
-                artifact_entries
-                    .iter()
-                    .chain(&value_entries)
-                    .cloned()
-                    .collect(),
+                entries,
             )
-            .map_err(|error| {
-                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                    stage = "segment_native_availability", %error,
-                    "compiler original selection refused");
-                CertificationError::OriginalClosure(Box::new(error))
-            })?;
+            .map(|physical| SegmentOriginalAdmission::OriginalOnly(Arc::new(physical)))
+        } else {
+            compiler_inputs
+                .artifacts()
+                .inventory()
+                .bind_segment(
+                    compiler_inputs.artifacts(),
+                    entries,
+                    &products.source_selection,
+                )
+                .map(|bound| {
+                    products.source_selection = bound.source_selection().clone();
+                    SegmentOriginalAdmission::Executable(bound)
+                })
+        };
+        let admission = admitted.map_err(|error| {
+            if tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG) {
+                if let crate::CompileError::ArtifactInventory(failure) = &error {
+                    if let crate::artifact_inventory::ArtifactInventoryFailure::NativeRootOutsideView { artifact } = &failure.failure {
+                        let incoming = artifact_entries.iter().chain(&value_entries)
+                            .find(|entry| entry.descriptor.id == *artifact);
+                        let retained = compiler_inputs.artifacts().observed_payload(artifact);
+                        let selected = products.source_selection.native_selections()
+                            .find(|native| native.original_artifact_id().ok() == Some(*artifact));
+                        let offered = products.source_selection.issued_native_availability()
+                            .any(|offer| offer.original_artifact_id() == *artifact);
+                        tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                            stage = "segment_native_availability", ?artifact,
+                            incoming_descriptor = ?incoming.map(|entry| &entry.descriptor),
+                            retained_descriptor = ?retained.map(|entry| &entry.descriptor),
+                            selected_owner = ?selected.map(|native| &native.owner),
+                            selected_origin = ?selected.map(|native| &native.origin),
+                            offered,
+                            "native root refusal physical issuer evidence");
+                    }
+                }
+            }
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                stage = "segment_native_availability", %error,
+                "compiler original selection refused");
+            CertificationError::OriginalClosure(Box::new(error))
+        })?;
         timing.advance("finish_segment");
         let value_entry_index = value_entries
             .iter()
@@ -576,7 +622,7 @@ impl CertifiedSegmentOriginals {
             value_entry_index,
             value_entries: value_entries.into(),
             original_sources,
-            authored_artifacts: authored.map(|_| physical),
+            admission,
             package_availability,
             raw,
             receipt,
@@ -614,11 +660,32 @@ impl CertifiedSegmentOriginals {
     pub(crate) fn authored_artifacts(
         &self,
     ) -> CertResult<&crate::artifact_inventory::ArtifactView> {
-        self.authored_artifacts
-            .as_ref()
-            .ok_or(CertificationError::Mismatch(
+        match &self.admission {
+            SegmentOriginalAdmission::OriginalOnly(inputs) => Ok(inputs.issued_artifacts()),
+            SegmentOriginalAdmission::Executable(_) => Err(CertificationError::Mismatch(
                 "executable segment has no authored original stage",
-            ))
+            )),
+        }
+    }
+
+    pub(crate) fn physical_inputs(
+        &self,
+    ) -> &Arc<crate::declaration_context::OriginalCompilerInputs> {
+        match &self.admission {
+            SegmentOriginalAdmission::OriginalOnly(inputs) => inputs,
+            SegmentOriginalAdmission::Executable(bound) => bound.physical_inputs(),
+        }
+    }
+
+    pub(crate) fn bound_artifacts(
+        &self,
+    ) -> CertResult<crate::artifact_inventory::BoundArtifactSelection> {
+        match &self.admission {
+            SegmentOriginalAdmission::Executable(bound) => Ok(bound.clone()),
+            SegmentOriginalAdmission::OriginalOnly(_) => Err(CertificationError::Mismatch(
+                "authored original stage has no executable cursor",
+            )),
+        }
     }
 
     pub(crate) fn original_sources(&self) -> &Arc<AvailableOriginalSources> {
@@ -636,9 +703,9 @@ impl CertifiedSegmentOriginals {
 
     pub(crate) fn select_item(
         &self,
+        cursor: &mut crate::artifact_inventory::BoundArtifactSelection,
         item: SegmentItemReceipt,
         prepared: &PreparedProgram,
-        selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<(
@@ -650,6 +717,15 @@ impl CertifiedSegmentOriginals {
             return Err(CertificationError::Mismatch(
                 "segment inventory accounting owner",
             ));
+        }
+        match (&self.products.source_selection.produced_types, produced) {
+            (None, None) => {}
+            (Some(segment), Some(item)) if item.is_item_of(segment) => {}
+            _ => {
+                return Err(CertificationError::Mismatch(
+                    "item produced type selection differs from its physical segment",
+                ));
+            }
         }
         for (owner, witness) in &item.packages {
             check_segment_package_addition(
@@ -695,15 +771,15 @@ impl CertifiedSegmentOriginals {
             }
             verify_package_interface(validation, witness)?;
         }
+        // This segment already authenticated every captured input interface.
+        // An item can need an input's type without retaining its runtime value.
+        // Only this request's produced interfaces need ordinal narrowing here;
+        // executable demand is issued separately from the actual target imports.
         let selected_value = |value: &&crate::recovery_artifacts::CertifiedValueInterface| {
-            if let Some(outputs) =
-                produced.filter(|outputs| outputs.owns_artifact(value.artifact_id()))
-            {
-                outputs.selects_artifact(value.artifact_id())
-            } else {
-                tidepool_repr::SessionModule::from_module_name(value.interface().module())
-                    .is_some_and(|owner| selected_values.contains(&owner))
-            }
+            produced.is_none_or(|outputs| {
+                !outputs.owns_artifact(value.artifact_id())
+                    || outputs.selects_artifact(value.artifact_id())
+            })
         };
         let selected_count = self
             .products
@@ -758,7 +834,11 @@ impl CertifiedSegmentOriginals {
                 ));
             }
         }
+        let original_inputs = cursor
+            .advance_compiler_prefix(self.physical_inputs(), produced, &validation.inventory)
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let products = CertifiedProducts {
+            original_inputs: Some(original_inputs),
             groups: self.products.groups.clone(),
             recovery_products: self.products.recovery_products.clone(),
             module_interfaces: self.products.module_interfaces.clone(),
@@ -2973,6 +3053,12 @@ impl NativeGroupCandidates {
 }
 
 impl CertifiedSourceSelection {
+    pub(crate) fn produced_types(
+        &self,
+    ) -> Option<&crate::checked_cell::ProducedValueTypeInterfaces> {
+        self.produced_types.as_ref()
+    }
+
     /// Bind current membership to the actual output row and payload. Available
     /// originals and an absent continuation are not evidence of current output.
     pub(crate) fn current_product<'a>(
@@ -9923,6 +10009,7 @@ pub(crate) fn certify_products_with_validation(
     let groups = IssuedGroupCandidates::bind(groups.into(), &recovery_products)?;
     source_selection.bind_produced_originals(&groups)?;
     Ok(CertifiedProducts {
+        original_inputs: None,
         groups,
         recovery_products: recovery_products.into(),
         module_interfaces: module_interfaces.into(),
@@ -17042,7 +17129,9 @@ pub(crate) mod tests {
                     &inventory.empty_view(),
                     vec![entry.clone()],
                 )
-                .unwrap();
+                .unwrap()
+                .issued_artifacts()
+                .clone();
                 let private =
                     OriginalCompilerInputs::from_selection(&physical, &completed).unwrap();
                 let support =
@@ -17479,7 +17568,9 @@ pub(crate) mod tests {
             &inventory.empty_view(),
             entries.clone(),
         )
-        .unwrap();
+        .unwrap()
+        .issued_artifacts()
+        .clone();
         let physical_availability = physical.issued_native_availability().collect::<Vec<_>>();
         let [issued] = physical_availability.as_slice() else {
             panic!("one physical native product");
@@ -19005,7 +19096,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert!(next
                 .compiler_inputs()
-                .metadata
+                .metadata()
                 .retained
                 .selected_native_groups
                 .is_empty());
@@ -23231,7 +23322,7 @@ pub(crate) mod tests {
                 .all(|artifact| artifact.product.is_none()));
             let selected = request
                 .compiler_inputs()
-                .metadata
+                .metadata()
                 .entries
                 .values()
                 .find(|entry| entry.descriptor.owner.module == "Fresh")
@@ -24714,7 +24805,7 @@ None,
             assert!(request.groups.is_empty());
             assert!(request
                 .compiler_inputs()
-                .metadata
+                .metadata()
                 .retained
                 .selected_native_groups
                 .is_empty());
@@ -24722,7 +24813,7 @@ None,
             let effective = request.compiler_inputs();
             assert_eq!(
                 effective
-                    .metadata
+                    .metadata()
                     .retained
                     .artifacts
                     .values()
@@ -25114,7 +25205,7 @@ None,
                 assert!(cached_request.groups.is_empty());
                 assert!(cached_request
                     .compiler_inputs()
-                    .metadata
+                    .metadata()
                     .retained
                     .selected_native_groups
                     .is_empty());

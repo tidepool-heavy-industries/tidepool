@@ -62,21 +62,23 @@ import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openTempFile, hPutStrLn, stderr)
-import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, captureArtifactBytes)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, captureArtifactBytes)
 import System.Mem.StableName (makeStableName)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope, serializeOriginalInterface
-  , newOriginalInterfaceArtifacts, originalInterfaceBody )
+  , newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithReader, originalInterfaceBody )
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.FinalizedCore
-import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts, captureFinalizedInterface)
+import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts, captureFinalizedInterface, homeInterfaceUsageOwners)
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), admittedInterfaceCore
   , ExactScope, scopeManifestPath, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
   , canonicalCertificatePath, canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope, captureCanonicalProofs, CanonicalInterfaceUse(..)
-  , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, admittedInterfaceCoreBody, extendExactScopeInputs, ExactInterfaceEvidence(..) )
-import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifactsWithOutputs, finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, localFinalizedPackageBody, localFinalizedPackageEvidence, matchesCapturedFinalization, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts)
-import Tidepool.CompilerProducts (certifiedFinalizedArtifacts, newPreparedOriginalInterfaceArtifacts)
+  , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, admittedInterfaceCoreBody, canonicalProofOriginalBytes, extendExactScopeInputs, ExactInterfaceEvidence(..) )
+import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, captureFinalizedModuleTypeInterfaces, emptyFinalizedModuleArtifacts, finalizedTypeInterfaces, materializeFinalizedModuleArtifactsWithOutputs, finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedPackageEvidence, matchesCapturedFinalization, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts, FinalizedArtifactFailure(..))
+import Tidepool.HomeProducts (AdmittedFinalizedOriginal, admitCompiledCanonicalOriginal, admittedOriginalModule, admittedOriginalProof, CandidateCoreFailure(..))
+import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..), ProductAvailability(..))
+import Tidepool.CompilerProducts (certifiedFinalizedArtifacts, newPreparedOriginalInterfaceArtifacts, retainTypeInterfaceCaptures, retainedTypeInterfaceBody)
 import Tidepool.GhcPipeline
   ( pprPipelineResult, pprFinalizedModules, pprPackageImports, preparedFreshDependencies, prHscEnv, prResultType, PipelineSelection(..)
   , pprAcceptedCandidates, revalidatePreparedCandidateInputs, CheckedEnvironmentResult(..), CompilePurpose(..), runPipelineSessionSelected, withResidentPipelineSelected, withSourceImportIntents )
@@ -173,6 +175,23 @@ deferredFinalizationChecks work env original = do
   assert (captureCount "finalized_interface_encoding_attempts" interfaceCounts == 1
       && captureCount "finalized_interface_encoding_completions" interfaceCounts == 1)
     "same-owner concurrent demands did not share one interface encoding"
+  let selectedOwner = mi_module (hm_iface home)
+      artifact = ExactIfaceArtifact (unitString (moduleUnit selectedOwner))
+        (moduleNameString (moduleName selectedOwner)) (work </> "absent-old-type.hi")
+        (artifactSha256 left) (homeInterfaceUsageOwners env (hm_iface home))
+      relocated = artifact {exactPath=work </> "absent-new-type.hi"}
+      key = (exactUnit artifact,exactModule artifact)
+  forM_ [exactPath artifact,exactPath relocated] $ \path -> do
+    exists <- doesFileExist path
+    assert (not exists) "type-custody relocation control accidentally has a readable alias"
+  retained <- either fail pure (retainTypeInterfaceCaptures Map.empty (Map.singleton key (artifact,left)))
+  let readRetained requested = maybe (fail "relocated type attempted an unowned path read") pure
+        (retainedTypeInterfaceBody retained requested)
+  relocatedView <- newOriginalInterfaceArtifactsWithReader readRetained env Map.empty
+    [relocated] [] [] work
+  borrowed <- originalInterfaceBody relocatedView selectedOwner
+    >>= maybe (fail "relocated type lost its actual captured interface") pure
+  sameBody "relocated type reader did not borrow its previously issued body" left borrowed
   distinct <- fresh
   (distinctBody, distinctCounts) <- withTiming $ captureDiagnostics $
     captureFinalizedCore distinct >>= requireRight
@@ -243,6 +262,10 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
     Nothing source [work] Nothing
   let env = prHscEnv (pprPipelineResult prepared)
       name = mkModuleName "FinalizedCoreFixture"
+  assert (any (\node -> dependencyModuleName node == "FinalizedCoreFixture"
+      && dependencyModuleProduct node == ProductInterfaceOnly)
+      (dependencyModules (preparedFreshDependencies prepared)))
+    "fresh SOURCE control already had native publication authority"
   finalized <- maybe (fail "compiler omitted its completed original finalization") pure
     (Map.lookup name (pprFinalizedModules prepared))
   summary <- case [item {ms_hspp_buf = Nothing}
@@ -253,6 +276,10 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   let heldDirectory = work </> "capture-before-materialization"
   createDirectory heldDirectory
   heldInterfaces <- newPreparedOriginalInterfaceArtifacts prepared heldDirectory
+  missingReceipt <- try (captureFinalizedModuleTypeInterfaces heldInterfaces env (Map.singleton name finalized)
+    (emptyFinalizedModuleArtifacts env)) :: IO (Either FinalizedArtifactFailure FinalizedModuleArtifacts)
+  assert (case missingReceipt of Left (MissingFinalizedInterface _ actual) -> actual == "FinalizedCoreFixture"; _ -> False)
+    "nonfresh TYPE capture invented an input receipt from a compiler finalization"
   ((held, issuedOutputs), publicationCounts) <- withTiming $ captureDiagnostics $ do
     held <- captureFinalizedModuleArtifacts heldInterfaces env (pprFinalizedModules prepared)
       (pprPackageImports prepared) (preparedFreshDependencies prepared) heldDirectory
@@ -266,6 +293,20 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   let admissions = finalizedLocalAdmissions held
       packageMap = pprPackageImports prepared
       packageBytes = sum (map (BS.length . artifactBytes . localFinalizedPackageBody) (Map.elems admissions))
+      inputArtifacts = [artifact | admission <- Map.elems admissions
+        , let (artifact,_,_) = localFinalizedInterface admission]
+      readTypeInput artifact = case Map.lookup (exactUnit artifact,exactModule artifact) admissions of
+        Just admission | let (actual,_,_) = localFinalizedInterface admission, actual == artifact ->
+          pure (localFinalizedInterfaceBody admission)
+        _ -> fail "TYPE input differs from its actual issued original interface"
+  typeInputs <- newOriginalInterfaceArtifactsWithReader readTypeInput env Map.empty inputArtifacts [] [] work
+  typeOnly <- captureFinalizedModuleTypeInterfaces typeInputs env (pprFinalizedModules prepared)
+    (emptyFinalizedModuleArtifacts env)
+  assert (Map.null (finalizedLocalAdmissions typeOnly)
+      && Map.size (finalizedTypeInterfaces typeOnly) == Map.size (pprFinalizedModules prepared))
+    "TYPE-only capture issued an original admission or lost its interface custody"
+  (_,typeOutputs) <- materializeFinalizedModuleArtifactsWithOutputs (work </> "type-only") typeOnly
+  assert (null typeOutputs) "TYPE-only custody materialized original/native output payloads"
   assert (captureCount "finalized_package_encoding_attempts" publicationCounts == fromIntegral (Map.size admissions)
       && captureCount "finalized_package_encoding_completions" publicationCounts == fromIntegral (Map.size admissions)
       && captureCount "finalized_package_encoded_bytes" publicationCounts == fromIntegral packageBytes)
@@ -319,6 +360,24 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   originalCoreBody <- admittedInterfaceCoreBody (ModuleInterfaceAdmission proof)
   rawBytes <- requireRight =<< captureFinalizedCore finalized
   assert (bytes == artifactBytes rawBytes) "certification did not retain the original finalized Core bytes"
+  roots <- maybe (fail "canonical admission control lost its compiler package facts") pure
+    (Map.lookup name (pprPackageImports prepared))
+  canonical <- admitCompiledCanonicalOriginal env proof finalized roots
+  assert (admittedOriginalProof canonical == proof)
+    "compiled canonical admission replaced its selected original proof"
+  changedCore <- newFinalizedModule env (finalizedHomeModInfo finalized) guts {cg_binds=[]}
+  rejectedCore <- try (admitCompiledCanonicalOriginal env proof changedCore roots)
+    :: IO (Either CandidateCoreFailure AdmittedFinalizedOriginal)
+  assert (case rejectedCore of Left CandidateOriginalCoreMismatch -> True; _ -> False)
+    "same interface with a different original Core passed canonical admission"
+  let changedRoots = roots {packageInterfaces = case packageInterfaces roots of
+        [] -> []
+        root:rest -> root {packagePath=packagePath root ++ ".foreign"}:rest}
+  assert (changedRoots /= roots) "canonical package refusal did not change a real package owner"
+  rejectedPackages <- try (admitCompiledCanonicalOriginal env proof finalized changedRoots)
+    :: IO (Either CandidateCoreFailure AdmittedFinalizedOriginal)
+  assert (case rejectedPackages of Left CandidateOriginalPackagesMismatch -> True; _ -> False)
+    "canonical admission accepted another package witness"
   let emptyStubs = ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [] [])
       initializer = mkInitializerStubLabel (cg_module guts) (fsLit "canonical_test_init")
       nonemptyStubs =
@@ -354,7 +413,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
     (Map.lookup key (scopeModuleInterfaceProofs makeScope))
   assert (canonicalCertificateSha256 makeProof == canonicalCertificateSha256 proof)
     "independent delivery changed the original canonical identity"
-  promotionScopeChecks env work scope proof
+  promotionScopeChecks env work scope proof finalized roots
   capturedConsumerChecks libdir work scope artifact bytes summary proof
   -- Relocated receipt views may disappear without revoking the compiler-issued
   -- byte owner. A new materialization writes held bodies; its fresh destination
@@ -910,10 +969,11 @@ snapshotExecutableHook = withTiming $ withScratch $ \producer -> withScratch $ \
 
 -- Metadata proof validation, executable promotion and scope extension form one
 -- custody history. Exact byte budgets cover every captured interface, certificate, sidecar and Core.
-promotionScopeChecks :: HscEnv -> FilePath -> ExactScope -> CanonicalInterfaceProof -> IO ()
-promotionScopeChecks env work scope proof = do
+promotionScopeChecks :: HscEnv -> FilePath -> ExactScope -> CanonicalInterfaceProof
+  -> FinalizedModule -> PackageImportEvidence -> IO ()
+promotionScopeChecks env work scope proof finalized roots = do
   let key = ("main","FinalizedCoreFixture")
-  row@(iface,packages,_) <- case scopeInterfaces scope of
+  row@(iface,packages,packagesSha) <- case scopeInterfaces scope of
     [row] -> pure row
     _ -> fail "promotion fixture requires one original interface"
   core@(corePath,_) <- maybe (fail "promotion fixture lacks defining Core") pure
@@ -928,6 +988,30 @@ promotionScopeChecks env work scope proof = do
       descriptor <- metadataProof
       metadata <- captureCanonicalProofs Nothing [(descriptor,MetadataInterfaceUse)]
       assert (length metadata == 1) "metadata-only promotion required absent Core"
+      captured <- case metadata of
+        [selected] -> pure selected
+        _ -> fail "metadata capture lost its selected canonical proof"
+      absentCore <- try (admittedInterfaceCoreBytes (ModuleInterfaceAdmission captured))
+        :: IO (Either IOException BS.ByteString)
+      assert (either (const True) (const False) absentCore)
+        "metadata proof unexpectedly held the absent original Core payload"
+      current <- admitCompiledCanonicalOriginal env captured finalized roots
+      assert (admittedOriginalProof current == captured)
+        "current finalization replaced its metadata-only canonical proof"
+      currentCore <- requireRight =<< captureFinalizedCore (admittedOriginalModule current)
+      assert (artifactBytes currentCore == bytes)
+        "canonical admission did not retain its actual current finalized Core"
+      packageBody <- BS.readFile packages
+      bracket (removeFile packages) (\_ -> BS.writeFile packages packageBody) $ \_ -> do
+        retainedPackages <- canonicalProofOriginalBytes (admittedOriginalProof current) packages packagesSha
+        assert (retainedPackages == packageBody)
+          "current canonical original lost its captured downstream package witness"
+      changed <- newFinalizedModule env (finalizedHomeModInfo finalized)
+        (finalizedTidyGuts finalized) {cg_binds=[]}
+      refused <- try (admitCompiledCanonicalOriginal env captured changed roots)
+        :: IO (Either CandidateCoreFailure AdmittedFinalizedOriginal)
+      assert (case refused of Left CandidateOriginalCoreMismatch -> True; _ -> False)
+        "metadata-only canonical proof accepted different current Core"
       unowned <- try (admittedInterfaceCoreBytes (ModuleInterfaceAdmission descriptor))
         :: IO (Either IOException BS.ByteString)
       assert (either (const True) (const False) unowned)

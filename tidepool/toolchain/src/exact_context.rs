@@ -1520,6 +1520,9 @@ impl ImmutableLexicalFactRef {
     }
 }
 
+#[cfg(test)]
+thread_local! { static LEXICAL_APPEND_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) }; }
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ExactLexicalSnapshot {
     facts: OrdMap<ExactModuleIdentity, ImmutableLexicalFactRef>,
@@ -1539,6 +1542,11 @@ impl ExactLexicalSnapshot {
         let mut facts = self.facts.clone();
         let mut changed = false;
         for mut node in nodes {
+            #[cfg(test)]
+            LEXICAL_APPEND_WORK.with(|work| {
+                let (rows, issued) = work.get();
+                work.set((rows + 1, issued));
+            });
             node.imports.sort();
             node.imports.dedup();
             if let Some(previous) = facts.get(&node.owner) {
@@ -1552,6 +1560,11 @@ impl ExactLexicalSnapshot {
             let owner = node.owner.clone();
             let fact = ImmutableLexicalFactRef::new(node)
                 .map_err(|error| crate::CompileError::ExtractFailed(error.to_string()))?;
+            #[cfg(test)]
+            LEXICAL_APPEND_WORK.with(|work| {
+                let (rows, issued) = work.get();
+                work.set((rows, issued + 1));
+            });
             facts.insert(owner, fact);
             changed = true;
         }

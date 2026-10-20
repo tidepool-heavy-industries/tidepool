@@ -1,14 +1,79 @@
 # Compiler work and authority map
 
-Production workflow map checked at `8245fa800aec17fd7fd37fbe64cd4a35aa3efcde`;
-campaign qualification observations below use base
-`5b74c2f1fe010c5c343e0c6f331d54328fbd5090` and their named joined revision.
-The later source changes below were inspected at campaign `c10837d44d`;
-qualification records their actual consumers separately from the demand-service
-amendment. Proposed world/resolver owners are not existing production facts.
-Stage names identify ownership boundaries; their timings are not additive.
-Use [compiler profiling](compiler-profiling.md) for measurement and
+The service map covers root `76618b88bb414800dd6416c60dba0f607f25198b`
+and explicitly named receiving candidates on 2026-10-20. A candidate is not part
+of that root merely because its source review or a component check passed.
+The later P1–P10 material describes the earlier finite path at
+`8245fa800a`/`c10837d44d`; it is a historical deletion inventory, not the live
+service dataflow. Stage timings are inclusive and are not additive. Use
+[compiler profiling](compiler-profiling.md) for measurement and
 [property testing](property-testing.md) for independent checks.
+
+## Service path: current ownership and receiving boundaries
+
+The controlling documents are the [completion plan](../plans/shared-warm-compiler/completion/plan.md)
+and [implementation reset](../plans/shared-warm-compiler/completion/implementation-reset.md).
+The [verification ledger](../plans/shared-warm-compiler/completion/tests/verification-ledger.md)
+owns named discovery/notebook commands and their pending execution gates.
+Persistent GHC processes already existed in the baseline. The intended change
+removes repeated reconstruction and competing resident routes; process reuse
+alone proves neither completion nor a speedup.
+
+| Boundary | Root owner and carried facts | Receiving work and qualification limit |
+| --- | --- | --- |
+| Runtime admission | Runtime captures the actual original source, target scope, reservation and compiler World association. Source permission, checked execution provenance and compiler identity remain distinct. | engine_completion and root own the joined used/unused/wrong-payload and crossed/retired input controls. A compiler reply or an uncertain END cannot authorize evaluation or publication. |
+| Held compiler environment | `HeldCompilerWorld` retains immutable input facts and `WorldPreparedModules`; `runHeldWorldSource` shares dependency preparation between closed cell and observation operations. Queries consume transient checked environments before returning. | Engine candidate `e824639893` restores actual retained Original HMI at consuming phases; it compiles and advances mixed execution to interface validation. Haskell candidate `ef0add70c0` retains the completed lexical graph with boot identity; its repair/checks are in flight. Neither candidate is the reviewed root. No whole mutable `TcGblEnv` is retained as query authority. |
+| Parsed operation and settlement | The shared source owner carries the actual parsed/no-quasiquote proof, native TYPE annotation and ordered stage facts. PREP5/protocol 27 preserves stage-local runtime references. Root `e8ad8a0f50` carries admitted item identity through generated source preparation. | Matching source/item/world and outer END are still required before executable sealing. Stage-environment reuse must preserve actual source versus boot graph nodes and same-input change detection. A prior PREP4/component pass does not qualify the joined worker. |
+| Physical products | GHC owns finalized interfaces/Core and the certifier owns their physical source, producer and certificate pairing. Checked compiler imports include unused inputs; runtime demand selects only actual executable references. | world_native_assembly candidate `f335478f83` carries normalized segment input facts through one admission boundary. This is a partial issuer refactor with consumer compilation pending, not an established single-issuer completion. Keep fresh SOURCE, admitted canonical SOURCE, retained Original and TYPE-only support distinct. |
+| Native planning | Exact issued bindings, available byte custody and current-product intent are separate facts. Runtime installation consumes the selected native closure, not a whole retained catalog. | audit_native_selection candidate `a90b7ab55b` with follow-up `9d6f18b498` carries Exact/NewGroup planning. Source is accepted; behavioral acceptance remains pending after the first focused pair failed and receiving corrections entered compilation/rerun. Historical edges must keep exact binding identity, and graph-only recovery cannot manufacture runtime source permission. |
+| Host input and renderer preparation | `RuntimeHostPrototypeReceipt` carries the purpose-specific original owner. Request/input TYPE evidence is separate from the live payload and its mount; the checked import owner supplies certificate interfaces even when a value is unused. | Root's actual input run at `4417536c2e` executes two cases, one pass and one failure. Root `76618b88` localizes the positive case's `NativeRootOutsideView`: the direct `Aeson.Value` row is missing from `artifacts.retained_payloads` in `for_compiler_roles`. This excludes an `Arc` mismatch at that guard; root is tracing the receiving caller. Do not infer a new availability policy from this error alone. |
+| Checked execution and publication | `CheckedTurnCompletion::install_certified_turn_in` preserves the exact prefix/item/world while installing its own native source facts. Items advance a private prefix; successful cell completion promotes public World and bindings together. | A failed/cancelled cell publishes no new cell names; already executed external effects remain. Final native support must come from the same physical-output issuer. Actual declaration, mixed and later-reuse histories remain required on the receiving join. |
+| Queries and status | Actor effects and status use the held-World observation path. The actor carries actual request/row/model observations; runtime owns entry snapshots, pinned-answer validation, source/END checks and final installation. | Actual GHC Name/namespace/operator controls pass at their own revisions. The shared all-five hosted program checks semantic fields, read-only state, discovered `readFile` execution and stale-pin refusal after publication; hosted execution remains open. The separate status race must reach real answer settlement, not fail during initial source parsing. |
+| Source publication | The publication claim and ordered source gates retain the actual prerequisite lease. Confirmation rechecks those prerequisites under the actor owner; ordinary restoration cannot erase external uncertainty. | The same affine source/retirement attempt must serve the actual public/default endpoint. Prior publication component counts do not qualify that endpoint, caller-loss retention or durable recovery. |
+| Reload retirement | Root `CoherentReloadOperation::run` still publishes directly; the required public retirement-core integration is receiving work. The retained owner must keep candidate, source fence, cleanup and continuation obligations together. | audit_reload_ownership candidate `b9bf83b15c` joins the same retained core with transient drivers and releases drivers after source settlement. Its first consumer compile exposed mechanical errors; fixes/checks are pending. Default success/refusal comes before early Persona; force/recovery remain mandatory later work. DTO codec/presenter passes do not establish runtime ownership. |
+| Remaining finite mutation APIs | `validate_rendered_module` captures generated declaration value types through `run_inspections_strict`. Direct definition/staging consumers found in the bounded actor/runtime sweep are test-only, but non-World binding installation still has a conditional declaration-retraction edge. | audit_warm_lifecycle owns the first deletion increment: checked host/carrier installation must reject a declaration collision instead of invoking finite recompilation. Known activation/job mounts avoid collisions; static reachability is not an observed startup bypass. Migrate remaining finite define/stage/retract/query tests through actual producers before deleting their APIs; no resident-path exemption by helper name. |
+
+The Root, Haskell, Rust physical-issuer, native-planner and retirement rows above
+are separate receiving boundaries. Their candidates must join before one workflow
+can qualify them together. Carrying a fact across an owner does not permit a
+second reconstruction from broader inventories, another native issuer, or a
+fallback to the historical finite compiler path.
+
+The current native refusal is a missing retained payload, not an unresolved
+choice between absence and pointer mismatch. Root `76618b88` identifies the direct
+`Aeson.Value` native row missing from `artifacts.retained_payloads` when
+`for_compiler_roles` applies its payload guard. The remaining question is which
+receiving caller loses that exact payload before the check. Preserve its artifact
+and issuing history while tracing that handoff; do not relax the check or infer
+equivalence from matching interface bytes.
+
+The latest mixed/input observations are advances to another boundary, not passing
+histories. In particular, the old `0477b3481b` Scientific/interface failure is
+superseded as the current frontier by the actual `4417536c2e` one-pass/one-failure
+cohort. Its passing owner-refusal case does not qualify successful payload use.
+The engine/Haskell mixed-cell advance likewise does not establish final adoption,
+phase-correct boot reuse, or later query behavior.
+
+No matched warm/cold performance comparison or frozen Persona qualification is
+established here. Structural removal of a duplicate parser/issuer, a component
+counter, cached compilation, and an actual runtime speedup are different claims.
+Measure the exact joined bundle with source, compiler profile, workload,
+hydration/planning/product counts, memory and cleanup observations. G2 additionally
+requires actual ordinary/mixed/source-defined cells, private-input controls,
+semantic queries, default reload, selected Persona spec/tools/memory and a bounded
+real DeepSeek multi-turn smoke on that same frozen bundle. Force/recovery and the
+remaining campaign failures are not waived by early Persona delivery.
+
+Execution manifests retain each result's own revision under
+`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/completion/engine/`.
+Use those manifests and the verification ledger rather than transferring earlier
+leaf counts onto root or treating partial compilation as executed acceptance.
+
+## Earlier finite path and deletion inventory
+
+Everything below this heading is the historical finite-path inventory at the
+revisions named above. Its “current” labels describe that snapshot, not the
+service implementation or the receiving candidates.
 
 ```mermaid
 flowchart TD

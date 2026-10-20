@@ -5302,6 +5302,9 @@ fn decode_export_item(v: &CborValue) -> Result<ExportItem, CompileError> {
         ("EValue", 2) => Ok(ExportItem::Value {
             name: cbor_expect_text(&arr[1], "EValue name")?.to_string(),
         }),
+        ("EPattern", 2) => Ok(ExportItem::Pattern {
+            name: cbor_expect_text(&arr[1], "EPattern name")?.to_string(),
+        }),
         ("EType", 3) => Ok(ExportItem::Type {
             name: cbor_expect_text(&arr[1], "EType name")?.to_string(),
             cons: decode_string_array(&arr[2], "EType cons")?,
@@ -5884,6 +5887,7 @@ fn parse_classify_export_item(v: &serde_json::Value) -> Result<ExportItem, Compi
     };
     match (tag, fields.len()) {
         ("EValue", 2) => Ok(ExportItem::Value { name: name()? }),
+        ("EPattern", 2) => Ok(ExportItem::Pattern { name: name()? }),
         ("EType", 3) => Ok(ExportItem::Type {
             name: name()?,
             cons: children()?,
@@ -10979,6 +10983,20 @@ mod tests {
         .unwrap();
         assert_eq!(cs[0].kind, TurnKind::Expr);
         assert!(cs[0].binders.is_empty());
+    }
+
+    #[test]
+    fn pattern_export_wire_preserves_constructor_namespace() {
+        let classified = parse_classify_json(
+            r#"{"verdicts":[{"kind":"decl","binders":["PublishedPattern"],"items":[["EPattern","PublishedPattern"]]}]}"#,
+            1,
+        ).unwrap();
+        let expected = ExportItem::Pattern { name: "PublishedPattern".into() };
+        assert_eq!(classified[0].items, vec![expected.clone()]);
+        let value = CborValue::Array(vec![CborValue::Text("EPattern".into()), CborValue::Text("PublishedPattern".into())]);
+        assert_eq!(decode_export_item(&value).unwrap(), expected);
+        let extra = CborValue::Array(vec![CborValue::Text("EPattern".into()), CborValue::Text("PublishedPattern".into()), CborValue::Null]);
+        assert!(decode_export_item(&extra).is_err());
     }
 
     #[test]

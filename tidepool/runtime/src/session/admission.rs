@@ -288,6 +288,30 @@ impl RuntimeHostBindingAdmission {
 }
 
 impl PersistentSession {
+    pub(super) fn validate_fresh_host_binding_in(
+        &self,
+        scope: ScopeId,
+        binding: &str,
+    ) -> Result<(), SessionError> {
+        if !self.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        if self.resolve_in(scope, binding).is_some()
+            || self.has_lib()
+                && self
+                    .lib()
+                    .current_declarations_in(scope)
+                    .iter()
+                    .any(|(item, _)| item.value_names().any(|name| name == binding))
+        {
+            return Err(SessionError::HostBindingNameCollision {
+                scope,
+                binding: binding.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn admit_binding_interface(
         &mut self,
         scope: ScopeId,
@@ -299,6 +323,7 @@ impl PersistentSession {
             return Err(SessionError::DeadScope(scope));
         }
         self.admit_source_work_in(scope)?;
+        self.validate_fresh_host_binding_in(scope, &binding)?;
         let (generation, _) = self.reserve_value_generations(1)?;
         let visibility = self
             .public_visibility_snapshot_in(scope)
@@ -3089,21 +3114,24 @@ impl PersistentSession {
         let original_source = item
             .planned_declaration_source()
             .ok_or(SessionError::StaleStagedDeclaration)?;
-        // A World declaration item settles through the same missing per-item
-        // successor capability; the finite planned-row lookup cannot supply it.
-        if prefix.admission.world_reservation().is_some() {
-            return Err(SessionError::WorldCellSuccessorCapabilityMissing {
-                ordinal: item.index(),
-            });
-        }
-        let generation = prefix
-            .admission
-            .plan_reservation()?
-            .ok_or(SessionError::StaleStagedDeclaration)?
-            .items()
-            .get(item.index())
-            .and_then(|row| row.declaration_generation())
-            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let generation = if let Some(reservation) = prefix.admission.world_reservation() {
+            use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
+            match reservation.slots().get(item.index()) {
+                Some(Slot::Prologue { declaration } | Slot::Declaration { declaration }) => {
+                    Generation(*declaration)
+                }
+                _ => return Err(SessionError::StaleStagedDeclaration),
+            }
+        } else {
+            prefix
+                .admission
+                .plan_reservation()?
+                .ok_or(SessionError::StaleStagedDeclaration)?
+                .items()
+                .get(item.index())
+                .and_then(|row| row.declaration_generation())
+                .ok_or(SessionError::StaleStagedDeclaration)?
+        };
         let prepared = prefix.admission.prepared_declaration(item)?;
         let module = tidepool_repr::SessionModule::lib(generation);
         if prepared.generation != generation
@@ -3134,7 +3162,10 @@ impl PersistentSession {
             binders: observation.verdict.binders.clone(),
             items: observation.verdict.items.clone(),
         };
-        let external = state.snapshot.view()?.persistent_imports().clone();
+        let external = match state.snapshot.world() {
+            Some(_) => self.lib().workbench_imports_in(scope),
+            None => state.snapshot.view()?.persistent_imports().clone(),
+        };
         let (external_imports, _, visible_values) =
             self.declaration_staging_context_in(scope, &receipt, &external)?;
         let base_tip = self.lib().scope_tip(scope);
@@ -3185,6 +3216,115 @@ impl PersistentSession {
                 item.clone(),
                 prepared.projection.receipt().clone(),
             )?;
+        if let Some(predecessor) = state.snapshot.world().cloned() {
+            let source = prefix.admission.world_source_reference()?.clone();
+            let original_source = prefix.admission.original_source()?;
+            original_source.validate_source_issuer()?;
+            let target = prefix.admission._retained_scope.clone();
+            self.validate_lexical_scope_lease(scope, &target)?;
+            if self
+                .lib()
+                .tips
+                .get(&scope)
+                .and_then(|tip| tip.inspection_world.as_ref())
+                .is_none_or(|association| !Arc::ptr_eq(&association.world, &predecessor))
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+            let mut imports = self.lib().workbench_imports_in(scope);
+            imports.extend(&staged.turn.workbench_imports);
+            let import_specs = imports.into_specs();
+            let prior = state.snapshot.clone();
+            let interfaces = prior.interfaces.clone();
+            let native_imports = prior.native_imports.clone();
+            let retained = prior._retained_scope.clone();
+            let owner = self.admission_owner().clone();
+            let epoch = owner.epoch();
+            let selected = item
+                .world_selected_runtime_inputs()
+                .ok_or(SessionError::StaleStagedDeclaration)?;
+            let mut retained_ids = std::collections::HashSet::new();
+            for input in selected.inputs() {
+                let entry = self
+                    .bindings()
+                    .get(input.session_var())
+                    .filter(|entry| {
+                        entry.value.identity == *input.symbol()
+                            && entry.scope.0 == input.defining_scope()
+                            && entry.module
+                                == tidepool_repr::SessionModule::val(Generation(input.generation()))
+                    })
+                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                let handle = entry.value.handle;
+                if self
+                    .prepared()
+                    .and_then(|engine| engine.prepared_handle_of(handle.raw()))
+                    != Some(handle)
+                {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                retained_ids.insert(entry.id);
+            }
+            let mut retained_ids = retained_ids.into_iter().collect::<Vec<_>>();
+            retained_ids.sort_by_key(|id| id.raw());
+            return self.adopt_staged_declaration_with_world_activation(
+                staged,
+                &prior.visibility,
+                &retained_ids,
+                |key, visibility, delta| {
+                    let successor = prefix.program.declaration_item_successor(
+                        &predecessor,
+                        item,
+                        prepared.projection.receipt(),
+                        prepared.projection.context(),
+                        import_specs,
+                        delta
+                            .iter()
+                            .map(|(name, binding)| (name.as_str(), binding.as_ref().map(|binding| {
+                                tidepool_toolchain::compiler_world::CompilerWorldBinding::from_checked_value(
+                                    name, &binding.identity, binding.id, binding.defining_scope, binding.row.clone(),
+                                )
+                            }))),
+                    )?;
+                    let association = Arc::new(super::inspection::InspectionWorldAssociation {
+                        base: super::inspection::InspectionWorldBase {
+                            scope,
+                            key: key.clone(),
+                            owner,
+                            epoch,
+                            source,
+                            original_source:
+                                super::inspection::InspectionWorldSourceObservation::new(
+                                    &original_source,
+                                ),
+                            target: super::inspection::InspectionWorldLeaseObservation::new(
+                                &target,
+                            ),
+                        },
+                        world: successor.clone(),
+                    });
+                    let next = Arc::new(world_checked_snapshot(
+                        successor,
+                        key,
+                        prior.session_root.clone(),
+                        visibility,
+                        interfaces,
+                        compiler_prefix,
+                        prefix.admission.digest(),
+                        retained,
+                        native_imports,
+                    ));
+                    Ok(move |lib: &mut super::SessionLib| {
+                        lib.tips
+                            .get_mut(&scope)
+                            .expect("prepared declaration scope")
+                            .inspection_world = Some(association);
+                        state.snapshot = next;
+                        state.reservation = None;
+                    })
+                },
+            );
+        }
         let compile_inputs = state
             .compile_inputs
             .clone()
@@ -3207,7 +3347,7 @@ impl PersistentSession {
                 retained,
                 native_imports,
             ));
-            Ok(move || {
+            Ok(move |_: &mut super::SessionLib| {
                 state.snapshot = next;
                 state.reservation = None;
             })
