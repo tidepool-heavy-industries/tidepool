@@ -1786,26 +1786,31 @@ tidepool_buildscript_run(
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
             if package_name == "exomonad-actor":
-                world_tests = [
-                    "resident_workbench::request_tests::public_module_world_hot_queries_skip_retained_history_preparation",
-                    "resident_workbench::request_tests::public_module_world_retains_source_domain_and_invalidates_runtime_base",
-                ]
-                world_env, world_resources, world_worker = compiler_service_test_inputs(
-                    package_name, "actor_compiler_world_queries_test"
-                )
-                rules.append("\n".join([
-                    "tidepool_rust_test_cases(",
-                    '    name = "actor_compiler_world_queries_test",',
-                    f"    binary = {json.dumps(':' + unit_target['name'])},",
-                    "    exact_tests = [", render_strings(world_tests, 8), "    ],",
-                    f"    expected_count = {len(world_tests)},", "    ignored = True,",
-                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1260000,",
-                    '    case_compiler_modes = {' + ", ".join(
-                        json.dumps(test) + ': "owned-resident"' for test in world_tests
-                    ) + "},",
-                    runtime_arguments(world_env, world_resources, world_worker),
-                    '    visibility = ["PUBLIC"],', ")", "",
-                ]))
+                for world_target, world_tests in [
+                    ("actor_compiler_world_queries_test", [
+                        "resident_workbench::request_tests::public_module_world_hot_queries_skip_retained_history_preparation",
+                        "resident_workbench::request_tests::public_module_world_retains_source_domain_and_invalidates_runtime_base",
+                    ]),
+                    ("actor_world_lifetime_test", [
+                        "resident_workbench::request_tests::abandoned_private_world_birth_reaps_scope_after_lost_delivery",
+                    ]),
+                ]:
+                    world_env, world_resources, world_worker = compiler_service_test_inputs(
+                        package_name, world_target
+                    )
+                    rules.append("\n".join([
+                        "tidepool_rust_test_cases(",
+                        f'    name = {json.dumps(world_target)},',
+                        f"    binary = {json.dumps(':' + unit_target['name'])},",
+                        "    exact_tests = [", render_strings(world_tests, 8), "    ],",
+                        f"    expected_count = {len(world_tests)},", "    ignored = True,",
+                        "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1260000,",
+                        '    case_compiler_modes = {' + ", ".join(
+                            json.dumps(test) + ': "owned-resident"' for test in world_tests
+                        ) + "},",
+                        runtime_arguments(world_env, world_resources, world_worker),
+                        '    visibility = ["PUBLIC"],', ")", "",
+                    ]))
         NATIVE_TARGETS[package_name]["libraries"][library["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("" if shared else "_binary"), "test": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("_all" if shared else "")})
         if package_name == "tidepool-toolchain":
             for world_target, world_case in [
