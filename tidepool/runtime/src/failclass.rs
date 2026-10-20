@@ -80,6 +80,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::SourceAdmission(_)
         | SessionError::GenerationExhausted(_)
         | SessionError::DeadScope(_)
+        | SessionError::HostBindingNameCollision { .. }
         | SessionError::MissingDeclarationLibrary
         | SessionError::MissingRetainedValueInterface(_)
         | SessionError::UnsupportedCompilerWorldBinding { .. }
