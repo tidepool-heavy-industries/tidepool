@@ -2015,7 +2015,9 @@ impl CheckedTurnCompletion {
             (tidepool_repr::execution_schema::CachedHomeOwner, u32),
         >,
         inherited_needed: &[tidepool_codegen::prepared_program::InheritedSourceDemand],
-        retained_sources: &dyn Fn(super::persistent::ValidatedRetainedSourceRef<'_>) -> Option<super::resident::NativeSourceCustody>,
+        retained_sources: &dyn Fn(
+            super::persistent::ValidatedRetainedSourceRef<'_>,
+        ) -> Option<super::resident::NativeSourceCustody>,
     ) -> Result<super::persistent::InstalledCertifiedTurn, super::resident::ResidentError> {
         let association = {
             let state = self.prefix.state.lock();
@@ -2688,7 +2690,9 @@ impl RuntimeCellAdmission {
                 RuntimeCellCompilerBasis::World { reservation, .. } => {
                     use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
                     match reservation.slots().get(index) {
-                        Some(Slot::Prologue { declaration } | Slot::Declaration { declaration }) => Some(Generation(*declaration)),
+                        Some(
+                            Slot::Prologue { declaration } | Slot::Declaration { declaration },
+                        ) => Some(Generation(*declaration)),
                         _ => None,
                     }
                 }
@@ -3240,10 +3244,11 @@ impl PersistentSession {
             let retained = prior._retained_scope.clone();
             let owner = self.admission_owner().clone();
             let epoch = owner.epoch();
+            // Direct stage observations are checked independently. Lifetime
+            // roots come from the accepted join's full native body closure.
             let selected = item
                 .world_selected_runtime_inputs()
                 .ok_or(SessionError::StaleStagedDeclaration)?;
-            let mut retained_ids = std::collections::HashSet::new();
             for input in selected.inputs() {
                 let entry = self
                     .bindings()
@@ -3263,14 +3268,10 @@ impl PersistentSession {
                 {
                     return Err(SessionError::StaleStagedDeclaration);
                 }
-                retained_ids.insert(entry.id);
             }
-            let mut retained_ids = retained_ids.into_iter().collect::<Vec<_>>();
-            retained_ids.sort_by_key(|id| id.raw());
             return self.adopt_staged_declaration_with_world_activation(
                 staged,
                 &prior.visibility,
-                &retained_ids,
                 |key, visibility, delta| {
                     let successor = prefix.program.declaration_item_successor(
                         &predecessor,
@@ -5477,9 +5478,13 @@ impl PersistentSession {
             initial_value_generation,
             declarations: RuntimeCellDeclarations {
                 root: self.lib().root.clone(),
-                declaration_baseline: if !reservation.slots().iter().any(|slot| matches!(slot,
+                declaration_baseline: if !reservation.slots().iter().any(|slot| {
+                    matches!(slot,
                     tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Prologue { .. } |
-                    tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Declaration { .. })) { None } else {
+                    tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Declaration { .. })
+                }) {
+                    None
+                } else {
                     super::lexical_projection::DeclarationProjectionBaseline::capture(
                         self.lib(), self.lib().scope_tip(scope),
                     )?

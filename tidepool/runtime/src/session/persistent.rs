@@ -2470,7 +2470,7 @@ impl PersistentSession {
         &mut self,
         staged: super::StagedDeclaration,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
-        self.adopt_staged_declaration_prepared(staged, None, |_, _, _, _, _| {
+        self.adopt_staged_declaration_prepared(staged, |_, _, _, _, _| {
             Ok(|_: &mut super::SessionLib| {})
         })
     }
@@ -2490,7 +2490,6 @@ impl PersistentSession {
         let mut successor = None;
         let committed = self.adopt_staged_declaration_prepared(
             staged,
-            None,
             |session, staged, origin, changes, next_epoch| {
                 let origin = origin.ok_or(SessionError::StaleStagedDeclaration)?;
                 let (view, visibility, retained) =
@@ -2518,7 +2517,6 @@ impl PersistentSession {
         &mut self,
         staged: super::StagedDeclaration,
         prior: &super::PublicVisibilitySnapshot,
-        retained_ids: &[SessionVarId],
         prepare: impl FnOnce(
             CompileViewKey,
             super::PublicVisibilitySnapshot,
@@ -2527,7 +2525,6 @@ impl PersistentSession {
     ) -> Result<DeclarationPlaneCommit, SessionError> {
         self.adopt_staged_declaration_prepared(
             staged,
-            Some(retained_ids),
             |session, staged, origin, changes, next_epoch| {
                 let scope = staged.scope();
                 if prior.scope != scope
@@ -2549,19 +2546,21 @@ impl PersistentSession {
                     .visible_changes()
                     .map(|(name, entry)| {
                         let binding = entry
-                            .map(|entry| -> Result<WorldDeclarationVisibleBinding, SessionError> {
-                                let row = session
-                                    .retained_checked_value_artifact(entry.module)
-                                    .ok_or(SessionError::MissingRetainedValueInterface(
-                                        entry.module,
-                                    ))?;
-                                Ok(WorldDeclarationVisibleBinding {
-                                    identity: entry.value.identity.clone(),
-                                    id: entry.id,
-                                    defining_scope: entry.scope.0,
-                                    row: row.clone(),
-                                })
-                            })
+                            .map(
+                                |entry| -> Result<WorldDeclarationVisibleBinding, SessionError> {
+                                    let row = session
+                                        .retained_checked_value_artifact(entry.module)
+                                        .ok_or(SessionError::MissingRetainedValueInterface(
+                                            entry.module,
+                                        ))?;
+                                    Ok(WorldDeclarationVisibleBinding {
+                                        identity: entry.value.identity.clone(),
+                                        id: entry.id,
+                                        defining_scope: entry.scope.0,
+                                        row: row.clone(),
+                                    })
+                                },
+                            )
                             .transpose()?;
                         Ok((name.0.clone(), binding))
                     })
@@ -2600,7 +2599,6 @@ impl PersistentSession {
     fn adopt_staged_declaration_prepared<A: FnOnce(&mut super::SessionLib)>(
         &mut self,
         staged: super::StagedDeclaration,
-        retained_ids: Option<&[SessionVarId]>,
         prepare: impl FnOnce(
             &mut Self,
             &super::StagedDeclaration,
@@ -2647,24 +2645,20 @@ impl PersistentSession {
             })
             .transpose()
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        let legacy_retained;
-        let retained_ids = match retained_ids {
-            Some(ids) => ids,
-            None => {
-                legacy_retained = staged
-                    .certified_authored
-                    .as_ref()
-                    .map(|certificate| {
-                        let requirements = certificate
-                            .projection
-                            .receipt()
-                            .native_binding_custody_requirements()?;
-                        self.resolve_native_binding_custody(scope, &requirements)
-                    })
-                    .transpose()?;
-                legacy_retained.as_deref().unwrap_or(&[])
-            }
-        };
+        // The accepted native body owns its complete retained-value closure,
+        // including hidden dependencies that Haskell did not directly observe.
+        let retained = staged
+            .certified_authored
+            .as_ref()
+            .map(|certificate| {
+                let requirements = certificate
+                    .projection
+                    .receipt()
+                    .native_binding_custody_requirements()?;
+                self.resolve_native_binding_custody(scope, &requirements)
+            })
+            .transpose()?;
+        let retained_ids = retained.as_deref().unwrap_or(&[]);
         let binding_changes = match source_origin.as_mut() {
             Some(origin) => self
                 .bindings
@@ -6785,7 +6779,8 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &authored_custody,
-                &[owner])
+                &[owner],
+            )
             .unwrap();
         session
             .bindings
@@ -6850,7 +6845,8 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &keys_a,
-                &[owner.clone()])
+                &[owner.clone()],
+            )
             .unwrap();
         session.bindings.commit_exact_binding_promotion(accepted);
         let before = session.residency().unwrap();
@@ -7068,7 +7064,8 @@ mod checkpoint_scope_tests {
                     public,
                     &[],
                     keys,
-                    &[owner])
+                    &[owner],
+                )
                 .unwrap();
             session.bindings.commit_exact_binding_promotion(publication);
         }
@@ -7148,7 +7145,8 @@ mod checkpoint_scope_tests {
                         public,
                         &[],
                         keys,
-                        &[owner.clone()])
+                        &[owner.clone()],
+                    )
                     .unwrap();
                 session.bindings.commit_exact_binding_promotion(prepared);
             }
