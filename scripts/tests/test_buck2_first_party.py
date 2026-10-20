@@ -1095,6 +1095,20 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(publication['resource_env'], rooted['resource_env'])
         self.assertEqual(publication['resources'], rooted['resources'])
         self.assertTrue(publication['haskell_worker'])
+        durable = self.rule('exomonad/actor', 'actor_world_durable_generation_history_test',
+                            'tidepool_rust_test_cases')
+        self.assertEqual(durable['binary'], rooted['binary'])
+        self.assertEqual(durable['exact_tests'], [
+            'resident_workbench::request_tests::quoted_source_original_survives_coherent_generation_replacement',
+        ])
+        self.assertEqual(durable['expected_count'], 1)
+        self.assertTrue(durable['ignored'])
+        self.assertEqual(durable['case_compiler_modes'], {
+            durable['exact_tests'][0]: 'owned-resident',
+        })
+        self.assertEqual(durable['resource_env'], rooted['resource_env'])
+        self.assertEqual(durable['resources'], rooted['resources'])
+        self.assertTrue(durable['haskell_worker'])
 
     def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [

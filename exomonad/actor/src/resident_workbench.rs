@@ -22654,6 +22654,7 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
     async fn quoted_source_original_survives_coherent_generation_replacement() {
         with_test_compiler_owner(
             quoted_source_original_survives_coherent_generation_replacement_with_preparation_client,
