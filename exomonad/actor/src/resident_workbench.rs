@@ -2056,7 +2056,18 @@ pub(crate) struct ActorGenerationPublicationBody {
 /// Body visibility is not confirmed publication. Only the retained serial owner
 /// may turn this observation into a settled publication and notify its caller.
 #[must_use]
-pub(crate) enum ActorGenerationPublicationBodyResult {
+pub(crate) struct ActorGenerationPublicationBodyResult {
+    attempt: ActorPublicationAttemptObserver,
+    completion: ActorGenerationPublicationBodyCompletion,
+}
+
+impl ActorGenerationPublicationBodyResult {
+    pub(crate) fn completion(&self) -> &ActorGenerationPublicationBodyCompletion {
+        &self.completion
+    }
+}
+
+pub(crate) enum ActorGenerationPublicationBodyCompletion {
     Observed {
         outcome: Result<ActorGenerationBodyOutcome, ResidentActorWorkbenchError>,
         obligations: PublicationBodyObligations,
@@ -2121,11 +2132,14 @@ impl ActorGenerationPublicationOwner {
         &mut self,
         body: ActorGenerationPublicationBodyResult,
     ) -> Result<(), ActorGenerationPublicationBodyResult> {
-        if self.body.is_some() || self.prepared.is_some() {
+        if self.body.is_some()
+            || self.prepared.is_some()
+            || !Arc::ptr_eq(&self.guard.attempt, &body.attempt.0)
+        {
             return Err(body);
         }
-        self.body = Some(match body {
-            ActorGenerationPublicationBodyResult::Observed {
+        self.body = Some(match body.completion {
+            ActorGenerationPublicationBodyCompletion::Observed {
                 outcome:
                     Ok(ActorGenerationBodyOutcome::Visible {
                         generation,
@@ -2136,7 +2150,7 @@ impl ActorGenerationPublicationOwner {
                 generation,
                 cancellation_pending,
             },
-            ActorGenerationPublicationBodyResult::Observed {
+            ActorGenerationPublicationBodyCompletion::Observed {
                 outcome,
                 obligations,
             } => {
@@ -2154,7 +2168,7 @@ impl ActorGenerationPublicationOwner {
                     obligations,
                 }
             }
-            ActorGenerationPublicationBodyResult::Unobserved { primary } => {
+            ActorGenerationPublicationBodyCompletion::Unobserved { primary } => {
                 RecordedPublicationBody::Unobserved {
                     primary: Arc::new(primary),
                 }
@@ -2614,6 +2628,7 @@ impl ActorGenerationReservationDriver {
 #[must_use]
 pub(crate) struct ActorGenerationPublicationDriver {
     candidate: std::sync::Weak<ActorGenerationCandidate>,
+    attempt: ActorPublicationAttemptObserver,
     publish: GenerationPublicationAction,
 }
 
@@ -2625,6 +2640,7 @@ impl ActorGenerationPublicationDriver {
         if !self
             .candidate
             .ptr_eq(&Arc::downgrade(&body.prepared.candidate))
+            || !Arc::ptr_eq(&self.attempt.0, &body.visibility.attempt)
         {
             return Err((body, self));
         }
@@ -3681,10 +3697,12 @@ where
                     move |prepared| match self.reserve(prepared, decision, kind) {
                         Ok(ActorGenerationReservation::Reserved(reserved)) => {
                             let candidate = Arc::downgrade(&reserved.prepared.candidate);
+                            let attempt = reserved.attempt_observer();
                             ActorGenerationRetirementPreparationOutcome::Reserved {
                                 reserved,
                                 publisher: ActorGenerationPublicationDriver {
                                     candidate,
+                                    attempt,
                                     publish: Box::new(move |reserved| {
                                         Box::pin(async move {
                                             self.run_publication_execution(reserved).await
@@ -3845,8 +3863,8 @@ where
             decision: publication,
             publication_kind,
         };
-        match self.run_publication_execution(body).await {
-            ActorGenerationPublicationBodyResult::Observed {
+        match self.run_publication_execution(body).await.completion {
+            ActorGenerationPublicationBodyCompletion::Observed {
                 outcome,
                 obligations,
             } => PublicationBodyCompletion::Observed {
@@ -3868,7 +3886,7 @@ where
                 }),
                 obligations,
             },
-            ActorGenerationPublicationBodyResult::Unobserved { primary } => {
+            ActorGenerationPublicationBodyCompletion::Unobserved { primary } => {
                 PublicationBodyCompletion::Unobserved {
                     guard: owner,
                     primary,
@@ -3881,6 +3899,7 @@ where
         &self,
         body: ActorGenerationPublicationBody,
     ) -> ActorGenerationPublicationBodyResult {
+        let attempt = ActorPublicationAttemptObserver(body.visibility.attempt.clone());
         let ActorGenerationPublicationBody {
             prepared,
             visibility,
@@ -4002,16 +4021,22 @@ where
         let (outcome, obligations) = match completed {
             Ok(outcome) => outcome,
             Err(primary) => {
-                return ActorGenerationPublicationBodyResult::Unobserved { primary };
+                return ActorGenerationPublicationBodyResult {
+                    attempt,
+                    completion: ActorGenerationPublicationBodyCompletion::Unobserved { primary },
+                };
             }
         };
         #[cfg(test)]
         if let Some(probe) = &self.settlement_probe {
             probe.wait();
         }
-        ActorGenerationPublicationBodyResult::Observed {
-            outcome,
-            obligations,
+        ActorGenerationPublicationBodyResult {
+            attempt,
+            completion: ActorGenerationPublicationBodyCompletion::Observed {
+                outcome,
+                obligations,
+            },
         }
     }
 }
@@ -24225,7 +24250,9 @@ pub(crate) mod request_tests {
             Ok(settlement) => settlement,
             Err(_) => panic!("the actual reservation matches its publisher"),
         };
-        let ActorGenerationPublicationBodyResult::Unobserved { primary } = &settlement else {
+        let ActorGenerationPublicationBodyCompletion::Unobserved { primary } =
+            settlement.completion()
+        else {
             panic!("unobserved checkout cannot grant source restoration")
         };
         assert!(matches!(primary, ResidentActorWorkbenchError::Checkout(_)));

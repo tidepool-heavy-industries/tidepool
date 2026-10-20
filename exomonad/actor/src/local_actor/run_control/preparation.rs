@@ -3,8 +3,8 @@ use super::*;
 
 use crate::resident_workbench::{
     ActorGenerationBodyOutcome, ActorGenerationPublicationBody,
-    ActorGenerationPublicationBodyResult, ActorGenerationPublicationDriver,
-    ActorPublicationAttemptObserver,
+    ActorGenerationPublicationBodyCompletion, ActorGenerationPublicationBodyResult,
+    ActorGenerationPublicationDriver, ActorPublicationAttemptObserver,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -72,7 +72,6 @@ pub(super) enum PublicationTerminalObservation {
     NotStarted(PublicationNonStartKind),
     Completed {
         outcome: PublicationOutcomeObservation,
-        notification: PublicationNotificationObservation,
     },
     ProducerLostAfterExecute,
 }
@@ -102,28 +101,26 @@ impl PublicationWriter {
                 PublicationTerminalObservation::NotStarted(reason.kind())
             }
             PublicationDelivery::Observed { body } => {
-                let outcome = match body {
-                    ActorGenerationPublicationBodyResult::Observed { outcome, .. } => match outcome
-                    {
-                        Ok(ActorGenerationBodyOutcome::Visible { .. }) => {
-                            PublicationOutcomeObservation::Visible
+                let outcome = match body.completion() {
+                    ActorGenerationPublicationBodyCompletion::Observed { outcome, .. } => {
+                        match outcome {
+                            Ok(ActorGenerationBodyOutcome::Visible { .. }) => {
+                                PublicationOutcomeObservation::Visible
+                            }
+                            Ok(ActorGenerationBodyOutcome::Refused(_)) => {
+                                PublicationOutcomeObservation::Refused
+                            }
+                            Ok(ActorGenerationBodyOutcome::Unconfirmed(_)) => {
+                                PublicationOutcomeObservation::Unconfirmed
+                            }
+                            Err(_) => PublicationOutcomeObservation::Failed,
                         }
-                        Ok(ActorGenerationBodyOutcome::Refused(_)) => {
-                            PublicationOutcomeObservation::Refused
-                        }
-                        Ok(ActorGenerationBodyOutcome::Unconfirmed(_)) => {
-                            PublicationOutcomeObservation::Unconfirmed
-                        }
-                        Err(_) => PublicationOutcomeObservation::Failed,
-                    },
-                    ActorGenerationPublicationBodyResult::Unobserved { .. } => {
+                    }
+                    ActorGenerationPublicationBodyCompletion::Unobserved { .. } => {
                         PublicationOutcomeObservation::Unconfirmed
                     }
                 };
-                PublicationTerminalObservation::Completed {
-                    outcome,
-                    notification: PublicationNotificationObservation::NotRequired,
-                }
+                PublicationTerminalObservation::Completed { outcome }
             }
         };
         // Publish compact completion before either the oneshot receiver or

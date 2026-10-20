@@ -539,7 +539,6 @@ impl RunControlClient {
             terminal.get(),
             Some(preparation::PublicationTerminalObservation::Completed {
                 outcome: preparation::PublicationOutcomeObservation::Visible,
-                notification: preparation::PublicationNotificationObservation::NotRequired,
             })
         ));
         // This round trip drains the worker completion without supplying its lost body result.
