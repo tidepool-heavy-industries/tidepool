@@ -350,12 +350,12 @@ impl super::PreparedNotebookGeneration {
 
     pub fn with_compiler_world(
         self,
-        completed: super::CompletedCompilerWorld,
+        completed: Arc<super::CompletedCompilerWorld>,
     ) -> Result<super::PreparedNotebookGenerationWithWorld, SessionError> {
         self.validate_compiler_world(&completed)?;
         Ok(super::PreparedNotebookGenerationWithWorld {
             prepared: self,
-            world: Arc::new(completed),
+            world: completed,
         })
     }
 }
@@ -1971,6 +1971,35 @@ impl PersistentSession {
             },
         )
         .unwrap_or(false)
+    }
+
+    pub(super) fn with_current_compiler_world<T>(
+        &self,
+        completed: &super::CompletedCompilerWorld,
+        publication: &super::RuntimeSourcePublicationView,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, SessionError> {
+        let association = &completed.association;
+        publication.with_current(&association.base.target, || {
+            completed
+                .cancellation
+                .checkpoint()
+                .map_err(tidepool_toolchain::CompileError::from)?;
+            if !self.inspection_world_base_is_current(
+                &association.base,
+                &association.base.source,
+                &association.base.original_source,
+            ) || !self
+                .lib()
+                .tips
+                .get(&association.base.scope)
+                .and_then(|state| state.inspection_world.as_ref())
+                .is_some_and(|installed| Arc::ptr_eq(installed, association))
+            {
+                return Err(SessionError::WrongPublicManifestTicket);
+            }
+            Ok(action())
+        })?
     }
 
     /// Read mutation-owner facts without constructing a view or its digest.
