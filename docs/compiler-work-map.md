@@ -1,7 +1,7 @@
 # Compiler work and authority map
 
-The service-path update below was inspected at root `e27921de24` and joined
-engine `7ae7d2741d` on 2026-10-20. It distinguishes implemented owners from
+The service-path update below covers root `25316371c1`, the `115c81ee9e` fixture
+repair, and the explicitly named area candidates on 2026-10-20. It distinguishes implemented owners from
 receiving work and does not establish release readiness. The subsequent P1–P10
 tables describe the earlier finite path at `8245fa800a`/`c10837d44d`; they remain
 a deletion and consumer-migration inventory, not the current service dataflow.
@@ -21,13 +21,14 @@ alone is neither its implementation nor evidence of a speedup.
 | Boundary | Current owner and carried fact | Open receiving work |
 | --- | --- | --- |
 | Runtime admission | Runtime captures actual source A, target B, reservation and current compiler-world association. Compiler identity does not replace source or execution authority. | Ordinary syntax, original source/target separation and joined cancellation controls must all use this owner. |
-| Compiler preparation | The service retains the parsed operation and its actual world. Ordered stages carry their own checked prefixes; matching outer END is required before executable sealing. | Paired PREP5 stage inputs and protocol 27 queries are being compiled on area branches. They are not part of the earlier PREP4 execution evidence. |
+| Compiler preparation | The service retains the parsed operation and its actual world. Ordered stages carry their own checked prefixes; matching outer END is required before executable sealing. | PREP5/protocol 27 producer `b3909545ec` and scoped query consumer `e1a1af0c0b` compile separately. Joined execution is pending; earlier PREP4 results do not qualify this pair. |
 | Finalized interfaces and original products | GHC owns completed interfaces/Core; `CompilerProducts` owns original-product admission. A finalized-module inventory is broader than fresh implementation selection. | Preserve fresh source, selected canonical SOURCE, retained staged Original and TYPE-only custody distinctly. Do not make every finalized interface a newly issued original or compare relocated paths as implementation identities. |
-| Native selection and installation | The existing resolver selects exact issued bindings or positively completed current groups. Installation retains each program's actual acquired source support. | Keep support on its selected causal edge, including implicit historical dependencies. A live export may outlast its declaring native program; that lifetime is under investigation. |
-| Checked runtime continuation | `CheckedTurnCompletion::install_certified_turn_in` validates the same prefix/item/world before installation and advances only the association's runtime key after successful installation. The world and captured source observations remain the same. | Root `e27921de24` has independent source review; joined compilation and the real in-cell query replay remain pending. No generic key refresh or stale-check bypass is authorized. |
+| Native selection and installation | The existing resolver selects exact issued bindings or positively completed current groups. `ScopedTargetImage` carries its demanded images into installation, preventing a caller from pairing another image vector with the target. | Bundled candidate `93d82210be` compiles. Its 18 controls initially passed 17; the remaining source-transaction fixture was repaired and passes separately. Current versus historical classification must follow the winning issued row, not artifact-byte identity. Causal source support remains under review. |
+| Checked runtime continuation | `CheckedTurnCompletion::install_certified_turn_in` validates the same prefix/item/world before installation and advances only the association's runtime key after successful installation. The world and captured source observations remain the same. | The `b2f02e4cc1` replay passes the formerly failing in-cell query and settlement. Its later unrelated-history setup fails source admission; `115c81ee9e` replaces that setup with real issued admission and awaits replay. No generic key refresh or stale-check bypass is authorized. |
 | Host and renderer preparation | `RuntimeHostPrototypeReceipt` retains a purpose-specific actual finite owner or World source/reservation. Cold World host preparation no longer asks for a finite-only accessor. | Joined `7ae7d2741d` compiles. Its private-input test passes the lifetime/refusal case; the positive case reaches a later Haskell finalization failure. |
-| Declaration adoption | The actual declaration origin carries immutable hidden-input custody. Prospective readers validate exact baseline, scope and origin pairing before mutation. | Source-reviewed shared validation and precommit owned projections still need joined execution. Final publication must consume one same-owner declaration/context/import product, not reconstruct a namespace from inventories. |
-| Queries and reload | Queries use the held compiler operation; runtime owns view currency. Reload keeps publication guard, source fences and settlement with their actual attempt. | All-five scoped queries, final physical recapture/stop, force and recovery remain unqualified. An absent receipt does not establish either failure or successful cleanup. |
+| Declaration adoption | The actual declaration origin carries immutable hidden-input custody. Prospective readers validate exact baseline, scope and origin pairing before mutation. | Frozen support has 12 focused passes at `857afe6454`; final runtime publication `3b6682bab7` and removal of the earlier World reservation refusal require joined compilation and the actual declaration-history gate. |
+| Queries | The five discovery operations use the held compiler operation; runtime owns view currency. The actor captures its actual request/row/model observation with the scaffold. | `e1a1af0c0b` compiles with five projection/refusal controls and a context mutation control passing. Semantic all-five execution and canonical-name correlation remain unqualified. The last finite consumer is missing type-text enrichment in bindings status; its replacement is assigned. |
+| Reload | Publication guard, source fences and settlement remain with their actual attempt. Only an observed unpublished body may return the same refusal guard. | The real A/B unpublished-body control passes at `8a0e1ac303`. Affine worker return, post-death recovery checkout, final physical recapture/stop and full force/recovery remain unfinished. An absent receipt establishes neither failure nor successful cleanup. |
 
 The checked-install distinction matters inside a running cell: native source
 registration changes runtime revisions before an authored query runs. Treating
@@ -39,8 +40,10 @@ not narrow the general revision witness or rewrite old source observations.
 Finalization has two receiving counterexamples: a positive private-input history
 reports `MissingFinalizedSource` for `Tidepool.Aeson.Scientific`, and a mixed
 history rejects an unchanged interface repeated under another stage path.
-The first owner's precise source role is still being measured; selected World
-SOURCE receipts alone are not yet proven to explain it. A repair must account
+The failing operation's actual successor selects Scientific as a module/interface;
+the earlier empty base-world inspection was not that operation's input. The
+selected canonical proof is now carried into completion by `ae08e6e4c6`, but
+the finalization role partition and matched execution remain pending. A repair must account
 for actual compiler-issued roles and executable demand, with genuine conflicting
 originals still refused. Filtering unexplained rows away is not an admission rule.
 
@@ -51,6 +54,11 @@ The current actual private-input cohort executed **two cases: one pass and one
 failure**, build `c8fc8e2a-2d57-43b7-99e1-2d6f3b15d0a5`. The passing crossed/retired
 owner control does not qualify successful input execution. No new matched
 performance comparison or frozen Persona qualification follows.
+
+The later query cohort at `b2f02e4cc1` also executed two cases, with one pass
+and one failure (build `c49c1081-216d-4c8d-b56c-5382e60cdd49`). The failure moved
+past the repaired query/settlement to a fixture lacking actual source admission.
+This narrows the defect; it does not turn the whole case into a pass.
 
 ## Earlier finite path and deletion inventory
 
