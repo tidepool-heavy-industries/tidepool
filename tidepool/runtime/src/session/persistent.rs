@@ -3930,14 +3930,68 @@ impl PersistentSession {
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
         // The final promotion witness must be taken from the SAME prepared
         // promotion that would commit. It is only meaningful after removals.
-        let world_promotion_witness = world_execution
-            .as_ref()
-            .map(|_| {
-                self.bindings
-                    .prepared_promotion_scope_witness(self.scope_tree(), &prepared)
-                    .map_err(SessionError::InvalidPublicBindingPromotion)
-            })
-            .transpose()?;
+        let promoted_world = if let Some(intent) = &world_execution {
+            if ticket.declaration.is_some() {
+                return Err(SessionError::WorldCellDeclarationPublicationCapabilityMissing);
+            }
+            let world = intent.world().expect("World execution was selected");
+            let public = self
+                .lib()
+                .tips
+                .get(&ticket.public_scope)
+                .and_then(|tip| tip.inspection_world.as_ref())
+                .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+            if !self.inspection_world_base_is_current(
+                &public.base,
+                &public.base.source,
+                &public.base.original_source,
+            ) || !Arc::ptr_eq(&public.base.target, &world.target)
+            {
+                return Err(SessionError::WorldCellPublicationBaseStale);
+            }
+            let projection = self
+                .bindings
+                .prepared_promotion_projection(self.scope_tree(), &prepared)
+                .map_err(SessionError::InvalidPublicBindingPromotion)?;
+            if projection.target_scope() != ticket.public_scope {
+                return Err(SessionError::WorldCellPublicationBaseStale);
+            }
+            let successor = public.world.promote_private_bindings(
+                &world.association.world,
+                &world.private.world,
+                ticket.public_scope.0,
+                projection.visible_changes().map(|(name, entry)| {
+                    (
+                        name.0.as_str(),
+                        entry.map(|entry| (entry.id, entry.scope.0)),
+                    )
+                }),
+            )?;
+            let bindings = self
+                .bindings
+                .prepared_promotion_scope_witness(self.scope_tree(), &prepared)
+                .map_err(SessionError::InvalidPublicBindingPromotion)?;
+            Some(Arc::new(super::inspection::InspectionWorldAssociation {
+                base: super::inspection::InspectionWorldBase {
+                    scope: ticket.public_scope,
+                    key: CompileViewKey {
+                        library: self.lib().compile_view_identity,
+                        tip: self.lib().scope_tip(ticket.public_scope),
+                        bindings,
+                        compiler_inputs: self.compiler_input_revision,
+                        public_epoch: next_epoch,
+                    },
+                    owner: self.admission_owner().clone(),
+                    epoch: self.admission_owner().epoch(),
+                    source: world.source.clone(),
+                    original_source: world.original_source.clone(),
+                    target: world.target.clone(),
+                },
+                world: successor,
+            }))
+        } else {
+            None
+        };
         self.public_visibility_epochs
             .try_reserve(1)
             .map_err(|error| SessionError::RecoveryManifest {
@@ -3953,25 +4007,18 @@ impl PersistentSession {
                     .prepare_resident_declaration(public_scope, declaration)
             })
             .transpose()?;
-        if let (Some(intent), Some(_witness)) = (&world_execution, world_promotion_witness) {
-            // Final compare after every fallible preparation and effect, before
-            // any claim or install. A stale base refuses without replay and
-            // preserves the executed effects and private prefix.
-            if !self.world_execution_base_is_current(intent) {
-                return Ok(super::PublicationAttempt::Settled(
-                    PublicManifestCommit::Refused {
-                        error: Box::new(SessionError::WorldCellPublicationBaseStale),
-                    },
-                ));
-            }
-            // The binding promotion and its exact post-removal scope witness
-            // are prepared, but installing the matching World association
-            // requires Warm's SAME final promotion product. The Host must not
-            // synthesize that product from raw receipts. Drop the prepared
-            // promotion without claiming or committing.
+        // The source guards and exclusive checkout still cover this final
+        // compare after every fallible construction, before the commit claim.
+        if world_execution.as_ref().is_some_and(|intent| {
+            !self.world_execution_base_is_current(intent)
+                || !ticket
+                    .semantic
+                    .public_view
+                    .is_current(self, ticket.public_scope)
+        }) {
             return Ok(super::PublicationAttempt::Settled(
                 PublicManifestCommit::Refused {
-                    error: Box::new(SessionError::WorldCellFinalPromotionCapabilityMissing),
+                    error: Box::new(SessionError::WorldCellPublicationBaseStale),
                 },
             ));
         }
@@ -3989,13 +4036,15 @@ impl PersistentSession {
         let outcome = lib
             .as_mut()
             .expect("preflight library")
-            .publish_staged_public_manifest_unchecked(ticket, declaration, |_| {
-                // A World publication must commit its final association in
-                // this SAME callback, next to the binding promotion, using the
-                // SAME prepared promotion and scope witness. The finite path
-                // below cannot install a World pair and never runs for one.
+            .publish_staged_public_manifest_unchecked(ticket, declaration, |lib| {
                 bindings.commit_exact_binding_promotion(prepared);
                 public_visibility_epochs.insert(public_scope, next_epoch);
+                if let Some(world) = promoted_world {
+                    lib.tips
+                        .get_mut(&public_scope)
+                        .expect("the prepared public World association exists")
+                        .inspection_world = Some(world);
+                }
             });
         match &outcome {
             PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral => {
