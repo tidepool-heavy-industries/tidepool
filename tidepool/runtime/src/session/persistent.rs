@@ -864,7 +864,23 @@ impl PersistentSession {
         let current = certification
             .current_native_sources(prepared)
             .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
-        self.resolve_certification_with_sources(scope, prepared, certification, current.as_ref())
+        self.resolve_certification_with_sources(
+            scope,
+            prepared,
+            certification,
+            current.as_ref(),
+            None,
+        )
+    }
+
+    pub(super) fn resolve_closed_source_entry_in(
+        &self,
+        scope: ScopeId,
+        prepared: &PreparedProgram,
+        certification: &TurnCertification,
+        source: &super::resident::CapturedSourceOrigin,
+    ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
+        self.resolve_certification_with_sources(scope, prepared, certification, None, Some(source))
     }
 
     pub(crate) fn resolve_runtime_target_in(
@@ -886,6 +902,7 @@ impl PersistentSession {
             target.prepared.prepared(),
             &certification,
             current.as_ref(),
+            None,
         )
     }
 
@@ -895,6 +912,7 @@ impl PersistentSession {
         prepared: &PreparedProgram,
         certification: &TurnCertification,
         current: Option<&super::turn::CurrentNativeSources<'_>>,
+        closed: Option<&super::resident::CapturedSourceOrigin>,
     ) -> Result<ResolvedCertifiedTurn, PreparedRuntimeError> {
         if !self.scopes.is_live(scope) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
@@ -1079,6 +1097,11 @@ impl PersistentSession {
             groups.push(ResolvedSourceGroup {
                 sources: current
                     .map(|current| current.group(pending))
+                    .or_else(|| {
+                        closed.map(|source| {
+                            source.for_closed_entry_sites(pending.group().definitions().sites())
+                        })
+                    })
                     .unwrap_or_else(|| {
                         NativeSourceCustody::unknown(
                             pending
@@ -1103,6 +1126,7 @@ impl PersistentSession {
             groups,
             target_sources: current
                 .map(super::turn::CurrentNativeSources::target)
+                .or_else(|| closed.map(|source| source.for_closed_entry_sites(prepared.sites())))
                 .unwrap_or_else(|| {
                     NativeSourceCustody::unknown(prepared.sites().iter().map(|site| site.site))
                 }),
@@ -2549,19 +2573,21 @@ impl PersistentSession {
                     .visible_changes()
                     .map(|(name, entry)| {
                         let binding = entry
-                            .map(|entry| -> Result<WorldDeclarationVisibleBinding, SessionError> {
-                                let row = session
-                                    .retained_checked_value_artifact(entry.module)
-                                    .ok_or(SessionError::MissingRetainedValueInterface(
-                                        entry.module,
-                                    ))?;
-                                Ok(WorldDeclarationVisibleBinding {
-                                    identity: entry.value.identity.clone(),
-                                    id: entry.id,
-                                    defining_scope: entry.scope.0,
-                                    row: row.clone(),
-                                })
-                            })
+                            .map(
+                                |entry| -> Result<WorldDeclarationVisibleBinding, SessionError> {
+                                    let row = session
+                                        .retained_checked_value_artifact(entry.module)
+                                        .ok_or(SessionError::MissingRetainedValueInterface(
+                                            entry.module,
+                                        ))?;
+                                    Ok(WorldDeclarationVisibleBinding {
+                                        identity: entry.value.identity.clone(),
+                                        id: entry.id,
+                                        defining_scope: entry.scope.0,
+                                        row: row.clone(),
+                                    })
+                                },
+                            )
                             .transpose()?;
                         Ok((name.0.clone(), binding))
                     })
@@ -6785,7 +6811,8 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &authored_custody,
-                &[owner])
+                &[owner],
+            )
             .unwrap();
         session
             .bindings
@@ -6850,7 +6877,8 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &keys_a,
-                &[owner.clone()])
+                &[owner.clone()],
+            )
             .unwrap();
         session.bindings.commit_exact_binding_promotion(accepted);
         let before = session.residency().unwrap();
@@ -7068,7 +7096,8 @@ mod checkpoint_scope_tests {
                     public,
                     &[],
                     keys,
-                    &[owner])
+                    &[owner],
+                )
                 .unwrap();
             session.bindings.commit_exact_binding_promotion(publication);
         }
@@ -7148,7 +7177,8 @@ mod checkpoint_scope_tests {
                         public,
                         &[],
                         keys,
-                        &[owner.clone()])
+                        &[owner.clone()],
+                    )
                     .unwrap();
                 session.bindings.commit_exact_binding_promotion(prepared);
             }
