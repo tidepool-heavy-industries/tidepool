@@ -10807,6 +10807,12 @@ pub(super) mod tests {
             inputs: vec![],
         });
         let mut state = super::super::PersistentSession::new(None, 64 * 1024);
+        let source = state.mint_isolated_scope_with_lease().unwrap();
+        let settled = state.with_source_compiler_transaction(
+            source.original_source().clone(),
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(), None, |_| {},
+            |state, _| {
         let producer = state
             .install_prepared(testing::prepare(wire).unwrap(), None)
             .unwrap();
@@ -10873,6 +10879,12 @@ pub(super) mod tests {
             "new binding cannot borrow another binding's retained source pair"
         );
         assert_eq!(state.prepared().unwrap().residency(), before);
+            },
+        ).unwrap();
+        assert!(matches!(
+            settled.close(),
+            crate::CompilerTransactionClose::NotStarted
+        ));
     }
 
     #[test]
