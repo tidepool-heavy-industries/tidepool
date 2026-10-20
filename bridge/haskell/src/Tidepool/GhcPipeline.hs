@@ -5671,8 +5671,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   [take 256 source | summary <- summaries graph owner
                     , source <- maybe [] pure (ml_hs_file (ms_location summary))]
                 selected = [mi_module (hm_iface (finalizedHomeModInfo finalized))
-                | finalized <- Map.elems finalizedModules
-                , matches (mi_module (hm_iface (finalizedHomeModInfo finalized)))]
+                  | finalized <- Map.elems finalizedModules
+                  , matches (mi_module (hm_iface (finalizedHomeModInfo finalized)))]
             hPutStrLn stderr ("e6-finalized-role-request owner=" ++ show (take 256 requested)
               ++ " finalized_matches=" ++ show (length selected))
             forM_ (take 1 selected) $ \owner -> do
