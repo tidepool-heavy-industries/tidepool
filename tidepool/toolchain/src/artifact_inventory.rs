@@ -7076,6 +7076,38 @@ impl ArtifactView {
             .contains(&InventoryNodeKey::Group(group))
     }
 
+    /// Retain matching owned payloads without choosing a compiler role or group.
+    /// Native owner equality omits producer and certificate identity, so several
+    /// independently issued artifacts can provide the same dependency bytes.
+    fn native_payload_custody_ids(
+        &self,
+        owned: &imbl::OrdSet<InventoryNodeKey>,
+        initial: &BTreeSet<ArtifactId>,
+    ) -> BTreeSet<ArtifactId> {
+        let mut native_owners = BTreeMap::<NativeOwnerKey, Vec<ArtifactId>>::new();
+        for id in artifact_ids(owned) {
+            let ArtifactPayload::Original(product) = &self.lease.payloads[&id].payload else {
+                continue;
+            };
+            native_owners
+                .entry(NativeOwnerKey::from_owner(product.owner()))
+                .or_default()
+                .push(id);
+        }
+        let mut retained = initial.clone();
+        let mut pending = initial.iter().copied().collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            for required in self.lease.payloads[&id].native_owners.values() {
+                for &required_id in native_owners.get(required).into_iter().flatten() {
+                    if retained.insert(required_id) {
+                        pending.push(required_id);
+                    }
+                }
+            }
+        }
+        retained
+    }
+
     pub(crate) fn select_publication_roots(
         &self,
         original: ArtifactId,
@@ -7102,26 +7134,7 @@ impl ArtifactView {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let owned = &self.read_projection(&state).nodes;
         let initial = artifact_ids(&admitted_closure(&state, selected.iter().copied()));
-        let native_owners = artifact_ids(owned)
-            .into_iter()
-            .filter_map(|id| {
-                let ArtifactPayload::Original(product) = &self.lease.payloads[&id].payload else {
-                    return None;
-                };
-                Some((NativeOwnerKey::from_owner(product.owner()), id))
-            })
-            .collect::<BTreeMap<_, _>>();
-        let mut retained_ids = initial.clone();
-        let mut pending = initial.iter().copied().collect::<Vec<_>>();
-        while let Some(id) = pending.pop() {
-            for required in self.lease.payloads[&id].native_owners.values() {
-                if let Some(required_id) = native_owners.get(required).copied() {
-                    if retained_ids.insert(required_id) {
-                        pending.push(required_id);
-                    }
-                }
-            }
-        }
+        let retained_ids = self.native_payload_custody_ids(owned, &initial);
         // Hidden native dependencies preserve every owned issuer as custody;
         // the explicit publication namespace remains the source choice.
         let mut custody = owned
@@ -7446,37 +7459,17 @@ impl ArtifactView {
         // Qualify exact original carriers before traversing their complete
         // native dependency custody. Canonical roots retain these carriers
         // privately, without selecting their bodies for execution.
-        let native_owners = artifact_ids(owned)
-            .into_iter()
-            .filter_map(|id| {
-                let ArtifactPayload::Original(product) = &self.lease.payloads[&id].payload else {
-                    return None;
-                };
-                Some((NativeOwnerKey::from_owner(product.owner()), id))
-            })
-            .collect::<BTreeMap<_, _>>();
         let initial = artifact_ids(&admitted_closure(
             &state,
             selected.iter().chain(carriers.iter()).copied(),
         ));
-        let mut retained_ids = initial.clone();
-        let mut pending = initial.iter().copied().collect::<Vec<_>>();
-        while let Some(id) = pending.pop() {
-            for required in self.lease.payloads[&id].native_owners.values() {
-                let Some(required_id) = native_owners.get(required).copied() else {
-                    continue;
-                };
-                if retained_ids.insert(required_id) {
-                    pending.push(required_id);
-                }
-            }
-        }
+        let retained_ids = self.native_payload_custody_ids(owned, &initial);
         let mut custody_roots = carriers
             .into_iter()
             .filter(|node| !selected_nodes.contains(node))
             .collect::<Vec<_>>();
         // These dependencies retain bytes, not a compiler or execution choice.
-        // Every required id came from native_owners built from this owned graph.
+        // Every required id came from matching payloads in this owned graph.
         // Preserve each exact issuer instead of resolving its shared payload id.
         custody_roots.extend(owned.iter().copied().filter(|node| {
             matches!(node, InventoryNodeKey::Artifact(binding)
@@ -17489,6 +17482,133 @@ mod tests {
         assert_eq!(recovered.capture_graph_selection(), graph);
         drop(recovered);
         assert_eq!(recovered_inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn hidden_native_custody_preserves_distinct_artifacts_with_equal_native_owner() {
+        for publication in [false, true] {
+            let inventory = ArtifactInventory::default();
+            let hidden = [[2; 32], [3; 32]].map(|producer| {
+                Arc::new(issued_native_groups_in_unit(
+                    "fixture",
+                    producer,
+                    "EqualHiddenOwner",
+                    vec![0x42],
+                    vec![(7, vec![])],
+                    &[],
+                    &BTreeMap::new(),
+                ))
+            });
+            let keys = hidden.each_ref().map(|entry| {
+                let ArtifactPayload::Original(product) = &entry.payload else {
+                    unreachable!()
+                };
+                NativeOwnerKey::from_owner(product.owner())
+            });
+            assert_eq!(keys[0], keys[1]);
+            assert_ne!(hidden[0].descriptor.id, hidden[1].descriptor.id);
+            let root = Arc::new(issued_native_groups(
+                "EqualOwnerCustodyRoot",
+                vec![(0, vec![]), (9, vec![issued_source(&hidden[0], 7)])],
+                &[],
+                &BTreeMap::new(),
+            ));
+            let ArtifactPayload::Original(product) = &root.payload else {
+                unreachable!()
+            };
+            let canonical = Arc::new(ArtifactEntry::canonical(
+                product.module_interface().unwrap().clone(),
+            ));
+            let original = inventory
+                .admit_recovery_selection(
+                    &inventory.empty_view(),
+                    vec![root.clone(), hidden[0].clone()],
+                    &BTreeSet::from([
+                        NativeGroupKey {
+                            artifact: root.descriptor.id,
+                            original_ordinal: 0,
+                        },
+                        NativeGroupKey {
+                            artifact: hidden[0].descriptor.id,
+                            original_ordinal: 7,
+                        },
+                    ]),
+                )
+                .unwrap();
+            let independent = inventory
+                .admit_recovery_selection(
+                    &inventory.empty_view(),
+                    vec![hidden[1].clone()],
+                    &BTreeSet::from([NativeGroupKey {
+                        artifact: hidden[1].descriptor.id,
+                        original_ordinal: 7,
+                    }]),
+                )
+                .unwrap();
+            let roles = CompilerInputProjection::from_issued_entries(&[root.clone()]).unwrap();
+            let broad = original
+                .with_compiler_projection(&roles)
+                .map(std::borrow::Cow::into_owned)
+                .unwrap()
+                .retain_custody(&independent)
+                .unwrap();
+            let expected = hidden
+                .each_ref()
+                .map(|entry| entry.descriptor.id)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            assert!(expected.iter().all(|id| broad.artifact_ids().contains(id)));
+            let selected = if publication {
+                broad
+                    .select_publication_roots(
+                        root.descriptor.id,
+                        vec![root.descriptor.id, canonical.descriptor.id],
+                    )
+                    .unwrap()
+            } else {
+                broad.select_roots(vec![canonical.descriptor.id]).unwrap()
+            };
+            let actual = selected.artifact_ids();
+            assert!(expected.iter().all(|id| actual.contains(id)), "custody projection discarded an independently issued payload: {expected:?} versus {actual:?}");
+            assert!(hidden
+                .iter()
+                .all(|entry| !selected.contains_namespace_artifact(entry.descriptor.id)));
+            assert_eq!(
+                selected.selected_native_groups(),
+                if publication {
+                    BTreeSet::from([NativeGroupKey {
+                        artifact: root.descriptor.id,
+                        original_ordinal: 0,
+                    }])
+                } else {
+                    BTreeSet::new()
+                }
+            );
+            let graph = selected.capture_graph_selection();
+            let recovered_inventory = ArtifactInventory::default();
+            let recovered = recovered_inventory
+                .recover_selection(
+                    &recovered_inventory.empty_view(),
+                    selected.entries(),
+                    &graph,
+                    &selected.binding_dependencies(),
+                )
+                .unwrap();
+            drop(original);
+            drop(independent);
+            drop(broad);
+            assert!(expected
+                .iter()
+                .all(|id| selected.artifact_ids().contains(id)));
+            assert_eq!(recovered.capture_graph_selection(), graph);
+            assert!(expected
+                .iter()
+                .all(|id| recovered.artifact_ids().contains(id)));
+            drop(selected);
+            assert_eq!(inventory.node_count(), 0);
+            drop(recovered);
+            assert_eq!(recovered_inventory.node_count(), 0);
+        }
     }
 
     #[test]
