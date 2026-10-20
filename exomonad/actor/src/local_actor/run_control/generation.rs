@@ -44,6 +44,7 @@ pub(crate) enum GenerationCollateralIdentity {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GenerationLifetimeEdge {
     PhysicalSupervision,
+    SupervisorExitUnclassified,
     PendingSupervision,
     PendingResourcePreparation,
     ResourceOwnership,
@@ -70,6 +71,25 @@ pub(crate) struct GenerationPopulation {
 }
 
 impl RunState {
+    fn generation_resource_identity(
+        &self,
+        id: ractor::ActorId,
+    ) -> Option<GenerationResourceIdentity> {
+        self.identities
+            .runtime
+            .get(&id)
+            .copied()
+            .map(GenerationResourceIdentity::Actor)
+            .or_else(|| {
+                self.resources
+                    .get(&id)
+                    .map(|record| GenerationResourceIdentity::Native {
+                        issued_to: record.issued_to,
+                        id,
+                    })
+            })
+    }
+
     pub(super) fn generation_population(
         &self,
         dependency: GenerationDependency,
@@ -250,6 +270,25 @@ impl RunState {
                 GenerationResourceIdentity::Preparation(_) => None,
             };
             if let Some(cell) = cell {
+                if let Some(parent) = cell.try_get_supervisor() {
+                    let identity = self.generation_resource_identity(parent.get_id());
+                    if !identity
+                        .as_ref()
+                        .is_some_and(|identity| captured.contains(identity))
+                    {
+                        // A physical link identifies the parent, not its child-exit
+                        // policy. Arbitrary native handlers can stop that parent.
+                        collateral.push(GenerationCollateral {
+                            stopping: resource.identity.clone(),
+                            affected: identity
+                                .map(GenerationCollateralIdentity::Classified)
+                                .unwrap_or(GenerationCollateralIdentity::UnclassifiedPhysical(
+                                    parent.get_id(),
+                                )),
+                            edge: GenerationLifetimeEdge::SupervisorExitUnclassified,
+                        });
+                    }
+                }
                 let mut pending = cell.get_children();
                 let mut visited = HashSet::new();
                 while let Some(child) = pending.pop() {
@@ -258,20 +297,7 @@ impl RunState {
                         continue;
                     }
                     pending.extend(child.get_children());
-                    let identity = self
-                        .identities
-                        .runtime
-                        .get(&id)
-                        .copied()
-                        .map(GenerationResourceIdentity::Actor)
-                        .or_else(|| {
-                            self.resources.get(&id).map(|record| {
-                                GenerationResourceIdentity::Native {
-                                    issued_to: record.issued_to,
-                                    id,
-                                }
-                            })
-                        });
+                    let identity = self.generation_resource_identity(id);
                     let affected = match identity {
                         Some(identity) if captured.contains(&identity) => continue,
                         Some(identity) => GenerationCollateralIdentity::Classified(identity),
@@ -605,6 +631,47 @@ mod retirement_tests {
     }
 
     #[tokio::test]
+    async fn physical_capture_preserves_unproven_independent_supervisor() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let (parent, parent_task) = Actor::spawn(None, Probe, stopped.clone()).await.unwrap();
+        let (child, child_task) =
+            Actor::spawn_linked(None, Probe, stopped.clone(), parent.get_cell())
+                .await
+                .unwrap();
+        let issued_to = ActorRef::first(crate::ActorId(1));
+        let mut state = RunState::default();
+        retain_native(&mut state, child.get_cell(), issued_to);
+        let captured = [observation(&child.get_cell(), issued_to)];
+        assert_eq!(
+            state.generation_collateral(&captured),
+            [GenerationCollateral {
+                stopping: captured[0].identity.clone(),
+                affected: GenerationCollateralIdentity::UnclassifiedPhysical(parent.get_id()),
+                edge: GenerationLifetimeEdge::SupervisorExitUnclassified,
+            }]
+        );
+        // Even a registered identity does not prove the supervisor's policy.
+        retain_native(&mut state, parent.get_cell(), issued_to);
+        assert_eq!(
+            state.generation_collateral(&captured)[0].affected,
+            GenerationCollateralIdentity::Classified(
+                observation(&parent.get_cell(), issued_to).identity
+            )
+        );
+        assert_eq!(stopped.load(Ordering::SeqCst), 0);
+        child
+            .stop_and_wait(None, Some(Duration::from_secs(2)))
+            .await
+            .unwrap();
+        parent
+            .stop_and_wait(None, Some(Duration::from_secs(2)))
+            .await
+            .unwrap();
+        child_task.await.unwrap();
+        parent_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn physical_capture_reports_independent_child_and_leaves_sibling_live() {
         let stopped = Arc::new(AtomicUsize::new(0));
         let (parent, parent_task) = Actor::spawn(None, Probe, stopped.clone()).await.unwrap();
@@ -747,12 +814,17 @@ mod retirement_tests {
                 let mut expected = HashSet::new();
                 for (stopping, capture) in selected.iter().enumerate() {
                     if !capture { continue; }
+                    if let Some(parent) = parents[stopping] {
+                        if !selected[parent] {
+                            expected.insert((stopping, parent, true));
+                        }
+                    }
                     for affected in 0..nodes.len() {
                         if selected[affected] { continue; }
                         let mut cursor = parents[affected];
                         while let Some(parent) = cursor {
                             if parent == stopping {
-                                expected.insert((stopping, affected));
+                                expected.insert((stopping, affected, false));
                                 break;
                             }
                             cursor = parents[parent];
@@ -761,7 +833,11 @@ mod retirement_tests {
                 }
                 let report = state.generation_collateral(&captured);
                 let observed: HashSet<_> = report.iter().map(|edge| {
-                    assert_eq!(edge.edge, GenerationLifetimeEdge::PhysicalSupervision);
+                    let upward = match edge.edge {
+                        GenerationLifetimeEdge::PhysicalSupervision => false,
+                        GenerationLifetimeEdge::SupervisorExitUnclassified => true,
+                        _ => unreachable!(),
+                    };
                     let GenerationResourceIdentity::Native { id, .. } = edge.stopping else { unreachable!() };
                     let stopping = actors.iter().position(|actor| actor.get_id() == id).unwrap();
                     let id = match &edge.affected {
@@ -771,7 +847,7 @@ mod retirement_tests {
                     };
                     let affected = actors.iter().position(|actor| actor.get_id() == id).unwrap();
                     assert_eq!(matches!(&edge.affected, GenerationCollateralIdentity::UnclassifiedPhysical(_)), !nodes[affected].1);
-                    (stopping, affected)
+                    (stopping, affected, upward)
                 }).collect();
                 assert_eq!(observed, expected);
                 assert_eq!(stopped.load(Ordering::SeqCst), 0);
