@@ -136,7 +136,7 @@ data BoundCompilerRequest = BoundCompilerRequest CompilerScope WorkerRequest
 -- is a typed refusal, not an admitted operation with absent fields.
 data AdmittedCompilerOperation
   = AdmittedExactOperation (Maybe ExactScope) RequestOperation
-  | AdmittedHeldQueryOperation (Maybe HeldWorldQueryBinding) WorldPublicModuleRequest
+  | AdmittedHeldQueryOperation (Maybe HeldWorldQueryBinding) WorldQueryRequest
   | AdmittedHeldCellPlanOperation (Maybe HeldWorldQueryBinding) WorldCellPlanRequest
   | AdmittedHeldCellPrepareOperation HeldWorldCellPreparation
 
@@ -151,7 +151,7 @@ boundRequestOperation :: BoundCompilerRequest -> RequestOperation
 boundRequestOperation (BoundCompilerRequest _ _ admitted _ _ _) = admittedTag admitted
   where
     admittedTag (AdmittedExactOperation _ operation) = operation
-    admittedTag (AdmittedHeldQueryOperation _ question) = WorldPublicModuleOperation question
+    admittedTag (AdmittedHeldQueryOperation _ question) = WorldQueryOperation question
     admittedTag (AdmittedHeldCellPlanOperation _ question) = WorldCellPlanOperation question
     admittedTag (AdmittedHeldCellPrepareOperation preparation) =
       WorldCellPrepareOperation (heldPreparationQuestion preparation)
@@ -220,7 +220,7 @@ withBoundCompilerRequest sink compilerScope parsed use = do
               (throwIO CheckedPurposeMismatch)
         pure scope
       admitted <- case operation of
-        WorldPublicModuleOperation question -> AdmittedHeldQueryOperation <$>
+        WorldQueryOperation question -> AdmittedHeldQueryOperation <$>
           scopedReadHeldWorld compilerScope (worldQueryIdentity question) (worldQueryRealization question)
           <*> pure question
         WorldCellPlanOperation question -> AdmittedHeldCellPlanOperation <$>

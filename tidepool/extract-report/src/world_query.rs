@@ -117,6 +117,37 @@ pub struct WorldQueryExpectation<'a> {
     pub fingerprint: &'a str,
 }
 
+/// Exact operands of a current-scope observation. These are descriptions,
+/// never World/source/runtime admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorldObservationQuestion {
+    Info(NameQuery),
+    Type(NameQuery),
+    RowFit(IdentifierRef),
+    Expression(String),
+    TypeSearch { pattern: String, limit: u32 },
+}
+
+pub struct WorldObservationExpectation<'a> {
+    pub world: &'a [u8; 32],
+    pub question: &'a WorldObservationQuestion,
+    pub generation: u64,
+    pub fingerprint: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorldObservationOutcome {
+    Answer(inspection::ScopedReply),
+    Rejected(WorldQueryRejection),
+}
+
+/// Decoded correlation facts remain separate from the authenticating issuer.
+#[derive(Clone, Debug)]
+pub struct DecodedWorldObservation {
+    pub provenance: inspection::ScopeProvenance,
+    pub outcome: WorldObservationOutcome,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WorldAnswerDecodeError {
     #[error("malformed world answer: {0}")]
@@ -216,12 +247,7 @@ fn check_query(
     Ok(())
 }
 
-/// Decode the outer world envelope and its single structured result once.
-/// Source-domain/profile authentication remains with the toolchain world issuer.
-pub fn decode_world_answer(
-    bytes: &[u8],
-    expected: &WorldQueryExpectation<'_>,
-) -> Result<WorldAnswer, WorldAnswerDecodeError> {
+fn decode_world_envelope(bytes: &[u8]) -> Result<Value, WorldAnswerDecodeError> {
     if bytes.get(..8) != Some(b"TPWQ0002") || bytes.len() < 12 {
         return Err(malformed("world header"));
     }
@@ -239,6 +265,16 @@ pub fn decode_world_answer(
     if reader.position() != size as u64 {
         return Err(malformed("trailing world CBOR"));
     }
+    Ok(value)
+}
+
+/// Decode the outer world envelope and its single structured result once.
+/// Source-domain/profile authentication remains with the toolchain world issuer.
+pub fn decode_world_answer(
+    bytes: &[u8],
+    expected: &WorldQueryExpectation<'_>,
+) -> Result<WorldAnswer, WorldAnswerDecodeError> {
+    let value = decode_world_envelope(bytes)?;
     let fields = array(&value, 8)?;
     let echo = array(&fields[4], 4)?;
     if number(&fields[0])? != 1
@@ -324,7 +360,7 @@ pub fn decode_world_answer(
                 }
                 QueryError::Unsupported(detail) => NameRefusal::Unsupported(detail.clone()),
                 QueryError::UnknownModule(_) => {
-                    return Err(mismatch("resolved module paired with absence"))
+                    return Err(mismatch("resolved module paired with absence"));
                 }
             };
             return Ok(WorldAnswer::NameRefused { requested, refusal });
@@ -361,6 +397,145 @@ pub fn decode_world_answer(
             info,
         },
         StructuredReply::Error(_) => unreachable!("name refusal returned above"),
+    })
+}
+
+pub fn decode_world_observation(
+    bytes: &[u8],
+    expected: &WorldObservationExpectation<'_>,
+) -> Result<DecodedWorldObservation, WorldAnswerDecodeError> {
+    use inspection::{ScopeProvenance, ScopedReply};
+    let value = decode_world_envelope(bytes)?;
+    let fields = array(&value, 5)?;
+    let pin = array(&fields[2], 2)?;
+    if number(&fields[0])? != 2
+        || hash(&fields[1])? != *expected.world
+        || number(&pin[0])? != expected.generation
+        || text(&pin[1])? != expected.fingerprint
+    {
+        return Err(mismatch("observation envelope"));
+    }
+    let namespace = |value: NameNamespace| match value {
+        NameNamespace::Any => 0,
+        NameNamespace::Value => 1,
+        NameNamespace::Type => 2,
+        NameNamespace::Constructor => 3,
+    };
+    let identifier_namespace = |value: IdentifierNamespace| match value {
+        IdentifierNamespace::Value => 1,
+        IdentifierNamespace::Type => 2,
+        IdentifierNamespace::Constructor => 3,
+        IdentifierNamespace::Field => 4,
+    };
+    let echo = match expected.question {
+        WorldObservationQuestion::Info(query) | WorldObservationQuestion::Type(query) => {
+            if query.scope != NameScope::Current {
+                return Err(mismatch("observation question scope"));
+            }
+            let echo = array(&fields[3], 3)?;
+            let tag = if matches!(expected.question, WorldObservationQuestion::Info(_)) {
+                2
+            } else {
+                3
+            };
+            number(&echo[0])? == tag
+                && number(&echo[1])? == namespace(query.namespace)
+                && text(&echo[2])? == query.name
+        }
+        WorldObservationQuestion::RowFit(reference) => {
+            let echo = array(&fields[3], 4)?;
+            number(&echo[0])? == 4
+                && number(&echo[1])? == identifier_namespace(reference.namespace)
+                && text(&echo[2])? == reference.name
+                && text(&echo[3])? == reference.module
+        }
+        WorldObservationQuestion::Expression(expression) => {
+            let echo = array(&fields[3], 2)?;
+            number(&echo[0])? == 5 && text(&echo[1])? == expression
+        }
+        WorldObservationQuestion::TypeSearch { pattern, limit } => {
+            let echo = array(&fields[3], 3)?;
+            number(&echo[0])? == 6
+                && text(&echo[1])? == pattern
+                && number(&echo[2])? == u64::from(*limit)
+                && *limit > 0
+        }
+    };
+    if !echo {
+        return Err(mismatch("observation operands"));
+    }
+    let provenance = ScopeProvenance {
+        scope: NameScope::Current,
+        generation: number(&pin[0])?,
+        fingerprint: text(&pin[1])?.into(),
+    };
+    let result = array(&fields[4], 2)?;
+    let outcome = match text(&result[0])? {
+        "rejected" => WorldObservationOutcome::Rejected(match number(&result[1])? {
+            0 => WorldQueryRejection::Unsupported,
+            1 => WorldQueryRejection::Unavailable,
+            2 => WorldQueryRejection::Corrupt,
+            _ => return Err(malformed("unknown observation refusal")),
+        }),
+        "answer" => {
+            let reply = inspection::decode_scoped_output(blob(&result[1])?)
+                .map_err(|error| malformed(error.to_string()))?;
+            let same_pin = |actual: &ScopeProvenance| {
+                actual.scope == NameScope::Current && actual.same_view(&provenance)
+            };
+            let name_matches = |reference: &IdentifierRef, query: &NameQuery| {
+                !reference.module.is_empty()
+                    && !reference.name.is_empty()
+                    && (query.namespace == NameNamespace::Any
+                        || namespace(query.namespace) == identifier_namespace(reference.namespace)
+                        || query.namespace == NameNamespace::Value
+                            && reference.namespace == IdentifierNamespace::Field)
+            };
+            match (expected.question, &reply) {
+                (WorldObservationQuestion::Info(query), ScopedReply::Info(info))
+                    if same_pin(&info.provenance) && name_matches(&info.identifier, query) => {}
+                (WorldObservationQuestion::Type(query), ScopedReply::Type(info))
+                    if same_pin(&info.provenance) && name_matches(&info.identifier, query) => {}
+                (
+                    WorldObservationQuestion::RowFit(expected),
+                    ScopedReply::RowFit { identifier, .. },
+                ) if expected == identifier => {}
+                (
+                    WorldObservationQuestion::Expression(expected),
+                    ScopedReply::Expression { expression, .. },
+                ) if expected == expression => {}
+                (
+                    WorldObservationQuestion::TypeSearch {
+                        pattern: expected,
+                        limit,
+                    },
+                    ScopedReply::TypeSearch { pattern, matches },
+                ) if pattern == expected && matches.len() <= *limit as usize => {}
+                (question, ScopedReply::Error(error)) => match (question, error) {
+                    (
+                        WorldObservationQuestion::Info(expected)
+                        | WorldObservationQuestion::Type(expected),
+                        QueryError::Unknown(actual) | QueryError::Ambiguous(actual, _),
+                    ) if actual == expected => {}
+                    (
+                        WorldObservationQuestion::RowFit(expected),
+                        QueryError::Unknown(actual) | QueryError::Ambiguous(actual, _),
+                    ) if actual.scope == NameScope::Current
+                        && actual.name == expected.name
+                        && namespace(actual.namespace)
+                            == identifier_namespace(expected.namespace) => {}
+                    (_, QueryError::Unsupported(_)) => {}
+                    _ => return Err(mismatch("observation name refusal")),
+                },
+                _ => return Err(mismatch("observation answer kind or provenance")),
+            }
+            WorldObservationOutcome::Answer(reply)
+        }
+        _ => return Err(malformed("unknown observation outcome")),
+    };
+    Ok(DecodedWorldObservation {
+        provenance,
+        outcome,
     })
 }
 
@@ -468,6 +643,154 @@ mod tests {
             fingerprint: "",
         }
     }
+    fn scoped_packet(echo: Value, result: Value) -> Value {
+        let mut payload = Vec::new();
+        ciborium::ser::into_writer(
+            &arr(vec![
+                txt("TPINSP008"),
+                arr(vec![txt("Complete"), arr(vec![result])]),
+            ]),
+            &mut payload,
+        )
+        .unwrap();
+        arr(vec![
+            num(2),
+            Value::Bytes(vec![7; 32]),
+            arr(vec![num(3), txt("pin")]),
+            echo,
+            arr(vec![txt("answer"), Value::Bytes(payload)]),
+        ])
+    }
+    fn scoped_cases() -> Vec<(WorldObservationQuestion, Value, Value)> {
+        let name = NameQuery {
+            scope: NameScope::Current,
+            namespace: NameNamespace::Value,
+            name: "x".into(),
+        };
+        let reference = IdentifierRef {
+            module: "M".into(),
+            name: "x".into(),
+            namespace: IdentifierNamespace::Value,
+        };
+        let identity = arr(vec![txt("M"), txt("x"), txt("Value")]);
+        let ty = arr(vec![txt("Int"), arr(vec![]), arr(vec![])]);
+        let pin = arr(vec![arr(vec![txt("Current")]), num(3), txt("pin")]);
+        vec![
+            (
+                WorldObservationQuestion::Info(name.clone()),
+                arr(vec![num(2), num(1), txt("x")]),
+                arr(vec![
+                    txt("StructuredInfoOk"),
+                    arr(vec![
+                        identity.clone(),
+                        arr(vec![txt("Value"), ty.clone()]),
+                        Value::Null,
+                        pin.clone(),
+                    ]),
+                ]),
+            ),
+            (
+                WorldObservationQuestion::Type(name),
+                arr(vec![num(3), num(1), txt("x")]),
+                arr(vec![
+                    txt("StructuredTypeOk"),
+                    arr(vec![identity.clone(), ty, pin]),
+                ]),
+            ),
+            (
+                WorldObservationQuestion::RowFit(reference),
+                arr(vec![num(4), num(1), txt("x"), txt("M")]),
+                arr(vec![txt("RowFit"), identity.clone(), txt("Available")]),
+            ),
+            (
+                WorldObservationQuestion::Expression("x".into()),
+                arr(vec![num(5), txt("x")]),
+                arr(vec![txt("Type"), txt("x"), txt("Int"), txt("Available")]),
+            ),
+            (
+                WorldObservationQuestion::TypeSearch {
+                    pattern: "Int".into(),
+                    limit: 1,
+                },
+                arr(vec![num(6), txt("Int"), num(1)]),
+                arr(vec![
+                    txt("TypeMatches"),
+                    txt("Int"),
+                    arr(vec![arr(vec![
+                        txt("x"),
+                        txt("M"),
+                        txt("Int"),
+                        txt("Exact"),
+                        txt("Available"),
+                        arr(vec![]),
+                        identity,
+                    ])]),
+                ]),
+            ),
+        ]
+    }
+    #[test]
+    fn scoped_answers_decode_all_closed_shapes_once() {
+        for (question, echo, result) in scoped_cases() {
+            let expected = WorldObservationExpectation {
+                world: &[7; 32],
+                question: &question,
+                generation: 3,
+                fingerprint: "pin",
+            };
+            let decoded =
+                decode_world_observation(&encoded(&scoped_packet(echo, result)), &expected)
+                    .unwrap();
+            assert!(matches!(
+                decoded.outcome,
+                WorldObservationOutcome::Answer(_)
+            ));
+            assert_eq!(decoded.provenance.scope, NameScope::Current);
+            assert_eq!(decoded.provenance.fingerprint, "pin");
+        }
+    }
+    #[test]
+    fn scoped_answers_reject_wrong_pin_question_kind_and_candidate() {
+        let mut cases = scoped_cases();
+        let (question, echo, result) = cases.remove(2);
+        let expected = WorldObservationExpectation {
+            world: &[7; 32],
+            question: &question,
+            generation: 3,
+            fingerprint: "pin",
+        };
+        let packet = scoped_packet(echo, result);
+        for index in [1, 2, 3] {
+            let mut wrong = packet.clone();
+            wrong.as_array_mut().unwrap()[index] = match index {
+                1 => Value::Bytes(vec![9; 32]),
+                2 => arr(vec![num(4), txt("pin")]),
+                _ => arr(vec![num(4), num(1), txt("other"), txt("M")]),
+            };
+            assert!(matches!(
+                decode_world_observation(&encoded(&wrong), &expected),
+                Err(WorldAnswerDecodeError::ProvenanceMismatch(_))
+            ));
+        }
+        let wrong_ref = scoped_packet(
+            arr(vec![num(4), num(1), txt("x"), txt("M")]),
+            arr(vec![
+                txt("RowFit"),
+                arr(vec![txt("Other"), txt("x"), txt("Value")]),
+                txt("Available"),
+            ]),
+        );
+        assert!(decode_world_observation(&encoded(&wrong_ref), &expected).is_err());
+        let wrong_kind = scoped_packet(
+            arr(vec![num(4), num(1), txt("x"), txt("M")]),
+            arr(vec![txt("Type"), txt("x"), txt("Int"), txt("Available")]),
+        );
+        assert!(decode_world_observation(&encoded(&wrong_kind), &expected).is_err());
+        let mut trailing = encoded(&packet);
+        trailing.push(0);
+        assert!(decode_world_observation(&trailing, &expected).is_err());
+    }
+
     #[test]
     fn found_answers_keep_requested_and_canonical_defining_identity() {
         for kind in [WorldQueryKind::Info, WorldQueryKind::Type] {

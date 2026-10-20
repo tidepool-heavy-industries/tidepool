@@ -1930,9 +1930,9 @@ impl PersistentSession {
             && self.compile_view_key_in(base.scope).as_ref() == Some(&base.key)
     }
 
-    pub(super) fn install_inspection_world_if_current(
+    pub(super) fn install_inspection_world_if_current<A>(
         &mut self,
-        completed: &super::inspection::CompletedInspectionWorld,
+        completed: &super::inspection::CompletedInspectionWorld<A>,
         source: &super::GenerationArtifactReference,
         original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> bool {

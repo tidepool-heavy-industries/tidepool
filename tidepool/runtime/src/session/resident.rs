@@ -4009,9 +4009,10 @@ where
         prepared: &super::PreparedNotebookGeneration,
         source: &Arc<super::RuntimeOriginalSource>,
     ) -> Result<super::AdmittedInspectionWorld, SessionError> {
-        self.state.capture_notebook_generation_world(prepared, source, |id| {
-            self.hidden_host_bindings.contains_key(&id)
-        })
+        self.state
+            .capture_notebook_generation_world(prepared, source, |id| {
+                self.hidden_host_bindings.contains_key(&id)
+            })
     }
 
     pub fn commit_notebook_generation_with_world(
@@ -4021,7 +4022,8 @@ where
         source: &super::RuntimeSourcePublicationView,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.state.commit_notebook_generation_with_world(prepared, publication, source, on_visible)
+        self.state
+            .commit_notebook_generation_with_world(prepared, publication, source, on_visible)
     }
 
     pub fn commit_notebook_generation_with_world_continuing(
@@ -4031,7 +4033,12 @@ where
         source: &super::RuntimeSourcePublicationView,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.state.commit_notebook_generation_with_world_continuing(prepared, publication, source, on_visible)
+        self.state.commit_notebook_generation_with_world_continuing(
+            prepared,
+            publication,
+            source,
+            on_visible,
+        )
     }
 
     pub fn commit_notebook_generation(
@@ -4998,9 +5005,9 @@ where
     }
 
     /// Attach only the world returned by the runner for this unchanged base.
-    pub fn install_inspection_world_if_current(
+    pub fn install_inspection_world_if_current<A>(
         &mut self,
-        completed: &super::CompletedInspectionWorld,
+        completed: &super::CompletedInspectionWorld<A>,
         source: &super::GenerationArtifactReference,
         original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> bool {
@@ -6035,11 +6042,18 @@ where
             return Err(PreparedRuntimeError::Cancelled.into());
         }
         self.admit_original_source_work_in(&owner.input.original_source, scope)?;
-        let target = self.state.source_lease_in(scope).map_err(SessionError::SourceAdmission)?;
-        owner.input.original_source.with_open_target(
-            &target,
-            || self.state.consume_binding_interface(reservation, &interface),
-        ).map_err(SessionError::SourceAdmission)??;
+        let target = self
+            .state
+            .source_lease_in(scope)
+            .map_err(SessionError::SourceAdmission)?;
+        owner
+            .input
+            .original_source
+            .with_open_target(&target, || {
+                self.state
+                    .consume_binding_interface(reservation, &interface)
+            })
+            .map_err(SessionError::SourceAdmission)??;
         self.mount_compiled_binding_prepared(
             scope,
             &binder,
@@ -7671,7 +7685,9 @@ where
         if self.state.mount_cancelled(self.run_context.resource_scope) {
             return Err(PreparedRuntimeError::Cancelled.into());
         }
-        admission.with_open_sources(|| ()).map_err(SessionError::SourceAdmission)?;
+        admission
+            .with_open_sources(|| ())
+            .map_err(SessionError::SourceAdmission)?;
         Ok(())
     }
 
@@ -7735,12 +7751,16 @@ where
         drop(provenance_admission);
         self.state
             .validate_lexical_scope_lease(admission.scope_lease.scope(), &admission.scope_lease)?;
-        self.state.source_transaction.as_ref()
+        self.state
+            .source_transaction
+            .as_ref()
             .ok_or(super::SourceAdmissionError::MissingTransaction)
-            .and_then(|source| source.admit_original(
-                &mounted.original_source,
-                Some(admission.scope_lease.clone()),
-            ))
+            .and_then(|source| {
+                source.admit_original(
+                    &mounted.original_source,
+                    Some(admission.scope_lease.clone()),
+                )
+            })
             .map_err(SessionError::SourceAdmission)?;
         // The authoritative spend follows every non-consuming admission and
         // lease check. A refusal after this point leaves the admission spent;

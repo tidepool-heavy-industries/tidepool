@@ -4,7 +4,7 @@
 module Tidepool.ExtractRequest
   ( CompileWorkload(..)
   , ExactInputsRequest(..), ExactInputsAcquisition(..)
-  , WorldPublicModuleRequest(..), WorldQueryMode(..)
+  , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), WorldObservationQuery(..), publicQuestionInspection, publicQuestionIsType
   , WorldCellRecipe(..), WorldCellOperandRequest(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
   , EnsureExactInputsOutcome(..), ExactInputsRejection(..), encodeEnsureExactInputsOutcomeWithin
   , RequestField(..)
@@ -64,15 +64,40 @@ validWorldIdentity value = length value == 64 && all (\c -> c >= '0' && c <= '9'
 validReference :: String -> Bool
 validReference value = not (null value) && '\0' `notElem` value
 
-data WorldQueryMode = WorldStructuredInfo | WorldStructuredType deriving (Eq, Show)
+data WorldPublicQuestion
+  = WorldPublicInfo StructuredInspection
+  | WorldPublicType StructuredInspection
+  deriving (Eq, Show)
 
-data WorldPublicModuleRequest = WorldPublicModuleRequest
+data WorldQueryQuestion
+  = WorldPublicModuleQuery WorldPublicQuestion
+  | WorldScopedQuery WorldObservationQuery
+  deriving (Eq, Show)
+
+data WorldQueryRequest = WorldQueryRequest
   { worldQueryIdentity :: String
   , worldQueryRealization :: String
-  , worldQueryMode :: WorldQueryMode
-  , worldQueryInspection :: StructuredInspection
+  , worldQueryQuestion :: WorldQueryQuestion
   , worldQueryOutput :: FilePath
   } deriving (Eq, Show)
+
+publicQuestionInspection :: WorldPublicQuestion -> StructuredInspection
+publicQuestionInspection (WorldPublicInfo query) = query
+publicQuestionInspection (WorldPublicType query) = query
+
+publicQuestionIsType :: WorldPublicQuestion -> Bool
+publicQuestionIsType WorldPublicInfo{} = False
+publicQuestionIsType WorldPublicType{} = True
+
+-- Operands only: source, imports, effect row and native type witnesses belong
+-- to the held World's protected observation scaffold.
+data WorldObservationQuery
+  = WorldObservationInfo StructuredInspection
+  | WorldObservationType StructuredInspection
+  | WorldObservationRowFit StructuredInspection String
+  | WorldObservationExpression InspectionProvenance String
+  | WorldObservationTypeSearch InspectionProvenance String Int
+  deriving (Eq, Show)
 
 -- Recipe bytes and reservations are request data. Runtime admission and the
 -- held-world owner, rather than a digest or a slot constructor, grant use.
@@ -163,12 +188,20 @@ validWorldCellPrepareRequest request = validWorldIdentity (worldCellPrepareIdent
       PlannedExpression _ observation -> validReference observation && utf8Within 65536 observation
       _ -> True
 
-validWorldPublicModuleRequest :: WorldPublicModuleRequest -> Bool
-validWorldPublicModuleRequest request = validWorldIdentity (worldQueryIdentity request)
+validWorldQueryRequest :: WorldQueryRequest -> Bool
+validWorldQueryRequest request = validWorldIdentity (worldQueryIdentity request)
   && validReference (worldQueryRealization request) && validReference (worldQueryOutput request)
-  && case structuredScope (worldQueryInspection request) of
-    StructuredPublicModule name -> validReference name
-    StructuredCurrentScope -> False
+  && case worldQueryQuestion request of
+    WorldPublicModuleQuery question -> case structuredScope (publicQuestionInspection question) of
+      StructuredPublicModule name -> validReference name
+      StructuredCurrentScope -> False
+    WorldScopedQuery query -> case query of
+      WorldObservationInfo question -> current question
+      WorldObservationType question -> current question
+      WorldObservationRowFit question owner -> current question && structuredNamespace question /= StructuredAnyName && validReference owner
+      WorldObservationExpression _ expression -> validReference expression
+      WorldObservationTypeSearch _ expression limit -> validReference expression && limit > 0
+  where current question = structuredScope question == StructuredCurrentScope && validReference (structuredName question)
 
 data EnsureExactInputsOutcome
   = ExactInputsReady String String
@@ -256,7 +289,7 @@ data RequestField
   | InspectionStrict
   | PortableOutput
   | EnsureExactInputs ExactInputsRequest
-  | WorldPublicModule WorldPublicModuleRequest
+  | WorldQuery WorldQueryRequest
   | WorldCellPlan WorldCellPlanRequest
   | WorldCellPrepare WorldCellPrepareRequest
   deriving (Eq, Show)
@@ -314,7 +347,7 @@ data WorkerRequest = WorkerRequest
   , requestActivationPreview :: Bool
   , requestPortableOutput :: Bool
   , requestEnsureExactInputs :: Maybe ExactInputsRequest
-  , requestWorldPublicModule :: Maybe WorldPublicModuleRequest
+  , requestWorldQuery :: Maybe WorldQueryRequest
   , requestWorldCellPlan :: Maybe WorldCellPlanRequest
   , requestWorldCellPrepare :: Maybe WorldCellPrepareRequest
   , requestInspectionStrict :: Bool
@@ -325,7 +358,7 @@ data WorkerRequest = WorkerRequest
 -- refines a turn; declaration operations own both their manifest and output.
 data RequestOperation
   = EnsureExactInputsOperation ExactInputsRequest
-  | WorldPublicModuleOperation WorldPublicModuleRequest
+  | WorldQueryOperation WorldQueryRequest
   | WorldCellPlanOperation WorldCellPlanRequest
   | WorldCellPrepareOperation WorldCellPrepareRequest
   | SourceOperation
@@ -341,7 +374,7 @@ data RequestOperation
 
 data RequestShapeError
   = InvalidExactInputsShape
-  | InvalidWorldPublicModuleShape
+  | InvalidWorldQueryShape
   | InvalidWorldCellShape
   | InvalidSourceCheckShape
   | InvalidPortableOutputShape
@@ -366,14 +399,14 @@ admitRequestOperation args
         , requestEnsureExactInputs = Just request }
       then Right (EnsureExactInputsOperation request)
       else Left InvalidExactInputsShape
-  | Just request <- requestWorldPublicModule args =
-      if validWorldPublicModuleRequest request && args == emptyWorkerRequest
+  | Just request <- requestWorldQuery args =
+      if validWorldQueryRequest request && args == emptyWorkerRequest
         { requestWorkload = requestWorkload args
         , requestCompilerJobs = requestCompilerJobs args
         , requestCompilerCapabilities = requestCompilerCapabilities args
-        , requestWorldPublicModule = Just request }
-      then Right (WorldPublicModuleOperation request)
-      else Left InvalidWorldPublicModuleShape
+        , requestWorldQuery = Just request }
+      then Right (WorldQueryOperation request)
+      else Left InvalidWorldQueryShape
   | Just request <- requestWorldCellPlan args =
       if validWorldCellPlanRequest request && args == emptyWorkerRequest
         { requestWorkload = requestWorkload args
@@ -491,7 +524,7 @@ emptyWorkerRequest = WorkerRequest
   , requestActivationPreview = False
   , requestPortableOutput = False
   , requestEnsureExactInputs = Nothing
-  , requestWorldPublicModule = Nothing
+  , requestWorldQuery = Nothing
   , requestWorldCellPlan = Nothing
   , requestWorldCellPrepare = Nothing
   , requestInspectionStrict = False
@@ -507,6 +540,7 @@ data InspectionRequest
   | InspectTypeSearchBounded String Int
   | InspectStructuredInfoOf StructuredInspection
   | InspectStructuredTypeOf StructuredInspection
+  | InspectKeyedAvailability StructuredInspection String
   deriving (Eq, Show)
 
 data StructuredNameScope
@@ -610,7 +644,7 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       InspectionStrict -> request { requestInspectionStrict = True }
       PortableOutput -> request { requestPortableOutput = True }
       EnsureExactInputs inputs -> request { requestEnsureExactInputs = Just inputs }
-      WorldPublicModule query -> request { requestWorldPublicModule = Just query }
+      WorldQuery query -> request { requestWorldQuery = Just query }
       WorldCellPlan query -> request { requestWorldCellPlan = Just query }
       WorldCellPrepare query -> request { requestWorldCellPrepare = Just query }
 
@@ -619,7 +653,7 @@ workerRequestFlag = "--worker-request-v" ++ show workerRequestVersion
 
 -- The launcher flag and byte framing describe the same grammar version.
 workerRequestVersion :: Int
-workerRequestVersion = 26
+workerRequestVersion = 27
 
 workerRequestMagic :: BS.ByteString
 workerRequestMagic = TE.encodeUtf8 (T.pack ("TPREQ" ++ replicate (3 - length version) '0' ++ version))
@@ -647,10 +681,10 @@ workerRequestFromArgv _ = Left "worker requires exactly one versioned request"
 -- duplicate operations or source/output authority beside a source-free exchange.
 validateExactInputsFields :: [RequestField] -> Either String ()
 validateExactInputsFields fields
-  | null [() | EnsureExactInputs _ <- fields] && null [() | WorldPublicModule _ <- fields]
+  | null [() | EnsureExactInputs _ <- fields] && null [() | WorldQuery _ <- fields]
       && null [() | WorldCellPlan _ <- fields] && null [() | WorldCellPrepare _ <- fields] = Right ()
   | [EnsureExactInputs request] <- fields, validExactInputsRequest request = Right ()
-  | [WorldPublicModule request] <- fields, validWorldPublicModuleRequest request = Right ()
+  | [WorldQuery request] <- fields, validWorldQueryRequest request = Right ()
   | [WorldCellPlan request] <- fields, validWorldCellPlanRequest request = Right ()
   | [WorldCellPrepare request] <- fields, validWorldCellPrepareRequest request = Right ()
   | otherwise = Left "worker request: exact input acquisition must be source-free and exclusive"
@@ -766,10 +800,9 @@ encodeField field = case field of
     <> worldCellPrepareAdmission request <> putU64 (worldCellPrepareDefiningScope request)
     <> putU32 (length (worldCellPrepareSlots request)) <> foldMap encodeWorldCellSlot (worldCellPrepareSlots request)
     <> textFrame (worldCellPrepareDirectory request) <> textFrame (worldCellPrepareOutput request)
-  WorldPublicModule request -> BS.singleton 58
+  WorldQuery request -> BS.singleton 58
     <> textFrame (worldQueryIdentity request) <> textFrame (worldQueryRealization request)
-    <> BS.singleton (case worldQueryMode request of WorldStructuredInfo -> 0; WorldStructuredType -> 1)
-    <> encodeStructuredInspection (worldQueryInspection request) <> textFrame (worldQueryOutput request)
+    <> encodeWorldQueryQuestion (worldQueryQuestion request) <> textFrame (worldQueryOutput request)
   InspectScopeBrowse -> BS.singleton 43
   InspectBrowseBounded value expanded budget ->
     BS.singleton 62 <> textFrame value <> BS.singleton (if expanded then 1 else 0) <> putU32 budget
@@ -812,6 +845,52 @@ encodeWorldCellSlot (ordinal,slot) = putU64 ordinal <> case slot of
   PlannedDeclaration generation -> BS.singleton 1 <> putU64 generation
   PlannedBind generation -> BS.singleton 2 <> putU64 generation
   PlannedExpression generation observation -> BS.singleton 3 <> putU64 generation <> textFrame observation
+
+encodeWorldQueryQuestion :: WorldQueryQuestion -> BS.ByteString
+encodeWorldQueryQuestion question = case question of
+  WorldPublicModuleQuery (WorldPublicInfo query) -> BS.singleton 0 <> encodeStructuredInspection query
+  WorldPublicModuleQuery (WorldPublicType query) -> BS.singleton 1 <> encodeStructuredInspection query
+  WorldScopedQuery query -> case query of
+    WorldObservationInfo name -> BS.singleton 2 <> encodeStructuredInspection name
+    WorldObservationType name -> BS.singleton 3 <> encodeStructuredInspection name
+    WorldObservationRowFit name owner -> BS.singleton 4 <> encodeStructuredInspection name <> textFrame owner
+    WorldObservationExpression provenance expression -> BS.singleton 5 <> pin provenance <> textFrame expression
+    WorldObservationTypeSearch provenance expression limit -> BS.singleton 6 <> pin provenance <> textFrame expression <> putU32 limit
+  where pin provenance = putU64 (inspectionGeneration provenance) <> textFrame (inspectionFingerprint provenance)
+
+pWorldQueryQuestion :: Parser WorldQueryQuestion
+pWorldQueryQuestion input = do
+  (tag,afterTag) <- pWord8 input
+  case tag of
+    0 -> public WorldPublicInfo afterTag
+    1 -> public WorldPublicType afterTag
+    2 -> scoped WorldObservationInfo afterTag
+    3 -> scoped WorldObservationType afterTag
+    4 -> do
+      (name,afterName) <- pStructuredInspection afterTag
+      (owner,afterOwner) <- pText afterName
+      pure (WorldScopedQuery (WorldObservationRowFit name owner),afterOwner)
+    5 -> do
+      (provenance,afterPin) <- pin afterTag
+      (expression,afterExpression) <- pText afterPin
+      pure (WorldScopedQuery (WorldObservationExpression provenance expression),afterExpression)
+    6 -> do
+      (provenance,afterPin) <- pin afterTag
+      (expression,afterExpression) <- pText afterPin
+      (limit,afterLimit) <- pWord32 afterExpression
+      pure (WorldScopedQuery (WorldObservationTypeSearch provenance expression (fromIntegral limit)),afterLimit)
+    _ -> Left "worker request: invalid world query question"
+  where
+    public constructor bytes = do
+      (name,rest) <- pStructuredInspection bytes
+      pure (WorldPublicModuleQuery (constructor name),rest)
+    scoped constructor bytes = do
+      (name,rest) <- pStructuredInspection bytes
+      pure (WorldScopedQuery (constructor name),rest)
+    pin bytes = do
+      (generation,afterGeneration) <- pWord64 bytes
+      (fingerprint,rest) <- pText afterGeneration
+      pure (InspectionProvenance generation fingerprint,rest)
 
 encodeStructuredInspection :: StructuredInspection -> BS.ByteString
 encodeStructuredInspection query =
@@ -946,16 +1025,11 @@ pField bytes = do
     58 -> do
       (root, afterRoot) <- pText rest
       (reference, afterReference) <- pText afterRoot
-      (modeTag, afterMode) <- pWord8 afterReference
-      mode <- case modeTag of
-        0 -> Right WorldStructuredInfo
-        1 -> Right WorldStructuredType
-        _ -> Left "worker request: invalid world query mode"
-      (query, afterQuery) <- pStructuredInspection afterMode
-      (output, afterOutput) <- pText afterQuery
-      let request = WorldPublicModuleRequest root reference mode query output
-      if validWorldPublicModuleRequest request then Right (WorldPublicModule request, afterOutput)
-        else Left "worker request: invalid world public module query"
+      (question,afterQuestion) <- pWorldQueryQuestion afterReference
+      (output,afterOutput) <- pText afterQuestion
+      let request = WorldQueryRequest root reference question output
+      if validWorldQueryRequest request then Right (WorldQuery request,afterOutput)
+        else Left "worker request: invalid world query"
     59 -> do
       (root,a) <- pCellText 64 rest
       (reference,b) <- pText a

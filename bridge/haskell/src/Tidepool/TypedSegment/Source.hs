@@ -4,7 +4,7 @@ module Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences
   , ParsedSegmentDemand, prepareSegmentDemand, segmentDemandMatchesSource
   , ParsedModuleDemand, prepareModuleDemand, moduleDemandMatchesSource
-  , moduleInputOccurrences, segmentModuleDemand, annotateModuleDemand
+  , moduleInputOccurrences, segmentModuleDemand, annotateModuleDemand, ObservationOperand(..), validateObservationContribution
   , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope, associateSegmentDemandName
   ) where
 
@@ -13,11 +13,14 @@ import Control.Monad (forM, foldM)
 import qualified Data.ByteString as BS
 import Data.Data (Data)
 import Data.Generics (everything, mkQ)
-import Data.List (intersect, nub, sortOn)
+import Data.List (intersect, nub, sort, sortOn)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import GHC (ParsedModule (..))
+import GHC.Parser.Annotation (getLocA)
+import GHC.Data.Strict qualified as Strict
 import GHC.Driver.Session (DynFlags, GeneralFlag(Opt_HelpfulErrors,Opt_DeferOutOfScopeVariables), gopt_set, gopt_unset, xopt)
 import GHC.Driver.Env (HscEnv, hsc_NC, hscUpdateFlags)
 import GHC.Iface.Env (allocateGlobalBinder)
@@ -41,7 +44,7 @@ import GHC.Types.Name.Reader
   ( RdrName, isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc
   , GlobalRdrEnv, mkGlobalRdrEnv, mkLocalVanillaGRE, Parent(NoParent)
   , plusGlobalRdrEnv, shadowNames, extendGlobalRdrEnv )
-import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan, mkRealSrcLoc)
+import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan, mkRealSrcLoc, getBufSpan, bufSpanStart, bufSpanEnd, bufPos)
 import GHC.Unit.Types (interactiveUnit, mkModule)
 import GHC.Unit.Module (mkModuleName)
 import GHC.Unit.Module.ModSummary (ms_hspp_opts)
@@ -50,6 +53,7 @@ import Tidepool.TypedSegment.Types
 import Tidepool.ExactHydration
   ( CapturedGeneratedScaffoldSource, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath )
 import Tidepool.CheckedCell (ResolvedNativeSlots, applyNativeAnnotations)
+import Tidepool.CheckedPrefixImports (parsedDeclarationOccurrences)
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 
 -- The source issuer has already checked these bytes against its protected
@@ -68,6 +72,69 @@ segmentModuleDemand (ParsedSegmentDemand parsed) = parsed
 moduleDemandMatchesSource :: ParsedModuleDemand -> FilePath -> BS.ByteString -> Bool
 moduleDemandMatchesSource (ParsedModuleDemand captured _ _) path bytes =
   capturedGeneratedScaffoldPath captured == path && capturedGeneratedScaffoldBytes captured == bytes
+
+-- Physical rendered-source boundaries are independent of user LINE pragmas.
+-- These closed modes constrain an operand to its generated expression/type
+-- slot; no additional top-level declaration can alter the checking scope.
+data ObservationOperand
+  = ObservationNoOperand
+  | ObservationExpressionOperand
+  | ObservationTypeOperand Int
+
+validateObservationContribution :: Int -> ObservationOperand -> [String] -> ParsedModuleDemand
+  -> Either String ()
+validateObservationContribution prefix mode probes (ParsedModuleDemand _ _ parsed) = do
+  suffix <- fmap concat $ mapM classify (hsmodDecls (unLoc parsed))
+  let expected = map (False,) probes ++ case mode of
+        ObservationNoOperand -> []
+        ObservationExpressionOperand -> [(False,"__tidepool_inspect_0")]
+        ObservationTypeOperand _ -> [(True,"__tidepool_type_search_query"),(False,"__tidepool_type_search_query")]
+  if sort suffix == sort expected then Right ()
+    else Left "observation operand changed its generated declaration set"
+  where
+    issued = Set.fromList (probes ++ case mode of
+      ObservationNoOperand -> []
+      ObservationExpressionOperand -> ["__tidepool_inspect_0"]
+      ObservationTypeOperand _ -> ["__tidepool_type_search_query"])
+    physical declaration = case getBufSpan (getLocA declaration) of
+      Strict.Just span' -> Right (bufPos (bufSpanStart span'),bufPos (bufSpanEnd span'))
+      Strict.Nothing -> Left "observation declaration lacks a physical source boundary"
+    classify declaration = do
+      (start,end) <- physical declaration
+      let signatureNames = case unLoc declaration of
+            SigD _ (TypeSig _ names _) -> map (rdrNameOcc . unLoc) names
+            _ -> []
+          declared = map occNameString (signatureNames ++ parsedDeclarationOccurrences declaration)
+      if end <= prefix then
+        if any (`Set.member` issued) declared then Left "observation probe collides with a protected declaration"
+          else pure []
+        else if start < prefix
+        then Left "observation declaration crosses its protected source boundary"
+        else case unLoc declaration of
+          SigD _ (TypeSig _ [name] _) -> pure [(True,occNameString (rdrNameOcc (unLoc name)))]
+          ValD _ binding@FunBind{} -> do
+            let name = occNameString (rdrNameOcc (unLoc (fun_id binding)))
+            case unLoc (mg_alts (fun_matches binding)) of
+              [locatedMatch] -> do
+                let match = unLoc locatedMatch
+                case (unLoc (m_pats match),grhssGRHSs (m_grhss match),grhssLocalBinds (m_grhss match)) of
+                  (arguments,[locatedRhs],EmptyLocalBinds _) -> case unLoc locatedRhs of
+                    GRHS _ [] body -> do
+                      case mode of
+                        ObservationExpressionOperand | name == "__tidepool_inspect_0" ->
+                          case (arguments,unLoc body) of
+                            ([],HsPar {}) -> pure ()
+                            _ -> Left "observation expression escaped its generated slot"
+                        ObservationTypeOperand valueStart | name == "__tidepool_type_search_query" ->
+                          if null arguments && start == valueStart then pure ()
+                            else Left "observation type changed its generated value body"
+                        _ -> if Set.member name issued && length arguments == 1 then pure ()
+                          else Left "observation has an unexpected value declaration"
+                      pure [(False,name)]
+                    _ -> Left "observation generated binder has guards"
+                  _ -> Left "observation generated binder has arguments or local declarations"
+              _ -> Left "observation generated binder has extra equations"
+          _ -> Left "observation operand introduced a top-level declaration"
 
 -- Native type substitution preserves the source issuer and no-quasiquote proof.
 -- The same resolved annotation product must also feed final module checking.

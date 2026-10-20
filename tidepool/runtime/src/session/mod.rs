@@ -20,10 +20,9 @@ mod admission;
 mod source_admission;
 pub use source_admission::{
     OwnSourceFenceReopened, RuntimeSourceAdmission, RuntimeSourceCompilerTransaction,
-    RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim, RuntimeSourceReopen,
-    RuntimeSourcePublicationView,
-    SourceAdmissionError, SourceFenceTransitionFailure,
-    SourceAdmissionHook, SourceAdmissionPhase,
+    RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim,
+    RuntimeSourcePublicationView, RuntimeSourceReopen, SourceAdmissionError, SourceAdmissionHook,
+    SourceAdmissionPhase, SourceFenceTransitionFailure,
 };
 mod binding_table;
 mod dialect;
@@ -84,12 +83,12 @@ pub use dialect::{
 
 pub use inspection::{
     finish_admitted_compiler_world, finish_admitted_world_inspection, run_admitted_compiler_world,
-    run_admitted_inspections, run_admitted_world_inspection, run_inspections,
-    AdmittedInspectionInputs, AdmittedInspectionWorld, ClassMethodInfo, CompletedCompilerWorld,
-    CompletedInspectionWorld, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,
-    IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery,
-    InspectionRequest, InspectionResult, InspectionScopeSnapshot, InspectionActorObservation, InspectionRequestIdentity, NameNamespace, NameQuery, NameScope,
-    QueryError,
+    run_admitted_inspections, run_admitted_world_inspection, run_admitted_world_scope_inspection,
+    run_inspections, AdmittedInspectionInputs, AdmittedInspectionWorld, ClassMethodInfo,
+    CompletedCompilerWorld, CompletedInspectionWorld, ConstructorInfo, DeclarationInfo, FieldInfo,
+    IdentifierInfo, IdentifierNamespace, IdentifierRef, InfoEntry, InspectionActorObservation,
+    InspectionAvailability, InspectionQuery, InspectionRequest, InspectionRequestIdentity,
+    InspectionResult, InspectionScopeSnapshot, NameNamespace, NameQuery, NameScope, QueryError,
     ScopeBindingsAnswer, ScopeProvenance, TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
     WorldInspectionError, SCOPE_BINDING_LIMIT,
 };
@@ -104,8 +103,7 @@ pub use admission::{
     PrivateExecutionAdmission, RuntimeBindingInterfaceReservation, RuntimeCellAdmission,
     RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
     RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission, RuntimeLexicalScopeLease,
-    RuntimeOriginalSource,
-    RuntimeWorldCellOperand,
+    RuntimeOriginalSource, RuntimeWorldCellOperand,
 };
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{

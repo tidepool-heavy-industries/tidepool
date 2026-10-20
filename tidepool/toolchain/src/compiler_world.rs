@@ -2244,7 +2244,7 @@ impl CompilerWorld {
 
 pub use tidepool_extract_report::world_query::{
     ClosedModuleAbsence, WorldAnswer, WorldModuleOrigin, WorldModuleReceipt, WorldModuleResolution,
-    WorldQueryRejection,
+    WorldObservationOutcome, WorldObservationQuestion, WorldQueryRejection,
 };
 
 #[derive(Clone, Debug)]
@@ -2272,6 +2272,29 @@ impl WorldQueryResult {
     }
     pub fn into_answer(self) -> WorldAnswer {
         self.answer
+    }
+}
+
+/// A scoped answer issued only by an actual admitted service operation.
+/// Runtime END, cancellation and the current actor view remain separate gates.
+#[derive(Clone, Debug)]
+pub struct ScopedWorldQueryResult {
+    world: Arc<CompilerWorld>,
+    question: WorldObservationQuestion,
+    decoded: tidepool_extract_report::world_query::DecodedWorldObservation,
+}
+impl ScopedWorldQueryResult {
+    pub fn world(&self) -> &Arc<CompilerWorld> {
+        &self.world
+    }
+    pub fn question(&self) -> &WorldObservationQuestion {
+        &self.question
+    }
+    pub fn provenance(&self) -> &crate::inspection::ScopeProvenance {
+        &self.decoded.provenance
+    }
+    pub fn into_outcome(self) -> WorldObservationOutcome {
+        self.decoded.outcome
     }
 }
 
@@ -3506,6 +3529,95 @@ pub fn query_public_module(
     question: PublicModuleQuestion,
 ) -> Result<WorldQueryResult, CompileError> {
     scoped_world_action(|| query_world_inner(endpoint.identity(), Arc::clone(world), question))
+}
+
+/// Observe current lexical/type facts of the same held World. The supplied
+/// view is descriptive correlation; it does not issue runtime admission.
+pub fn query_scope(
+    endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+    world: &Arc<CompilerWorld>,
+    question: WorldObservationQuestion,
+    provenance: &crate::inspection::ScopeProvenance,
+) -> Result<ScopedWorldQueryResult, CompileError> {
+    if provenance.scope != crate::inspection::NameScope::Current {
+        return Err(world_response_error(true));
+    }
+    scoped_world_action(|| {
+        let bytes = query_world_transport(
+            endpoint.identity(),
+            world,
+            scoped_question_wire(&question, provenance),
+        )?;
+        let decoded = tidepool_extract_report::world_query::decode_world_observation(
+            &bytes,
+            &tidepool_extract_report::world_query::WorldObservationExpectation {
+                world: world.logical_id(),
+                question: &question,
+                generation: provenance.generation,
+                fingerprint: &provenance.fingerprint,
+            },
+        )
+        .map_err(world_answer_decode_error)?;
+        Ok(ScopedWorldQueryResult {
+            world: Arc::clone(world),
+            question,
+            decoded,
+        })
+    })
+}
+
+fn scoped_question_wire(
+    question: &WorldObservationQuestion,
+    provenance: &crate::inspection::ScopeProvenance,
+) -> tidepool_extract_cmd::WorldQueryQuestion {
+    use crate::inspection::{IdentifierNamespace, NameNamespace};
+    use tidepool_extract_cmd::WorldQueryQuestion as Q;
+    let structured = |namespace, name: String| StructuredInspection {
+        scope: InspectionScope::Current,
+        namespace,
+        name,
+        generation: provenance.generation,
+        fingerprint: provenance.fingerprint.clone(),
+    };
+    let query_namespace = |namespace| match namespace {
+        NameNamespace::Any => InspectionNamespace::Any,
+        NameNamespace::Value => InspectionNamespace::Value,
+        NameNamespace::Type => InspectionNamespace::Type,
+        NameNamespace::Constructor => InspectionNamespace::Constructor,
+    };
+    match question {
+        WorldObservationQuestion::Info(query) => Q::ScopeInfo(structured(
+            query_namespace(query.namespace),
+            query.name.clone(),
+        )),
+        WorldObservationQuestion::Type(query) => Q::ScopeType(structured(
+            query_namespace(query.namespace),
+            query.name.clone(),
+        )),
+        WorldObservationQuestion::RowFit(reference) => Q::RowFit {
+            query: structured(
+                match reference.namespace {
+                    IdentifierNamespace::Value => InspectionNamespace::Value,
+                    IdentifierNamespace::Type => InspectionNamespace::Type,
+                    IdentifierNamespace::Constructor => InspectionNamespace::Constructor,
+                    IdentifierNamespace::Field => InspectionNamespace::Field,
+                },
+                reference.name.clone(),
+            ),
+            defining_module: reference.module.clone(),
+        },
+        WorldObservationQuestion::Expression(expression) => Q::Expression {
+            generation: provenance.generation,
+            fingerprint: provenance.fingerprint.clone(),
+            expression: expression.clone(),
+        },
+        WorldObservationQuestion::TypeSearch { pattern, limit } => Q::TypeSearch {
+            generation: provenance.generation,
+            fingerprint: provenance.fingerprint.clone(),
+            pattern: pattern.clone(),
+            limit: *limit,
+        },
+    }
 }
 
 /// Parse current authored input in the logical world. Source authority and
@@ -5519,6 +5631,23 @@ fn query_world_inner(
     world: Arc<CompilerWorld>,
     question: PublicModuleQuestion,
 ) -> Result<WorldQueryResult, CompileError> {
+    let wire = match question.kind {
+        PublicModuleQuestionKind::StructuredInfo => {
+            tidepool_extract_cmd::WorldQueryQuestion::PublicInfo(question.query.clone())
+        }
+        PublicModuleQuestionKind::StructuredType => {
+            tidepool_extract_cmd::WorldQueryQuestion::PublicType(question.query.clone())
+        }
+    };
+    let bytes = query_world_transport(identity, &world, wire)?;
+    decode_world_answer(world, question, &bytes)
+}
+
+fn query_world_transport(
+    identity: &tidepool_extract_cmd::CompilerIdentity,
+    world: &Arc<CompilerWorld>,
+    question: tidepool_extract_cmd::WorldQueryQuestion,
+) -> Result<Vec<u8>, CompileError> {
     let realization = ensure_world(&world, identity)?;
     let output_owner = Arc::new(
         tempfile::Builder::new()
@@ -5530,14 +5659,10 @@ fn query_world_inner(
         return Err(source_failure("world question requires its compiler scope"));
     }
     let (mut cmd, endpoint) = world_command(identity)?;
-    cmd.world_public_module(tidepool_extract_cmd::WorldPublicModuleRequest {
+    cmd.world_query(tidepool_extract_cmd::WorldQueryRequest {
         world: world_hex(world.logical_id()),
         realization,
-        mode: match question.kind {
-            PublicModuleQuestionKind::StructuredInfo => tidepool_extract_cmd::WorldQueryMode::Info,
-            PublicModuleQuestionKind::StructuredType => tidepool_extract_cmd::WorldQueryMode::Type,
-        },
-        query: question.query.clone(),
+        question,
         output: output.clone(),
     });
     let run = world_execute(&cmd, endpoint, Vec::new())?;
@@ -5553,7 +5678,12 @@ fn query_world_inner(
     if bytes.len() as u64 > allowance {
         return Err(world_response_error(false));
     }
-    decode_world_answer(world, question, &bytes)
+    tracing::debug!(
+        reply_bytes = bytes.len(),
+        allowance,
+        "compiler World query reply consumed"
+    );
+    Ok(bytes)
 }
 
 fn world_response_error(provenance: bool) -> CompileError {
