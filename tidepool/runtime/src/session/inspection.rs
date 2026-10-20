@@ -79,6 +79,31 @@ pub struct ScopeProvenance {
     pub fingerprint: String,
 }
 
+/// The part of a compile view that decides whether two answers describe the
+/// same view. `scope` is a presentation label: the same generation and content
+/// can be reported under a current or a public-module label depending on which
+/// entry point asked, and that difference alone is not staleness.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewIdentity {
+    pub generation: u64,
+    pub fingerprint: String,
+}
+
+impl ScopeProvenance {
+    pub fn view_identity(&self) -> ViewIdentity {
+        ViewIdentity {
+            generation: self.generation,
+            fingerprint: self.fingerprint.clone(),
+        }
+    }
+
+    /// Staleness compares only the view identity. Keep the full provenance for
+    /// diagnostics such as `ScopeChanged { before, after }`.
+    pub fn same_view(&self, other: &Self) -> bool {
+        self.generation == other.generation && self.fingerprint == other.fingerprint
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IdentifierNamespace {
     Value,

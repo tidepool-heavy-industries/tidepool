@@ -14606,7 +14606,7 @@ fn structured_introspection_answer(
     provenance: tidepool_runtime::session::ScopeProvenance,
     current: tidepool_runtime::session::ScopeProvenance,
 ) -> StructuredIntrospectionAnswer {
-    if current != provenance {
+    if !current.same_view(&provenance) {
         return StructuredIntrospectionAnswer::ScopeChanged {
             before: provenance,
             after: current,

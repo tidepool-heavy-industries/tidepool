@@ -573,7 +573,7 @@ pub(super) fn entry_scope_refusal(
     entry: &ScopeProvenance,
 ) -> Option<CompilerQueryAnswer> {
     query.expected_scope().and_then(|expected| {
-        (expected != entry).then(|| CompilerQueryAnswer::ScopeChanged {
+        (!expected.same_view(entry)).then(|| CompilerQueryAnswer::ScopeChanged {
             before: expected.clone(),
             after: entry.clone(),
         })
@@ -595,7 +595,7 @@ pub(super) fn compiler_query_answer(
     if let Some(refusal) = entry_scope_refusal(query, &before) {
         return refusal;
     }
-    if before != current {
+    if !before.same_view(&current) {
         return CompilerQueryAnswer::ScopeChanged {
             before,
             after: current,
@@ -1944,6 +1944,61 @@ mod tests {
                 "{query:?} reported the moved view instead of refusing the stale pin at entry"
             );
         }
+    }
+
+    #[test]
+    fn a_scope_label_change_alone_is_not_staleness() {
+        // The same generation and content can be labelled as the executing
+        // scope or as a public module depending on which entry point asked.
+        // Only the view identity decides staleness; the label stays in the
+        // diagnostic provenance.
+        let pinned = ScopeProvenance {
+            scope: NameScope::Current,
+            generation: 7,
+            fingerprint: "world-a".into(),
+        };
+        let relabelled = ScopeProvenance {
+            scope: NameScope::PublicModule("Data.Thing".into()),
+            generation: 7,
+            fingerprint: "world-a".into(),
+        };
+        let query = CompilerQuery::ScopeBindings {
+            expected_scope: Some(pinned.clone()),
+        };
+        assert!(entry_scope_refusal(&query, &relabelled).is_none());
+        let answer = compiler_query_answer(
+            &query,
+            pinned.clone(),
+            relabelled.clone(),
+            BatchOutcome::Answer(Ok(browse(vec![entry(
+                "thing",
+                "Data.Thing",
+                InspectionAvailability::Available,
+            )]))),
+        );
+        assert!(
+            matches!(answer, CompilerQueryAnswer::Names(_)),
+            "a relabelled view was refused: {}", answer_name(&answer)
+        );
+        // A real identity change is still refused, with the full provenance.
+        let moved = ScopeProvenance {
+            generation: 8,
+            ..relabelled
+        };
+        assert!(matches!(
+            compiler_query_answer(
+                &query,
+                pinned.clone(),
+                moved.clone(),
+                BatchOutcome::Answer(Ok(browse(vec![entry(
+                    "thing",
+                    "Data.Thing",
+                    InspectionAvailability::Available,
+                )]))),
+            ),
+            CompilerQueryAnswer::ScopeChanged { before: ref seen_before, after: ref seen_after }
+                if *seen_before == pinned && *seen_after == moved
+        ));
     }
 
     #[test]
