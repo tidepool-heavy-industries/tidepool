@@ -15140,7 +15140,16 @@ mod tests {
         );
         assert!(
             matches!(&denied, Err(CompileError::ArtifactInventory(error))
-                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })),
+                if matches!(&error.failure,
+                    ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact,
+                        original_ordinal: 12,
+                    } if *artifact == root.descriptor.id)
+                && matches!(&error.native_refusal,
+                    Some(NativeAdmissionRefusal::CurrentProductConflicting {
+                        original,
+                        original_ordinal: 12,
+                    }) if *original == root.descriptor.id)),
             "competing root proofs at executable demand returned {denied:?}"
         );
     }
