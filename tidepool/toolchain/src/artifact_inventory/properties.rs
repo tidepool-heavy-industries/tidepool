@@ -1436,13 +1436,13 @@ proptest! {
             };
             let mut receipts = NativeSourceReceipts::default();
             receipts.insert(NativeSourceUse::Root(binding((0, 7))), NativeSourceCause::Current);
-            receipts.insert(NativeSourceUse::Root(binding((0, 11))), NativeSourceCause::missing());
+            receipts.insert(NativeSourceUse::Root(binding((0, 11))), NativeSourceCause::Unwitnessed);
             for (parent, children) in &edges {
                 for child in children {
                     receipts.insert(NativeSourceUse::Edge {
                         parent: binding(*parent), child: binding(*child),
                     }, if edge_missing(*parent, *child) {
-                        NativeSourceCause::missing()
+                        NativeSourceCause::Unwitnessed
                     } else {
                         NativeSourceCause::Current
                     });
@@ -1459,7 +1459,7 @@ proptest! {
                 }
             }
             let mut sources = NativeSourceTraversal {
-                issued: &receipts,
+                issued: NativeSourceReceiptView::Operation(&receipts),
                 selected: NativeSourceReceipts::default(),
             };
             let reached = native_groups_in_custody(&state, &view.lease.payloads, owned,
@@ -1470,8 +1470,8 @@ proptest! {
                 let actual = sources.selected.0[&NativeSourceUse::Root(binding(logical))].iter()
                     .map(|cause| match cause {
                         NativeSourceCause::Current => false,
-                        NativeSourceCause::Historical(compiler_projection::SelectedNativeSupport::Missing(_)) => true,
-                        NativeSourceCause::Historical(_) => panic!("model has no live source acquisitions"),
+                        NativeSourceCause::Unwitnessed | NativeSourceCause::Historical { support: compiler_projection::SelectedNativeSupport::Missing(_), .. } => true,
+                        NativeSourceCause::Historical { .. } => panic!("model has no live source acquisitions"),
                     }).collect::<BTreeSet<_>>();
                 prop_assert_eq!(actual, expected, "logical source state {:?}", logical);
             }
