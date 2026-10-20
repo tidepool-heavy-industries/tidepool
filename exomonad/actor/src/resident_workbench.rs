@@ -17225,13 +17225,27 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn scope_bindings_reads_the_admitted_world_without_an_extract_worker() {
         with_test_compiler_owner(|preparation_client| async move {
-            let (machines, context, source, _root) = actor_registry_fixture();
-            let (captured, _owner) = world_query_test_source_files_with_support(
+            let (machines, mut context, source, _root) = actor_registry_fixture();
+            let (captured, owner) = world_query_test_source_files_with_support(
                 &[vec![(
                     "WorldScope.hs",
                     "module WorldScope where\nworldA :: Int\nworldA = 7\n",
                 )]],
                 &source.base_include,
+            );
+            // The production route refuses without a retained captured source
+            // owner (`public_module_query_source`). The fixture must satisfy
+            // that precondition or this test would pass against a route it
+            // never admitted.
+            context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            assert!(
+                public_module_query_source(&context.source_layer).is_ok(),
+                "fixture must satisfy the production admission precondition"
+            );
+            assert!(
+                public_module_query_source(&crate::ActorSourceRoots::Deployment(Vec::new().into()))
+                    .is_err(),
+                "an incomplete source layer must not satisfy admission"
             );
             let workbench = ResidentActorWorkbench::new(
                 machines,
@@ -17242,9 +17256,44 @@ pub(crate) mod request_tests {
                 .adopt_final_source_scope(context.clone())
                 .await
                 .unwrap();
-            workbench
-                .publish_cell_for_test(
-                    context.clone(),
+            // A private cell compiled under a test-only authority rejects a
+            // complete source layer ("nonempty actor helper source requires an
+            // owned source capsule"). Borrow the captured owner explicitly so
+            // the fixture context is the same admitted shape production sees.
+            let descriptor = crate::ActorDescriptor::new("private-cell-test", context.placement);
+            let public_owner =
+                crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
+                    .unwrap();
+            let private = Arc::new(
+                workbench_runner_for_test(&workbench)
+                    .begin_private_execution(
+                        context.clone(),
+                        public_owner,
+                        tidepool_runtime::session::PublicationDecision::new(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            let mut private_context = context.clone();
+            private_context.placement.lexical_scope = private.private_scope;
+            let layers: crate::ActorSourceLayerResolver = owner.clone();
+            let (frontend_context, authority) =
+                crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                    private_context,
+                    captured.clone(),
+                    None,
+                    Some(&layers),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("the captured owner must admit its retained source: {error:?}")
+                });
+            let frontend = workbench
+                .shared_view()
+                .with_compilation_authority(authority)
+                .with_private_execution(private);
+            frontend
+                .execute_cell_for_test(
+                    frontend_context.clone(),
                     "let (worldA, worldB) = ((7 :: Int), (8 :: Int))",
                 )
                 .await
@@ -17253,9 +17302,9 @@ pub(crate) mod request_tests {
             // for this scope. The old `ScopeBrowse` path enumerated the
             // generated probe module instead, so equality here is the
             // correctness claim, not just a smoke test.
-            let mut expected = workbench
+            let mut expected = frontend
                 .access
-                .with_machine(context.clone(), |session, context, _| {
+                .with_machine(frontend_context.clone(), |session, context, _| {
                     Ok(session.binding_names_in(context.placement.lexical_scope))
                 })
                 .await
@@ -17272,9 +17321,9 @@ pub(crate) mod request_tests {
             // whatever its exit status, so a regression cannot hide behind a
             // swallowed launch error.
             let spawns_before = tidepool_extract_cmd::extract_spawn_count();
-            let answer = workbench
+            let answer = frontend
                 .access
-                .with_machine(context.clone(), move |session, context, _| {
+                .with_machine(frontend_context.clone(), move |session, context, _| {
                     let original = context.source_dependency().source_lease()?;
                     let admitted = session
                         .capture_inspection_world_in(
