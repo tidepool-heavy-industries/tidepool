@@ -4111,26 +4111,8 @@ impl ActorGenerationPublicationIssue {
     }
 }
 
+#[cfg(test)]
 impl ActorGenerationCommit {
-    pub(crate) fn notify_initial_generation(
-        self,
-        lifecycle: &crate::LifecycleHandle,
-    ) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
-        if let Self::Published { generation, .. } = &self {
-            if lifecycle.generation_published(generation.clone())
-                == crate::kernel::GenerationPublicationNotification::Refused
-            {
-                return Err(ResidentActorWorkbenchError::PublicationSettlement {
-                    failure: Box::new(ActorPublicationSettlementFailure {
-                        outcome: Arc::new(Ok(self)),
-                        settlement: PublicationSettlementError::NotificationRefused,
-                    }),
-                });
-            }
-        }
-        self.into_initial_generation()
-    }
-
     fn into_initial_generation(self) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
         match self {
             Self::Published { generation, .. } => Ok(generation),
