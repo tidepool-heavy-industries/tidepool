@@ -44,6 +44,9 @@ module Tidepool.ExactScope
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow
   , worldBindingRowInterface, worldBindingCertifiedArtifact, worldBindingCompilerReceipt, worldBindingRowFactCID
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
+  , WorldCellOperandInputs, WorldCellOperandExposure(..), readWorldCellOperandWithOwner
+  , worldCellOperandExposure, worldCellOperandBinding, worldCellOperandInterface
+  , worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
   , worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty
   , WorldLexicalSurface, WorldDeclarationSurface, worldInputsLexicalSurface
@@ -2385,29 +2388,108 @@ readWorldBindingInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> [Strin
       Map.Map InterfaceOwner WorldTypeClosureEntry))
 readWorldBindingInputs owner env facts occurrences = do
   let selected = [(name,value) | name <- occurrences,Just value <- [Map.lookup name (worldInputsBindings facts)]]
-      rows = [worldBindingRowInterface (worldBindingRow value) | (_,value) <- selected]
-      key (artifact,_,_) = (exactUnit artifact,exactModule artifact)
-      distinct = Map.fromList [(key row,row) | row <- rows]
-      tokens = worldInputsCustody facts
   if length selected /= length occurrences
     then pure (Left "world value demand contains an unbound occurrence")
-    else if any (\row -> Map.lookup (key row) distinct /= Just row) rows
-      then pure (Left "world value aliases select conflicting captured interface versions")
-      else do
-        typeInputs <- readWorldTypeInputs owner env facts
-          (concatMap (\(artifact,_,_) -> exactRequirements artifact) (Map.elems distinct))
-        case typeInputs of
-          Left reason -> pure (Left reason)
-          Right types -> do
-            packages <- readWorldPackageInputs env facts distinct
-            case packages of
-              Left reason -> pure (Left reason)
-              Right _ -> do
-                captured <- forM (Map.elems distinct) $ \(artifact,path,sha) -> do
-                  body <- capturedRequestInputToken tokens (exactPath artifact) (exactSha256 artifact)
-                  packageBody <- capturedRequestInputToken tokens path sha
-                  pure (artifact,body,packageBody)
-                pure (Right (selected,captured,types))
+    else fmap (\(captured,types) -> (selected,captured,types)) <$>
+      readWorldSelectedBindingInputs owner env facts (worldInputsCustody facts) (map snd selected)
+
+-- Selected operands and namespace demands use the same checked-row reader. The
+-- held primary facts alone supply TYPE closure; incoming custody cannot add it.
+readWorldSelectedBindingInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> RequestOriginalInputs -> [WorldBinding]
+  -> IO (Either String ([(ExactIfaceArtifact,ArtifactBytes,ArtifactBytes)],Map.Map InterfaceOwner WorldTypeClosureEntry))
+readWorldSelectedBindingInputs owner env facts tokens selected = do
+  let rows = [worldBindingRowInterface (worldBindingRow value) | value <- selected]
+      key (artifact,_,_) = (exactUnit artifact,exactModule artifact)
+      distinct = Map.fromList [(key row,row) | row <- rows]
+  if any (\row -> Map.lookup (key row) distinct /= Just row) rows
+    then pure (Left "world value aliases select conflicting captured interface versions")
+    else do
+      typeInputs <- readWorldTypeInputs owner env facts
+        (concatMap (\(artifact,_,_) -> exactRequirements artifact) (Map.elems distinct))
+      case typeInputs of
+        Left reason -> pure (Left reason)
+        Right types -> do
+          packages <- readWorldPackageInputsWithCustody env tokens distinct
+          case packages of
+            Left reason -> pure (Left reason)
+            Right _ -> do
+              captured <- forM (Map.elems distinct) $ \(artifact,path,sha) -> do
+                body <- capturedRequestInputToken tokens (exactPath artifact) (exactSha256 artifact)
+                packageBody <- capturedRequestInputToken tokens path sha
+                pure (artifact,body,packageBody)
+              pure (Right (captured,types))
+
+-- A sealed operand is one selected checked row, not an additional World or an
+-- executable grant. This tuple has no profile field: the request owner must
+-- match the worker profile. Its row and arena authenticate the held producer.
+data WorldCellOperandExposure = WorldInputOperand | WorldSessionInputOperand
+  deriving (Eq,Show)
+
+data WorldCellOperandInputs = WorldCellOperandInputs WorldCellOperandExposure WorldBinding
+  ArtifactBytes ArtifactBytes (Map.Map InterfaceOwner WorldTypeClosureEntry)
+
+worldCellOperandExposure :: WorldCellOperandInputs -> WorldCellOperandExposure
+worldCellOperandExposure (WorldCellOperandInputs exposure _ _ _ _) = exposure
+
+worldCellOperandBinding :: WorldCellOperandInputs -> WorldBinding
+worldCellOperandBinding (WorldCellOperandInputs _ binding _ _ _) = binding
+
+worldCellOperandInterface :: WorldCellOperandInputs -> ExactIfaceArtifact
+worldCellOperandInterface = worldBindingInterfaceArtifact . worldCellOperandBinding
+
+worldCellOperandBody :: WorldCellOperandInputs -> ArtifactBytes
+worldCellOperandBody (WorldCellOperandInputs _ _ body _ _) = body
+
+worldCellOperandPackages :: WorldCellOperandInputs -> ArtifactBytes
+worldCellOperandPackages (WorldCellOperandInputs _ _ _ packages _) = packages
+
+worldCellOperandTypes :: WorldCellOperandInputs -> Map.Map InterfaceOwner WorldTypeClosureEntry
+worldCellOperandTypes (WorldCellOperandInputs _ _ _ _ types) = types
+
+readWorldCellOperandWithOwner :: ExactInputOwner -> HscEnv -> WorldInputFacts -> FilePath -> BS.ByteString
+  -> IO WorldCellOperandInputs
+readWorldCellOperandWithOwner owner@(ExactInputOwner _ state) env facts path expectedSHA = acquire `catch` classify
+  where
+    classify (failure :: IOException) = throwIO (WorldInputsFailure
+      (if isUserError failure then WorldInputsCorrupt else WorldInputsUnavailable) (show failure))
+    acquire = do
+      unless (isAbsolute path && BS.length expectedSHA == 32)
+        (worldCorrupt "world operand requires an absolute descriptor and SHA256 seal")
+      limit <- requestCaptureByteLimit
+      let bound = fromInteger (min limit (toInteger (maxBound :: Int)-1))
+      ((exposure,reference@(_,_,_,_,cid),blocks,offered,acquisition),_) <-
+        captureRequestInputTokens Nothing $ \readToken -> do
+          descriptor <- readToken path bound
+          either worldCorrupt pure (checkArtifactSeal (hexBytes expectedSHA) descriptor)
+          let bytes = artifactBytes descriptor
+          decodeWorldBytes (decodeWorldCellOperand (BS.length bytes)) bytes
+      frontier <- verifyWorldBlocks [cid] blocks
+      (rows,custody,_) <- admitWorldRows state (worldInputsProducer facts) acquisition [offered]
+      eligible <- worldVisibleSemantic <$> worldRowsByOwner rows
+      (binding,_,_) <- readChangedWorldBinding frontier eligible reference
+      inputs <- readWorldSelectedBindingInputs owner env facts custody [binding]
+      case inputs of
+        Left reason -> worldCorrupt reason
+        Right ([(artifact,body,packages)],types)
+          | artifact == worldBindingInterfaceArtifact binding ->
+              pure (WorldCellOperandInputs exposure binding body packages types)
+        Right _ -> worldCorrupt "world operand lost its one selected checked interface"
+
+decodeWorldCellOperand :: Int -> Decoder s (WorldCellOperandExposure,
+    (SymbolIdentity,Word64,Word64,Word64,BS.ByteString),[(BS.ByteString,BS.ByteString)],OfferedWorldRow,InputAcquisition)
+decodeWorldCellOperand bytes = do
+  worldArray 6
+  magic <- decodeStringCanonical
+  unless (magic == "TPCWCELLOPERAND1") (fail "unsupported compiler world operand")
+  exposure <- decodeWordCanonical >>= \case
+    0 -> pure WorldInputOperand
+    1 -> pure WorldSessionInputOperand
+    _ -> fail "unsupported compiler world operand exposure"
+  reference <- decodeWorldBindingValueWith worldRawCID
+  blocks <- worldFactList bytes (worldArray 2 >> ((,) <$> decodeBytesCanonical <*> decodeBytesCanonical))
+  offered <- worldArray 2 >> ((,) <$> decodeInterfaceRow <*> rawWorldDigestCanonical)
+  acquisition <- decodeInputAcquisition
+  pure (exposure,reference,blocks,offered,acquisition)
 
 -- Artifact, decoded compiler identity, admitted role and package facts travel
 -- together. This is type availability, never source or native execution rights.
@@ -2433,9 +2515,13 @@ worldTypeEntryInterfaceBody (WorldTypeClosureEntry _ _ _ body) = body
 -- current compiler selection before these facts become available to callers.
 readWorldPackageInputs :: HscEnv -> WorldInputFacts -> Map.Map InterfaceOwner InterfaceRow
   -> IO (Either String (Map.Map InterfaceOwner PackageImportEvidence))
-readWorldPackageInputs env facts rows = do
+readWorldPackageInputs env facts = readWorldPackageInputsWithCustody env (worldInputsCustody facts)
+
+readWorldPackageInputsWithCustody :: HscEnv -> RequestOriginalInputs -> Map.Map InterfaceOwner InterfaceRow
+  -> IO (Either String (Map.Map InterfaceOwner PackageImportEvidence))
+readWorldPackageInputsWithCustody env custody rows = do
   decoded <- forM (Map.toAscList rows) $ \(key,(artifact,path,sha)) -> do
-    body <- capturedRequestInputToken (worldInputsCustody facts) path sha
+    body <- capturedRequestInputToken custody path sha
     pure ((,) key <$> decodeCapturedPackageImports artifact (artifactBytes body))
   case sequence decoded of
     Left reason -> pure (Left reason)
@@ -3703,7 +3789,11 @@ worldBindingText = do
   pure value
 
 decodeWorldBindingValue :: Decoder s (SymbolIdentity,Word64,Word64,Word64,BS.ByteString)
-decodeWorldBindingValue = do
+decodeWorldBindingValue = decodeWorldBindingValueWith worldCID
+
+decodeWorldBindingValueWith :: Decoder s BS.ByteString
+  -> Decoder s (SymbolIdentity,Word64,Word64,Word64,BS.ByteString)
+decodeWorldBindingValueWith rowCID = do
   token <- peekTokenType
   unless (token == TypeListLen) (fail "invalid compiler world binding value tuple")
   count <- decodeListLenCanonical
@@ -3721,7 +3811,7 @@ decodeWorldBindingValue = do
   variable <- decodeWord64Canonical
   scope <- decodeWord64Canonical
   generation <- decodeWord64Canonical
-  row <- worldCID
+  row <- rowCID
   pure (SymbolIdentity unit name namespace occurrence parent,variable,scope,generation,row)
 
 -- Compare one exact canonical semantic row, including role/requirements, with
