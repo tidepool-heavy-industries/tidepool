@@ -97,7 +97,7 @@ pub enum RlNativeIdentity {
     ReloadNativeRemote(String, String),
 }
 
-/// Exact coordinates projected from existing resource owners, not names or new handles. Actor addresses contain id and incarnation. Native ids preserve the owning runtime's Local/Remote identity; form ids and reservation attempts retain their issuing UUIDs.
+/// Exact coordinates projected from existing resource owners, not names or new handles. Actor addresses contain id and incarnation. Native ids preserve the owning runtime's Local/Remote identity; form ids and reservation attempts retain their issuing UUIDs. Actor-owned and preparation-owned compiler resources are distinct from invocation-owned ReloadCompilerResource. Their registration ids and preparation ids preserve exact unsigned decimal coordinates as Text; these observations grant no authority.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum RlResource {
     ReloadActorResource((i64, i64)),
@@ -109,6 +109,8 @@ pub enum RlResource {
     ReloadDisplayResource(RlOperation),
     ReloadWatchResource((i64, i64), i64),
     ReloadUnclassifiedPhysicalResource(RlNativeIdentity),
+    ReloadActorCompilerResource((i64, i64), String),
+    ReloadPreparationCompilerResource(String, String),
 }
 
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
