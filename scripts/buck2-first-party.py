@@ -1828,6 +1828,12 @@ tidepool_buildscript_run(
                 retirement_tests = [
                     "resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic",
+                    "resident_workbench::request_tests::actual_retirement_owner_loss_before_send_keeps_original_open",
+                    "resident_workbench::request_tests::actual_retirement_queued_owner_loss_keeps_original_open",
+                    "resident_workbench::request_tests::actual_retirement_handler_panic_retains_frozen_candidate",
+                    "resident_workbench::request_tests::actual_retirement_waiter_loss_retains_frozen_candidate",
+                    "resident_workbench::request_tests::actual_retirement_owner_loss_after_capture_retains_guarded_membership",
+                    "resident_workbench::request_tests::actual_retirement_publication_body_refusal_retains_same_guard",
                 ]
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",
@@ -1839,6 +1845,32 @@ tidepool_buildscript_run(
                     '    case_compiler_modes = {' + ", ".join(
                         json.dumps(test) + ': "owned-resident"' for test in retirement_tests
                     ) + "},",
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+                # The full retirement roster is fixed in the runner's arguments;
+                # this component alias selects one genuine publisher history.
+                publication_refusal = "resident_workbench::request_tests::actual_retirement_publication_body_refusal_retains_same_guard"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_publication_refusal_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([publication_refusal], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(publication_refusal) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+                capture_control = "resident_workbench::request_tests::actual_retirement_owner_loss_after_capture_retains_guarded_membership"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_retirement_capture_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([capture_control], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(capture_control) + ': "owned-resident"},',
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))

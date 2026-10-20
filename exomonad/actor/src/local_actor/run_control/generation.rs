@@ -1371,6 +1371,7 @@ mod retirement_retention_tests {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GenerationRetirementNativeControl {
+    PublicationBodyRefusal,
     BeforeSend,
     QueuedBeforeReceive,
     KillAfterReserve,

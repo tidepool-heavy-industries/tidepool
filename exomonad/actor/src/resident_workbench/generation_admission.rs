@@ -2606,6 +2606,80 @@ mod tests {
         }
     }
 
+    async fn assert_actual_publication_body_refusal(
+        preparation: super::super::ActorGenerationRetirementPreparation,
+        state: &Arc<super::super::InstalledToolsState>,
+        expected: &Arc<super::super::ActorGeneration>,
+        target: GenerationDependency,
+        decision: &Arc<tidepool_runtime::session::PublicationDecision>,
+    ) {
+        use super::super::{
+            ActorGenerationCommit, ActorGenerationPublicationSettlement,
+            ActorGenerationRetirementCutoff, ActorGenerationRetirementPreparationOutcome,
+            InstalledToolsAvailability,
+        };
+        let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        let mut operation = match preparation.reserve().unwrap() {
+            ActorGenerationRetirementPreparationOutcome::Reserved(operation) => operation,
+            ActorGenerationRetirementPreparationOutcome::Refused(reason) => panic!("{reason}"),
+        };
+        let observer = operation.attempt_observer();
+        let mut original = match operation.reserved_mut().fence_original() {
+            ActorGenerationRetirementCutoff::Fenced(fence) => fence,
+            _ => panic!("the actual live owner must fence its exact selected A"),
+        };
+        assert!(matches!(&state.0.lock().availability,
+            InstalledToolsAvailability::PublicationInProgress(attempt)
+                if Arc::ptr_eq(attempt, &observer.0)));
+        assert!(SourceDependency::Generation(expected.dependency().clone())
+            .claim()
+            .is_err());
+        assert!(SourceDependency::Generation(target.clone())
+            .claim()
+            .is_err());
+        assert_eq!(
+            decision.request_cancellation(),
+            tidepool_runtime::session::PublicationCancellation::RequestedBeforeCommit
+        );
+        let ActorGenerationPublicationSettlement::Unpublished(mut refusal) = operation.run().await
+        else {
+            panic!("an observed cancelled body must return its actual armed guard");
+        };
+        let primary = refusal.outcome().clone();
+        assert!(matches!(
+            primary.as_ref(),
+            Ok(ActorGenerationCommit::Refused(_))
+        ));
+        assert!(matches!(&state.0.lock().availability,
+            InstalledToolsAvailability::PublicationInProgress(attempt)
+                if Arc::ptr_eq(attempt, &observer.0)));
+        assert!(state.current_generation().is_none());
+        assert!(SourceDependency::Generation(expected.dependency().clone())
+            .claim()
+            .is_err());
+        assert!(SourceDependency::Generation(target.clone())
+            .claim()
+            .is_err());
+        refusal.refuse_retirement(&mut original).unwrap();
+        assert!(Arc::ptr_eq(refusal.outcome(), &primary));
+        assert!(Arc::ptr_eq(&state.current_generation().unwrap(), expected));
+        drop(
+            SourceDependency::Generation(expected.dependency().clone())
+                .claim()
+                .unwrap(),
+        );
+        drop(SourceDependency::Generation(target).claim().unwrap());
+        assert_eq!(
+            decision.phase(),
+            tidepool_runtime::session::PublicationPhase::CancellationRequested
+        );
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            compiler_calls,
+            "observed cancellation and source settlement never replay the compiler"
+        );
+    }
+
     pub(crate) async fn assert_native_retirement_owner_control(
         workbench: &super::super::ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
         state: Arc<super::super::InstalledToolsState>,
@@ -2617,6 +2691,18 @@ mod tests {
     ) {
         assert_eq!(expected.context().actor, context.actor);
         assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
+        let external = expected.dependency().prerequisite().as_ref().unwrap();
+        assert_eq!(external.actor(), crate::ActorRef::first(crate::ActorId(99)));
+        assert!(prepared
+            .candidate
+            .installation
+            .source_dependency()
+            .generation()
+            .unwrap()
+            .prerequisite()
+            .as_ref()
+            .unwrap()
+            .same_owner(external));
         let (directory, directory_task) = crate::LocalActorDirectory::start().await.unwrap();
         let (start_entered, starting) = tokio::sync::oneshot::channel();
         let (start_release, continue_start) = tokio::sync::oneshot::channel();
@@ -2680,6 +2766,13 @@ mod tests {
         if let Some(disposed) = &disposed {
             publisher = publisher.with_disposal_probe(disposed.clone());
         }
+        let target = prepared
+            .candidate
+            .installation
+            .source_dependency()
+            .generation()
+            .unwrap()
+            .clone();
         let preparation = publisher.into_retirement_preparation(
             prepared,
             publication.clone(),
@@ -2694,17 +2787,29 @@ mod tests {
             &expected
         ));
         assert!(actor.terminal().get().is_none());
-        directory
-            .assert_generation_retirement_owner_control(
-                directory_task,
-                preparation,
-                state,
-                expected,
-                publication,
-                control,
-                disposed,
+        if control
+            == crate::local_actor::run_control::GenerationRetirementNativeControl::PublicationBodyRefusal
+        {
+            assert_actual_publication_body_refusal(
+                preparation, &state, &expected, target, &publication,
             )
             .await;
+            directory
+                .assert_retirement_owner_loss_without_attempt(directory_task)
+                .await;
+        } else {
+            directory
+                .assert_generation_retirement_owner_control(
+                    directory_task,
+                    preparation,
+                    state,
+                    expected,
+                    publication,
+                    control,
+                    disposed,
+                )
+                .await;
+        }
         assert!(actor.terminal().get().is_none());
         assert!(
             actor.terminal().requested_shutdown().is_none(),

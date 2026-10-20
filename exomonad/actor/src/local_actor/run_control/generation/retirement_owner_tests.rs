@@ -17,6 +17,22 @@ fn expect_begin(
 }
 
 impl RunControlClient {
+    pub(crate) async fn assert_retirement_owner_loss_without_attempt(
+        &self,
+        owner_task: ractor::concurrency::JoinHandle<()>,
+    ) {
+        let retained = self.native_cleanup.clone();
+        self.owner.get_cell().kill();
+        tokio::time::timeout(Duration::from_secs(10), owner_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let Some(RunControlNativeExit::OwnerLost { attempts, .. }) = retained.terminal.get() else {
+            panic!("lost native owner must retain its terminal observation");
+        };
+        assert!(attempts.is_empty());
+    }
+
     pub(crate) async fn assert_generation_retirement_owner_control(
         &self,
         owner_task: ractor::concurrency::JoinHandle<()>,
@@ -37,6 +53,20 @@ impl RunControlClient {
         assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
         let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
         let retained = self.native_cleanup.clone();
+        // This member is admitted under A's real gate. Installing A does not
+        // change the hosting actor's independent physical birth provenance.
+        let captured_reservation = if control == GenerationRetirementNativeControl::AfterCapture {
+            Some(
+                self.reserve_source_actor(
+                    &SourceDependency::Generation(expected.dependency().clone()),
+                    crate::Incarnation::FIRST,
+                )
+                .await
+                .unwrap(),
+            )
+        } else {
+            None
+        };
         let mut acknowledged = None;
         let mut waiter = None;
         let mut pause_release = None;
@@ -112,6 +142,11 @@ impl RunControlClient {
                 | GenerationRetirementNativeControl::QueuedBeforeReceive
         );
         if !before_reserve {
+            assert_eq!(
+                decision.phase(),
+                tidepool_runtime::session::PublicationPhase::Running,
+                "losing an observer does not request publication cancellation"
+            );
             assert_eq!(
                 decision.request_cancellation(),
                 tidepool_runtime::session::PublicationCancellation::RequestedBeforeCommit
@@ -194,13 +229,22 @@ impl RunControlClient {
                         capture.work,
                         GenerationRetirementWork::Unavailable
                     ));
-                    let GenerationCapturePhysicalClosure::Guarded { actors, cells } =
+                    let GenerationCapturePhysicalClosure::Guarded { actors, .. } =
                         &capture.physical_closure;
-                    assert!(actors.contains(&actor));
-                    assert!(capture.actors.iter().any(|captured| {
-                        captured.identity() == actor
-                            && cells.contains(&captured.address().get_id())
-                    }));
+                    let member = captured_reservation.as_ref().unwrap().identity();
+                    assert!(actors.contains(&member));
+                    assert!(capture
+                        .population
+                        .resources
+                        .iter()
+                        .any(|resource| resource.identity
+                            == GenerationResourceIdentity::Actor(member)));
+                    assert_eq!(capture.reservations.len(), 1);
+                    assert!(!actors.contains(&actor));
+                    assert!(!capture
+                        .actors
+                        .iter()
+                        .any(|captured| captured.identity() == actor));
                 }
                 (
                     _,
@@ -222,6 +266,12 @@ impl RunControlClient {
                 tidepool_runtime::session::PublicationPhase::CancellationRequested
             );
         }
+        let external = expected.dependency().prerequisite().as_ref().unwrap();
+        drop(
+            SourceDependency::Generation(external.clone())
+                .claim()
+                .unwrap(),
+        );
         assert_eq!(
             tidepool_extract_cmd::extract_spawn_count(),
             compiler_calls,
