@@ -1649,6 +1649,19 @@ impl InventoryOperation {
         codec::decode_value(bytes, limits, &mut *budget)
     }
 
+    /// Parse a neutral group using this operation's cumulative admission budget.
+    pub fn parse_projected_group(
+        &self,
+        bytes: &[u8],
+        requirements: &ProgramRequirements,
+    ) -> Result<ProjectedGroup, ParseError> {
+        let mut budget = self
+            .budget
+            .lock()
+            .map_err(|_| ParseError::LimitExceeded("accounting owner"))?;
+        parse_projected_group_with_budget(bytes, requirements, self.limits.program, &mut budget)
+    }
+
     pub fn parse_module_products(
         &self,
         bytes: &[u8],
