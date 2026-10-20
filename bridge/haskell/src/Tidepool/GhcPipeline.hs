@@ -246,6 +246,7 @@ import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeInspectionWildcards, withInspectionWork, runWorldInspectionGhc, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..))
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
+  , WorldResidency(..), WorldNonRetentionReason(..)
   , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), publicQuestionInspection, publicQuestionIsType, WorldObservationQuery(..), InspectionRequest(..), StructuredInspection(..), StructuredNameScope(..)
   , WorldCellPlanRequest(..), WorldCellPrepareRequest(..), WorldCellOperandRequest(..), WorldCellRecipe(..), PlannedCellSlot(..)
   , StructuredNameNamespace(..), InspectionProvenance(..) )
@@ -1561,6 +1562,14 @@ compilerWorldCharge (HeldCompilerWorld facts _ materialized _) =
       (raw,entries) = worldInputsRetainedCharge facts
   in (raw + copies,entries + nodes + 1)
 
+-- This is an optional input/backing storage policy, not a GHC heap bound or a
+-- lease. A retained realization can subsequently be evicted or lose its worker.
+worldAdmissionResidency :: Integer -> HeldCompilerWorld -> WorldResidency
+worldAdmissionResidency limit world
+  | required > limit = WorldActiveOnly (WorldStorageAllowanceExceeded required limit)
+  | otherwise = WorldRetainedAtAdmission
+  where required = fst (compilerWorldCharge world)
+
 worldMaterializationCharge :: WorldMaterialization -> (Integer,Int)
 worldMaterializationCharge (WorldMaterialization _ _ _ _ _ _ copies nodes _) = (copies,nodes)
 
@@ -1613,10 +1622,10 @@ removeCompilerWorld root cache = case Map.lookup root (cachedCompilerWorlds cach
       _ -> throw WorldQueryCorrupt
     where key = worldMaterializationKey materialized
 
-admitCompilerWorld :: (Integer,Int) -> String -> HeldCompilerWorld -> CompilerWorldCache
+admitCompilerWorld :: Integer -> String -> HeldCompilerWorld -> CompilerWorldCache
   -> (CompilerWorldCache,[HeldCompilerWorld])
-admitCompilerWorld (byteLimit,countLimit) root world@(HeldCompilerWorld facts _ materialized _) cache
-  | standaloneBytes > byteLimit || standaloneNodes > countLimit = (cache,[])
+admitCompilerWorld byteLimit root world@(HeldCompilerWorld facts _ materialized _) cache
+  | standaloneBytes > byteLimit = (cache,[])
   | Map.member root (cachedCompilerWorlds cache) = throw WorldQueryCorrupt
   | otherwise = case Map.lookup key (compilerWorldBackingAccounts cache) of
       Just (WorldBackingAccounting live resident bytes nodes) -> trim [] cache
@@ -1630,7 +1639,7 @@ admitCompilerWorld (byteLimit,countLimit) root world@(HeldCompilerWorld facts _ 
       Nothing -> throw WorldQueryCorrupt
   where
     ticket = nextCompilerWorldTicket cache
-    (standaloneBytes,standaloneNodes) = compilerWorldCharge world
+    standaloneBytes = fst (compilerWorldCharge world)
     key = worldMaterializationKey materialized
     (raw,rawEntries) = worldInputsRetainedCharge facts
     (charge,entries) = (raw,rawEntries+1)
@@ -1639,7 +1648,7 @@ admitCompilerWorld (byteLimit,countLimit) root world@(HeldCompilerWorld facts _ 
       Just _ -> (0,0)
       Nothing -> throw WorldQueryCorrupt
     trim evicted selected
-      | compilerWorldRetainedBytes selected <= byteLimit && compilerWorldRetainedNodes selected <= countLimit = (selected,reverse evicted)
+      | compilerWorldRetainedBytes selected <= byteLimit = (selected,reverse evicted)
       | otherwise = case Map.lookupMin (cachedCompilerWorldOrder selected) of
           Just (_,oldest) -> case Map.lookup oldest (cachedCompilerWorlds selected) of
             Just (CachedCompilerWorld _ _ _ retired) -> trim (retired:evicted) (removeCompilerWorld oldest selected)
@@ -7158,16 +7167,18 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   let install event world@(HeldCompilerWorld facts reference _ _) = do
                         writeIORef heldWorld (Just world)
                         observeCompilerWorld timing selected event root reference (Just world)
-                        pure (ExactInputsReady (worldInputsIdentity facts) reference)
+                        pure (ExactInputsReady (worldInputsIdentity facts) reference
+                          (worldAdmissionResidency (fst (exactInputRetentionLimits (universeOriginalInputs selected))) world))
                       publish world@(HeldCompilerWorld facts reference _ _) = do
                         selected <- readIORef universe
                         let (nextWorlds,evicted) = admitCompilerWorld
-                              (exactInputRetentionLimits (universeOriginalInputs selected)) root world (universeWorlds selected)
+                              (fst (exactInputRetentionLimits (universeOriginalInputs selected))) root world (universeWorlds selected)
                             retiredWorlds = removeCompilerWorld root nextWorlds
                         _ <- evaluate (toInteger (length evicted) + fst (compilerWorldCacheCharge retiredWorlds))
                         retired <- evaluate (selected {universeWorlds=retiredWorlds})
                         held <- evaluate (Just world)
-                        ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) reference)
+                        ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) reference
+                          (worldAdmissionResidency (fst (exactInputRetentionLimits (universeOriginalInputs selected))) world))
                         -- Retire old private owners before unlinking their backing.
                         -- The shared reservation remains conservative until cleanup
                         -- succeeds; failure retains it and retires this worker.
@@ -7182,14 +7193,14 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         finishCompletion (appendCleanupFailures released failures)
                         settled <- readIORef universe
                         let (settledWorlds,unexpected) = admitCompilerWorld
-                              (exactInputRetentionLimits (universeOriginalInputs settled)) root world (universeWorlds settled)
+                              (fst (exactInputRetentionLimits (universeOriginalInputs settled))) root world (universeWorlds settled)
                             finalNext = settled {universeWorlds=settledWorlds}
-                            (settledBytes,settledCount) = compilerWorldCacheCharge settledWorlds
+                            settledBytes = fst (compilerWorldCacheCharge settledWorlds)
                         unless (null unexpected) (throwIO WorldQueryCorrupt)
                         _ <- evaluate finalNext
                         finalResult <- evaluate (ready,world,finalNext)
                         -- No fallible or interruptible work follows decoder commit.
-                        commitWorldInputRetention (universeOriginalInputs selected) settledBytes settledCount $ do
+                        commitWorldInputRetention (universeOriginalInputs selected) settledBytes $ do
                           writeIORef universe finalNext
                           writeIORef heldWorld held
                         pure finalResult

@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldRejectionDiagnosticBoundaries) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries) where
 
 import Tidepool.RequestCompletion (finishCompletion)
 
@@ -87,7 +87,7 @@ import Tidepool.FatIface (readExactInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldCellPlan, boundWorldCellPreparation
   , prepareWorldCell, commitPreparedWorldDependencies)
 import Tidepool.ExtractRequest
-  ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..)
+  ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), WorldResidency(..), WorldNonRetentionReason(..)
   , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
   , RequestField(..), WorkerRequest, workerArgv, workerRequestFromArgv )
 import Tidepool.GhcPipeline
@@ -1401,39 +1401,42 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
     unless (positiveLimit < sum imageSizes)
       (fail "positive eviction fixture lacks two separately retainable images")
     withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" (show positiveLimit) $ do
-      -- The production world index reserves against this same owner. A full
-      -- byte OR entry reservation must evict genuine optional image/decoder
-      -- state while preserving the live receiving scope's captured bytes.
-      forM_ [False,True] $ \entriesOnly -> do
-        shared <- newExactInputOwner
-        sharedLive <- readExactScopeWithOwner shared thirdPath >>= either fail pure
-        let (byteLimit,entryLimit) = exactInputRetentionLimits shared
-            (reservedBytes,reservedEntries) = if entriesOnly then (0,entryLimit) else (byteLimit,0)
-            interfaces = [iface | (iface,_,_) <- scopeInterfaces sharedLive]
-            decode = readScopedInterfaces (prHscEnv (pprPipelineResult original)) sharedLive interfaces >>= either fail pure
-        before <- mapM (scopeInterfaceBytes sharedLive) interfaces
-        _ <- decode
-        published <- newIORef False
-        commitWorldInputRetention shared reservedBytes reservedEntries (writeIORef published True)
-        installed <- readIORef published
-        unless installed (fail "shared retention did not publish its world reservation")
-        _ <- decode
-        (_,decoded) <- captureDiagnostics decode
-        unless (sum [total ("exact_iface_read_calls." ++ exactModule iface) decoded | iface <- interfaces] == 2
-            && sum [total ("exact_iface_decode_reuse." ++ exactModule iface) decoded | iface <- interfaces] == 0)
-          (fail "world reservation left optional image decoding in another pool")
-        (_,reserved) <- captureDiagnostics (readExactScopeWithOwner shared thirdPath >>= either fail pure)
-        unless (counterValues "original_inputs.retained_encoded_bytes" reserved == [0]
-            && total "original_inputs.certificate.misses" reserved == 2)
-          (fail "legacy acquisition ignored the shared world reservation")
-        after <- mapM (scopeInterfaceBytes sharedLive) interfaces
-        unless (before == after) (fail "world reservation revoked live raw input custody")
-        commitWorldInputRetention shared 0 0 (pure ())
-        _ <- readExactScopeWithOwner shared thirdPath >>= either fail pure
-        (_,released) <- captureDiagnostics (readExactScopeWithOwner shared thirdPath >>= either fail pure)
-        unless (total "original_inputs.retained_encoded_bytes" released > 0
-            && total "original_inputs.certificate.hits" released > 0)
-          (fail "released world reservation failed to restore the same optional pool")
+      -- World bytes reserve against the same optional pool. World graph/node
+      -- counts cannot consume original-image slots; a zero-byte reservation
+      -- leaves the existing image retention policy unchanged.
+      shared <- newExactInputOwner
+      sharedLive <- readExactScopeWithOwner shared thirdPath >>= either fail pure
+      commitWorldInputRetention shared 0 (pure ())
+      (_,unreserved) <- captureDiagnostics (readExactScopeWithOwner shared thirdPath >>= either fail pure)
+      unless (total "original_inputs.retained_encoded_bytes" unreserved > 0
+          && total "original_inputs.certificate.hits" unreserved > 0)
+        (fail "zero World byte reservation consumed original-image retention")
+      let (byteLimit,_) = exactInputRetentionLimits shared
+          interfaces = [iface | (iface,_,_) <- scopeInterfaces sharedLive]
+          decode = readScopedInterfaces (prHscEnv (pprPipelineResult original)) sharedLive interfaces >>= either fail pure
+      before <- mapM (scopeInterfaceBytes sharedLive) interfaces
+      _ <- decode
+      published <- newIORef False
+      commitWorldInputRetention shared byteLimit (writeIORef published True)
+      installed <- readIORef published
+      unless installed (fail "shared retention did not publish its world reservation")
+      _ <- decode
+      (_,decoded) <- captureDiagnostics decode
+      unless (sum [total ("exact_iface_read_calls." ++ exactModule iface) decoded | iface <- interfaces] == 2
+          && sum [total ("exact_iface_decode_reuse." ++ exactModule iface) decoded | iface <- interfaces] == 0)
+        (fail "world reservation left optional image decoding in another pool")
+      (_,reserved) <- captureDiagnostics (readExactScopeWithOwner shared thirdPath >>= either fail pure)
+      unless (counterValues "original_inputs.retained_encoded_bytes" reserved == [0]
+          && total "original_inputs.certificate.misses" reserved == 2)
+        (fail "legacy acquisition ignored the shared world reservation")
+      after <- mapM (scopeInterfaceBytes sharedLive) interfaces
+      unless (before == after) (fail "world reservation revoked live raw input custody")
+      commitWorldInputRetention shared 0 (pure ())
+      _ <- readExactScopeWithOwner shared thirdPath >>= either fail pure
+      (_,released) <- captureDiagnostics (readExactScopeWithOwner shared thirdPath >>= either fail pure)
+      unless (total "original_inputs.retained_encoded_bytes" released > 0
+          && total "original_inputs.certificate.hits" released > 0)
+        (fail "released world reservation failed to restore the same optional pool")
       bounded <- newExactInputOwner
       (live,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
       let interfaces = [iface | (iface,_,_) <- scopeInterfaces live]
@@ -1639,8 +1642,10 @@ consumedChars buffer end
 -- the plan operation nor the consuming validation reparses the same recipe.
 -- Rooted boot supplies the production package profile through its actual
 -- service association rather than an observation-only fixture scope.
-worldCellAdmissionParse :: IO ()
-worldCellAdmissionParse = withTiming $ withScratch $ \work ->
+withCapturedWorldContext
+  :: (IORef [Handle] -> FilePath -> BS.ByteString -> BS.ByteString -> BS.ByteString -> IO result)
+  -> IO result
+withCapturedWorldContext use = withTiming $ withScratch $ \work ->
   bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
     forM_ ["CanonicalSource.hs","CanonicalDependency.hs"] $ \name ->
       copyFile ("test-source-boot/fixtures" </> name) (work </> name)
@@ -1653,6 +1658,10 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
     let producerHex = scopeProducerSha256 scope
     producer <- rawWorldHex producerHex
     profile <- rawWorldHex rootedProfileIdentity
+    use handles work producer profile contextParcel
+
+worldCellAdmissionParse :: IO ()
+worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer profile contextParcel -> do
     (packetPath,_primary) <- writeWorldCellAdmissionPacket handles work producer profile contextParcel
     owner <- newExactInputOwner
     facts <- readWorldInputsWithOwner owner packetPath
@@ -1665,7 +1674,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
           admission <- runScope (pure ()) $ \compiler -> do
             ready <- scopedEnsureWorld compiler (ExactInputsRequest identity (CompleteExactInputs packetPath))
             reference <- case ready of
-              ExactInputsReady _ realization -> pure realization
+              ExactInputsReady _ realization _ -> pure realization
               other -> fail ("real preparation could not acquire its captured world: " ++ show other)
             -- The component template uses session/dialect.rs:EVAL_PRAGMAS.
             -- Its explicit Prelude import supplies this small template's
@@ -1948,7 +1957,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
             ready <- scopedEnsureWorld compiler (ExactInputsRequest identity
               (ResidentExactInputs (worldCellPrepareRealization question)))
             case ready of
-              ExactInputsReady _ _ -> pure ()
+              ExactInputsReady _ _ _ -> pure ()
               other -> fail ("scope substitution control lost the actual retained world: " ++ show other)
             crossed <- try (void (scopedCompileWorldCell compiler admission CheckedEnvironment Set.empty))
               :: IO (Either InputRejection ())
@@ -1962,13 +1971,120 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 
+worldResidencyBoundaries :: IO ()
+worldResidencyBoundaries = withCapturedWorldContext $ \handles work producer profile contextParcel -> do
+  directory <- canonicalizePath work
+  withRootedCompilerEnvironment directory $
+    withQuietStdout (worldResidencyHistories handles work producer profile contextParcel)
+
+-- Reuse the actual compiled Context and owned arenas from the preparation
+-- fixture. Added captured files exercise storage scale without issuing native
+-- authority or compiling another fixed program.
+worldResidencyHistories :: IORef [Handle] -> FilePath -> BS.ByteString -> BS.ByteString
+  -> BS.ByteString -> IO ()
+worldResidencyHistories handles work producer profile parcel = do
+  let largeFiles = [(BS8.pack ("residency/" ++ show index ++ ".txt"),BS.empty)
+        | index <- [0..4096 :: Int]]
+      create label files = do
+        let directory = work </> label
+        createDirectory directory
+        (path,_) <- writeWorldCellAdmissionPacketWithSources handles directory producer profile parcel files
+        facts <- newExactInputOwner >>= \owner -> readWorldInputsWithOwner owner path
+        pure (path,worldInputsIdentity facts,snd (worldInputsRetainedCharge facts))
+      directories = Set.fromList . filter ("world." `isPrefixOf`) <$> listDirectory work
+      ready expectedRoot expectedResidency outcome = case outcome of
+        ExactInputsReady root reference residency | root == expectedRoot && expectedResidency residency -> pure reference
+        other -> fail ("World residency outcome differs: " ++ show other)
+      retained WorldRetainedAtAdmission = True
+      retained _ = False
+      requireMiss root outcome = case outcome of
+        ExactInputsNeedsAcquisition missing | missing == root -> pure ()
+        other -> fail ("nonresident World did not request acquisition: " ++ show other)
+  (firstPath,firstRoot,firstEntries) <- create "residency-first" largeFiles
+  (secondPath,secondRoot,_) <- create "residency-second" (largeFiles ++ [("residency/second.txt","different captured source")])
+  unless (firstEntries > 4096 && firstRoot /= secondRoot)
+    (fail "residency history lacks distinct genuine Worlds above the former mixed entry limit")
+  -- Exercise the actual default, independent of the launcher's optional override.
+  bracket (lookupEnv "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES")
+    (maybe (unsetEnv "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES") (setEnv "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES")) $ \_ -> do
+    unsetEnv "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES"
+    owner <- newExactInputOwner
+    unless (fst (exactInputRetentionLimits owner) == 128 * 1024 * 1024)
+      (fail "residency control did not exercise the default shared storage allowance")
+    withResidentCompilerScopes [] $ \runScope -> do
+      before <- directories
+      reference <- runScope (pure ()) $ \compiler ->
+        scopedEnsureWorld compiler (ExactInputsRequest firstRoot (CompleteExactInputs firstPath))
+          >>= ready firstRoot retained
+      after <- directories
+      backing <- case Set.toList (after Set.\\ before) of
+        [directory] -> pure (work </> directory </> "root-0" </> "residency")
+        _ -> fail "retained World did not own exactly one new source backing"
+      copied <- listDirectory backing
+      unless (length copied == length largeFiles)
+        (fail "large source history did not actually retain its captured files")
+      runScope (pure ()) $ \compiler -> do
+        same <- scopedEnsureWorld compiler (ExactInputsRequest firstRoot (ResidentExactInputs reference))
+          >>= ready firstRoot retained
+        unless (same == reference) (fail "END replaced a retained World realization")
+      unchanged <- directories
+      unless (unchanged == after)
+        (fail "resident reuse rematerialized the retained World source backing")
+  -- A valid oversized World remains usable through the current attempt; END
+  -- retires it. Its typed reason supplies the actual reservation for the FIFO
+  -- boundary below, rather than a fixture-derived budget guess.
+  (firstBytes,secondBytes) <- withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" "0" $ do
+    before <- directories
+    sizes <- withResidentCompilerScopes [] $ \runScope -> forM [(firstPath,firstRoot),(secondPath,secondRoot)] $ \(path,root) -> do
+      (reference,required) <- runScope (pure ()) $ \compiler -> do
+        result <- scopedEnsureWorld compiler (ExactInputsRequest root (CompleteExactInputs path))
+        (reference,required) <- case result of
+          ExactInputsReady actual reference (WorldActiveOnly (WorldStorageAllowanceExceeded required limit))
+            | actual == root && required > 0 && limit == 0 -> pure (reference,required)
+          other -> fail ("zero optional allowance changed valid World acquisition: " ++ show other)
+        held <- scopedEnsureWorld compiler (ExactInputsRequest root (ResidentExactInputs reference))
+        _ <- ready root (== WorldActiveOnly (WorldStorageAllowanceExceeded required 0)) held
+        pure (reference,required)
+      runScope (pure ()) $ \compiler ->
+        scopedEnsureWorld compiler (ExactInputsRequest root (ResidentExactInputs reference)) >>= requireMiss root
+      pure required
+    after <- directories
+    unless (before == after) (fail "active-only END left an unindexed physical World backing")
+    case sizes of
+      [first,second] -> pure (first,second)
+      _ -> fail "residency history lost an actual acquisition"
+  let allowance = max firstBytes secondBytes
+  unless (allowance < firstBytes + secondBytes)
+    (fail "FIFO control does not require eviction")
+  withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" (show allowance) $
+    withResidentCompilerScopes [] $ \runScope -> do
+      first <- runScope (pure ()) $ \compiler ->
+        scopedEnsureWorld compiler (ExactInputsRequest firstRoot (CompleteExactInputs firstPath)) >>= ready firstRoot retained
+      before <- directories
+      second <- runScope (pure ()) $ \compiler ->
+        scopedEnsureWorld compiler (ExactInputsRequest secondRoot (CompleteExactInputs secondPath)) >>= ready secondRoot retained
+      after <- directories
+      unless (Set.size (before Set.\\ after) == 1 && Set.size (after Set.\\ before) == 1)
+        (fail "FIFO eviction did not replace exactly one independent physical backing")
+      runScope (pure ()) $ \compiler ->
+        scopedEnsureWorld compiler (ExactInputsRequest firstRoot (ResidentExactInputs first)) >>= requireMiss firstRoot
+      runScope (pure ()) $ \compiler -> do
+        same <- scopedEnsureWorld compiler (ExactInputsRequest secondRoot (ResidentExactInputs second)) >>= ready secondRoot retained
+        unless (same == second) (fail "FIFO evicted its newly admitted World")
+
 -- The Context fixture's logical roots and captured bytes stay genuine. Only
 -- the transport restoration's profile field is rebound to the rooted service
 -- profile, and its owned acquisition is resealed as production DATA endpoints.
 writeWorldCellAdmissionPacket
   :: IORef [Handle] -> FilePath -> BS.ByteString -> BS.ByteString -> BS.ByteString
   -> IO (FilePath,BS.ByteString)
-writeWorldCellAdmissionPacket handles work producer profile parcelBytes = do
+writeWorldCellAdmissionPacket handles work producer profile parcelBytes =
+  writeWorldCellAdmissionPacketWithSources handles work producer profile parcelBytes []
+
+writeWorldCellAdmissionPacketWithSources
+  :: IORef [Handle] -> FilePath -> BS.ByteString -> BS.ByteString -> BS.ByteString
+  -> [(BS.ByteString,BS.ByteString)] -> IO (FilePath,BS.ByteString)
+writeWorldCellAdmissionPacketWithSources handles work producer profile parcelBytes extraSources = do
   (primary,association,base,durable,contextBlocks,lexical) <- worldParcel parcelBytes
   acquisition <- sealWorldParcel handles (TList durable)
   (emptyPrimary,_,emptyBase,_,emptyBlocks,_) <- fixture "world-context-blocks" [TBytes producer] >>= worldParcel
@@ -1987,7 +2103,7 @@ writeWorldCellAdmissionPacket handles work producer profile parcelBytes = do
   libraryRoot <- lookupEnv "TIDEPOOL_PRELUDE_DIR" >>= maybe
     (fail "missing declared renderer source resource") pure
   library <- captureSourceFiles libraryRoot libraryRoot
-  let capturedFiles = sortOn fst (captured ++ library)
+  let capturedFiles = sortOn fst (captured ++ library ++ extraSources)
       word32 value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..3 :: Int]]
       frame bytes = word32 (BS.length bytes) <> bytes
       sources = "TPCSRC01" <> frame "world-stage-source" <> word32 1 <> word32 (length capturedFiles)
