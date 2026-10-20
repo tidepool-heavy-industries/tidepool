@@ -1336,7 +1336,13 @@ impl NativeOfferCustody {
                     })
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let available_groups = native_groups(&reachable);
+        let available_groups = reachable
+            .iter()
+            .filter_map(|node| match node {
+                ArtifactBindingNode::Group(group) => Some(*group),
+                _ => None,
+            })
+            .collect();
         let mut materializations = Vec::new();
         lease.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
         let physical = crate::declaration_context::RetainedArtifactMaterialization::capture_custody(

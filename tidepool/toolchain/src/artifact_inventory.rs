@@ -7245,7 +7245,7 @@ impl ArtifactView {
         let key = MaterializationKey::Compilation(metadata.materialization_key());
         let leaves = self.checked_value_leaves(&retained, metadata);
         if let Some(complete) = retained.get(&key) {
-            let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata);
+            let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect());
             retained.insert(key, complete.clone());
             return Ok(complete);
         }
@@ -7257,6 +7257,7 @@ impl ArtifactView {
             crate::declaration_context::RetainedArtifactMaterialization::select_custody_inputs(
                 &parents,
                 &metadata.retained,
+                &self.selected_native_binding_rows().1.into_iter().collect(),
             );
         let materialization = Arc::new(prepare(parents)?);
         retained.insert(key, Arc::clone(&materialization));
@@ -7318,7 +7319,7 @@ impl ArtifactView {
             return Ok(None);
         };
         let leaves = self.checked_value_leaves(&retained, metadata);
-        let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata);
+        let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect());
         retained.insert(key, complete.clone());
         Ok(Some(complete))
     }
@@ -8575,6 +8576,7 @@ impl ArtifactView {
             crate::declaration_context::RetainedArtifactMaterialization::select_custody_inputs(
                 owners,
                 &self.metadata_snapshot(),
+                &self.selected_native_binding_rows().1.into_iter().collect(),
             );
         if custody.is_empty() {
             return custody;
@@ -8641,6 +8643,7 @@ impl ArtifactView {
                     crate::declaration_context::RetainedArtifactMaterialization::select_custody_inputs(
                         &materializations,
                         &retained.metadata_snapshot(),
+                        &retained.selected_native_binding_rows().1.into_iter().collect(),
                     );
                 Arc::get_mut(&mut retained.lease)
                     .expect("new selection lease")

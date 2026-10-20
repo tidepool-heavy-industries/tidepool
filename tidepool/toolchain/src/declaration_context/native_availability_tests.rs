@@ -790,6 +790,7 @@ fn issued_offer_retention_preserves_materialization_parent_precedence() {
         let owner = issuer
             .retain_materialization(&metadata, |parents| {
                 context.materialize_retained_artifacts(
+                    &issuer,
                     &metadata,
                     parents,
                     tempfile::tempdir().unwrap(),

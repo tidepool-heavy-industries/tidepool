@@ -19721,7 +19721,7 @@ pub(crate) mod tests {
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                 admitted.artifacts(),
                 &issued,
-                &[],
+                None,
                 &mut validation,
             )
             .unwrap(),
@@ -19760,7 +19760,7 @@ pub(crate) mod tests {
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                 foreign.artifacts(),
                 &issued,
-                &[],
+                None,
                 &mut validation,
             )
             .unwrap(),
@@ -19792,7 +19792,7 @@ pub(crate) mod tests {
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                 independent.artifacts(),
                 &issued,
-                &[],
+                None,
                 &mut validation,
             )
             .unwrap(),
@@ -19819,7 +19819,7 @@ pub(crate) mod tests {
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                 &joined,
                 &issued,
-                &[],
+                None,
                 &mut validation,
             )
             .unwrap();

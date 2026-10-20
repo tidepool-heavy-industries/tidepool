@@ -274,7 +274,7 @@ fn check_admission_shapes(ordinals: &[u32], choices: &[(u8, u8, u8)]) {
     let admitted = crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
         &narrowed,
         &issued,
-        &[],
+        None,
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap();

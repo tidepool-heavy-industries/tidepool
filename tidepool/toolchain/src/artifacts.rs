@@ -1022,7 +1022,7 @@ pub fn prepare_world_cell_program(
                     Some(&segment.originals),
                     Some(entry),
                     None,
-                    &[],
+                    None,
                     Some(SegmentItemDemand {
                         selection: &mut artifacts,
                         view: prior_view,
@@ -4127,7 +4127,7 @@ fn seal_turn_outputs_with_validation(
         segment_originals,
         typed_entry,
         request_admission.map(|request| request.compiler_inputs().artifacts()),
-        request_admission.map_or(&[], |request| request.groups()),
+        request_admission.map(|request| request.certified_groups()),
         segment_cursor.take(),
         validation,
     )?;
@@ -4301,7 +4301,7 @@ fn admit_native_target_products(
     segment_originals: Option<&certified_products::CertifiedSegmentOriginals>,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
     compiler_artifacts: Option<&crate::artifact_inventory::ArtifactView>,
-    inherited_groups: &[certified_products::PendingCertifiedGroup],
+    inherited_groups: Option<&crate::declaration_context::CertifiedArtifactGroupBindings>,
     mut segment_cursor: Option<SegmentItemDemand<'_>>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<AdmittedNativeTargetProducts, CompileError> {
@@ -6178,7 +6178,7 @@ fn compile_invocation_inner(
                 &certified.groups,
                 exact_request
                     .as_ref()
-                    .map_or(&[], |request| request.groups.as_ref()),
+                    .map(|request| request.groups.as_ref()),
                 &mut validation,
             )?,
         );
