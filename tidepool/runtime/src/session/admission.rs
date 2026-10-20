@@ -3221,7 +3221,7 @@ impl PersistentSession {
             let mut retained_ids = std::collections::HashSet::new();
             for input in selected.inputs() {
                 let entry = self
-                    .bindings
+                    .bindings()
                     .get(input.session_var())
                     .filter(|entry| {
                         entry.value.identity == *input.symbol()

@@ -5,7 +5,7 @@
 //! Suspension is threadless: a continuation is rooted as data and a later
 //! entry may resume it from a fresh evaluation thread.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -2460,7 +2460,7 @@ impl PersistentSession {
                     .visible_changes()
                     .map(|(name, entry)| {
                         let binding = entry
-                            .map(|entry| {
+                            .map(|entry| -> Result<WorldDeclarationVisibleBinding, SessionError> {
                                 let row = session
                                     .retained_checked_value_artifact(entry.module)
                                     .ok_or(SessionError::MissingRetainedValueInterface(
