@@ -1806,6 +1806,9 @@ tidepool_buildscript_run(
                         "resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate",
                         "resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic",
                     ]),
+                    ("actor_world_declaration_publication_test", [
+                        "resident_workbench::request_tests::world_declaration_publication_retains_operand_after_failed_later_cell",
+                    ]),
                     ("actor_world_lifetime_test", [
                         "resident_workbench::request_tests::abandoned_private_world_birth_reaps_scope_after_lost_delivery",
                     ]),

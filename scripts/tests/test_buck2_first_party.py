@@ -1081,6 +1081,20 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         })
         self.assertEqual(retirement['resource_env'], rooted['resource_env'])
         self.assertEqual(retirement['resources'], rooted['resources'])
+        publication = self.rule('exomonad/actor', 'actor_world_declaration_publication_test',
+                                'tidepool_rust_test_cases')
+        self.assertEqual(publication['binary'], rooted['binary'])
+        self.assertEqual(publication['exact_tests'], [
+            'resident_workbench::request_tests::world_declaration_publication_retains_operand_after_failed_later_cell',
+        ])
+        self.assertEqual(publication['expected_count'], 1)
+        self.assertTrue(publication['ignored'])
+        self.assertEqual(publication['case_compiler_modes'], {
+            publication['exact_tests'][0]: 'owned-resident',
+        })
+        self.assertEqual(publication['resource_env'], rooted['resource_env'])
+        self.assertEqual(publication['resources'], rooted['resources'])
+        self.assertTrue(publication['haskell_worker'])
 
     def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [
