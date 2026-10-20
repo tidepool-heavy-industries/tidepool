@@ -1900,6 +1900,8 @@ pub(crate) struct ActorGenerationPublisher<H, O> {
     access: ResidentMachineAccess<H, O>,
     state: Arc<InstalledToolsState>,
     owner: ActorPublicationOwner,
+    #[cfg(test)]
+    settlement_probe: Option<Arc<PublicationSettlementProbe>>,
 }
 
 #[derive(Clone)]
@@ -1941,18 +1943,59 @@ struct ActorPublicationAttempt {
 enum PublicationAuthority {
     World(generation_admission::WorldPublication),
     TargetFence {
-        fence: tidepool_runtime::session::RuntimeSourceFence,
+        fence: PublicationFence,
         prerequisite: Option<tidepool_runtime::session::RuntimeSourceLeaseClaim>,
     },
+}
+
+/// Moving the affine fence into reopening must not move its cleanup owner.
+enum PublicationFence {
+    Held(tidepool_runtime::session::RuntimeSourceFence),
+    ReopenAttempted,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum PublicationSettlementError {
+    #[error(transparent)]
+    Source(#[from] tidepool_runtime::session::SourceAdmissionError),
+    #[error("publication no longer owns its exact installation or world")]
+    SelectionChanged,
+    #[error("publication's actor or preparation owner is unavailable")]
+    OwnerUnavailable,
+    #[error("publication already attempted to reopen its source fence")]
+    ReopenAttempted,
+    #[error("publication's worker outcome was not observed")]
+    BodyUnobserved,
+    #[error("publication completion cannot establish whether visibility committed")]
+    PublicationUnconfirmed,
+}
+
+impl PublicationFence {
+    fn reopen(
+        &mut self,
+        target: &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        settle: impl for<'a> FnOnce(
+            tidepool_runtime::session::RuntimeSourceReopen<'a>,
+        ) -> Result<(), PublicationSettlementError>,
+    ) -> Result<(), PublicationSettlementError> {
+        let Self::Held(fence) = std::mem::replace(self, Self::ReopenAttempted) else {
+            return Err(PublicationSettlementError::ReopenAttempted);
+        };
+        fence.reopen_with(target, settle)?.map(|_reopened| ())
+    }
+}
+
+enum ActorPublicationState {
+    Armed(PublicationAuthority),
+    Settled,
 }
 
 struct ActorPublicationGuard {
     state: Arc<InstalledToolsState>,
     attempt: Arc<ActorPublicationAttempt>,
-    authority: Option<PublicationAuthority>,
+    settlement: ActorPublicationState,
     decision: Arc<tidepool_runtime::session::PublicationDecision>,
     owner: ActorPublicationOwner,
-    settled: bool,
     #[cfg(test)]
     settlement_probe: Option<Arc<PublicationSettlementProbe>>,
 }
@@ -1961,6 +2004,7 @@ struct ActorPublicationGuard {
 pub(super) struct PublicationSettlementProbe {
     pub(super) entered: std::sync::mpsc::SyncSender<()>,
     pub(super) release: Mutex<std::sync::mpsc::Receiver<()>>,
+    pub(super) unwind: bool,
 }
 #[cfg(test)]
 impl PublicationSettlementProbe {
@@ -1970,6 +2014,7 @@ impl PublicationSettlementProbe {
             .lock()
             .recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
+        assert!(!self.unwind, "publication settlement control unwound");
     }
 }
 
@@ -2003,7 +2048,7 @@ impl ActorPublicationGuard {
                     .transpose()?;
                 let fence = target.runtime_admission().fence_if_idle()?;
                 PublicationAuthority::TargetFence {
-                    fence,
+                    fence: PublicationFence::Held(fence),
                     prerequisite,
                 }
             }
@@ -2037,10 +2082,9 @@ impl ActorPublicationGuard {
         Ok(Some(Self {
             state,
             attempt,
-            authority: Some(authority),
+            settlement: ActorPublicationState::Armed(authority),
             decision,
             owner,
-            settled: false,
             #[cfg(test)]
             settlement_probe: None,
         }))
@@ -2061,36 +2105,61 @@ impl ActorPublicationGuard {
                 &outcome,
                 Ok(ActorGenerationCommit::Published { .. } | ActorGenerationCommit::Unconfirmed(_))
             );
-        if known_unpublished {
-            self.refused();
+        let settlement = if known_unpublished {
+            self.refused()
         } else if matches!(&outcome, Ok(ActorGenerationCommit::Published { .. })) {
-            if !self.confirmed() {
-                return Ok(ActorGenerationCommit::Unconfirmed(
-                    "publication lost its exact operational selection before settlement".into(),
-                ));
-            }
+            self.confirmed()
+        } else if matches!(&outcome, Ok(ActorGenerationCommit::Unconfirmed(_))) {
+            return outcome;
+        } else {
+            return Err(ResidentActorWorkbenchError::PublicationSettlement {
+                failure: Box::new(ActorPublicationSettlementFailure {
+                    outcome,
+                    settlement: PublicationSettlementError::PublicationUnconfirmed,
+                }),
+            });
+        };
+        if let Err(settlement) = settlement {
+            return Err(ResidentActorWorkbenchError::PublicationSettlement {
+                failure: Box::new(ActorPublicationSettlementFailure {
+                    outcome,
+                    settlement,
+                }),
+            });
         }
         outcome
+    }
+
+    fn unobserved(self, primary: ResidentActorWorkbenchError) -> ResidentActorWorkbenchError {
+        ResidentActorWorkbenchError::PublicationSettlement {
+            failure: Box::new(ActorPublicationSettlementFailure {
+                outcome: Err(primary),
+                settlement: PublicationSettlementError::BodyUnobserved,
+            }),
+        }
     }
 
     fn visibility(&self) -> ActorPublicationVisibility {
         ActorPublicationVisibility {
             state: self.state.clone(),
             attempt: self.attempt.clone(),
-            world: match &self.authority {
-                Some(PublicationAuthority::World(world)) => Some(world.visibility()),
-                Some(PublicationAuthority::TargetFence { .. }) | None => None,
+            world: match &self.settlement {
+                ActorPublicationState::Armed(PublicationAuthority::World(world)) => {
+                    Some(world.visibility())
+                }
+                ActorPublicationState::Armed(PublicationAuthority::TargetFence { .. })
+                | ActorPublicationState::Settled => None,
             },
         }
     }
 
-    fn refused(mut self) {
+    fn refused(mut self) -> Result<(), PublicationSettlementError> {
         let restore = |reopen: tidepool_runtime::session::RuntimeSourceReopen<'_>| {
             self.owner.with_live_source_settlement(|| {
                 let mut record = self.state.0.lock();
                 let current = &mut record.availability;
                 if !matches!(&*current, InstalledToolsAvailability::PublicationInProgress(attempt) if Arc::ptr_eq(attempt, &self.attempt)) {
-                    return Err(());
+                    return Err(PublicationSettlementError::SelectionChanged);
                 }
                 *current = match &self.attempt.expected {
                     ActorRequestSnapshot::Bootstrap(lease) => InstalledToolsAvailability::Available(lease.clone()),
@@ -2101,16 +2170,17 @@ impl ActorPublicationGuard {
                 if let Some(probe) = &self.settlement_probe { probe.wait(); }
                 reopen.commit();
                 Ok(())
-            }).unwrap_or(Err(()))
+            }).ok_or(PublicationSettlementError::OwnerUnavailable)?
         };
-        self.settled = self
-            .authority
-            .take()
-            .expect("one publication authority")
-            .refused_when(&self.attempt.target, restore);
+        let ActorPublicationState::Armed(authority) = &mut self.settlement else {
+            return Err(PublicationSettlementError::ReopenAttempted);
+        };
+        authority.refused_when(&self.attempt.target, restore)?;
+        self.settlement = ActorPublicationState::Settled;
+        Ok(())
     }
 
-    fn confirmed(mut self) -> bool {
+    fn confirmed(mut self) -> Result<(), PublicationSettlementError> {
         let promote = |reopen: tidepool_runtime::session::RuntimeSourceReopen<'_>| {
             self.owner
                 .with_live_source_settlement(|| {
@@ -2128,7 +2198,7 @@ impl ActorPublicationGuard {
                         _ => None,
                     };
                     let Some(generation) = selected else {
-                        return Err(());
+                        return Err(PublicationSettlementError::SelectionChanged);
                     };
                     *current = InstalledToolsAvailability::Generation(generation);
                     #[cfg(test)]
@@ -2138,23 +2208,22 @@ impl ActorPublicationGuard {
                     reopen.commit();
                     Ok(())
                 })
-                .unwrap_or(Err(()))
+                .ok_or(PublicationSettlementError::OwnerUnavailable)?
         };
-        let confirmed = self
-            .authority
-            .take()
-            .expect("one publication authority")
-            .confirmed_when(&self.attempt.target, promote);
-        self.settled = confirmed;
-        confirmed
+        let ActorPublicationState::Armed(authority) = &mut self.settlement else {
+            return Err(PublicationSettlementError::ReopenAttempted);
+        };
+        authority.confirmed_when(&self.attempt.target, promote)?;
+        self.settlement = ActorPublicationState::Settled;
+        Ok(())
     }
 }
 
 impl Drop for ActorPublicationGuard {
     fn drop(&mut self) {
-        if self.settled {
+        let ActorPublicationState::Armed(authority) = &mut self.settlement else {
             return;
-        }
+        };
         self.decision.request_cancellation();
         let state = self.state.clone();
         let attempt = self.attempt.clone();
@@ -2182,18 +2251,7 @@ impl Drop for ActorPublicationGuard {
                 _ => {}
             }
         };
-        if let Some(mut authority) = self.authority.take() {
-            authority.unavailable(mark_installed);
-            if let PublicationAuthority::TargetFence {
-                prerequisite: authority_prerequisite,
-                ..
-            } = &mut authority
-            {
-                if let Some(claim) = authority_prerequisite.take() {
-                    claim.retain_unconfirmed();
-                }
-            }
-        }
+        authority.unavailable(mark_installed);
         // WorldPublication drops prerequisite claims only after both locks unlock.
     }
 }
@@ -2258,50 +2316,51 @@ impl PublicationAuthority {
     fn unavailable(&mut self, mark_installed: impl FnOnce()) {
         match self {
             Self::World(world) => world.unavailable(mark_installed),
-            Self::TargetFence { .. } => mark_installed(),
+            Self::TargetFence { prerequisite, .. } => {
+                mark_installed();
+                if let Some(claim) = prerequisite.take() {
+                    claim.retain_unconfirmed();
+                }
+            }
         }
     }
 
     fn refused_when(
-        self,
+        &mut self,
         target: &generation_admission::GenerationDependency,
         restore: impl for<'a> FnOnce(
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
-        ) -> Result<(), ()>,
-    ) -> bool {
+        ) -> Result<(), PublicationSettlementError>,
+    ) -> Result<(), PublicationSettlementError> {
         match self {
             Self::World(world) => world.refused_when(restore),
             Self::TargetFence {
                 fence,
                 prerequisite,
             } => {
-                let refused = fence
-                    .reopen_with(target.runtime_lease(), restore)
-                    .is_ok_and(|result| result.is_ok());
-                drop(prerequisite);
-                refused
+                fence.reopen(target.runtime_lease(), restore)?;
+                drop(prerequisite.take());
+                Ok(())
             }
         }
     }
 
     fn confirmed_when(
-        self,
+        &mut self,
         target: &generation_admission::GenerationDependency,
         promote: impl for<'a> FnOnce(
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
-        ) -> Result<(), ()>,
-    ) -> bool {
+        ) -> Result<(), PublicationSettlementError>,
+    ) -> Result<(), PublicationSettlementError> {
         match self {
             Self::World(world) => world.confirmed_when(promote),
             Self::TargetFence {
                 fence,
                 prerequisite,
             } => {
-                let confirmed = fence
-                    .reopen_with(target.runtime_lease(), promote)
-                    .is_ok_and(|result| result.is_ok());
-                drop(prerequisite);
-                confirmed
+                fence.reopen(target.runtime_lease(), promote)?;
+                drop(prerequisite.take());
+                Ok(())
             }
         }
     }
@@ -2450,8 +2509,12 @@ where
         }).await;
         let outcome = match completed {
             Ok(outcome) => outcome,
-            Err(error) => return Err(error),
+            Err(error) => return Err(owner.unobserved(error)),
         };
+        #[cfg(test)]
+        if let Some(probe) = &self.settlement_probe {
+            probe.wait();
+        }
         owner.complete(outcome)
     }
 }
@@ -2468,6 +2531,47 @@ pub(crate) enum ActorGenerationCommit {
     },
     Refused(String),
     Unconfirmed(String),
+}
+
+/// A primary publication outcome and its independent failed source settlement.
+/// The outcome stays typed until the actor's final diagnostic boundary.
+pub struct ActorPublicationSettlementFailure {
+    outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+    settlement: PublicationSettlementError,
+}
+
+impl std::fmt::Debug for ActorPublicationSettlementFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActorPublicationSettlementFailure")
+            .field("settlement", &self.settlement)
+            .field("primary", &self.to_string())
+            .finish()
+    }
+}
+
+impl std::fmt::Display for ActorPublicationSettlementFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.outcome {
+            Ok(ActorGenerationCommit::Published { generation, .. }) => {
+                write!(formatter, "generation {:?} became visible", generation.id())?;
+            }
+            Ok(ActorGenerationCommit::Refused(reason)) => {
+                write!(formatter, "publication refused: {reason}")?
+            }
+            Ok(ActorGenerationCommit::Unconfirmed(reason)) => {
+                write!(formatter, "publication unconfirmed: {reason}")?
+            }
+            Err(error) => write!(formatter, "{error}")?,
+        }
+        write!(formatter, "; source settlement failed: {}", self.settlement)
+    }
+}
+
+impl std::error::Error for ActorPublicationSettlementFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.settlement)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3102,6 +3206,8 @@ where
             access: self.access.sharing(),
             state,
             owner,
+            #[cfg(test)]
+            settlement_probe: None,
         }
     }
 }
@@ -6282,6 +6388,11 @@ pub enum ResidentActorWorkbenchError {
     PreparedEntryAbsent { recipe: String },
     #[error("source preparation compiler admission refused: {0}")]
     PreparationAdmission(#[source] Arc<ResidentActorWorkbenchError>),
+    #[error("{failure}")]
+    PublicationSettlement {
+        #[source]
+        failure: Box<ActorPublicationSettlementFailure>,
+    },
     #[error("resident workbench execution failed: {0}")]
     Resident(#[from] ResidentError),
     /// The response that answers a boundary's effect was already handed to
@@ -6381,6 +6492,8 @@ impl ResidentActorWorkbenchError {
             Self::InvocationCancelled => {
                 Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
             }
+            Self::PublicationSettlement { failure } => failure.outcome.as_ref().err()
+                .and_then(|primary| primary.execution_failure_kind()),
             Self::Resident(error) | Self::Delivered(error) => {
                 resident_prepared_failure_kind(error)
             }
@@ -6407,6 +6520,7 @@ impl ResidentActorWorkbenchError {
     /// The run owner must stop admission and recover before any further execution.
     pub fn requires_recovery(&self) -> bool {
         match self {
+            Self::PublicationSettlement { .. } => true,
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.requires_recovery(),
             Self::PreparationAdmission(source) => source.requires_recovery(),
@@ -6449,6 +6563,11 @@ impl ResidentActorWorkbenchError {
             Self::CellCheck(failure) => Some(activation_compile_diagnostic(&failure.error)),
             Self::InputCompilation { error, .. } => Some(activation_compile_diagnostic(error)),
             Self::RendererProduction { failure } => renderer_production_diagnostic(failure),
+            Self::PublicationSettlement { failure } => Some(tidepool_toolchain::failclass::FailureEnvelope::new(
+                FailureClass::Infra,
+                tidepool_toolchain::failclass::Phase::Install,
+                failure.to_string(),
+            )),
             Self::CompileInfrastructure(diagnostic) => Some(diagnostic.clone()),
             Self::Kernel(error) => error.diagnostic.clone(),
             Self::Resident(ResidentError::Session(error))
@@ -9303,7 +9422,7 @@ where
                                 &evidence.reference,
                                 &original_source,
                             ) {
-                                world_introspection_answer(kind, &completed)
+                                world_introspection_answer(&completed)
                             } else {
                                 StructuredIntrospectionAnswer::CompilerUnavailable(
                                     "inspection world base changed before resumption".into(),
@@ -14772,39 +14891,27 @@ fn public_module_query_source(
 }
 
 fn world_introspection_answer(
-    kind: StructuredInspectionKind,
     completed: &tidepool_runtime::session::CompletedInspectionWorld,
 ) -> StructuredIntrospectionAnswer {
-    // Runtime CAS has checked the exact private world base. The displayed
-    // world observation is not the checked-source compile-view fingerprint.
-    match (kind, completed.result()) {
-        (
-            StructuredInspectionKind::Info,
-            Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info))),
-        ) => StructuredIntrospectionAnswer::Info(info.clone()),
-        (
-            StructuredInspectionKind::Type,
-            Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))),
-        ) => StructuredIntrospectionAnswer::Type(info.clone()),
-        (
-            _,
-            Ok(
-                tidepool_runtime::session::InspectionResult::StructuredInfo(Err(error))
-                | tidepool_runtime::session::InspectionResult::StructuredType(Err(error)),
-            ),
-        ) => StructuredIntrospectionAnswer::QueryError(error.clone()),
-        (_, Err(tidepool_toolchain::compiler_world::WorldQueryRejection::Unsupported)) => {
+    use tidepool_toolchain::compiler_world::{WorldAnswer, WorldQueryRejection};
+    match completed.answer() {
+        WorldAnswer::Info { info, .. } => StructuredIntrospectionAnswer::Info(info.clone()),
+        WorldAnswer::Type { info, .. } => StructuredIntrospectionAnswer::Type(info.clone()),
+        WorldAnswer::NameRefused { refusal, .. } => {
+            StructuredIntrospectionAnswer::QueryError(refusal.clone().into())
+        }
+        WorldAnswer::Absent(absence) => StructuredIntrospectionAnswer::QueryError(
+            tidepool_runtime::session::QueryError::UnknownModule(absence.module.clone()),
+        ),
+        WorldAnswer::Rejected(WorldQueryRejection::Unsupported) => {
             StructuredIntrospectionAnswer::QueryError(
                 tidepool_runtime::session::QueryError::Unsupported(
                     "compiler world does not support this public-module query".into(),
                 ),
             )
         }
-        (_, Err(reason)) => StructuredIntrospectionAnswer::CompilerUnavailable(format!(
-            "compiler world refused the query: {reason:?}"
-        )),
-        (_, Ok(_)) => StructuredIntrospectionAnswer::CompilerUnavailable(
-            "world inspection returned the wrong structured answer".into(),
+        WorldAnswer::Rejected(reason) => StructuredIntrospectionAnswer::CompilerUnavailable(
+            format!("compiler world refused the query: {reason:?}"),
         ),
     }
 }
@@ -17586,7 +17693,7 @@ pub(crate) mod request_tests {
             workbench_runner_for_test(&workbench).adopt_final_source_scope(context.clone()).await.unwrap();
             let cold = HostWorkObservation::new();
             let first = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Info, cold.clone()).await;
-            assert!(matches!(first.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info))) if info.identifier.name == "known"));
+            assert!(matches!(first.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Info { info, .. } if info.identifier.name == "known"));
             assert_eq!(cold.snapshot().get(HostWorkCounter::ColdBootstrap), 1);
             assert!(cold.snapshot().get(HostWorkCounter::CompilerMetadataSnapshot) > 0);
             let fingerprint = first.provenance().fingerprint.clone();
@@ -17692,7 +17799,7 @@ pub(crate) mod request_tests {
                     let observation = HostWorkObservation::new();
                     let answer = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", kind, observation.clone()).await;
                     assert_eq!(answer.provenance().fingerprint, fingerprint);
-                    assert!(answer.result().is_ok());
+                    assert!(matches!(answer.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Info { .. } | tidepool_toolchain::compiler_world::WorldAnswer::Type { .. }));
                     assert_world_hot_work(&observation.snapshot(), WorldEnsureExpectation::ResidentHit);
                 }
             }
@@ -17701,7 +17808,7 @@ pub(crate) mod request_tests {
             transferred.placement = history_context.placement;
             let transferred_cold = HostWorkObservation::new();
             let transferred_answer = installed_world_query(&workbench, transferred.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Type, transferred_cold.clone()).await;
-            assert!(matches!(transferred_answer.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))) if info.expression.canonical == "Int"));
+            assert!(matches!(transferred_answer.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Int"));
             assert_eq!(transferred_cold.snapshot().get(HostWorkCounter::RetainedValueSupportMerge), 0);
             assert!(transferred_cold.snapshot().get(HostWorkCounter::ReachableValueVisit) >= 3);
             let original = context.source_dependency().source_lease().unwrap();
@@ -17769,7 +17876,7 @@ pub(crate) mod request_tests {
                 if !receipt.unit.is_empty() && receipt.module == "WorldQuestion"
                     && matches!(&receipt.origin, WorldModuleOrigin::Home { root: 4, path, source_sha256 }
                         if path == "WorldQuestion.hs" && source_sha256 == expected.sha256())));
-            assert!(matches!(first.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))) if info.expression.canonical == "Int"));
+            assert!(matches!(first.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Int"));
             let initially_absent = installed_world_query(&workbench, context.clone(), captured.clone(), "CreatedLater", StructuredInspectionKind::Info, HostWorkObservation::new()).await;
             assert!(matches!(initially_absent.resolution(), WorldModuleResolution::Absent(missing) if missing.module == "CreatedLater"));
             let mut reversed_bodies = bodies.clone();
@@ -17790,17 +17897,17 @@ pub(crate) mod request_tests {
                 if !receipt.unit.is_empty() && receipt.module == "WorldQuestion"
                     && matches!(&receipt.origin, WorldModuleOrigin::Home { root: 4, path, source_sha256 }
                         if path == "WorldQuestion.hs" && source_sha256 == expected_second.sha256())));
-            assert!(matches!(second.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))) if info.expression.canonical == "Bool"));
+            assert!(matches!(second.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Bool"));
             assert_ne!(first.provenance().fingerprint, second.provenance().fingerprint);
             std::fs::write(owner.paths[4].join("WorldQuestion.hs"), second_body).unwrap();
             std::fs::write(owner.paths[4].join("CreatedLater.hs"), "module CreatedLater where\nknown = True\n").unwrap();
             let hot = HostWorkObservation::new();
             let retained = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Type, hot.clone()).await;
-            assert!(matches!(retained.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))) if info.expression.canonical == "Int"));
+            assert!(matches!(retained.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Int"));
             assert_world_hot_work(&hot.snapshot(), WorldEnsureExpectation::ResidentHit);
             let absent = installed_world_query(&workbench, context.clone(), captured.clone(), "CreatedLater", StructuredInspectionKind::Info, HostWorkObservation::new()).await;
             assert!(matches!(absent.resolution(), WorldModuleResolution::Absent(missing) if missing.module == "CreatedLater"));
-            assert!(matches!(absent.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Err(tidepool_runtime::session::QueryError::UnknownModule(module)))) if module == "CreatedLater"));
+            assert!(matches!(absent.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Absent(absence) if absence.module == "CreatedLater"));
             let stale = workbench.query_public_module_world(context.clone(), tidepool_runtime::session::NameQuery {
                 scope: tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()),
                 namespace: tidepool_runtime::session::NameNamespace::Value, name: "known".into(),
@@ -17860,7 +17967,7 @@ pub(crate) mod request_tests {
             assert_eq!(defining.module, "GHC.Internal.Maybe");
             assert_ne!(defining.unit, facade_module.unit);
             assert!(matches!(&defining.origin, WorldModuleOrigin::Package { .. }));
-            assert!(matches!(facade.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info)))
+            assert!(matches!(facade.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Info { info, .. }
                 if info.identifier.module == "GHC.Internal.Maybe" && info.identifier.name == "Just"));
             let direct = installed_named_world_query(&workbench, reexport_context, reexports, constructor_query("GHC.Internal.Maybe"), StructuredInspectionKind::Info, HostWorkObservation::new()).await;
             let expected_home = tidepool_runtime::session::GenerationArtifactReference::capture(home_body.as_bytes().to_vec());
@@ -17870,7 +17977,7 @@ pub(crate) mod request_tests {
                 if path == "GHC/Internal/Maybe.hs" && source_sha256 == expected_home.sha256()));
             assert_eq!(direct.defining_module(), Some(&home_module));
             assert_ne!(defining.unit, home_module.unit);
-            assert!(matches!(direct.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info)))
+            assert!(matches!(direct.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Info { info, .. }
                 if info.identifier.name == "Just"));
             let (mismatched, _mismatched_owner) = world_query_test_source(&[Some("module Different where\nknown :: Int\nknown = 7\n")]);
             let mismatch_layer = mismatched.clone();
@@ -20218,7 +20325,7 @@ pub(crate) mod request_tests {
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay(
     ) {
         with_test_compiler_owner(|preparation_client|
-            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), None),
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), None, None),
         ).await
     }
 
@@ -20234,29 +20341,241 @@ pub(crate) mod request_tests {
         preparation_client: crate::CompilerPreparationClient,
     ) {
         with_test_compiler_owner(|_|
-            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), Some(crate::ActorPersistencePolicy::Durable)),
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), Some(crate::ActorPersistencePolicy::Durable), None),
         ).await;
     }
 
     #[tokio::test]
     async fn quoted_source_original_survives_ephemeral_generation_replacement() {
         with_test_compiler_owner(|preparation_client|
-            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), Some(crate::ActorPersistencePolicy::Ephemeral)),
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), Some(crate::ActorPersistencePolicy::Ephemeral), None),
         ).await
+    }
+
+    #[derive(Clone, Copy)]
+    enum PublicationFailureControl {
+        BootstrapOwnerLoss,
+        ReplacementOwnerLoss,
+        BootstrapCheckoutRetired,
+        ReplacementCheckoutRetired,
+    }
+
+    impl PublicationFailureControl {
+        fn bootstrap(self) -> bool {
+            matches!(
+                self,
+                Self::BootstrapOwnerLoss | Self::BootstrapCheckoutRetired
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_publisher_checkout_loss_reaches_reload_as_unconfirmed() {
+        for control in [
+            PublicationFailureControl::BootstrapCheckoutRetired,
+            PublicationFailureControl::ReplacementCheckoutRetired,
+        ] {
+            with_test_compiler_owner(|client| async move {
+                quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                    client, Some(crate::ActorPersistencePolicy::Ephemeral), Some(control),
+                ).await;
+            }).await;
+        }
+    }
+
+    async fn assert_real_publisher_checkout_loss(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        state: Arc<InstalledToolsState>,
+        prepared: PreparedActorGeneration,
+    ) {
+        let target = prepared
+            .installation
+            .source_dependency()
+            .generation()
+            .unwrap()
+            .clone();
+        let parent = target.prerequisite().as_ref().unwrap().clone();
+        let checkout = workbench
+            .access
+            .machines
+            .checkout_run(prepared.checkout_context.placement.session)
+            .unwrap();
+        let (held_session, receipt) = checkout.into_parts();
+        let terminal = crate::CompilerPreparationOwner::new();
+        let publisher = workbench.generation_publisher(
+            state.clone(),
+            ActorPublicationOwner::Preparation(terminal.client()),
+        );
+        let publication = publisher.publish(
+            prepared,
+            tidepool_runtime::session::PublicationDecision::new(),
+            ActorGenerationPublication::Terminal,
+        );
+        tokio::pin!(publication);
+        assert!(futures_util::poll!(publication.as_mut()).is_pending());
+        assert!(
+            matches!(&state.0.lock().availability, InstalledToolsAvailability::PublicationInProgress(attempt) if attempt.target.same_prepared(&target))
+        );
+        let parent_fence = parent.runtime_admission().fence().unwrap();
+        assert_eq!(parent_fence.pending_claims(), 1);
+        workbench.access.machines.settle_retire(
+            receipt,
+            "publication checkout control retired the actual owner",
+        );
+        let error = match publication.await {
+            Err(error) => error,
+            Ok(_) => panic!("retired checkout cannot publish"),
+        };
+        assert!(error.requires_recovery());
+        assert!(
+            matches!(&error, ResidentActorWorkbenchError::PublicationSettlement { failure }
+            if matches!(failure.outcome, Err(ResidentActorWorkbenchError::Checkout(_)))
+                && matches!(failure.settlement, PublicationSettlementError::BodyUnobserved))
+        );
+        let diagnostic = error.to_string();
+        let observed = crate::resident_actor::reload_publication_result(Err(error)).unwrap();
+        assert!(
+            matches!(observed, ActorGenerationCommit::Unconfirmed(ref detail) if detail == &diagnostic && detail.contains("publication checkout control retired the actual owner"))
+        );
+        assert!(
+            matches!(&state.0.lock().availability, InstalledToolsAvailability::PublicationUnavailable(attempt) if attempt.target.same_prepared(&target))
+        );
+        assert_eq!(parent_fence.pending_claims(), 1);
+        assert_eq!(parent_fence.unconfirmed_claims(), 1);
+        drop(held_session);
+    }
+
+    async fn assert_real_publisher_failure(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        state: Arc<InstalledToolsState>,
+        prepared: PreparedActorGeneration,
+        control: PublicationFailureControl,
+    ) {
+        match control {
+            PublicationFailureControl::BootstrapOwnerLoss
+            | PublicationFailureControl::ReplacementOwnerLoss => {
+                assert_real_publisher_owner_loss(workbench, state, prepared).await;
+            }
+            PublicationFailureControl::BootstrapCheckoutRetired
+            | PublicationFailureControl::ReplacementCheckoutRetired => {
+                assert_real_publisher_checkout_loss(workbench, state, prepared).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_publisher_owner_loss_after_visibility_retains_external_prerequisite() {
+        for control in [
+            PublicationFailureControl::BootstrapOwnerLoss,
+            PublicationFailureControl::ReplacementOwnerLoss,
+        ] {
+            with_test_compiler_owner(|client| async move {
+                quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                    client, Some(crate::ActorPersistencePolicy::Ephemeral), Some(control),
+                ).await;
+            }).await;
+        }
+    }
+
+    async fn assert_real_publisher_owner_loss(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        state: Arc<InstalledToolsState>,
+        prepared: PreparedActorGeneration,
+    ) {
+        let parent = prepared
+            .installation
+            .source_dependency()
+            .generation()
+            .unwrap()
+            .prerequisite()
+            .as_ref()
+            .unwrap()
+            .clone();
+        let target = prepared
+            .installation
+            .source_dependency()
+            .generation()
+            .unwrap()
+            .clone();
+        let terminal = crate::CompilerPreparationOwner::new();
+        let mut publisher = workbench.generation_publisher(
+            state.clone(),
+            ActorPublicationOwner::Preparation(terminal.client()),
+        );
+        let (entered, observed) = std::sync::mpsc::sync_channel(0);
+        let (release, released) = std::sync::mpsc::channel();
+        publisher.settlement_probe = Some(Arc::new(PublicationSettlementProbe {
+            entered,
+            release: Mutex::new(released),
+            unwind: false,
+        }));
+        let close = std::thread::spawn(move || {
+            observed
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .unwrap();
+            let fence = parent.runtime_admission().fence().unwrap();
+            assert_eq!(fence.pending_claims(), 1);
+            drop(terminal);
+            release.send(()).unwrap();
+            fence
+        });
+        let result = publisher
+            .publish(
+                prepared,
+                tidepool_runtime::session::PublicationDecision::new(),
+                ActorGenerationPublication::Terminal,
+            )
+            .await;
+        let parent_fence = close.join().unwrap();
+        let Err(error @ ResidentActorWorkbenchError::PublicationSettlement { .. }) = result else {
+            panic!("lost publication owner must retain uncertainty")
+        };
+        assert!(error.requires_recovery());
+        let ResidentActorWorkbenchError::PublicationSettlement { failure } = error else {
+            unreachable!()
+        };
+        assert!(matches!(
+            failure.outcome,
+            Ok(ActorGenerationCommit::Published { .. })
+        ));
+        assert!(matches!(
+            failure.settlement,
+            PublicationSettlementError::OwnerUnavailable
+        ));
+        assert!(
+            matches!(&state.0.lock().availability, InstalledToolsAvailability::GenerationUnavailable(generation) if generation.dependency().same_prepared(&target))
+        );
+        assert_eq!(parent_fence.pending_claims(), 1);
+        assert_eq!(parent_fence.unconfirmed_claims(), 1);
+        assert!(target.runtime_lease().admit_source().is_err());
     }
 
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
         preparation_client: crate::CompilerPreparationClient,
         generation_replacement: Option<crate::ActorPersistencePolicy>,
+        publication_failure: Option<PublicationFailureControl>,
     ) {
         let mut recovery = None;
-        let (session, context, source, session_root) = host_mount_fixture_with_lib(|lib| {
+        let (mut session, mut context, source, session_root) = host_mount_fixture_with_lib(|lib| {
             let fixture =
                 crate::recovery::recovery_test_fixture::RecoveryFixture::create(lib.include_dir());
             tidepool_testing::with_settlement(|settlement| fixture.attach_root(lib, settlement));
             recovery = Some(fixture);
         });
         let recovery = recovery.unwrap();
+        if publication_failure.is_some() {
+            let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+            let parent = generation_admission::GenerationDependency::new(
+                crate::ActorRef::first(crate::ActorId(99)),
+                tidepool_runtime::session::NotebookGenerationId::INITIAL,
+                crate::CheckpointSourceLayer::default(),
+                &lease,
+                None,
+            );
+            context.source_dependency = generation_admission::SourceDependency::World(
+                generation_admission::BootstrapWorld::new(Some(parent)),
+            );
+        }
         let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
             context.actor.incarnation.0,
@@ -20334,6 +20653,12 @@ pub(crate) mod request_tests {
             .with_compilation_authority(
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
             );
+        if publication_failure.is_some() {
+            workbench_runner_for_test(&workbench)
+                .adopt_final_source_scope(context.clone())
+                .await
+                .unwrap();
+        }
         let warmed = if generation_replacement.is_some() {
             source
                 .prepare_source_toolset(
@@ -20711,6 +21036,10 @@ pub(crate) mod request_tests {
                 restored_decodes: 0,
             };
             assert_eq!(prepared.installation_work, expected_work);
+            if let Some(control) = publication_failure.filter(|control| control.bootstrap()) {
+                assert_real_publisher_failure(&workbench, state, prepared, control).await;
+                return;
+            }
             let initial = match workbench
                 .generation_publisher(
                     state.clone(),
@@ -21004,6 +21333,10 @@ pub(crate) mod request_tests {
                 revision,
                 "an unrelated public owner forces the prepared replacement to rebase"
             );
+            if let Some(control) = publication_failure.filter(|control| !control.bootstrap()) {
+                assert_real_publisher_failure(&workbench, state, prepared, control).await;
+                return;
+            }
             let replacement = match workbench
                 .generation_publisher(
                     state.clone(),

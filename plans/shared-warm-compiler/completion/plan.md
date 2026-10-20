@@ -1,8 +1,7 @@
 # Complete the shared compiler service and remove the old cell path
 
-Status: implementation partially folded and reviewed at code
-`de12466597312787e7eda3230d67857c60df2997`; the service-only execution path is not
-complete or qualified. The controlling branch is
+Status: owner scaffolds and bounded repairs are being implemented and folded;
+the service-only execution path is not complete or qualified. The controlling branch is
 `integration/compiler-query-warm-final`. Read the
 [current checkpoint review](review-de12466597.md) and
 [next-wave assignments](next-wave.md) before dispatch. Use this branch's latest
@@ -46,24 +45,30 @@ a reason to preserve the finite engine while building another abstraction layer.
 - World preparation currently excludes declarations/multiple inference segments,
   source-dependent retained value types and ordinary expression reservations.
   These are required completion work, not unsupported Persona profiles to retain.
-- The 32-failure sweep now has a first-failure triage, not completed dispositions.
-  The residency fixture stops before measurements because it omits real source
-  admission. Its pre-existing failure does not clear later code. Q10's four
-  passes exercise synthetic observer histories, not a running service cell.
-- Native N1 still infers current production from availability and loses exact
-  parent issuance. Repair A1c's demanded native custody without adopting the
-  temporary effective compiler projection; that would widen semantic roles.
+- The 32-failure sweep has a first-failure triage, not completed dispositions.
+  The repaired residency fixture enters real source admission. Native completion
+  previously stopped it before measurements; the owner-derived current-product
+  scaffold now allows the bounded-residency and original-source gate controls
+  to execute successfully. Broader collection histories remain receiving work.
+  Q10's earlier four passes still concern synthetic observer histories.
+- Native current membership now comes from its actual certified source row and
+  preserves a carried own binding. N1 must finish exact historical traversal,
+  both planners and support custody. Repair A1c without adopting the temporary
+  effective compiler projection; that would widen semantic roles.
 - Q2/Q3/Q6/Q7/Q8/Q9 contain useful owner and representation improvements, but
   several migrations stop before their real consumer. The publication guard has
   a new failed-settlement regression; off-checkout native preparation was lost.
   The current review assigns bounded repairs and the necessary replacement tests.
 
-The current review ran no new builds or tests. The incoming handoff reports
+The initial review ran no new builds or tests. The incoming handoff reports
 runtime/toolchain compilation, Q9 1/1, Q10 4/4 and residency 0/1 at `de12466597`;
 Haskell selectors and the full `session` target were not rerun there. Retained
 evidence is under `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`,
 especially `completion/` and `post-de124-review/`. Findings in other revisions
-or dirty instrumentation checkouts retain their own scope.
+or dirty instrumentation checkouts retain their own scope. Subsequent receiving
+evidence is in `root-native-scaffold/`, `verification-scaffold/`, `haskell-h/`,
+and the area owners' handoffs. Component passes are not joined World execution
+or release qualification.
 
 ## Delivery tree and ownership
 

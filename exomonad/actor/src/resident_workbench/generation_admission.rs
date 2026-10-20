@@ -155,9 +155,10 @@ impl BootstrapWorld {
         state.publication = Some(attempt.clone());
         Ok(WorldPublication {
             world: self.clone(),
-            settled: false,
-            prerequisite,
-            fence: Some(fence),
+            settlement: WorldPublicationSettlement::Armed {
+                prerequisite,
+                fence: super::PublicationFence::Held(fence),
+            },
             visibility: WorldPublicationVisibility {
                 world: self.clone(),
                 target: target.clone(),
@@ -216,10 +217,17 @@ impl Drop for BootstrapClaim {
 /// The actual publisher owns this cutoff. Dropping it preserves uncertainty.
 pub(super) struct WorldPublication {
     world: BootstrapWorld,
-    settled: bool,
-    prerequisite: Option<tidepool_runtime::session::RuntimeSourceLeaseClaim>,
-    fence: Option<tidepool_runtime::session::RuntimeSourceFence>,
+    settlement: WorldPublicationSettlement,
     visibility: WorldPublicationVisibility,
+}
+
+enum WorldPublicationSettlement {
+    Armed {
+        prerequisite: Option<tidepool_runtime::session::RuntimeSourceLeaseClaim>,
+        fence: super::PublicationFence,
+    },
+    Settled,
+    UnavailableRecorded,
 }
 
 /// Visibility of one prepared attempt, without its fence or settlement rights.
@@ -283,16 +291,37 @@ impl WorldPublication {
     }
 
     pub(super) fn unavailable(&mut self, mark_installed: impl FnOnce()) {
-        let mut state = self.world.0.state.lock();
-        if state
-            .publication
-            .as_ref()
-            .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
+        let WorldPublicationSettlement::Armed {
+            prerequisite,
+            fence,
+        } = &mut self.settlement
+        else {
+            mark_installed();
+            return;
+        };
         {
-            state.phase = WorldPhase::Unavailable(self.visibility.target.clone());
-            state.uncertainty_fence = self.fence.take();
+            let mut state = self.world.0.state.lock();
+            if state
+                .publication
+                .as_ref()
+                .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
+            {
+                state.phase = WorldPhase::Unavailable(self.visibility.target.clone());
+                if let super::PublicationFence::Held(held) =
+                    std::mem::replace(fence, super::PublicationFence::ReopenAttempted)
+                {
+                    // A repeated fallback cannot erase a fence already retained.
+                    state.uncertainty_fence.get_or_insert(held);
+                }
+            }
+            // Installation has its own exact attempt compare, even if this
+            // world's selection changed. Keep the world -> installation order.
             mark_installed();
         }
+        if let Some(claim) = prerequisite.take() {
+            claim.retain_unconfirmed();
+        }
+        self.settlement = WorldPublicationSettlement::UnavailableRecorded;
     }
 
     #[cfg(test)]
@@ -305,11 +334,11 @@ impl WorldPublication {
         state.phase = WorldPhase::Bound(target.clone());
     }
     pub(super) fn confirmed_when(
-        mut self,
+        &mut self,
         current: impl for<'a> FnOnce(
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
-        ) -> Result<(), ()>,
-    ) -> bool {
+        ) -> Result<(), super::PublicationSettlementError>,
+    ) -> Result<(), super::PublicationSettlementError> {
         let mut state = self.world.0.state.lock();
         if !state
             .publication
@@ -317,33 +346,32 @@ impl WorldPublication {
             .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
             || !matches!(&state.phase, WorldPhase::Bound(target) if target.same_prepared(&self.visibility.target))
         {
-            return false;
+            return Err(super::PublicationSettlementError::SelectionChanged);
         }
-        let confirmed = self
-            .fence
-            .take()
-            .expect("initial source publication fence")
-            .reopen_with(self.visibility.target.runtime_lease(), current)
-            .is_ok_and(|result| result.is_ok());
-        if confirmed {
-            self.settled = true;
-            state.publication = None;
-        }
-        confirmed
+        let WorldPublicationSettlement::Armed { fence, .. } = &mut self.settlement else {
+            return Err(super::PublicationSettlementError::ReopenAttempted);
+        };
+        fence.reopen(self.visibility.target.runtime_lease(), current)?;
+        state.publication = None;
+        drop(state);
+        // Last prerequisite custody must never drop under world/source locks.
+        self.settlement = WorldPublicationSettlement::Settled;
+        Ok(())
     }
     #[cfg(test)]
-    pub(super) fn confirmed(self) {
-        assert!(self.confirmed_when(|reopen| {
+    pub(super) fn confirmed(mut self) {
+        self.confirmed_when(|reopen| {
             reopen.commit();
             Ok(())
-        }));
+        })
+        .unwrap();
     }
     pub(super) fn refused_when(
-        mut self,
+        &mut self,
         current: impl for<'a> FnOnce(
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
-        ) -> Result<(), ()>,
-    ) -> bool {
+        ) -> Result<(), super::PublicationSettlementError>,
+    ) -> Result<(), super::PublicationSettlementError> {
         let mut state = self.world.0.state.lock();
         if !state
             .publication
@@ -351,37 +379,30 @@ impl WorldPublication {
             .is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
             || !matches!(state.phase, WorldPhase::Publishing(_))
         {
-            return false;
+            return Err(super::PublicationSettlementError::SelectionChanged);
         }
-        let refused = self
-            .fence
-            .take()
-            .expect("initial source publication fence")
-            .reopen_with(self.visibility.target.runtime_lease(), current)
-            .is_ok_and(|result| result.is_ok());
-        if refused {
-            state.phase = WorldPhase::Bootstrap;
-            state.publication = None;
-            self.settled = true;
-        }
-        refused
+        let WorldPublicationSettlement::Armed { fence, .. } = &mut self.settlement else {
+            return Err(super::PublicationSettlementError::ReopenAttempted);
+        };
+        fence.reopen(self.visibility.target.runtime_lease(), current)?;
+        state.phase = WorldPhase::Bootstrap;
+        state.publication = None;
+        drop(state);
+        self.settlement = WorldPublicationSettlement::Settled;
+        Ok(())
     }
     #[cfg(test)]
-    pub(super) fn refused(self) {
-        assert!(self.refused_when(|reopen| {
+    pub(super) fn refused(mut self) {
+        self.refused_when(|reopen| {
             reopen.commit();
             Ok(())
-        }));
+        })
+        .unwrap();
     }
 }
 impl Drop for WorldPublication {
     fn drop(&mut self) {
-        if !self.settled {
-            self.unavailable(|| {});
-            if let Some(prerequisite) = self.prerequisite.take() {
-                prerequisite.retain_unconfirmed();
-            }
-        }
+        self.unavailable(|| {});
     }
 }
 
@@ -729,9 +750,32 @@ mod tests {
 
     impl PublicationFixture {
         fn new() -> Self {
+            Self::with_prerequisite(false)
+        }
+
+        fn with_prerequisite(external: bool) -> Self {
             let mut history = History::new();
-            let dependency = generation(&mut history, NotebookGenerationId::INITIAL, None);
-            let world = BootstrapWorld::new(None);
+            let prerequisite = external.then(|| {
+                let scope = history
+                    .session
+                    .mint_notebook_scope_with_lease(None)
+                    .unwrap();
+                let parent = GenerationDependency::new(
+                    crate::ActorRef::first(crate::ActorId(99)),
+                    NotebookGenerationId::INITIAL,
+                    crate::CheckpointSourceLayer::default(),
+                    &scope,
+                    None,
+                );
+                history.scopes.push(scope);
+                parent
+            });
+            let dependency = generation(
+                &mut history,
+                NotebookGenerationId::INITIAL,
+                prerequisite.clone(),
+            );
+            let world = BootstrapWorld::new(prerequisite);
             world
                 .adopt_scope(dependency.runtime_lease().clone())
                 .unwrap();
@@ -789,10 +833,14 @@ mod tests {
         }
 
         fn after_confirmed_c() -> Self {
-            let mut fixture = Self::new();
+            Self::replacement(false)
+        }
+
+        fn replacement(external: bool) -> Self {
+            let mut fixture = Self::with_prerequisite(external);
             let initial = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
             assert!(initial.visibility().install(fixture.generation.clone()));
-            assert!(initial.confirmed());
+            initial.confirmed().unwrap();
             let predecessor = fixture.generation.clone();
             let dependency = generation(
                 &mut fixture._history,
@@ -833,10 +881,17 @@ mod tests {
         }
 
         fn assert_candidate_unavailable(&self) {
-            assert!(matches!(
-                self.generation.installation.source_dependency().claim(),
-                Err(GenerationAdmissionError::Closed { .. })
-            ));
+            match self.generation.installation.source_dependency().claim() {
+                Err(GenerationAdmissionError::Closed { scope, .. }) => {
+                    assert_eq!(scope, self.generation.scope.scope());
+                }
+                Err(GenerationAdmissionError::Unconfirmed { scope, count }) => {
+                    let parent = self.generation.dependency().prerequisite().as_ref().unwrap();
+                    assert_eq!(scope, parent.runtime_lease().scope());
+                    assert_eq!(count, 1);
+                }
+                _ => panic!("candidate or its exact prerequisite must refuse source admission"),
+            }
             assert!(self.state.snapshot_for_call().is_err());
             assert!(self.state.current_generation().is_none());
         }
@@ -870,6 +925,252 @@ mod tests {
     }
 
     #[test]
+    fn publisher_failed_settlement_retains_external_prerequisite_and_primary_outcome() {
+        for bootstrap in [true, false] {
+            for visible in [true, false] {
+                let mut fixture = if bootstrap {
+                    PublicationFixture::with_prerequisite(true)
+                } else {
+                    PublicationFixture::replacement(true)
+                };
+                let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+                let parent = fixture
+                    .generation
+                    .dependency()
+                    .prerequisite()
+                    .as_ref()
+                    .unwrap()
+                    .clone();
+                let parent_fence = parent.runtime_admission().fence().unwrap();
+                assert_eq!(parent_fence.pending_claims(), 1);
+                if visible {
+                    assert!(owner.visibility().install(fixture.generation.clone()));
+                }
+                drop(fixture.preparation.take());
+                let primary = if visible {
+                    Ok(super::super::ActorGenerationCommit::Published {
+                        generation: fixture.generation.clone(),
+                        cancellation_pending: false,
+                    })
+                } else {
+                    Err(crate::ResidentActorWorkbenchError::InvocationCancelled)
+                };
+                let Err(error @ crate::ResidentActorWorkbenchError::PublicationSettlement { .. }) =
+                    owner.complete(primary)
+                else {
+                    panic!("failed restoration must retain both outcomes")
+                };
+                assert!(error.requires_recovery());
+                assert_eq!(
+                    error.execution_failure_kind(),
+                    if visible {
+                        None
+                    } else {
+                        Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
+                    }
+                );
+                let crate::ResidentActorWorkbenchError::PublicationSettlement { failure } = error
+                else {
+                    unreachable!()
+                };
+                assert!(matches!(
+                    failure.settlement,
+                    super::super::PublicationSettlementError::OwnerUnavailable
+                ));
+                assert_eq!(parent_fence.pending_claims(), 1);
+                assert_eq!(parent_fence.unconfirmed_claims(), 1);
+                {
+                    let state = fixture.state.0.lock();
+                    assert!(
+                        matches!(&state.availability,
+                        super::super::InstalledToolsAvailability::GenerationUnavailable(_) if visible)
+                            || matches!(&state.availability,
+                        super::super::InstalledToolsAvailability::PublicationUnavailable(_) if !visible)
+                    );
+                }
+                if let SourceDependency::World(world) = &fixture.source {
+                    assert!(matches!(
+                        world.0.state.lock().phase,
+                        WorldPhase::Unavailable(_)
+                    ));
+                }
+                fixture.assert_candidate_unavailable();
+            }
+        }
+    }
+
+    #[test]
+    fn publisher_success_and_refusal_release_external_prerequisite_once() {
+        for bootstrap in [true, false] {
+            for visible in [true, false] {
+                let fixture = if bootstrap {
+                    PublicationFixture::with_prerequisite(true)
+                } else {
+                    PublicationFixture::replacement(true)
+                };
+                let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+                let parent = fixture
+                    .generation
+                    .dependency()
+                    .prerequisite()
+                    .as_ref()
+                    .unwrap()
+                    .clone();
+                let parent_fence = parent.runtime_admission().fence().unwrap();
+                assert_eq!(parent_fence.pending_claims(), 1);
+                if visible {
+                    assert!(owner.visibility().install(fixture.generation.clone()));
+                    owner.confirmed().unwrap();
+                } else {
+                    owner.refused().unwrap();
+                }
+                assert_eq!(parent_fence.pending_claims(), 0);
+                assert_eq!(parent_fence.unconfirmed_claims(), 0);
+                parent_fence
+                    .reopen_with(parent.runtime_lease(), |reopen| {
+                        reopen.commit();
+                        Ok::<_, ()>(())
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert!(fixture.state.snapshot_for_call().is_ok());
+                fixture.source.claim().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn publisher_unwind_after_promotion_preserves_external_uncertainty() {
+        for bootstrap in [true, false] {
+            let fixture = if bootstrap {
+                PublicationFixture::with_prerequisite(true)
+            } else {
+                PublicationFixture::replacement(true)
+            };
+            let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            assert!(owner.visibility().install(fixture.generation.clone()));
+            let parent = fixture
+                .generation
+                .dependency()
+                .prerequisite()
+                .as_ref()
+                .unwrap()
+                .clone();
+            let parent_fence = parent.runtime_admission().fence().unwrap();
+            let (entered, observed) = std::sync::mpsc::sync_channel(0);
+            let (release, released) = std::sync::mpsc::channel();
+            owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
+                entered,
+                release: parking_lot::Mutex::new(released),
+                unwind: true,
+            }));
+            let settling = std::thread::spawn(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| owner.confirmed()))
+            });
+            observed
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            assert!(fixture.state.0.try_lock().is_none());
+            release.send(()).unwrap();
+            assert!(settling.join().unwrap().is_err());
+            assert_eq!(parent_fence.pending_claims(), 1);
+            assert_eq!(parent_fence.unconfirmed_claims(), 1);
+            assert!(
+                matches!(&fixture.state.0.lock().availability, super::super::InstalledToolsAvailability::GenerationUnavailable(selected) if Arc::ptr_eq(selected, &fixture.generation))
+            );
+            fixture.assert_candidate_unavailable();
+        }
+    }
+
+    #[test]
+    fn publisher_unobserved_body_and_uncertain_phase_preserve_primary_recovery_obligations() {
+        for bootstrap in [true, false] {
+            for body_observed in [true, false] {
+                let fixture = if bootstrap {
+                    PublicationFixture::with_prerequisite(true)
+                } else {
+                    PublicationFixture::replacement(true)
+                };
+                let decision = tidepool_runtime::session::PublicationDecision::new();
+                let owner = fixture.reserve(decision.clone());
+                let parent = fixture
+                    .generation
+                    .dependency()
+                    .prerequisite()
+                    .as_ref()
+                    .unwrap()
+                    .clone();
+                let parent_fence = parent.runtime_admission().fence().unwrap();
+                let primary = crate::ResidentActorWorkbenchError::InvocationCancelled;
+                let error = if body_observed {
+                    let _claim = decision.claim_commit().unwrap();
+                    match owner.complete(Err(primary)) {
+                        Err(error) => error,
+                        Ok(_) => panic!("unconfirmed commit must not become ordinary cancellation"),
+                    }
+                } else {
+                    owner.unobserved(primary)
+                };
+                assert!(error.requires_recovery());
+                assert_eq!(
+                    error.execution_failure_kind(),
+                    Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
+                );
+                let crate::ResidentActorWorkbenchError::PublicationSettlement { failure } = error
+                else {
+                    panic!("both facts remain owned")
+                };
+                assert!(matches!(
+                    failure.outcome,
+                    Err(crate::ResidentActorWorkbenchError::InvocationCancelled)
+                ));
+                assert!(
+                    matches!(failure.settlement,
+                    super::super::PublicationSettlementError::PublicationUnconfirmed if body_observed)
+                        || matches!(failure.settlement, super::super::PublicationSettlementError::BodyUnobserved if !body_observed)
+                );
+                assert_eq!(parent_fence.pending_claims(), 1);
+                assert_eq!(parent_fence.unconfirmed_claims(), 1);
+                assert!(matches!(
+                    fixture.state.0.lock().availability,
+                    super::super::InstalledToolsAvailability::PublicationUnavailable(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn publisher_repeated_world_fallback_retains_fence_and_uncertainty_once() {
+        let fixture = PublicationFixture::with_prerequisite(true);
+        let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let SourceDependency::World(world) = &fixture.source else {
+            unreachable!()
+        };
+        let parent = fixture
+            .generation
+            .dependency()
+            .prerequisite()
+            .as_ref()
+            .unwrap()
+            .clone();
+        let parent_fence = parent.runtime_admission().fence().unwrap();
+        let super::super::ActorPublicationState::Armed(authority) = &mut owner.settlement else {
+            unreachable!()
+        };
+        authority.unavailable(|| {});
+        authority.unavailable(|| {});
+        assert!(world.0.state.lock().uncertainty_fence.is_some());
+        drop(owner);
+        assert!(world.0.state.lock().uncertainty_fence.is_some());
+        assert_eq!(parent_fence.pending_claims(), 1);
+        assert_eq!(parent_fence.unconfirmed_claims(), 1);
+        assert!(matches!(
+            fixture.state.0.lock().availability,
+            super::super::InstalledToolsAvailability::PublicationUnavailable(_)
+        ));
+    }
+
+    #[test]
     fn publisher_terminal_clear_before_confirmation_never_reopens_retained_target() {
         for bootstrap in [true, false] {
             let fixture = if bootstrap {
@@ -880,7 +1181,7 @@ mod tests {
             let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
             assert!(owner.visibility().install(fixture.generation.clone()));
             drop(fixture.state.drain_retired());
-            assert!(!owner.confirmed());
+            assert!(owner.confirmed().is_err());
             fixture.assert_candidate_unavailable();
         }
     }
@@ -900,6 +1201,7 @@ mod tests {
             owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
                 entered,
                 release: parking_lot::Mutex::new(released),
+                unwind: false,
             }));
             let settling = std::thread::spawn(move || owner.confirmed());
             observed
@@ -918,7 +1220,7 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap();
             release.send(()).unwrap();
-            assert!(settling.join().unwrap());
+            settling.join().unwrap().unwrap();
             clear.join().unwrap();
             assert!(fixture.state.snapshot_for_call().is_err());
         }
@@ -938,6 +1240,7 @@ mod tests {
             owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
                 entered,
                 release: parking_lot::Mutex::new(released),
+                unwind: false,
             }));
             let settling = std::thread::spawn(move || owner.confirmed());
             observed
@@ -985,11 +1288,11 @@ mod tests {
             // owner's installation lock. Exactly one ordering wins, but the
             // terminal transition must dominate either outcome.
             release.send(()).unwrap();
-            assert!(settling.join().unwrap());
+            settling.join().unwrap().unwrap();
             drain.join().unwrap();
             if let Some(owner) = republish.join().unwrap() {
                 assert!(
-                    !owner.confirmed(),
+                    owner.confirmed().is_err(),
                     "a late publisher must not confirm after terminal drain"
                 );
             }
@@ -1025,9 +1328,9 @@ mod tests {
             }
             drop(fixture.preparation.take());
             if confirmed {
-                assert!(!owner.confirmed());
+                assert!(owner.confirmed().is_err());
             } else {
-                owner.refused();
+                assert!(owner.refused().is_err());
             }
             fixture.assert_candidate_unavailable();
         }
@@ -1038,7 +1341,7 @@ mod tests {
         let fixture = PublicationFixture::new();
         let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
         drop(fixture.state.drain_retired());
-        owner.refused();
+        assert!(owner.refused().is_err());
         assert!(fixture.source.claim().is_err());
         fixture.assert_candidate_unavailable();
     }
@@ -1070,7 +1373,7 @@ mod tests {
         fixture.source.claim().unwrap();
         drop(claim);
         let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
-        owner.refused();
+        owner.refused().unwrap();
         fixture.source.claim().unwrap();
     }
 
@@ -1191,7 +1494,7 @@ mod tests {
         assert!(!stale.install(fixture.generation.clone()));
         assert!(retry.visibility().is_current());
         assert!(retry.visibility().install(fixture.generation.clone()));
-        assert!(retry.confirmed());
+        retry.confirmed().unwrap();
         drop(fixture.source.claim().unwrap());
         assert!(Arc::ptr_eq(
             &fixture.state.current_generation().unwrap(),

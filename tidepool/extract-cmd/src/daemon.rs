@@ -835,14 +835,14 @@ fn identify_request(
     admission: AdmissionId,
     ordinal: RequestOrdinal,
     cwd: &Path,
-    argv: &[OsString],
+    request: &ExtractRequest,
 ) {
     tracing::info!(
         target: "tidepool_extract_cmd::endpoint",
         daemon_epoch = %hex(&epoch.0),
         admission_id = admission.0,
         request_ordinal = ordinal.0,
-        compile_request = %compile_request_correlation(cwd, argv),
+        compile_request = %compile_request_correlation(cwd, request),
         transport = "daemon",
         "compiler request identified"
     );
@@ -964,7 +964,7 @@ pub(crate) fn execute(
     socket_path: &Path,
     epoch: &[u8; 32],
     cwd: &Path,
-    argv: &[OsString],
+    request: &ExtractRequest,
 ) -> Result<Output, DaemonError> {
     let deadline = Instant::now() + IO_TIMEOUT;
     let mut busy_retries = 0u64;
@@ -977,7 +977,7 @@ pub(crate) fn execute(
             );
             return Err(DaemonError::Busy);
         }
-        match execute_once(socket_path, epoch, cwd, argv, remaining) {
+        match execute_once(socket_path, epoch, cwd, request, remaining) {
             Err(DaemonError::Busy) => {
                 busy_retries = busy_retries.saturating_add(1);
                 wait_for_busy(deadline, None)?;
@@ -991,10 +991,11 @@ fn execute_once(
     socket_path: &Path,
     epoch: &[u8; 32],
     cwd: &Path,
-    argv: &[OsString],
+    request: &ExtractRequest,
     admission_timeout: Duration,
 ) -> Result<Output, DaemonError> {
     let admission_started = Instant::now();
+    let argv = request.worker_argv();
     let mut stream = UnixStream::connect(socket_path).map_err(DaemonError::Connect)?;
     stream
         .set_read_timeout(Some(admission_timeout))
@@ -1006,7 +1007,7 @@ fn execute_once(
     let mut req = Vec::new();
     req.extend_from_slice(REQUEST);
     req.extend_from_slice(epoch);
-    req.extend_from_slice(&encode_request(cwd, argv));
+    req.extend_from_slice(&encode_request(cwd, &argv));
     if let Err(error) = stream.write_all(&req) {
         // The daemon may reject and close before reading every byte. Only a
         // rejection it already sent proves nonacceptance; any other loss after
@@ -1035,7 +1036,7 @@ fn execute_once(
                 admission_id,
                 RequestOrdinal(1),
                 cwd,
-                argv,
+                request,
             );
             stream
                 .set_read_timeout(Some(IO_TIMEOUT))
@@ -1223,7 +1224,7 @@ fn begin_transaction_once(
 pub(crate) fn execute_transaction_request(
     transaction: &mut DaemonTransaction,
     cwd: &Path,
-    argv: &[OsString],
+    request: &ExtractRequest,
 ) -> Result<Output, DaemonError> {
     if !transaction.framing_known || transaction.terminal.is_some() || transaction.end_sent {
         return Err(DaemonError::AfterAcceptance(Box::new(
@@ -1241,13 +1242,14 @@ pub(crate) fn execute_transaction_request(
         transaction.admission_id,
         ordinal,
         cwd,
-        argv,
+        request,
     );
     let started = Instant::now();
+    let argv = request.worker_argv();
     let write = transaction
         .stream
         .write_all(&[TRANSACTION_REQUEST])
-        .and_then(|()| transaction.stream.write_all(&encode_request(cwd, argv)))
+        .and_then(|()| transaction.stream.write_all(&encode_request(cwd, &argv)))
         .and_then(|()| transaction.stream.flush());
     if let Err(error) = write {
         if !transaction
@@ -1602,7 +1604,7 @@ pub(crate) fn decode_output<R: Read>(r: &mut R) -> Result<Output, DaemonError> {
 /// each time; a plain request is a one-request transaction whose supplier
 /// yields its single already-parsed request and then an orderly end.
 enum RequestStep {
-    Request(std::path::PathBuf, Vec<OsString>),
+    Request(std::path::PathBuf, PreparedRequest),
     End,
     Disconnected,
     Malformed,
@@ -1689,22 +1691,39 @@ fn service_transaction(
                 ));
                 break;
             }
-            RequestStep::Request(cwd, argv) => {
+            RequestStep::Request(cwd, mut prepared_request) => {
                 request_ordinal =
                     RequestOrdinal(request_ordinal.0.checked_add(1).ok_or_else(|| {
                         FrontendError::Daemon("compiler request ordinal exhausted".into())
                     })?);
-                let compile_request = compile_request_correlation(&cwd, &argv);
-                let request_mode = ExtractRequest::decode_worker_argv(&argv)
-                    .ok()
-                    .map(|request| request.mode());
+                let correlation_started = Instant::now();
+                let (compile_request, correlation_bytes) =
+                    compile_request_correlation_with_bytes(&cwd, &prepared_request.request);
+                let correlation_ns = elapsed_ns(correlation_started);
+                let request_mode = prepared_request.request.mode();
+                tracing::info!(
+                    run_id,
+                    %compile_request,
+                    admission_id = admission_id.0,
+                    request_ordinal = request_ordinal.0,
+                    phase = "compiler_request_preparation",
+                    stage = "ingress_and_correlation",
+                    ingress_argument_bytes = prepared_request.preparation.ingress_argument_bytes,
+                    typed_decodes = prepared_request.preparation.typed_decodes,
+                    cli_parses = prepared_request.preparation.cli_parses,
+                    decode_ns = prepared_request.preparation.decode_ns,
+                    grant_ns = prepared_request.preparation.grant_ns,
+                    correlation_ns,
+                    correlation_encoded_bytes = correlation_bytes,
+                    "compiler request prepared"
+                );
                 let request_span = tracing::info_span!(
                     "compile_request",
                     run_id,
                     %compile_request,
                     execution_layer = "physical",
                     physical_execution = %format!("{}:{}:{}", hex(epoch), admission_id.0, request_ordinal.0),
-                    request_mode = request_mode.map(|mode| mode.to_string()).as_deref(),
+                    request_mode = %request_mode,
                     admission_id = admission_id.0,
                     compiler_workload,
                     compiler_jobs = grant.jobs,
@@ -1724,7 +1743,12 @@ fn service_transaction(
                 let started = Instant::now();
                 tracing::info!(run_id, %compile_request, "compiler request started");
                 tracing::debug!(run_id, %compile_request, source_root = %cwd.display(), "compiler request source");
-                match worker.request_while_connected(&connection, &cwd, &argv, request_deadline) {
+                match worker.request_while_connected(
+                    &connection,
+                    &cwd,
+                    &mut prepared_request.request,
+                    request_deadline,
+                ) {
                     Ok((code, stdout, stderr)) => {
                         *served += 1;
                         // Keep worker service separate from host-side parsing
@@ -2087,7 +2111,7 @@ pub(crate) fn serve(
 /// never crosses into a worker thread.
 enum Job {
     Transaction(UnixStream),
-    Request(UnixStream, std::path::PathBuf, Vec<OsString>),
+    Request(UnixStream, std::path::PathBuf, PreparedRequest),
 }
 
 struct PendingJob {
@@ -2332,17 +2356,18 @@ impl ResourceAdmission {
     }
 }
 
-fn grant_worker_argv(
-    argv: &[OsString],
+fn grant_worker_request(
+    prepared: &mut PreparedRequest,
     workload: CompileWorkload,
     grant: ExecutionGrant,
-) -> Result<Vec<OsString>, crate::ProtocolError> {
-    let mut request = ExtractRequest::decode_worker_argv(argv)?;
-    if request.workload() != workload {
+) -> Result<(), crate::ProtocolError> {
+    let started = Instant::now();
+    if prepared.request.workload() != workload {
         return Err(crate::ProtocolError::InvalidExecutionGrant);
     }
-    request.set_execution_grant(grant);
-    Ok(request.worker_argv())
+    prepared.request.set_execution_grant(grant);
+    prepared.preparation.grant_ns = elapsed_ns(started);
+    Ok(())
 }
 
 struct QuarantinedSlot {
@@ -2452,9 +2477,9 @@ fn admit_job_observed(
         None
     };
     let Some(mut resource_permit) = resources.acquire_with_capacity(workload, capacity) else {
-        if let Job::Request(_, cwd, argv) = &job {
+        if let Job::Request(_, cwd, prepared) = &job {
             tracing::debug!(
-                compile_request = %compile_request_correlation(cwd, argv),
+                compile_request = %compile_request_correlation(cwd, &prepared.request),
                 compiler_workload = match workload {
                     CompileWorkload::Foreground => "foreground",
                     CompileWorkload::Preparation => "preparation",
@@ -2647,9 +2672,9 @@ fn serve_workers(
                                                 return RequestStep::Malformed;
                                             }
                                         };
-                                        match normalize_worker_argv(argv) {
-                                            Ok(argv) => match grant_worker_argv(&argv, workload, grant) {
-                                                Ok(argv) => RequestStep::Request(cwd, argv),
+                                        match prepare_worker_request(argv) {
+                                            Ok(mut prepared) => match grant_worker_request(&mut prepared, workload, grant) {
+                                                Ok(()) => RequestStep::Request(cwd, prepared),
                                                 Err(_) => RequestStep::Malformed,
                                             },
                                             Err(error) => {
@@ -2669,8 +2694,8 @@ fn serve_workers(
                                 }
                             } else {
                                 match first_request.take() {
-                                    Some((cwd, argv)) => match grant_worker_argv(&argv, workload, grant) {
-                                        Ok(argv) => RequestStep::Request(cwd, argv),
+                                    Some((cwd, mut prepared)) => match grant_worker_request(&mut prepared, workload, grant) {
+                                        Ok(()) => RequestStep::Request(cwd, prepared),
                                         Err(_) => RequestStep::Malformed,
                                     },
                                     None => RequestStep::End,
@@ -2910,8 +2935,8 @@ fn serve_workers(
                     continue;
                 }
             };
-            let worker_argv = match normalize_worker_argv(argv) {
-                Ok(argv) => argv,
+            let prepared_request = match prepare_worker_request(argv) {
+                Ok(prepared) => prepared,
                 Err(_) => {
                     tracing::warn!(run_id, "rejected invalid typed compiler request");
                     log_reject_failure(
@@ -2955,10 +2980,8 @@ fn serve_workers(
                     &job_txs,
                     ordinary_busy.as_ref(),
                     &resources,
-                    ExtractRequest::decode_worker_argv(&worker_argv)
-                        .expect("normalized request")
-                        .workload(),
-                    Job::Request(worker_connection, cwd, worker_argv),
+                    prepared_request.request.workload(),
+                    Job::Request(worker_connection, cwd, prepared_request),
                     &mut connection,
                     &mut next_admission_id,
                     DaemonEpoch(*epoch),
@@ -3108,20 +3131,17 @@ fn log_compile_timing(run_id: &str, compile_request: &str, stderr: &[u8]) {
 /// The daemon replaces the typed execution grant before worker submission.
 /// Normalize only that grant for diagnostic correlation; actual worker bytes
 /// retain the admitted allowance, reported separately in the physical span.
-/// Untyped diagnostic inputs retain their raw digest. This hash grants no
-/// authority and is not an artifact or endpoint identity.
-pub(crate) fn compile_request_correlation(cwd: &Path, worker_argv: &[OsString]) -> String {
-    let logical_argv = ExtractRequest::decode_worker_argv(worker_argv)
-        .ok()
-        .map(|mut request| {
-            request.set_execution_grant(ExecutionGrant::default());
-            request.worker_argv()
-        });
-    let digest = blake3::hash(&encode_request(
-        cwd,
-        logical_argv.as_deref().unwrap_or(worker_argv),
-    ));
-    hex(&digest.as_bytes()[..8])
+/// Correlation observes the parsed logical request before late product placement.
+/// This hash grants no authority and is not an artifact or endpoint identity.
+pub(crate) fn compile_request_correlation(cwd: &Path, request: &ExtractRequest) -> String {
+    compile_request_correlation_with_bytes(cwd, request).0
+}
+
+fn compile_request_correlation_with_bytes(cwd: &Path, request: &ExtractRequest) -> (String, u64) {
+    let argv = request.worker_argv_with_grant(ExecutionGrant::default());
+    let bytes = encode_request(cwd, &argv);
+    let digest = blake3::hash(&bytes);
+    (hex(&digest.as_bytes()[..8]), bytes.len() as u64)
 }
 
 fn stamp_changed(
@@ -3177,12 +3197,7 @@ impl BuildProductsNamespace {
         ))
     }
 
-    pub(crate) fn place(
-        &mut self,
-        cwd: &Path,
-        argv: &[OsString],
-    ) -> Result<(Vec<OsString>, Vec<u8>), FrontendError> {
-        let mut request = ExtractRequest::decode_worker_argv(argv)?;
+    pub(crate) fn place(&mut self, cwd: &Path, request: &mut ExtractRequest) -> Vec<u8> {
         let mut diagnostics = Vec::new();
         for (logical, physical) in request.place_build_products(&self.path) {
             self.directories.insert(if physical.is_absolute() {
@@ -3197,7 +3212,7 @@ impl BuildProductsNamespace {
                 diagnostics.extend_from_slice(line.as_bytes());
             }
         }
-        Ok((request.worker_argv(), diagnostics))
+        diagnostics
     }
 
     /// Called only after the last owning child was reaped. Failed paths stay
@@ -3441,20 +3456,58 @@ impl Drop for OwnedSocket {
     }
 }
 
-pub(crate) fn normalize_worker_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, FrontendError> {
-    if matches!(argv.as_slice(), [flag, _] if flag == crate::request::WORKER_REQUEST_FLAG) {
-        ExtractRequest::decode_worker_argv(&argv)?;
-        return Ok(argv);
-    }
-    if argv
-        .iter()
-        .any(|arg| arg == crate::request::WORKER_REQUEST_FLAG)
-    {
-        return Err(FrontendError::Usage(
-            "typed worker request must contain exactly a marker and payload".to_owned(),
-        ));
-    }
-    Ok(ExtractRequest::from_cli(&argv)?.worker_argv())
+#[derive(Clone, Default)]
+// Bounded scalar observations follow the parsed request through queueing. The
+// request itself remains transport data, not compiler-operation admission.
+struct RequestPreparation {
+    ingress_argument_bytes: u64,
+    typed_decodes: u64,
+    cli_parses: u64,
+    decode_ns: u64,
+    grant_ns: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedRequest {
+    pub(crate) request: ExtractRequest,
+    preparation: RequestPreparation,
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+pub(crate) fn prepare_worker_request(
+    argv: Vec<OsString>,
+) -> Result<PreparedRequest, FrontendError> {
+    let started = Instant::now();
+    let ingress_argument_bytes = argv.iter().fold(0u64, |total, arg| {
+        total.saturating_add(arg.as_bytes().len() as u64)
+    });
+    let typed = matches!(argv.as_slice(), [flag, _] if flag == crate::request::WORKER_REQUEST_FLAG);
+    let request = if typed {
+        ExtractRequest::decode_worker_argv(&argv)?
+    } else {
+        if argv
+            .iter()
+            .any(|arg| arg == crate::request::WORKER_REQUEST_FLAG)
+        {
+            return Err(FrontendError::Usage(
+                "typed worker request must contain exactly a marker and payload".to_owned(),
+            ));
+        }
+        ExtractRequest::from_cli(&argv)?
+    };
+    Ok(PreparedRequest {
+        request,
+        preparation: RequestPreparation {
+            ingress_argument_bytes,
+            typed_decodes: u64::from(typed),
+            cli_parses: u64::from(!typed),
+            decode_ns: elapsed_ns(started),
+            grant_ns: 0,
+        },
+    })
 }
 
 pub(crate) fn read_request(
@@ -3878,11 +3931,21 @@ impl Worker {
     pub(crate) fn request(
         &mut self,
         cwd: &Path,
-        argv: &[OsString],
+        request: &mut ExtractRequest,
     ) -> Result<(i32, Vec<u8>, Vec<u8>), FrontendError> {
-        let (worker_argv, placement_diagnostics) =
-            self.build_products_namespace.place(cwd, argv)?;
-        let bytes = encode_request(cwd, &worker_argv);
+        let placement_started = Instant::now();
+        let placement_diagnostics = self.build_products_namespace.place(cwd, request);
+        let placement_ns = elapsed_ns(placement_started);
+        let encoding_started = Instant::now();
+        let bytes = encode_request(cwd, &request.worker_argv());
+        tracing::info!(
+            phase = "compiler_request_preparation",
+            stage = "worker_encoding",
+            placement_ns,
+            encoding_ns = elapsed_ns(encoding_started),
+            worker_encoded_bytes = bytes.len() as u64,
+            "compiler request prepared"
+        );
         let stdin = self
             .stdin
             .as_mut()
@@ -3922,13 +3985,16 @@ impl Worker {
         &mut self,
         connection: &UnixStream,
         cwd: &Path,
-        argv: &[OsString],
+        request: &mut ExtractRequest,
         deadline: Duration,
     ) -> Result<WorkerResponse, FrontendError> {
         let request_span = tracing::Span::current();
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
         self.operation_while_connected(connection, deadline, WorkerOperation::Request, |worker| {
-            let _entered = request_span.enter();
-            worker.request(cwd, argv)
+            tracing::dispatcher::with_default(&dispatcher, || {
+                let _entered = request_span.enter();
+                worker.request(cwd, request)
+            })
         })
     }
 
@@ -4139,6 +4205,31 @@ mod response_properties;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_request(argv: &[OsString]) -> ExtractRequest {
+        prepare_worker_request(argv.to_vec()).unwrap().request
+    }
+
+    fn test_worker_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, FrontendError> {
+        prepare_worker_request(argv).map(|prepared| prepared.request.worker_argv())
+    }
+
+    fn execute_test_request(
+        socket: &Path,
+        epoch: &[u8; 32],
+        cwd: &Path,
+        argv: &[OsString],
+    ) -> Result<Output, DaemonError> {
+        super::execute(socket, epoch, cwd, &test_request(argv))
+    }
+
+    fn execute_test_transaction_request(
+        transaction: &mut DaemonTransaction,
+        cwd: &Path,
+        argv: &[OsString],
+    ) -> Result<Output, DaemonError> {
+        super::execute_transaction_request(transaction, cwd, &test_request(argv))
+    }
 
     #[test]
     fn compiler_capture_selection_defaults_to_summaries_and_preserves_full_opt_in() {
@@ -4420,7 +4511,7 @@ mod tests {
                 )
                 .unwrap_err()
             } else {
-                execute(
+                execute_test_request(
                     &socket,
                     &[7; 32],
                     Path::new("/tmp"),
@@ -4697,34 +4788,19 @@ mod tests {
             capabilities: 99,
         });
         request.input("Source.hs");
-        let argv = grant_worker_argv(
-            &request.worker_argv(),
-            CompileWorkload::Preparation,
-            ExecutionGrant {
-                jobs: 4,
-                capabilities: 4,
-            },
-        )
-        .unwrap();
-        let granted = ExtractRequest::decode_worker_argv(&argv).unwrap();
-        assert_eq!(
-            granted.execution_grant(),
-            ExecutionGrant {
-                jobs: 4,
-                capabilities: 4
-            }
-        );
-        assert_eq!(granted.cli_argv(), request.cli_argv());
-        assert!(grant_worker_argv(
-            &argv,
-            CompileWorkload::Foreground,
-            ExecutionGrant {
-                jobs: 4,
-                capabilities: 4
-            }
-        )
-        .is_err());
+        let original_cli = request.cli_argv();
+        let mut prepared = prepare_worker_request(request.worker_argv()).unwrap();
+        let grant = ExecutionGrant {
+            jobs: 4,
+            capabilities: 4,
+        };
+        grant_worker_request(&mut prepared, CompileWorkload::Preparation, grant).unwrap();
+        let granted = ExtractRequest::decode_worker_argv(&prepared.request.worker_argv()).unwrap();
+        assert_eq!(granted.execution_grant(), grant);
+        assert_eq!(granted.cli_argv(), original_cli);
+        assert!(grant_worker_request(&mut prepared, CompileWorkload::Foreground, grant).is_err());
     }
+
     use std::io::Cursor;
     use std::os::unix::ffi::OsStringExt;
 
@@ -4763,7 +4839,7 @@ mod tests {
 
     fn products_response(worker: &mut Worker, cwd: &Path, argv: &[OsString]) -> Vec<String> {
         worker.begin_transaction().unwrap();
-        let (code, output, stderr) = worker.request(cwd, argv).unwrap();
+        let (code, output, stderr) = worker.request(cwd, &mut test_request(argv)).unwrap();
         worker.end_transaction().unwrap();
         assert_eq!(code, 0);
         assert!(String::from_utf8(stderr)
@@ -5121,8 +5197,9 @@ mod tests {
         assert_ne!(out_a[0], out_b[0]);
         assert_eq!(out_b[1], "");
         let mut cli_namespace = BuildProductsNamespace::direct().unwrap();
-        let (cli, diagnostic) = cli_namespace.place(dir.path(), &argv).unwrap();
-        assert_ne!(cli, argv);
+        let mut cli_request = test_request(&argv);
+        let diagnostic = cli_namespace.place(dir.path(), &mut cli_request);
+        assert_ne!(cli_request.worker_argv(), argv);
         assert!(String::from_utf8(diagnostic)
             .unwrap()
             .starts_with("tidepool-build-products "));
@@ -5522,7 +5599,7 @@ mod tests {
             drop(socket);
         });
         let large = OsString::from_vec(vec![b'x'; 8 << 20]);
-        let error = execute(&path, &[1; 32], Path::new("/tmp"), &[large]).unwrap_err();
+        let error = execute_test_request(&path, &[1; 32], Path::new("/tmp"), &[large]).unwrap_err();
         server.join().unwrap();
         assert!(
             matches!(&error, DaemonError::NotAccepted(message) if message == "daemon rotating"),
@@ -5544,7 +5621,7 @@ mod tests {
             drop(socket);
         });
         let large = OsString::from_vec(vec![b'x'; 8 << 20]);
-        let error = execute(&path, &[1; 32], Path::new("/tmp"), &[large]).unwrap_err();
+        let error = execute_test_request(&path, &[1; 32], Path::new("/tmp"), &[large]).unwrap_err();
         server.join().unwrap();
         assert!(!error.is_not_accepted(), "{error}");
         assert!(!error.was_accepted(), "{error}");
@@ -5592,7 +5669,8 @@ mod tests {
             connection.read_exact(&mut header).unwrap();
             read_request(&mut connection).unwrap();
         });
-        let error = execute(&path, &[1; 32], Path::new("/tmp"), &["request".into()]).unwrap_err();
+        let error = execute_test_request(&path, &[1; 32], Path::new("/tmp"), &["request".into()])
+            .unwrap_err();
         server.join().unwrap();
         assert!(!error.is_not_accepted());
         assert!(!error.was_accepted());
@@ -5655,45 +5733,175 @@ mod tests {
             let mut request =
                 ExtractRequest::from_cli(&["Expr.hs".into(), "--turn".into()]).unwrap();
             request.set_workload(workload);
-            let client_argv = request.worker_argv();
-            let logical_digest = compile_request_correlation(cwd, &client_argv);
+            let logical_digest = compile_request_correlation(cwd, &request);
             for jobs in [2, 4, 8, 16] {
                 let grant = ExecutionGrant {
                     jobs,
                     capabilities: jobs + 1,
                 };
-                let daemon_argv = grant_worker_argv(
-                    &normalize_worker_argv(client_argv.clone()).unwrap(),
-                    workload,
-                    grant,
-                )
-                .unwrap();
-                assert_ne!(client_argv, daemon_argv);
+                let mut prepared = prepare_worker_request(request.worker_argv()).unwrap();
+                grant_worker_request(&mut prepared, workload, grant).unwrap();
+                assert_eq!(prepared.request.execution_grant(), grant);
                 assert_eq!(
-                    ExtractRequest::decode_worker_argv(&daemon_argv)
-                        .unwrap()
-                        .execution_grant(),
-                    grant
-                );
-                assert_eq!(
-                    compile_request_correlation(cwd, &daemon_argv),
+                    compile_request_correlation(cwd, &prepared.request),
                     logical_digest
                 );
             }
         }
         let request = ExtractRequest::from_cli(&["Expr.hs".into(), "--turn".into()]).unwrap();
-        let client_argv = request.worker_argv();
         let mut preparation = request.clone();
         preparation.set_workload(CompileWorkload::Preparation);
         assert_ne!(
-            compile_request_correlation(cwd, &client_argv),
-            compile_request_correlation(cwd, &preparation.worker_argv())
+            compile_request_correlation(cwd, &request),
+            compile_request_correlation(cwd, &preparation)
         );
         let other = ExtractRequest::from_cli(&["Other.hs".into()]).unwrap();
         assert_ne!(
-            compile_request_correlation(cwd, &client_argv),
-            compile_request_correlation(cwd, &other.worker_argv())
+            compile_request_correlation(cwd, &request),
+            compile_request_correlation(cwd, &other)
         );
+    }
+
+    #[test]
+    fn typed_request_correlation_preserves_frozen_wire_and_field_order() {
+        // Frozen worker packets predate the parsed-request flow. The expected
+        // correlation hashes their literal argv framing, independently of the
+        // new grant-normalized encoder. These cover query, plan, prepare and
+        // resident-acquisition modes, including source/template/receipt bodies.
+        let packets = [
+            "5450524551303234000100000001000000010000000107000000457870722e6873",
+            "5450524551303234000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e",
+            "5450524551303234000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72",
+            "5450524551303234000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72",
+            "54505245513032340001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564",
+];
+        for payload in packets.into_iter().flat_map(|payload| {
+            [
+                payload.to_owned(),
+                format!("{}01{}", &payload[..16], &payload[18..]),
+            ]
+        }) {
+            for cwd in [Path::new("/tmp/work"), Path::new("/tmp/λ work")] {
+                let mut old_frame = Vec::new();
+                for bytes in [cwd.as_os_str().as_bytes()] {
+                    old_frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    old_frame.extend_from_slice(bytes);
+                }
+                old_frame.extend_from_slice(&2u32.to_le_bytes());
+                for bytes in [b"--worker-request-v24".as_slice(), payload.as_bytes()] {
+                    old_frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    old_frame.extend_from_slice(bytes);
+                }
+                let expected = hex(&blake3::hash(&old_frame).as_bytes()[..8]);
+                let mut prepared = prepare_worker_request(vec![
+                    crate::request::WORKER_REQUEST_FLAG.into(),
+                    payload.as_str().into(),
+                ])
+                .unwrap();
+                assert_eq!(
+                    prepared.request.worker_argv()[1],
+                    OsString::from(payload.as_str())
+                );
+                let workload = prepared.request.workload();
+                for jobs in [1, 2, 16] {
+                    grant_worker_request(
+                        &mut prepared,
+                        workload,
+                        ExecutionGrant {
+                            jobs,
+                            capabilities: jobs + 1,
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        compile_request_correlation(cwd, &prepared.request),
+                        expected
+                    );
+                    let emitted =
+                        ExtractRequest::decode_worker_argv(&prepared.request.worker_argv())
+                            .unwrap();
+                    assert_eq!(
+                        emitted.execution_grant(),
+                        ExecutionGrant {
+                            jobs,
+                            capabilities: jobs + 1
+                        }
+                    );
+                }
+            }
+        }
+        let left = prepare_worker_request(vec![
+            "Expr.hs".into(),
+            "--include".into(),
+            "a".into(),
+            "--include".into(),
+            "b".into(),
+        ])
+        .unwrap();
+        let right = prepare_worker_request(vec![
+            "Expr.hs".into(),
+            "--include".into(),
+            "b".into(),
+            "--include".into(),
+            "a".into(),
+        ])
+        .unwrap();
+        assert_ne!(
+            compile_request_correlation(Path::new("/tmp"), &left.request),
+            compile_request_correlation(Path::new("/tmp"), &right.request)
+        );
+    }
+
+    #[test]
+    fn parsed_request_placement_keeps_grant_and_original_correlation_separate() {
+        let cwd = Path::new("/tmp/work");
+        let args = vec![
+            "Expr.hs".into(),
+            "--include".into(),
+            "inc".into(),
+            "--build-products-dir".into(),
+            "products".into(),
+        ];
+        let mut cli = prepare_worker_request(args).unwrap();
+        let typed = prepare_worker_request(cli.request.worker_argv()).unwrap();
+        assert_eq!(cli.request.worker_argv(), typed.request.worker_argv());
+        assert_eq!(cli.preparation.cli_parses, 1);
+        assert_eq!(typed.preparation.typed_decodes, 1);
+        let original = compile_request_correlation(cwd, &cli.request);
+        let grant = ExecutionGrant {
+            jobs: 4,
+            capabilities: 3,
+        };
+        grant_worker_request(&mut cli, CompileWorkload::Foreground, grant).unwrap();
+        assert_eq!(compile_request_correlation(cwd, &cli.request), original);
+        let mut placement =
+            BuildProductsNamespace::new(PathBuf::from("epoch/0"), BuildProductsTransport::Daemon);
+        assert!(placement.place(cwd, &mut cli.request).is_empty());
+        let emitted = ExtractRequest::decode_worker_argv(&cli.request.worker_argv()).unwrap();
+        assert_eq!(emitted.execution_grant(), grant);
+        let mut expected = ExtractRequest::from_cli(&[
+            "Expr.hs".into(),
+            "--include".into(),
+            "inc".into(),
+            "--build-products-dir".into(),
+            "products/epoch/0".into(),
+        ])
+        .unwrap();
+        expected.set_execution_grant(grant);
+        assert_eq!(emitted.worker_argv(), expected.worker_argv());
+        assert_eq!(
+            typed.request.cli_argv(),
+            ExtractRequest::from_cli(&[
+                "Expr.hs".into(),
+                "--include".into(),
+                "inc".into(),
+                "--build-products-dir".into(),
+                "products".into()
+            ])
+            .unwrap()
+            .cli_argv()
+        );
+        assert_ne!(compile_request_correlation(cwd, &emitted), original);
     }
 
     #[test]
@@ -5940,7 +6148,7 @@ tidepool-reuse-error: witness failed\n";
                     AdmissionId(7),
                     RequestOrdinal(2),
                     Path::new("/owned/source"),
-                    &[],
+                    &ExtractRequest::default(),
                 );
                 log_compile_timing("owned", "digest", b"tidepool-validation {\"schema\":1,\"invocation_id\":2,\"worker_pid\":123,\"start_ns\":10,\"end_ns\":20,\"wall_ns\":10,\"cpu_ns\":9,\"clock_domain\":\"ghc_monotonic_ns\",\"outcome\":\"success\",\"counts\":{}}\ntidepool-timing-detail parent=prepared_recover phase=lookup ms=1\ntidepool-module-counts name=raw_projection_output owner_unit=main owner_module=Execute count_ns=21 successful_groups=2 original_encoding_bytes=70\n");
             });
@@ -6059,17 +6267,10 @@ tidepool-reuse-error: witness failed\n";
 
     #[test]
     fn compiler_request_correlation_is_stable_and_content_addressed() {
-        let argv = [
-            OsString::from("--worker-request-v14"),
-            OsString::from("payload"),
-        ];
-        assert_eq!(
-            compile_request_correlation(Path::new("/work"), &argv),
-            compile_request_correlation(Path::new("/work"), &argv)
-        );
+        let request = ExtractRequest::from_cli(&["Expr.hs".into()]).unwrap();
         assert_ne!(
-            compile_request_correlation(Path::new("/work"), &argv),
-            compile_request_correlation(Path::new("/other-work"), &argv)
+            compile_request_correlation(Path::new("/work"), &request),
+            compile_request_correlation(Path::new("/other-work"), &request)
         );
     }
 
@@ -6078,14 +6279,14 @@ tidepool-reuse-error: witness failed\n";
         let valid = ExtractRequest::from_cli(&["Expr.hs".into()])
             .unwrap()
             .worker_argv();
-        assert_eq!(normalize_worker_argv(valid.clone()).unwrap(), valid);
+        assert_eq!(test_worker_argv(valid.clone()).unwrap(), valid);
 
         let mixed = vec![
             "Expr.hs".into(),
             crate::request::WORKER_REQUEST_FLAG.into(),
             "payload".into(),
         ];
-        assert!(normalize_worker_argv(mixed).is_err());
+        assert!(test_worker_argv(mixed).is_err());
     }
 
     #[test]
@@ -6094,7 +6295,7 @@ tidepool-reuse-error: witness failed\n";
             crate::request::WORKER_REQUEST_FLAG.into(),
             "54505245513031320100000009".into(),
         ];
-        assert!(normalize_worker_argv(malformed).is_err());
+        assert!(test_worker_argv(malformed).is_err());
     }
 
     fn encode_response_bytes(code: i32, stdout: &[u8], stderr: &[u8]) -> Vec<u8> {
@@ -6330,7 +6531,8 @@ tidepool-reuse-error: witness failed\n";
             connection.write_all(&0i32.to_le_bytes()).unwrap();
             connection.write_all(&u32::MAX.to_le_bytes()).unwrap();
         });
-        let error = execute(&socket, &[1; 32], Path::new("/tmp"), &["request".into()]).unwrap_err();
+        let error = execute_test_request(&socket, &[1; 32], Path::new("/tmp"), &["request".into()])
+            .unwrap_err();
         server.join().unwrap();
         assert!(error.was_accepted());
         assert!(!error.permits_rebind());
@@ -6573,7 +6775,7 @@ tidepool-reuse-error: witness failed\n";
             if phase == 0 {
                 cancellation.cancel();
             }
-            let result = execute_transaction_request(
+            let result = execute_test_transaction_request(
                 &mut transaction,
                 Path::new("/tmp"),
                 &["one-request".into()],
@@ -6639,7 +6841,12 @@ tidepool-reuse-error: witness failed\n";
                 connection.read_exact(&mut command).unwrap();
                 assert_eq!(command, [TRANSACTION_REQUEST]);
                 let (_, argv) = read_request(&mut connection).unwrap();
-                assert_eq!(argv, [OsString::from(expected)]);
+                assert_eq!(
+                    ExtractRequest::decode_worker_argv(&argv)
+                        .unwrap()
+                        .cli_argv(),
+                    [OsString::from(expected)]
+                );
                 connection.write_all(&[TRANSACTION_OUTPUT]).unwrap();
                 write_response(&mut connection, 0, expected.as_bytes(), b"").unwrap();
             }
@@ -6659,7 +6866,7 @@ tidepool-reuse-error: witness failed\n";
         );
         tracing::subscriber::with_default(subscriber, || {
             for expected in ["one", "one"] {
-                let output = execute_transaction_request(
+                let output = execute_test_transaction_request(
                     &mut transaction,
                     Path::new("/tmp"),
                     &[OsString::from(expected)],
@@ -6696,20 +6903,15 @@ tidepool-reuse-error: witness failed\n";
     fn transaction_queue_and_repeated_requests_have_exact_identities() {
         let dir = tempfile::tempdir().unwrap();
         let argv = vec![OsString::from("Expr.hs")];
-        let client_argv = normalize_worker_argv(argv.clone()).unwrap();
-        let client_digest = compile_request_correlation(dir.path(), &client_argv);
+        let client_argv = test_worker_argv(argv.clone()).unwrap();
+        let client_digest = compile_request_correlation(dir.path(), &test_request(&client_argv));
         let grant = ExecutionGrant {
             jobs: 2,
             capabilities: 2,
         };
-        let granted_argv =
-            grant_worker_argv(&client_argv, CompileWorkload::Foreground, grant).unwrap();
-        assert_eq!(
-            ExtractRequest::decode_worker_argv(&granted_argv)
-                .unwrap()
-                .execution_grant(),
-            grant
-        );
+        let mut granted_request = prepare_worker_request(client_argv).unwrap();
+        grant_worker_request(&mut granted_request, CompileWorkload::Foreground, grant).unwrap();
+        assert_eq!(granted_request.request.execution_grant(), grant);
         let worker_bin = compile_sleepy_fake_worker(dir.path(), &argv, 0);
         let prepared = PreparedWorker::for_test(worker_bin).unwrap();
         let mut worker = Worker::spawn(&prepared).unwrap();
@@ -6727,11 +6929,12 @@ tidepool-reuse-error: witness failed\n";
             preparation_jobs: None,
         };
         let trace = CapturedWriter::default();
-        let subscriber = tracing_subscriber(
+        let subscriber = tracing_subscriber_with_trace_filter(
             CapturedWriter::default(),
             CapturedWriter::default(),
             trace.clone(),
             tracing_subscriber::EnvFilter::new("debug"),
+            compiler_trace_filter(None, Some("minimal")),
         );
         let mut served = 0;
         let mut followed_rotation = false;
@@ -6769,9 +6972,9 @@ tidepool-reuse-error: witness failed\n";
                                 AdmissionId(admission),
                                 RequestOrdinal(request_count - remaining),
                                 dir.path(),
-                                &client_argv,
+                                &granted_request.request,
                             );
-                            RequestStep::Request(dir.path().to_path_buf(), granted_argv.clone())
+                            RequestStep::Request(dir.path().to_path_buf(), granted_request.clone())
                         }
                     },
                 )
@@ -6840,6 +7043,57 @@ tidepool-reuse-error: witness failed\n";
             finished[0]["fields"]["compile_request"],
             finished[1]["fields"]["compile_request"]
         );
+        let preparation: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event["fields"]["stage"] == "ingress_and_correlation")
+            .collect();
+        assert_eq!(preparation.len(), 2);
+        for ((index, event), ordinal) in preparation.iter().zip([1, 2]) {
+            let fields = &event["fields"];
+            assert_eq!(fields["compile_request"], client_digest);
+            assert_eq!(fields["admission_id"], 41);
+            assert_eq!(fields["request_ordinal"], ordinal);
+            assert_eq!(fields["typed_decodes"], 1);
+            assert_eq!(fields["cli_parses"], 0);
+            for key in [
+                "decode_ns",
+                "grant_ns",
+                "correlation_ns",
+                "correlation_encoded_bytes",
+                "ingress_argument_bytes",
+            ] {
+                assert!(
+                    fields[key].as_u64().is_some(),
+                    "missing bounded preparation metric {key}"
+                );
+            }
+            let started = events
+                .iter()
+                .position(|row| {
+                    row["fields"]["message"] == "compiler request started"
+                        && row["span"]["request_ordinal"] == ordinal
+                })
+                .unwrap();
+            assert!(
+                *index < started,
+                "ingress preparation precedes the physical timer"
+            );
+        }
+        let encodings: Vec<_> = events
+            .iter()
+            .filter(|event| event["fields"]["stage"] == "worker_encoding")
+            .collect();
+        assert_eq!(encodings.len(), 2);
+        for event in encodings {
+            assert_eq!(event["span"]["compile_request"], client_digest);
+            for key in ["placement_ns", "encoding_ns", "worker_encoded_bytes"] {
+                assert!(
+                    event["fields"][key].as_u64().is_some(),
+                    "missing bounded encoding metric {key}"
+                );
+            }
+        }
         assert_eq!(served, 2);
     }
 
@@ -6861,7 +7115,8 @@ tidepool-reuse-error: witness failed\n";
             let error = if transaction {
                 begin_transaction(&socket, &[1; 32]).unwrap_err()
             } else {
-                execute(&socket, &[1; 32], Path::new("/tmp"), &["request".into()]).unwrap_err()
+                execute_test_request(&socket, &[1; 32], Path::new("/tmp"), &["request".into()])
+                    .unwrap_err()
             };
             server.join().unwrap();
             assert!(error.was_accepted(), "{error}");
@@ -6880,7 +7135,12 @@ tidepool-reuse-error: witness failed\n";
                 let mut header = [0; 40];
                 stream.read_exact(&mut header).unwrap();
                 let (_, argv) = read_request(&mut stream).unwrap();
-                assert_eq!(argv, [OsString::from("same-request")]);
+                assert_eq!(
+                    ExtractRequest::decode_worker_argv(&argv)
+                        .unwrap()
+                        .cli_argv(),
+                    [OsString::from("same-request")]
+                );
                 if busy {
                     write_busy(&mut stream).unwrap();
                 } else {
@@ -6899,7 +7159,7 @@ tidepool-reuse-error: witness failed\n";
         );
         tracing::subscriber::with_default(subscriber, || {
             assert_eq!(
-                execute(
+                execute_test_request(
                     &socket,
                     &[9; 32],
                     Path::new("/tmp"),
@@ -6947,7 +7207,9 @@ tidepool-reuse-error: witness failed\n";
             stream.read_exact(&mut command).unwrap();
             assert_eq!(command, [TRANSACTION_REQUEST]);
             assert_eq!(
-                read_request(&mut stream).unwrap().1,
+                ExtractRequest::decode_worker_argv(&read_request(&mut stream).unwrap().1)
+                    .unwrap()
+                    .cli_argv(),
                 [OsString::from("same-request")]
             );
             written_tx.send(()).unwrap();
@@ -6977,7 +7239,7 @@ tidepool-reuse-error: witness failed\n";
             let mut transaction =
                 begin_transaction_with_cancellation(&socket, &[9; 32], Some(&cancellation))
                     .unwrap();
-            let error = execute_transaction_request(
+            let error = execute_test_transaction_request(
                 &mut transaction,
                 Path::new("/work"),
                 &["same-request".into()],
@@ -7031,7 +7293,7 @@ tidepool-reuse-error: witness failed\n";
         let result = worker.request_while_connected(
             &connection,
             Path::new("/tmp"),
-            &normalize_worker_argv(vec![OsString::from("request")]).unwrap(),
+            &mut test_request(&[OsString::from("request")]),
             DEFAULT_REQUEST_DEADLINE,
         );
         assert!(matches!(
@@ -7129,7 +7391,7 @@ tidepool-reuse-error: witness failed\n";
     #[test]
     fn independently_exited_worker_is_not_a_client_disconnect() {
         let cwd = Path::new("/tmp");
-        let argv = normalize_worker_argv(vec![OsString::from("request")]).unwrap();
+        let argv = test_worker_argv(vec![OsString::from("request")]).unwrap();
         let request_bytes = encode_request(cwd, &argv).len() + 1;
         #[allow(
             clippy::disallowed_methods,
@@ -7151,8 +7413,12 @@ tidepool-reuse-error: witness failed\n";
             _package_source: None,
         };
         let (connection, client) = UnixStream::pair().unwrap();
-        let result =
-            worker.request_while_connected(&connection, cwd, &argv, DEFAULT_REQUEST_DEADLINE);
+        let result = worker.request_while_connected(
+            &connection,
+            cwd,
+            &mut test_request(&argv),
+            DEFAULT_REQUEST_DEADLINE,
+        );
         assert!(
             matches!(result, Err(FrontendError::Daemon(_))),
             "{result:?}"
@@ -7177,7 +7443,8 @@ tidepool-reuse-error: witness failed\n";
             assert_eq!(&header[..8], REQUEST);
             write_rejected(&mut connection, "epoch changed").unwrap();
         });
-        let error = execute(&socket, &[1; 32], Path::new("/tmp"), &["request".into()]).unwrap_err();
+        let error = execute_test_request(&socket, &[1; 32], Path::new("/tmp"), &["request".into()])
+            .unwrap_err();
         server.join().unwrap();
         assert!(error.is_not_accepted());
         std::fs::remove_file(socket).ok();
@@ -7199,7 +7466,8 @@ tidepool-reuse-error: witness failed\n";
             connection.write_all(&[ACCEPTED]).unwrap();
             connection.write_all(&1u64.to_le_bytes()).unwrap();
         });
-        let error = execute(&socket, &[1; 32], Path::new("/tmp"), &["request".into()]).unwrap_err();
+        let error = execute_test_request(&socket, &[1; 32], Path::new("/tmp"), &["request".into()])
+            .unwrap_err();
         server.join().unwrap();
         assert!(!error.is_not_accepted());
         assert!(error.was_accepted());
@@ -7321,7 +7589,7 @@ tidepool-reuse-error: witness failed\n";
         let first_socket = socket.clone();
         let first_epoch = binding.epoch;
         let first = std::thread::spawn(move || {
-            execute(
+            execute_test_request(
                 &first_socket,
                 &first_epoch,
                 &request_dir,
@@ -7372,7 +7640,7 @@ tidepool-reuse-error: witness failed\n";
         let old_reaped_at_receipt = !Path::new("/proc").join(&old_pid).exists();
         // Settle the daemon even on the counterfactual skip's missing receipt,
         // so the sensitivity failure itself cannot leak a test-owned daemon.
-        let recovered = execute(
+        let recovered = execute_test_request(
             &socket,
             &binding.epoch,
             directory.path(),
@@ -7511,7 +7779,7 @@ tidepool-reuse-error: witness failed\n";
             }
             let started = Instant::now();
             drop(client);
-            let output = execute(&socket, &binding.epoch, &dir, &argv).unwrap();
+            let output = execute_test_request(&socket, &binding.epoch, &dir, &argv).unwrap();
             let retained_count = output.stdout;
             request_stop(&socket).unwrap();
             settled_rx
@@ -7612,7 +7880,8 @@ tidepool-reuse-error: witness failed\n";
                     .unwrap();
             let argv = vec![OsString::from("Expr.hs")];
             if matches!(operation, WorkerOperation::EndTransaction) {
-                let output = execute_transaction_request(&mut transaction, &dir, &argv).unwrap();
+                let output =
+                    execute_test_transaction_request(&mut transaction, &dir, &argv).unwrap();
                 assert_eq!(output.status.code(), Some(0));
             }
             let client_dir = dir.clone();
@@ -7621,7 +7890,7 @@ tidepool-reuse-error: witness failed\n";
             let client = std::thread::spawn(move || {
                 let result = match operation {
                     WorkerOperation::BeginTransaction | WorkerOperation::Request => {
-                        let action = execute_transaction_request(
+                        let action = execute_test_transaction_request(
                             &mut transaction,
                             &client_dir,
                             &client_argv,
@@ -7684,7 +7953,7 @@ tidepool-reuse-error: witness failed\n";
             if !matches!(recovery, ControlRecovery::Stop) {
                 let next = preflight(&socket).unwrap();
                 assert_eq!(next.epoch, binding.epoch);
-                let output = execute(&socket, &binding.epoch, &dir, &argv).unwrap();
+                let output = execute_test_request(&socket, &binding.epoch, &dir, &argv).unwrap();
                 assert_eq!(output.status.code(), Some(0));
                 if matches!(recovery, ControlRecovery::Cancel) {
                     assert!(
@@ -7747,7 +8016,7 @@ tidepool-reuse-error: witness failed\n";
         // bytes (never reading the frames' contents) so it neither blocks
         // on a partial read nor races its own exit against the daemon's
         // write.
-        let worker_argv = normalize_worker_argv(argv.clone()).unwrap();
+        let worker_argv = test_worker_argv(argv.clone()).unwrap();
         let payload_len = encode_request(&dir, &worker_argv).len();
         let source = dir.join("fake_worker.rs");
         std::fs::write(
@@ -7847,7 +8116,7 @@ fn main() {{
         ));
         let started = Instant::now();
         let error = tracing::dispatcher::with_default(&dispatch, || {
-            execute(&socket, &binding.epoch, &dir, &argv)
+            execute_test_request(&socket, &binding.epoch, &dir, &argv)
         })
         .unwrap_err();
         assert!(
@@ -7865,7 +8134,7 @@ fn main() {{
         // The replacement worker (second script invocation) serves the next
         // request normally.
         let output = tracing::dispatcher::with_default(&dispatch, || {
-            execute(&socket, &binding.epoch, &dir, &argv)
+            execute_test_request(&socket, &binding.epoch, &dir, &argv)
         })
         .unwrap();
         assert_eq!(output.status.code(), Some(0));
@@ -7909,7 +8178,7 @@ fn main() {{
         let release = dir.join("release");
         let second_started = dir.join("second-started");
         let argv = vec![OsString::from("Expr.hs")];
-        let worker_argv = normalize_worker_argv(argv.clone()).unwrap();
+        let worker_argv = test_worker_argv(argv.clone()).unwrap();
         let payload_len = encode_request(&dir, &worker_argv).len();
         let source = dir.join("fake_worker.rs");
         std::fs::write(
@@ -7999,7 +8268,7 @@ fn main() {{
         let first_epoch = binding.epoch;
         let first_argv = argv.clone();
         let first = std::thread::spawn(move || {
-            execute(&first_socket, &first_epoch, &first_dir, &first_argv)
+            execute_test_request(&first_socket, &first_epoch, &first_dir, &first_argv)
         });
         while !started.exists() {
             assert!(Instant::now() < ready_deadline, "worker did not start");
@@ -8030,7 +8299,7 @@ fn main() {{
             let dir = dir.clone();
             let argv = argv.clone();
             let epoch = binding.epoch;
-            move || execute(&socket, &epoch, &dir, &argv)
+            move || execute_test_request(&socket, &epoch, &dir, &argv)
         });
 
         let control_started = Instant::now();
@@ -8067,7 +8336,7 @@ fn main() {{
         std::fs::write(&stamp, b"boot").unwrap();
         let started_sentinel = dir.join("started");
         let argv = vec![OsString::from("Expr.hs")];
-        let worker_argv = normalize_worker_argv(argv.clone()).unwrap();
+        let worker_argv = test_worker_argv(argv.clone()).unwrap();
         let payload_len = encode_request(&dir, &worker_argv).len();
         let source = dir.join("fake_worker.rs");
         std::fs::write(
@@ -8161,7 +8430,7 @@ fn main() {{
         let client_dir = dir.clone();
         let client_argv = argv.clone();
         let in_flight = std::thread::spawn(move || {
-            execute(&client_socket, &client_epoch, &client_dir, &client_argv)
+            execute_test_request(&client_socket, &client_epoch, &client_dir, &client_argv)
         });
 
         // Wait for the fake worker to confirm the daemon has dispatched the
@@ -8188,7 +8457,7 @@ fn main() {{
             let socket = socket.clone();
             let epoch = binding.epoch;
             let dir = dir.clone();
-            move || execute(&socket, &epoch, &dir, &[OsString::from("Expr.hs")])
+            move || execute_test_request(&socket, &epoch, &dir, &[OsString::from("Expr.hs")])
         });
 
         // The in-flight request completes successfully, unaffected by the
@@ -8227,7 +8496,7 @@ fn main() {{
         argv: &[OsString],
         sleep_ms: u64,
     ) -> std::path::PathBuf {
-        let worker_argv = normalize_worker_argv(argv.to_vec()).unwrap();
+        let worker_argv = test_worker_argv(argv.to_vec()).unwrap();
         let payload_len = encode_request(dir, &worker_argv).len();
         let started = dir.join("started");
         let source = dir.join("fake_worker.rs");
@@ -8385,11 +8654,11 @@ fn main() {{
                     barrier.wait();
                     if index == 0 {
                         let mut stream = begin_transaction(&socket, &epoch)?;
-                        let output = execute_transaction_request(&mut stream, &dir, &argv)?;
+                        let output = execute_test_transaction_request(&mut stream, &dir, &argv)?;
                         end_transaction(&mut stream)?;
                         Ok(output)
                     } else {
-                        execute(&socket, &epoch, &dir, &argv)
+                        execute_test_request(&socket, &epoch, &dir, &argv)
                     }
                 })
             })
@@ -8443,7 +8712,7 @@ fn main() {{
             let dir = dir.clone();
             let argv = argv.clone();
             let epoch = binding.epoch;
-            move || execute(&socket, &epoch, &dir, &argv)
+            move || execute_test_request(&socket, &epoch, &dir, &argv)
         });
         while !dir.join("started").exists() {
             assert!(Instant::now() < deadline, "worker did not start");
@@ -8547,13 +8816,16 @@ fn main() {{
                 std::thread::sleep(Duration::from_millis(5));
             };
             let mut host = begin_transaction(&socket, &binding.epoch).unwrap();
-            let host_reply = execute_transaction_request(&mut host, dir.path(), &argv).unwrap();
+            let host_reply =
+                execute_test_transaction_request(&mut host, dir.path(), &argv).unwrap();
             assert!(host_reply.status.success());
             let mut spill = begin_transaction(&socket, &binding.epoch).unwrap();
-            assert!(execute_transaction_request(&mut spill, dir.path(), &argv)
-                .unwrap()
-                .status
-                .success());
+            assert!(
+                execute_test_transaction_request(&mut spill, dir.path(), &argv)
+                    .unwrap()
+                    .status
+                    .success()
+            );
             let mut pending = begin_transaction(&socket, &binding.epoch).unwrap();
             let oldest = pending.admission_id.0;
             // Accepted on slot 0, but no physical request can execute there
@@ -8571,7 +8843,7 @@ fn main() {{
                 let mut transaction = begin_transaction(&socket, &binding.epoch).unwrap();
                 newer.push(transaction.admission_id.0);
                 assert!(
-                    execute_transaction_request(&mut transaction, dir.path(), &argv)
+                    execute_test_transaction_request(&mut transaction, dir.path(), &argv)
                         .unwrap()
                         .status
                         .success()
@@ -8720,7 +8992,7 @@ fn main() {{
                 let epoch = binding.epoch;
                 let dir = dir.clone();
                 let argv = argv.clone();
-                std::thread::spawn(move || execute(&socket, &epoch, &dir, &argv))
+                std::thread::spawn(move || execute_test_request(&socket, &epoch, &dir, &argv))
             })
             .collect();
         for client in clients {
@@ -8837,7 +9109,7 @@ fn main() {
             OsString::from("--target"),
             OsString::from("result"),
         ];
-        let output = execute(&socket, &binding.epoch, &dir, &argv).unwrap();
+        let output = execute_test_request(&socket, &binding.epoch, &dir, &argv).unwrap();
         assert_eq!(output.status.code(), Some(0));
         #[allow(
             clippy::disallowed_methods,
@@ -8913,7 +9185,7 @@ fn main() {
                 let epoch = binding.epoch;
                 let dir = dir.clone();
                 let argv = argv.clone();
-                std::thread::spawn(move || execute(&socket, &epoch, &dir, &argv))
+                std::thread::spawn(move || execute_test_request(&socket, &epoch, &dir, &argv))
             })
             .collect();
 
@@ -8961,7 +9233,7 @@ fn main() {
         std::fs::write(&stamp, b"boot").unwrap();
         let sentinel = dir.join("hung-once");
         let argv = vec![OsString::from("Expr.hs")];
-        let worker_argv = normalize_worker_argv(argv.clone()).unwrap();
+        let worker_argv = test_worker_argv(argv.clone()).unwrap();
         let payload_len = encode_request(&dir, &worker_argv).len();
         let source = dir.join("fake_worker.rs");
         std::fs::write(
@@ -9067,7 +9339,7 @@ fn main() {{
                 let argv = argv.clone();
                 std::thread::spawn(move || {
                     let started = Instant::now();
-                    let result = execute(&socket, &epoch, &dir, &argv);
+                    let result = execute_test_request(&socket, &epoch, &dir, &argv);
                     (started.elapsed(), result)
                 })
             })

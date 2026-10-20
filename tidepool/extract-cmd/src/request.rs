@@ -876,16 +876,16 @@ impl ExtractRequest {
                 Some("--inspect-search") => request.fields.push(Field::InspectSearch(
                     text_value(&mut args, "--inspect-search")?.into(),
                 )),
-                Some(option @ ("--inspect-browse-bounded" | "--inspect-browse-expanded-bounded")) => {
+                Some(
+                    option @ ("--inspect-browse-bounded" | "--inspect-browse-expanded-bounded"),
+                ) => {
                     let raw = text_value(&mut args, option)?;
                     let (module, budget) = bounded_value(&raw, option)?;
-                    request
-                        .fields
-                        .push(Field::InspectBrowseBounded(
-                            module,
-                            option == "--inspect-browse-expanded-bounded",
-                            budget,
-                        ));
+                    request.fields.push(Field::InspectBrowseBounded(
+                        module,
+                        option == "--inspect-browse-expanded-bounded",
+                        budget,
+                    ));
                 }
                 Some("--inspect-search-bounded") => {
                     let raw = text_value(&mut args, "--inspect-search-bounded")?;
@@ -982,9 +982,7 @@ impl ExtractRequest {
                     let expanded = match decoder.byte()? {
                         0 => false,
                         1 => true,
-                        other => {
-                            return Err(ProtocolError::InvalidBrowseExpansion(other))
-                        }
+                        other => return Err(ProtocolError::InvalidBrowseExpansion(other)),
                     };
                     Field::InspectBrowseBounded(module, expanded, nonzero_budget(decoder.u32()?)?)
                 }
@@ -1415,8 +1413,11 @@ impl ExtractRequest {
     }
 
     pub(crate) fn inspect_browse_bounded(&mut self, module: &str, expanded: bool, budget: u32) {
-        self.fields
-            .push(Field::InspectBrowseBounded(module.to_owned(), expanded, budget));
+        self.fields.push(Field::InspectBrowseBounded(
+            module.to_owned(),
+            expanded,
+            budget,
+        ));
     }
 
     pub(crate) fn inspect_search(&mut self, query: &str) {
@@ -1616,10 +1617,14 @@ impl ExtractRequest {
     }
 
     pub fn encode(&self) -> Vec<u8> {
+        self.encode_with_grant(self.execution_grant)
+    }
+
+    fn encode_with_grant(&self, grant: ExecutionGrant) -> Vec<u8> {
         let mut out = MAGIC.to_vec();
         out.push(self.workload.wire_tag());
-        out.extend_from_slice(&self.execution_grant.jobs.to_le_bytes());
-        out.extend_from_slice(&self.execution_grant.capabilities.to_le_bytes());
+        out.extend_from_slice(&grant.jobs.to_le_bytes());
+        out.extend_from_slice(&grant.capabilities.to_le_bytes());
         push_u32(&mut out, self.fields.len());
         for field in &self.fields {
             encode_field(&mut out, field);
@@ -1628,7 +1633,14 @@ impl ExtractRequest {
     }
 
     pub(crate) fn worker_argv(&self) -> Vec<OsString> {
-        vec![WORKER_REQUEST_FLAG.into(), hex(&self.encode()).into()]
+        self.worker_argv_with_grant(self.execution_grant)
+    }
+
+    pub(crate) fn worker_argv_with_grant(&self, grant: ExecutionGrant) -> Vec<OsString> {
+        vec![
+            WORKER_REQUEST_FLAG.into(),
+            hex(&self.encode_with_grant(grant)).into(),
+        ]
     }
 }
 
