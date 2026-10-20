@@ -963,6 +963,7 @@ async fn source_handler_failure_retains_original_checkpoint_and_source_after_sta
     });
     let target = SourceTarget::Lifecycle(actor);
     let execution = CallbackExecution::from_context(behavior.descriptor.session_context(actor));
+    behavior.sources.bind_owner(actor);
     behavior.sources.push(SourceBinding {
         target,
         execution,
@@ -976,6 +977,7 @@ async fn source_handler_failure_retains_original_checkpoint_and_source_after_sta
         ),
     });
     let delivery = crate::SourceDelivery {
+        slot_delivery: None,
         slot: 0,
         target,
         event: SourceEvent::Lifecycle(crate::ActorLifecycle::Paused(

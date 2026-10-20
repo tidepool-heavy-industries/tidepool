@@ -16,9 +16,28 @@ pub(crate) struct GenerationWorkObservations {
     pub(crate) actors: Vec<ActorRef>,
     pub(crate) invocations: Vec<invocation_work::GenerationInvocationObservation>,
     pub(crate) routes: Vec<GenerationRouteObservation>,
+    pub(crate) source_registrations: Vec<source_slots::CapturedSourceRegistration>,
 }
 
 impl ResidentGenerationInventory {
+    /// Called only after the exact A fence reopened, with no source/slot guard.
+    /// Failed enqueue keeps the same pre-mapper delivery in its actual slot.
+    pub(crate) fn resume_deferred(
+        &self,
+        dependency: &GenerationDependency,
+    ) -> Vec<source_slots::SourceRegistrationObservation> {
+        let owners: Vec<_> = self
+            .actors
+            .lock()
+            .values()
+            .map(|record| record.source_slots.clone())
+            .collect();
+        owners
+            .into_iter()
+            .flat_map(|owner| owner.resume_deferred(dependency))
+            .collect()
+    }
+
     /// Called by the serial retirement owner after closing the issued source.
     /// This projects existing membership without granting stop authority.
     pub(crate) fn observe(&self, dependency: &GenerationDependency) -> GenerationWorkObservations {
@@ -26,13 +45,21 @@ impl ResidentGenerationInventory {
             .actors
             .lock()
             .iter()
-            .map(|(actor, record)| (*actor, record.workbench_executions.clone()))
+            .map(|(actor, record)| {
+                (
+                    *actor,
+                    record.workbench_executions.clone(),
+                    record.source_slots.clone(),
+                )
+            })
             .collect();
         // Retention publication locks work state before actor records. Release
         // the record guard before entering any ledger or invocation owner.
-        let actors = ledgers.iter().map(|(actor, _)| *actor).collect();
+        let actors = ledgers.iter().map(|(actor, _, _)| *actor).collect();
         let mut invocations = Vec::new();
-        for (_, ledger) in ledgers {
+        let mut source_registrations = Vec::new();
+        for (_, ledger, source_slots) in ledgers {
+            source_registrations.extend(source_slots.capture(dependency));
             invocations.extend(
                 ledger
                     .lock()
@@ -44,6 +71,7 @@ impl ResidentGenerationInventory {
             actors,
             invocations,
             routes,
+            source_registrations,
         }
     }
 }
@@ -77,6 +105,7 @@ pub(crate) async fn assert_owner_observation_contract(dependency: GenerationDepe
             lifecycle: fixture.kernel.lifecycle().clone(),
             fresh_context_seed: None,
             workbench_executions: journal.clone(),
+            source_slots: source_slots::SourceSlots::default(),
             interactive_policy_installed: false,
             descriptor: crate::ActorDescriptor::new(
                 "inventory owner",

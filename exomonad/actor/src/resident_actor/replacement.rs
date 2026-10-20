@@ -34,7 +34,8 @@ struct StagedHandler {
     checkpoint: StateCheckpoint,
     shutdown_hook: Option<RootCustody>,
     sources: Vec<crate::request::sources::SourceBinding>,
-    dynamic_sources: Vec<crate::request::sources::SourceBinding>,
+    dynamic_sources: Vec<Option<crate::request::sources::SourceBinding>>,
+    _source_claims: Vec<crate::resident_workbench::generation_admission::SourceClaim>,
     session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
     placement_custody: child_launch::ChildPlacementCustody,
     _placement_startup: Mutex<crate::WorkbenchAbandonGuard>,
@@ -57,7 +58,7 @@ pub(super) struct RetainedHandler {
 }
 
 pub(super) struct ReplacementCustody {
-    sources: Option<crate::request::sources::ActorSourceConnections>,
+    sources: source_slots::SourceSlots,
     worktree: Option<Arc<dyn crate::WorkspaceCustody>>,
     retained: Vec<RetainedHandler>,
 }
@@ -170,12 +171,10 @@ where
                 error.to_string(),
             ));
         }
-        if let Some(sources) = &mut self.source_connections {
-            sources
-                .handoff(grant)
-                .await
-                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-        }
+        self.sources
+            .handoff(grant)
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         self.replacement_transfer = Some(ReplacementTransfer {
             send: transfer,
             successor: successor.clone(),
@@ -221,17 +220,17 @@ where
             placement: self.descriptor.placement(),
             _standing: std::mem::replace(&mut self.standing, ResidentStanding::Terminal),
             _committed: self.committed.take(),
-            _sources: std::mem::take(&mut self.sources),
+            _sources: self.sources.bindings().into_iter().flatten().collect(),
             _shutdown_hook: self.shutdown_hook.take(),
         };
         self.retained_replacements.push(retained);
         let custody = ReplacementCustody {
-            sources: self.source_connections.take(),
+            sources: std::mem::take(&mut self.sources),
             worktree: self.worktree_custody.take(),
             retained: std::mem::take(&mut self.retained_replacements),
         };
         if let Err(custody) = transfer.send.send(custody) {
-            self.source_connections = custody.sources;
+            self.sources = custody.sources;
             self.worktree_custody = custody.worktree;
             self.retained_replacements = custody.retained;
             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -273,7 +272,11 @@ where
                 "replacement custody was not transferred: {error}"
             ))
         })?;
-        self.source_connections = custody.sources;
+        let mut bindings: Vec<_> = staged.sources.iter().cloned().map(Some).collect();
+        bindings.extend(staged.dynamic_sources.iter().cloned());
+        self.sources
+            .adopt_replacement(&custody.sources, bindings)
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         self.worktree_custody = custody.worktree;
         self.retained_replacements = custody.retained;
         self.standing = ResidentStanding::Receiving(staged.receiver);
@@ -283,8 +286,7 @@ where
         });
         self.shutdown_hook = staged.shutdown_hook;
         self.static_source_count = staged.sources.len();
-        self.sources = staged.sources;
-        self.sources.extend(staged.dynamic_sources);
+
         Ok(KernelStep::Continue(()))
     }
 
@@ -335,6 +337,7 @@ where
         definition: crate::ActorReplacementDefinition,
         candidate: &mut ReplacementCandidate,
     ) -> Result<StagedHandler, ResidentActorWorkbenchError> {
+        let source_claims = self.sources.claim_sources()?;
         let reject = |detail: &str| ResidentActorWorkbenchError::ActorProtocol(detail.into());
         let checkpoint = match &self.standing {
             ResidentStanding::Paused(paused) => &paused.checkpoint,
@@ -458,7 +461,7 @@ where
                 } => {
                     let original = self
                         .sources
-                        .get(sources.len())
+                        .binding(sources.len())
                         .filter(|_| sources.len() < self.static_source_count)
                         .ok_or_else(|| reject("replacement added a startup source"))?;
                     if original.target != source.target {
@@ -514,7 +517,16 @@ where
             return Err(reject("replacement checkpoint and receiver sites differ"));
         }
         let mut dynamic_sources = Vec::new();
-        for source in &self.sources[self.static_source_count..] {
+        for source in self
+            .sources
+            .bindings()
+            .into_iter()
+            .skip(self.static_source_count)
+        {
+            let Some(source) = source else {
+                dynamic_sources.push(None);
+                continue;
+            };
             let entry = if descriptor.placement().session == self.descriptor.placement().session {
                 source.entry.clone()
             } else {
@@ -544,11 +556,11 @@ where
                     None => {}
                 }
             }
-            dynamic_sources.push(crate::request::sources::SourceBinding {
+            dynamic_sources.push(Some(crate::request::sources::SourceBinding {
                 target: source.target,
                 entry,
                 execution,
-            });
+            }));
         }
         Ok(StagedHandler {
             exit_destination,
@@ -561,6 +573,7 @@ where
             shutdown_hook,
             sources,
             dynamic_sources,
+            _source_claims: source_claims,
             session_startup: candidate.session_startup.take(),
             placement_custody: candidate.placement.clone(),
             _placement_startup: Mutex::new(
