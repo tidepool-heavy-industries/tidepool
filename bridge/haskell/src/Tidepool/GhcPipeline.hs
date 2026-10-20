@@ -111,7 +111,7 @@ import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, Type
   pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
 import Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences, prepareSegmentDemand
-  , ParsedSegmentDemand, segmentDemandMatchesSource, SegmentDemandScope, newSegmentDemandScope )
+  , ParsedSegmentDemand, segmentDemandMatchesSource, SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, renderDiag, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -294,8 +294,8 @@ import Tidepool.ExactScope
   , scopeAvailableOriginalProducts
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
   , exactInputRetentionLimits, commitWorldInputRetention
-  , WorldInputFacts, WorldBinding, CapturedWorldSources, WorldSourceClosureEntry(..), readWorldInputsWithOwner, readWorldSuccessorWithOwner, worldSuccessorFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
-  , worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsRetainedCharge, worldInputsBindings
+  , WorldInputFacts, WorldBinding, CapturedWorldSources, WorldSourceClosureEntry(..), readWorldInputsWithOwner, readWorldSuccessorWithOwner, WorldSuccessorInputs, worldSuccessorFacts, worldSuccessorChangedAliases, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
+  , worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsBindings
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow, worldBindingRowFactCID
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , WorldInputsFailure(..)
@@ -1652,19 +1652,23 @@ releaseWorldMaterialization (WorldMaterialization directory _ _ _ _ _ _ _ (World
 
 -- The caller is the service's authenticated successor issuer. Equal source
 -- seals can validate that exact base's inherited backing, never select a base.
-retainHeldWorldSuccessor :: IORef CompilerUniverse -> HeldCompilerWorld -> WorldInputFacts -> Set.Set String -> String
+retainHeldWorldSuccessor :: IORef CompilerUniverse -> HeldCompilerWorld -> WorldSuccessorInputs -> String
   -> (HeldCompilerWorld -> IO result) -> IO result
-retainHeldWorldSuccessor universeRef (HeldCompilerWorld base _ materialized preparedRef) facts hints reference publish = mask $ \_ -> do
+retainHeldWorldSuccessor universeRef (HeldCompilerWorld base _ materialized preparedRef) successorInputs reference publish = mask $ \_ -> do
+  let facts = worldSuccessorFacts successorInputs
   unless (worldInputsProducer base == worldInputsProducer facts
       && worldInputsProfile base == worldInputsProfile facts
       && worldSourceDomainSha256 (worldInputsSources base) == worldSourceDomainSha256 (worldInputsSources facts))
     (throwIO WorldCellCorrupt)
-  WorldPreparedModules table receipts dependencies _ <- readIORef preparedRef
-  prepared <- newIORef (WorldPreparedModules table receipts dependencies Nothing)
+  WorldPreparedModules table receipts dependencies demandScope <- readIORef preparedRef
   universe <- readIORef universeRef
+  updatedScope <- traverse (updateSegmentDemandScope (universeEnvironment universe)
+    [(alias,Map.lookup alias (worldInputsBindings facts)) | alias <- Set.toAscList (worldSuccessorChangedAliases successorInputs)]) demandScope
+  prepared <- newIORef (WorldPreparedModules table receipts dependencies updatedScope)
   unless (Map.member (worldMaterializationKey materialized) (compilerWorldBackingAccounts (universeWorlds universe)))
     (throwIO WorldCellCorrupt)
-  let WorldMaterialization directory products roots names paths _ bytes nodes lease = materialized
+  let WorldMaterialization directory products roots names paths baseHints bytes nodes lease = materialized
+      hints = if worldInputsSamePrimary base facts then baseHints else worldInputsSourceModuleHints facts
       successorMaterialization = WorldMaterialization directory products roots names paths hints bytes nodes lease
       successor = HeldCompilerWorld facts reference successorMaterialization prepared
   charged <- evaluate (registerWorldBacking materialized (universeWorlds universe))
@@ -6261,8 +6265,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                       unique <- RequestUnique.hashUnique <$> RequestUnique.newUnique
                                       let facts = worldSuccessorFacts successor
                                           issued = hexBytes (servicePackageWorkerInstance association) ++ "." ++ show unique
-                                      (ready,world,committed) <- retainHeldWorldSuccessor universe base facts
-                                        (worldInputsSourceModuleHints facts) issued publish
+                                      (ready,world,committed) <- retainHeldWorldSuccessor universe base successor issued publish
                                       emitCount timing "world.successor.inherited_realizations" 1
                                       let event = case lookupCompilerWorld root (universeWorlds committed) of
                                             Just _ -> WorldAdmittedRetained

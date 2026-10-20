@@ -41,7 +41,7 @@ module Tidepool.ExactScope
   , worldBindingRowInterface, worldBindingCertifiedArtifact, worldBindingCompilerReceipt, worldBindingRowFactCID
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
-  , worldInputsSourceModuleHints, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty
+  , worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty
   , WorldLexicalSurface, WorldDeclarationSurface, worldInputsLexicalSurface
   , worldLexicalImports, worldLexicalDeclaration, worldDeclarationInterface, worldDeclarationExports
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
@@ -2511,6 +2511,13 @@ newtype WorldSourceRoot = WorldSourceRoot { worldSourceFiles :: Map.Map FilePath
 -- Only a Context-selected acquired source row can prevent an absence result.
 -- The hint grants no HPT hydration or source replay; captured source/version
 -- resolution remains with the world module resolver.
+-- Equal authenticated Context and association roots select the same primary
+-- rows. Successors can borrow their source-name hint set without a row census.
+worldInputsSamePrimary :: WorldInputFacts -> WorldInputFacts -> Bool
+worldInputsSamePrimary left right = case (worldInputsFrontier left,worldInputsFrontier right) of
+  (VerifiedWorldFrontier _ _ _ [a,b,_,_] _,VerifiedWorldFrontier _ _ _ [c,d,_,_] _) -> a == c && b == d
+  _ -> False
+
 worldInputsSourceModuleHints :: WorldInputFacts -> Set.Set String
 worldInputsSourceModuleHints facts = Set.fromList
   [exactModule iface
