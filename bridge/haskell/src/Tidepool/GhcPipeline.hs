@@ -109,7 +109,9 @@ import GHC.Tc.Errors.Types qualified as TcError
 import GHC.Utils.Logger (LogAction, makeThreadSafe)
 import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, TypedSegment, PendingTypedSegment, TypedSegmentFailure(..),
   pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
-import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot, typedSegmentInputOccurrences)
+import Tidepool.TypedSegment.Source
+  ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences, prepareSegmentDemand
+  , SegmentDemandScope, newSegmentDemandScope )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, renderDiag, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -284,14 +286,15 @@ import Tidepool.ExactHydration
   , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
-  , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
+  , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget, captureGeneratedScaffoldSource
+  , capturedGeneratedScaffoldBytes
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), revalidateSourceSelectedOriginals, extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
   , exactInputRetentionLimits, commitWorldInputRetention
-  , WorldInputFacts, CapturedWorldSources, WorldSourceClosureEntry(..), readWorldInputsWithOwner, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
+  , WorldInputFacts, WorldBinding, CapturedWorldSources, WorldSourceClosureEntry(..), readWorldInputsWithOwner, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
   , worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsRetainedCharge, worldInputsBindings
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow, worldBindingRowFactCID
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
@@ -1360,7 +1363,7 @@ data WorldHomeSource = WorldHomeSource Int FilePath FilePath BS.ByteString
 data WorldMaterialization = WorldMaterialization FilePath FilePath [FilePath]
   (Map.Map ModuleName WorldHomeSource) (Map.Map FilePath WorldHomeSource) (Set.Set String) !Integer !Int WorldBackingLease
 data WorldPreparedModules = WorldPreparedModules HomePackageTable (Map.Map Module WorldHomeSource)
-  (Maybe WorldCompletedDependencies)
+  (Maybe WorldCompletedDependencies) (Maybe (SegmentDemandScope WorldBinding))
 
 type WorldModuleVersions = Map.Map Module (Map.Map MemoSelectionKey (Map.Map MemoValidity CompletedModuleVersion))
 
@@ -1382,7 +1385,7 @@ data PendingWorldDependencies = PendingWorldDependencies CompilerExecutor String
   (IORef (Maybe WorldModuleVersions))
 
 emptyWorldPreparedModules :: WorldPreparedModules
-emptyWorldPreparedModules = WorldPreparedModules emptyHomePackageTable Map.empty Nothing
+emptyWorldPreparedModules = WorldPreparedModules emptyHomePackageTable Map.empty Nothing Nothing
 
 worldDependencyPolicy :: CompilerUniverse -> WorldInputFacts -> IO WorldDependencyPolicy
 worldDependencyPolicy universe facts = case universePackageAssociation universe of
@@ -1403,7 +1406,7 @@ beginHeldWorldDependencyAttempt :: CompilerUniverse -> HeldCompilerWorld -> IO W
 beginHeldWorldDependencyAttempt universe
     (HeldCompilerWorld facts reference (WorldMaterialization _ _ _ _ paths _ _ _ _) preparedRef) = do
   policy <- worldDependencyPolicy universe facts
-  WorldPreparedModules _ _ completed <- readIORef preparedRef
+  WorldPreparedModules _ _ completed _ <- readIORef preparedRef
   versions <- case completed of
     Nothing -> pure Map.empty
     Just (WorldCompletedDependencies issued selected)
@@ -1474,7 +1477,7 @@ commitHeldWorldDependencies :: PendingWorldDependencies -> HeldCompilerWorld -> 
 commitHeldWorldDependencies (PendingWorldDependencies _ identity reference policy pending)
     (HeldCompilerWorld facts issued _ preparedRef) = do
   unless (identity == worldInputsIdentity facts && reference == issued) (throwIO WorldCellCorrupt)
-  WorldPreparedModules table receipts previous <- readIORef preparedRef
+  WorldPreparedModules table receipts previous demandScope <- readIORef preparedRef
   versions <- case previous of
     Nothing -> pure Map.empty
     Just (WorldCompletedDependencies selected retained)
@@ -1488,7 +1491,7 @@ commitHeldWorldDependencies (PendingWorldDependencies _ identity reference polic
         (Map.unionWith (Map.unionWith (Map.unionWith preferModuleVersion)) additions versions)
   let WorldCompletedDependencies _ retained = completed
   _ <- evaluate (Map.size retained)
-  writeIORef preparedRef (WorldPreparedModules table receipts (Just completed))
+  writeIORef preparedRef (WorldPreparedModules table receipts (Just completed) demandScope)
 
 -- The same world owner accounts optional residency separately from all live
 -- physical backing, including active-only and quarantined extents.
@@ -1655,8 +1658,8 @@ retainHeldWorldSuccessor universeRef (HeldCompilerWorld base _ materialized prep
       && worldInputsProfile base == worldInputsProfile facts
       && worldSourceDomainSha256 (worldInputsSources base) == worldSourceDomainSha256 (worldInputsSources facts))
     (throwIO WorldCellCorrupt)
-  WorldPreparedModules table receipts dependencies <- readIORef preparedRef
-  prepared <- newIORef (WorldPreparedModules table receipts dependencies)
+  WorldPreparedModules table receipts dependencies _ <- readIORef preparedRef
+  prepared <- newIORef (WorldPreparedModules table receipts dependencies Nothing)
   universe <- readIORef universeRef
   unless (Map.member (worldMaterializationKey materialized) (compilerWorldBackingAccounts (universeWorlds universe)))
     (throwIO WorldCellCorrupt)
@@ -1796,7 +1799,7 @@ runWorldPublicModule producer universe baseEnv timing
     requested <- case structuredScope (worldQueryInspection question) of
       StructuredPublicModule name | not (isReservedSessionModuleName name) -> pure name
       _ -> liftIO (throwIO WorldQueryUnsupported)
-    prepared@(WorldPreparedModules table receipts dependencies) <- liftIO (readIORef preparedRef)
+    prepared@(WorldPreparedModules table receipts dependencies demandScope) <- liftIO (readIORef preparedRef)
     borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
     let flags = (hsc_dflags baseEnv) {importPaths=[],workingDirectory=Nothing}
         fresh = (hscUpdateHPT (const table) (hscUpdateFlags (const flags) borrowed))
@@ -1842,7 +1845,7 @@ runWorldPublicModule producer universe baseEnv timing
               (liftIO (throwIO WorldQueryCorrupt))
             let combined = foldl' (\homes home -> addToHpt homes (moduleName (mi_module (hm_iface home))) home)
                   table (eltsHpt compiled)
-                completed = WorldPreparedModules combined (Map.union selected receipts) dependencies
+                completed = WorldPreparedModules combined (Map.union selected receipts) dependencies demandScope
             pure (Just (owner,completed))
       Nothing -> do
         -- A known source name without a captured finder-representable path
@@ -1857,7 +1860,7 @@ runWorldPublicModule producer universe baseEnv timing
     case resolved of
       Nothing -> pure (encodeWorldQueryResult facts question WorldAbsent Nothing
         (encodeInspectionResults [InspectionStructuredError (StructuredUnknownModule requested)]))
-      Just (owner,completed@(WorldPreparedModules selected selectedReceipts _)) -> do
+      Just (owner,completed@(WorldPreparedModules selected selectedReceipts _ _)) -> do
         -- Restore a fresh mutable context around exactly this realization's
         -- selected immutable HPT. No expression/checking target is fabricated.
         current <- getSession
@@ -2047,7 +2050,7 @@ compileHeldWorldCell :: IO () -> Maybe CompilerProducerIdentity -> CompilerUnive
   -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> FilePath
   -> Ghc (CompletedCompilerResult result)
 compileHeldWorldCell guard producer universe baseEnv timing attempt
-    world@(HeldCompilerWorld facts _ (WorldMaterialization _ _ roots _ _ _ _ _ _) _) grant executor question selection retained purpose path = do
+    world@(HeldCompilerWorld facts _ (WorldMaterialization _ _ roots _ _ _ _ _ _) preparedRef) grant executor question selection retained purpose path = do
   -- Dependency completions use one closed compiler route. Caller-composed
   -- purpose wrappers cannot silently widen the retained dependency policy.
   unless (closedWorldCellPurpose purpose) (liftIO (throwIO WorldCellUnsupported))
@@ -2060,17 +2063,31 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
     {hsc_hooks=hsc_hooks baseEnv,hsc_logger=hsc_logger baseEnv,hsc_targets=[]})
   variant <- liftIO (normalVariant purpose)
   recipe <- maybe (liftIO (throwIO WorldCellCorrupt)) pure (pvGeneratedScaffold variant)
-  source <- liftIO (captureGeneratedScaffoldTarget recipe path >>= either fail pure)
-  let sourceText = Text.unpack (TextEncoding.decodeUtf8 source)
+  capturedSource <- liftIO (captureGeneratedScaffoldSource recipe path >>= either fail pure)
+  let source = capturedGeneratedScaffoldBytes capturedSource
+      sourceText = Text.unpack (TextEncoding.decodeUtf8 source)
   effective <- liftIO (sourceModuleFlags flags sourceText >>= either (throwIO . SourceRejection . renderCellSplitError) pure)
   liftIO (requireWorldModuleFlags path effective)
   plan <- maybe (liftIO (throwIO WorldCellCorrupt)) pure (typedPurposePlan purpose)
   current <- getSession
-  demand <- liftIO (typedSegmentInputOccurrences (hscUpdateFlags (const effective) current) plan sourceText)
-  occurrences <- either (\failure -> liftIO $ do
+  parsedDemand <- either (const (liftIO (throwIO WorldCellUnsupported))) pure
+    (prepareSegmentDemand plan effective capturedSource)
+  demandScope <- liftIO $ do
+    WorldPreparedModules table receipts dependencies retainedScope <- readIORef preparedRef
+    case retainedScope of
+      Just issued -> pure issued
+      Nothing -> do
+        emitCount timing "world.cell.demand_scope_builds" 1
+        emitCount timing "world.cell.demand_scope_aliases" (toInteger (Map.size (worldInputsBindings facts)))
+        issued <- newSegmentDemandScope current (worldInputsBindings facts)
+        writeIORef preparedRef (WorldPreparedModules table receipts dependencies (Just issued))
+        pure issued
+  demand <- liftIO (typedSegmentInputOccurrences current demandScope parsedDemand)
+  demanded <- either (\failure -> liftIO $ do
     emitWorldAcquisitionRejection "world cell demand" path (show failure)
     throwIO WorldCellUnsupported) pure demand
-  let selected = [binding | name <- occurrences,Just binding <- [Map.lookup name (worldInputsBindings facts)]]
+  let occurrences = map fst demanded
+      selected = map snd demanded
   -- The initial checked-value slice admits package-only native types. A home
   -- dependency requires its exact selected type closure, not passive custody.
   when (any (not . null . exactRequirements . worldBindingInterfaceArtifact) selected)

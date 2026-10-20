@@ -2451,11 +2451,17 @@ readWorldSourceInputs env facts roots = case walk Map.empty roots >>= validate o
 -- Equal seals alone do not establish physical sharing between acquisitions.
 worldInputsRetainedCharge :: WorldInputFacts -> (Integer,Int)
 worldInputsRetainedCharge facts =
-  (requestInputBytes custody + bindingBytes + primaryBytes + lexicalBytes
-    ,requestInputCount custody + bindingEntries + primaryEntries + lexicalEntries)
+  (requestInputBytes custody + bindingBytes + demandBytes + primaryBytes + lexicalBytes
+    ,requestInputCount custody + bindingEntries + demandEntries + primaryEntries + lexicalEntries)
   where
     custody = worldInputsCustody facts
     (bindingBytes,bindingEntries) = worldInputsBindingCharge facts
+    -- Reserve the encoded binding basis again for the NameCache-bound demand
+    -- index. Each alias adds a GRE and a reverse-association entry; referenced
+    -- binding rows remain shared. This is conservative input accounting, not
+    -- a measurement of GHC heap size, and is settled before cache admission.
+    demandBytes = bindingBytes
+    demandEntries = 2 * Map.size (worldInputsBindings facts)
     (primaryBytes,primaryEntries) = worldPrimaryRetainedCharge (worldInputsPrimary facts)
     (lexicalBytes,lexicalEntries) = worldLexicalCharge (worldInputsLexicalSurface facts)
 
@@ -2567,7 +2573,7 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
         (zip visibleRows (drop (length baseRows) complete))
       let (_,primaryEntries) = worldPrimaryRetainedCharge primaryFacts
       when (toInteger (requestInputCount custody) + toInteger (snd bindingCharge) + toInteger primaryEntries
-          + toInteger (snd (worldLexicalCharge lexical)) > toInteger (maxBound :: Int))
+          + toInteger (snd (worldLexicalCharge lexical)) + 2 * toInteger (Map.size bindings) > toInteger (maxBound :: Int))
         (worldCorrupt "compiler world retained entry count exceeds host range")
       let identity = SHA.hash restoration
       pure (WorldInputFacts (hexBytes identity) identity producer profile sources
