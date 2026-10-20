@@ -3357,18 +3357,16 @@ mod answer_tests {
         )
         .unwrap()
     }
-    fn home(root: u64, body: &[u8]) -> ciborium::value::Value {
-        world_array(vec![
-            world_text("resolved"),
-            world_text("main"),
-            world_text("Module"),
-            world_array(vec![
-                world_text("home"),
-                root.into(),
-                world_text("Module.hs"),
-                world_blob(world_digest(body)),
-            ]),
-        ])
+    fn home(root: u32, body: &[u8]) -> WorldModuleReceipt {
+        WorldModuleReceipt {
+            unit: "main".into(),
+            module: "Module".into(),
+            origin: WorldModuleOrigin::Home {
+                root,
+                path: "Module.hs".into(),
+                source_sha256: world_digest(body),
+            },
+        }
     }
     #[test]
     fn captured_source_aliases_survive_transport_directory_retirement() {
@@ -3437,23 +3435,55 @@ mod answer_tests {
         let a = b"module Module where\nvalue = (1 :: Int)\n";
         let b = b"module Module where\nvalue = True\n";
         let ab = sources(a, b);
-        assert!(module_receipt(&home(0, a), &ab, &[7; 32], ModuleReceiptUse::Requested).is_ok());
-        assert!(module_receipt(&home(1, b), &ab, &[7; 32], ModuleReceiptUse::Requested).is_err());
+        assert!(authenticate_module_receipt(
+            &home(0, a),
+            &ab,
+            &[7; 32],
+            ModuleReceiptUse::Requested
+        )
+        .is_ok());
+        assert!(authenticate_module_receipt(
+            &home(1, b),
+            &ab,
+            &[7; 32],
+            ModuleReceiptUse::Requested
+        )
+        .is_err());
         let ba = sources(b, a);
-        assert!(module_receipt(&home(0, b), &ba, &[7; 32], ModuleReceiptUse::Requested).is_ok());
-        assert!(module_receipt(&home(1, a), &ba, &[7; 32], ModuleReceiptUse::Requested).is_err());
+        assert!(authenticate_module_receipt(
+            &home(0, b),
+            &ba,
+            &[7; 32],
+            ModuleReceiptUse::Requested
+        )
+        .is_ok());
+        assert!(authenticate_module_receipt(
+            &home(1, a),
+            &ba,
+            &[7; 32],
+            ModuleReceiptUse::Requested
+        )
+        .is_err());
         assert_ne!(ab.seal(), ba.seal());
-        let package = world_array(vec![
-            world_text("resolved"),
-            world_text("base"),
-            world_text("Module"),
-            world_array(vec![world_text("package"), world_blob([7; 32])]),
-        ]);
-        assert!(module_receipt(&package, &ab, &[7; 32], ModuleReceiptUse::Requested).is_err());
+        let package = WorldModuleReceipt {
+            unit: "base".into(),
+            module: "Module".into(),
+            origin: WorldModuleOrigin::Package { profile: [7; 32] },
+        };
+        assert!(
+            authenticate_module_receipt(&package, &ab, &[7; 32], ModuleReceiptUse::Requested)
+                .is_err()
+        );
         // A package-qualified reexport may define a name in a different unit
         // despite a same-named home module in the captured search namespace.
-        assert!(module_receipt(&package, &ab, &[7; 32], ModuleReceiptUse::Defining).is_ok());
-        assert!(module_receipt(&package, &ab, &[8; 32], ModuleReceiptUse::Defining).is_err());
+        assert!(
+            authenticate_module_receipt(&package, &ab, &[7; 32], ModuleReceiptUse::Defining)
+                .is_ok()
+        );
+        assert!(
+            authenticate_module_receipt(&package, &ab, &[8; 32], ModuleReceiptUse::Defining)
+                .is_err()
+        );
     }
     #[test]
     fn cold_world_row_seal_binds_roles_requirements_order_and_ignores_aliases() {
