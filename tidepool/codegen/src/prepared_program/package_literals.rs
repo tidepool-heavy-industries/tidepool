@@ -265,6 +265,14 @@ impl DemandedImage {
 }
 
 impl CompiledProgram {
+    /// Whether this actual import slot is supplied by admitted immutable bytes.
+    /// This observes native installation storage; it grants no source authority.
+    pub fn import_is_literal(&self, id: GlobalId) -> Option<bool> {
+        self.import_slots
+            .get(id.0 as usize)
+            .map(|slot| slot.literal.is_some())
+    }
+
     /// Literal storage issued by compilation of a validated original Bytes group.
     pub fn source_literals(&self) -> BTreeMap<SourceBinder, SourceLiteral> {
         let image = self;
