@@ -4904,6 +4904,72 @@ impl ArtifactInventory {
             }
             prebound.insert(*group, *choices.iter().next().unwrap());
         }
+        // A chosen Original root keeps the carrier and canonical binding
+        // recorded by that group. Historical children do not constrain the
+        // receiving namespace merely because their payloads are retained.
+        let mut prebound_artifacts = BTreeMap::new();
+        if let Some(namespace_ids) = &namespace_ids {
+            for (key, chosen) in &prebound {
+                if !namespace_ids.contains(&key.artifact) {
+                    continue;
+                }
+                let entry = &selected[&key.artifact];
+                let carried_root_choice =
+                    root_intent.input_constraints().is_some_and(|(_, catalog)| {
+                        matches!(catalog.decision(&entry.descriptor.owner),
+                        InputNativeDecision::IssuedChoices(choices)
+                            if choices.get(&key.original_ordinal) == Some(chosen))
+                    });
+                if !groups.contains(key)
+                    && !required_roots.contains_key(key)
+                    && !carried_root_choice
+                {
+                    continue;
+                }
+                let ArtifactPayload::Original(product) = &entry.payload else {
+                    return Err(failure("chosen Original root lacks its original payload"));
+                };
+                let recorded_carrier = |source, artifact| {
+                    let bindings = state
+                        .outgoing(source)
+                        .filter_map(|(target, edge)| match target {
+                            InventoryNodeKey::Artifact(binding)
+                                if binding.artifact == artifact
+                                    && *edge == ArtifactDependency::Interface =>
+                            {
+                                Some(binding)
+                            }
+                            _ => None,
+                        })
+                        .collect::<BTreeSet<_>>();
+                    if bindings.len() != 1 {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::BindingAmbiguity { artifact },
+                        ));
+                    }
+                    Ok(*bindings.first().unwrap())
+                };
+                let carrier = recorded_carrier(InventoryNodeKey::Group(*chosen), key.artifact)?;
+                let canonical =
+                    ArtifactEntry::canonical_artifact_id(product.module_interface().ok_or_else(
+                        || failure("chosen Original root lacks its canonical interface"),
+                    )?);
+                let canonical = recorded_carrier(InventoryNodeKey::Artifact(carrier), canonical)?;
+                for binding in [carrier, canonical] {
+                    if prebound_artifacts
+                        .insert(binding.artifact, binding)
+                        .is_some_and(|previous| previous != binding)
+                    {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::NativeGroupSelectionConflict {
+                                artifact: key.artifact,
+                                original_ordinal: key.original_ordinal,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
         // Traverse the union once. Exact handles distinguish independently
         // issued children with the same payload; the demanding group gives
         // deterministic refusal evidence for every retained row.
@@ -5067,7 +5133,10 @@ impl ArtifactInventory {
             LogicalNodeKey::Group(group) => {
                 prebound.get(group).copied().map(InventoryNodeKey::Group)
             }
-            LogicalNodeKey::Artifact(_) => None,
+            LogicalNodeKey::Artifact(id) => prebound_artifacts
+                .get(id)
+                .copied()
+                .map(InventoryNodeKey::Artifact),
         };
         // Historical descendants retain their issuer's exact edges. Only a
         // selected root can qualify one of several handles for new execution.
@@ -15946,6 +16015,61 @@ mod tests {
                         &requirements,
                     )
                     .unwrap();
+                let check_original_namespace = |stage: &str, view: &ArtifactView| {
+                    let namespace = view.namespace();
+                    for original in &originals {
+                        let expected_carriers = model
+                            .rows
+                            .iter()
+                            .filter_map(|(from, to, edge)| match (from, to, edge) {
+                                (
+                                    ArtifactBindingNode::Group(group),
+                                    ArtifactBindingNode::Artifact(carrier),
+                                    ArtifactDependency::Interface,
+                                ) if group.binding.artifact() == original.descriptor.id
+                                    && carrier.artifact == original.descriptor.id =>
+                                {
+                                    Some(*carrier)
+                                }
+                                _ => None,
+                            })
+                            .collect::<BTreeSet<_>>();
+                        assert_eq!(
+                            expected_carriers.len(),
+                            1,
+                            "one carrier in the independent original issuer"
+                        );
+                        let carrier = *expected_carriers.first().unwrap();
+                        assert_eq!(namespace.get(&original.descriptor.id), Some(&carrier),
+                        "stage={stage}_original_carrier, helper_groups={count}, reverse={reverse}");
+                        let ArtifactPayload::Original(product) = &original.payload else {
+                            unreachable!()
+                        };
+                        let canonical = ArtifactEntry::canonical_artifact_id(
+                            product.module_interface().unwrap(),
+                        );
+                        let expected_canonical = model
+                            .rows
+                            .iter()
+                            .filter_map(|(from, to, edge)| match (from, to, edge) {
+                                (
+                                    ArtifactBindingNode::Artifact(from),
+                                    ArtifactBindingNode::Artifact(to),
+                                    ArtifactDependency::Interface,
+                                ) if *from == carrier && to.artifact == canonical => Some(*to),
+                                _ => None,
+                            })
+                            .collect::<BTreeSet<_>>();
+                        assert_eq!(
+                            expected_canonical.len(),
+                            1,
+                            "one paired canonical in the independent original issuer"
+                        );
+                        assert_eq!(namespace.get(&canonical), expected_canonical.first(),
+                        "stage={stage}_original_canonical, helper_groups={count}, reverse={reverse}");
+                    }
+                };
+                check_original_namespace("projected", &selected);
                 model.check(&selected).unwrap_or_else(|error| {
                     panic!("stage=projected_admission, helper_groups={count}, reverse={reverse}: {error}")
                 });
@@ -15958,6 +16082,7 @@ mod tests {
                         &selected.binding_dependencies(),
                     )
                     .unwrap();
+                check_original_namespace("recovery", &recovered);
                 model.check(&recovered).unwrap_or_else(|error| {
                     panic!("stage=recovery, helper_groups={count}, reverse={reverse}: {error}")
                 });
@@ -15987,6 +16112,7 @@ mod tests {
                     )
                     .map(|admitted| admitted.artifacts)
                     .unwrap();
+                check_original_namespace("bound_target", &target);
                 model.check(&target).unwrap_or_else(|error| {
                     panic!("stage=bound_target, helper_groups={count}, reverse={reverse}: {error}")
                 });
@@ -16025,6 +16151,7 @@ mod tests {
                         &helper_requirements,
                     )
                     .unwrap();
+                check_original_namespace("explicit_helper_admission", &chosen);
                 model.check(&chosen).unwrap_or_else(|error| {
                     panic!("stage=explicit_helper_admission, helper_groups={count}, reverse={reverse}: {error}")
                 });
@@ -16056,6 +16183,7 @@ mod tests {
                     )
                     .map(|admitted| admitted.artifacts)
                     .unwrap();
+                check_original_namespace("explicit_helper_target", &direct);
                 model.check(&direct).unwrap_or_else(|error| {
                     panic!("stage=explicit_helper_target, helper_groups={count}, reverse={reverse}: {error}")
                 });
