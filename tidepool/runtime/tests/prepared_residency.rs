@@ -325,12 +325,12 @@ fn structural_resume_classifies_rejection_and_consumed_failure() {
 
     let mut notebook = Notebook::with_effects(&[tidepool_mcp::console_decl()]);
     let success = notebook.prepare_expression("say \"pause\" >> pure (42 :: Int)");
-    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .run_with_sites("response_rejection", success.code(), settlement)
-    })
-    .unwrap() else {
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .source_action(|session, settlement| {
+            session.run_with_sites("response_rejection", success.code(), settlement)
+        })
+        .unwrap()
+    else {
         panic!("Console request must suspend");
     };
     let roots = notebook.session.persistent_roots_count();
@@ -361,12 +361,12 @@ fn structural_resume_classifies_rejection_and_consumed_failure() {
 
     let failure = notebook
         .prepare_expression("say \"pause\" >> (error \"after response\" :: Eff '[Console] Int)");
-    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .run_with_sites("consumed_response", failure.code(), settlement)
-    })
-    .unwrap() else {
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .source_action(|session, settlement| {
+            session.run_with_sites("consumed_response", failure.code(), settlement)
+        })
+        .unwrap()
+    else {
         panic!("Console request must suspend before its failure");
     };
     let error = tidepool_testing::with_settlement(|settlement| {
@@ -378,12 +378,12 @@ fn structural_resume_classifies_rejection_and_consumed_failure() {
         "{error:?}"
     );
     assert!(notebook.session.parked_holes().is_empty());
-    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .run_with_sites("after_consumed_failure", success.code(), settlement)
-    })
-    .unwrap() else {
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .source_action(|session, settlement| {
+            session.run_with_sites("after_consumed_failure", success.code(), settlement)
+        })
+        .unwrap()
+    else {
         panic!("the session must remain usable after a consumed failure");
     };
     assert!(matches!(
@@ -404,12 +404,12 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
     let mut notebook = Notebook::with_effects(&[tidepool_mcp::console_decl()]);
     notebook.bind("held <- pure ()");
     let success = notebook.prepare_expression("say \"pause\" >> pure (42 :: Int)");
-    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .run_with_sites("framed_rejection", success.code(), settlement)
-    })
-    .unwrap() else {
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .source_action(|session, settlement| {
+            session.run_with_sites("framed_rejection", success.code(), settlement)
+        })
+        .unwrap()
+    else {
         panic!("Console request must suspend");
     };
     let held = notebook
@@ -442,12 +442,12 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
 
     let failure = notebook
         .prepare_expression("say \"pause\" >> (error \"after handle\" :: Eff '[Console] Int)");
-    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .run_with_sites("consumed_handle", failure.code(), settlement)
-    })
-    .unwrap() else {
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .source_action(|session, settlement| {
+            session.run_with_sites("consumed_handle", failure.code(), settlement)
+        })
+        .unwrap()
+    else {
         panic!("Console request must suspend before its failure");
     };
     let held = notebook
@@ -506,18 +506,23 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     let [binder] = bound.as_slice() else {
         panic!("held must have one original binder");
     };
+    assert!(compiled.prepared().globals().iter().all(|global| {
+        tidepool_repr::SessionModule::from_module_name(&global.identity.module)
+            .is_none_or(|module| module.kind != tidepool_repr::SessionModuleKind::Lib)
+    }));
     let generation = Generation(left.generation);
     let install = |notebook: &mut Notebook| {
-        let outcome = tidepool_testing::with_settlement(|settlement| {
-            notebook.session.run_bind_with_sites(
-                "shared_held",
-                compiled.code(),
-                binder,
-                generation,
-                settlement,
-            )
-        })
-        .expect("install the original immutable binding in an independent machine");
+        let outcome = notebook
+            .source_action(|session, settlement| {
+                session.run_bind_with_sites(
+                    "shared_held",
+                    compiled.code(),
+                    binder,
+                    generation,
+                    settlement,
+                )
+            })
+            .expect("install the original immutable binding in an independent machine");
         assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
         notebook.generation = generation.0;
         notebook.injected.push(binder.module.clone());
@@ -570,22 +575,28 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
 
     let right_handles_before = right.session.value_handle_count();
     let right_programs_before = right.session.residency().unwrap().programs;
+    let right_visibility_before = right.session.public_visibility_snapshot_in(root).unwrap();
     let imported = right
         .session
         .import_parcel(parcel, tidepool_runtime::session::RealmId::ROOT)
         .expect("the parcel installs its source instance in the sibling machine");
     assert_eq!(
         right.session.value_handle_count(),
-        right_handles_before + 2,
-        "import mints the value handle and one retained source-binding handle"
+        right_handles_before + 1,
+        "a self-contained parcel mints its value handle without declaration-binding handles"
     );
     assert!(
         right.session.residency().unwrap().programs > right_programs_before,
         "import retains the left installation, even with the same code installed on the right"
     );
     assert_eq!(
-        right.session.current_binding_in(root, "held"),
-        Some(right_binding)
+        right.session.current_binding_in(root, "held").as_ref(),
+        Some(&right_binding)
+    );
+    assert_eq!(
+        right.session.public_visibility_snapshot_in(root).unwrap(),
+        right_visibility_before,
+        "native instance custody does not publish source bindings"
     );
     drop(left);
 
@@ -596,11 +607,14 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     assert_eq!(before, after, "the value round-trips byte-for-byte");
     assert_eq!(after, "999999");
 
-    // Releasing the imported custody leaves the source-binding handle rooted
-    // for the carried installation's import slot. The source machine's
-    // custody was already consumed by export.
+    // There are no declaration-binding imports to retain after releasing the
+    // transferred value. The receiver's independently installed binding survives.
     assert!(right.session.discard_custody(imported));
-    assert_eq!(right.session.value_handle_count(), right_handles_before + 1);
+    assert_eq!(right.session.value_handle_count(), right_handles_before);
+    assert_eq!(
+        right.session.current_binding_in(root, "held").as_ref(),
+        Some(&right_binding)
+    );
 }
 
 /// Fixture mirror of `PreparedEngine::MAJOR_COLLECTION_INSTALL_INTERVAL`
