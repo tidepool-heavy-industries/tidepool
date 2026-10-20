@@ -1503,7 +1503,8 @@ impl crate::checked_cell::CellProgram {
             return Err(source_failure("finite declaration has no World successor"));
         };
         let ordinal = item.index();
-        self.items()
+        let issued = self
+            .items()
             .get(ordinal)
             .filter(|issued| issued.checked_item() == item)
             .ok_or_else(|| source_failure("declaration belongs to another checked output"))?;
@@ -1571,10 +1572,11 @@ impl crate::checked_cell::CellProgram {
                 "declaration projection substitutes its authored interface",
             ));
         }
-        let advance = predecessor
+        let declaration = predecessor
             .restoration
             .primary_compiler_inputs
             .with_declaration_projection(joined, projection_context)?;
+        let advance = declaration.with_native_completion_from(issued.compiler_context())?;
         tracing::debug!(target: "exomonad_harness::timing",
             promotion_qualifier_invocations = advance.promotion_qualifier_invocations,
             changed_primary_owners = advance.changed_owners.len(),
@@ -1613,7 +1615,7 @@ impl crate::checked_cell::CellProgram {
             });
             (name, fact)
         });
-        let world = predecessor.project_bindings_with_declaration(
+        let world = predecessor.project_bindings_with_primary(
             predecessor.restoration.inputs.bindings.query_scope,
             changes,
             Some(WorldCellPosition {
@@ -1622,7 +1624,7 @@ impl crate::checked_cell::CellProgram {
                 next_item: ordinal + 1,
                 total_items: program.items().len(),
             }),
-            Some((advance, lexical)),
+            Some(WorldPrimaryAdvance::Declaration { advance, lexical }),
         )?;
         Ok(CheckedWorldSuccessor { world })
     }
@@ -1701,7 +1703,11 @@ impl crate::checked_cell::CellProgram {
                 ));
             }
         }
-        let world = predecessor.project_bindings(
+        let advance = predecessor
+            .restoration
+            .primary_compiler_inputs
+            .with_native_completion_from(issued.compiler_context())?;
+        let world = predecessor.project_bindings_with_primary(
             predecessor.restoration.inputs.bindings.query_scope,
             additions
                 .entries
@@ -1713,8 +1719,40 @@ impl crate::checked_cell::CellProgram {
                 next_item: ordinal + 1,
                 total_items: program.items().len(),
             }),
+            Some(WorldPrimaryAdvance::NativeCompletion(advance)),
         )?;
         Ok(CheckedWorldSuccessor { world })
+    }
+}
+
+/// Runtime completion can advance without changing the compiler namespace.
+/// Only a declaration also replaces the lexical surface.
+enum WorldPrimaryAdvance {
+    NativeCompletion(crate::declaration_context::WorldPrimaryProgramSupport),
+    Declaration {
+        advance: crate::declaration_context::WorldPrimaryProgramSupport,
+        lexical: CompilerWorldLexicalSurface,
+    },
+}
+
+impl WorldPrimaryAdvance {
+    fn support(&self) -> &crate::declaration_context::WorldPrimaryProgramSupport {
+        match self {
+            Self::NativeCompletion(advance) | Self::Declaration { advance, .. } => advance,
+        }
+    }
+
+    fn lexical(&self) -> Option<&CompilerWorldLexicalSurface> {
+        match self {
+            Self::NativeCompletion(_) => None,
+            Self::Declaration { lexical, .. } => Some(lexical),
+        }
+    }
+
+    fn into_inputs(self) -> Arc<crate::declaration_context::RequestCompilerInputs> {
+        match self {
+            Self::NativeCompletion(advance) | Self::Declaration { advance, .. } => advance.inputs,
+        }
     }
 }
 
@@ -1793,9 +1831,23 @@ impl CompilerWorld {
                         "declaration publication belongs to another World",
                     ));
                 }
-                Ok((declaration.advance, declaration.lexical))
+                Ok(WorldPrimaryAdvance::Declaration {
+                    advance: declaration
+                        .advance
+                        .with_native_completion_from(&private.restoration.inputs.primary_context)?,
+                    lexical: declaration.lexical,
+                })
             })
-            .transpose()?;
+            .transpose()?
+            .map_or_else(
+                || {
+                    self.restoration
+                        .primary_compiler_inputs
+                        .with_native_completion_from(&private.restoration.inputs.primary_context)
+                        .map(WorldPrimaryAdvance::NativeCompletion)
+                },
+                Ok,
+            )?;
         let mut changes = BTreeMap::new();
         for (name, binding) in visible_changes {
             crate::host_work::checkpoint()?;
@@ -1831,7 +1883,7 @@ impl CompilerWorld {
             };
             changes.insert(name.to_owned(), fact);
         }
-        self.project_bindings_with_declaration(target_scope, changes, None, declaration)
+        self.project_bindings_with_primary(target_scope, changes, None, Some(declaration))
     }
 
     /// Extend the held primary with only canonical TYPE roles selected by
@@ -2021,24 +2073,23 @@ impl CompilerWorld {
         changes: impl IntoIterator<Item = (String, Option<WorldBindingFact>)>,
         position: Option<WorldCellPosition>,
     ) -> Result<Arc<Self>, CompileError> {
-        self.project_bindings_with_declaration(query_scope, changes, position, None)
+        self.project_bindings_with_primary(query_scope, changes, position, None)
     }
 
-    fn project_bindings_with_declaration(
+    fn project_bindings_with_primary(
         self: &Arc<Self>,
         query_scope: u64,
         changes: impl IntoIterator<Item = (String, Option<WorldBindingFact>)>,
         position: Option<WorldCellPosition>,
-        declaration: Option<(
-            crate::declaration_context::WorldPrimaryProgramSupport,
-            CompilerWorldLexicalSurface,
-        )>,
+        primary: Option<WorldPrimaryAdvance>,
     ) -> Result<Arc<Self>, CompileError> {
         let prior = &self.restoration;
         let mut inputs = prior.inputs.clone();
-        if let Some((advance, lexical)) = &declaration {
-            inputs.primary_context = advance.context.clone();
-            inputs.lexical = lexical.clone();
+        if let Some(advance) = &primary {
+            inputs.primary_context = advance.support().context.clone();
+            if let Some(lexical) = advance.lexical() {
+                inputs.lexical = lexical.clone();
+            }
         }
         inputs.bindings.query_scope = query_scope;
         let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
@@ -2060,7 +2111,8 @@ impl CompilerWorld {
         let mut primary_associations = prior.primary_associations.clone();
         let mut primary_changes = Vec::new();
         let mut lexical_root = prior.lexical_root;
-        if let Some((advance, _)) = &declaration {
+        if let Some(primary) = &primary {
+            let advance = primary.support();
             let mut runtime_materializer = Materializer::new(&prior.runtime_context_blocks);
             primary_root = runtime_materializer
                 .materialize_context(
@@ -2101,9 +2153,11 @@ impl CompilerWorld {
             primary_associations = materializer
                 .materialize_map(Some(&prior.primary_associations), &associations)
                 .map_err(|error| source_failure(error.to_string()))?;
-            lexical_root = inputs
-                .lexical
-                .materialize(&inputs.primary_context, &mut materializer)?;
+            if primary.lexical().is_some() {
+                lexical_root = inputs
+                    .lexical
+                    .materialize(&inputs.primary_context, &mut materializer)?;
+            }
         }
         // Remove all touched heads first, then add their resulting actual
         // selections. A row shared by several changed names is issued once.
@@ -2318,9 +2372,9 @@ impl CompilerWorld {
             runtime_context_blocks,
             primary_blocks,
             primary_associations,
-            primary_compiler_inputs: declaration.map_or_else(
+            primary_compiler_inputs: primary.map_or_else(
                 || prior.primary_compiler_inputs.clone(),
-                |(advance, _)| advance.inputs,
+                WorldPrimaryAdvance::into_inputs,
             ),
             bindings,
             binding_rows: row_roots,
