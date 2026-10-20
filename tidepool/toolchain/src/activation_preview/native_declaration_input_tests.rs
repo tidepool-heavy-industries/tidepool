@@ -474,7 +474,7 @@ proptest::proptest! {
     #![proptest_config(display_property_config())]
     #[test]
     fn display_projection_ignores_only_unreachable_value_histories(versions in proptest::collection::vec(1u8..255, 1..12)) {
-        let original = original_context(&[(true, true, true)]);
+        let original = original_context_with_roles(&[(true, true, true)], true);
         let prototype = display_prototype(&original);
         let expected = OriginalDisplayContext::issue(&prototype, &original).unwrap().unwrap();
         let mut previous = original.semantic_sha256();
@@ -500,8 +500,8 @@ proptest::proptest! {
 
 #[test]
 fn display_projection_preserves_native_availability_and_refuses_missing_instance_evidence() {
-    let without_native = original_context(&[(true, false, true)]);
-    let with_native = original_context(&[(true, true, true)]);
+    let without_native = original_context_with_roles(&[(true, false, true)], true);
+    let with_native = original_context_with_roles(&[(true, true, true)], true);
     let prototype = display_prototype(&with_native);
     let absent = OriginalDisplayContext::issue(&prototype, &without_native)
         .unwrap()
@@ -531,7 +531,7 @@ fn display_projection_preserves_native_availability_and_refuses_missing_instance
 
 #[test]
 fn display_projection_keeps_native_custody_without_promoting_group_demand() {
-    let original = original_context(&[(true, true, true)]);
+    let original = original_context_with_roles(&[(true, true, true)], true);
     let prototype = display_prototype(&original);
     let expanded = with_irrelevant_values(&original, &[1], false);
     let before_groups = expanded.artifact_view().selected_native_groups();
@@ -642,7 +642,8 @@ fn display_projection_preserves_exact_canonical_implementation_dependencies() {
 #[test]
 fn original_native_declaration_body_is_available_without_heap_or_lexical_promotion() {
     let earlier = original_context(&[]);
-    let later = original_context(&[(true, true, true)]);
+    let type_only = original_context(&[(true, true, true)]);
+    let later = original_context_with_roles(&[(true, true, true)], true);
     assert!(offered_native_owners(&earlier).is_empty());
     assert_eq!(offered_native_owners(&later), ["Tidepool.Session.Lib.G1"]);
     assert!(
@@ -656,7 +657,7 @@ fn original_native_declaration_body_is_available_without_heap_or_lexical_promoti
         .unwrap();
     request.validate_artifacts().unwrap();
     assert!(
-        later.validate_artifacts(&request.artifacts).is_err(),
+        type_only.validate_artifacts(&request.artifacts).is_err(),
         "request availability must not promote persistent type-only roles"
     );
     let native = request
@@ -842,17 +843,20 @@ proptest::proptest! {
         // an arbitrary captured prefix and later extension that shrink normally.
         let mut before = before;
         before.extend((0..8).map(|mask| (mask & 1 != 0, mask & 2 != 0, mask & 4 != 0)));
-        let captured = original_context(&before);
-        let original_roles = original_context_with_roles(&before, true);
+        let captured = original_context_with_roles(&before, true);
+        let interface_only = original_context(&before);
         let mut extended = before.clone();
         extended.extend(after);
-        let later = original_context(&extended);
+        let later = original_context_with_roles(&extended, true);
         proptest::prop_assert_eq!(offered_native_owners(&captured), expected(&before));
-        proptest::prop_assert_eq!(offered_native_owners(&original_roles), expected(&before));
+        proptest::prop_assert!(
+            offered_native_owners(&interface_only).is_empty(),
+            "interface-only roles carry custody without issuing a native offer"
+        );
         proptest::prop_assert_eq!(offered_native_owners(&later), expected(&extended));
         drop(later);
         proptest::prop_assert_eq!(offered_native_owners(&captured), expected(&before));
-        proptest::prop_assert_eq!(offered_native_owners(&original_roles), expected(&before));
+        proptest::prop_assert!(offered_native_owners(&interface_only).is_empty());
         static COMPLETED_HISTORIES: AtomicUsize = AtomicUsize::new(0);
         let completed = COMPLETED_HISTORIES.fetch_add(1, Ordering::Relaxed) + 1;
         if completed.is_power_of_two() {

@@ -12459,7 +12459,7 @@ mod tests {
         assert_context_observation_wire(&base);
         assert_eq!(
             hex(&base.semantic_sha256()),
-            "38c954e31cc17c0b3ea10155e2490d5b3d8155009a7374ba19ac49b53bef0c91"
+            "57662e6c4c6d51913dd8c9d18ee75f4f44e87f8d616707ffe269ecbb768b72cd"
         );
         let mut complete = base.clone();
         complete = complete.rebuild(|facts| {
@@ -12470,7 +12470,7 @@ mod tests {
         assert_context_observation_wire(&complete);
         assert_eq!(
             hex(&complete.semantic_sha256()),
-            "79cefd269cead0be57b9b3d3b4369ee4965a3fdd56479c79f67f11c406e3e497"
+            "095f07297f14b1bf77e3e1110364052f66a3200be55ec74f7381e2fcc3e9e3de"
         );
         let mut missing = base.clone();
         missing = missing.rebuild(|facts| {
@@ -12483,7 +12483,7 @@ mod tests {
         assert_context_observation_wire(&missing);
         assert_eq!(
             hex(&missing.semantic_sha256()),
-            "bdb20f1087c6e7392613622f3e4860c8e3a4a317e1feaa4a2c916298db958f8d"
+            "799457f756f754673b43633481143ed49ba45afff5f65cd9d8e2ba9e68bdc53c"
         );
         let reversed = {
             let mut context = missing.clone();
@@ -15099,6 +15099,7 @@ mod tests {
             original_input_identity,
             selection,
             selection_sha256,
+            native_authority,
             ..
         } = &roles[0]
         else {
@@ -15123,6 +15124,7 @@ mod tests {
                 "original_input_identity": original_input_identity,
                 "selection": selection.observation_digest().unwrap(),
                 "selection_sha256": selection_sha256,
+                "native_authority": native_authority.facts().commitment(),
             }])
         );
         assert!(
@@ -18151,8 +18153,12 @@ mod tests {
                         .unwrap()
                 })
                 .collect::<Vec<_>>();
-            recover_fixture_compiler_support(projection, support.artifacts().clone(), offers)
-                .unwrap()
+            super::native_availability_tests::fixture_support_with_issued_offers(
+                projection,
+                support.artifacts().clone(),
+                offers,
+            )
+            .unwrap()
         } else {
             support
         };
