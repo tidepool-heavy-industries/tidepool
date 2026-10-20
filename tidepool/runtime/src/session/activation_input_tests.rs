@@ -3819,6 +3819,49 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         ),
         "generic-installer refusal precedes missing-transaction admission"
     );
+    // The authored-turn production entry reaches the same purpose refusal
+    // without a caller-side pre-check, and that refusal leaves the admission
+    // fresh for its own preview install.
+    let production = source_action(&mut resident, |resident, settlement| {
+        resident.run_with_sites(
+            "genericPreviewRefusal",
+            compiled.renderer.compiled.code(),
+            settlement,
+        )
+    });
+    assert!(
+        matches!(
+            production,
+            Err(ResidentError::Session(SessionError::SourceAdmission(
+                super::super::SourceAdmissionError::Unqualified
+            )))
+        ),
+        "the authored-turn entry refuses preview code through the generic installer"
+    );
+    assert!(
+        !compiled.admission().is_consumed(),
+        "authored-turn refusal must not spend the affine preview admission"
+    );
+    // The snapshot entry owns a MissingTransaction refusal; the purpose guard
+    // must report Unqualified first even when no compiler transaction exists.
+    let snapshot = resident.snapshot_run_prepared(
+        compiled.renderer.compiled.code().into_owned(),
+        PendingPreparedMode::Value,
+        None,
+    );
+    assert!(
+        matches!(
+            snapshot,
+            Err(ResidentError::Session(SessionError::SourceAdmission(
+                super::super::SourceAdmissionError::Unqualified
+            )))
+        ),
+        "snapshot refusal is Unqualified, not MissingTransaction"
+    );
+    assert!(
+        !compiled.admission().is_consumed(),
+        "snapshot refusal must not spend the affine preview admission"
+    );
     let before_fault = resident.residency();
     {
         let incomplete = bundle.omitting_target_image();
@@ -4133,6 +4176,207 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
         .values()
         .flatten()
         .all(|owner| owner.upgrade().is_none()));
+}
+
+#[test]
+fn activation_preview_revoked_original_lease_refuses_before_spend() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-display-two-children.hs"),
+        false,
+        SessionId(1851),
+    );
+    let owners = Arc::new(ActivationDisplayOwners::default());
+    let images = Arc::new(ImageRegistry::new());
+    let mut parent = fixture.fresh();
+    parent.set_activation_display_owners(owners.clone());
+    parent.set_image_registry(images.clone());
+    let mut reservation = fixture.start(&mut parent);
+    let mut children = Vec::new();
+    let mut child_roots = Vec::new();
+    let mut last_submission = None;
+    for index in 0..2 {
+        let submission = settle_request_reservation(&mut parent, reservation, index + 1);
+        let payload = parent
+            .live_payload_handle(submission.cont_id())
+            .unwrap()
+            .unwrap();
+        let parcel = parent.export_custody(payload).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut child =
+            InputFixture::fresh_in(SessionId(1851 + index as u64), &root, &fixture.recipe);
+        child.set_activation_display_owners(owners.clone());
+        child.set_image_registry(images.clone());
+        let imported = child.import_parcel(parcel, RealmId::ROOT).unwrap();
+        let receiver = child
+            .retain_binding_custody("activationReceiver")
+            .unwrap()
+            .unwrap();
+        let hole = suspended(
+            source_action(&mut child, |child, settlement| {
+                child.run_rooted_application(
+                    "revokedLeaseChild",
+                    &receiver,
+                    &imported,
+                    RealmId::ROOT,
+                    None,
+                    settlement,
+                )
+            })
+            .unwrap(),
+        );
+        let site = parked_site(&mut child, &hole);
+        let (input, interface) = issued_input(&mut child, &hole, site, fixture.recipe.clone());
+        let mounted = mount_original(&mut child, input, interface);
+        let view = child
+            .compile_view_in(ScopeId::ROOT)
+            .unwrap()
+            .with_scoped_injection();
+        let admission = child.admit_activation_preview(mounted, view).unwrap();
+        child_roots.push(root);
+        children.push((child, admission));
+        if index == 0 {
+            reservation = suspended(settle_request_submission(&mut parent, submission));
+        } else {
+            last_submission = Some(submission);
+            break;
+        }
+    }
+    assert!(last_submission.is_some(), "parent retained its last request");
+    let template = turn::assemble_activation_preview_module(512);
+    let turn::ActivationPreviewCompilation::Ready(first) = compile_activation_preview(
+        children[0].1.clone(),
+        &template,
+        512,
+        &fixture.recipe.include,
+    )
+    .unwrap() else {
+        panic!("package input is renderable")
+    };
+    let cached = first.renderer.clone();
+    // A revoked original lease refuses a fresh bind and leaves the admission
+    // unspent, so the refusal cannot strand it in the bound phase.
+    let revoked_scope = children[1].1.scope_lease.scope();
+    let retired = children[1].0.retire_scope(revoked_scope);
+    assert_eq!(retired.scopes_retired, 1, "the detached preview scope retires");
+    let refused = turn::bind_activation_renderer(
+        children[1].1.clone(),
+        &SharedActivationRenderer::Renderable(cached.clone()),
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(turn::ActivationRendererFailure::Admission(
+                ResidentError::Session(SessionError::SourceAdmission(
+                    super::super::SourceAdmissionError::StaleSourceLease
+                ))
+            ))
+        ),
+        "a revoked original lease refuses a fresh bind"
+    );
+    assert!(
+        !children[1].1.is_consumed(),
+        "the refused bind leaves the preview admission unspent"
+    );
+    // The same revocation between bind and run refuses execution before the
+    // spend, with a typed dead-scope failure that consumes nothing. The first
+    // child's renderer is already bound, so only the execution lease stands
+    // between the admission and its spend.
+    let revoked_scope = children[0].1.scope_lease.scope();
+    let retired = children[0].0.retire_scope(revoked_scope);
+    assert_eq!(retired.scopes_retired, 1, "the bound preview scope retires");
+    let refused = source_action(&mut children[0].0, |child, settlement| {
+        child.run_activation_preview(first, settlement)
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(ResidentError::Session(SessionError::DeadScope(scope))) if scope == revoked_scope
+        ),
+        "a revoked original lease refuses execution before consumption"
+    );
+    assert!(
+        !children[0].1.is_consumed(),
+        "revocation between bind and run does not spend the admission"
+    );
+    drop(parent);
+}
+
+#[test]
+fn activation_preview_failed_execution_admission_after_spend_stays_consumed() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-package.hs"),
+        false,
+        SessionId(1854),
+    );
+    let mut resident = fixture.fresh();
+    let reservation = fixture.start(&mut resident);
+    let (_, hole) = fixture.deliver(&mut resident, reservation, 1);
+    let site = parked_site(&mut resident, &hole);
+    let input = resident
+        .capture_activation_input(&hole, RealmId::ROOT, site)
+        .unwrap();
+    let (owner, interface) = issued_captured_input(&mut resident, input, fixture.recipe.clone());
+    let mounted = mount_original(&mut resident, owner, interface);
+    let view = resident
+        .compile_view_in(ScopeId::ROOT)
+        .unwrap()
+        .with_scoped_injection();
+    let admission = resident.admit_activation_preview(mounted, view).unwrap();
+    let template = turn::assemble_activation_preview_module(512);
+    let turn::ActivationPreviewCompilation::Ready(compiled) = compile_activation_preview(
+        admission.clone(),
+        &template,
+        512,
+        &fixture.recipe.include,
+    )
+    .unwrap() else {
+        panic!("package input is renderable")
+    };
+    let CompiledActivationPreview { bound, renderer } = compiled;
+    let binding = admission.mounted.binding;
+    let spent = bound
+        .try_consume()
+        .expect("the bound preview admission spends exactly once");
+    assert!(admission.is_consumed());
+    // A failing execution admission after the spend leaves the admission
+    // consumed: the spent token admits only code carrying this admission's
+    // preview proof, and the failure cannot reseal it.
+    let mut foreign = renderer.compiled.code().into_owned();
+    foreign.certification = Cow::Owned(None);
+    let refused = resident.admit_turn_code_in(
+        admission.scope_lease.scope(),
+        foreign,
+        TurnInstallationAdmission::ActivationPreviewSpent(&spent),
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(ResidentError::ActivationPreviewRefused { binding: refused }) if refused == binding
+        ),
+        "the spent token refuses code without this admission's preview proof"
+    );
+    assert!(
+        admission.is_consumed(),
+        "a failed execution admission cannot reseal the spent preview"
+    );
+    assert!(matches!(
+        admission.try_bind(),
+        Err(ResidentError::ActivationPreviewRefused { binding: refused }) if refused == binding
+    ));
+    let refused = turn::bind_activation_renderer(
+        admission.clone(),
+        &SharedActivationRenderer::Renderable(renderer.clone()),
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(turn::ActivationRendererFailure::Admission(
+                ResidentError::ActivationPreviewRefused { binding: refused }
+            )) if refused == binding
+        ),
+        "cached renderer reuse after the spend is refused"
+    );
+    drop(spent);
 }
 
 #[test]

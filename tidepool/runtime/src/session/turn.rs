@@ -2678,6 +2678,14 @@ pub fn bind_activation_renderer(
         }
         .into());
     }
+    // A revoked original lease can never execute this preview. Refuse before
+    // claiming the affine admission so the refusal cannot strand it bound.
+    admission
+        .source_lease()
+        .validate_source_issuer()
+        .map_err(|error| {
+            super::ResidentError::Session(crate::session::SessionError::SourceAdmission(error))
+        })?;
     let renderer = match renderer {
         super::SharedActivationRenderer::Renderable(renderer)
         | super::SharedActivationRenderer::Opaque(renderer) => renderer.clone(),
