@@ -2,7 +2,9 @@
 
 Status: implementation resumed after architectural review on 2026-10-20.
 Controlling branch: `integration/compiler-query-warm-final`.
-Reviewed root source: `e8ad8a0f50f9350bb80d68ec924ca9846c779e54`.
+Reviewed root source: `3fe27b8d9f55d21077e6f2dc6ea4f7d455d5b274`.
+Current implementation contract: [demand-products.md](demand-products.md).
+It owns this wave's work split, identity/projection contracts and acceptance.
 This plan and [implementation reset](implementation-reset.md) supersede previous
 execution ordering and progress claims. [contracts.md](contracts.md) remains the
 shared semantic contract except where this reset explicitly narrows machinery.
@@ -22,30 +24,38 @@ certifier, evaluator, journals, and test infrastructure. Delete replaced routes.
 
 ## Current evidence and disposition
 
-| Source | Established | Unqualified / disposition |
-| --- | --- | --- |
-| Root `e8ad8a0f50` | Reviewed source/item identity repair and carried checked-import selection | Joined release is not qualified; root was 24 commits ahead of public branch at reset |
-| Engine `2f4f4cdf28` | Worker/toolchain compilation; actual Original sealing 1/1 | Mixed history loses G32 at phase-specific import checking; selection fixture expects an unissued operand interface |
-| Actual input `593d9f1da9` | Two executed, one owner-refusal pass, confirmed cleanup | Positive fails NativeRootOutsideView for 354aaa09; exact Rust artifact/callsite not yet established |
-| Native `cf54086244` | Three of four focused controls pass | Replace partial root partition with exact/new typed planning; fourth expectation needs stage-specific refusal review |
-| Lifecycle `6f3e46993b` | Focused owner histories and consumer compilation | Actual Reload bypasses retirement owner; default/force public behavior unqualified |
-| Retirement child `a1e88c78c4` | Earlier target compilation | Three WIP files incomplete/uncompiled; preserve before replacing |
-| Fence repair `65c930b2fa` | Source-reviewed same-fence typed errors | Compile, execute, then receive; do not treat as already integrated |
+The reviewed checkpoint is clean; release qualification remains incomplete.
 
-Earlier leaf counts remain evidence only for their exact code and boundary. The
-32-case historical ledger needs dispositions, not blanket deletion or stale pass
-claims. Synthetic graph tests are component controls, not actual GHC histories.
+- Production startup exposed repeated 31–33 second World acquisitions. The
+  retained packet has 5,204 reachable blocks; broad native proofs dominate its
+  bytes. Both the mixed 4096 count and shared optional byte allowance prevent
+  expected retention. Narrow compiler demand before tuning its limits.
+- Engine experiment `e192545d66` advances SOURCE native preparation/checking but
+  then loses the certified Name association needed for CacheEntry recovery.
+  It is a reusable experiment, not a passing candidate.
+- Lifecycle `1a497cdf8e` compiled joined consumers; four of eight focused controls
+  passed. Three positive fixtures omit the producer-issued source selection;
+  the delivery-loss oracle needs the actual terminal value before attribution.
+- Public reload is blocked earlier by startup's canonical interface mismatch.
+  Owner-specific diagnostics must establish its cause. Force/cold recovery and
+  exact frozen-bundle M1–M3 remain unqualified.
+- Mixed native binding ambiguity remains separately unresolved. Source acceptance
+  of broader custody is not proof that this runtime failure is fixed.
+
+Earlier leaf counts qualify only their exact code and boundary. Preserve the
+historical failure ledger and useful test contracts; do not delete cases merely
+because their old setup used a removed API.
 
 ## Ownership and integration
 
 | Area | Current owner | Result |
 | --- | --- | --- |
-| Compiler World | engine_completion | Actual HMI and lexical graph at consuming stage; mixed cells and retry identity |
-| Rust output assembly | world_native_assembly | Final normalized physical issuer retained through prefix and runtime adoption |
-| Native planning | audit_native_selection | Exact historical versus new groups, coordinated with assembly owner on shared files |
-| Reload/recovery | audit_reload_ownership | Single retained attempt, public default first, then force and recovery |
-| Discovery/verification | audit_query_surface | Actual all-five query and notebook histories, exact qualification commands and gaps |
-| Integration and unresolved refusal | root | Shared contracts, NativeRootOutsideView diagnosis, critical review, joined checkpoints |
+| Compiler projection | audit_native_selection | One issued compiler-primary product; full runtime identity remains exact |
+| Completed products | engine_completion | Actual source/HMI/native Name handoff and SOURCE recovery |
+| Residency | audit_compiler_dataflow_cost | Honest storage units, explicit optional retention, END custody |
+| Worker affinity | audit_command_retirement | Existing pool prefers an eligible idle realization; no accepted replay |
+| Lifecycle qualification | audit_reload_ownership | Real producer-issued inputs, truthful terminal outcomes, public startup diagnosis |
+| Integration | root | Shared contracts, independent review, early joined tests, map and release evidence |
 
 Reuse existing isolated warm checkouts. Children report proposal, blocker,
 review-ready and settled events; parents continue the ready frontier. Each area
@@ -59,14 +69,13 @@ integration checkpoints labelled with their actual qualification state.
 
 ## Sequence and gates
 
-1. Preserve source/WIP and publish the reviewed checkpoint and reset plan.
-2. Repair Haskell stage environments and Rust physical issuance in parallel;
-   execute an actual mixed/private-input history immediately on their join.
-3. Complete native planning and public default reload; integrate reviewed pieces
-   promptly. Root localizes the remaining native refusal before changing policy.
-4. Deliver an early Persona candidate after G2. Continue force/recovery and final
-   qualification as mandatory campaign work.
-5. Reconcile current public release/main, qualify the integrated result and push.
+1. Land the demand-products contract on the consolidated checkpoint.
+2. Run projection, completed-product, residency/routing and lifecycle work in
+   isolated checkouts. Review exact commits and integrate coherent parcels.
+3. Execute the joined production World history early, then measure cold/warm
+   demand costs and resolve the remaining ordinary-workflow failures.
+4. Freeze one matched bundle and deliver the next Persona candidate after G2.
+5. Complete G3 and reconcile/push reviewed release/main checkpoints.
 
 ### G2: early Persona candidate
 

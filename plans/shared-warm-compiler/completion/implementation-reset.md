@@ -3,13 +3,19 @@
 Accepted 2026-10-20. Read with plan.md and contracts.md. This is the receiving
 contract for implementation, not a claim of passing behavior.
 
+[demand-products.md](demand-products.md) is the current implementation contract
+for compiler inputs, completed products, optional residency and affinity.
+
 ## Haskell World environment
 
 The failing mixed history reaches rnImports inside GHC Make's T_Hsc hook.
 Initial downsweep setup succeeded; Make replaced the earlier environment.
 Retain actual same-World HomeModInfo, including hm_details, instead of converting
-all prior originals into interfaces and rehydrating them. Same NameCache/EPS
-ownership is required; this is not cross-interpreter bytecode reuse.
+all unchanged prior originals into interfaces and rehydrating them. Same
+NameCache/EPS ownership is required; this is not cross-interpreter bytecode reuse.
+Changed SOURCE SCC completion still requires GHC's knot-repair rehydration.
+Preserve exact boot/nonboot nodes and the affected closure; the certified
+Name/identity association survives separately from replaceable details knots.
 
 At the consuming phase combine actual prefix Original HMIs, source-less Finder
 locations/exclusions and virtual graph nodes/edges justified by real imports.
