@@ -68,6 +68,22 @@ pub(crate) struct SourceRegistrationObservation {
     pub(crate) state: SourceRegistrationState,
 }
 
+/// Result of this call's native redispatch, independent of callback execution
+/// and of any service work already retained before the call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SourceRedispatchOutcome {
+    NotAttempted,
+    Accepted {
+        identity: SourceRegistrationIdentity,
+        delivery: u64,
+    },
+    Refused {
+        identity: SourceRegistrationIdentity,
+        delivery: u64,
+        failure: SourceRegistrationFailure,
+    },
+}
+
 struct OpenSourceSlot {
     binding: SourceBinding,
     connection: Option<ActorSourceConnections>,
@@ -147,16 +163,15 @@ impl CapturedSourceRegistration {
     }
 
     /// Redispatch retained, unrun input only after the exact source reopened.
-    pub(crate) fn resume_deferred(&self) -> SourceRegistrationObservation {
-        resume_slot(&self.slot);
-        self.observation()
+    pub(crate) fn resume_deferred(&self) -> SourceRedispatchOutcome {
+        resume_slot(&self.slot)
     }
     #[cfg(test)]
     pub(super) fn resume_deferred_after_source_observation(
         &self,
         observe: impl FnOnce(),
     ) -> SourceRegistrationObservation {
-        resume_slot_observed(&self.slot, observe);
+        let _ = resume_slot_observed(&self.slot, observe);
         self.observation()
     }
 
@@ -207,7 +222,7 @@ impl Drop for AdmittedSourceDelivery {
     fn drop(&mut self) {
         // Finish the admitted mapper/receiver before the next queued input.
         drop(self.claim.take());
-        resume_slot(&self.slot);
+        let _ = resume_slot(&self.slot);
     }
 }
 
@@ -514,7 +529,7 @@ impl SourceSlots {
         }
         // Post-store recheck closes reopen racing the first failed claim. The
         // same marked head is retained until admitted, never remapped on retry.
-        resume_slot(&slot);
+        let _ = resume_slot(&slot);
         SourceDeliveryAdmission::Deferred(slot.identity.clone())
     }
     pub(super) async fn handoff(
@@ -587,7 +602,7 @@ impl SourceSlots {
         drop(discarded);
         let slots = self.0.lock().slots.clone();
         for slot in slots {
-            resume_slot(&slot);
+            let _ = resume_slot(&slot);
         }
         Ok(())
     }
@@ -641,11 +656,11 @@ fn close_slot(slot: &Arc<SourceSlot>, expected: Option<&SourceDependency>) {
     drop(discarded);
 }
 
-fn resume_slot(slot: &Arc<SourceSlot>) {
-    resume_slot_observed(slot, || ());
+fn resume_slot(slot: &Arc<SourceSlot>) -> SourceRedispatchOutcome {
+    resume_slot_observed(slot, || ())
 }
 
-fn resume_slot_observed(slot: &Arc<SourceSlot>, observe: impl FnOnce()) {
+fn resume_slot_observed(slot: &Arc<SourceSlot>, observe: impl FnOnce()) -> SourceRedispatchOutcome {
     let binding = match &*slot.state.lock() {
         SourceSlotState::Open(open)
             if !open.deferred.is_empty()
@@ -656,29 +671,31 @@ fn resume_slot_observed(slot: &Arc<SourceSlot>, observe: impl FnOnce()) {
         }
         _ => None,
     };
-    let Some(binding) = binding else { return };
+    let Some(binding) = binding else {
+        return SourceRedispatchOutcome::NotAttempted;
+    };
     let admission = binding.execution.admit_activation();
     observe();
     let mut state = slot.state.lock();
     let SourceSlotState::Open(open) = &mut *state else {
-        return;
+        return SourceRedispatchOutcome::NotAttempted;
     };
     if !Arc::ptr_eq(&open.binding.entry, &binding.entry)
         || open.binding.execution.source_dependency() != binding.execution.source_dependency()
     {
-        return;
+        return SourceRedispatchOutcome::NotAttempted;
     }
     if open.redispatched.is_some()
         || matches!(&open.resume_failure, Some(SourceRegistrationFailure::Admission(error)) if !temporarily_fenced(error))
     {
-        return;
+        return SourceRedispatchOutcome::NotAttempted;
     }
     if let Err(error) = admission {
         open.resume_failure = Some(SourceRegistrationFailure::Admission(error));
-        return;
+        return SourceRedispatchOutcome::NotAttempted;
     }
     let Some((marker, delivery)) = open.deferred.front() else {
-        return;
+        return SourceRedispatchOutcome::NotAttempted;
     };
     let marker = *marker;
     let mut delivery = delivery.clone();
@@ -701,9 +718,18 @@ fn resume_slot_observed(slot: &Arc<SourceSlot>, observe: impl FnOnce()) {
         Ok(()) => {
             open.redispatched = Some(marker);
             open.resume_failure = None;
+            SourceRedispatchOutcome::Accepted {
+                identity: slot.identity.clone(),
+                delivery: marker,
+            }
         }
         Err(error) => {
-            open.resume_failure = Some(error);
+            open.resume_failure = Some(error.clone());
+            SourceRedispatchOutcome::Refused {
+                identity: slot.identity.clone(),
+                delivery: marker,
+                failure: error,
+            }
         }
     }
 }

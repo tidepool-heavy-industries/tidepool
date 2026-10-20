@@ -1143,7 +1143,8 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
     use crate::request::sources::tests::{receive, DirectoryFixture};
     use crate::request::sources::{CallbackExecution, SourceBinding, SourceEvent};
     use crate::resident_actor::source_slots::{
-        SourceDeliveryAdmission, SourceRegistrationFailure, SourceRegistrationState, SourceSlots,
+        SourceDeliveryAdmission, SourceRedispatchOutcome, SourceRegistrationFailure,
+        SourceRegistrationState, SourceSlots,
     };
 
     // Both executable mappings come from this one actual compiled fixture;
@@ -1246,15 +1247,41 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
         .unwrap();
     drop(attach_claim);
     let drop_initial = receive(&mut drop_events).await;
+    let drop_fence = source_b.source_admission().fence().unwrap();
     assert!(matches!(
         drop_slots.admit_delivery(drop_initial),
-        SourceDeliveryAdmission::Admitted(_)
+        SourceDeliveryAdmission::Deferred(_)
     ));
     let dropped_capture = drop_slots.capture_source(source_b.source_admission());
+    assert_eq!(
+        dropped_capture[0].resume_deferred(),
+        SourceRedispatchOutcome::NotAttempted
+    );
+    drop_recipient.lifecycle().stop_owner_for_test().await;
+    drop_fence
+        .reopen_with(source_b.original_source(), |reopen| {
+            reopen.commit();
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(dropped_capture[0].resume_deferred(), SourceRedispatchOutcome::Refused {
+        identity, delivery: 1, failure: SourceRegistrationFailure::Dispatch(_),
+    } if identity.actor == drop_recipient.identity() && identity.slot == 0)
+    );
+    assert!(
+        matches!(
+            dropped_capture[0].observation().state,
+            SourceRegistrationState::Open { deferred: 1, .. }
+        ),
+        "a refused native handoff retains the same original input"
+    );
+    assert!(drop_events.try_recv().is_err());
     drop(drop_slots);
     assert!(matches!(
         dropped_capture[0].observation().state,
-        SourceRegistrationState::Closed { rejected: 0 }
+        SourceRegistrationState::Closed { rejected: 1 }
     ));
     crate::local_actor::run_control::assert_source_registration_retirement_projection(
         dropped_capture.clone(),
@@ -1404,9 +1431,13 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
         SourceDeliveryAdmission::Deferred(_)
     ));
     assert!(matches!(
-        captured_a[0].resume_deferred().state,
+        captured_a[0].observation().state,
         SourceRegistrationState::Open { deferred: 1, .. }
     ));
+    assert_eq!(
+        captured_a[0].resume_deferred(),
+        SourceRedispatchOutcome::NotAttempted
+    );
     assert!(
         events.try_recv().is_err(),
         "fenced input never reaches the mapper"
@@ -1418,7 +1449,13 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
         })
         .unwrap()
         .unwrap();
-    captured_a[0].resume_deferred();
+    assert!(
+        matches!(captured_a[0].resume_deferred(), SourceRedispatchOutcome::Accepted {
+        identity, delivery: 1,
+    } if identity.actor == actor && identity.slot == 0)
+    );
+    assert!(matches!(captured_a[0].observation().state, SourceRegistrationState::Open { deferred: 1, .. }),
+        "native handoff is accepted while the original is retained for deduplication, before mapper execution");
     let marked_first = receive(&mut events).await;
     assert!(marked_first.slot_delivery.is_some());
     let mut wrong_slot = marked_first.clone();
@@ -1438,7 +1475,10 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
         slots.admit_delivery(next),
         SourceDeliveryAdmission::Deferred(_)
     ));
-    captured_a[0].resume_deferred();
+    assert_eq!(
+        captured_a[0].resume_deferred(),
+        SourceRedispatchOutcome::NotAttempted
+    );
     assert!(
         events.try_recv().is_err(),
         "repeated resume does not resend the marked head"
@@ -1593,7 +1633,12 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
         )
     ));
     for _ in 0..2 {
-        assert!(matches!(refused_b[0].resume_deferred().state,
+        assert_eq!(
+            refused_b[0].resume_deferred(),
+            SourceRedispatchOutcome::NotAttempted,
+            "preexisting service refusal creates no new restoration dispatch obligation"
+        );
+        assert!(matches!(refused_b[0].observation().state,
             SourceRegistrationState::Open { deferred: 1, resume_failure: Some(SourceRegistrationFailure::Admission(
                 crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed {
                     phase: tidepool_runtime::session::SourceAdmissionPhase::Retired { .. }, ..
