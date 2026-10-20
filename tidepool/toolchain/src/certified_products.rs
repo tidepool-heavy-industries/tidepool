@@ -4715,11 +4715,17 @@ fn resolve_receipt_owner(
 
 /// Symbol membership resolved by one actual request input owner. Later product
 /// certification consumes these issued coordinates instead of selecting again.
-#[derive(Debug)]
 pub(crate) struct ResolvedOriginalBindings {
     basis: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     operation: Arc<InventoryOperation>,
     uses: BTreeMap<ReceiptImportOwner, (CachedHomeOwner, u32)>,
+}
+
+impl std::fmt::Debug for ResolvedOriginalBindings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("ResolvedOriginalBindings")
+            .field("uses", &self.uses).finish_non_exhaustive()
+    }
 }
 
 impl ResolvedOriginalBindings {
