@@ -1,15 +1,52 @@
 # Compiler work and authority map
 
-The service map covers root `24d8e0a9607d1a01377214d1a417ee6b324cb2f1`
-and explicitly named receiving candidates on 2026-10-20. A candidate is not part
-of that root merely because its source review or a component check passed.
+The current review baseline is `aa811a4483`, with the demand-product changes
+still on receiving branches on 2026-10-20. A candidate is not part of that
+root merely because its source review or a component check passed.
 The later P1–P10 material describes the earlier finite path at
 `8245fa800a`/`c10837d44d`; it is a historical deletion inventory, not the live
 service dataflow. Stage timings are inclusive and are not additive. Use
 [compiler profiling](compiler-profiling.md) for measurement and
 [property testing](property-testing.md) for independent checks.
 
-## Service path: current ownership and receiving boundaries
+## Current service costs and receiving changes
+
+The [demand-products contract](../plans/shared-warm-compiler/completion/demand-products.md)
+owns the accepted next implementation. These changes are not yet integrated or
+qualified at the baseline above.
+
+| Current producer and consumer | Work still present | Receiving change and invariant |
+| --- | --- | --- |
+| Rust `CompilerWorld` restoration → Haskell `ExactScope` | `compiler_world.rs` exports a full `MaterializedContext` plus a separate primary-association map. The compiler receives runtime graph facts beyond its selected compiler inputs. | N replaces these with one private, owner-issued compiler-primary projection. Full runtime correlation remains distinct from compiler-input identity and exact native demand. Equal interfaces do not authorize exchanging historical implementations. |
+| Held World → staged native certification | Completed source products and native certification have separate handoffs. Certified GHC Name mappings are not carried as a complete reusable product. | E pairs the existing completion and certification owners, carries the certified Name mapping within its actual compiler universe, and uses the same native worklist with optional prior products. SOURCE-cycle rehydration remains required. |
+| `ExactInputOwner` → optional World residency | One 128 MiB default encoded-input allowance is shared by original inputs and World backing. A separate 4096-entry limit currently also counts World nodes and subtracts them from original-image slots. | D removes World participation in this mixed count, preserving shared byte accounting, cleanup quarantine and RSS admission. A residency observation is not a permanent retention promise. |
+| Endpoint binding → daemon scheduler | A World reference does not yet supply an idle-worker affinity hint to transaction admission. A warm process alone does not establish reuse of the desired World. | C prefers a matching idle worker without changing admission authority, queue policy or accepted-request ownership. Actual worker identity is observed after transaction start, including queued worker replacement. |
+| Public Reload → retirement owner | The larger affine lifecycle tranche at `1a497cdf8e` remains outside this baseline. Its source review does not establish current root behavior. | Integrate the tranche coherently, including public callers, source slots, ownership transfer and protocol mirrors. Delivery-loss execution and production nonstart discharge remain unresolved gates. |
+
+The triggering packet census measured 5,204 distinct reachable blocks: 4,698
+HAMT nodes, two scope proofs and 504 smaller facts. The two proofs represented
+20,951 logical native groups in different issuance scopes; they were not
+duplicate nodes within one proof. The context subtree occupied about 54.3 MB,
+while its separate primary-association subtree occupied about 45 KB. That is
+evidence of over-delivery, not permission to erase distinct issuance scopes.
+
+The retained trace measured three Complete acquisitions on the same process at
+31.981 s, 33.149 s and 31.598 s. These are pre-change observations from the
+investigation, not timings of this baseline or a forecast for the new design.
+The first acquisition is not yet fully decomposed. The compiler projection
+change also leaves Rust's runtime-context materialization and commitment
+calculation as a measured residual, rather than claiming all graph work vanishes.
+
+Root `aa811a4483` adds owner, expected/actual interface seals and certificate/input
+paths to canonical-interface mismatch diagnostics. Its compilation and execution
+are pending. The public startup mismatch must still be reproduced with that
+diagnostic; inventory contents alone cannot identify its cause.
+
+## Earlier service checkpoint and receiving boundaries
+
+The table below records root `24d8e0a9607d1a01377214d1a417ee6b324cb2f1`
+and its then-receiving candidates. Its worker IDs and pending results are
+historical context, not current integration or qualification evidence.
 
 The controlling documents are the [completion plan](../plans/shared-warm-compiler/completion/plan.md)
 and [implementation reset](../plans/shared-warm-compiler/completion/implementation-reset.md).
