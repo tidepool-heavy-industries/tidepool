@@ -24,8 +24,9 @@ commits should follow `92fa518105`.
 
 ## State you are inheriting
 
-- Branch `integration/compiler-query-warm-final`; code tip `92fa518105`,
-  documentation tip `fc73e0e652`.
+- Branch `integration/compiler-query-warm-final`; code tip `92fa518105`.
+  Everything after it is documentation only; use the branch HEAD for the notes
+  and `92fa518105` for code claims.
 - It builds. Three distinct selectors pass in six executions: query dispatch
   (`04`, `10`, and `14` at the docs tip), persona successor (`05`, `11`), and
   the front-door prepared fixture (`07` at `a4aa30a0a2`, `14` at the docs tip).

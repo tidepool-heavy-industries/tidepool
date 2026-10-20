@@ -10,11 +10,11 @@ campaign. Evidence lives outside Git under
 - Checkout: `/srv/swarm/checkouts/tidepool-join-final-20261019`
 - Branch: `integration/compiler-query-warm-final`
 - **Code tip: `92fa518105`** (Batch A merge)
-- Documentation-only commits follow it: `75476fb97b` (these notes),
-  `e5e86803e5` (guide and plan anchor corrections) and `fc73e0e652` (a
-  fact-check rewrite of these notes, plus current-state banners on the
-  superseded `README`, `STATUS`, `TAKEOVER` and `HANDOFF` pages). Treat
-  `92fa518105` as the OID for any code or test claim.
+- Every commit after it is documentation only: `75476fb97b` (these notes),
+  `e5e86803e5` (guide and plan anchor corrections), `fc73e0e652` (fact-check
+  rewrite), `75b1946709` (superseded-handoff banners, tip reruns, A1c result)
+  and later note updates. Confirm with `git diff --name-only 92fa518105..HEAD`.
+  Treat `92fa518105` as the OID for any code or test claim.
 
 The join contains, in first-parent order: `1df404b22f` (handlers/moduleExports
 cut), merge `630f6e5d35` (native product anchor), merge `961cc99a2a` (d5 reopen
