@@ -229,12 +229,32 @@ seal. A symbol/generation key is a correlation key, not authority; incompatible
 references must still refuse. Do not reattribute an earlier captured reference
 to a later consumer or infer native demand from the whole helper inventory.
 
+Declaration publication has executable demand even when the cell contains no
+immediate expression. Root actual exported runtime values, published instance
+dictionaries, class default implementations and pattern matcher/builders through
+their GHC identities and the existing certified native closure. Do not infer
+these roots from generated spelling. The runtime consumes the resulting exact
+retained references in the same declaration commit, including a hidden private
+operand that the ordinary visible-binding enumeration deliberately excludes.
+Later invocation must remain valid after the temporary host mount retires.
+
+Preserve export namespace through planning, rendering, certification and recovery.
+A pattern synonym and a type with the same spelling are distinct declarations;
+rendering or decoding must not reconstruct namespace from capitalization.
+
 An authored stage's Lib certificate proves that stage's exports and closure.
 It does not prove a cumulative lexical facade. Use the existing authenticated
 declaration-join issuer for cumulative publication and advance the runtime World
 from the actual join and name delta. Never relabel the stage output or reconstruct
 a finite compile view to fill the gap. Count and measure any remaining cumulative
 join work as its owner's optimization obligation.
+
+The prepared name delta owns each resulting winner, including an ancestor
+revealed by removing a shadow. Carry its actual retained checked row into the
+compiler successor. Looking up that spelling in the predecessor's visible map
+cannot establish the newly exposed binding. Prepare fallible successor products
+before committing, then install the World association and runtime name/origin
+changes together through the existing infallible activation callback.
 
 ## 4. Same physical output through the existing executable issuer
 
