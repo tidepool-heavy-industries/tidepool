@@ -829,7 +829,7 @@ impl HostCarrier {
     pub fn session_root(&self) -> Result<&Path, ResidentError> {
         match &self.origin {
             HostCarrierOrigin::Checked { admission, .. } => {
-                Ok(admission.snapshot().view().session_root())
+                Ok(admission.snapshot().session_root())
             }
             HostCarrierOrigin::Interface { admission, .. } => Ok(&admission.session_root),
             HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
@@ -5883,7 +5883,7 @@ where
         let interface = execution
             .value_interface_certificate()
             .ok_or(ResidentError::UnsupportedCheckedTurn)?;
-        let session_root = admission.snapshot().view().session_root().to_path_buf();
+        let session_root = admission.snapshot().session_root().to_path_buf();
         let staged = self.state.stage_checked_value_interface(interface)?;
         self.state.validate_staged_value_interface(&staged)?;
         if self.state.mount_cancelled(self.run_context.resource_scope) {

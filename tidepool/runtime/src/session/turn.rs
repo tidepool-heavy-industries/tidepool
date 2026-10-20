@@ -8866,6 +8866,7 @@ mod tests {
         let adopted = protected.snapshot();
         let imports = adopted
             .view()
+            .unwrap()
             .turn_imports(&crate::session::SourceImports::new());
         assert!(
             imports
@@ -8878,12 +8879,13 @@ mod tests {
             "the local native original is not the future lexical import"
         );
         assert_eq!(
-            adopted.view().library().unwrap().module_name(),
+            adopted.view().unwrap().library().unwrap().module_name(),
             module,
             "the reserved native declaration identity remains unchanged"
         );
         assert!(adopted
             .view()
+            .unwrap()
             .exact_declaration_context()
             .unwrap()
             .lexical_graph()
@@ -8950,6 +8952,7 @@ mod tests {
         let original_context = protected
             .snapshot()
             .view()
+            .unwrap()
             .exact_declaration_context()
             .cloned();
         let value_items = [replacement, binding, expression];
@@ -9027,7 +9030,7 @@ mod tests {
                 item.index() + 1
             );
             assert_eq!(
-                protected.snapshot().view().exact_declaration_context(),
+                protected.snapshot().view().unwrap().exact_declaration_context(),
                 original_context.as_ref(),
                 "private value overlays must preserve the exact original declaration context"
             );
