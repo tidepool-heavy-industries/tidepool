@@ -21,6 +21,7 @@ mod source_admission;
 pub use source_admission::{
     OwnSourceFenceReopened, RuntimeSourceAdmission, RuntimeSourceCompilerTransaction,
     RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim, RuntimeSourceReopen,
+    RuntimeSourcePublicationView,
     SourceAdmissionError, SourceFenceTransitionFailure,
     SourceAdmissionHook, SourceAdmissionPhase,
 };
@@ -103,6 +104,7 @@ pub use admission::{
     PrivateExecutionAdmission, RuntimeBindingInterfaceReservation, RuntimeCellAdmission,
     RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
     RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission, RuntimeLexicalScopeLease,
+    RuntimeOriginalSource,
 };
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
@@ -220,7 +222,7 @@ mod notebook_generation;
 pub use notebook_generation::{
     ActiveNotebookGeneration, ComposedPromptSnapshot, DurableGenerationReferences,
     GenerationArtifactReference, NotebookGenerationError, NotebookGenerationId,
-    PreparedNotebookGeneration,
+    PreparedNotebookGeneration, PreparedNotebookGenerationWithWorld,
 };
 
 use std::collections::{BTreeMap, HashMap};

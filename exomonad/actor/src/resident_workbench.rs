@@ -1873,17 +1873,16 @@ impl ActorGeneration {
     }
 }
 
-enum PreparedGenerationCommit {
+enum PreparedGenerationCommit<D = tidepool_runtime::session::PreparedNotebookGenerationWithWorld> {
     Restored {
         selected: tidepool_runtime::session::ActiveNotebookGeneration,
         readiness: Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
     },
     Ephemeral {
         id: tidepool_runtime::session::NotebookGenerationId,
-        source: Option<tidepool_runtime::session::PendingPublishedSourceOriginals>,
     },
     Durable {
-        prepared: tidepool_runtime::session::PreparedNotebookGeneration,
+        prepared: D,
         selected: tidepool_runtime::session::ActiveNotebookGeneration,
     },
 }
@@ -1895,13 +1894,43 @@ pub(crate) struct PreparedActorGeneration {
     machine_owner: std::sync::Weak<dyn std::any::Any + Send + Sync>,
     checkout_context: crate::ActorSessionContext,
     expected: ActorRequestSnapshot,
+    reload_report: Option<PreparedReloadReport>,
+    candidate: Arc<ActorGenerationCandidate>,
+    commit: PreparedGenerationCommit,
+    public_owner: crate::resident_actor::PreparedWorkbenchGenerationOwner,
+    #[cfg(test)]
+    installation_work: InstallationObservationWork,
+}
+
+struct ActorGenerationCandidate {
+    installation: InstalledToolLease,
     prompts: tidepool_runtime::session::ComposedPromptSnapshot,
     configuration_digest: [u8; 32],
-    reload_report: Option<PreparedReloadReport>,
+    context: crate::ActorSessionContext,
+    scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    compiler_world: Arc<tidepool_runtime::session::CompletedCompilerWorld>,
+}
+
+/// Retains the same frozen B product without publication or settlement rights.
+#[derive(Clone)]
+pub(crate) struct ActorGenerationCandidateCustody(Arc<ActorGenerationCandidate>);
+
+impl ActorGenerationCandidateCustody {
+    pub(crate) fn same_candidate(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+struct PreparingActorGeneration {
+    machine_owner: std::sync::Weak<dyn std::any::Any + Send + Sync>,
+    checkout_context: crate::ActorSessionContext,
+    expected: ActorRequestSnapshot,
+    prompts: tidepool_runtime::session::ComposedPromptSnapshot,
+    configuration_digest: [u8; 32],
     installation: InstalledToolLease,
     context: crate::ActorSessionContext,
     scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-    commit: PreparedGenerationCommit,
+    commit: PreparedGenerationCommit<tidepool_runtime::session::PreparedNotebookGeneration>,
     public_owner: crate::resident_actor::PreparedWorkbenchGenerationOwner,
     #[cfg(test)]
     installation_work: InstallationObservationWork,
@@ -1948,6 +1977,10 @@ pub(crate) enum ActorGenerationRetirementCutoff {
 }
 
 impl ReservedActorGeneration {
+    pub(crate) fn candidate_custody(&self) -> ActorGenerationCandidateCustody {
+        ActorGenerationCandidateCustody(self.prepared.candidate.clone())
+    }
+
     pub(crate) fn expected_generation(&self) -> Option<&Arc<ActorGeneration>> {
         self.guard.attempt.expected.generation()
     }
@@ -2143,6 +2176,15 @@ enum RetirementSettlementStage {
 }
 
 impl PublicationFence {
+    fn publication_view(
+        &self,
+    ) -> Result<tidepool_runtime::session::RuntimeSourcePublicationView, PublicationSettlementError> {
+        match self {
+            Self::Held(fence) => Ok(fence.publication_view()),
+            Self::ReopenAttempted => Err(PublicationSettlementError::ReopenAttempted),
+        }
+    }
+
     fn reopen(
         &mut self,
         target: &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
@@ -2195,6 +2237,7 @@ struct ActorPublicationVisibility {
     state: Arc<InstalledToolsState>,
     attempt: Arc<ActorPublicationAttempt>,
     world: Option<generation_admission::WorldPublicationVisibility>,
+    source: tidepool_runtime::session::RuntimeSourcePublicationView,
 }
 
 impl ActorPublicationGuard {
@@ -2311,8 +2354,17 @@ impl ActorPublicationGuard {
         }
     }
 
-    fn visibility(&self) -> ActorPublicationVisibility {
-        ActorPublicationVisibility {
+    fn visibility(&self) -> Result<ActorPublicationVisibility, PublicationSettlementError> {
+        let source = match &self.settlement {
+            ActorPublicationState::Armed(PublicationAuthority::World(world)) => {
+                world.source_publication_view()?
+            }
+            ActorPublicationState::Armed(PublicationAuthority::TargetFence { fence, .. }) => {
+                fence.publication_view()?
+            }
+            ActorPublicationState::Settled => return Err(PublicationSettlementError::ReopenAttempted),
+        };
+        Ok(ActorPublicationVisibility {
             state: self.state.clone(),
             attempt: self.attempt.clone(),
             world: match &self.settlement {
@@ -2322,7 +2374,8 @@ impl ActorPublicationGuard {
                 ActorPublicationState::Armed(PublicationAuthority::TargetFence { .. })
                 | ActorPublicationState::Settled => None,
             },
-        }
+            source,
+        })
     }
 
     fn cutoff_error(error: PublicationSettlementError) -> ResidentActorWorkbenchError {
@@ -2686,6 +2739,7 @@ where
             self.state.clone(),
             prepared.expected.clone(),
             prepared
+                .candidate
                 .installation
                 .source_dependency()
                 .generation()
@@ -2734,7 +2788,19 @@ where
             )));
         }
         let publication = owner.decision.clone();
-        let visibility = owner.visibility();
+        let visibility = match owner.visibility() {
+            Ok(visibility) => visibility,
+            Err(settlement) => {
+                return Err(ResidentActorWorkbenchError::PublicationSettlement {
+                    failure: Box::new(ActorPublicationSettlementFailure {
+                        outcome: Ok(ActorGenerationCommit::Refused(
+                            "publication has no armed source fence".into(),
+                        )),
+                        settlement,
+                    }),
+                });
+            }
+        };
         // The affine phase/fence owner is outside checkout, including cancellation
         // and setup failure. The worker receives visibility rights only.
         let completed = self.access.with_machine_wait_mode(prepared.checkout_context.clone(), None, false, move |session, _, _| {
@@ -2742,8 +2808,13 @@ where
                 return Ok(Ok(ActorGenerationCommit::Refused("publication attempt is unavailable".into())));
             }
             let outcome = (|| {
-            session.validate_lexical_scope_lease(prepared.scope.scope(), &prepared.scope)?;
-            let PreparedActorGeneration { installation, context, scope, commit, public_owner, prompts, configuration_digest, .. } = prepared;
+            session.validate_lexical_scope_lease(prepared.candidate.scope.scope(), &prepared.candidate.scope)?;
+            let PreparedActorGeneration { candidate, commit, public_owner, .. } = prepared;
+            let installation = candidate.installation.clone();
+            let context = candidate.context.clone();
+            let scope = candidate.scope.clone();
+            let prompts = candidate.prompts.clone();
+            let configuration_digest = candidate.configuration_digest;
             let mut visible = None;
             let mut visibility_live = true;
             match commit {
@@ -2759,27 +2830,27 @@ where
                     }
                     let owner = public_owner.bind(Some(readiness));
                     let generation = Arc::new(ActorGeneration { id:selected.generation(),installation,prompts:selected.references.prompts.clone(),context,public_owner:owner,scope,configuration_digest,durable:Some(selected) });
-                    if !visibility.install(generation.clone()) {
+                    if !session.with_current_compiler_world(&candidate.compiler_world, &visibility.source, || visibility.install(generation.clone())).map_err(ResidentError::Session)? {
                         return Ok(ActorGenerationCommit::Unconfirmed("publication became unavailable at visibility".into()));
                     }
                     visible=Some((generation, false));
                 },
-                PreparedGenerationCommit::Ephemeral { id, source } => {
+                PreparedGenerationCommit::Ephemeral { id } => {
                     let owner = public_owner.bind(None);
-                    let Some(claim) = publication.claim_commit() else { return Ok(ActorGenerationCommit::Refused("reload cancelled before commit".into())); };
-                    if let Some(source) = source {
-                        if let Err(error) = session.publish_source_originals(source) {
-                            claim.before_rename_failure();
-                            return Err(error.into());
-                        }
-                    }
                     let generation = Arc::new(ActorGeneration { id,installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:None });
-                    visibility_live = visibility.install(generation.clone());
-                    let cancellation_pending = match publication_kind {
-                        ActorGenerationPublication::Terminal => claim.published(),
-                        ActorGenerationPublication::Continuing => claim.published_continuing(),
-                    };
-                    visible = Some((generation, cancellation_pending));
+                    let settled = session.with_current_compiler_world(&candidate.compiler_world, &visibility.source, || {
+                        let Some(claim) = publication.claim_commit() else { return Err(ActorGenerationCommit::Refused("reload cancelled before commit".into())); };
+                        visibility_live = visibility.install(generation.clone());
+                        let cancellation_pending = match publication_kind {
+                            ActorGenerationPublication::Terminal => claim.published(),
+                            ActorGenerationPublication::Continuing => claim.published_continuing(),
+                        };
+                        visible = Some((generation, cancellation_pending));
+                        Ok(())
+                    }).map_err(ResidentError::Session)?;
+                    if let Err(refusal) = settled {
+                        return Ok(refusal);
+                    }
                 },
                 PreparedGenerationCommit::Durable { prepared, selected } => {
                     let mut candidate = Some(InitialPublicationCandidate {
@@ -2792,9 +2863,9 @@ where
                     };
                     let result = match publication_kind {
                         ActorGenerationPublication::Terminal => session
-                            .commit_notebook_generation(prepared, &publication, on_visible),
+                            .commit_notebook_generation_with_world(prepared, &publication, &visibility.source, on_visible),
                         ActorGenerationPublication::Continuing => session
-                            .commit_notebook_generation_continuing(prepared, &publication, on_visible),
+                            .commit_notebook_generation_with_world_continuing(prepared, &publication, &visibility.source, on_visible),
                     };
                     let result = match result {
                         Ok(result) => result,
@@ -3342,7 +3413,7 @@ where
             .as_ref()
             .and_then(|_| observed.lease.tools.as_ref())
             .and_then(|tools| tools._source_original.clone());
-        self.access
+        let preparing = self.access
             .with_continuation_machine(context, move |session, context, _, _| {
                 let _source_claim = context.source_dependency().claim()?;
                 let mut next_context = context.clone();
@@ -3391,6 +3462,13 @@ where
                             installation_work = observed.work;
                         }
                         installation = observed.lease;
+                        if let Some(selection) = source {
+                            let pending = session.stage_published_source_originals_in(
+                                scope.scope(),
+                                selection,
+                            )?;
+                            session.publish_source_originals(pending)?;
+                        }
                         PreparedGenerationCommit::Ephemeral {
                             id: expected
                                 .as_ref()
@@ -3401,14 +3479,6 @@ where
                                 .map_err(|error| {
                                     ResidentActorWorkbenchError::ActorProtocol(error.to_string())
                                 })?,
-                            source: source
-                                .map(|selection| {
-                                    session.stage_published_source_originals_in(
-                                        scope.scope(),
-                                        selection,
-                                    )
-                                })
-                                .transpose()?,
                         }
                     }
                     crate::ActorPersistencePolicy::Durable => {
@@ -3501,13 +3571,12 @@ where
                     &scope,
                     native_owner,
                 )?;
-                Ok(PreparedActorGeneration {
+                Ok(PreparingActorGeneration {
                     machine_owner,
                     checkout_context,
                     expected: expected_snapshot,
                     prompts,
                     configuration_digest,
-                    reload_report: None,
                     #[cfg(test)]
                     installation_work,
                     installation,
@@ -3517,7 +3586,120 @@ where
                     public_owner,
                 })
             })
-            .await
+            .await?;
+        self.complete_actor_generation_world(preparing).await
+    }
+
+    async fn complete_actor_generation_world(
+        &self,
+        preparing: PreparingActorGeneration,
+    ) -> Result<PreparedActorGeneration, ResidentActorWorkbenchError> {
+        let source = preparing.installation.source().clone();
+        let reference = source
+            .generation_evidence()
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "candidate compiler world lacks its frozen source evidence".into(),
+                )
+            })?
+            .reference
+            .clone();
+        let context = preparing.context.clone();
+        let capture_reference = reference.clone();
+        let (preparing, admitted) = self
+            .access
+            .with_compiler_machine(context.clone(), move |session, _, _, _| {
+                let admitted = match &preparing.commit {
+                    PreparedGenerationCommit::Durable { prepared, .. } => session
+                        .capture_notebook_generation_world(prepared, &preparing.scope)
+                        .map_err(ResidentError::Session)?,
+                    _ => session
+                        .capture_inspection_world_in(
+                            preparing.scope.scope(),
+                            &capture_reference,
+                            &preparing.scope,
+                        )
+                        .map_err(ResidentError::Session)?,
+                };
+                Ok((preparing, admitted))
+            })
+            .await?;
+        let dependency = context.source_dependency().clone();
+        let work = crate::capabilities::CompilerOwnerScope::current()?
+            .with_source_dependency(&dependency)
+            .admit_work()?;
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(work.control()));
+        let completed = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+            let settled = work.run_source_compiler_phase(
+                &dependency,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                |owner, _| tidepool_runtime::session::run_admitted_compiler_world(owner, admitted, || {
+                    source.capture_compiler_sources().map_err(|error| match error {
+                        crate::SourceInspectionError::Unavailable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnavailable(detail),
+                        crate::SourceInspectionError::Unreadable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnreadable(detail),
+                    })
+                }),
+            ).map_err(ResidentActorWorkbenchError::from)?;
+            tidepool_runtime::session::finish_admitted_compiler_world(settled)
+                .map_err(ResidentActorWorkbenchError::WorldInspection)
+        })).await.map_err(ResidentActorWorkbenchError::Join)??;
+        cancel_on_drop.0 = None;
+        let compiler_world = Arc::new(completed);
+        if matches!(
+            &preparing.commit,
+            PreparedGenerationCommit::Restored { .. } | PreparedGenerationCommit::Ephemeral { .. }
+        ) {
+            let install = compiler_world.clone();
+            let original = preparing.scope.clone();
+            self.access
+                .with_compiler_machine(context, move |session, _, _, _| {
+                    if !session.install_compiler_world_if_current(&install, &reference, &original) {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "candidate compiler world changed before installation".into(),
+                        ));
+                    }
+                    Ok(())
+                })
+                .await?;
+        }
+        let commit = match preparing.commit {
+            PreparedGenerationCommit::Durable { prepared, selected } => {
+                PreparedGenerationCommit::Durable {
+                    prepared: prepared
+                        .with_compiler_world(compiler_world.clone())
+                        .map_err(ResidentError::Session)?,
+                    selected,
+                }
+            }
+            PreparedGenerationCommit::Restored {
+                selected,
+                readiness,
+            } => PreparedGenerationCommit::Restored {
+                selected,
+                readiness,
+            },
+            PreparedGenerationCommit::Ephemeral { id } => {
+                PreparedGenerationCommit::Ephemeral { id }
+            }
+        };
+        Ok(PreparedActorGeneration {
+            machine_owner: preparing.machine_owner,
+            checkout_context: preparing.checkout_context,
+            expected: preparing.expected,
+            reload_report: None,
+            candidate: Arc::new(ActorGenerationCandidate {
+                installation: preparing.installation,
+                prompts: preparing.prompts,
+                configuration_digest: preparing.configuration_digest,
+                context: preparing.context,
+                scope: preparing.scope,
+                compiler_world,
+            }),
+            commit,
+            public_owner: preparing.public_owner,
+            #[cfg(test)]
+            installation_work: preparing.installation_work,
+        })
     }
 
     /// The existing machine checkout and one actor issuance fence own publication.
@@ -21197,6 +21379,7 @@ pub(crate) mod request_tests {
         prepared: PreparedActorGeneration,
     ) {
         let target = prepared
+            .candidate
             .installation
             .source_dependency()
             .generation()
@@ -21291,6 +21474,7 @@ pub(crate) mod request_tests {
         prepared: PreparedActorGeneration,
     ) {
         let parent = prepared
+            .candidate
             .installation
             .source_dependency()
             .generation()
@@ -21300,6 +21484,7 @@ pub(crate) mod request_tests {
             .unwrap()
             .clone();
         let target = prepared
+            .candidate
             .installation
             .source_dependency()
             .generation()
@@ -21953,7 +22138,7 @@ pub(crate) mod request_tests {
                     .await
                     .unwrap();
                 assert_eq!(rejected.installation_work, expected_work);
-                let rejected_scope = rejected.scope.clone();
+                let rejected_scope = rejected.candidate.scope.clone();
                 let decision = tidepool_runtime::session::PublicationDecision::new();
                 if cancelled {
                     decision.request_cancellation();
@@ -22087,7 +22272,7 @@ pub(crate) mod request_tests {
                 .await
                 .unwrap();
             assert_eq!(prepared.installation_work, expected_work);
-            let next_scope = prepared.scope.scope();
+            let next_scope = prepared.candidate.scope.scope();
             workbench
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
