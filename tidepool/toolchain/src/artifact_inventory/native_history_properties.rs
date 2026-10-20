@@ -608,8 +608,10 @@ impl Rows {
             roots: BTreeSet::new(),
             demand: BTreeSet::new(),
             root_bindings: BTreeSet::new(),
+            root_options: BTreeMap::new(),
         };
         let mut root_bindings = parent.root_bindings.clone();
+        let mut root_options = BTreeMap::new();
         root_bindings.extend(
             namespace
                 .iter()
@@ -668,7 +670,13 @@ impl Rows {
                     "unobserved fresh issuing identity"
                 );
                 if is_root {
-                    root_bindings.extend(&matching);
+                    if matching.len() == 1 {
+                        root_bindings.extend(&matching);
+                    } else {
+                        // Scope interning may reuse one qualified prior issuer.
+                        // Keep an independent allowed relation, never all peers.
+                        root_options.insert(*raw, matching.clone());
+                    }
                 }
                 selected.extend(matching);
             }
@@ -683,6 +691,7 @@ impl Rows {
             roots: parent.roots.clone(),
             demand: catalog.group_closure(&parent.demand.union(demanded).copied().collect()),
             root_bindings,
+            root_options,
         }
     }
 }
@@ -699,6 +708,9 @@ struct View {
     // Exact root bindings are distinct from both the selected logical closure
     // and the complete retained physical graph.
     root_bindings: BTreeSet<Physical>,
+    // Only ambiguous/no-fresh issuance has alternatives. Eligibility comes
+    // from the prior model; a validated witness is frozen for the next step.
+    root_options: BTreeMap<RawGroup, BTreeSet<Physical>>,
 }
 
 impl View {
@@ -713,6 +725,7 @@ impl View {
 struct GraphObservation {
     physical: BTreeSet<ArtifactBindingNode>,
     roots: BTreeSet<ArtifactBindingNode>,
+    root_options: BTreeMap<RawGroup, BTreeSet<ArtifactBindingNode>>,
     namespace: BTreeSet<ArtifactBinding>,
     edges: BTreeSet<(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)>,
     demand: BTreeSet<NativeGroupKey>,
@@ -726,6 +739,16 @@ impl GraphObservation {
                 .root_bindings
                 .iter()
                 .map(|row| rows.handles[row])
+                .collect(),
+            root_options: view
+                .root_options
+                .iter()
+                .map(|(raw, candidates)| {
+                    (
+                        *raw,
+                        candidates.iter().map(|row| rows.handles[row]).collect(),
+                    )
+                })
                 .collect(),
             namespace: view
                 .namespace
@@ -763,11 +786,42 @@ impl GraphObservation {
                 )
                 .collect(),
             roots: graph.roots.into_iter().collect(),
+            root_options: BTreeMap::new(),
             namespace: graph.namespace.into_iter().collect(),
             edges: view.binding_dependencies().into_iter().collect(),
             demand: view.selected_native_groups(),
         }
     }
+}
+
+fn check_root_frontier(
+    fixed: &BTreeSet<ArtifactBindingNode>,
+    options: &BTreeMap<RawGroup, BTreeSet<ArtifactBindingNode>>,
+    actual: &BTreeSet<ArtifactBindingNode>,
+) -> Result<(), TestCaseError> {
+    prop_assert!(
+        fixed.is_subset(actual),
+        "an exact prior/artifact root was dropped"
+    );
+    let extra = actual.difference(fixed).copied().collect::<BTreeSet<_>>();
+    let allowed = options.values().flatten().copied().collect::<BTreeSet<_>>();
+    prop_assert!(
+        extra.is_subset(&allowed),
+        "a root lies outside the independently allowed frontier"
+    );
+    for (raw, eligible) in options {
+        prop_assert!(
+            extra.intersection(eligible).count() <= 1,
+            "more than one additional root for {:?}",
+            raw
+        );
+        prop_assert!(
+            actual.intersection(eligible).next().is_some(),
+            "no qualified root witness for {:?}",
+            raw
+        );
+    }
+    Ok(())
 }
 
 fn check_graph_observation(
@@ -783,13 +837,17 @@ fn check_graph_observation(
         step,
         slot
     );
-    prop_assert_eq!(
-        &actual.roots,
-        &expected.roots,
-        "exact roots at step {}, slot {}",
-        step,
-        slot
-    );
+    check_root_frontier(&expected.roots, &expected.root_options, &actual.roots).map_err(
+        |error| {
+            TestCaseError::fail(format!(
+                "root frontier at step {step}, slot {slot}: {error}"
+            ))
+        },
+    )?;
+    prop_assert!(expected
+        .root_options
+        .values()
+        .all(|candidates| candidates.is_subset(&expected.physical)));
     prop_assert_eq!(
         &actual.namespace,
         &expected.namespace,
@@ -1217,6 +1275,7 @@ fn run_history_observed(
                     roots: BTreeSet::new(),
                     demand: BTreeSet::new(),
                     root_bindings: BTreeSet::new(),
+                    root_options: BTreeMap::new(),
                 });
             }
             Op::Admit {
@@ -1410,6 +1469,7 @@ fn run_history_observed(
                             roots: ids,
                             demand,
                             root_bindings,
+                            root_options: BTreeMap::new(),
                         });
                         coverage.projections += 1;
                     } else {
@@ -1455,6 +1515,7 @@ fn run_history_observed(
                         roots,
                         demand,
                         root_bindings,
+                        root_options: BTreeMap::new(),
                     });
                     coverage.merges += 1;
                     if left_view.inventory != right_view.inventory {
@@ -1609,6 +1670,16 @@ fn run_history_observed(
                     step,
                     slot
                 );
+                if !view.root_options.is_empty() {
+                    let witnessed = observed_graph
+                        .roots
+                        .iter()
+                        .map(|root| rows.register(catalog, *root))
+                        .collect();
+                    let next = model[slot].as_mut().unwrap();
+                    next.root_bindings = witnessed;
+                    next.root_options.clear();
+                }
             }
         }
         for inventory in 0..2 {
@@ -1740,6 +1811,7 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
             roots: BTreeSet::new(),
             demand: BTreeSet::new(),
             root_bindings: BTreeSet::new(),
+            root_options: BTreeMap::new(),
         };
         let base_model = rows.admit(
             &catalog,
@@ -1802,6 +1874,7 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                 roots: BTreeSet::new(),
                 demand: BTreeSet::new(),
                 root_bindings: BTreeSet::new(),
+                root_options: BTreeMap::new(),
             };
             let private = ArtifactView::from_custody(Arc::clone(offer.custody_lease()));
             check_graph_observation(
@@ -2111,7 +2184,95 @@ fn raw_graph_oracle_rejects_extra_bindings_edges_roots_and_demand() {
         roots: BTreeSet::new(),
         demand: BTreeSet::new(),
         root_bindings: BTreeSet::new(),
+        root_options: BTreeMap::new(),
     };
+    // Three real recovery issuers share the same carrier but have different
+    // qualified Group scopes. Exercise the allowed relation itself, before
+    // any accepted witness can become the next model state's exact frontier.
+    {
+        let common = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                catalog.entries(true, false),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        let available = catalog.supplied_ids(true);
+        let mut relation_rows = Rows::default();
+        let common_model = relation_rows.admit(
+            &catalog,
+            &parent,
+            &common,
+            &available,
+            &BTreeSet::new(),
+            &available,
+            &BTreeSet::new(),
+        );
+        let raw = (1, 3);
+        let mut candidates = Vec::new();
+        let mut unintended = None;
+        for root in [0, 1, 3] {
+            let requested = catalog.group_closure(&root_groups(root));
+            let issuer = inventory
+                .admit_recovery_selection(&common, Vec::new(), &catalog.selection(&requested))
+                .unwrap();
+            let identities = issuer
+                .capture_graph_selection()
+                .roots
+                .into_iter()
+                .filter_map(|root| match root {
+                    ArtifactBindingNode::Group(group) => Some(group),
+                    _ => None,
+                })
+                .collect();
+            let modeled = relation_rows.admit(
+                &catalog,
+                &common_model,
+                &issuer,
+                &available,
+                &requested,
+                &BTreeSet::new(),
+                &identities,
+            );
+            let eligible = modeled
+                .physical
+                .iter()
+                .filter(|row| {
+                    row.fact == Fact::Group(raw)
+                        && relation_rows.carrier(**row)
+                            == common_model.namespace[&catalog.key(raw).artifact]
+                        && relation_rows.compatible(**row, &common_model.namespace)
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            assert_eq!(eligible.len(), 1);
+            candidates.push(relation_rows.handles[&eligible[0]]);
+            if root == 0 {
+                unintended = modeled
+                    .physical
+                    .iter()
+                    .find(|row| row.fact == Fact::Group((2, 3)))
+                    .map(|row| relation_rows.handles[row]);
+            }
+        }
+        let allowed = candidates.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(allowed.len(), 3);
+        let fixed = BTreeSet::from([candidates[0]]);
+        let options = BTreeMap::from([(raw, allowed)]);
+        assert!(check_root_frontier(&fixed, &options, &fixed).is_ok());
+        let valid = BTreeSet::from([candidates[0], candidates[1]]);
+        assert!(check_root_frontier(&fixed, &options, &valid).is_ok());
+        let mut dropped_prior = valid.clone();
+        dropped_prior.remove(&candidates[0]);
+        assert!(check_root_frontier(&fixed, &options, &dropped_prior).is_err());
+        let mut second_peer = valid.clone();
+        second_peer.insert(candidates[2]);
+        assert!(check_root_frontier(&fixed, &options, &second_peer).is_err());
+        let mut promoted_descendant = valid.clone();
+        promoted_descendant.insert(unintended.unwrap());
+        assert!(check_root_frontier(&fixed, &options, &promoted_descendant).is_err());
+        assert!(check_root_frontier(&BTreeSet::new(), &options, &BTreeSet::new()).is_err());
+    }
     let demanded = catalog.group_closure(&root_groups(0));
     let supplied = catalog.supplied_ids(false);
     let issued = inventory
