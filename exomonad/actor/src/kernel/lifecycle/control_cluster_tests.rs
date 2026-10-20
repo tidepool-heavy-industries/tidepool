@@ -129,9 +129,9 @@ async fn resident_retirement_source_lifetime_with_preparation(
         endpoint.snapshot_for_request().unwrap()
     });
     drop(endpoint);
-    // Production stopped() clears this shared selection before sending the
+    // Production stopped() drains this shared selection before sending the
     // lifecycle retirement event; only issued requests may retain the lease.
-    installed.clear();
+    drop(installed.drain_retired());
     drop(installed);
     if matches!(case, RetirementSourceCase::Failure) {
         owner

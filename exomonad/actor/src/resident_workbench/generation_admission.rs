@@ -239,6 +239,9 @@ impl WorldPublicationVisibility {
     ) -> bool {
         let mut world = self.world.0.state.lock();
         let mut current = installed.0.lock();
+        // `InstalledToolsRecord` keeps installation and reply custody together;
+        // publication only owns the availability half.
+        let current = &mut current.availability;
         let exact = world
             .publication
             .as_ref()
@@ -876,7 +879,7 @@ mod tests {
             };
             let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
             assert!(owner.visibility().install(fixture.generation.clone()));
-            fixture.state.clear();
+            drop(fixture.state.drain_retired());
             assert!(!owner.confirmed());
             fixture.assert_candidate_unavailable();
         }
@@ -909,7 +912,7 @@ mod tests {
             let (clearing, started) = std::sync::mpsc::sync_channel(0);
             let clear = std::thread::spawn(move || {
                 clearing.send(()).unwrap();
-                state.clear();
+                drop(state.drain_retired());
             });
             started
                 .recv_timeout(std::time::Duration::from_secs(10))
@@ -919,6 +922,97 @@ mod tests {
             clear.join().unwrap();
             assert!(fixture.state.snapshot_for_call().is_err());
         }
+    }
+
+    #[test]
+    fn terminal_drain_racing_republication_never_repopulates() {
+        // A bootstrap world can begin only one publication and is Bound after
+        // its first install, so the contested republication is a generation
+        // replacement. Bootstrap refusal after retirement is covered below.
+        {
+            let fixture = PublicationFixture::after_confirmed_c();
+            let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            assert!(owner.visibility().install(fixture.generation.clone()));
+            let (entered, observed) = std::sync::mpsc::sync_channel(0);
+            let (release, released) = std::sync::mpsc::channel();
+            owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
+                entered,
+                release: parking_lot::Mutex::new(released),
+            }));
+            let settling = std::thread::spawn(move || owner.confirmed());
+            observed
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+
+            let drain_state = fixture.state.clone();
+            let (draining, drain_started) = std::sync::mpsc::sync_channel(0);
+            let drain = std::thread::spawn(move || {
+                draining.send(()).unwrap();
+                drop(drain_state.drain_retired());
+            });
+            drain_started
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+
+            let republish_state = fixture.state.clone();
+            let expected = fixture.expected.clone();
+            let generation = fixture.generation.clone();
+            let dependency = fixture.generation.dependency().clone();
+            let source = fixture.source.clone();
+            let preparation = fixture.preparation.as_ref().unwrap().client();
+            let (republishing, republish_started) = std::sync::mpsc::sync_channel(0);
+            let republish = std::thread::spawn(move || {
+                republishing.send(()).unwrap();
+                let owner = super::super::ActorPublicationGuard::reserve(
+                    republish_state,
+                    expected,
+                    dependency,
+                    &source,
+                    tidepool_runtime::session::PublicationDecision::new(),
+                    super::super::ActorPublicationOwner::Preparation(preparation),
+                )
+                .unwrap();
+                if let Some(owner) = &owner {
+                    owner.visibility().install(generation);
+                }
+                owner
+            });
+            republish_started
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+
+            // Both terminal drain and republication wait on the settlement
+            // owner's installation lock. Exactly one ordering wins, but the
+            // terminal transition must dominate either outcome.
+            release.send(()).unwrap();
+            assert!(settling.join().unwrap());
+            drain.join().unwrap();
+            if let Some(owner) = republish.join().unwrap() {
+                assert!(
+                    !owner.confirmed(),
+                    "a late publisher must not confirm after terminal drain"
+                );
+            }
+            assert!(fixture.state.is_retired());
+            assert!(fixture.state.snapshot_for_call().is_err());
+            fixture.assert_candidate_unavailable();
+        }
+    }
+
+    #[test]
+    fn terminal_drain_refuses_bootstrap_reinstall_into_retired_state() {
+        let fixture = PublicationFixture::new();
+        drop(fixture.state.drain_retired());
+        assert!(fixture.state.is_retired());
+        assert_eq!(
+            fixture.state.install_bootstrap(
+                super::super::BootstrapExpectation::Empty,
+                fixture.generation.installation.clone(),
+            ),
+            Err(super::super::BootstrapInstallationError::Retired)
+        );
+        assert!(fixture.state.snapshot_for_call().is_err());
+        assert!(fixture.state.current_generation().is_none());
     }
 
     #[test]
@@ -943,7 +1037,7 @@ mod tests {
     fn publisher_terminal_clear_before_refusal_does_not_restore_bootstrap_aliases() {
         let fixture = PublicationFixture::new();
         let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
-        fixture.state.clear();
+        drop(fixture.state.drain_retired());
         owner.refused();
         assert!(fixture.source.claim().is_err());
         fixture.assert_candidate_unavailable();
@@ -1025,7 +1119,7 @@ mod tests {
         fixture.assert_candidate_unavailable();
         assert!(retained_d.claim().is_err());
         assert!(
-            matches!(&*fixture.state.0.lock(), super::super::InstalledToolsAvailability::GenerationUnavailable(selected)
+            matches!(&fixture.state.0.lock().availability, super::super::InstalledToolsAvailability::GenerationUnavailable(selected)
             if Arc::ptr_eq(selected, &fixture.generation))
         );
     }
@@ -1054,7 +1148,7 @@ mod tests {
         assert!(!callback.join().unwrap());
         fixture.assert_unavailable();
         assert!(
-            matches!(&*fixture.state.0.lock(), super::super::InstalledToolsAvailability::GenerationUnavailable(selected)
+            matches!(&fixture.state.0.lock().availability, super::super::InstalledToolsAvailability::GenerationUnavailable(selected)
             if Arc::ptr_eq(selected, &fixture.generation))
         );
     }
@@ -1075,7 +1169,7 @@ mod tests {
         callback.join().unwrap();
         fixture.assert_unavailable();
         assert!(
-            matches!(&*fixture.state.0.lock(), super::super::InstalledToolsAvailability::GenerationUnavailable(selected)
+            matches!(&fixture.state.0.lock().availability, super::super::InstalledToolsAvailability::GenerationUnavailable(selected)
             if Arc::ptr_eq(selected, &fixture.generation))
         );
     }

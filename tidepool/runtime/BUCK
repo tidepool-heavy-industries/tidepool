@@ -1056,30 +1056,6 @@ rust_compile_fail(
 )
 
 rust_compile_fail(
-    name = "compile_fail_prepared_install_consumes_pending",
-    source = "tests/compile_fail/prepared_install_consumes_pending.rs",
-    control = "tests/compile_pass/prepared_install_consumes_pending.rs",
-    expected = "tests/compile_fail/prepared_install_consumes_pending.stderr",
-    dependencies = {
-        "tidepool_runtime": ":tidepool_runtime",
-    },
-    visibility = ["PUBLIC"],
-)
-
-rust_compile_fail(
-    name = "compile_fail_prepared_install_crossed_image",
-    source = "tests/compile_fail/prepared_install_crossed_image.rs",
-    control = "tests/compile_pass/prepared_install_crossed_image.rs",
-    expected = "tests/compile_fail/prepared_install_crossed_image.stderr",
-    dependencies = {
-        "frunk": "//third-party/rust:frunk",
-        "tidepool_mcp": "//bridge/mcp:tidepool_mcp",
-        "tidepool_runtime": ":tidepool_runtime",
-    },
-    visibility = ["PUBLIC"],
-)
-
-rust_compile_fail(
     name = "compile_fail_request_receiver_from_root",
     source = "tests/compile_fail/request_receiver_from_root.rs",
     control = "tests/compile_pass/request_receiver_from_root.rs",

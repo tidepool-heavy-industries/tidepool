@@ -152,8 +152,8 @@ pub use facade::{
 pub use resident::{
     truncate_preview_at_line, ActivationDisplayOwners, CompiledActivationPreview,
     HostBindingPrototype, HostBindingType, HostCarrier, HostPayload, MountedActivationInput,
-    PendingPreparedInstall, PendingPreparedMode, PreparedStartupEntry, ProgramProvenance,
-    ProgramProvenanceError, ReadyPreparedInstall, RequestReceiverEntry, ResidentContinuationEvent,
+    PreparedStartupEntry, ProgramProvenance, ProgramProvenanceError, RequestReceiverEntry,
+    ResidentContinuationEvent,
     ResidentError, ResidentHole, ResidentOutcome, ResidentParcel, ResidentResumeError,
     ResidentSession, RootCustody, RuntimeActivationInput, RuntimeActivationInputAdmission,
     RuntimeActivationPreviewAdmission, RuntimeProgressPublication, RuntimeResultParcel,

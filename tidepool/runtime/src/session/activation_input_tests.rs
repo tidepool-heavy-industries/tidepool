@@ -3843,26 +3843,6 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         !compiled.admission().is_consumed(),
         "authored-turn refusal must not spend the affine preview admission"
     );
-    // The snapshot entry owns a MissingTransaction refusal; the purpose guard
-    // must report Unqualified first even when no compiler transaction exists.
-    let snapshot = resident.snapshot_run_prepared(
-        compiled.renderer.compiled.code().into_owned(),
-        PendingPreparedMode::Value,
-        None,
-    );
-    assert!(
-        matches!(
-            snapshot,
-            Err(ResidentError::Session(SessionError::SourceAdmission(
-                super::super::SourceAdmissionError::Unqualified
-            )))
-        ),
-        "snapshot refusal is Unqualified, not MissingTransaction"
-    );
-    assert!(
-        !compiled.admission().is_consumed(),
-        "snapshot refusal must not spend the affine preview admission"
-    );
     let before_fault = resident.residency();
     {
         let incomplete = bundle.omitting_target_image();

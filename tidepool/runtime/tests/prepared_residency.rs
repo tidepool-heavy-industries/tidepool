@@ -833,47 +833,6 @@ fn resident_turn_carries_worker_certified_import_owners() {
 }
 
 #[test]
-fn certified_resident_turn_compiles_off_checkout_then_installs() {
-    use tidepool_runtime::session::PendingPreparedMode;
-
-    let mut notebook = Notebook::new();
-    notebook.bind("source <- pure (1 :: Int)");
-    let TurnResult::Bind {
-        bound, compiled, ..
-    } = notebook.compile("splitValue <- pure (source + 2)")
-    else {
-        panic!("expected a compiled bind turn");
-    };
-    assert!(compiled.certification().is_some());
-    let [binder] = bound.as_slice() else {
-        panic!("split turn must bind one value");
-    };
-    let pending = notebook
-        .session
-        .snapshot_run_prepared(
-            compiled.into_code(),
-            PendingPreparedMode::Binding {
-                binder: binder.clone(),
-                generation: Generation(notebook.generation),
-                observation: None,
-            },
-            None,
-        )
-        .expect("certified split snapshot");
-    let compiled = pending
-        .compile_off_checkout()
-        .expect("off-checkout compile");
-    let outcome = tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .revalidate_and_run_prepared(compiled, settlement)
-    })
-    .expect("certified split install")
-    .expect("unchanged public view");
-    assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
-}
-
-#[test]
 fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     use tidepool_codegen::scope::ScopeId;
     use tidepool_runtime::session::{HostBindingType, HostCarrier, HostPayload};
