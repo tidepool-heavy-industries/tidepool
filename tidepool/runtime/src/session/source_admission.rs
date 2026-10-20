@@ -208,7 +208,7 @@ impl RuntimeSourceAdmission {
             let next_attempt = attempt
                 .checked_add(1)
                 .ok_or(SourceAdmissionError::Exhausted)?;
-            let mut cutoff = ScopedSourceFence {
+            let cutoff = ScopedSourceFence {
                 state: &mut state,
                 attempt,
                 next_attempt,
@@ -360,6 +360,36 @@ pub struct RuntimeSourceFence {
     attempt: u64,
 }
 
+/// Publication may observe its exact held fence without reopening or retiring it.
+#[derive(Clone)]
+pub struct RuntimeSourcePublicationView {
+    owner: RuntimeSourceAdmission,
+    attempt: u64,
+}
+
+impl RuntimeSourcePublicationView {
+    pub(super) fn with_current<T>(
+        &self,
+        lease: &Arc<super::RuntimeLexicalScopeLease>,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, SourceAdmissionError> {
+        if !lease.source_admission().same_owner(&self.owner) {
+            return Err(SourceAdmissionError::StaleFence);
+        }
+        super::RuntimeLexicalScopeLease::with_source_leases([lease.clone()], |_| {
+            let state = self.owner.0.state.lock();
+            if state.phase
+                != (SourceAdmissionPhase::Fenced {
+                    attempt: self.attempt,
+                })
+            {
+                return Err(SourceAdmissionError::StaleFence);
+            }
+            Ok(action())
+        })
+    }
+}
+
 /// A refusal before cutoff differs from a callback that failed after cutoff.
 /// The latter returns the same newly issued fence with its primary error.
 pub enum SourceFenceTransitionFailure<E> {
@@ -435,6 +465,13 @@ impl Drop for ScopedReopen<'_> {
     }
 }
 impl RuntimeSourceFence {
+    pub fn publication_view(&self) -> RuntimeSourcePublicationView {
+        RuntimeSourcePublicationView {
+            owner: self.owner.clone(),
+            attempt: self.attempt,
+        }
+    }
+
     pub fn unconfirmed_claims(&self) -> usize {
         self.owner.0.state.lock().unconfirmed
     }
@@ -562,6 +599,40 @@ mod tests {
     use super::*;
     use crate::session::{PersistentSession, SessionError};
     use proptest::prelude::*;
+
+    #[test]
+    fn publication_view_requires_its_exact_still_held_fence() {
+        let mut session = PersistentSession::new(None, 0);
+        let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+        let other = session.mint_notebook_scope_with_lease(None).unwrap();
+        let fence = lease.source_admission().fence().unwrap();
+        let view = fence.publication_view();
+        let ran = std::cell::Cell::new(false);
+        assert_eq!(
+            view.with_current(&other, || ran.set(true)),
+            Err(SourceAdmissionError::StaleFence)
+        );
+        assert!(!ran.get());
+        view.with_current(&lease, || ran.set(true)).unwrap();
+        assert!(ran.replace(false));
+
+        fence.reopen(&lease).unwrap();
+        assert_eq!(
+            view.with_current(&lease, || ran.set(true)),
+            Err(SourceAdmissionError::StaleFence)
+        );
+        let replacement = lease.source_admission().fence().unwrap();
+        assert_eq!(
+            view.with_current(&lease, || ran.set(true)),
+            Err(SourceAdmissionError::StaleFence)
+        );
+        assert!(!ran.get());
+        replacement
+            .publication_view()
+            .with_current(&lease, || ran.set(true))
+            .unwrap();
+        assert!(ran.get());
+    }
 
     #[test]
     fn scoped_cutoff_refusal_and_missing_commit_leave_gate_unchanged() {

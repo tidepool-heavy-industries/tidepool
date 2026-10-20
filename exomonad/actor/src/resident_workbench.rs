@@ -2143,6 +2143,15 @@ enum RetirementSettlementStage {
 }
 
 impl PublicationFence {
+    fn publication_view(
+        &self,
+    ) -> Result<tidepool_runtime::session::RuntimeSourcePublicationView, PublicationSettlementError> {
+        match self {
+            Self::Held(fence) => Ok(fence.publication_view()),
+            Self::ReopenAttempted => Err(PublicationSettlementError::ReopenAttempted),
+        }
+    }
+
     fn reopen(
         &mut self,
         target: &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
@@ -2195,6 +2204,7 @@ struct ActorPublicationVisibility {
     state: Arc<InstalledToolsState>,
     attempt: Arc<ActorPublicationAttempt>,
     world: Option<generation_admission::WorldPublicationVisibility>,
+    source: tidepool_runtime::session::RuntimeSourcePublicationView,
 }
 
 impl ActorPublicationGuard {
@@ -2311,8 +2321,17 @@ impl ActorPublicationGuard {
         }
     }
 
-    fn visibility(&self) -> ActorPublicationVisibility {
-        ActorPublicationVisibility {
+    fn visibility(&self) -> Result<ActorPublicationVisibility, PublicationSettlementError> {
+        let source = match &self.settlement {
+            ActorPublicationState::Armed(PublicationAuthority::World(world)) => {
+                world.source_publication_view()?
+            }
+            ActorPublicationState::Armed(PublicationAuthority::TargetFence { fence, .. }) => {
+                fence.publication_view()?
+            }
+            ActorPublicationState::Settled => return Err(PublicationSettlementError::ReopenAttempted),
+        };
+        Ok(ActorPublicationVisibility {
             state: self.state.clone(),
             attempt: self.attempt.clone(),
             world: match &self.settlement {
@@ -2322,7 +2341,8 @@ impl ActorPublicationGuard {
                 ActorPublicationState::Armed(PublicationAuthority::TargetFence { .. })
                 | ActorPublicationState::Settled => None,
             },
-        }
+            source,
+        })
     }
 
     fn cutoff_error(error: PublicationSettlementError) -> ResidentActorWorkbenchError {
@@ -2734,7 +2754,19 @@ where
             )));
         }
         let publication = owner.decision.clone();
-        let visibility = owner.visibility();
+        let visibility = match owner.visibility() {
+            Ok(visibility) => visibility,
+            Err(settlement) => {
+                return Err(ResidentActorWorkbenchError::PublicationSettlement {
+                    failure: Box::new(ActorPublicationSettlementFailure {
+                        outcome: Ok(ActorGenerationCommit::Refused(
+                            "publication has no armed source fence".into(),
+                        )),
+                        settlement,
+                    }),
+                });
+            }
+        };
         // The affine phase/fence owner is outside checkout, including cancellation
         // and setup failure. The worker receives visibility rights only.
         let completed = self.access.with_machine_wait_mode(prepared.checkout_context.clone(), None, false, move |session, _, _| {

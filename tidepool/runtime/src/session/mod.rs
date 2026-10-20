@@ -21,6 +21,7 @@ mod source_admission;
 pub use source_admission::{
     OwnSourceFenceReopened, RuntimeSourceAdmission, RuntimeSourceCompilerTransaction,
     RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim, RuntimeSourceReopen,
+    RuntimeSourcePublicationView,
     SourceAdmissionError, SourceFenceTransitionFailure,
     SourceAdmissionHook, SourceAdmissionPhase,
 };
