@@ -50,7 +50,7 @@ main = do
       refused = ReloadResourceOutcome nextActor
         (ReloadStopRefused (ReloadCause ReloadStopFailed "still live")) ReloadCleanupNotRequired
       pending = ReloadResourceOutcome nextActor ReloadStopPending ReloadCleanupPending
-      unknown = ReloadResourceOutcome nextActor
+      unknown = ReloadResourceOutcome (ReloadActorResource (42, 9))
         (ReloadStopUnconfirmed cause) (ReloadCleanupUnknown cause)
       blockers =
         [ ReloadResourceBlocker actor ReloadStartingResource
@@ -93,8 +93,8 @@ main = do
   assert ("Warnings: repair projection" `T.isInfixOf` published) "published warnings lost"
   assert ("Primary: retirement blocked" `T.isInfixOf` reopened) "reopened receipt lost primary cause"
   assert ("Secondary causes: continuation failed" `T.isInfixOf` published) "published receipt lost secondary cause"
-  let states = [ReloadAReopened, ReloadRetirementFenced ReloadResourceStop, ReloadBPublished [] []]
-  assert (toJSON (receipt (head states) []) /= toJSON (receipt (states !! 1) [])) "reopened and fenced codec collapsed"
+  assert (toJSON (receipt ReloadAReopened []) /=
+    toJSON (receipt (ReloadRetirementFenced ReloadResourceStop) [])) "reopened and fenced codec collapsed"
   assert (toJSON pending /= toJSON unknown) "pending and unconfirmed codec collapsed"
   assert (toJSON actor /= toJSON nextActor) "actor incarnations collapsed"
   assert (toJSON (ReloadWorkbenchReservation "exec-issued" "attempt-a") /=

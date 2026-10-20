@@ -733,7 +733,10 @@ mod context_constructor_tests {
                     detail: "receipt display failed after commit".into(),
                 },
             });
-            receipt.secondary = vec![receipt.primary.clone().unwrap()];
+            receipt.secondary = vec![RlCause {
+                kind: RlCauseKind::ReloadContinuationFailed,
+                detail: "secondary response delivery failed".into(),
+            }];
             receipt.outcomes = outcomes;
             let outcome = SrReloadOutcome::ReloadRetirement(receipt.clone());
             let encoded = outcome.to_value(&table).unwrap();
