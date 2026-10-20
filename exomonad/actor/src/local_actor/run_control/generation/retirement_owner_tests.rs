@@ -538,23 +538,17 @@ impl RunControlClient {
         assert!(matches!(
             terminal.get(),
             Some(preparation::PublicationTerminalObservation::Completed {
-                outcome: preparation::PublicationOutcomeObservation::Published,
-                notification: preparation::PublicationNotificationObservation::Accepted,
+                outcome: preparation::PublicationOutcomeObservation::Visible,
+                notification: preparation::PublicationNotificationObservation::NotRequired,
             })
         ));
-        // The ready notification precedes this ordinary directory round trip.
+        // This round trip drains the worker completion without supplying its lost body result.
         assert_eq!(
             self.resolve(actor).await.unwrap().unwrap().identity(),
             actor
         );
-        let published = state.current_generation().unwrap();
-        assert_eq!(published.id(), target.generation());
-        assert!(!Arc::ptr_eq(&published, &expected));
-        let actual_owner = lifecycle
-            .public_owner(Some(published.public_owner().clone()), false)
-            .await
-            .unwrap();
-        assert!(Arc::ptr_eq(&actual_owner, published.public_owner()));
+        assert!(state.current_generation().is_none());
+        assert!(state.snapshot_for_call().is_err());
         assert_eq!(
             decision.phase(),
             tidepool_runtime::session::PublicationPhase::Published
@@ -568,11 +562,15 @@ impl RunControlClient {
                 }
             )
         ));
-        drop(
-            SourceDependency::Generation(target.clone())
-                .claim()
-                .unwrap(),
-        );
+        assert!(matches!(
+            SourceDependency::Generation(target.clone()).claim(),
+            Err(
+                crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed {
+                    phase: tidepool_runtime::session::SourceAdmissionPhase::Fenced { .. },
+                    ..
+                }
+            )
+        ));
         self.owner.get_cell().kill();
         tokio::time::timeout(Duration::from_secs(10), owner_task)
             .await
@@ -590,6 +588,8 @@ impl RunControlClient {
                 observer: actual,
                 cutoff: GenerationRetirementCutoffPhase::Captured { fence, .. },
                 custody: publication,
+                owner,
+                ..
             } = &attempt.phase
             else {
                 panic!("lost affine delivery must retain the actual A fence");
@@ -601,10 +601,13 @@ impl RunControlClient {
                 panic!("closed receiver must retain the SAME terminal publication metadata");
             };
             assert!(Arc::ptr_eq(actual, &terminal));
-            assert!(publication.published());
+            assert!(!publication.published());
+            assert!(owner.confirmed_generation().is_none());
+            assert!(!owner.source_restored());
+            assert!(!owner.settled_obligations());
             assert_eq!(
                 publication.notification(),
-                preparation::PublicationNotificationObservation::Accepted
+                preparation::PublicationNotificationObservation::Unobserved
             );
             let (obligations, _) = custody.attempts[0]
                 .operational_obligations(&GenerationRetirementReplyOwner::Native(&recovery));
@@ -614,14 +617,16 @@ impl RunControlClient {
             assert!(obligations.contains(&tidepool_bridge_effects::RlRetirementObligation::ReloadOriginalRetirementObligation(
                 tidepool_bridge_effects::RlObligationObservation::ReloadObligationPending,
             )));
-            assert!(!obligations.iter().any(|obligation| matches!(obligation,
-                tidepool_bridge_effects::RlRetirementObligation::ReloadPublicationNotificationObligation(_),
+            assert!(obligations.contains(&tidepool_bridge_effects::RlRetirementObligation::ReloadPublicationNotificationObligation(
+                tidepool_bridge_effects::RlObligationObservation::ReloadObligationUnconfirmed,
             )));
 
-            assert!(Arc::ptr_eq(
-                &state.current_generation().unwrap(),
-                &published
-            ));
+            assert!(state.current_generation().is_none());
+            assert!(state.snapshot_for_call().is_err());
+            assert!(matches!(SourceDependency::Generation(target.clone()).claim(),
+                Err(crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed {
+                    phase: tidepool_runtime::session::SourceAdmissionPhase::Fenced { .. }, ..
+                })));
             assert_eq!(
                 decision.phase(),
                 tidepool_runtime::session::PublicationPhase::Published

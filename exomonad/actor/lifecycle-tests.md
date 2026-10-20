@@ -1,0 +1,31 @@
+# Generation lifecycle controls
+
+The quoted-generation fixture prepares genuine compiler products. Its retirement
+component controls use unavailable resident inventory and an explicit component
+decision. They do not issue a staged Reload report or qualify automatic Reload.
+
+| Existing control | Contract it exercises |
+| --- | --- |
+| Foreign target before cutoff | Actual reservation refuses a foreign target fence while A remains unchanged. |
+| Owner loss before send or queued receive | No reservation/source effect is inferred from an unaccepted command. |
+| Owner loss after reserve, panic, lost waiter, disposal panic | The same candidate, reservation and source fence survive under native cleanup custody. |
+| Owner loss after capture | FIFO capture retains actual population and physical ownership without initiating a stop. |
+| Body refusal and linked cancelled body | An executed body returns its own refusal and obligations; this is not command nonstart. |
+| Native recovery of linked result | Native cleanup consumes the same actual body result, preserving physical obligations. |
+| Crossed source receipts and partial reopening | Only the same reservation's source receipt can discharge it; partial A restoration remains refused. |
+| Lost body delivery after visibility | A compact visibility observation does not confirm publication or notify the lifecycle. The core retains the guard, both source gates stay closed, and notification remains unconfirmed. |
+
+Retain these component controls when changing the publication protocol. A
+component pass does not establish successful hosted Reload, force, complete
+physical cleanup, or cold recovery. Failed histories remain unqualified until
+their intended assertions execute.
+
+Command-nonstart coverage belongs at the actor-owned publication boundary: use
+an actual reservation/fence, a real refused transport returning the same unrun
+body, the owner-held guard, and an ordinary acknowledged operation diagnostic.
+Do not attach a fabricated Reload report, create a capture, or bypass automatic
+policy to make a component fixture resemble the hosted path.
+
+The host's coherent reload histories use the real source staging owner and the
+authored tool. The frozen-source history must execute a new B cell after A's
+cutoff and a later disk C edit; a publication receipt alone is insufficient.
