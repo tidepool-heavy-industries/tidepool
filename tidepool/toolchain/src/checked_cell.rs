@@ -2073,7 +2073,15 @@ impl CheckedValueImportAuthority {
         let operation = program.validation().inventory.as_ref();
         let producer = program.reservation().plan().producer_sha256();
         let mut values = BTreeMap::<String, CapturedValueInterface>::new();
-        for original in stage.demanded_rows() {
+        // The operation's actual operand is compiler availability even when
+        // this stage has no runtime demand for it. This does not alter the
+        // stage's selected runtime witnesses or native root custody.
+        let operand = program.reservation().plan().operand();
+        for original in stage
+            .demanded_rows()
+            .iter()
+            .chain(operand.map(|operand| operand.checked_row()))
+        {
             crate::host_work::checkpoint()?;
             operation
                 .charge(1)

@@ -9174,13 +9174,25 @@ pub(crate) struct WorldProgramContinuation {
 }
 
 impl WorldProgramContinuation {
-    pub(crate) fn begin(program: &crate::compiler_world::CheckedWorldCellProgram) -> Self {
-        Self {
-            context: Arc::clone(program.primary_context()),
-            inputs: Arc::clone(program.primary_compiler_inputs()),
+    pub(crate) fn begin(
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+    ) -> Result<Self, CompileError> {
+        let mut context = Arc::clone(program.primary_context());
+        let mut inputs = Arc::clone(program.primary_compiler_inputs());
+        if let Some(operand) = program.reservation().plan().operand() {
+            let operand_types = Arc::new(ExactDeclarationContext::checked_value_interface_context(
+                operand.checked_row(),
+            )?);
+            let extended = inputs.with_type_interfaces(&[operand_types])?;
+            context = extended.context;
+            inputs = extended.inputs;
+        }
+        Ok(Self {
+            context,
+            inputs,
             program: ProgramSourceSupportState::default(),
             private_input: None,
-        }
+        })
     }
 }
 
@@ -10633,6 +10645,40 @@ impl ExactDeclarationContext {
             witnesses,
             signatures,
         )
+    }
+
+    /// The actual checked Val interface and its sealed TYPE requirements,
+    /// without source names, original bodies, or executable group authority.
+    pub(crate) fn checked_value_interface_context(
+        value: &crate::checked_cell::CheckedValueArtifact,
+    ) -> Result<Self, CompileError> {
+        let certified = value.certified_interface();
+        let interface = certified.interface();
+        let producer = interface.toolchain_identity_sha256();
+        if producer == [0; 32] || value.world_issuer().0 != producer {
+            return Err(failure(
+                "checked value TYPE row has another compiler producer",
+            ));
+        }
+        let selected = value.compiler_source_support().selected_interfaces()?;
+        let owner = identity(interface.unit(), interface.module());
+        let row = selected
+            .get(&owner)
+            .ok_or_else(|| failure("checked value TYPE row lacks its issued interface"))?;
+        if row.descriptor.id != certified.artifact_id()
+            || row.descriptor.producer_sha256 != producer
+        {
+            return Err(failure(
+                "checked value TYPE row differs from its certified interface",
+            ));
+        }
+        Ok(Self::from_facts(DeclarationContextFacts {
+            compiler_support: selected.type_interfaces_for_owners(vec![owner])?,
+            producer,
+            lexical: Default::default(),
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            template_imports: None,
+        }))
     }
 
     pub(crate) fn checked_value_type_interfaces(
