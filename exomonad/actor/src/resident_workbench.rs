@@ -2113,13 +2113,29 @@ pub(crate) enum PublicationOwnerSettlement {
 impl ActorGenerationPublicationOwner {
     pub(crate) fn take_body(
         &mut self,
-    ) -> Result<ActorGenerationPublicationBody, PublicationSettlementError> {
-        // Validate while both the guard and preparation are still in the core.
-        let visibility = self.guard.visibility()?;
+    ) -> Result<ActorGenerationPublicationBody, Arc<PublicationSettlementError>> {
+        if !matches!(self.settlement, PublicationOwnerSettlement::Pending)
+            || self.prepared.is_none()
+        {
+            return Err(self
+                .settlement_error()
+                .cloned()
+                .unwrap_or_else(|| Arc::new(PublicationSettlementError::ReopenAttempted)));
+        }
+        // Failed visibility admission remains in this same owner. A caller
+        // cannot turn a generic dispatch refusal into retry authority.
+        let visibility = match self.guard.visibility() {
+            Ok(visibility) => visibility,
+            Err(error) => {
+                let error = Arc::new(error);
+                self.settlement = PublicationOwnerSettlement::Failed(error.clone());
+                return Err(error);
+            }
+        };
         let prepared = self
             .prepared
             .take()
-            .ok_or(PublicationSettlementError::ReopenAttempted)?;
+            .ok_or_else(|| Arc::new(PublicationSettlementError::ReopenAttempted))?;
         Ok(ActorGenerationPublicationBody {
             prepared,
             visibility,
@@ -2218,6 +2234,15 @@ impl ActorGenerationPublicationOwner {
                         ..
                     })
                 ))
+    }
+
+    pub(crate) fn failure_outcome(
+        &self,
+    ) -> Option<&Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>> {
+        match &self.body {
+            Some(RecordedPublicationBody::Failure { outcome, .. }) => Some(outcome),
+            _ => None,
+        }
     }
 
     pub(crate) fn unobserved_primary(&self) -> Option<&ResidentActorWorkbenchError> {
@@ -8710,10 +8735,7 @@ impl ResidentActorWorkbenchError {
     pub fn requires_recovery(&self) -> bool {
         match self {
             Self::PublicationSettlement { .. } => true,
-            Self::InitialPublication { source } => matches!(source.as_ref(),
-                crate::local_actor::run_control::InitialGenerationPublicationError::OwnerLost |
-                crate::local_actor::run_control::InitialGenerationPublicationError::Unconfirmed |
-                crate::local_actor::run_control::InitialGenerationPublicationError::NotificationRefused),
+            Self::InitialPublication { source } => source.requires_recovery(),
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.requires_recovery(),
             Self::PreparationAdmission(source) => source.requires_recovery(),

@@ -8,7 +8,7 @@ use crate::resident_workbench::{
 };
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum PublicationNonStartKind {
+pub(crate) enum PublicationNonStartKind {
     SupervisorSendFailed,
     SpawnFailed,
     WorkerSendFailed,
