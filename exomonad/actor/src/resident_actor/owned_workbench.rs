@@ -2415,7 +2415,12 @@ where
                 Box::pin(async move {
                     let actor = context.actor;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_started", "workbench phase");
-                    let published = runner.publish_private_execution(context, private).await;
+                    let published = async {
+                        if let Some(dependencies) = owned.state.cursor.dependencies.as_mut() {
+                            dependencies.retire_input_for_publication().await?;
+                        }
+                        runner.publish_private_execution(context, private).await
+                    }.await;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_completed", "workbench phase");
                     published
                 })
