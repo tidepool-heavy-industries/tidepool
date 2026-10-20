@@ -617,7 +617,7 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
     setSession hydrated
     when (("main","CanonicalSource") `elem` selectedOwners) $ do
       setContext [IIDecl (simpleImportDecl (mkModuleName "CanonicalSource"))]
-      _ <- exprType TM_Inst "(\\x -> x) :: CanonicalSource.Answer -> CanonicalSource.Answer"
+      _ <- exprType TM_Inst "(\\x -> x) :: CanonicalSource.Retained -> CanonicalSource.Retained"
       pure ()
     setSession environment
     freshFinder <- liftIO initFinderCache
