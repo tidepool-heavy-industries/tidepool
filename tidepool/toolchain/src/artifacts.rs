@@ -873,13 +873,6 @@ pub fn prepare_world_cell_program(
     let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
         program.validation().inventory.clone(),
     );
-    let names = program
-        .demanded_rows()
-        .iter()
-        .map(|row| row.owner().module_name())
-        .collect::<Vec<_>>();
-    let selected_values =
-        SelectedSessionValueOwners::capture(names.iter().map(std::ffi::OsStr::new))?;
     let produced_outputs =
         checked_cell::CheckedValueInputs::capture_world_produced_types(&program, &mut validation)?;
     let mut continuation = crate::declaration_context::WorldProgramContinuation::begin(&program)?;
@@ -889,6 +882,13 @@ pub fn prepare_world_cell_program(
     let mut item_contexts = BTreeMap::new();
     for stage in program.stages() {
         crate::host_work::checkpoint()?;
+        let names = stage
+            .demanded_rows()
+            .iter()
+            .map(|row| row.owner().module_name())
+            .collect::<Vec<_>>();
+        let selected_values =
+            SelectedSessionValueOwners::capture(names.iter().map(std::ffi::OsStr::new))?;
         let first = *stage
             .ordinals()
             .first()
@@ -8619,8 +8619,8 @@ mod module_product_tests {
                     wrong_domain[0] ^= 1;
                     assert!(!identity.matches_source_recipe(&wrong_base, domain));
                     assert!(!identity.matches_source_recipe(base.logical_id(), &wrong_domain));
-                    let prepared = prepare_world_cell_program(checked)?;
-                    Ok::<_, CompileError>((prepared, origin))
+                    let prepared = prepare_world_cell_program(Arc::clone(&checked))?;
+                    Ok::<_, CompileError>((prepared, checked, origin))
                 },
             );
             assert_eq!(observed_close.as_ref(), Some(settled.close()));
@@ -8638,13 +8638,50 @@ mod module_product_tests {
                 .host_admission_cancellation()
                 .expect("owner-issued post-END admission")
                 .clone();
-            if let Ok((_, origin)) = settled.action() {
+            if let Ok((_, _, origin)) = settled.action() {
                 assert!(settled.belongs_to(origin));
             }
-            let (prepared, _) = settled
+            let (prepared, checked, _) = settled
                 .into_outcome()
                 .action
                 .expect("actual World native preparation");
+            if mixed && !cancel_after_end {
+                use crate::compiler_world::WorldCellRuntimeInputOrigin;
+                assert_eq!(checked.stages().len(), 3);
+                assert_eq!(checked.stages()[0].ordinals(), &[0]);
+                assert_eq!(checked.stages()[1].ordinals(), &[1]);
+                assert_eq!(checked.stages()[2].ordinals(), &[2, 3]);
+                let first = checked.item(0).expect("actual first binding");
+                let [base] = first.binders() else {
+                    panic!("first item captures exactly baseStage");
+                };
+                assert_eq!(base.name(), "baseStage");
+                let base = tidepool_repr::SessionVarId::from_extract(base.varid());
+                let demand = checked.runtime_binding_demand();
+                assert!(demand.existing().is_empty());
+                assert_eq!(demand.prior_stage(), &[base]);
+                assert!(checked.demanded_rows().is_empty());
+                assert!(first.selected_runtime_inputs().inputs().is_empty());
+                for ordinal in [1, 2] {
+                    let inputs = checked
+                        .item(ordinal)
+                        .expect("actual later stage")
+                        .selected_runtime_inputs();
+                    assert!(!inputs.inputs().is_empty());
+                    for input in inputs.inputs() {
+                        assert_eq!(input.session_var(), base);
+                        assert!(input.checked_row().is_none());
+                        assert!(matches!(
+                            input.origin(),
+                            WorldCellRuntimeInputOrigin::PriorStage {
+                                producer: 0,
+                                consumer: 1 | 2,
+                            }
+                        ));
+                    }
+                }
+                checked.assert_captured_stage_output_refusals();
+            }
             if cancel_after_end {
                 cancellation.cancel_host_admission();
                 let Err(CompileError::Io(error)) = prepared.seal(&admission) else {

@@ -9571,7 +9571,13 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
                 excluded.insert(owner);
             }
         }
-        for row in self.program.demanded_rows() {
+        for row in self.binding.stage.demanded_rows().iter().chain(
+            self.program
+                .reservation()
+                .plan()
+                .operand()
+                .map(|operand| operand.checked_row()),
+        ) {
             crate::host_work::checkpoint()?;
             charge(operation.charge(1))?;
             let interface = row.certified_interface().interface();

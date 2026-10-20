@@ -485,3 +485,34 @@ Actual missing, crossed and later-stage bundle replay controls are supplied by
 the checked receiver owner and will be invoked after matching compiler END.
 They require a genuine completed multi-stage packet, so neither red producer
 run qualifies those controls or the Original native certifier.
+
+## Paired stage demand caller follow-up
+
+The PREP5/worker27 continuation is based on compiled engine source
+`37787bf18f4e35e348bb1e5c3c87e74f5228ef25`. The original native branch remains
+preserved at `96cfa1381b`; the paired continuation branch received only that
+fixture parcel as `4c2a3d91a3`. An attempted ancestry merge encountered duplicate
+cherry-picked history conflicts and was aborted before any resolution. No
+unrelated compiler, runtime or protocol source was rewritten.
+
+Native item selection now captures external selected value owners from the
+same stage's demanded rows. Prior same-cell value interfaces remain selected
+by the existing produced-output ordinal prefix. Source-edge exclusion likewise
+uses the same stage rows plus the exact sealed plan operand as independent
+compiler availability, without changing runtime roots or using the program-wide
+union. This does not generalize compiler availability to every visible BaseWorld
+binding; the compiler-only unused BaseWorld-helper case remains an open boundary.
+
+The mixed fixture additionally requires no preexisting runtime roots and the
+actual first binding as its sole PriorStage runtime root. It checks the exact
+three-stage order, prior-origin coordinates and absence of fabricated checked
+rows for those same-cell inputs. The receiver's assertion-only raw-output replay
+helper runs after matching END, outside the active compiler transaction, once
+on the successful mixed preparation. It changes only cloned packet data and
+requires one positive replay and twelve typed bundle-role refusals.
+
+This caller follow-up is source-only until the affected cfg target and genuine
+mixed native gate execute. The independent actual Some input gate exposed the
+projector's dependence on a lazy cold metadata cache after a coherent TYPE
+delta. The engine owns the separate RequestCompilerInputs boundary repair; no
+metadata fallback or pointer-check removal is included in this caller parcel.
