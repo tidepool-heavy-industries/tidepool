@@ -8484,10 +8484,11 @@ mod module_product_tests {
             let [signature] = native.item().signatures() else {
                 panic!("the actual Int binding has one checked signature")
             };
-            let types = crate::declaration_context::ExactDeclarationContext::checked_value_type_interfaces(
-                &value, signature,
-            )
-            .expect("actual checked-value type projection");
+            let types =
+                crate::declaration_context::ExactDeclarationContext::checked_value_type_interfaces(
+                    &value, signature,
+                )
+                .expect("actual checked-value type projection");
             assert!(
                 types.compiler_input_roles().is_empty(),
                 "Int has only package type owners"

@@ -395,8 +395,13 @@ impl CompilerWorldCellOperand {
         defining_scope: u64,
         interface: &Arc<crate::checked_cell::ExactHostBindingInterface>,
     ) -> Result<Arc<Self>, CompileError> {
-        Self::from_binder(world, exposure, defining_scope, interface.binder(),
-            interface.value_interface_certificate())
+        Self::from_binder(
+            world,
+            exposure,
+            defining_scope,
+            interface.binder(),
+            interface.value_interface_certificate(),
+        )
     }
 
     pub fn from_checked_host_execution(
@@ -405,10 +410,12 @@ impl CompilerWorldCellOperand {
         defining_scope: u64,
         execution: &Arc<crate::checked_cell::ExactCompiledItem>,
     ) -> Result<Arc<Self>, CompileError> {
-        let row = execution.value_interface_certificate()
+        let row = execution
+            .value_interface_certificate()
             .ok_or_else(|| source_failure("host execution has no checked value interface"))?;
         let mut binders = execution.checked_bound_binders();
-        let binder = binders.next()
+        let binder = binders
+            .next()
             .ok_or_else(|| source_failure("host execution has no bound operand"))?;
         if binders.next().is_some() {
             return Err(source_failure("host execution has more than one operand"));
@@ -433,64 +440,136 @@ impl CompilerWorldCellOperand {
         };
         let producer = world.restoration.producer;
         if module != artifact.owner().module_name() || artifact.world_issuer().0 != producer {
-            return Err(source_failure("host operand belongs to another compiler owner"));
+            return Err(source_failure(
+                "host operand belongs to another compiler owner",
+            ));
         }
         let symbol = tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "main".into(), module: module.into(), namespace: "value".into(),
-            occurrence: name.into(), record_parent: None,
+            unit: "main".into(),
+            module: module.into(),
+            namespace: "value".into(),
+            occurrence: name.into(),
+            record_parent: None,
         };
         let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
         let mut rows = WorldColdRows {
-            producer, files: BTreeMap::new(), images: BTreeMap::new(), rows: BTreeMap::new(),
-            arenas: Default::default(), diagnostics: None,
+            producer,
+            files: BTreeMap::new(),
+            images: BTreeMap::new(),
+            rows: BTreeMap::new(),
+            arenas: Default::default(),
+            diagnostics: None,
         };
         let (entry, parts) = artifact.world_type_parts()?;
         let mut remaining = capture_allowance()?;
-        remaining = remaining.checked_sub(binding_row_metadata_bound(
-            &entry.descriptor.owner.unit, &entry.descriptor.owner.module, &entry.requirements,
-        )?).ok_or_else(source_size_failure)?;
+        remaining = remaining
+            .checked_sub(binding_row_metadata_bound(
+                &entry.descriptor.owner.unit,
+                &entry.descriptor.owner.module,
+                &entry.requirements,
+            )?)
+            .ok_or_else(source_size_failure)?;
         for part in &parts {
-            remaining = remaining.checked_sub(part.bytes).ok_or_else(source_size_failure)?;
+            remaining = remaining
+                .checked_sub(part.bytes)
+                .ok_or_else(source_size_failure)?;
         }
         let (offered, _) = rows.row(&entry, parts)?;
-        let row_fact = world_array(vec![world_semantic_row(&offered, &producer)?,
-            world_blob(artifact.certified_interface().artifact_id().0), world_blob(artifact.world_issuer().1)]);
+        let row_fact = world_array(vec![
+            world_semantic_row(&offered, &producer)?,
+            world_blob(artifact.certified_interface().artifact_id().0),
+            world_blob(artifact.world_issuer().1),
+        ]);
         let store = fvm_ipld_blockstore::MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
-        let row_fact_cid = materializer.materialize_value(&row_fact)
+        let row_fact_cid = materializer
+            .materialize_value(&row_fact)
             .map_err(|error| source_failure(error.to_string()))?;
-        let staged = materializer.finish().map_err(|error| source_failure(error.to_string()))?;
-        let blocks = staged.blocks().iter().map(|(cid, body)|
-            world_array(vec![world_blob(cid.to_bytes()), world_blob(body)])).collect();
-        let acquisition = rows.arenas.acquisition(rows.images.into_values().collect())?;
-        let descriptor = world_array(vec![world_text("TPCWCELLOPERAND1"),
-            match exposure { WorldCellOperandExposure::Input => 0u64, WorldCellOperandExposure::SessionInput => 1 }.into(),
-            world_array(vec![world_array(vec![world_text(&symbol.unit), world_text(&symbol.module),
-                world_text(&symbol.namespace), world_text(&symbol.occurrence), ciborium::value::Value::Null]),
-                var.into(), defining_scope.into(), artifact.owner().gen.0.into(), world_blob(row_fact_cid.to_bytes())]),
-            world_array(blocks), offered, acquisition]);
+        let staged = materializer
+            .finish()
+            .map_err(|error| source_failure(error.to_string()))?;
+        let blocks = staged
+            .blocks()
+            .iter()
+            .map(|(cid, body)| world_array(vec![world_blob(cid.to_bytes()), world_blob(body)]))
+            .collect();
+        let acquisition = rows
+            .arenas
+            .acquisition(rows.images.into_values().collect())?;
+        let descriptor = world_array(vec![
+            world_text("TPCWCELLOPERAND1"),
+            match exposure {
+                WorldCellOperandExposure::Input => 0u64,
+                WorldCellOperandExposure::SessionInput => 1,
+            }
+            .into(),
+            world_array(vec![
+                world_array(vec![
+                    world_text(&symbol.unit),
+                    world_text(&symbol.module),
+                    world_text(&symbol.namespace),
+                    world_text(&symbol.occurrence),
+                    ciborium::value::Value::Null,
+                ]),
+                var.into(),
+                defining_scope.into(),
+                artifact.owner().gen.0.into(),
+                world_blob(row_fact_cid.to_bytes()),
+            ]),
+            world_array(blocks),
+            offered,
+            acquisition,
+        ]);
         let bytes = world_bytes(&descriptor)?;
         let sha256 = world_digest(&bytes);
         let path = directory.path().join("cell-operand.cbor");
         std::fs::write(&path, bytes).map_err(|error| source_failure(error.to_string()))?;
-        Ok(Arc::new(Self { exposure, symbol, session_var: tidepool_repr::SessionVarId::from_extract(var),
-            defining_scope, row: artifact, row_fact_cid,
-            request: tidepool_extract_cmd::WorldCellOperandRequest { descriptor: path, sha256 },
-            directory, input_files: rows.files.into_values().collect() }))
+        Ok(Arc::new(Self {
+            exposure,
+            symbol,
+            session_var: tidepool_repr::SessionVarId::from_extract(var),
+            defining_scope,
+            row: artifact,
+            row_fact_cid,
+            request: tidepool_extract_cmd::WorldCellOperandRequest {
+                descriptor: path,
+                sha256,
+            },
+            directory,
+            input_files: rows.files.into_values().collect(),
+        }))
     }
 
-    pub fn exposure(&self) -> WorldCellOperandExposure { self.exposure }
-    pub fn symbol(&self) -> &tidepool_repr::execution_schema::SymbolIdentity { &self.symbol }
-    pub fn session_var(&self) -> tidepool_repr::SessionVarId { self.session_var }
-    pub fn defining_scope(&self) -> u64 { self.defining_scope }
-    pub fn generation(&self) -> u64 { self.row.owner().gen.0 }
-    pub fn row_fact_cid(&self) -> &cid::Cid { &self.row_fact_cid }
-    pub fn checked_row(&self) -> &Arc<CheckedValueArtifact> { &self.row }
-    pub(crate) fn request(&self) -> &tidepool_extract_cmd::WorldCellOperandRequest { &self.request }
+    pub fn exposure(&self) -> WorldCellOperandExposure {
+        self.exposure
+    }
+    pub fn symbol(&self) -> &tidepool_repr::execution_schema::SymbolIdentity {
+        &self.symbol
+    }
+    pub fn session_var(&self) -> tidepool_repr::SessionVarId {
+        self.session_var
+    }
+    pub fn defining_scope(&self) -> u64 {
+        self.defining_scope
+    }
+    pub fn generation(&self) -> u64 {
+        self.row.owner().gen.0
+    }
+    pub fn row_fact_cid(&self) -> &cid::Cid {
+        &self.row_fact_cid
+    }
+    pub fn checked_row(&self) -> &Arc<CheckedValueArtifact> {
+        &self.row
+    }
+    pub(crate) fn request(&self) -> &tidepool_extract_cmd::WorldCellOperandRequest {
+        &self.request
+    }
 
     fn retain_for_request(&self) -> Result<Vec<Arc<std::fs::File>>, CompileError> {
         if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(&self.directory)) {
-            return Err(source_failure("cell operand requires its compiler transaction"));
+            return Err(source_failure(
+                "cell operand requires its compiler transaction",
+            ));
         }
         Ok(self.input_files.clone())
     }
@@ -3201,12 +3280,21 @@ pub fn plan_cell(
 ) -> Result<Arc<crate::cell_plan::CompilerWorldCellPlan>, CompileError> {
     scoped_world_action(|| {
         let producer = CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256();
-        let profile = endpoint.identity().package_source_association()
-            .ok_or_else(|| source_failure("cell planning requires its retained compiler deployment"))?;
-        if producer != world.restoration.producer || profile.profile_id() != &world.restoration.profile
-            || operand.as_ref().is_some_and(|operand| operand.row.world_issuer().0 != producer)
+        let profile = endpoint
+            .identity()
+            .package_source_association()
+            .ok_or_else(|| {
+                source_failure("cell planning requires its retained compiler deployment")
+            })?;
+        if producer != world.restoration.producer
+            || profile.profile_id() != &world.restoration.profile
+            || operand
+                .as_ref()
+                .is_some_and(|operand| operand.row.world_issuer().0 != producer)
         {
-            return Err(source_failure("cell operand or World belongs to another compiler deployment"));
+            return Err(source_failure(
+                "cell operand or World belongs to another compiler deployment",
+            ));
         }
         let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
         let output = directory.path().join("cell-plan.cbor");
@@ -3232,7 +3320,11 @@ pub fn plan_cell(
             .map_err(|error| source_failure(error.to_string()))?;
         let diagnostics =
             crate::artifacts::CompilerDiagnosticCapture::start(directory.path(), &command);
-        let files = operand.as_ref().map(|operand| operand.retain_for_request()).transpose()?.unwrap_or_default();
+        let files = operand
+            .as_ref()
+            .map(|operand| operand.retain_for_request())
+            .transpose()?
+            .unwrap_or_default();
         let result = world_execute(&command, bound, files)?;
         diagnostics.completed(
             directory.path(),

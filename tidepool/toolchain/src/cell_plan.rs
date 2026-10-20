@@ -186,7 +186,9 @@ impl AdmissionIssueGate {
 }
 
 impl CompilerWorldCellPlan {
-    pub fn operand(&self) -> Option<&Arc<crate::compiler_world::CompilerWorldCellOperand>> { self.operand.as_ref() }
+    pub fn operand(&self) -> Option<&Arc<crate::compiler_world::CompilerWorldCellOperand>> {
+        self.operand.as_ref()
+    }
     pub(crate) fn recipe_owned(&self) -> Arc<tidepool_extract_cmd::WorldCellRecipe> {
         Arc::clone(&self.recipe)
     }
@@ -558,7 +560,13 @@ pub(crate) fn admit_world_plan(
     producer: [u8; 32],
     receipt: Vec<u8>,
 ) -> Result<Arc<CompilerWorldCellPlan>, CompileError> {
-    let facts = admit_world_parser_receipt(world.logical_id(), &recipe, producer, operand.as_ref().map(|operand| operand.request().sha256), &receipt)?;
+    let facts = admit_world_parser_receipt(
+        world.logical_id(),
+        &recipe,
+        producer,
+        operand.as_ref().map(|operand| operand.request().sha256),
+        &receipt,
+    )?;
     Ok(Arc::new(CompilerWorldCellPlan {
         world,
         recipe,
@@ -606,8 +614,8 @@ fn admit_world_parser_receipt(
         ));
     }
     match (operand_sha256, &fields[8]) {
-        (None, Value::Null) => {},
-        (Some(expected), value) if hash(value)? == expected => {},
+        (None, Value::Null) => {}
+        (Some(expected), value) if hash(value)? == expected => {}
         _ => return Err(failure("world parser operand descriptor differs")),
     }
     let templates = list(&fields[5], 256)?;
@@ -1108,11 +1116,22 @@ mod tests {
         let expected = [37; 32];
         receipt.as_array_mut().unwrap()[8] = Value::Bytes(expected.to_vec());
         let bytes = encoded(&receipt);
-        assert!(admit_world_parser_receipt(&world, &recipe, producer, Some(expected), &bytes).is_ok());
+        assert!(
+            admit_world_parser_receipt(&world, &recipe, producer, Some(expected), &bytes).is_ok()
+        );
         assert!(admit_world_parser_receipt(&world, &recipe, producer, None, &bytes).is_err());
-        assert!(admit_world_parser_receipt(&world, &recipe, producer, Some([38;32]), &bytes).is_err());
+        assert!(
+            admit_world_parser_receipt(&world, &recipe, producer, Some([38; 32]), &bytes).is_err()
+        );
         receipt.as_array_mut().unwrap()[8] = Value::Null;
-        assert!(admit_world_parser_receipt(&world, &recipe, producer, Some(expected), &encoded(&receipt)).is_err());
+        assert!(admit_world_parser_receipt(
+            &world,
+            &recipe,
+            producer,
+            Some(expected),
+            &encoded(&receipt)
+        )
+        .is_err());
     }
 
     #[test]
@@ -1120,7 +1139,8 @@ mod tests {
         let (recipe, world, producer, receipt) = world_plan_fixture();
         let (_, _, legacy) = fixture();
         let admitted =
-            admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&receipt)).unwrap();
+            admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&receipt))
+                .unwrap();
         assert_eq!(admitted.items[0].binders(), ["owned"]);
         // Runtime expectations remain data, but cannot substitute another
         // occurrence, item kind or reserved generation for this parser plan.
@@ -1221,16 +1241,24 @@ mod tests {
         assert_eq!(reserved_slots.as_ref(), slots.as_slice());
         assert_eq!(reserved_bindings.as_ref(), bindings.as_slice());
 
-        assert!(admit_world_parser_receipt(&world, &recipe, [1; 32], None, &encoded(&receipt)).is_err());
         assert!(
-            admit_world_parser_receipt(&[8; 32], &recipe, producer, None, &encoded(&receipt)).is_err()
+            admit_world_parser_receipt(&world, &recipe, [1; 32], None, &encoded(&receipt)).is_err()
+        );
+        assert!(
+            admit_world_parser_receipt(&[8; 32], &recipe, producer, None, &encoded(&receipt))
+                .is_err()
         );
         for index in 0..8 {
             let mut changed = receipt.clone();
             changed.as_array_mut().unwrap()[index] = Value::Null;
-            assert!(
-                admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&changed)).is_err()
-            );
+            assert!(admit_world_parser_receipt(
+                &world,
+                &recipe,
+                producer,
+                None,
+                &encoded(&changed)
+            )
+            .is_err());
         }
         let mut other = receipt.clone();
         let other_producer =
@@ -1238,7 +1266,8 @@ mod tests {
                 .sha256();
         other.as_array_mut().unwrap()[2] = Value::Bytes(other_producer.to_vec());
         let other =
-            admit_world_parser_receipt(&world, &recipe, other_producer, None, &encoded(&other)).unwrap();
+            admit_world_parser_receipt(&world, &recipe, other_producer, None, &encoded(&other))
+                .unwrap();
         assert_ne!(admitted.digest, other.digest);
         // Authority is the plan allocation, not the echoed digest or the
         // subject facts: a token issued by the other plan cannot reserve this
@@ -1260,7 +1289,8 @@ mod tests {
         // bound to the allocation, the equal digest does not transfer
         // authority to the derived plan.
         let derived =
-            admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&receipt)).unwrap();
+            admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&receipt))
+                .unwrap();
         assert_eq!(derived.digest, admitted.digest);
         assert!(!Arc::ptr_eq(&derived.allocation, &admitted.allocation));
         let token = issue_world_cell_admission(
@@ -1275,14 +1305,17 @@ mod tests {
         )
         .unwrap();
         assert!(consume_world_cell_admission(&derived.allocation, token).is_err());
-        assert!(admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&legacy)).is_err());
+        assert!(
+            admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&legacy)).is_err()
+        );
     }
 
     #[test]
     fn live_plan_issues_its_admission_token_once() {
         let (recipe, world, producer, receipt) = world_plan_fixture();
         let admitted =
-            admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&receipt)).unwrap();
+            admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&receipt))
+                .unwrap();
         use crate::checked_cell::CheckedPlannedCellSlot as Slot;
         let subject = |owner: [u8; 16]| {
             WorldCellAdmissionSubject::new(
@@ -1336,8 +1369,8 @@ mod tests {
         assert!(issue(&unburned).is_ok());
         // A fresh admission of the same receipt has its own allocation and
         // gate, exactly as `admit_world_plan` constructs it, and still issues.
-        let fresh =
-            admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&receipt)).unwrap();
+        let fresh = admit_world_parser_receipt(&world, &recipe, producer, None, &encoded(&receipt))
+            .unwrap();
         assert!(claim_and_issue_world_cell_admission(
             &AdmissionIssueGate::default(),
             &world,
