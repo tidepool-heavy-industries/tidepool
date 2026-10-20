@@ -18130,6 +18130,311 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn fresh_same_key_group_keeps_selected_historical_descendant() {
+        use crate::artifact_inventory::{
+            ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
+            CanonicalProducerIdentity, CompilerInputProjection, CompilerSourceSupport,
+            NativeArtifactDemand, NativeGroupKey, NativeOriginalRequirement,
+        };
+        use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
+        let producer = CanonicalProducerIdentity::from_producer_bytes(b"mixed-current-historical-key");
+        let values_old =
+            fixture_module_interface(producer.sha256(), "fixture", "Values", BTreeMap::new());
+        let values_new = fixture_module_core(&values_old, b"new captured Values Core".to_vec());
+        let values_old = Arc::new(ArtifactEntry::canonical(values_old));
+        let values_new = Arc::new(ArtifactEntry::canonical(values_new));
+        assert_eq!(values_old.descriptor.owner, values_new.descriptor.owner);
+        assert_ne!(values_old.descriptor.id, values_new.descriptor.id);
+        let source = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct, ordinal| {
+            let definitions = original_native_group_definitions(product, ordinal).unwrap();
+            let binding = match &definitions.bindings()[0] {
+                tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+                tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0],
+            };
+            PendingImportOwner::Source {
+                owner: product.owner().clone(),
+                original_ordinal: ordinal,
+                binder: binding.identity.clone(),
+            }
+        };
+        let g = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "MixedG",
+                vec![(
+                    7,
+                    vec![PendingImportOwner::Retained {
+                        identity: testing::identity("Values", "value"),
+                        generation: 4,
+                    }],
+                )],
+                91,
+                &BTreeMap::new(),
+                b"G interface".to_vec(),
+            ),
+            producer.sha256(),
+        );
+        let g = recovered_witness_fixtures(&[g]).remove(0).product;
+        let r = fixture_finalized_product_with_requirements(
+            original_groups_fixture_with_interface(
+                "MixedR",
+                vec![(8, vec![source(&g, 7)])],
+                92,
+                &BTreeMap::new(),
+                b"R interface".to_vec(),
+            ),
+            producer.sha256(),
+            Some(BTreeMap::from([(
+                (g.owner().unit.clone(), g.owner().module.clone()),
+                g.module_interface().unwrap().interface_sha256(),
+            )])),
+        );
+        let r = recovered_witness_fixtures(&[r]).remove(0).product;
+        let g_entry = Arc::new(ArtifactEntry::original(producer.sha256(), g.clone()).unwrap());
+        let r_entry = Arc::new(ArtifactEntry::original(producer.sha256(), r.clone()).unwrap());
+        let inventory = ArtifactInventory::default();
+        let physical = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![g_entry.clone(), r_entry.clone(), values_old.clone()],
+                NativeArtifactDemand::AllGroups,
+            )
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[r_entry.clone()]).unwrap();
+        let validation = PackageInterfaceValidation::default();
+        let requirements =
+            NativeOriginalRequirement::for_projection(&projection, &physical, &[]).unwrap();
+        assert_eq!(requirements.len(), 1);
+        let mut original = CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &physical.metadata_snapshot(),
+            &validation.inventory,
+        )
+        .unwrap();
+        original
+            .with_new_product_dependencies(&physical.metadata_snapshot(), &requirements)
+            .unwrap();
+        let issued = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut original,
+            &physical,
+            vec![r_entry.clone()],
+        )
+        .unwrap();
+        let output = OriginalCompilerInputs::from_selection(&original, &issued).unwrap();
+        let closure = original.selected_original_closure(&issued).unwrap();
+        let support = CompilerSourceSupport::close_complete_output(&output)
+            .unwrap()
+            .certify_original_closure(&closure)
+            .unwrap();
+        let old_groups = support.artifacts().capture_graph_selection().native_groups;
+        assert_eq!(old_groups.len(), 2);
+        let old_g = *old_groups
+            .iter()
+            .find(|group| group.binding.artifact() == g_entry.descriptor.id)
+            .unwrap();
+        let old_r = *old_groups
+            .iter()
+            .find(|group| group.binding.artifact() == r_entry.descriptor.id)
+            .unwrap();
+        let old_edges = support.artifacts().binding_dependencies();
+        assert!(old_edges.contains(&(
+            ArtifactBindingNode::Group(old_r),
+            ArtifactBindingNode::Group(old_g),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 8,
+                required_ordinal: 7
+            },
+        )));
+        let old_value = old_edges
+            .iter()
+            .find_map(|(from, to, edge)| {
+                if *from != ArtifactBindingNode::Group(old_g)
+                    || !matches!(edge, ArtifactDependency::NativeBinding { .. })
+                {
+                    return None;
+                }
+                match to {
+                    ArtifactBindingNode::Artifact(binding) => Some(*binding),
+                    _ => None,
+                }
+            })
+            .unwrap();
+        assert_eq!(old_value.artifact, values_old.descriptor.id);
+        let context = ExactDeclarationContext::new(&[], &[], Vec::new())
+            .unwrap()
+            .extend_issued_compiler_support(&support)
+            .unwrap();
+        let request = context
+            .capture_world_primary_compiler_inputs(producer.sha256())
+            .unwrap();
+        assert!(!request
+            .projection()
+            .snapshot_roles()
+            .contains_key(&values_old.descriptor.owner));
+        let mut current =
+            CertifiedSourceSelection::from_compiler_inputs(&request, &validation.inventory).unwrap();
+        assert!(current
+            .current_product(
+                NativeGroupKey {
+                    artifact: r_entry.descriptor.id,
+                    original_ordinal: 8
+                },
+                &r_entry
+            )
+            .unwrap()
+            .is_none());
+        assert!(current
+            .interface_only_artifact(&g_entry.descriptor.owner)
+            .is_some());
+        let j = fixture_finalized_product_with_requirements(
+            original_groups_fixture_with_interface(
+                "MixedJ",
+                vec![(9, vec![source(&r, 8)])],
+                93,
+                &BTreeMap::new(),
+                b"J interface".to_vec(),
+            ),
+            producer.sha256(),
+            Some(BTreeMap::from([(
+                (r.owner().unit.clone(), r.owner().module.clone()),
+                r.module_interface().unwrap().interface_sha256(),
+            )])),
+        );
+        let j = recovered_witness_fixtures(&[j]).remove(0).product;
+        let j_entry = Arc::new(ArtifactEntry::original(producer.sha256(), j.clone()).unwrap());
+        for product in [&g, &j] {
+            current
+                .admit_current(
+                    product.owner(),
+                    ProductOrigin::Cached,
+                    product.module_interface().unwrap(),
+                    &validation.inventory,
+                )
+                .unwrap();
+        }
+        current
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), &[g.clone(), j.clone()]).unwrap(),
+            )
+            .unwrap();
+        current
+            .admit_interface(&values_new, &validation.inventory)
+            .unwrap();
+        let g_key = NativeGroupKey {
+            artifact: g_entry.descriptor.id,
+            original_ordinal: 7,
+        };
+        let j_key = NativeGroupKey {
+            artifact: j_entry.descriptor.id,
+            original_ordinal: 9,
+        };
+        assert!(current.new_product_native_requirements().next().is_none());
+        assert!(
+            matches!(current.current_product(g_key, &g_entry).unwrap().unwrap()
+            .own_group_candidates().unwrap(), NativeGroupCandidates::NewProduct(groups) if groups.is_empty())
+        );
+        let entries = vec![g_entry.clone(), j_entry.clone(), values_new.clone()];
+        // Complete the general PrivateAvailability issuer before the bound
+        // consumer: J's exact input closure contains the old binding of G7.
+        let finished = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut current,
+            request.artifacts(),
+            entries.clone(),
+        )
+        .unwrap();
+        let g_current = current.current_product(g_key, &g_entry).unwrap().unwrap();
+        let g_candidates = g_current.own_group_candidates().unwrap();
+        assert_eq!(g_candidates.bindings().len(), 1);
+        let fresh_g = *g_candidates.bindings().first().unwrap();
+        assert_ne!(fresh_g, old_g);
+        let CertifiedNativeGroupSupport::Issued(g_offer) =
+            g_current.own_group_support(fresh_g).unwrap()
+        else {
+            panic!("completed G owns its issued support");
+        };
+        let g_edges = g_offer.custody_snapshot().binding_dependencies().unwrap();
+        let fresh_value = g_edges
+            .iter()
+            .find_map(|(from, to, edge)| {
+                if *from != ArtifactBindingNode::Group(fresh_g)
+                    || !matches!(edge, ArtifactDependency::NativeBinding { .. })
+                {
+                    return None;
+                }
+                match to {
+                    ArtifactBindingNode::Artifact(binding) => Some(*binding),
+                    _ => None,
+                }
+            })
+            .unwrap();
+        assert_eq!(fresh_value.artifact, values_new.descriptor.id);
+        let j_current = current.current_product(j_key, &j_entry).unwrap().unwrap();
+        let j_candidates = j_current.own_group_candidates().unwrap();
+        assert_eq!(j_candidates.bindings().len(), 1);
+        let fresh_j = *j_candidates.bindings().first().unwrap();
+        let CertifiedNativeGroupSupport::Issued(j_offer) =
+            j_current.own_group_support(fresh_j).unwrap()
+        else {
+            panic!("completed J owns its issued support");
+        };
+        let j_edges = j_offer.custody_snapshot().binding_dependencies().unwrap();
+        assert!(old_edges.iter().all(|edge| j_edges.contains(edge)));
+        let j_to_r = (
+            ArtifactBindingNode::Group(fresh_j),
+            ArtifactBindingNode::Group(old_r),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: 9,
+                required_ordinal: 8,
+            },
+        );
+        assert!(j_edges.contains(&j_to_r));
+        assert!(!finished
+            .roots()
+            .contains(&ArtifactBindingNode::Group(fresh_g)));
+        assert!(!finished
+            .roots()
+            .contains(&ArtifactBindingNode::Group(fresh_j)));
+        let owner = finished.inventory();
+        let mut bound = owner.bind_segment(&finished, entries, &current).unwrap();
+        let imports = [source(&g, 7), source(&j, 9)];
+        let target = owner
+            .admit_bound_target(
+                &mut bound,
+                &owner.empty_view(),
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &current,
+            )
+            .unwrap()
+            .artifacts()
+            .clone();
+        assert_eq!(
+            target
+                .capture_graph_selection()
+                .native_groups
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([old_r, old_g, fresh_g, fresh_j])
+        );
+        assert_eq!(
+            target.selected_native_groups(),
+            BTreeSet::from([
+                g_key,
+                j_key,
+                NativeGroupKey {
+                    artifact: r_entry.descriptor.id,
+                    original_ordinal: 8
+                },
+            ])
+        );
+        let edges = target.binding_dependencies();
+        assert!(old_edges.iter().all(|edge| edges.contains(edge)));
+        assert!(edges.contains(&j_to_r));
+        assert!(g_edges.iter().all(|edge| edges.contains(edge)));
+        assert!(target.artifact_ids().contains(&old_value.artifact));
+        assert!(target.artifact_ids().contains(&fresh_value.artifact));
+    }
+
+    #[test]
     fn current_cohort_dependencies_keep_required_owners_in_both_planners() {
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, CanonicalProducerIdentity,
