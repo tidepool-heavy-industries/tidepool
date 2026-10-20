@@ -229,7 +229,7 @@ fn compile_admitted_seed_cell(
 /// Intended production spelling once the world checked-prefix capability lands:
 ///
 /// ```ignore
-/// session.begin_cell_program(admission, program)
+/// session.begin_cell_program(program)
 /// ```
 fn begin_checked_seed_cell(
     _session: &ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,

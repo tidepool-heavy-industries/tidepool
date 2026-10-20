@@ -1031,7 +1031,7 @@ fn try_check_fixture_cell(
         turn::compile_cell_program_admitted(admission.clone(), settlement)
     })?;
     let prefix = resident
-        .begin_cell_program(admission, program)
+        .begin_cell_program(program)
         .unwrap()
         .expect("compiled fixture has executable items");
     Ok(CheckedFixtureCell { checked, prefix })
@@ -1295,7 +1295,7 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
     .unwrap();
     let item = checked.checked_item(0).unwrap();
     let prefix = resident
-        .begin_cell_program(admission, program)
+        .begin_cell_program(program)
         .unwrap()
         .unwrap();
     let reservation = source_action(resident, |resident, _| {

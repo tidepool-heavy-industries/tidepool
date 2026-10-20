@@ -8978,7 +8978,7 @@ where
             .access
             .with_machine(context.clone(), move |session, _, _| {
                 session
-                    .begin_cell_program(admission, program)
+                    .begin_cell_program(program)
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })
@@ -27665,7 +27665,7 @@ pub(crate) mod request_tests {
             "receiver setup is one grouped binding"
         );
         let prefix = session
-            .begin_cell_program(admission, program)
+            .begin_cell_program(program)
             .unwrap()
             .unwrap();
         let reservation = session

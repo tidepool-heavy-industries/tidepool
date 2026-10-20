@@ -3913,10 +3913,9 @@ where
 
     pub fn begin_cell_program(
         &self,
-        admission: Arc<super::RuntimeCellAdmission>,
-        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        settled: super::SettledCellProgram,
     ) -> Result<Option<Arc<super::RuntimeCheckedPrefix>>, SessionError> {
-        self.state.begin_cell_program(admission, program)
+        self.state.begin_cell_program(settled)
     }
 
     pub fn admit_native_setup_cell_in(
@@ -9404,7 +9403,7 @@ mod authored_publication_tests {
         .unwrap();
         let first = checked.checked_item(0).unwrap();
         let prefix = state
-            .begin_cell_program(admission, program)
+            .begin_cell_program(program)
             .unwrap()
             .unwrap();
         let mut resident = TestSession::from_persistent_for_test(frunk::HNil, EmptyOutput, state);
@@ -11687,7 +11686,7 @@ mod authored_publication_tests {
         .unwrap();
         let item = checked.checked_item(0).unwrap();
         let prefix = session
-            .begin_cell_program(admission, program)
+            .begin_cell_program(program)
             .unwrap()
             .unwrap();
         let item_admission = session.admit_checked_item(prefix.clone(), item).unwrap();

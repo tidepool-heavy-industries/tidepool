@@ -2895,7 +2895,7 @@ pub fn compile_cell_program_admitted(
 ) -> Result<
     (
         CellCheck,
-        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        SettledCellProgram,
     ),
     CellCheckFailure,
 > {
@@ -2914,7 +2914,7 @@ fn compile_cell_program_admitted_receipt_controls(
 ) -> Result<
     (
         CellCheck,
-        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        SettledCellProgram,
     ),
     CellCheckFailure,
 > {
@@ -2945,7 +2945,7 @@ fn compile_cell_program_admitted_native_emission_controls(
 ) -> Result<
     (
         CellCheck,
-        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        SettledCellProgram,
     ),
     CellCheckFailure,
 > {
@@ -3061,7 +3061,7 @@ fn compile_cell_program_admitted_work_controls(
 ) -> Result<
     (
         CellCheck,
-        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        SettledCellProgram,
     ),
     CellCheckFailure,
 > {
@@ -3078,11 +3078,46 @@ fn compile_cell_program_admitted_work_controls(
 /// No endpoint or compiler lease survives in this host admission owner.
 pub struct PreparedRuntimeCell {
     origin: crate::CompilerTransactionOrigin,
+    admission: Arc<super::RuntimeCellAdmission>,
     checked: CellCheck,
     program: tidepool_toolchain::artifacts::PreparedCellProgram,
-    offer: AppliedModuleCandidateOffer,
-    root: Arc<tempfile::TempDir>,
-    stderr: Vec<u8>,
+    evidence: PreparedRuntimeCellEvidence,
+}
+
+/// Executable runtime admission issued only after the SAME compiler owner has
+/// settled END and cancellation and sealed its exact native output. Compiler
+/// evidence alone cannot construct this inseparable pairing.
+#[derive(Clone, Debug)]
+pub struct SettledCellProgram {
+    admission: Arc<super::RuntimeCellAdmission>,
+    program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    cancellation: crate::HostAdmissionCancellation,
+}
+
+impl SettledCellProgram {
+    pub fn program(&self) -> &Arc<tidepool_toolchain::checked_cell::CellProgram> {
+        &self.program
+    }
+    pub fn admission(&self) -> &Arc<super::RuntimeCellAdmission> {
+        &self.admission
+    }
+    pub(super) fn checkpoint(&self) -> Result<(), CompileError> {
+        self.cancellation.checkpoint().map_err(CompileError::from)
+    }
+}
+
+impl std::ops::Deref for SettledCellProgram {
+    type Target = tidepool_toolchain::checked_cell::CellProgram;
+    fn deref(&self) -> &Self::Target { &self.program }
+}
+
+enum PreparedRuntimeCellEvidence {
+    Finite {
+        offer: AppliedModuleCandidateOffer,
+        root: Arc<tempfile::TempDir>,
+        stderr: Vec<u8>,
+    },
+    World(Arc<tidepool_toolchain::compiler_world::CheckedWorldCellProgram>),
 }
 
 // boundary: see CELL-PREPARATION-BOUNDARY.md
@@ -3107,6 +3142,29 @@ pub fn plan_world_cell_admitted(
     tidepool_toolchain::compiler_world::plan_cell(&endpoint, world, recipe)
 }
 
+pub struct PreparedWorldCellPlan {
+    origin: crate::CompilerTransactionOrigin,
+    plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+}
+
+pub fn prepare_world_cell_plan_admitted(
+    source: &super::RuntimeSourceCompilerTransaction,
+    world: &tidepool_toolchain::compiler_world::CompilerWorld,
+    recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+) -> Result<PreparedWorldCellPlan, super::WorldInspectionError> {
+    let origin = crate::CompilerTransactionOrigin::current().ok_or(
+        CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
+    )?;
+    Ok(PreparedWorldCellPlan { origin, plan: plan_world_cell_admitted(source, world, recipe)? })
+}
+
+pub fn finish_world_cell_plan_admitted(
+    settled: crate::CompilerTransactionSettled<Result<PreparedWorldCellPlan, super::WorldInspectionError>>,
+) -> Result<Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>, super::WorldInspectionError> {
+    super::inspection::finish_world_operation(settled, |prepared| &prepared.origin)
+        .map(|(prepared, _)| prepared.plan)
+}
+
 pub fn prepare_cell_program_admitted(
     source: &super::RuntimeSourceCompilerTransaction,
     admission: Arc<super::RuntimeCellAdmission>,
@@ -3128,7 +3186,7 @@ pub fn finish_cell_program_admitted(
 ) -> Result<
     (
         CellCheck,
-        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        SettledCellProgram,
     ),
     CellCheckFailure,
 > {
@@ -3179,6 +3237,13 @@ pub fn finish_cell_program_admitted(
 }
 
 impl PreparedRuntimeCell {
+    #[cfg(test)]
+    fn finite_evidence(&self) -> (&AppliedModuleCandidateOffer, &Arc<tempfile::TempDir>, &Vec<u8>) {
+        match &self.evidence {
+            PreparedRuntimeCellEvidence::Finite { offer, root, stderr } => (offer, root, stderr),
+            PreparedRuntimeCellEvidence::World(_) => panic!("finite audit requires finite preparation evidence"),
+        }
+    }
     #[tracing::instrument(
         target = "exomonad_harness::timing",
         name = "cell_program.seal",
@@ -3192,21 +3257,26 @@ impl PreparedRuntimeCell {
     ) -> Result<
         (
             CellCheck,
-            Arc<tidepool_toolchain::checked_cell::CellProgram>,
+            SettledCellProgram,
         ),
         CellCheckFailure,
     > {
         let program = cancellation
             .run_sync(|| self.program.seal(cancellation))
-            .map_err(|error| {
-                self.offer.retain_failure(
-                    self.root.path(),
-                    self.offer.command(),
-                    &self.stderr,
-                    error,
-                )
+            .map_err(|error| match &self.evidence {
+                PreparedRuntimeCellEvidence::Finite { offer, root, stderr } => {
+                    offer.retain_failure(root.path(), offer.command(), stderr, error)
+                }
+                PreparedRuntimeCellEvidence::World(program) => {
+                    tracing::debug!(target: "exomonad_harness::timing", certificate = ?program.certificate_sha256(), "world cell executable seal refused");
+                    error
+                }
             })?;
-        Ok((self.checked, program))
+        Ok((self.checked, SettledCellProgram {
+            admission: self.admission,
+            program,
+            cancellation: cancellation.clone(),
+        }))
     }
 }
 
@@ -3217,7 +3287,7 @@ fn compile_cell_program_admitted_inner(
 ) -> Result<
     (
         CellCheck,
-        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        SettledCellProgram,
     ),
     CellCheckFailure,
 > {
@@ -3244,10 +3314,10 @@ fn compile_cell_program_admitted_inner(
         .action()
         .as_ref()
         .ok()
-        .map(|prepared| (prepared.root.clone(), prepared.stderr.clone()));
+        .map(|prepared| (prepared.finite_evidence().1.clone(), prepared.finite_evidence().2.clone()));
     #[cfg(test)]
     if let (CellProgramAudit::Receipts(test_name), Ok(prepared)) = (audit, outcome.action()) {
-        audit_compiler_issued_item_receipts(&prepared.offer, prepared.root.path(), test_name);
+        audit_compiler_issued_item_receipts(prepared.finite_evidence().0, prepared.finite_evidence().1.path(), test_name);
     }
     let result = finish_cell_program_admitted(outcome);
     #[cfg(test)]
@@ -3304,17 +3374,30 @@ fn prepare_cell_program_admitted_inner(
         )
         .into());
     }
-    // A held-world reservation carries parser expectations only. The SAME
-    // certifier's checked-program/item issuer has not landed in this tree:
-    // `compiler_world::CheckedWorldCellProgram` exposes observations and
-    // demand rows, but no runtime-facing constructor for the `CellProgram`
-    // and checked items this preparer returns. Refuse before any compiler
-    // work rather than rebuilding a finite baseline view.
-    if admission.world_reservation().is_some() {
-        return Err(CompileError::ExtractFailed(
-            super::SessionError::WorldCellCheckedProgramCapabilityMissing.to_string(),
-        )
-        .into());
+    if let Some(reservation) = admission.world_reservation() {
+        let reference = admission.world_source_reference()
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let revision = reference.sha256().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let selection = tidepool_toolchain::compiler_world::WorldSourceSelection::new(
+            *reference.sha256(), revision,
+        )?;
+        let command = extract_cmd()?;
+        let endpoint = bind_extract_cmd(&command)?;
+        let output = tidepool_toolchain::compiler_world::admit_world_cell_program(
+            &endpoint, reservation.clone(), selection.clone(), selection, &origin,
+        )?.map_err(|refusal| CompileError::ExtractFailed(format!("compiler world cell preparation refused: {refusal:?}")))?;
+        let program = tidepool_toolchain::artifacts::prepare_world_cell_program(output.clone())?;
+        let mut checked = decode_cell_out(
+            program.checked_cell().observations(),
+            &reservation.plan().recipe().source,
+            admission.initial_value_generation().0,
+            "",
+        )?;
+        checked.authority = Some(program.checked_cell().clone());
+        checked.admission = Some(admission.clone());
+        tracing::debug!(target: "exomonad_harness::timing", logical_world = ?output.logical().logical_id(), certificate = ?output.certificate_sha256(), origin = ?output.origin(), "world cell compiler output prepared");
+        return Ok(PreparedRuntimeCell { origin, admission, checked, program,
+            evidence: PreparedRuntimeCellEvidence::World(output) });
     }
     let finite_failure =
         |error: super::SessionError| CompileError::ExtractFailed(error.to_string());
@@ -3476,14 +3559,13 @@ fn prepare_cell_program_admitted_inner(
         .in_scope(|| admission.prepare_declaration_projections(program.checked_cell(), settlement))
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     checked.authority = Some(program.checked_cell().clone());
-    checked.admission = Some(admission);
+    checked.admission = Some(admission.clone());
     Ok(PreparedRuntimeCell {
         origin,
+        admission,
         checked,
         program,
-        offer,
-        root: scratch,
-        stderr: run.output.stderr,
+        evidence: PreparedRuntimeCellEvidence::Finite { offer, root: scratch, stderr: run.output.stderr },
     })
 }
 
@@ -6369,7 +6451,7 @@ mod tests {
     struct CheckedHomeCell {
         admission: Arc<crate::session::RuntimeCellAdmission>,
         checked: CellCheck,
-        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        program: SettledCellProgram,
     }
 
     struct CheckedHomeFixture {
@@ -6589,7 +6671,7 @@ mod tests {
                 crate::CompilerTransactionCancellation::new(), None, |_| {},
                 |resident, settlement| {
             let prefix = resident
-                .begin_cell_program(cell.admission.clone(), cell.program)
+                .begin_cell_program(cell.program)
                 .unwrap()
                 .expect("fixture must execute a nonempty checked program");
             let mut artifacts = Vec::new();
@@ -7316,13 +7398,13 @@ mod tests {
         })
         .unwrap();
         state
-            .begin_cell_program(admission, program)
+            .begin_cell_program(program)
             .unwrap()
             .unwrap();
     }
 
     #[test]
-    fn substituted_search_inputs_refuse_before_compilation_or_prefix_claim() {
+    fn settled_search_inputs_refuse_a_foreign_session_before_prefix_claim() {
         use crate::session::{ModuleEnv, PersistentSession, SessionLib};
         use tidepool_codegen::scope::ScopeId;
         use tidepool_repr::SessionId;
@@ -7458,15 +7540,15 @@ mod tests {
             alternate_program.items()[0].checked_item().include_paths(),
             alternate.include_paths().unwrap()
         );
-        assert!(state
-            .begin_cell_program(admission.clone(), alternate_program)
+        assert!(crate::session::PersistentSession::new(None, crate::DEFAULT_NURSERY_SIZE)
+            .begin_cell_program(alternate_program)
             .is_err());
         let (_, program) = tidepool_testing::with_settlement(|settlement| {
             compile_cell_program_admitted(admission.clone(), settlement)
         })
         .unwrap();
         state
-            .begin_cell_program(admission, program)
+            .begin_cell_program(program)
             .expect("refusal must leave original admission unclaimed")
             .unwrap();
     }
@@ -7573,7 +7655,7 @@ mod tests {
         assert_eq!(before.0, before.1, "one decode per captured item");
         let mut originals = std::collections::BTreeMap::new();
         let mut changed = 0;
-        for entry in std::fs::read_dir(prepared.root.path()).unwrap() {
+        for entry in std::fs::read_dir(prepared.finite_evidence().1.path()).unwrap() {
             let directory = entry.unwrap().path();
             let path = directory.join("meta.cbor");
             if path.is_file() {
@@ -7629,7 +7711,7 @@ mod tests {
         drop(natives);
         let prefix = fixture
             .resident
-            .begin_cell_program(admission, program)
+            .begin_cell_program(program)
             .unwrap()
             .unwrap();
         let reserved = fixture
@@ -8036,8 +8118,8 @@ mod tests {
             crate::CompilerTransactionClose::Retired(_)
         ));
         let prepared = outcome.action().as_ref().unwrap();
-        let root = prepared.root.path().to_owned();
-        let weak = Arc::downgrade(&prepared.root);
+        let root = prepared.finite_evidence().1.path().to_owned();
+        let weak = Arc::downgrade(&prepared.finite_evidence().1);
         assert!(root.join("cell.cbor").exists());
         let after = tidepool_extract_cmd::extract_spawn_count();
         assert_eq!(after - before, 1);
@@ -8103,8 +8185,8 @@ mod tests {
             crate::CompilerTransactionClose::Retired(_)
         ));
         let prepared = original.action.as_ref().unwrap();
-        let weak = Arc::downgrade(&prepared.root);
-        let root = prepared.root.path().to_owned();
+        let weak = Arc::downgrade(&prepared.finite_evidence().1);
+        let root = prepared.finite_evidence().1.path().to_owned();
         assert!(root.join("cell.cbor").exists());
         let fresh = crate::CompilerTransactionCancellation::new();
         let reassociated =
@@ -8182,7 +8264,7 @@ mod tests {
     }
 
     #[test]
-    fn substituted_checked_specification_refuses_before_claiming_prefix() {
+    fn settled_checked_specification_refuses_a_foreign_session_before_claiming_prefix() {
         let mut fixture = CheckedHomeFixture::new();
         let legitimate = fixture.check("let value = (42 :: Int)", &[], None).unwrap();
         let alternate = fixture.check("let value = (43 :: Int)", &[], None).unwrap();
@@ -8190,20 +8272,19 @@ mod tests {
             alternate.admission.specification_digest().unwrap(),
             legitimate.admission.specification_digest().unwrap()
         );
-        assert!(fixture
-            .resident
-            .begin_cell_program(legitimate.admission.clone(), alternate.program)
+        assert!(crate::session::PersistentSession::new(None, crate::DEFAULT_NURSERY_SIZE)
+            .begin_cell_program(alternate.program)
             .is_err());
         let prefix = fixture
             .resident
-            .begin_cell_program(legitimate.admission, legitimate.program)
+            .begin_cell_program(legitimate.program)
             .expect("refused alternate specification must not claim the one-shot prefix")
             .unwrap();
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
     }
 
     #[test]
-    fn substituted_reserved_original_refuses_before_claiming_prefix() {
+    fn settled_reserved_original_refuses_a_foreign_session_before_claiming_prefix() {
         let mut fixture = CheckedHomeFixture::new();
         let legitimate = fixture
             .check("originalValue = (42 :: Int)", &[], None)
@@ -8219,13 +8300,12 @@ mod tests {
             alternate.admission.reserved_generations(),
             legitimate.admission.reserved_generations()
         );
-        assert!(fixture
-            .resident
-            .begin_cell_program(legitimate.admission.clone(), alternate.program)
+        assert!(crate::session::PersistentSession::new(None, crate::DEFAULT_NURSERY_SIZE)
+            .begin_cell_program(alternate.program)
             .is_err());
         let prefix = fixture
             .resident
-            .begin_cell_program(legitimate.admission, legitimate.program)
+            .begin_cell_program(legitimate.program)
             .expect("refused alternate original owner must not claim the one-shot prefix")
             .unwrap();
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
@@ -8404,7 +8484,7 @@ mod tests {
             .unwrap();
             let item = checked.checked_item(0).unwrap();
             let prefix = session
-                .begin_cell_program(admission.clone(), program)
+                .begin_cell_program(program)
                 .unwrap()
                 .unwrap();
             let item_admission = session.admit_checked_item(prefix, item).unwrap();
@@ -8580,7 +8660,7 @@ mod tests {
             let item = checked.checked_item(0).unwrap();
             assert!(item.planned_declaration().is_some());
             let prefix = session
-                .begin_cell_program(admission.clone(), program)
+                .begin_cell_program(program)
                 .unwrap()
                 .unwrap();
             let reservation = session.admit_checked_item(prefix.clone(), item).unwrap();
@@ -8796,7 +8876,7 @@ mod tests {
             .append_declaration_with_projection(declaration.clone(), receipt)
             .is_err());
         let protected = session
-            .begin_cell_program(admission, program)
+            .begin_cell_program(program)
             .unwrap()
             .unwrap();
         let prologue_reservation = session
@@ -9435,7 +9515,7 @@ mod tests {
             .any(|name| name.module() == original.product().owner().module
                 && name.occurrence() == "HiddenResult"));
         let prefix = session
-            .begin_cell_program(admission.clone(), program)
+            .begin_cell_program(program)
             .unwrap()
             .unwrap();
         let item_admission = session.admit_checked_item(prefix, item.clone()).unwrap();
@@ -9537,7 +9617,7 @@ mod tests {
             .any(|name| name.module() == original.product().owner().module
                 && name.occurrence() == "HiddenResult"));
         let expression_prefix = session
-            .begin_cell_program(expression_admission, expression_program)
+            .begin_cell_program(expression_program)
             .unwrap()
             .unwrap();
         let expression_reservation = session

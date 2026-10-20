@@ -128,7 +128,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
             .expect("expression owns its issued observation capture")
             .to_owned();
         let prefix = session
-            .begin_cell_program(admission, program.clone())
+            .begin_cell_program(program.clone())
             .unwrap()
             .expect("checked program starts with its first expression");
         let reservation = session
