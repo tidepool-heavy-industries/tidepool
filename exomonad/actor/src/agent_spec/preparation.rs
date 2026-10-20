@@ -709,11 +709,6 @@ pub(crate) mod tests {
             retained.upgrade().is_some(),
             "installed tool leases retain the original entry after cache retirement"
         );
-        assert!(ready
-            .entry
-            .compiled()
-            .ordinary_original_compile_input()
-            .is_some());
         run_cache_history(ready).await;
     }
 

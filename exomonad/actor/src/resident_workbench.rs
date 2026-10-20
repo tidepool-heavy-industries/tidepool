@@ -9941,16 +9941,13 @@ where
                     .resolved
                     .checked_module()
                     .map(|module| {
-                        prepared
-                            .entry
-                            .compiled()
-                            .published_source_original_selection(
-                                &prepared.source_revision,
-                                &tidepool_toolchain::declaration_join::ExactModuleIdentity {
-                                    unit: "main".into(),
-                                    module,
-                                },
-                            )
+                        prepared.entry.published_source_original_selection(
+                            &prepared.source_revision,
+                            &tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                                unit: "main".into(),
+                                module,
+                            },
+                        )
                     })
                     .transpose()
             })
@@ -10029,7 +10026,7 @@ where
                     let (outcome, warnings) = match (prepared, source_startup, installer) {
                         (Some(prepared), Some(entry), None) => (
                             session.run_source_startup_entry(entry, settlement),
-                            prepared.entry.compiled().warnings.warnings.clone(),
+                            prepared.entry.warnings().warnings.clone(),
                         ),
                         (None, None, Some(installer)) => (
                             session.run_rooted_entry_borrowed(
@@ -23353,9 +23350,7 @@ pub(crate) mod request_tests {
         assert!(fresh
             .prepared
             .entry
-            .compiled()
             .ordinary_original_compile_input()
-            .unwrap()
             .replay_eligible_identity()
             .is_none());
         std::fs::write(&input, "42").unwrap();
@@ -23540,10 +23535,10 @@ pub(crate) mod request_tests {
                     crate::ToolsetAcquisition::DeploymentOriginal { .. }
                 ));
                 assert!(!Arc::ptr_eq(&fresh.prepared, &loaded.prepared));
-                assert_eq!(
-                    fresh.prepared.entry.compiled().prepared(),
-                    loaded.prepared.entry.compiled().prepared()
-                );
+                assert!(fresh
+                    .prepared
+                    .entry
+                    .has_same_prepared_code(&loaded.prepared.entry));
                 assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
 
                 run_native_quoted_probe(
@@ -23604,10 +23599,10 @@ pub(crate) mod request_tests {
                     retried.completed_entry_selection().unwrap(),
                     (recipe, original)
                 );
-                assert_eq!(
-                    retried.prepared.entry.compiled().prepared(),
-                    fresh.prepared.entry.compiled().prepared()
-                );
+                assert!(retried
+                    .prepared
+                    .entry
+                    .has_same_prepared_code(&fresh.prepared.entry));
                 assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
                 assert_eq!(
                     std::fs::read_to_string(input.with_extension("executions")).unwrap(),
@@ -25076,7 +25071,6 @@ pub(crate) mod request_tests {
             let public_selection = warmed
                 .prepared
                 .entry
-                .compiled()
                 .published_source_original_selection(
                     &warmed.prepared.source_revision,
                     &tidepool_toolchain::declaration_join::ExactModuleIdentity {
@@ -25319,9 +25313,7 @@ pub(crate) mod request_tests {
                 .prepared()
                 .expect("source-prepared installation")
                 .entry
-                .compiled()
-                .ordinary_original_compile_input()
-                .unwrap();
+                .ordinary_original_compile_input();
             assert!(
                 proof.replay_eligible_identity().is_none(),
                 "quotation remains ineligible for ordinary source replay"
@@ -25447,9 +25439,7 @@ pub(crate) mod request_tests {
             .prepared()
             .unwrap()
             .entry
-            .compiled()
-            .ordinary_original_compile_input()
-            .unwrap();
+            .ordinary_original_compile_input();
         if generation_replacement.is_some() {
             let replacement_publication_history = async {
                 // Replacement publishes its own issued source base without inheriting the notebook.
@@ -26641,9 +26631,7 @@ pub(crate) mod request_tests {
                 .prepared()
                 .expect("source-prepared installation")
                 .entry
-                .compiled()
-                .ordinary_original_compile_input()
-                .unwrap();
+                .ordinary_original_compile_input();
             assert!(Arc::ptr_eq(proof, retained));
             assert_eq!(retained.original_source(), original_source);
             assert_eq!(
