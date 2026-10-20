@@ -146,13 +146,24 @@ pub(crate) enum CompleteProductKind {
     SegmentOriginals,
 }
 
+/// A named immutable package output declared by the matched compiler writer.
+/// This is receipt data; the completed output owner must authenticate its bytes
+/// and defining provenance before issuing executable package code.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageProductOutput {
+    pub relative_path: PathBuf,
+    pub sha256: [u8; 32],
+}
+
 pub(crate) struct SegmentItemReceipt {
+    pub package_products: Vec<PackageProductOutput>,
     pub globals: Vec<AcceptedGlobal>,
     pub packages: BTreeMap<(String, String), PackageInterfaceWitness>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CertifiedReceipt {
+    pub package_products: Vec<PackageProductOutput>,
     pub modules: Vec<CertifiedModuleReceipt>,
     pub targets: BTreeMap<String, Vec<AcceptedGlobal>>,
     pub packages: BTreeMap<(String, String), PackageInterfaceWitness>,
@@ -1893,8 +1904,9 @@ fn decode_receipt_value_in(
         finalization_value,
         recipe_value,
         coordinates_value,
+        package_products_value,
     ) = match payload {
-        [tag, modules, targets, packages, globals, finalization, recipe, coordinates]
+        [tag, modules, targets, packages, globals, finalization, recipe, coordinates, package_products]
             if string(tag)? == "ordinary" =>
         {
             (
@@ -1906,9 +1918,10 @@ fn decode_receipt_value_in(
                 finalization,
                 recipe,
                 coordinates,
+                package_products,
             )
         }
-        [tag, modules, packages, globals, finalization, recipe, coordinates]
+        [tag, modules, packages, globals, finalization, recipe, coordinates, package_products]
             if string(tag)? == "segment-originals" =>
         {
             (
@@ -1920,6 +1933,7 @@ fn decode_receipt_value_in(
                 finalization,
                 recipe,
                 coordinates,
+                package_products,
             )
         }
         _ => {
@@ -1928,6 +1942,7 @@ fn decode_receipt_value_in(
             ))
         }
     };
+    let package_products = decode_package_product_outputs(package_products_value, operation)?;
     let mut coordinates = OwnerCoordinates::decode(coordinates_value)?;
     let mut dictionary =
         GlobalDictionary::decode_with_operation(globals_value, &mut coordinates, operation)?;
@@ -2082,6 +2097,7 @@ fn decode_receipt_value_in(
     Ok(DecodedReceiptPacket {
         kind,
         receipt: CertifiedReceipt {
+            package_products,
             modules,
             targets,
             packages,
@@ -2149,7 +2165,7 @@ pub(crate) fn decode_segment_item_with_operation(
     }
     let value = operation.decode_value(bytes, limit)?;
     let payload = product_receipt_payload(&value)?;
-    let [tag, globals, packages] = payload else {
+    let [tag, globals, packages, package_products] = payload else {
         return Err(CertificationError::Receipt("segment item output arity"));
     };
     if string(tag)? != "segment-item" {
@@ -2166,7 +2182,60 @@ pub(crate) fn decode_segment_item_with_operation(
         })
         .collect::<CertResult<Vec<_>>>()?;
     let packages = decode_package_rows(packages, operation)?;
-    Ok(SegmentItemReceipt { globals, packages })
+    let package_products = decode_package_product_outputs(package_products, operation)?;
+    Ok(SegmentItemReceipt {
+        globals,
+        packages,
+        package_products,
+    })
+}
+
+fn decode_package_product_outputs(
+    value: &Value,
+    operation: &InventoryOperation,
+) -> CertResult<Vec<PackageProductOutput>> {
+    let mut outputs = Vec::new();
+    for value in array(value)? {
+        crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
+        let row = sized(value, 2)?;
+        let name = string(&row[0])?;
+        if name.is_empty()
+            || name.contains('\0')
+            || name
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            || Path::new(name).is_absolute()
+        {
+            return Err(CertificationError::Receipt("package product output path"));
+        }
+        let Value::Bytes(seal) = &row[1] else {
+            return Err(CertificationError::Receipt("package product output digest"));
+        };
+        let sha256: [u8; 32] = seal
+            .as_slice()
+            .try_into()
+            .map_err(|_| CertificationError::Receipt("package product output digest"))?;
+        if sha256 == [0; 32] {
+            return Err(CertificationError::Receipt("package product output digest"));
+        }
+        if outputs
+            .last()
+            .is_some_and(|previous: &PackageProductOutput| {
+                previous.relative_path.as_os_str() >= std::ffi::OsStr::new(name)
+            })
+        {
+            return Err(CertificationError::Receipt(
+                "package product outputs are not unique and ordered",
+            ));
+        }
+        operation.reserve::<PackageProductOutput>(1)?;
+        operation.charge(name.len())?;
+        outputs.push(PackageProductOutput {
+            relative_path: PathBuf::from(name),
+            sha256,
+        });
+    }
+    Ok(outputs)
 }
 
 fn decode_package_rows(
@@ -22964,6 +23033,7 @@ pub(crate) mod tests {
                 contextual_native_availability: Vec::new(),
             },
             CertifiedReceipt {
+                package_products: Vec::new(),
                 source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization(
                     None,
@@ -23574,6 +23644,7 @@ pub(crate) mod tests {
         let mut accepted = receipt(&bytes, &admitted, support_source);
         accepted.dependency_witness_sha256 = sha(&evidence_bytes);
         let mut fresh_receipt = CertifiedReceipt {
+            package_products: Vec::new(),
             source_recipe: WorkerExecutionSource::Ordinary,
             finalization: fixture_finalization(Some(root.path()), &vec![accepted.clone()]),
             modules: vec![accepted.clone()],
@@ -23855,6 +23926,7 @@ pub(crate) mod tests {
         accepted.product_sha256 = bundle.owner.product_sha256;
         accepted.dependency_witness_sha256 = sha(&serde_json::to_vec(&bundle.evidence).unwrap());
         let cached_receipt = CertifiedReceipt {
+            package_products: Vec::new(),
             source_recipe: if exact_mode {
                 WorkerExecutionSource::ExactUnavailable(SourceRecipeUnavailable::NoFreshOriginals)
             } else {
@@ -24028,6 +24100,7 @@ pub(crate) mod tests {
                 bundle.original_module_interface.interface_sha256(),
             );
             let mixed = CertifiedReceipt {
+                package_products: Vec::new(),
                 source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization(
                     Some(root.path()),
@@ -24236,6 +24309,7 @@ pub(crate) mod tests {
         }
         accepted.dependency_witness_sha256 = sha(&initial_evidence);
         let mut packet = CertifiedReceipt {
+            package_products: Vec::new(),
             source_recipe: WorkerExecutionSource::Ordinary,
             finalization: fixture_finalization(Some(root.path()), &vec![accepted.clone()]),
             modules: vec![accepted],
@@ -25683,6 +25757,7 @@ None,
         }
         accepted.dependency_witness_sha256 = sha(&initial_evidence);
         let mut packet = CertifiedReceipt {
+            package_products: Vec::new(),
             source_recipe: WorkerExecutionSource::Ordinary,
             finalization: fixture_finalization(Some(root.path()), &vec![accepted.clone()]),
             modules: vec![accepted],
@@ -25780,6 +25855,7 @@ None,
             marker_receipt.skinny_iface_sha256 = sha(&marker_interface);
             marker_receipt.dependency_witness_sha256 = sha(&marker_worker);
             let marker_packet = CertifiedReceipt {
+                package_products: Vec::new(),
                 source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization_from_products(
                     Some(root.path()),
@@ -26467,6 +26543,7 @@ None,
         let certified = certify_products(
             None,
             &CertifiedReceipt {
+                package_products: Vec::new(),
                 source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization(Some(directory.path()), &vec![accepted.clone()]),
                 modules: vec![accepted],
@@ -26670,6 +26747,7 @@ None,
         let mut types = receipt(&bytes, &evidence, types_source);
         types.module = "Types".into();
         let mut receipt = CertifiedReceipt {
+            package_products: Vec::new(),
             source_recipe: WorkerExecutionSource::Ordinary,
             finalization: fixture_finalization(Some(directory.path()), &[accepted.clone(), types]),
             modules: vec![accepted],
@@ -26793,6 +26871,7 @@ None,
             certify_products(
                 None,
                 &CertifiedReceipt {
+                    package_products: Vec::new(),
                     source_recipe: WorkerExecutionSource::Ordinary,
                     finalization: fixture_finalization(
                         Some(directory.path()),
@@ -26814,6 +26893,7 @@ None,
         let certified = certify_products(
             None,
             &CertifiedReceipt {
+                package_products: Vec::new(),
                 source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization(Some(directory.path()), &vec![accepted.clone()]),
                 modules: vec![accepted.clone()],
@@ -26862,6 +26942,7 @@ None,
             certify_products(
                 None,
                 &CertifiedReceipt {
+                    package_products: Vec::new(),
                     source_recipe: WorkerExecutionSource::Ordinary,
                     finalization: fixture_finalization(
                         Some(directory.path()),
@@ -26894,6 +26975,7 @@ None,
             certify_products(
                 None,
                 &CertifiedReceipt {
+                    package_products: Vec::new(),
                     source_recipe: WorkerExecutionSource::Ordinary,
                     finalization: fixture_finalization(
                         Some(directory.path()),
@@ -26925,6 +27007,7 @@ None,
         assert!(certify_products(
             None,
             &CertifiedReceipt {
+                package_products: Vec::new(),
                 source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization(Some(directory.path()), &vec![changed.clone()]),
                 modules: vec![changed],
@@ -26948,6 +27031,55 @@ None,
     }
 
     #[test]
+    fn package_product_output_table_is_required_and_canonical() {
+        let mut ordinary = dictionary_receipt(&empty_product_facts());
+        let payload = receipt_payload_mut(&mut ordinary);
+        payload.pop();
+        assert!(matches!(
+            decode_receipt(&receipt_bytes(&ordinary)),
+            Err(CertificationError::Receipt(
+                "complete product output variant"
+            ))
+        ));
+        let row = |name: &str| value_array([value_text(name), Value::Bytes(vec![7; 32])]);
+        let operation = InventoryOperation::new(Default::default());
+        let outputs = decode_package_product_outputs(
+            &value_array([row("packages/a.cbor"), row("packages/b.cbor")]),
+            &operation,
+        )
+        .unwrap();
+        assert_eq!(outputs[0].relative_path, Path::new("packages/a.cbor"));
+        assert_eq!(outputs[1].sha256, [7; 32]);
+        for invalid in [
+            "",
+            "/outside",
+            "../outside",
+            "p/../outside",
+            "p//group",
+            "./group",
+            "p/",
+        ] {
+            assert!(matches!(
+                decode_package_product_outputs(&value_array([row(invalid)]), &operation),
+                Err(CertificationError::Receipt("package product output path"))
+            ));
+        }
+        for names in [["p/a", "p/a"], ["p/b", "p/a"]] {
+            assert!(matches!(
+                decode_package_product_outputs(&value_array(names.map(row)), &operation),
+                Err(CertificationError::Receipt(
+                    "package product outputs are not unique and ordered"
+                ))
+            ));
+        }
+        assert!(decode_package_product_outputs(
+            &value_array([value_array([value_text("p/a"), Value::Bytes(vec![7; 31]),])]),
+            &operation
+        )
+        .is_err());
+    }
+
+    #[test]
     fn product_receipt_roles_are_closed_and_not_interchangeable() {
         let root = tempfile::tempdir().unwrap();
         let ordinary = dictionary_receipt(&empty_product_facts());
@@ -26958,7 +27090,12 @@ None,
         let item = value_array([
             value_text("TPCERT"),
             Value::Integer(11.into()),
-            value_array([value_text("segment-item"), value_array([]), value_array([])]),
+            value_array([
+                value_text("segment-item"),
+                value_array([]),
+                value_array([]),
+                value_array([]),
+            ]),
         ]);
         let decode_originals = |value: &Value| {
             decode_segment_originals_with_operation(
@@ -27424,7 +27561,7 @@ None,
                 }
             }
             let item = value_array([value_text("TPCERT"), Value::Integer(11.into()), value_array([
-                value_text("segment-item"), value_array([value_global(&left)]), value_array([]),
+                value_text("segment-item"), value_array([value_global(&left)]), value_array([]), value_array([]),
             ])]);
             let operation = InventoryOperation::new(Default::default());
             let decoded = decode_segment_item_with_operation(&receipt_bytes(&item), &operation).unwrap();
@@ -27796,6 +27933,7 @@ None,
         header.push(value_array(
             indexed.into_values().map(|(_, coordinate)| coordinate),
         ));
+        header.push(value_array([]));
         let payload =
             value_array(std::iter::once(value_text("ordinary")).chain(header[2..].iter().cloned()));
         value_array([value_text("TPCERT"), Value::Integer(11.into()), payload])
@@ -27948,6 +28086,7 @@ None,
         assert_eq!(
             decode_receipt(&encoded).unwrap(),
             CertifiedReceipt {
+                package_products: Vec::new(),
                 source_recipe: WorkerExecutionSource::Ordinary,
                 finalization: fixture_finalization(None, &vec![accepted.clone()]),
                 modules: vec![accepted],

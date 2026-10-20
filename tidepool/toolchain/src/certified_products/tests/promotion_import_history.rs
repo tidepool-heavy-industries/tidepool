@@ -431,6 +431,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     assert_eq!(parsed.products().len(), 2);
     let accepted = ordinary_receipts(&initial_bytes, &parsed, &initial_worker);
     let packet = CertifiedReceipt {
+        package_products: Vec::new(),
         source_recipe: WorkerExecutionSource::Ordinary,
         finalization: fixture_finalization_from_products(Some(root.path()), &accepted, &parsed),
         modules: accepted,
@@ -598,6 +599,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         })
         .collect::<Vec<_>>();
     let promoted_packet = CertifiedReceipt {
+        package_products: Vec::new(),
         source_recipe: WorkerExecutionSource::ExactUnavailable(
             SourceRecipeUnavailable::NoFreshOriginals,
         ),
