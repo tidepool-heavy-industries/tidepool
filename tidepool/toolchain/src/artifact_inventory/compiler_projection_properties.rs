@@ -669,66 +669,237 @@ fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
 #[test]
 fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge() {
     let catalog = Catalog::new(false, [5, 7, 11, 13, 17, 19]);
-    let view = catalog.full_view();
     let mut islands = Vec::new();
     for version in 0..VERSIONS {
-        let island = view
-            .select_roots(vec![catalog.original(0, version).descriptor.id])
+        let entries = (0..MODULES)
+            .map(|module| catalog.original(module, version).clone())
+            .chain(std::iter::once(catalog.capture.clone()))
+            .collect::<Vec<_>>();
+        let inventory = ArtifactInventory::default();
+        let physical = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
             .unwrap();
-        let expected = catalog
-            .closure(ORDINALS.map(|ordinal| (0, version, ordinal)))
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let mut selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &physical.metadata_snapshot(),
+                &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+            )
+            .unwrap();
+        let issued =
+            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selection,
+                &physical,
+                entries,
+            )
+            .unwrap();
+        let output = issued;
+        let empty = CompilerSourceSupport::close_complete_output(&output)
+            .unwrap()
+            .close_request(
+                None,
+                &crate::declaration_context::ProtectedScaffoldRequirements::default(),
+            )
+            .unwrap();
+        assert!(empty.artifacts().selected_native_groups().is_empty());
+        assert!(!empty.native_offers().is_empty());
+        assert!(empty.native_offers().iter().all(|offer| offer.is_full()));
+        let ArtifactPayload::Original(product) = &catalog.original(0, version).payload else {
+            unreachable!()
+        };
+        let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap());
+        let unchanged = empty
+            .close_request(
+                None,
+                &crate::declaration_context::ProtectedScaffoldRequirements::default(),
+            )
+            .unwrap();
+        for support in [&empty, &unchanged] {
+            match support
+                .checked_native_input_decision(
+                    catalog.original(0, version).descriptor.id,
+                    canonical,
+                    product.owner(),
+                )
+                .unwrap()
+            {
+                InputNativeDecision::IssuedChoices(choices) => assert!(choices.is_empty()),
+                InputNativeDecision::UnissuedPolicy => {
+                    panic!("Full availability cannot erase an issued empty choice")
+                }
+            }
+        }
+        let closure = selection
+                    .selected_original_closure(output.issued_artifacts())
+                    .unwrap();
+        let support = empty.certify_original_closure(&closure).unwrap();
+        // The explicit selection consumes all three completed output bodies here;
+        // the later target demand independently selects only its exact closure.
+        let expected = (0..MODULES)
+            .flat_map(|module| ORDINALS.map(|ordinal| (module, version, ordinal)))
+            .map(|group| catalog.key(group))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(support.artifacts().selected_native_groups(), expected);
+        catalog.assert_projection(
+            support.artifacts(),
+            support.projection(),
+            [Some(version); MODULES],
+        );
+        islands.push(support);
+    }
+    let selected_bindings = |view: &ArtifactView| {
+        let state = view.inventory().0.lock().unwrap();
+        view.selected_nodes(&state)
+            .iter()
+            .filter_map(|node| match node {
+                InventoryNodeKey::Group(group) => Some(*group),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    for version in 0..VERSIONS {
+        let selected = &islands[version];
+        let opposite = &islands[1 - version];
+        let before = selected.artifacts().capture_graph_selection();
+        let offered = selected
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == catalog.original(0, version).descriptor.id)
+            .unwrap();
+        let expected_keys = catalog
+            .closure([(0, version, 11)])
             .into_iter()
             .map(|group| catalog.key(group))
             .collect::<BTreeSet<_>>();
-        assert_eq!(island.selected_native_groups(), expected);
-        catalog.assert_projection(
-            &island,
-            &catalog.projection(&island, [Some(version); MODULES]),
-            [Some(version); MODULES],
-        );
-        assert!(catalog
-            .projection(&view, [Some(1 - version); MODULES])
-            .validate(&island)
-            .is_err());
-        assert!(island
-            .native_binding_requirements_from_roots(&[NativeRequirementRoot::Group {
-                artifact: catalog.original(0, 1 - version).descriptor.id,
-                original_ordinal: 29
-            }])
-            .is_err());
-        let separate = ArtifactInventory::default();
-        islands.push(
-            separate
-                .admit_recovery_selection(&separate.empty_view(), island.entries(), &expected)
-                .unwrap(),
+        let edges = offered.custody_snapshot().binding_dependencies().unwrap();
+        let peer = opposite.for_source_owners(&BTreeSet::new()).unwrap();
+        for (left, right) in [(selected, &peer), (&peer, selected)] {
+            let merged = left.merge(right).unwrap();
+            assert_eq!(
+                selected_bindings(merged.artifacts()),
+                selected_bindings(selected.artifacts())
+            );
+            catalog.assert_projection(
+                merged.artifacts(),
+                merged.projection(),
+                [Some(version); MODULES],
+            );
+            assert!(merged
+                .artifacts()
+                .artifact_ids()
+                .contains(&catalog.original(0, 1 - version).descriptor.id));
+            let carried_offer = merged
+                .native_offers()
+                .iter()
+                .find(|retained| retained.same_issuance(offered))
+                .unwrap();
+            assert_eq!(
+                carried_offer
+                    .custody_snapshot()
+                    .binding_dependencies()
+                    .unwrap(),
+                edges
+            );
+            let context = ExactDeclarationContext::new(&[], &[], Vec::new())
+                .unwrap()
+                .extend_issued_compiler_support(&merged)
+                .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs(
+                    catalog.original(0, version).descriptor.producer_sha256,
+                )
+                .unwrap();
+            let receipt =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    &inputs,
+                    &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                )
+                .unwrap();
+            let expected = selected_bindings(selected.artifacts())
+                .into_iter()
+                .filter(|binding| {
+                    expected_keys.contains(&NativeGroupKey {
+                        artifact: binding.binding.artifact(),
+                        original_ordinal: binding.original_ordinal,
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(expected.len(), expected_keys.len());
+            assert!(expected.is_subset(&selected_bindings(inputs.artifacts())));
+            let inventory = inputs.artifacts().inventory();
+            let mut fixed = inventory
+                .bind_segment(inputs.artifacts(), vec![], &receipt)
+                .unwrap();
+            let ArtifactPayload::Original(product) = &catalog.original(0, version).payload else {
+                unreachable!()
+            };
+            let imports = [PendingImportOwner::Source {
+                owner: product.owner().clone(),
+                original_ordinal: 11,
+                binder: binder(0, 11),
+            }];
+            let target = inventory
+                .admit_bound_target(
+                    &mut fixed,
+                    &inventory.empty_view(),
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &receipt,
+                )
+                .unwrap()
+                .artifacts;
+            assert_eq!(selected_bindings(&target), expected);
+            assert_eq!(
+                target
+                    .native_binding_requirements_from_roots(&[NativeRequirementRoot::Group {
+                        artifact: catalog.original(0, version).descriptor.id,
+                        original_ordinal: 11,
+                    }])
+                    .unwrap()
+                    .into_iter()
+                    .map(|requirement| (requirement.identity, requirement.generation))
+                    .collect::<BTreeMap<_, _>>(),
+                BTreeMap::from([(
+                    Catalog::capture_identity(0, version),
+                    catalog.generations[version * MODULES]
+                )])
+            );
+            let ArtifactPayload::Original(foreign) = &catalog.original(0, 1 - version).payload
+            else {
+                unreachable!()
+            };
+            let foreign_imports = [PendingImportOwner::Source {
+                owner: foreign.owner().clone(),
+                original_ordinal: 11,
+                binder: binder(0, 11),
+            }];
+            let mut fixed = inventory
+                .bind_segment(inputs.artifacts(), vec![], &receipt)
+                .unwrap();
+            let refused = inventory.admit_bound_target(
+                &mut fixed,
+                &inventory.empty_view(),
+                NativeArtifactDemand::CertifiedTargetImports(&foreign_imports),
+                vec![],
+                &receipt,
+            );
+            assert!(
+                matches!(refused, Err(crate::CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 11 }
+                    if artifact == catalog.original(0, 1 - version).descriptor.id))
+            );
+        }
+        assert_eq!(selected.artifacts().capture_graph_selection(), before);
+        assert!(
+            selected.merge(opposite).is_err(),
+            "a real compiler namespace cannot select both variants"
         );
     }
-    let expected = islands[0]
-        .selected_native_groups()
-        .union(&islands[1].selected_native_groups())
-        .copied()
-        .collect::<BTreeSet<_>>();
-    let old = islands[0].clone();
-    let merged = islands[0].merge_fixture_selections(&islands[1]).unwrap();
-    assert_eq!(merged.selected_native_groups(), expected);
-    assert_ne!(
-        old.selected_native_groups(),
-        expected,
-        "cross-inventory merge cannot widen the prior view"
-    );
-    for version in 0..VERSIONS {
-        catalog.assert_target(&merged, &[(0, version, 11)]);
-    }
-    catalog.assert_projection(
-        &merged,
-        &catalog.projection(&merged, [Some(0); MODULES]),
-        [Some(0); MODULES],
-    );
-    catalog.assert_projection(
-        &merged,
-        &catalog.projection(&merged, [Some(1); MODULES]),
-        [Some(1); MODULES],
-    );
 }
 
 #[test]
