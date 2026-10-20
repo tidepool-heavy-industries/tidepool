@@ -180,7 +180,7 @@ impl GenerationRetirementAttempt {
 }
 
 impl RunState {
-    fn retirement_blocks_link(
+    pub(super) fn retirement_blocks_link(
         &self,
         actors: &[ActorRef],
         cells: &[ractor::ActorId],
