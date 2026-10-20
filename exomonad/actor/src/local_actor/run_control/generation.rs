@@ -1,4 +1,7 @@
 //! Generation provenance travels through the existing run-directory owners.
+#[cfg(test)]
+mod publication_protocol_tests;
+
 use super::*;
 use crate::resident_workbench::generation_admission::{GenerationAdmissionError, GenerationFence};
 use crate::ResidentActorWorkbenchError;
@@ -2149,6 +2152,33 @@ fn retire_published_source(
     }
 }
 
+fn initial_publication_failure(
+    owner: &ActorGenerationPublicationOwner,
+    custody: &GenerationPublicationCustody,
+) -> (bool, InitialGenerationPublicationError) {
+    let independent_nonstart = matches!(
+        custody,
+        GenerationPublicationCustody::NotStarted {
+            reason: preparation::PublicationNonStart::SpawnFailed(_)
+        }
+    );
+    let discharge = owner.settled_obligations() && !independent_nonstart;
+    let error = if let Some(error) = owner.settlement_error() {
+        InitialGenerationPublicationError::Settlement(error.clone())
+    } else if let Some(outcome) = owner.failure_outcome() {
+        if discharge {
+            InitialGenerationPublicationError::Body(outcome.clone())
+        } else {
+            InitialGenerationPublicationError::UnconfirmedBody(outcome.clone())
+        }
+    } else if let GenerationPublicationCustody::NotStarted { reason } = custody {
+        InitialGenerationPublicationError::NotStarted(reason.kind())
+    } else {
+        InitialGenerationPublicationError::Unconfirmed
+    };
+    (discharge, error)
+}
+
 impl GenerationRetirementRecord {
     fn reconcile_live(&mut self) {
         self.core.reconcile();
@@ -2166,26 +2196,7 @@ impl GenerationRetirementRecord {
                 let Some(reply) = self.driver.initial_reply.take() else {
                     return;
                 };
-                let independent_nonstart = matches!(
-                    custody,
-                    GenerationPublicationCustody::NotStarted {
-                        reason: preparation::PublicationNonStart::SpawnFailed(_)
-                    }
-                );
-                let discharge = owner.settled_obligations() && !independent_nonstart;
-                let error = if let Some(error) = owner.settlement_error() {
-                    InitialGenerationPublicationError::Settlement(error.clone())
-                } else if let Some(outcome) = owner.failure_outcome() {
-                    if discharge {
-                        InitialGenerationPublicationError::Body(outcome.clone())
-                    } else {
-                        InitialGenerationPublicationError::UnconfirmedBody(outcome.clone())
-                    }
-                } else if let GenerationPublicationCustody::NotStarted { reason } = custody {
-                    InitialGenerationPublicationError::NotStarted(reason.kind())
-                } else {
-                    InitialGenerationPublicationError::Unconfirmed
-                };
+                let (discharge, error) = initial_publication_failure(owner, custody);
                 if discharge {
                     let actor = *actor;
                     let candidate = candidate.identity_observer();

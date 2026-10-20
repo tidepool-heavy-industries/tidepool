@@ -80,6 +80,8 @@ mod terminal_wait;
 mod tool_support;
 pub use tool_support::installed_intrinsic_effect_support;
 mod workbench_ledger;
+#[cfg(test)]
+pub(crate) use workbench_ledger::assert_publication_transport_protocol;
 
 #[cfg(test)]
 pub(crate) use drain_wait::{wait_drain_event, DrainWaitEvent};

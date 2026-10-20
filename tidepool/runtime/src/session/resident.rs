@@ -12965,6 +12965,38 @@ mod authored_publication_tests {
         let mut session =
             TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, Some(lib));
         let prior = session.mint_unpublished_notebook_scope(None).unwrap();
+        // Keep A's actual physical installation alive while the same immutable
+        // compiled entry is freshly instantiated for B in this machine.
+        let prior_entry = session
+            .with_source_compiler_transaction(
+                prior.lease().original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| session.prepare_source_startup_entry(&prepared),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        assert!(!prior_entry
+            .entry
+            .provenance
+            .original_sources
+            .sites
+            .is_empty());
+        for site in prior_entry.entry.provenance.original_sources.sites.keys() {
+            assert!(Arc::ptr_eq(
+                &prior_entry
+                    .entry
+                    .provenance
+                    .original_sources
+                    .require_unique(*site)
+                    .unwrap(),
+                prior.lease().original_source()
+            ));
+        }
         let candidate = session.mint_unpublished_notebook_scope(None).unwrap();
         let source = candidate.lease().original_source().clone();
         session
@@ -13148,6 +13180,14 @@ mod authored_publication_tests {
             "actual closed source executed after prior cutoff; witnessed native sites={sites}"
         );
         cutoff.reopen(prior.lease().original_source()).unwrap();
+        let prior_program = prior_entry.entry.program.unwrap();
+        drop(prior_entry);
+        session.settle_dropped_custody();
+        assert!(!session
+            .state
+            .require_prepared()
+            .unwrap()
+            .unpin(prior_program));
     }
 
     #[test]
