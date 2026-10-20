@@ -3085,6 +3085,28 @@ pub struct PreparedRuntimeCell {
     stderr: Vec<u8>,
 }
 
+// boundary: see CELL-PREPARATION-BOUNDARY.md
+/// Parse authored source in the execution's held compiler world. The recipe
+/// carries authored source and protected templates only: includes, imports,
+/// the baseline and every other compiler input come from the published world
+/// rather than from a reconstructed compile view.
+///
+/// The returned one-shot plan is consumed by
+/// `PersistentSession::admit_world_planned_cell_for_execution` (or the
+/// host-carrier entry) inside the admission's source transaction.
+pub fn plan_world_cell_admitted(
+    source: &super::RuntimeSourceCompilerTransaction,
+    world: &tidepool_toolchain::compiler_world::CompilerWorld,
+    recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+) -> Result<Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>, CompileError> {
+    source
+        .admit(None)
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    let command = extract_cmd()?;
+    let endpoint = bind_extract_cmd(&command)?;
+    tidepool_toolchain::compiler_world::plan_cell(&endpoint, world, recipe)
+}
+
 pub fn prepare_cell_program_admitted(
     source: &super::RuntimeSourceCompilerTransaction,
     admission: Arc<super::RuntimeCellAdmission>,
@@ -3279,6 +3301,18 @@ fn prepare_cell_program_admitted_inner(
     if !admission.has_execution_purpose() {
         return Err(CompileError::ExtractFailed(
             "checked execution requires its owning private or native setup admission".into(),
+        )
+        .into());
+    }
+    // A held-world reservation carries parser expectations only. The SAME
+    // certifier's checked-program/item issuer has not landed in this tree:
+    // `compiler_world::CheckedWorldCellProgram` exposes observations and
+    // demand rows, but no runtime-facing constructor for the `CellProgram`
+    // and checked items this preparer returns. Refuse before any compiler
+    // work rather than rebuilding a finite baseline view.
+    if admission.world_reservation().is_some() {
+        return Err(CompileError::ExtractFailed(
+            super::SessionError::WorldCellCheckedProgramCapabilityMissing.to_string(),
         )
         .into());
     }
