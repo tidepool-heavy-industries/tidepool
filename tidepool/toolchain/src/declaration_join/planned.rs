@@ -682,26 +682,147 @@ pub(crate) fn certify_same_offer_planned_declaration(
     includes: &[PathBuf],
     inventory_json: &[u8],
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
-    let sealed_artifacts = output.artifacts();
-    let source_selection = output.source_selection();
-    let source_admission = admission.source();
-    let module_name = module.module_name();
-    let source_path = source_admission.witness().source_path();
-    let source_sha256: [u8; 32] = Sha256::digest(normalized_source.as_bytes()).into();
+    validate_planned_declaration_source(
+        &module,
+        normalized_source,
+        producer_identity,
+        admission,
+        includes,
+    )?;
+    let source_path = admission.source().witness().source_path();
+    if std::fs::read(source_path)? != normalized_source.as_bytes() {
+        return Err(contract(
+            "planned original source differs from its exact admission",
+        ));
+    }
+    certify_admitted_planned_declaration(
+        module,
+        normalized_source,
+        producer_identity,
+        originals,
+        output,
+        admission,
+        includes,
+        inventory_json,
+    )
+}
+
+/// Consume an actual checked authored stage and its already-issued Original
+/// closure. The captured source owner replaces the finite path's live reread.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn certify_world_stage_planned_declaration(
+    program: &crate::compiler_world::CheckedWorldCellProgram,
+    stage: &Arc<crate::compiler_world::CheckedWorldCellStage>,
+    normalized_source: &str,
+    originals: &crate::certified_products::SelectedOriginalClosure,
+    output: &crate::declaration_context::IssuedOriginalOutput,
+    admission: &ExactProductAdmission<'_>,
+    includes: &[PathBuf],
+) -> Result<CertifiedAuthoredDeclaration, CompileError> {
+    let authored = NativeAuthoredDeclarationAdmission::from_world_stage(
+        program,
+        stage,
+        admission.source(),
+        normalized_source,
+    )?;
+    let [ordinal] = stage.ordinals() else {
+        return Err(contract(
+            "authored World stage has multiple execution items",
+        ));
+    };
+    let item = program
+        .items()
+        .get(*ordinal)
+        .ok_or_else(|| contract("authored World stage omits its checked item"))?;
+    if !Arc::ptr_eq(item.proof().stage(), stage) {
+        return Err(contract("authored World item belongs to another stage"));
+    }
+    let proof = match item.kind() {
+        crate::compiler_world::WorldItemProofKind::Declaration(proof)
+        | crate::compiler_world::WorldItemProofKind::Prologue(proof) => proof,
+        crate::compiler_world::WorldItemProofKind::Executable(_) => {
+            return Err(contract("authored World stage has an executable item"));
+        }
+    };
+    let selected = originals
+        .products()
+        .iter()
+        .find(|product| {
+            product.owner().unit == authored.owner.unit
+                && product.owner().module == authored.owner.module
+        })
+        .ok_or_else(|| contract("authored World item has no issued Original"))?;
+    let interface = selected
+        .module_interface()
+        .ok_or_else(|| contract("authored World Original lacks canonical interface"))?;
+    if proof.owner() != &authored.owner
+        || interface.interface_sha256() != *proof.iface_sha256()
+        || selected.interface_bytes() != interface.interface_bytes()
+    {
+        return Err(contract(
+            "authored World item differs from its sealed Original",
+        ));
+    }
+    let module = SessionModule::lib(tidepool_repr::Generation(authored.generation));
+    validate_planned_declaration_source(
+        &module,
+        normalized_source,
+        program.producer_identity_bytes(),
+        admission,
+        includes,
+    )?;
+    certify_admitted_planned_declaration(
+        module,
+        normalized_source,
+        program.producer_identity_bytes(),
+        originals,
+        output,
+        admission,
+        includes,
+        proof.inventory_json().as_bytes(),
+    )
+}
+
+fn validate_planned_declaration_source(
+    module: &SessionModule,
+    normalized_source: &str,
+    producer_identity: &[u8],
+    admission: &ExactProductAdmission<'_>,
+    includes: &[PathBuf],
+) -> Result<(), CompileError> {
+    let witness = admission.source().witness();
     if module.kind != SessionModuleKind::Lib
         || module.gen.0 == 0
         || producer_identity.is_empty()
         || includes.is_empty()
-        || !source_path.is_absolute()
-        || !source_admission
-            .witness()
-            .matches_source(source_path, normalized_source)
-        || std::fs::read(source_path)? != normalized_source.as_bytes()
+        || !witness.source_path().is_absolute()
+        || !witness.matches_source(witness.source_path(), normalized_source)
     {
         return Err(contract(
             "planned original source differs from its exact admission",
         ));
     }
+    Ok(())
+}
+
+/// Authenticate declaration facts against the same source/product admission.
+/// Physical source checks belong to the source owner before this shared step.
+#[allow(clippy::too_many_arguments)]
+fn certify_admitted_planned_declaration(
+    module: SessionModule,
+    normalized_source: &str,
+    producer_identity: &[u8],
+    originals: &crate::certified_products::SelectedOriginalClosure,
+    output: &crate::declaration_context::IssuedOriginalOutput,
+    admission: &ExactProductAdmission<'_>,
+    includes: &[PathBuf],
+    inventory_json: &[u8],
+) -> Result<CertifiedAuthoredDeclaration, CompileError> {
+    let sealed_artifacts = output.artifacts();
+    let source_selection = output.source_selection();
+    let source_admission = admission.source();
+    let module_name = module.module_name();
+    let source_sha256: [u8; 32] = Sha256::digest(normalized_source.as_bytes()).into();
     let toolchain_identity_sha256 =
         crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
             producer_identity,

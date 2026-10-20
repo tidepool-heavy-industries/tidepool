@@ -1000,7 +1000,7 @@ pub struct HostBindingPrototype {
     representation: HostRepresentation,
     authority_digest: [u8; 32],
     include_paths: Vec<std::path::PathBuf>,
-    _source_owner: Arc<dyn std::any::Any + Send + Sync>,
+    _source_owner: super::admission::RuntimeHostPrototypeSource,
 }
 
 impl HostBindingPrototype {
@@ -2249,6 +2249,13 @@ impl Drop for RootCustody {
 pub struct BindingLease {
     retained: Vec<SessionVarId>,
     cleanup: CustodyLease,
+}
+
+impl BindingLease {
+    /// Exact roots retained by the binding owner's dependency-closure admission.
+    pub fn retained_bindings(&self) -> &[SessionVarId] {
+        &self.retained
+    }
 }
 
 /// One installed startup program awaiting its actor's durable application
@@ -4303,13 +4310,19 @@ where
     pub fn admit_world_planned_host_carrier_cell_in(
         &mut self,
         scope: ScopeId,
-        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        plan: super::turn::RuntimeWorldCellPlan,
         binding: String,
         expected: HostBindingType,
+        authority_digest: [u8; 32],
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
-        self.state
-            .admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
+        self.state.admit_world_planned_host_carrier_cell_in(
+            scope,
+            plan,
+            binding,
+            expected,
+            authority_digest,
+        )
     }
 
     /// Admit one compiler-issued binder reserved for a native host payload.
@@ -4403,7 +4416,7 @@ where
     pub fn admit_world_planned_cell_for_execution(
         &mut self,
         execution: Arc<super::PrivateExecutionAdmission>,
-        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        plan: super::turn::RuntimeWorldCellPlan,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state
@@ -4414,12 +4427,25 @@ where
     pub fn admit_world_planned_cell_with_input(
         &mut self,
         execution: Arc<super::PrivateExecutionAdmission>,
-        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        plan: super::turn::RuntimeWorldCellPlan,
         input: Option<&super::PendingHostValueWrite>,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state
             .admit_world_planned_cell_with_input(execution, plan, input)
+    }
+
+    /// Capture the actual private input through its original mount receipt.
+    /// Its binding lease survives compiler waiting and uncertain delivery.
+    pub fn world_cell_operand_for_input(
+        &mut self,
+        execution: Arc<super::PrivateExecutionAdmission>,
+        input: &super::PendingHostValueWrite,
+    ) -> Result<Arc<super::RuntimeWorldCellOperand>, SessionError> {
+        self.settle_dropped_custody();
+        input.private_hidden_mount_key(&self.state, &execution)?;
+        let binding = self.lease_bindings(&[tidepool_repr::VarId(input.id().raw())]);
+        input.world_cell_operand(&self.state, execution, binding)
     }
 
     pub fn admit_checked_item(
@@ -4586,18 +4612,14 @@ where
         ),
         PreparedRuntimeError,
     > {
-        let (program, source_keys) = self.state.install_certified_turn_in(
+        self.state.install_certified_turn_in(
             scope,
             metadata,
             target,
             source_evidence,
             demanded,
             inherited_needed,
-        )?;
-        if !source_keys.is_empty() {
-            self.advance_public_visibility(scope);
-        }
-        Ok((program, source_keys))
+        )
     }
 
     fn retire_failed_turn_source_instances(
@@ -5041,6 +5063,7 @@ where
         source_revision: &[u8],
         selected_imports: &super::SourceImports,
         inputs: &super::RuntimeCompileInputs,
+        actor: Option<&super::InspectionActorObservation>,
         label: super::NameScope,
     ) -> Result<super::InspectionScopeSnapshot, SessionError> {
         self.state.capture_inspection_scope_in(
@@ -5048,6 +5071,7 @@ where
             source_revision,
             selected_imports,
             inputs,
+            actor,
             label,
         )
     }
@@ -6217,13 +6241,14 @@ where
             .code()
             .into_host_prototype()
             .map_err(SessionError::Compile)?;
+        let receipt = admission.prefix().admission().host_prototype_receipt()?;
         let prototype = Arc::new(HostBindingPrototype {
             compiler,
             code: Arc::new(code),
             representation: carrier.representation,
-            authority_digest: admission.prefix().admission().authority_digest()?,
-            include_paths: admission.prefix().admission().include_paths()?.to_vec(),
-            _source_owner: admission.prefix().admission().specification()?.clone(),
+            authority_digest: receipt.authority_digest,
+            include_paths: admission.item().include_paths().to_vec(),
+            _source_owner: receipt.source,
         });
         self.host_binding_prototypes
             .retain(|old| old.representation.host_type() != prototype.representation.host_type());
@@ -7856,6 +7881,7 @@ where
                 Some(bundle) => TurnImageAcquisition::Ready { bundle },
                 None => TurnImageAcquisition::Compile,
             },
+            checked.as_deref(),
         )?;
         timing::record_stage(
             timing::NO_NODE,
@@ -7919,6 +7945,7 @@ where
         &mut self,
         admission: AdmittedTurnCode<'a>,
         images: TurnImageAcquisition<'_>,
+        checked: Option<&CheckedTurnCompletion>,
     ) -> Result<InstalledAdmittedTurn<'a>, ResidentError> {
         let AdmittedTurnCode {
             code,
@@ -7942,14 +7969,25 @@ where
                     )?
                 }
             };
-            self.install_certified_turn_in(
-                scope,
-                &metadata,
-                target,
-                &resolved.source_evidence,
-                demanded,
-                &resolved.inherited_needed,
-            )?
+            match checked {
+                Some(checked) => checked.install_certified_turn_in(
+                    &mut self.state,
+                    scope,
+                    &metadata,
+                    target,
+                    &resolved.source_evidence,
+                    demanded,
+                    &resolved.inherited_needed,
+                )?,
+                None => self.install_certified_turn_in(
+                    scope,
+                    &metadata,
+                    target,
+                    &resolved.source_evidence,
+                    demanded,
+                    &resolved.inherited_needed,
+                )?,
+            }
         } else {
             if matches!(images, TurnImageAcquisition::Ready { .. }) {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
@@ -8012,7 +8050,7 @@ where
             program,
             source_keys,
             _inputs: _installed_inputs,
-        } = self.install_admitted_turn(admission, TurnImageAcquisition::Compile)?;
+        } = self.install_admitted_turn(admission, TurnImageAcquisition::Compile, None)?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)

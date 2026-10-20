@@ -3867,6 +3867,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
                 TurnImageAcquisition::Ready {
                     bundle: &incomplete,
                 },
+                None,
             )
         });
         assert!(

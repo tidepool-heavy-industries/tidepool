@@ -1,10 +1,17 @@
 frontendAnswer <- do
+  view <- currentScopeView
   answer <- info (NameQuery (PublicModule "WorldQuestion") ValueName "known")
-  case answer of
-    Right details
+  case (view, answer) of
+    (Right snapshot, Right details)
       | identifierName (inspectedIdentifier details) == "known"
-          && isPrefixOf "compiler-world:"
-            (provenanceFingerprint (identifierProvenance details)) ->
-              pure (7 :: Int)
-    Right _ -> error "wrong world query answer"
-    Left _ -> error "world query refused"
+          && provenanceScope snapshot == CurrentScope
+          && identifierModule (inspectedIdentifier details) == "WorldQuestion"
+          && identifierNamespace (inspectedIdentifier details) == ValueIdentifier
+          && provenanceScope (identifierProvenance details) == PublicModule "WorldQuestion"
+          && provenanceGeneration (identifierProvenance details) == provenanceGeneration snapshot
+          && provenanceFingerprint (identifierProvenance details) == provenanceFingerprint snapshot
+          && (case identifierDeclaration details of
+                ValueDeclaration expression -> typeCanonical expression == "Int"
+                _ -> False) -> pure (7 :: Int)
+    (Right _, Right _) -> error "wrong world query answer"
+    _ -> error "world query refused"

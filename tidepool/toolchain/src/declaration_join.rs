@@ -15,7 +15,9 @@ use crate::{
 };
 
 mod planned;
-pub(crate) use planned::certify_same_offer_planned_declaration;
+pub(crate) use planned::{
+    certify_same_offer_planned_declaration, certify_world_stage_planned_declaration,
+};
 
 pub use crate::declaration_context::{
     ExactCompileContext, ExactDeclarationContext, ExactSourceWitness,
@@ -189,10 +191,80 @@ impl NativeAuthoredDeclarationAdmission {
         module: &SessionModule,
         source: &crate::declaration_context::ExactSourceAdmission,
     ) -> Result<Self, CompileError> {
+        if module.kind != SessionModuleKind::Lib || module.gen.0 == 0 {
+            return Err(contract(
+                "planned authored origin differs from its reserved source",
+            ));
+        }
         let owner = ExactModuleIdentity {
             unit: "main".into(),
             module: module.module_name(),
         };
+        Self::from_source(owner, module.gen.0, source)
+    }
+
+    pub(crate) fn from_world_stage(
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        stage: &Arc<crate::compiler_world::CheckedWorldCellStage>,
+        source: &crate::declaration_context::ExactSourceAdmission,
+        source_text: &str,
+    ) -> Result<Self, CompileError> {
+        use crate::checked_cell::CheckedPlannedCellSlot;
+        use crate::compiler_world::WorldCellStageIdentity;
+        let actual = program
+            .stages()
+            .get(stage.index())
+            .ok_or_else(|| contract("authored World stage is absent from its checked output"))?;
+        if !Arc::ptr_eq(actual, stage)
+            || !source.matches_world_stage(program, stage.index(), source_text)?
+        {
+            return Err(contract("authored World source belongs to another stage"));
+        }
+        let (ordinal, owner, declaration) = match stage.identity() {
+            WorldCellStageIdentity::Declaration { ordinal, owner } => (*ordinal, owner, true),
+            WorldCellStageIdentity::Prologue { ordinal, owner } => (*ordinal, owner, false),
+            WorldCellStageIdentity::Executable { .. } => {
+                return Err(contract(
+                    "executable World stage has no authored declaration origin",
+                ));
+            }
+        };
+        let ordinal = usize::try_from(ordinal)
+            .map_err(|_| contract("authored World ordinal is not representable"))?;
+        if source.generated_source_owner()? != *owner {
+            return Err(contract(
+                "authored World original differs from its admitted generated source",
+            ));
+        }
+        let generation = match program.reservation().slots().get(ordinal) {
+            Some(CheckedPlannedCellSlot::Declaration {
+                declaration: generation,
+            }) if declaration => *generation,
+            Some(CheckedPlannedCellSlot::Prologue {
+                declaration: generation,
+            }) if !declaration => *generation,
+            _ => {
+                return Err(contract(
+                    "authored World stage differs from its reserved slot",
+                ))
+            }
+        };
+        if generation == 0
+            || owner.module
+                != SessionModule::lib(tidepool_repr::Generation(generation)).module_name()
+        {
+            return Err(contract(
+                "authored World stage has another reserved Lib owner",
+            ));
+        }
+        Self::from_source(owner.clone(), generation, source)
+    }
+
+    fn from_source(
+        owner: ExactModuleIdentity,
+        generation: u64,
+        source: &crate::declaration_context::ExactSourceAdmission,
+    ) -> Result<Self, CompileError> {
         let mut matching = source
             .evidence()
             .modules
@@ -201,9 +273,7 @@ impl NativeAuthoredDeclarationAdmission {
         let selected = matching
             .next()
             .ok_or_else(|| contract("planned authored origin has no reserved source"))?;
-        if module.kind != SessionModuleKind::Lib
-            || module.gen.0 == 0
-            || matching.next().is_some()
+        if matching.next().is_some()
             || !selected.is_generated_source()
             || selected.product != ProductAvailability::Ready
         {
@@ -213,7 +283,7 @@ impl NativeAuthoredDeclarationAdmission {
         }
         Ok(Self {
             owner,
-            generation: module.gen.0,
+            generation,
             source_path: source.witness().source_path().to_owned(),
             source_sha256: *source.witness().source_sha256(),
         })
@@ -283,6 +353,81 @@ pub(crate) fn source_lexical_closure(
     source_lexical_surface_inner(roots, imports, inherited, implementations, true)
 }
 
+pub(crate) fn shared_source_edges(
+    edges: &[ExactModuleIdentity],
+    implementation: impl Fn(&ExactModuleIdentity) -> Option<crate::artifact_inventory::ArtifactKind>,
+) -> Result<Vec<ExactModuleIdentity>, CompileError> {
+    edges
+        .iter()
+        .filter_map(|owner| {
+            if !SessionModule::is_reserved_name(&owner.module) {
+                // Compiler-issued lexical projections are implementation
+                // interfaces even when their owner is content-addressed.
+                // Their retained artifacts do not grant historical source imports.
+                return (implementation(owner).as_ref()
+                    != Some(&crate::artifact_inventory::ArtifactKind::LexicalJoin))
+                .then(|| Ok(owner.clone()));
+            }
+            let module = SessionModule::from_module_name(&owner.module).filter(|module| {
+                matches!(
+                    (implementation(owner).as_ref(), module.kind),
+                    (
+                        Some(crate::artifact_inventory::ArtifactKind::ValueInterface),
+                        SessionModuleKind::Val
+                    ) | (
+                        Some(
+                            crate::artifact_inventory::ArtifactKind::OriginalModule
+                                | crate::artifact_inventory::ArtifactKind::LexicalJoin
+                        ),
+                        SessionModuleKind::Lib
+                    )
+                )
+            });
+            if owner.unit == "main"
+                && module.is_some_and(|module| module.module_name() == owner.module)
+            {
+                None
+            } else {
+                Some(Err(contract(
+                    "source import lacks its authenticated session implementation",
+                )))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+}
+
+/// Walk only the exact source roots, borrowing prior adjacency by owner.
+pub(crate) fn keyed_source_lexical_closure(
+    roots: &[ExactModuleIdentity],
+    imports: impl Fn(&ExactModuleIdentity) -> Option<Vec<ExactModuleIdentity>>,
+    implementation: impl Fn(&ExactModuleIdentity) -> Option<crate::artifact_inventory::ArtifactKind>,
+) -> Result<OriginalSourceLexicalSurface, CompileError> {
+    let roots = shared_source_edges(roots, &implementation)?;
+    let mut pending = roots.clone();
+    let mut lexical = std::collections::BTreeMap::new();
+    while let Some(owner) = pending.pop() {
+        if lexical.contains_key(&owner) {
+            continue;
+        }
+        let edges = imports(&owner).ok_or_else(|| {
+            contract(format!(
+                "admitted surface root {}:{} lacks exact original source import evidence",
+                owner.unit, owner.module
+            ))
+        })?;
+        let edges = shared_source_edges(&edges, &implementation)?;
+        pending.extend(edges.iter().cloned());
+        lexical.insert(owner, edges);
+    }
+    Ok(OriginalSourceLexicalSurface {
+        roots,
+        lexical: lexical
+            .into_iter()
+            .map(|(owner, imports)| ExactLexicalNode { owner, imports })
+            .collect(),
+    })
+}
+
 fn source_lexical_surface_inner(
     roots: &[ExactModuleIdentity],
     imports: &std::collections::BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
@@ -295,43 +440,7 @@ fn source_lexical_surface_inner(
 ) -> Result<OriginalSourceLexicalSurface, CompileError> {
     use std::collections::{BTreeMap, BTreeSet};
     let shared_edges = |edges: &[ExactModuleIdentity]| {
-        edges
-            .iter()
-            .filter_map(|owner| {
-                if !SessionModule::is_reserved_name(&owner.module) {
-                    // Compiler-issued lexical projections are implementation
-                    // interfaces even when their owner is content-addressed.
-                    // Their retained artifacts do not grant historical source imports.
-                    return (implementations.get(owner)
-                        != Some(&crate::artifact_inventory::ArtifactKind::LexicalJoin))
-                    .then(|| Ok(owner.clone()));
-                }
-                let module = SessionModule::from_module_name(&owner.module).filter(|module| {
-                    matches!(
-                        (implementations.get(owner), module.kind),
-                        (
-                            Some(crate::artifact_inventory::ArtifactKind::ValueInterface),
-                            SessionModuleKind::Val
-                        ) | (
-                            Some(
-                                crate::artifact_inventory::ArtifactKind::OriginalModule
-                                    | crate::artifact_inventory::ArtifactKind::LexicalJoin
-                            ),
-                            SessionModuleKind::Lib
-                        )
-                    )
-                });
-                if owner.unit == "main"
-                    && module.is_some_and(|module| module.module_name() == owner.module)
-                {
-                    None
-                } else {
-                    Some(Err(contract(
-                        "source import lacks its authenticated session implementation",
-                    )))
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()
+        shared_source_edges(edges, |owner| implementations.get(owner).copied())
     };
     let roots = shared_edges(roots)?;
     let mut lexical = BTreeMap::new();
@@ -1688,6 +1797,56 @@ mod tests {
             original_source_lexical_surface(&original, &imports, &inherited, &BTreeMap::new())
                 .unwrap();
         assert!(source.lexical.iter().any(|node| node.owner == projection));
+    }
+
+    #[test]
+    fn keyed_source_closure_matches_general_policy_without_baseline_walk() {
+        use crate::artifact_inventory::ArtifactKind;
+        use std::collections::BTreeMap;
+        let owner = |module: &str| ExactModuleIdentity {
+            unit: "main".into(),
+            module: module.into(),
+        };
+        let root = owner("Shared");
+        let value = owner("Tidepool.Session.Val.G1");
+        let library = owner("Tidepool.Session.Lib.G2");
+        let projection = owner("Joined");
+        let kinds = BTreeMap::from([
+            (value.clone(), ArtifactKind::ValueInterface),
+            (library.clone(), ArtifactKind::OriginalModule),
+            (projection.clone(), ArtifactKind::LexicalJoin),
+        ]);
+        let imports = BTreeMap::from([(root.clone(), vec![value, library, projection])]);
+        for width in [1, 32, 128] {
+            let inherited = (0..width)
+                .map(|index| ExactLexicalNode {
+                    owner: owner(&format!("Unrelated{index}")),
+                    imports: vec![],
+                })
+                .collect::<Vec<_>>();
+            let expected =
+                source_lexical_closure(std::slice::from_ref(&root), &imports, &inherited, &kinds)
+                    .unwrap();
+            let reads = std::cell::Cell::new(0);
+            let actual = keyed_source_lexical_closure(
+                std::slice::from_ref(&root),
+                |owner| {
+                    reads.set(reads.get() + 1);
+                    imports.get(owner).cloned()
+                },
+                |owner| kinds.get(owner).copied(),
+            )
+            .unwrap();
+            assert_eq!(actual.roots, expected.roots);
+            assert_eq!(actual.lexical, expected.lexical);
+            assert_eq!(reads.get(), 1);
+        }
+        assert!(keyed_source_lexical_closure(
+            std::slice::from_ref(&root),
+            |owner| imports.get(owner).cloned(),
+            |_| None
+        )
+        .is_err());
     }
 
     #[test]

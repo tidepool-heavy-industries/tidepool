@@ -550,22 +550,15 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
             == canonical_interface
     }));
 
-    let key = crate::artifact_inventory::NativeGroupKey {
-        artifact: crate::artifact_inventory::ArtifactEntry::original_artifact_id(
-            CanonicalProducerIdentity::from_producer_bytes(&producer).sha256(),
-            &current.certified.recovery_products[0],
-        ),
-        original_ordinal: 7,
-    };
-    let NativeGroupCandidates::IssuedAvailability(bindings) = current
-        .certified
-        .source_selection
-        .native_group_candidates(key, &selected_owner)
+    let artifact = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+        CanonicalProducerIdentity::from_producer_bytes(&producer).sha256(),
+        &current.certified.recovery_products[0],
+    );
+    let required = original_available_groups(&current.certified.recovery_products[0])
         .unwrap()
-    else {
-        panic!("the physical producer completed this native availability");
-    };
-    assert!(!bindings.is_empty());
+        .map(|group| group.original_ordinal())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(required, BTreeSet::from([7, 11]));
     let rebound = crate::declaration_context::certified_product_artifact_view(
         CanonicalProducerIdentity::from_producer_bytes(&producer).sha256(),
         &custody,
@@ -573,25 +566,50 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
         None,
     )
     .unwrap();
-    for binding in &bindings {
-        let Some(CertifiedNativeGroupSupport::Issued(offer)) = current
+    let mut deliberately_missing = BTreeSet::new();
+    for original_ordinal in required {
+        let key = crate::artifact_inventory::NativeGroupKey {
+            artifact,
+            original_ordinal,
+        };
+        let NativeGroupCandidates::IssuedAvailability(bindings) = current
             .certified
             .source_selection
-            .native_group_support(key, &selected_owner, *binding)
+            .native_group_candidates(key, &selected_owner)
+            .unwrap()
         else {
-            panic!("completed availability retains its exact issuing offer");
+            panic!("the physical producer completed this native availability");
         };
-        assert!(offer.group_bindings(key).any(|issued| issued == *binding));
-        assert!(
-            !rebound.contains_issued_native_group(*binding),
-            "equal payloads do not recreate an issued Group binding"
-        );
+        assert!(!bindings.is_empty());
+        for binding in &bindings {
+            let Some(CertifiedNativeGroupSupport::Issued(offer)) = current
+                .certified
+                .source_selection
+                .native_group_support(key, &selected_owner, *binding)
+            else {
+                panic!("completed availability retains its exact issuing offer");
+            };
+            assert!(offer.group_bindings(key).any(|issued| issued == *binding));
+            assert!(
+                !rebound.contains_issued_native_group(*binding),
+                "equal payloads do not recreate an issued Group binding"
+            );
+        }
+        deliberately_missing.insert(original_ordinal);
     }
+    let rebound_result = current
+        .certified
+        .source_selection
+        .selected_original_closure(&rebound);
     assert!(
-        matches!(current.certified.source_selection.selected_original_closure(&rebound),
+        matches!(&rebound_result,
         Err(CertificationError::OriginalClosure(error)) if matches!(error.as_ref(),
             crate::CompileError::ArtifactInventory(error) if matches!(&error.failure,
-                crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 } if *artifact == key.artifact)))
+                crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                    artifact: refused, original_ordinal,
+                } if *refused == artifact && deliberately_missing.contains(original_ordinal)))),
+        "the exact current Original must refuse a deliberately missing required group: {:?}",
+        rebound_result.as_ref().err(),
     );
 
     // Retain every version through its actual physical issuer, in both orders.

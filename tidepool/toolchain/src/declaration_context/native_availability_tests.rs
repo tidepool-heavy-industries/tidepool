@@ -4417,8 +4417,10 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
             "custody cannot add an offer for B"
         );
         assert_eq!(
-            input.issued_input_decisions(),
-            Some(baseline.input_decisions())
+            input
+                .issued_input_decisions()
+                .map(|decisions| decisions.recorded_facts()),
+            Some(baseline.input_decisions().recorded_facts())
         );
         assert!(input
             .issued_artifacts()
@@ -4896,8 +4898,12 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         assert_eq!(received.native_availability(), input.native_availability());
         assert_eq!(received.issued_offers(), input.issued_offers());
         assert_eq!(
-            received.issued_input_decisions(),
-            input.issued_input_decisions()
+            received
+                .issued_input_decisions()
+                .map(|decisions| decisions.recorded_facts()),
+            input
+                .issued_input_decisions()
+                .map(|decisions| decisions.recorded_facts())
         );
         let directory = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(context.clone())
@@ -4953,8 +4959,12 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         assert_eq!(received.native_availability(), input.native_availability());
         assert_eq!(received.issued_offers(), input.issued_offers());
         assert_eq!(
-            received.issued_input_decisions(),
-            input.issued_input_decisions()
+            received
+                .issued_input_decisions()
+                .map(|decisions| decisions.recorded_facts()),
+            input
+                .issued_input_decisions()
+                .map(|decisions| decisions.recorded_facts())
         );
         if available {
             assert!(
@@ -7346,7 +7356,10 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
         }
         hydrate_context(&store, receipt.root()).unwrap()
     };
-    for ordinals in [vec![7, 9001], vec![9001], vec![]] {
+    for (ordinals, published) in [vec![7, 9001], vec![9001], vec![]]
+        .into_iter()
+        .flat_map(|ordinals| [false, true].map(move |published| (ordinals.clone(), published)))
+    {
         // Only durable facts and newly acquired certified bytes leave this
         // scope; no original offer/view/payload owner backs the restored context.
         let (snapshot, mut acquired_inventory, id, recorded_full, carriers) = {
@@ -7355,11 +7368,17 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 ArtifactEntry::original(producer.sha256(), product("ProofOnlyOffer", 119)).unwrap(),
             );
             let id = entry.descriptor.id;
+            let target = Arc::new(ArtifactEntry::canonical(
+                product("ProofOnlyOfferTarget", 120)
+                    .module_interface()
+                    .unwrap()
+                    .clone(),
+            ));
             let inventory = ArtifactInventory::default();
             let initial = inventory
                 .admit_shared_with_demand(
                     &inventory.empty_view(),
-                    vec![entry.clone()],
+                    vec![entry.clone(), target.clone()],
                     NativeArtifactDemand::ScopeInterfaces,
                 )
                 .unwrap();
@@ -7382,7 +7401,8 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 )
                 .unwrap();
             let projection =
-                CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+                CompilerInputProjection::from_issued_entries(&[entry.clone(), target.clone()])
+                    .unwrap();
             let full_support = fixture_compiler_support(projection.clone(), full.clone());
             let full_offer = full_support
                 .native_offers()
@@ -7444,6 +7464,131 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 template_imports: None,
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
             });
+            let selection =
+                crate::artifact_inventory::ExactArtifactSelection::capture(context.artifact_view());
+            let reopened = context
+                .artifact_view()
+                .select_issued(vec![id], &selection)
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                reopened.selection_snapshot(),
+                selection.snapshot()
+            ));
+            assert_eq!(
+                reopened.capture_graph_selection(),
+                context.artifact_view().capture_graph_selection()
+            );
+            let unrelated = Arc::new(ArtifactEntry::canonical(
+                product("UnrequestedOfferScope", 121)
+                    .module_interface()
+                    .unwrap()
+                    .clone(),
+            ));
+            let broader = context
+                .artifact_view()
+                .inventory()
+                .admit_shared_with_demand(
+                    context.artifact_view(),
+                    vec![unrelated.clone()],
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            assert!(broader.selection_snapshot().scopes.len() > selection.snapshot().scopes.len());
+            let narrowed = broader.select_issued(vec![id], &selection).unwrap();
+            assert!(Arc::ptr_eq(
+                narrowed.selection_snapshot(),
+                selection.snapshot()
+            ));
+            assert!(!narrowed.artifact_ids().contains(&unrelated.descriptor.id));
+            let mut custody_only = selection.snapshot().as_ref().clone();
+            for root in custody_only.roots.keys() {
+                custody_only.custody_roots.insert(*root, ());
+            }
+            custody_only.roots.clear();
+            custody_only.namespace.clear();
+            let custody_only = crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
+                Arc::new(custody_only),
+            );
+            let reopened_custody = broader.select_issued(vec![], &custody_only).unwrap();
+            assert!(!reopened_custody
+                .selection_snapshot()
+                .custody_roots
+                .is_empty());
+            assert!(reopened_custody.selection_snapshot().namespace.is_empty());
+            assert!(reopened_custody.selection_snapshot().roots.is_empty());
+            assert!(Arc::ptr_eq(
+                reopened_custody.selection_snapshot(),
+                custody_only.snapshot()
+            ));
+            assert!(
+                matches!(
+                    baseline.artifacts().select_issued(vec![id], &selection),
+                    Err(CompileError::ExtractFailed(detail))
+                        if detail == "artifact inventory: issued selection scope is outside acquisition custody"
+                ),
+                "available equal payloads cannot replace an unacquired proof scope"
+            );
+            let proof_scope = carriers
+                .keys()
+                .map(|group| group.binding.selection())
+                .find(|scope| {
+                    !baseline
+                        .artifacts()
+                        .selection_snapshot()
+                        .scopes
+                        .contains_key(scope)
+                })
+                .unwrap();
+            let mut altered = selection.snapshot().as_ref().clone();
+            let mut proof = altered.scopes[&proof_scope].proof().as_ref().clone();
+            proof.nodes.push(proof.nodes[0]);
+            altered.scopes.insert(
+                proof_scope,
+                ImmutableScopeProofRef::from_issued(Arc::new(proof)),
+            );
+            let altered =
+                crate::artifact_inventory::ExactArtifactSelection::from_snapshot(Arc::new(altered));
+            assert!(
+                matches!(
+                    context.artifact_view().select_issued(vec![id], &altered),
+                    Err(CompileError::ExtractFailed(detail))
+                        if detail == "artifact inventory: issued selection scope proof differs from acquisition custody"
+                ),
+                "scope identity alone cannot authenticate different immutable proof facts"
+            );
+            let context = if published {
+                let source = ExactDeclarationContext::from_authenticated_execution_support(
+                    producer.sha256(),
+                    context.compiler_source_support().clone(),
+                    vec![
+                        ExactLexicalNode {
+                            owner: target.descriptor.owner.clone(),
+                            imports: vec![entry.descriptor.owner.clone()],
+                        },
+                        ExactLexicalNode {
+                            owner: entry.descriptor.owner.clone(),
+                            imports: vec![],
+                        },
+                    ],
+                    target.descriptor.owner.clone(),
+                    &[
+                        target.descriptor.owner.clone(),
+                        entry.descriptor.owner.clone(),
+                    ],
+                )
+                .unwrap();
+                let publication = source
+                    .issue_published_source_original("revision", "input", &entry.descriptor.owner)
+                    .unwrap();
+                assert!(publication
+                    .context()
+                    .compiler_input_roles()
+                    .iter()
+                    .any(CompilerInputRole::is_published_source_original));
+                publication.context().as_ref().clone()
+            } else {
+                context
+            };
             assert!(context.artifact_view().selected_native_groups().is_empty());
             let row = context
                 .compiler_source_support()
@@ -7502,6 +7647,14 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             .context_for_expected_snapshot(receipt.root(), &receipt)
             .unwrap();
         assert!(restored.artifact_view().selected_native_groups().is_empty());
+        assert_eq!(restored.snapshot().roles, snapshot.roles);
+        assert_eq!(
+            restored
+                .compiler_input_roles()
+                .iter()
+                .any(CompilerInputRole::is_published_source_original),
+            published,
+        );
         assert_eq!(
             restored.snapshot().selection().as_ref(),
             snapshot.selection().as_ref()
@@ -7522,6 +7675,20 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             .unwrap();
         assert_eq!(full.snapshot_facts(), recorded_full);
         assert_eq!(full.issued_group_carriers().unwrap(), carriers);
+        if published {
+            let roles = restored.compiler_input_roles();
+            let selection = roles
+                .iter()
+                .find_map(|role| match role {
+                    CompilerInputRole::PublishedSourceOriginal { selection, .. } => Some(selection),
+                    _ => None,
+                })
+                .unwrap();
+            for (scope, proof) in &selection.snapshot().scopes {
+                let acquired = &restored.artifact_view().selection_snapshot().scopes[scope];
+                assert!(Arc::ptr_eq(proof.proof(), acquired.proof()));
+            }
+        }
         let scratch = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(restored))
             .prepare_compilation(scratch.path(), PRODUCER)
@@ -9055,7 +9222,7 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
 }
 
 #[test]
-fn fresh_candidate_dependency_uses_issued_availability_without_selecting_execution() {
+fn candidate_custody_preserves_issued_availability_without_selecting_execution() {
     use crate::artifact_inventory::{
         ArtifactBindingNode, ExactArtifactSelection, IssuedNativeOffer, NativeOriginalRequirement,
     };
@@ -9193,18 +9360,54 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
         catalog_owner: None,
         input_transport: Vec::new(),
     };
-    let inputs = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
-        .expect("fresh exact body dependency may consume issued group availability without selecting execution")
-        .unwrap();
-    assert!(inputs
-        .issued_artifacts()
-        .selected_native_groups()
-        .is_empty());
-    assert_eq!(context.artifact_view().capture_graph_selection(), before);
-    assert!(inputs
-        .native_offers()
-        .iter()
-        .any(|offer| offer.is_full() && offer.original() == fresh_id));
+    let assert_candidate_custody = |context: &ExactDeclarationContext| {
+        let before = context.artifact_view().capture_graph_selection();
+        let inputs = OriginalCompilerInputs::from_candidates(context, producer, &candidates)
+            .expect("candidate bytes do not demand fresh native permission")
+            .expect("candidate bytes produce a custody fragment");
+        assert!(inputs.issued_artifacts().artifact_ids().contains(&fresh_id));
+        assert!(inputs
+            .issued_artifacts()
+            .selected_native_groups()
+            .is_empty());
+        assert_eq!(
+            inputs.role_projection().snapshot_roles(),
+            context.compiler_input_projection().snapshot_roles(),
+            "candidate custody cannot select a fresh compiler role"
+        );
+        assert_eq!(
+            inputs.native_availability().snapshot_facts().unwrap(),
+            context
+                .compiler_source_support()
+                .native_availability()
+                .snapshot_facts()
+                .unwrap(),
+            "all existing permission rows survive unchanged"
+        );
+        assert_eq!(
+            inputs.native_offers().len(),
+            context.compiler_source_support().native_offers().len()
+        );
+        for (retained, issued) in inputs
+            .native_offers()
+            .iter()
+            .zip(context.compiler_source_support().native_offers())
+        {
+            assert!(retained.same_issuance(issued));
+            assert_eq!(retained.snapshot_facts(), issued.snapshot_facts());
+        }
+        assert!(!inputs
+            .native_offers()
+            .iter()
+            .any(|offer| offer.original() == fresh_id));
+        assert!(!inputs
+            .native_availability()
+            .snapshot_facts()
+            .unwrap()
+            .contains_key(&fresh_id));
+        assert_eq!(context.artifact_view().capture_graph_selection(), before);
+    };
+    assert_candidate_custody(&context);
 
     // A continued input carries its issued row permissions. It has no new
     // product receipt and cannot authorize a fresh body alongside those rows.
@@ -9415,34 +9618,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             .native_offers()
             .iter()
             .any(|retained| retained.same_issuance(&restored_offer)));
-        let result =
-            OriginalCompilerInputs::from_candidates(&bounded_context, producer, &candidates);
-        assert_eq!(
-            result.is_ok(),
-            expected,
-            "only an exact issued group3 can support this dependency"
-        );
-        if expected {
-            let inputs = result
-                .expect("the exact dependency group is available")
-                .expect("fresh candidate issuance must produce a fragment");
-            assert!(inputs
-                .issued_artifacts()
-                .selected_native_groups()
-                .is_empty());
-            assert!(inputs
-                .native_offers()
-                .iter()
-                .any(|offer| offer.is_full() && offer.original() == fresh_id));
-        } else {
-            assert!(
-                matches!(result, Err(CompileError::ArtifactInventory(error))
-                if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
-                    artifact, original_ordinal: 3,
-                } if artifact == entry.descriptor.id)),
-                "missing exact dependency availability must refuse at its typed owner"
-            );
-        }
+        assert_candidate_custody(&bounded_context);
     }
     let historical_view = inventory
         .admit_shared(
@@ -9502,40 +9678,7 @@ fn fresh_candidate_dependency_uses_issued_availability_without_selecting_executi
             before.namespace
         );
         assert!(scoped.artifact_view().selected_native_groups().is_empty());
-        let inputs = OriginalCompilerInputs::from_candidates(&scoped, producer, &candidates)
-            .unwrap()
-            .unwrap();
-        let fresh_offer = inputs
-            .native_offers()
-            .iter()
-            .find(|offer| offer.original() == fresh_id)
-            .unwrap();
-        assert!(fresh_offer.is_full());
-        let groups = fresh_offer.issued_group_carriers().unwrap();
-        let dependent = *groups
-            .keys()
-            .find(|group| group.binding.artifact() == fresh_id && group.original_ordinal == 11)
-            .unwrap();
-        let expected = (
-            ArtifactBindingNode::Group(dependent),
-            ArtifactBindingNode::Group(current_group),
-            crate::artifact_inventory::ArtifactDependency::NativeGroup {
-                dependent_ordinal: 11,
-                required_ordinal: 3,
-            },
-        );
-        assert!(
-            fresh_offer
-                .custody_snapshot()
-                .binding_dependencies()
-                .unwrap()
-                .contains(&expected),
-            "the fresh body uses the exact current carrier's issued dependency edge"
-        );
-        assert!(inputs
-            .issued_artifacts()
-            .selected_native_groups()
-            .is_empty());
+        assert_candidate_custody(&scoped);
     }
     let historical_support =
         fixture_compiler_support(context.compiler_input_projection().clone(), historical_view);

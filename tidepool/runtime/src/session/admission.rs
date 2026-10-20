@@ -205,6 +205,7 @@ pub(super) struct WorldExecutionAdmissionFacts {
         Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
 }
 
+#[derive(Clone)]
 pub(super) struct CertifiedPrivateValueWrite {
     name: String,
     identity: SymbolIdentity,
@@ -436,6 +437,50 @@ struct PrivateHiddenHostMount {
     after: Arc<super::inspection::InspectionWorldAssociation>,
 }
 
+/// One actual private host input, paired with its compiler interface and roots.
+/// This never adds the input to the public compiler World.
+pub struct RuntimeWorldCellOperand {
+    pub(super) compiler: Arc<tidepool_toolchain::compiler_world::CompilerWorldCellOperand>,
+    execution: Arc<PrivateExecutionAdmission>,
+    id: tidepool_repr::SessionVarId,
+    write: CertifiedPrivateValueWrite,
+    _binding: super::resident::BindingLease,
+}
+
+impl RuntimeWorldCellOperand {
+    pub(super) fn admit_preparation(
+        &self,
+        source: &super::RuntimeSourceCompilerTransaction,
+        world: &tidepool_toolchain::compiler_world::CompilerWorld,
+    ) -> Result<(), SessionError> {
+        let expected = self.execution.original_source()?;
+        let held_world = self.execution.compiler_world()?;
+        if !Arc::ptr_eq(world.restoration(), held_world.restoration())
+            || world.logical_id() != held_world.logical_id()
+        {
+            return Err(super::SourceAdmissionError::ForeignTransaction.into());
+        }
+        source.admit_original(&expected, Some(self.execution.retained_lexical_scope()))?;
+        Ok(())
+    }
+
+    fn matches(
+        &self,
+        execution: &Arc<PrivateExecutionAdmission>,
+        input: &PendingHostValueWrite,
+        compiler: &Arc<tidepool_toolchain::compiler_world::CompilerWorldCellOperand>,
+    ) -> bool {
+        Arc::ptr_eq(&self.execution, execution)
+            && Arc::ptr_eq(&self.compiler, compiler)
+            && self.id == input.id
+            && self.write.name == input.write.name
+            && self.write.identity == input.write.identity
+            && self.write.generation == input.write.generation
+            && self.write.root_id == input.write.root_id
+            && self.write.proof.same_original(&input.write.proof)
+    }
+}
+
 impl std::fmt::Debug for PendingHostValueWrite {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -447,6 +492,58 @@ impl std::fmt::Debug for PendingHostValueWrite {
 }
 
 impl PendingHostValueWrite {
+    pub(super) fn id(&self) -> tidepool_repr::SessionVarId {
+        self.id
+    }
+
+    pub(super) fn world_cell_operand(
+        &self,
+        session: &PersistentSession,
+        execution: Arc<PrivateExecutionAdmission>,
+        binding: super::resident::BindingLease,
+    ) -> Result<Arc<RuntimeWorldCellOperand>, SessionError> {
+        self.private_hidden_mount_key(session, &execution)?;
+        if !binding.retained_bindings().contains(&self.id) {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let world = execution.compiler_world()?;
+        use tidepool_toolchain::compiler_world::{
+            CompilerWorldCellOperand, WorldCellOperandExposure,
+        };
+        let compiler = match &self.write.proof {
+            CertifiedPrivateValueProof::Execution(proof) => {
+                CompilerWorldCellOperand::from_checked_host_execution(
+                    world,
+                    WorldCellOperandExposure::Input,
+                    self.scope.0,
+                    proof,
+                )?
+            }
+            CertifiedPrivateValueProof::HostInterface(proof) => {
+                CompilerWorldCellOperand::from_host_interface(
+                    world,
+                    WorldCellOperandExposure::Input,
+                    self.scope.0,
+                    proof,
+                )?
+            }
+        };
+        if compiler.session_var() != self.id
+            || compiler.symbol() != &self.write.identity
+            || compiler.generation() != self.write.generation.0
+            || compiler.defining_scope() != self.scope.0
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        Ok(Arc::new(RuntimeWorldCellOperand {
+            compiler,
+            execution,
+            id: self.id,
+            write: self.write.clone(),
+            _binding: binding,
+        }))
+    }
+
     pub(super) fn mounted(
         session: &PersistentSession,
         scope: ScopeId,
@@ -726,13 +823,26 @@ pub struct RuntimeCellAdmission {
     reserved_generations: Vec<Generation>,
     initial_value_generation: Generation,
     compiler_basis: RuntimeCellCompilerBasis,
+    declarations: RuntimeCellDeclarations,
     digest: tidepool_toolchain::checked_cell::AdmissionDigest,
+}
+
+struct RuntimeCellDeclarations {
+    root: PathBuf,
+    declaration_baseline: Option<super::lexical_projection::DeclarationProjectionBaseline>,
+    prepared_declarations: std::sync::OnceLock<
+        Vec<(
+            tidepool_toolchain::checked_cell::ExactCheckedItem,
+            Arc<super::lexical_projection::PreparedAuthoredDeclaration>,
+        )>,
+    >,
 }
 
 enum RuntimeCellCompilerBasis {
     Finite(RuntimeFiniteCellInputs),
     World {
         reservation: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation>,
+        _operand: Option<Arc<RuntimeWorldCellOperand>>,
         private_key: super::persistent::CompileViewKey,
         source: Arc<super::GenerationArtifactReference>,
         /// Original A from the issuing source transaction; the cell's retained
@@ -746,13 +856,6 @@ enum RuntimeCellCompilerBasis {
 pub(super) struct RuntimeFiniteCellInputs {
     visibility: PublicVisibilitySnapshot,
     catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
-    declaration_baseline: Option<super::lexical_projection::DeclarationProjectionBaseline>,
-    prepared_declarations: std::sync::OnceLock<
-        Vec<(
-            tidepool_toolchain::checked_cell::ExactCheckedItem,
-            Arc<super::lexical_projection::PreparedAuthoredDeclaration>,
-        )>,
-    >,
     compile_inputs: super::prepared::RuntimeCompileInputs,
     view: SessionCompileView,
     view_digest: [u8; 32],
@@ -779,7 +882,24 @@ enum RuntimeCellPurpose {
     HostCarrier {
         binding: String,
         expected: super::resident::HostBindingType,
+        authority_digest: [u8; 32],
     },
+}
+
+/// Source custody for a reusable host type prototype, without runtime target custody.
+pub(super) enum RuntimeHostPrototypeSource {
+    Finite {
+        _specification: Arc<dyn Any + Send + Sync>,
+    },
+    World {
+        _original_source: Arc<RuntimeOriginalSource>,
+        _reservation: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation>,
+    },
+}
+
+pub(super) struct RuntimeHostPrototypeReceipt {
+    pub(super) authority_digest: [u8; 32],
+    pub(super) source: RuntimeHostPrototypeSource,
 }
 
 impl RuntimeCellPurpose {
@@ -789,8 +909,13 @@ impl RuntimeCellPurpose {
             Self::Observation => {}
             Self::PrivateExecution(_) => frame(b"TidepoolPrivateExecutionAdmission1"),
             Self::NativeSetup => frame(b"TidepoolNativeSetupAdmission1"),
-            Self::HostCarrier { binding, expected } => {
-                frame(b"TidepoolHostCarrierAdmission1");
+            Self::HostCarrier {
+                binding,
+                expected,
+                authority_digest,
+            } => {
+                frame(b"TidepoolHostCarrierAdmission2");
+                frame(authority_digest);
                 frame(binding.as_bytes());
                 expected.frame_authorization(frame);
             }
@@ -1851,6 +1976,98 @@ pub(crate) struct CheckedTurnCompletion {
 }
 
 impl CheckedTurnCompletion {
+    /// Native installation changes runtime selection and custody, not the
+    /// compiler prefix from which this exact item was prepared. Keep its
+    /// association current before evaluation can suspend on a compiler query.
+    pub(crate) fn install_certified_turn_in(
+        &self,
+        session: &mut PersistentSession,
+        scope: ScopeId,
+        metadata: &tidepool_repr::DataConTable,
+        target: super::prepared::ScopedTargetImage,
+        source_evidence: &BTreeMap<
+            tidepool_codegen::prepared_program::SourceBinder,
+            (tidepool_repr::execution_schema::CachedHomeOwner, u32),
+        >,
+        demanded: Vec<tidepool_codegen::prepared_program::DemandedImage>,
+        inherited_needed: &[tidepool_codegen::prepared_program::InheritedSourceDemand],
+    ) -> Result<
+        (
+            tidepool_codegen::prepared_program::ProgramId,
+            tidepool_codegen::binding_table::SourceScopeAdmission,
+        ),
+        super::resident::ResidentError,
+    > {
+        let association = {
+            let state = self.prefix.state.lock();
+            if !self.prefix.admission.belongs_to(session)
+                || self.scope != scope
+                || state
+                    .in_flight
+                    .as_ref()
+                    .is_none_or(|execution| !Arc::ptr_eq(execution, &self.execution))
+                || !state.snapshot.is_current(session, scope)
+            {
+                return Err(SessionError::StaleStagedDeclaration.into());
+            }
+            match state.snapshot.world() {
+                None => None,
+                Some(predecessor) => {
+                    let association = session
+                        .lib()
+                        .tips
+                        .get(&scope)
+                        .and_then(|tip| tip.inspection_world.as_ref())
+                        .ok_or(SessionError::MissingPublishedCompilerWorld(scope))?;
+                    let source = self.prefix.admission.world_source_reference()?;
+                    let original = self.prefix.admission.original_source()?;
+                    if !Arc::ptr_eq(&association.world, predecessor)
+                        || !session.inspection_world_base_is_current(
+                            &association.base,
+                            source,
+                            &original,
+                        )
+                    {
+                        return Err(SessionError::StaleStagedDeclaration.into());
+                    }
+                    Some(association.clone())
+                }
+            }
+        };
+        // This owner earns and retains the actual source transaction claims.
+        // They permit finishing an admitted installation across a later fence;
+        // an outer gate lock here would recursively lock the same admissions.
+        let installed = session.install_certified_turn_in(
+            scope,
+            metadata,
+            target,
+            source_evidence,
+            demanded,
+            inherited_needed,
+        )?;
+        if let Some(association) = association {
+            let refreshed = session.compile_view_key_in(scope).map(|key| {
+                let mut base = association.base.clone();
+                base.key = key;
+                Arc::new(super::inspection::InspectionWorldAssociation {
+                    base,
+                    world: association.world.clone(),
+                })
+            });
+            // Only native registration ran under this exclusive checkout.
+            // Keep all original issuer observations; never refresh their epochs.
+            // Witness exhaustion disables reuse without losing installed-product
+            // ownership through a new fallible postcommit check.
+            session
+                .lib_mut()
+                .tips
+                .get_mut(&scope)
+                .expect("checked installation preserves its admitted scope")
+                .inspection_world = refreshed;
+        }
+        Ok(installed)
+    }
+
     pub(crate) fn validates_private_overlay(
         &self,
         session: &PersistentSession,
@@ -2387,10 +2604,7 @@ impl RuntimeCellAdmission {
             original_source, ..
         } = &self.compiler_basis
         {
-            let actual = source.admitted_original_source()?;
-            if !Arc::ptr_eq(&actual, original_source) {
-                return Err(super::SourceAdmissionError::ForeignTransaction);
-            }
+            return source.admit_original(original_source, Some(self.source_lease()));
         }
         source.admit(Some(self.source_lease()))
     }
@@ -2430,13 +2644,13 @@ impl RuntimeCellAdmission {
     /// Issue cumulative lexical projections while the machine and prefix
     /// mutex are stowed. Only this admission's immutable checked items enter
     /// the prepared sequence consumed by declaration adoption.
+    #[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.declaration_projections", skip_all, fields(inclusive = true))]
     pub(super) fn prepare_declaration_projections(
         &self,
         cell: &Arc<tidepool_toolchain::checked_cell::ExactCheckedCell>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), SessionError> {
-        let finite = self.finite_inputs()?;
-        let mut baseline = finite.declaration_baseline.clone();
+        let mut baseline = self.declarations.declaration_baseline.clone();
         let mut prepared = Vec::new();
         for index in 0..cell.item_count() {
             let item = cell.item(index)?;
@@ -2446,28 +2660,43 @@ impl RuntimeCellAdmission {
             let Some(evidence) = item.planned_declaration() else {
                 continue;
             };
-            let generation = match &finite.planned {
-                Some(plan) => plan
-                    .items()
-                    .get(index)
-                    .and_then(|row| row.declaration_generation()),
-                None if index == 0 => self.reserved_generations.first().copied(),
-                None => None,
-            }
-            .ok_or(SessionError::StaleStagedDeclaration)?;
+            let generation = match &self.compiler_basis {
+                RuntimeCellCompilerBasis::Finite(finite) => match &finite.planned {
+                    Some(plan) => plan.items().get(index).and_then(|row| row.declaration_generation()),
+                    None if index == 0 => self.reserved_generations.first().copied(),
+                    None => None,
+                },
+                RuntimeCellCompilerBasis::World { reservation, .. } => {
+                    use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
+                    match reservation.slots().get(index) {
+                        Some(Slot::Prologue { declaration } | Slot::Declaration { declaration }) => Some(Generation(*declaration)),
+                        _ => None,
+                    }
+                }
+            }.ok_or(SessionError::StaleStagedDeclaration)?;
+            let _join = tracing::debug_span!(target: "exomonad_harness::timing",
+                "cell_program.authenticated_declaration_join", inclusive = true,
+                item_ordinal = index, generation = generation.0,
+                baseline_export_count = baseline.as_ref().map_or(0, |prior| prior.exports.len()),
+                introduced_export_count = evidence.introduced_exports().len(),
+            ).entered();
+            let includes = match &self.compiler_basis {
+                RuntimeCellCompilerBasis::Finite(finite) => finite.include_paths.as_slice(),
+                RuntimeCellCompilerBasis::World { .. } => item.include_paths(),
+            };
             let projection = super::lexical_projection::prepare_authored_projection(
                 baseline.as_ref(),
                 generation,
                 evidence.clone(),
                 &[],
-                &finite.include_paths,
-                finite.view.session_root(),
+                includes,
+                &self.declarations.root,
                 settlement,
             )?;
             baseline = Some(projection.next_baseline());
             prepared.push((item, projection));
         }
-        finite
+        self.declarations
             .prepared_declarations
             .set(prepared)
             .map_err(|_| SessionError::StaleStagedDeclaration)
@@ -2489,7 +2718,7 @@ impl RuntimeCellAdmission {
         &self,
         item: &tidepool_toolchain::checked_cell::ExactCheckedItem,
     ) -> Result<Arc<super::lexical_projection::PreparedAuthoredDeclaration>, SessionError> {
-        self.finite_inputs()?
+        self.declarations
             .prepared_declarations
             .get()
             .and_then(|rows| rows.iter().find(|(prepared_item, _)| prepared_item == item))
@@ -2515,9 +2744,38 @@ impl RuntimeCellAdmission {
     }
     pub(super) fn host_carrier(&self) -> Option<(&str, super::resident::HostBindingType)> {
         match &self.purpose {
-            RuntimeCellPurpose::HostCarrier { binding, expected } => Some((binding, *expected)),
+            RuntimeCellPurpose::HostCarrier {
+                binding, expected, ..
+            } => Some((binding, *expected)),
             _ => None,
         }
+    }
+    pub(super) fn host_prototype_receipt(
+        &self,
+    ) -> Result<RuntimeHostPrototypeReceipt, SessionError> {
+        let RuntimeCellPurpose::HostCarrier {
+            authority_digest, ..
+        } = &self.purpose
+        else {
+            return Err(SessionError::StaleStagedDeclaration);
+        };
+        let source = match &self.compiler_basis {
+            RuntimeCellCompilerBasis::Finite(inputs) => RuntimeHostPrototypeSource::Finite {
+                _specification: inputs.specification.clone(),
+            },
+            RuntimeCellCompilerBasis::World {
+                original_source,
+                reservation,
+                ..
+            } => RuntimeHostPrototypeSource::World {
+                _original_source: original_source.clone(),
+                _reservation: reservation.clone(),
+            },
+        };
+        Ok(RuntimeHostPrototypeReceipt {
+            authority_digest: *authority_digest,
+            source,
+        })
     }
     pub fn view(&self) -> Result<&SessionCompileView, SessionError> {
         Ok(&self.finite_inputs()?.view)
@@ -3734,9 +3992,7 @@ impl PersistentSession {
             .source_transaction
             .as_ref()
             .ok_or(super::SourceAdmissionError::MissingTransaction)?;
-        if !Arc::ptr_eq(&transaction.source, original_source) {
-            return Err(super::SourceAdmissionError::ForeignTransaction.into());
-        }
+        transaction.admit_original(original_source, None)?;
         if !self.has_lib() {
             return Err(SessionError::MissingDeclarationLibrary);
         }
@@ -4003,7 +4259,11 @@ impl PersistentSession {
             authority_digest,
             include_paths,
             Some(plan),
-            RuntimeCellPurpose::HostCarrier { binding, expected },
+            RuntimeCellPurpose::HostCarrier {
+                binding,
+                expected,
+                authority_digest,
+            },
             compile_inputs,
         )
     }
@@ -4375,11 +4635,14 @@ impl PersistentSession {
             scope,
             reserved_generations,
             initial_value_generation,
+            declarations: RuntimeCellDeclarations {
+                root: view.session_root().to_path_buf(),
+                declaration_baseline,
+                prepared_declarations: std::sync::OnceLock::new(),
+            },
             compiler_basis: RuntimeCellCompilerBasis::Finite(RuntimeFiniteCellInputs {
                 visibility,
                 catalog_selection: self.catalog_selection().clone(),
-                declaration_baseline,
-                prepared_declarations: std::sync::OnceLock::new(),
                 compile_inputs,
                 view,
                 view_digest,
@@ -4763,7 +5026,7 @@ impl PersistentSession {
     pub fn admit_world_planned_cell_for_execution(
         &mut self,
         execution: Arc<PrivateExecutionAdmission>,
-        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        plan: super::turn::RuntimeWorldCellPlan,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.admit_world_planned_cell_with_input(execution, plan, None)
     }
@@ -4771,9 +5034,16 @@ impl PersistentSession {
     pub fn admit_world_planned_cell_with_input(
         &mut self,
         execution: Arc<PrivateExecutionAdmission>,
-        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        plan: super::turn::RuntimeWorldCellPlan,
         input: Option<&PendingHostValueWrite>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        let (plan, operand) = plan.into_parts();
+        match (&operand, input, plan.operand()) {
+            (Some(operand), Some(input), Some(compiler))
+                if operand.matches(&execution, input, compiler) => {}
+            (None, None, None) => {}
+            _ => return Err(SessionError::StaleStagedDeclaration),
+        }
         let scope = execution.private_scope();
         self.reap_admission_leases();
         if !Arc::ptr_eq(&execution.owner, self.admission_owner())
@@ -4801,6 +5071,7 @@ impl PersistentSession {
         self.reserve_world_cell(
             scope,
             plan,
+            operand,
             RuntimeCellPurpose::PrivateExecution(execution.clone()),
             execution.retained_lexical_scope(),
             original_source,
@@ -4817,10 +5088,15 @@ impl PersistentSession {
     pub fn admit_world_planned_host_carrier_cell_in(
         &mut self,
         scope: ScopeId,
-        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        plan: super::turn::RuntimeWorldCellPlan,
         binding: String,
         expected: super::resident::HostBindingType,
+        authority_digest: [u8; 32],
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        let (plan, operand) = plan.into_parts();
+        if operand.is_some() || plan.operand().is_some() {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
         self.reap_admission_leases();
         if !self.has_lib() {
@@ -4884,7 +5160,12 @@ impl PersistentSession {
         self.reserve_world_cell(
             scope,
             plan,
-            RuntimeCellPurpose::HostCarrier { binding, expected },
+            None,
+            RuntimeCellPurpose::HostCarrier {
+                binding,
+                expected,
+                authority_digest,
+            },
             retained_scope,
             original_source,
             published.base.source.clone(),
@@ -4900,6 +5181,7 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        operand: Option<Arc<RuntimeWorldCellOperand>>,
         purpose: RuntimeCellPurpose,
         retained_scope: Arc<RuntimeLexicalScopeLease>,
         original_source: Arc<RuntimeOriginalSource>,
@@ -4911,14 +5193,11 @@ impl PersistentSession {
         use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
 
         self.validate_lexical_scope_lease(scope, &retained_scope)?;
-        self.admit_source_work_in(scope)?;
         let transaction = self
             .source_transaction
             .as_ref()
             .ok_or(super::SourceAdmissionError::MissingTransaction)?;
-        if !Arc::ptr_eq(&transaction.source, &original_source) {
-            return Err(super::SourceAdmissionError::ForeignTransaction.into());
-        }
+        transaction.admit_original(&original_source, Some(retained_scope.clone()))?;
         if plan
             .items()
             .iter()
@@ -5062,8 +5341,20 @@ impl PersistentSession {
             scope,
             reserved_generations,
             initial_value_generation,
+            declarations: RuntimeCellDeclarations {
+                root: self.lib().root.clone(),
+                declaration_baseline: if !reservation.slots().iter().any(|slot| matches!(slot,
+                    tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Prologue { .. } |
+                    tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Declaration { .. })) { None } else {
+                    super::lexical_projection::DeclarationProjectionBaseline::capture(
+                        self.lib(), self.lib().scope_tip(scope),
+                    )?
+                },
+                prepared_declarations: std::sync::OnceLock::new(),
+            },
             compiler_basis: RuntimeCellCompilerBasis::World {
                 reservation,
+                _operand: operand,
                 private_key,
                 source,
                 original_source,
@@ -5395,7 +5686,7 @@ mod tests {
         assert!(matches!(
             settled.action.0,
             Err(SessionError::SourceAdmission(
-                super::super::SourceAdmissionError::ForeignTransaction
+                super::super::SourceAdmissionError::DifferentOriginalSource
             ))
         ));
         assert!(

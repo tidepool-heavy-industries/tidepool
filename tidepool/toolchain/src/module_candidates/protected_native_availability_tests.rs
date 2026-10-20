@@ -166,8 +166,10 @@ fn protected_catalog_availability_preserves_receiving_interface_only_selection()
     );
     assert_eq!(received.issued_offers(), support.native_offers());
     assert_eq!(
-        received.issued_input_decisions(),
-        Some(support.input_decisions())
+        received
+            .issued_input_decisions()
+            .map(|decisions| decisions.recorded_facts()),
+        Some(support.input_decisions().recorded_facts())
     );
     assert_eq!(
         received

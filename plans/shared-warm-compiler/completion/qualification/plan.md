@@ -8,7 +8,7 @@ second implementation of source selection, world admission or test fixtures.
 
 ## Starting evidence and limits
 
-The reviewed checkpoint is `6f7ae09b3b`, code `92fa518105`. The retained full
+The historical reviewed checkpoint is `6f7ae09b3b`, code `92fa518105`. The retained full
 toolchain sweep selected 1116 cases, executed 1086, passed 1054, failed 32 and
 ignored 30. Named query/Persona/front-door passes do not establish ordinary
 world-cell execution: the inspected actor still uses finite admission. The
@@ -23,9 +23,10 @@ its descriptor, source/profile, workspace, Harness and diagnostic limitations
 with any comparison. Do not use numbers from different workload/source contracts
 as interchangeable denominators.
 
-No new builds, executions or performance measurements were performed while
-writing this completion plan. Qualification starts from actual worker-produced
-commits, not from proposed API names or prior reviewers' assertions.
+The root plan records current joined compilation and focused execution evidence.
+The latest compiled integration is `6c289d64dd`; it is not a frozen-bundle or
+Persona acceptance result. Qualification uses actual worker-produced commits,
+not proposed API names or prior reviewers' assertions.
 
 ## Ownership and existing entry points
 

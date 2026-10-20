@@ -13,6 +13,69 @@ use crate::{timing, CompileError};
 
 use super::assemble_inspection_module;
 
+/// Descriptive request identity observed by a query; never request authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InspectionRequestIdentity(u64);
+
+impl InspectionRequestIdentity {
+    pub const fn new(identity: u64) -> Self {
+        Self(identity)
+    }
+}
+
+/// Small actor facts captured by its source owner alongside the runtime view.
+/// This description grants no runtime or compiler admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InspectionActorObservation {
+    principal: tidepool_repr::PrincipalId,
+    effects: super::HaskellTypeSource,
+    request: Option<InspectionRequestIdentity>,
+    model_type: Option<super::HaskellTypeSource>,
+}
+
+impl InspectionActorObservation {
+    pub fn new(
+        principal: tidepool_repr::PrincipalId,
+        effects: super::HaskellTypeSource,
+        request: Option<InspectionRequestIdentity>,
+        model_type: Option<super::HaskellTypeSource>,
+    ) -> Self {
+        Self {
+            principal,
+            effects,
+            request,
+            model_type,
+        }
+    }
+
+    fn frame(&self, frame: &mut impl FnMut(&[u8])) {
+        fn ty(source: &super::HaskellTypeSource, frame: &mut impl FnMut(&[u8])) {
+            frame(source.expression().as_bytes());
+            frame(&(source.required_imports().specs().len() as u64).to_le_bytes());
+            for import in source.required_imports().specs() {
+                frame(import.as_bytes());
+            }
+        }
+        frame(&self.principal.identity.to_le_bytes());
+        frame(&self.principal.incarnation.to_le_bytes());
+        ty(&self.effects, frame);
+        match self.request {
+            Some(request) => {
+                frame(b"request");
+                frame(&request.0.to_le_bytes());
+            }
+            None => frame(b"no-request"),
+        }
+        match &self.model_type {
+            Some(source) => {
+                frame(b"model-type");
+                ty(source, frame);
+            }
+            None => frame(b"no-model-type"),
+        }
+    }
+}
+
 /// An immutable observational snapshot of one runtime base and the actor's
 /// exact import/projection membrane. It carries no admission authority. Its
 /// existing cached base digest is resolved only when an answer needs the pin.
@@ -25,6 +88,7 @@ pub struct InspectionScopeSnapshot {
     pub(super) source_revision: std::sync::Arc<[u8]>,
     pub(super) selected_imports: super::SourceImports,
     pub(super) inputs: super::RuntimeCompileInputs,
+    pub(super) actor: Option<InspectionActorObservation>,
     pub(super) scope: NameScope,
 }
 
@@ -36,6 +100,7 @@ impl InspectionScopeSnapshot {
             &self.source_revision,
             &self.selected_imports,
             &self.inputs,
+            self.actor.as_ref(),
             self.scope.clone(),
         )
     }
@@ -50,6 +115,7 @@ pub(super) fn inspection_provenance(
     source_revision: &[u8],
     selected_imports: &super::SourceImports,
     inputs: &super::RuntimeCompileInputs,
+    actor: Option<&InspectionActorObservation>,
     scope: NameScope,
 ) -> ScopeProvenance {
     let mut fingerprint = blake3::Hasher::new();
@@ -57,11 +123,18 @@ pub(super) fn inspection_provenance(
         fingerprint.update(&(bytes.len() as u64).to_le_bytes());
         fingerprint.update(bytes);
     };
-    frame(b"runtime-inspection-view-v1");
+    frame(b"runtime-inspection-view-v2");
     frame(&base);
     frame(source_revision);
     frame(&serde_json::to_vec(selected_imports.specs()).expect("source imports serialize"));
     inputs.frame_authorization(&mut frame);
+    match actor {
+        Some(actor) => {
+            frame(b"actor");
+            actor.frame(&mut frame);
+        }
+        None => frame(b"runtime-only"),
+    }
     ScopeProvenance {
         scope,
         generation,
@@ -1684,6 +1757,47 @@ fn budget_u32(budget: usize) -> Result<u32, CompileError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn actor_observation_is_bound_by_the_same_scope_identity_owner() {
+        let imports = super::super::SourceImports::default();
+        let inputs = super::super::RuntimeCompileInputs::default();
+        let observe =
+            |identity, incarnation, row: &str, request: Option<u64>, model: Option<&str>| {
+                InspectionActorObservation::new(
+                    tidepool_repr::PrincipalId {
+                        identity,
+                        incarnation,
+                    },
+                    row.into(),
+                    request.map(InspectionRequestIdentity::new),
+                    model.map(Into::into),
+                )
+            };
+        let pin = |actor: &InspectionActorObservation| {
+            inspection_provenance(
+                [7; 32],
+                9,
+                b"source-owner",
+                &imports,
+                &inputs,
+                Some(actor),
+                NameScope::Current,
+            )
+        };
+        let original = observe(1, 2, "'[]", Some(41), None);
+        assert!(pin(&original).same_view(&pin(&original.clone())));
+        for changed in [
+            observe(3, 2, "'[]", Some(41), None),
+            observe(1, 3, "'[]", Some(41), None),
+            observe(1, 2, "'[Other]", Some(41), None),
+            observe(1, 2, "'[]", Some(42), None),
+            observe(1, 2, "'[]", None, None),
+            observe(1, 2, "'[]", Some(41), Some("Model Family")),
+        ] {
+            assert!(!pin(&original).same_view(&pin(&changed)));
+        }
+    }
+
     #[test]
     fn admitted_inspection_refuses_sibling_pairing_with_shared_root_and_context() {
         use crate::session::{ModuleEnv, PersistentSession, SessionId, SessionLib};

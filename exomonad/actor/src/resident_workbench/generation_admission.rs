@@ -1506,7 +1506,7 @@ mod tests {
     fn typed_durable_refusal_keeps_refusal_control_and_unassessed_obligations() {
         use super::super::{
             ActorGenerationCommit, ActorGenerationPublicationRefusalObservation as Observation,
-            ActorGenerationRefusal, ActorPublicationFailureCause as Cause,
+            ActorGenerationPublicationIssue, ActorPublicationFailureCause as Cause,
         };
         use tidepool_runtime::session::{SessionError, StoreError, StoreErrorKind};
         let fixture = PublicationFixture::replacement(true);
@@ -1516,7 +1516,7 @@ mod tests {
             guard,
             obligations: super::super::PublicationBodyObligations::Retained,
             outcome: Ok(ActorGenerationCommit::Refused(
-                ActorGenerationRefusal::Durable(Box::new(SessionError::RecoveryStore(Box::new(
+                ActorGenerationPublicationIssue::Durable(Box::new(SessionError::RecoveryStore(Box::new(
                     StoreError {
                         path: "typed-refusal-control.db".into(),
                         kind: StoreErrorKind::Storage,
@@ -1535,7 +1535,7 @@ mod tests {
         assert!(matches!(
             primary.as_ref(),
             Ok(ActorGenerationCommit::Refused(
-                ActorGenerationRefusal::Durable(_)
+                ActorGenerationPublicationIssue::Durable(_)
             ))
         ));
         assert_eq!(
@@ -1557,6 +1557,53 @@ mod tests {
         };
         assert!(reason.to_string().contains("actual typed storage cause"));
         assert!(reason.failure_diagnostic().is_some());
+    }
+
+    #[test]
+    fn unconfirmed_durable_publication_retains_exact_storage_cause_and_uncertainty() {
+        use super::super::{
+            ActorGenerationCommit, ActorGenerationPublicationIssue, ActorPublicationFailureCause,
+        };
+        use tidepool_runtime::session::{SessionError, StoreError, StoreErrorKind};
+        let fixture = PublicationFixture::replacement(true);
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let error = Box::new(SessionError::RecoveryStore(Box::new(StoreError {
+            path: "unconfirmed-owner-control.db".into(),
+            kind: StoreErrorKind::RecoveryRequired,
+            detail: "original storage uncertainty".into(),
+        })));
+        let original = std::ptr::from_ref(error.as_ref());
+        let outcome = owner
+            .complete(Ok(ActorGenerationCommit::Unconfirmed(
+                ActorGenerationPublicationIssue::Durable(error),
+            )))
+            .unwrap();
+        let ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(error)) =
+            &outcome
+        else {
+            panic!("actual uncertainty must keep its typed storage cause");
+        };
+        assert!(std::ptr::eq(error.as_ref(), original));
+        assert!(fixture.state.current_generation().is_none());
+        assert!(fixture.generation.scope.admit_source().is_err());
+        let failure = outcome
+            .into_initial_generation()
+            .err()
+            .expect("a typed unconfirmed outcome cannot finish startup");
+        assert!(failure.requires_recovery());
+        assert_eq!(
+            failure.publication_failure_cause(),
+            ActorPublicationFailureCause::RecoveryStore(StoreErrorKind::RecoveryRequired)
+        );
+        let crate::ResidentActorWorkbenchError::PublicationSettlement { failure } = failure else {
+            panic!("the independent publication uncertainty must remain explicit");
+        };
+        let Ok(ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(error))) =
+            failure.outcome.as_ref()
+        else {
+            unreachable!()
+        };
+        assert!(std::ptr::eq(error.as_ref(), original));
     }
 
     #[test]
@@ -2856,12 +2903,20 @@ mod tests {
             InstalledToolsAvailability,
         };
         let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
-        let mut operation = match preparation.reserve().unwrap() {
-            ActorGenerationRetirementPreparationOutcome::Reserved(operation) => operation,
+        let (prepared, driver) = preparation.into_parts();
+        let (mut reserved, publisher) = match driver
+            .reserve(prepared)
+            .unwrap_or_else(|_| panic!("the issued driver must accept its same preparation"))
+        {
+            ActorGenerationRetirementPreparationOutcome::Reserved {
+                reserved,
+                publisher,
+            } => (reserved, publisher),
             ActorGenerationRetirementPreparationOutcome::Refused(reason) => panic!("{reason}"),
+            ActorGenerationRetirementPreparationOutcome::Failed(error) => panic!("{error}"),
         };
-        let observer = operation.attempt_observer();
-        let mut original = match operation.reserved_mut().fence_original() {
+        let observer = reserved.attempt_observer();
+        let mut original = match reserved.fence_original() {
             ActorGenerationRetirementCutoff::Fenced(fence) => fence,
             _ => panic!("the actual live owner must fence its exact selected A"),
         };
@@ -2878,7 +2933,10 @@ mod tests {
             decision.request_cancellation(),
             tidepool_runtime::session::PublicationCancellation::RequestedBeforeCommit
         );
-        let ActorGenerationPublicationSettlement::Unpublished(mut refusal) = operation.run().await
+        let ActorGenerationPublicationSettlement::Unpublished(mut refusal) = publisher
+            .run(reserved)
+            .await
+            .unwrap_or_else(|_| panic!("the issued publisher must accept its same reservation"))
         else {
             panic!("an observed cancelled body must return its actual armed guard");
         };
@@ -2887,9 +2945,10 @@ mod tests {
             primary.as_ref(),
             Ok(ActorGenerationCommit::Refused(_))
         ));
-        refusal = refusal.into_settled_diagnostic().err().expect(
-            "a pre-effect body still cannot release its armed source owner",
-        );
+        refusal = refusal
+            .into_settled_diagnostic()
+            .err()
+            .expect("a pre-effect body still cannot release its armed source owner");
         assert!(Arc::ptr_eq(refusal.outcome(), &primary));
         assert!(matches!(&state.0.lock().availability,
             InstalledToolsAvailability::PublicationInProgress(attempt)
@@ -2920,9 +2979,10 @@ mod tests {
             "observed cancellation and source settlement never replay the compiler"
         );
         assert_eq!(
-            refusal.into_settled_diagnostic().ok().expect(
-                "the actual cancelled Ephemeral body issued diagnostic-only settlement",
-            ),
+            refusal
+                .into_settled_diagnostic()
+                .ok()
+                .expect("the actual cancelled Ephemeral body issued diagnostic-only settlement",),
             super::super::ActorGenerationPublicationRefusalObservation::Refused,
         );
     }
@@ -3024,9 +3084,6 @@ mod tests {
             prepared,
             publication.clone(),
             super::super::ActorGenerationPublication::Terminal,
-            runner.compiler_scope(super::super::CompilerCloseOwner::ActorLifecycle(
-                kernel.retained_exit(),
-            )),
         );
         assert_eq!(preparation.actor(), actor.identity());
         assert!(Arc::ptr_eq(

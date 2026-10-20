@@ -3,7 +3,9 @@
 module Tidepool.CertifiedProducts
   ( encodeCertifiedProducts, encodeCertifiedProductsWithOriginals
   , CertifiedProductKind(..), TargetCertificationContext
-  , encodeCertifiedOriginalProducts, encodeCertifiedItemProducts
+  , encodeCertifiedOriginalProducts, encodeCertifiedOriginalProductsWithPrior, encodeCertifiedItemProducts
+  , encodeCertifiedItemProductsWithInputs
+  , certifiedContextBinders, certifiedBinderInputClosure
   , resolvePackageGlobal, homeInterfaceUsageOwners, sourceProductSha256 ) where
 
 import Prelude hiding (product)
@@ -60,7 +62,8 @@ import Tidepool.ModuleCandidates
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), packageImportRoot, validatePackageImportRoot )
 import Tidepool.FatIface (readExactInterface)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.ExactHydration
+  ( ExactIfaceArtifact(..), OriginalInterfaceArtifacts, originalInterfaceSha256 )
 import Tidepool.FinalizedModule (homeInterfaceUsageOwners)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals )
@@ -72,7 +75,26 @@ data TargetCertificationContext = TargetCertificationContext
   { targetBinderOwners :: Map.Map SymbolIdentity BinderOwner
   , targetHomeModules :: Set.Set (T.Text,T.Text)
   , targetModulePackages :: Map.Map (T.Text,T.Text) (FilePath,T.Text)
+  , targetBinderAvailability :: Set.Set SymbolIdentity
+  , targetNativeOwners :: Set.Set (T.Text,T.Text)
+  , targetInterfaceSeals :: Map.Map (T.Text,T.Text) T.Text
+  , targetGroupWitnesses :: Map.Map BinderOwner [GlobalWitness]
   }
+
+certifiedContextBinders :: TargetCertificationContext -> Set.Set SymbolIdentity
+certifiedContextBinders = targetBinderAvailability
+
+-- Publication roots are real runtime binders, so every one must resolve to
+-- the same certified group. Availability cannot silently narrow publication.
+certifiedBinderInputClosure :: TargetCertificationContext -> Set.Set SymbolIdentity
+  -> Either String (Set.Set (SymbolIdentity,Word64))
+certifiedBinderInputClosure context roots = do
+  witnesses <- forM (Set.toAscList roots) $ \identity -> do
+    coordinate <- maybe (Left ("published runtime binder lacks its certified native owner: " ++ show identity)) Right
+      (Map.lookup identity (targetBinderOwners context))
+    maybe (Left "published runtime binder lacks its certified native group") Right
+      (Map.lookup coordinate (targetGroupWitnesses context))
+  retainedInputClosure context (concat witnesses)
 
 data ProductOrigin = FreshProduct | CachedProduct | RetainedCoreProduct deriving (Eq)
 
@@ -179,6 +201,22 @@ encodeCertifiedOriginalProducts
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext))
 encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
+  encodeCertifiedOriginalProductsWithPrior Nothing Nothing kind retained emittedSeals reconciled env sourceRecipe
+    interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes
+
+-- Prior facts come from this same issuer's completed stage. They add imported
+-- group coordinates and retained type seals, never newly emitted module rows.
+encodeCertifiedOriginalProductsWithPrior
+  :: Maybe TargetCertificationContext -> Maybe OriginalInterfaceArtifacts -> CertifiedProductKind
+  -> Map.Map (String,String) CanonicalInterfaceProof
+  -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
+  -> ReconciledOriginalProducts
+  -> HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [ModuleCandidate] -> Maybe ExactScope
+  -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
+  -> [(String, WireProgram)]
+  -> DependencyEvidence -> BS.ByteString -> BS.ByteString
+  -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext))
+encodeCertifiedOriginalProductsWithPrior prior originalInterfaces kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolvePackage, resolutionCounts) <- newPackageGlobalResolver timing env
@@ -223,21 +261,42 @@ encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env source
            | scope <- maybe [] pure exact, (iface, _, _) <- scopeInterfaces scope]
         ++ [((T.pack (exactUnit iface), T.pack (exactModule iface)), Set.singleton (T.pack (exactSha256 iface)))
            | scope <- maybe [] pure exact, iface <- scopeValueInterfaces scope])
+      previousSeals = maybe Map.empty targetInterfaceSeals prior
+      selectedSeals key = case Map.lookup key interfaceSeals of
+        Just seals -> Just seals
+        Nothing -> Set.singleton <$> Map.lookup key previousSeals
+      priorSealConflicts = Map.mapWithKey (\key seals -> case Map.lookup key previousSeals of
+        Nothing -> False
+        Just sha -> seals /= Set.singleton sha) interfaceSeals
   sealedProducts <- forM unsealedProducts $ \product -> do
     let owner = mkModule (stringToUnit (T.unpack (productUnit product))) (mkModuleName (T.unpack (productModule product)))
     selected <- case Map.lookup (moduleName owner) interfaces of
       Just iface | mi_module iface == owner -> pure (Right iface)
       _ -> fmap (either (const (Left "original interface usage inventory unavailable")) (Right . fst))
         (readExactInterface env owner)
+    retainedSeals <- case selected of
+      Left _ -> pure Map.empty
+      Right iface -> fmap Map.fromList $ forM (homeInterfaceUsageOwners env iface) $ \(unit,name) -> do
+        sha <- case originalInterfaces of
+          Nothing -> pure Nothing
+          Just artifacts -> originalInterfaceSha256 artifacts
+            (mkModule (stringToUnit unit) (mkModuleName name))
+        pure ((T.pack unit,T.pack name),T.pack <$> sha)
     pure $ do
       iface <- selected
       requirements <- forM (homeInterfaceUsageOwners env iface) $ \(unit, name) ->
-        case Map.lookup (T.pack unit, T.pack name) interfaceSeals of
-          Just seals | [sha] <- Set.toAscList seals -> Right (T.pack unit, T.pack name, sha)
-          selectedSeals -> Left ("original interface usage leaves the exact sealed owner closure: "
+        case selectedSeals (T.pack unit, T.pack name) of
+          Just seals | [sha] <- Set.toAscList seals -> do
+            case Map.lookup (T.pack unit,T.pack name) retainedSeals of
+              Just (Just actual) | actual /= sha -> Left "captured original interface differs from its prior sealed owner"
+              _ -> Right ()
+            Right (T.pack unit, T.pack name, sha)
+          Nothing | Just (Just sha) <- Map.lookup (T.pack unit,T.pack name) retainedSeals ->
+            Right (T.pack unit,T.pack name,sha)
+          missingSeals -> Left ("original interface usage leaves the exact sealed owner closure: "
             ++ show (productUnit product, productModule product)
             ++ " requires " ++ show (unit,name)
-            ++ "; selected seals=" ++ show (maybe [] Set.toAscList selectedSeals))
+            ++ "; selected seals=" ++ show (maybe [] Set.toAscList missingSeals))
       Right product { productInterfaces = requirements }
   let products = [product | Right product <- sealedProducts]
       expectedFresh = length fresh
@@ -251,8 +310,12 @@ encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env source
                     productVersion product, candidateGroupOrdinal group))
         | product <- products, group <- productGroups product
         , binder <- candidateGroupBinders group ]
-      ownerMap = Map.fromList binders
-      homeModules = Set.fromList (
+      freshOwnerMap = Map.fromList binders
+      priorOwners = maybe Map.empty targetBinderOwners prior
+      ownerMap = Map.union freshOwnerMap priorOwners
+      nativeOwners = Set.fromList [(productUnit product,productModule product) | product <- products]
+      binderConflicts = Map.intersectionWith (/=) freshOwnerMap priorOwners
+      homeModules = Set.union (maybe Set.empty targetHomeModules prior) $ Set.fromList (
         [ (T.pack (dependencyModuleUnit node), T.pack (dependencyModuleName node))
         | node <- dependencyModules evidence, not (dependencyModuleBoot node) ]
         ++ [(T.pack (exactUnit iface), T.pack (exactModule iface))
@@ -262,9 +325,12 @@ encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env source
       allGlobals =
         [ (product, group) | product <- products, group <- productGroups product ]
   if any ((/= 1) . Set.size) (Map.elems interfaceSeals)
+      || or (Map.elems priorSealConflicts)
       || length products /= length unsealedProducts
       || length freshProducts /= expectedFresh
-      || length binders /= Map.size ownerMap
+      || length binders /= Map.size freshOwnerMap
+      || or (Map.elems binderConflicts)
+      || not (Set.null (Set.intersection nativeOwners (maybe Set.empty targetNativeOwners prior)))
     then pure (Left (case [reason | Left reason <- sealedProducts] of
       reason : _ -> reason
       [] | any ((/= 1) . Set.size) (Map.elems interfaceSeals) -> "conflicting original interface owner seals"
@@ -364,9 +430,27 @@ encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env source
                 SegmentOriginalFacts -> array (encodeString "segment-originals" : originalFields)
               certificateBytes = toStrictByteString $
                 array [encodeString "TPCERT",encodeWord 10,payload]
+              priorPackages = maybe Map.empty targetModulePackages prior
+              currentPackages = Map.map Set.findMin packages
+              packageConflicts = Map.intersectionWith (\(_,left) (_,right) -> left /= right) currentPackages priorPackages
+              borrowedSeals = Map.fromList
+                [( (unit,name),sha) | product <- products, (unit,name,sha) <- productInterfaces product]
+              groupWitnesses = Map.fromList
+                [((productUnit product,productModule product,productVersion product,candidateGroupOrdinal group),witnesses)
+                | (product,group,witnesses) <- moduleRows]
               context = TargetCertificationContext ownerMap homeModules
-                (Map.map Set.findMin packages)
+                (Map.union currentPackages priorPackages)
+                (Set.union (Set.fromList (map fst binders)) (maybe Set.empty targetBinderAvailability prior))
+                (Set.union nativeOwners (maybe Set.empty targetNativeOwners prior))
+                (Map.union borrowedSeals (Map.union (Map.map Set.findMin interfaceSeals) previousSeals))
+                (Map.union groupWitnesses (maybe Map.empty targetGroupWitnesses prior))
           pure $ do
+            if Map.size groupWitnesses /= length moduleRows
+              then Left "duplicate certified native group coordinate"
+              else Right ()
+            if or (Map.elems packageConflicts)
+              then Left "prior native package owner changed its captured interface"
+              else Right ()
             versions <- retainedNativeVersions emittedSeals exact cached packages products moduleRows
             Right (certificateBytes,versions,context)
   where
@@ -383,7 +467,39 @@ encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env source
 -- An item adds only the facts selected by its own executable projection.
 encodeCertifiedItemProducts :: HscEnv -> TargetCertificationContext -> WireProgram
   -> IO (Either String BS.ByteString)
-encodeCertifiedItemProducts env context program = do
+encodeCertifiedItemProducts env context program =
+  fmap (fmap fst) (certifyItemProducts env context program)
+
+-- Selection consumes the same witnesses that issue the item certificate.
+-- Compiler-only names outside this executable closure create no value demand.
+encodeCertifiedItemProductsWithInputs :: HscEnv -> TargetCertificationContext -> WireProgram
+  -> IO (Either String (BS.ByteString,Set.Set (SymbolIdentity,Word64)))
+encodeCertifiedItemProductsWithInputs env context program = do
+  certified <- certifyItemProducts env context program
+  pure $ do
+    (bytes,witnesses) <- certified
+    inputs <- retainedInputClosure context witnesses
+    pure (bytes,inputs)
+
+retainedInputClosure :: TargetCertificationContext -> [GlobalWitness]
+  -> Either String (Set.Set (SymbolIdentity,Word64))
+retainedInputClosure context = visit Set.empty Set.empty
+  where
+    visit _ inputs [] = Right inputs
+    visit seen inputs ((identity,_,_,_,owner):pending) = case owner of
+      RetainedOwner generation -> visit seen (Set.insert (identity,generation) inputs) pending
+      PackageOwner _ _ _ (Just generation) -> visit seen (Set.insert (identity,generation) inputs) pending
+      PackageOwner _ _ _ Nothing -> visit seen inputs pending
+      SourceOwner unit name version ordinal ->
+        let coordinate = (unit,name,version,ordinal) in
+        if coordinate `Set.member` seen then visit seen inputs pending
+        else case Map.lookup coordinate (targetGroupWitnesses context) of
+          Nothing -> Left "executable input demand lacks its certified native group"
+          Just witnesses -> visit (Set.insert coordinate seen) inputs (witnesses ++ pending)
+
+certifyItemProducts :: HscEnv -> TargetCertificationContext -> WireProgram
+  -> IO (Either String (BS.ByteString,[GlobalWitness]))
+certifyItemProducts env context program = do
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolvePackage,_) <- newPackageGlobalResolver timing env
@@ -411,10 +527,11 @@ encodeCertifiedItemProducts env context program = do
   pure $ do
     witnesses <- sequence globals
     additions <- catMaybes <$> sequence validated
-    Right $ toStrictByteString $ array [encodeString "TPCERT",encodeWord 10,
-      array [encodeString "segment-item",list encodeFullWitness witnesses,
-        list (\((unit,name),path,seal) -> array [encodeString unit,encodeString name,
-          encodeString (T.pack path),encodeString seal]) additions]]
+    let bytes = toStrictByteString $ array [encodeString "TPCERT",encodeWord 10,
+          array [encodeString "segment-item",list encodeFullWitness witnesses,
+            list (\((unit,name),path,seal) -> array [encodeString unit,encodeString name,
+              encodeString (T.pack path),encodeString seal]) additions]]
+    Right (bytes,witnesses)
 
 encodeFullWitness :: GlobalWitness -> Encoding
 encodeFullWitness (identity,rep,signature,evaluated,owner) = array

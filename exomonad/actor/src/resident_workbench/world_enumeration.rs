@@ -110,13 +110,15 @@ where
         expected: Option<ScopeProvenance>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let source = self.access.source.config.clone();
+        let request_scope = self.request_scope.clone();
+        let snapshot_request_scope = request_scope.clone();
         let snapshot_source = source.clone();
         let snapshot = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 let current = match snapshot_source.inspection_provenance(
                     session,
-                    context,
+                    context, snapshot_request_scope.as_ref(),
                     NameScope::Current,
                 ) {
                     Ok(current) => current,
@@ -173,7 +175,7 @@ where
                     ScopeBindingsSnapshot::Ready { current, answer } => {
                         // Validate and resume under the same machine checkout so
                         // publication cannot move between the check and delivery.
-                        match source.inspection_provenance(session, context, NameScope::Current) {
+                        match source.inspection_provenance(session, context, request_scope.as_ref(), NameScope::Current) {
                             Ok(observed) if !observed.same_view(&current) => {
                                 ScopeBindingsOutcome::ScopeChanged {
                                     before: current,

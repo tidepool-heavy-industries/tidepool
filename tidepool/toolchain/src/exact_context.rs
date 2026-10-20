@@ -1061,18 +1061,26 @@ pub struct ImmutableScopeProofRef(Arc<ScopeFact>);
 #[derive(Debug)]
 struct ScopeFact {
     proof: Arc<ScopeProofV3>,
+    direct_ancestors: std::collections::BTreeSet<ArtifactSelectionId>,
     encoded: OnceLock<(Cid, Arc<[u8]>)>,
 }
 
 impl ImmutableScopeProofRef {
     pub(crate) fn from_issued(proof: Arc<ScopeProofV3>) -> Self {
+        let direct_ancestors = proof.scope_dependencies();
         Self(Arc::new(ScopeFact {
             proof,
+            direct_ancestors,
             encoded: OnceLock::new(),
         }))
     }
     pub fn proof(&self) -> &Arc<ScopeProofV3> {
         &self.0.proof
+    }
+    /// Direct external scope references belong to this immutable proof owner.
+    /// They are not the transitive proof closure and are derived only at birth.
+    pub(crate) fn direct_ancestors(&self) -> &std::collections::BTreeSet<ArtifactSelectionId> {
+        &self.0.direct_ancestors
     }
     fn encoded(&self) -> Result<&(Cid, Arc<[u8]>), SnapshotError> {
         if let Some(encoded) = self.0.encoded.get() {
@@ -1333,10 +1341,8 @@ impl SnapshotValueCodec<ImmutableScopeProofRef> for ScopeProofCodec {
         let proof: ScopeProofV3 = fvm_ipld_encoding::from_slice(&bytes).map_err(malformed)?;
         // The inventory authenticates complete scope identities and ancestry
         // before these decoded facts become live compiler custody.
-        let proof = ImmutableScopeProofRef(Arc::new(ScopeFact {
-            proof: Arc::new(proof),
-            encoded: OnceLock::from((cid, bytes.into())),
-        }));
+        let proof = ImmutableScopeProofRef::from_issued(Arc::new(proof));
+        let _ = proof.0.encoded.set((cid, bytes.into()));
         store.scopes.borrow_mut().insert(cid, proof.clone());
         Ok(proof)
     }
@@ -1526,6 +1532,39 @@ impl PartialEq for ExactLexicalSnapshot {
 }
 impl Eq for ExactLexicalSnapshot {}
 impl ExactLexicalSnapshot {
+    pub(crate) fn append_issued(
+        &self,
+        nodes: impl IntoIterator<Item = ExactLexicalNode>,
+    ) -> Result<Self, crate::CompileError> {
+        let mut facts = self.facts.clone();
+        let mut changed = false;
+        for mut node in nodes {
+            node.imports.sort();
+            node.imports.dedup();
+            if let Some(previous) = facts.get(&node.owner) {
+                if previous.node.as_ref() != &node {
+                    return Err(crate::CompileError::ExtractFailed(
+                        "program support changed its selected source graph".into(),
+                    ));
+                }
+                continue;
+            }
+            let owner = node.owner.clone();
+            let fact = ImmutableLexicalFactRef::new(node)
+                .map_err(|error| crate::CompileError::ExtractFailed(error.to_string()))?;
+            facts.insert(owner, fact);
+            changed = true;
+        }
+        Ok(if changed {
+            Self {
+                facts,
+                rows: Arc::new(OnceLock::new()),
+            }
+        } else {
+            self.clone()
+        })
+    }
+
     pub(crate) fn get(&self, owner: &ExactModuleIdentity) -> Option<&ExactLexicalNode> {
         self.facts.get(owner).map(|fact| fact.node.as_ref())
     }
