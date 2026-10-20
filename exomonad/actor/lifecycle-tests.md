@@ -29,9 +29,10 @@ policy to make a component fixture resemble the hosted path.
 The named `actor_generation_publication_protocol_tests` target exercises that
 lower production reconciliation boundary with three actual prepared replacements.
 It returns a body through a stopped supervisor, loses an actual diagnostic journal,
-and loses the real result only after native body visibility. It creates no Reload
-report, capture, or STOP command. Its source restoration and evidence assertions
-do not establish physical cleanup or successful hosted Reload.
+and loses the real result after the driver accepts and completes its body. That
+third history does not require or establish visibility or independent B source.
+It creates no Reload report, capture, or STOP command. Its source restoration and
+evidence assertions do not establish physical cleanup or successful hosted Reload.
 
 The separate `actor_initial_publication_protocol_tests` target uses actual
 Ephemeral and Durable initial preparations. Each is cancelled before committing
