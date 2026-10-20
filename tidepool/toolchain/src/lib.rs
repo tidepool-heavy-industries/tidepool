@@ -229,3 +229,12 @@ pub fn extract_module_name(source: &str) -> Option<String> {
     }
     None
 }
+
+/// Pure worker inspection wire values and decoding; no runtime authority.
+pub use tidepool_extract_report::inspection;
+
+impl From<inspection::InspectionDecodeError> for CompileError {
+    fn from(error: inspection::InspectionDecodeError) -> Self {
+        Self::ExtractFailed(error.to_string())
+    }
+}

@@ -1077,53 +1077,17 @@ impl crate::checked_cell::CellProgram {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WorldModuleOrigin {
-    Home {
-        root: u32,
-        path: String,
-        source_sha256: [u8; 32],
-    },
-    Package {
-        profile: [u8; 32],
-    },
-}
+pub use tidepool_extract_report::world_query::{
+    ClosedModuleAbsence, WorldAnswer, WorldModuleOrigin, WorldModuleReceipt, WorldModuleResolution,
+    WorldQueryRejection,
+};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorldModuleReceipt {
-    pub unit: String,
-    pub module: String,
-    pub origin: WorldModuleOrigin,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClosedModuleAbsence {
-    pub module: String,
-    pub source_domain: [u8; 32],
-    pub package_profile: [u8; 32],
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WorldModuleResolution {
-    Resolved(WorldModuleReceipt),
-    Absent(ClosedModuleAbsence),
-    Rejected(WorldQueryRejection),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WorldQueryRejection {
-    Unsupported,
-    Unavailable,
-    Corrupt,
-}
 
 #[derive(Clone, Debug)]
 pub struct WorldQueryResult {
     world: Arc<CompilerWorld>,
     question: PublicModuleQuestion,
-    resolution: WorldModuleResolution,
-    defining: Option<WorldModuleReceipt>,
-    inspection_payload: Vec<u8>,
+    answer: WorldAnswer,
 }
 
 impl WorldQueryResult {
@@ -1133,14 +1097,17 @@ impl WorldQueryResult {
     pub fn question(&self) -> &PublicModuleQuestion {
         &self.question
     }
-    pub fn resolution(&self) -> &WorldModuleResolution {
-        &self.resolution
+    pub fn resolution(&self) -> WorldModuleResolution {
+        self.answer.resolution()
     }
     pub fn defining_module(&self) -> Option<&WorldModuleReceipt> {
-        self.defining.as_ref()
+        self.answer.defining_module()
     }
-    pub fn inspection_payload(&self) -> &[u8] {
-        &self.inspection_payload
+    pub fn answer(&self) -> &WorldAnswer {
+        &self.answer
+    }
+    pub fn into_answer(self) -> WorldAnswer {
+        self.answer
     }
 }
 
@@ -2957,14 +2924,10 @@ pub fn admit_world_cell_program(
 ) -> Result<Result<Arc<CheckedWorldCellProgram>, WorldQueryRejection>, CompileError> {
     let producer_identity = *endpoint.identity().producer_bytes();
     match prepare_world_cell_outputs(endpoint, reservation)? {
-        Ok(output) => CheckedWorldCellProgram::admit(
-            output,
-            original,
-            target,
-            origin,
-            producer_identity,
-        )
-        .map(|program| Ok(Arc::new(program))),
+        Ok(output) => {
+            CheckedWorldCellProgram::admit(output, original, target, origin, producer_identity)
+                .map(|program| Ok(Arc::new(program)))
+        }
         Err(rejection) => Ok(Err(rejection)),
     }
 }
@@ -3634,198 +3597,34 @@ fn answer_cbor(bytes: &[u8]) -> Result<ciborium::value::Value, CompileError> {
     }
     Ok(value)
 }
-fn namespace_tag(namespace: InspectionNamespace) -> u64 {
-    match namespace {
-        InspectionNamespace::Any => 0,
-        InspectionNamespace::Value => 1,
-        InspectionNamespace::Type => 2,
-        InspectionNamespace::Constructor => 3,
-        InspectionNamespace::Field => 4,
-    }
-}
-fn namespace_text(namespace: InspectionNamespace) -> &'static str {
-    match namespace {
-        InspectionNamespace::Any => "Any",
-        InspectionNamespace::Value => "Value",
-        InspectionNamespace::Type => "Type",
-        InspectionNamespace::Constructor => "Constructor",
-        InspectionNamespace::Field => "Field",
-    }
-}
 #[derive(Clone, Copy)]
 enum ModuleReceiptUse {
     Requested,
     Defining,
 }
 
-fn module_receipt(
-    value: &ciborium::value::Value,
+fn authenticate_module_receipt(
+    receipt: &WorldModuleReceipt,
     sources: &CapturedCompilerSources,
     expected_profile: &[u8; 32],
     receipt_use: ModuleReceiptUse,
-) -> Result<WorldModuleReceipt, CompileError> {
-    let v = answer_array(value, 4)?;
-    if answer_text(&v[0])? != "resolved" {
-        return Err(world_response_error(false));
-    }
-    let unit = answer_text(&v[1])?.to_owned();
-    let module = answer_text(&v[2])?.to_owned();
-    if unit.is_empty() || module.is_empty() || unit.contains('\0') || module.contains('\0') {
-        return Err(world_response_error(true));
-    }
-    let origin = match &v[3] {
-        ciborium::value::Value::Array(o) if o.len() == 2 && answer_text(&o[0])? == "package" => {
-            let profile = answer_hash(&o[1])?;
-            if &profile != expected_profile
+) -> Result<(), CompileError> {
+    match &receipt.origin {
+        WorldModuleOrigin::Package { profile } => {
+            if profile != expected_profile
                 || (matches!(receipt_use, ModuleReceiptUse::Requested)
-                    && sources.selected_sources.contains_key(&module))
-            {
-                return Err(world_response_error(true));
-            }
-            WorldModuleOrigin::Package { profile }
-        }
-        ciborium::value::Value::Array(o) if o.len() == 4 && answer_text(&o[0])? == "home" => {
-            let root =
-                u32::try_from(answer_u64(&o[1])?).map_err(|_| world_response_error(false))?;
-            let path = answer_text(&o[2])?.to_owned();
-            if relative_source_path(Path::new(&path)).is_err() {
-                return Err(world_response_error(true));
-            }
-            let source_sha256 = answer_hash(&o[3])?;
-            let selected = WorldModuleOrigin::Home {
-                root,
-                path,
-                source_sha256,
-            };
-            if sources.selected_sources.get(&module) != Some(&selected) {
-                return Err(world_response_error(true));
-            }
-            selected
-        }
-        _ => return Err(world_response_error(false)),
-    };
-    Ok(WorldModuleReceipt {
-        unit,
-        module,
-        origin,
-    })
-}
-
-fn validate_identifier_namespace(
-    requested: InspectionNamespace,
-    actual: &str,
-) -> Result<(), CompileError> {
-    let actual = match actual {
-        "Value" => InspectionNamespace::Value,
-        "Type" => InspectionNamespace::Type,
-        "Constructor" => InspectionNamespace::Constructor,
-        "Field" => InspectionNamespace::Field,
-        _ => return Err(world_response_error(false)),
-    };
-    // GHC's value-name domain includes record selectors; the inspected
-    // identifier reports their more precise Field namespace.
-    if requested == InspectionNamespace::Any
-        || requested == actual
-        || (requested == InspectionNamespace::Value && actual == InspectionNamespace::Field)
-    {
-        Ok(())
-    } else {
-        Err(world_response_error(true))
-    }
-}
-
-fn validate_inspection(
-    payload: &[u8],
-    question: &PublicModuleQuestion,
-    resolution: &WorldModuleResolution,
-    defining: Option<&WorldModuleReceipt>,
-) -> Result<(), CompileError> {
-    let value = answer_cbor(payload)?;
-    let top = answer_array(&value, 2)?;
-    if answer_text(&top[0])? != "TPINSP008" {
-        return Err(world_response_error(false));
-    }
-    let complete = answer_array(&top[1], 2)?;
-    if answer_text(&complete[0])? != "Complete" {
-        return Err(world_response_error(false));
-    }
-    let only = answer_array(&complete[1], 1)?;
-    let answer = answer_array(&only[0], 2)?;
-    match answer_text(&answer[0])? {
-        "StructuredInfoOk" | "StructuredTypeOk" => {
-            let expected = match question.kind {
-                PublicModuleQuestionKind::StructuredInfo => "StructuredInfoOk",
-                PublicModuleQuestionKind::StructuredType => "StructuredTypeOk",
-            };
-            if answer_text(&answer[0])? != expected
-                || !matches!(resolution, WorldModuleResolution::Resolved(_))
-            {
-                return Err(world_response_error(true));
-            }
-            let details = answer_array(
-                &answer[1],
-                if expected == "StructuredInfoOk" { 4 } else { 3 },
-            )?;
-            let identifier = answer_array(&details[0], 3)?;
-            let definition = defining.ok_or_else(|| world_response_error(true))?;
-            let name = answer_text(&identifier[1])?;
-            validate_identifier_namespace(question.namespace(), answer_text(&identifier[2])?)?;
-            if answer_text(&identifier[0])? != definition.module
-                || !(question.name() == name
-                    || question.name() == format!("{}.{}", definition.module, name))
-            {
-                return Err(world_response_error(true));
-            }
-            let provenance = answer_array(
-                details.last().ok_or_else(|| world_response_error(false))?,
-                3,
-            )?;
-            let scope = answer_array(&provenance[0], 2)?;
-            if answer_text(&scope[0])? != "PublicModule"
-                || answer_text(&scope[1])? != question.module()
-                || answer_u64(&provenance[1])? != question.generation()
-                || answer_text(&provenance[2])? != question.fingerprint()
+                    && sources.selected_sources.contains_key(&receipt.module))
             {
                 return Err(world_response_error(true));
             }
         }
-        "StructuredError" => {
-            if defining.is_some() {
+        origin @ WorldModuleOrigin::Home { path, .. } => {
+            if relative_source_path(Path::new(path)).is_err()
+                || sources.selected_sources.get(&receipt.module) != Some(origin)
+            {
                 return Err(world_response_error(true));
             }
-            let ciborium::value::Value::Array(error) = &answer[1] else {
-                return Err(world_response_error(false));
-            };
-            let tag = answer_text(error.first().ok_or_else(|| world_response_error(false))?)?;
-            match tag {
-                "UnknownModule" if error.len() == 2 => {
-                    if !matches!(resolution, WorldModuleResolution::Absent(_))
-                        || answer_text(&error[1])? != question.module()
-                    {
-                        return Err(world_response_error(true));
-                    }
-                }
-                "Unknown" | "Ambiguous" if error.len() == if tag == "Unknown" { 2 } else { 3 } => {
-                    if !matches!(resolution, WorldModuleResolution::Resolved(_)) {
-                        return Err(world_response_error(true));
-                    }
-                    let query = answer_array(&error[1], 3)?;
-                    let scope = answer_array(&query[0], 2)?;
-                    if answer_text(&scope[0])? != "PublicModule"
-                        || answer_text(&scope[1])? != question.module()
-                        || answer_text(&query[1])? != namespace_text(question.namespace())
-                        || answer_text(&query[2])? != question.name()
-                    {
-                        return Err(world_response_error(true));
-                    }
-                }
-                "Unsupported" if error.len() == 2 => {
-                    let _ = answer_text(&error[1])?;
-                }
-                _ => return Err(world_response_error(false)),
-            }
         }
-        _ => return Err(world_response_error(false)),
     }
     Ok(())
 }
@@ -3835,118 +3634,69 @@ fn decode_world_answer(
     question: PublicModuleQuestion,
     bytes: &[u8],
 ) -> Result<WorldQueryResult, CompileError> {
-    if bytes.get(..8) != Some(b"TPWQ0002") || bytes.len() < 12 {
-        return Err(world_response_error(false));
-    }
-    let size = u32::from_le_bytes(
-        bytes[8..12]
-            .try_into()
-            .map_err(|_| world_response_error(false))?,
-    ) as usize;
-    if size != bytes.len() - 12 {
-        return Err(world_response_error(false));
-    }
-    let value = answer_cbor(&bytes[12..])?;
-    let v = answer_array(&value, 8)?;
-    let expected_mode = if question.kind == PublicModuleQuestionKind::StructuredInfo {
-        0
-    } else {
-        1
+    use crate::inspection::IdentifierNamespace as N;
+    use tidepool_extract_report::world_query::{
+        self, WorldAnswerDecodeError, WorldQueryExpectation, WorldQueryKind,
     };
-    let echoed = answer_array(&v[4], 4)?;
-    if answer_u64(&v[0])? != 1
-        || answer_hash(&v[1])? != *world.logical_id()
-        || answer_u64(&v[2])? != expected_mode
-        || answer_text(&v[3])? != question.module()
-        || answer_u64(&echoed[0])? != namespace_tag(question.namespace())
-        || answer_text(&echoed[1])? != question.name()
-        || answer_u64(&echoed[2])? != question.generation()
-        || answer_text(&echoed[3])? != question.fingerprint()
-    {
-        return Err(world_response_error(true));
-    }
-    let ciborium::value::Value::Array(resolution) = &v[5] else {
-        return Err(world_response_error(false));
+    let namespace = match question.namespace() {
+        InspectionNamespace::Any => None,
+        InspectionNamespace::Value => Some(N::Value),
+        InspectionNamespace::Type => Some(N::Type),
+        InspectionNamespace::Constructor => Some(N::Constructor),
+        InspectionNamespace::Field => Some(N::Field),
     };
-    let tag = answer_text(
-        resolution
-            .first()
-            .ok_or_else(|| world_response_error(false))?,
-    )?;
-    let resolution = match tag {
-        "resolved" => {
-            let receipt = module_receipt(
-                &v[5],
-                &world.restoration.inputs.sources,
-                &world.restoration.profile,
-                ModuleReceiptUse::Requested,
-            )?;
-            if receipt.module != question.module() {
-                return Err(world_response_error(true));
-            }
-            WorldModuleResolution::Resolved(receipt)
+    let answer = world_query::decode_world_answer(
+        bytes,
+        &WorldQueryExpectation {
+            world: world.logical_id(),
+            kind: match question.kind() {
+                PublicModuleQuestionKind::StructuredInfo => WorldQueryKind::Info,
+                PublicModuleQuestionKind::StructuredType => WorldQueryKind::Type,
+            },
+            module: question.module(),
+            namespace,
+            name: question.name(),
+            generation: question.generation(),
+            fingerprint: question.fingerprint(),
+        },
+    )
+    .map_err(|error| match error {
+        WorldAnswerDecodeError::Malformed(_) => world_response_error(false),
+        WorldAnswerDecodeError::ProvenanceMismatch(_) => world_response_error(true),
+    })?;
+    let sources = &world.restoration.inputs.sources;
+    let profile = &world.restoration.profile;
+    match &answer {
+        WorldAnswer::Info {
+            requested,
+            defining,
+            ..
         }
-        "absent" if resolution.len() == 4 => {
-            let module = answer_text(&resolution[1])?.to_owned();
-            let source_domain = answer_hash(&resolution[2])?;
-            let package_profile = answer_hash(&resolution[3])?;
-            if module != question.module()
-                || world
-                    .restoration
-                    .inputs
-                    .sources
-                    .selected_sources
-                    .contains_key(&module)
-                || source_domain != *world.restoration.inputs.sources.seal()
-                || package_profile != world.restoration.profile
+        | WorldAnswer::Type {
+            requested,
+            defining,
+            ..
+        } => {
+            authenticate_module_receipt(requested, sources, profile, ModuleReceiptUse::Requested)?;
+            authenticate_module_receipt(defining, sources, profile, ModuleReceiptUse::Defining)?;
+        }
+        WorldAnswer::NameRefused { requested, .. } => {
+            authenticate_module_receipt(requested, sources, profile, ModuleReceiptUse::Requested)?
+        }
+        WorldAnswer::Absent(absence) => {
+            if sources.selected_sources.contains_key(&absence.module)
+                || absence.source_domain != *sources.seal()
+                || absence.package_profile != *profile
             {
                 return Err(world_response_error(true));
             }
-            WorldModuleResolution::Absent(ClosedModuleAbsence {
-                module,
-                source_domain,
-                package_profile,
-            })
         }
-        "rejected" if resolution.len() == 2 => {
-            WorldModuleResolution::Rejected(match answer_u64(&resolution[1])? {
-                0 => WorldQueryRejection::Unsupported,
-                1 => WorldQueryRejection::Unavailable,
-                2 => WorldQueryRejection::Corrupt,
-                _ => return Err(world_response_error(false)),
-            })
-        }
-        _ => return Err(world_response_error(false)),
-    };
-    let defining = if matches!(v[6], ciborium::value::Value::Null) {
-        None
-    } else {
-        Some(module_receipt(
-            &v[6],
-            &world.restoration.inputs.sources,
-            &world.restoration.profile,
-            ModuleReceiptUse::Defining,
-        )?)
-    };
-    let inspection_payload = answer_blob(&v[7])?.to_vec();
-    if matches!(resolution, WorldModuleResolution::Rejected(_)) {
-        if defining.is_some() || !inspection_payload.is_empty() {
-            return Err(world_response_error(false));
-        }
-    } else {
-        validate_inspection(
-            &inspection_payload,
-            &question,
-            &resolution,
-            defining.as_ref(),
-        )?;
+        WorldAnswer::Rejected(_) => {}
     }
     Ok(WorldQueryResult {
         world,
         question,
-        resolution,
-        defining,
-        inspection_payload,
+        answer,
     })
 }
 
@@ -3984,18 +3734,16 @@ mod answer_tests {
         )
         .unwrap()
     }
-    fn home(root: u64, body: &[u8]) -> ciborium::value::Value {
-        world_array(vec![
-            world_text("resolved"),
-            world_text("main"),
-            world_text("Module"),
-            world_array(vec![
-                world_text("home"),
-                root.into(),
-                world_text("Module.hs"),
-                world_blob(world_digest(body)),
-            ]),
-        ])
+    fn home(root: u32, body: &[u8]) -> WorldModuleReceipt {
+        WorldModuleReceipt {
+            unit: "main".into(),
+            module: "Module".into(),
+            origin: WorldModuleOrigin::Home {
+                root,
+                path: "Module.hs".into(),
+                source_sha256: world_digest(body),
+            },
+        }
     }
     #[test]
     fn captured_source_aliases_survive_transport_directory_retirement() {
@@ -4064,23 +3812,55 @@ mod answer_tests {
         let a = b"module Module where\nvalue = (1 :: Int)\n";
         let b = b"module Module where\nvalue = True\n";
         let ab = sources(a, b);
-        assert!(module_receipt(&home(0, a), &ab, &[7; 32], ModuleReceiptUse::Requested).is_ok());
-        assert!(module_receipt(&home(1, b), &ab, &[7; 32], ModuleReceiptUse::Requested).is_err());
+        assert!(authenticate_module_receipt(
+            &home(0, a),
+            &ab,
+            &[7; 32],
+            ModuleReceiptUse::Requested
+        )
+        .is_ok());
+        assert!(authenticate_module_receipt(
+            &home(1, b),
+            &ab,
+            &[7; 32],
+            ModuleReceiptUse::Requested
+        )
+        .is_err());
         let ba = sources(b, a);
-        assert!(module_receipt(&home(0, b), &ba, &[7; 32], ModuleReceiptUse::Requested).is_ok());
-        assert!(module_receipt(&home(1, a), &ba, &[7; 32], ModuleReceiptUse::Requested).is_err());
+        assert!(authenticate_module_receipt(
+            &home(0, b),
+            &ba,
+            &[7; 32],
+            ModuleReceiptUse::Requested
+        )
+        .is_ok());
+        assert!(authenticate_module_receipt(
+            &home(1, a),
+            &ba,
+            &[7; 32],
+            ModuleReceiptUse::Requested
+        )
+        .is_err());
         assert_ne!(ab.seal(), ba.seal());
-        let package = world_array(vec![
-            world_text("resolved"),
-            world_text("base"),
-            world_text("Module"),
-            world_array(vec![world_text("package"), world_blob([7; 32])]),
-        ]);
-        assert!(module_receipt(&package, &ab, &[7; 32], ModuleReceiptUse::Requested).is_err());
+        let package = WorldModuleReceipt {
+            unit: "base".into(),
+            module: "Module".into(),
+            origin: WorldModuleOrigin::Package { profile: [7; 32] },
+        };
+        assert!(
+            authenticate_module_receipt(&package, &ab, &[7; 32], ModuleReceiptUse::Requested)
+                .is_err()
+        );
         // A package-qualified reexport may define a name in a different unit
         // despite a same-named home module in the captured search namespace.
-        assert!(module_receipt(&package, &ab, &[7; 32], ModuleReceiptUse::Defining).is_ok());
-        assert!(module_receipt(&package, &ab, &[8; 32], ModuleReceiptUse::Defining).is_err());
+        assert!(
+            authenticate_module_receipt(&package, &ab, &[7; 32], ModuleReceiptUse::Defining)
+                .is_ok()
+        );
+        assert!(
+            authenticate_module_receipt(&package, &ab, &[8; 32], ModuleReceiptUse::Defining)
+                .is_err()
+        );
     }
     #[test]
     fn cold_world_row_seal_binds_roles_requirements_order_and_ignores_aliases() {
@@ -4381,19 +4161,6 @@ mod answer_tests {
         }
     }
 
-    #[test]
-    fn world_identifier_namespace_is_checked_beyond_question_echo() {
-        use InspectionNamespace as N;
-        for actual in ["Value", "Type", "Constructor", "Field"] {
-            assert!(validate_identifier_namespace(N::Any, actual).is_ok());
-        }
-        assert!(validate_identifier_namespace(N::Type, "Type").is_ok());
-        assert!(validate_identifier_namespace(N::Type, "Value").is_err());
-        assert!(validate_identifier_namespace(N::Field, "Value").is_err());
-        assert!(validate_identifier_namespace(N::Value, "Field").is_ok());
-        assert!(validate_identifier_namespace(N::Constructor, "Type").is_err());
-        assert!(validate_identifier_namespace(N::Any, "Any").is_err());
-    }
     #[test]
     fn compiler_world_refuses_an_unscoped_action_before_preparation() {
         let reached = std::cell::Cell::new(false);

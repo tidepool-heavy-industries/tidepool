@@ -23,11 +23,12 @@
 //! `None` on Core, so there is nothing to assert there.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tidepool_repr::Generation;
 use tidepool_runtime::session::{
     resident_workbench_templates, run_turn, BoundBinder, CompiledTurn, ModuleEnv, ResidentOutcome,
-    ResidentSession, SessionLib, TurnRequest, TurnResult, TurnTemplate,
+    ResidentSession, RuntimeLexicalScopeLease, SessionLib, TurnRequest, TurnResult, TurnTemplate,
 };
 use tidepool_testing::effect_surface::TestEffectSurface;
 use tidepool_testing::eval_harness;
@@ -36,6 +37,7 @@ use tidepool_testing::eval_harness;
 /// one resident session, its compile plumbing, and expression/bind turns.
 struct Notebook {
     session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+    source: Arc<RuntimeLexicalScopeLease>,
     preamble: String,
     effect_stack: String,
     include: Vec<PathBuf>,
@@ -70,14 +72,18 @@ impl Notebook {
         .expect("open decl plane")
         .with_validation_include(vec![eval_harness::prelude_path()]);
         include.push(lib.include_dir().to_path_buf());
-        let session = ResidentSession::unbootstrapped(
+        let mut session = ResidentSession::unbootstrapped(
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(lib),
         );
+        let source = session
+            .mint_isolated_scope_with_lease()
+            .expect("issue the notebook's source owner");
         Self {
             session,
+            source,
             preamble,
             effect_stack,
             include,
@@ -102,14 +108,18 @@ impl Notebook {
         .expect("open decl plane")
         .with_validation_include(vec![eval_harness::prelude_path()]);
         include.push(lib.include_dir().to_path_buf());
-        let session = ResidentSession::unbootstrapped(
+        let mut session = ResidentSession::unbootstrapped(
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(lib),
         );
+        let source = session
+            .mint_isolated_scope_with_lease()
+            .expect("issue the notebook's source owner");
         Self {
             session,
+            source,
             preamble,
             effect_stack,
             include,
@@ -218,15 +228,45 @@ impl Notebook {
     /// Install the immutable artifact afresh on every turn. Compilation is
     /// shared; mutable heap state and program retirement are still exercised.
     fn expression(&mut self, compiled: &CompiledTurn) {
-        let outcome = tidepool_testing::with_settlement(|settlement| {
-            self.session
-                .run_with_sites("residency_expression", compiled.code(), settlement)
-        })
-        .expect("prepared expression runs");
+        let outcome = self
+            .source_action(|session, settlement| {
+                session.run_with_sites("residency_expression", compiled.code(), settlement)
+            })
+            .expect("prepared expression runs");
         assert!(
             matches!(outcome, ResidentOutcome::Completed { .. }),
             "{outcome:?}"
         );
+    }
+
+    fn source_action<T>(
+        &mut self,
+        action: impl FnOnce(
+            &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+            &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+        ) -> T,
+    ) -> T {
+        let settled = self
+            .session
+            .with_source_compiler_transaction(
+                self.source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                action,
+            )
+            .expect("admit the notebook's live source owner");
+        assert!(
+            matches!(
+                settled.close(),
+                tidepool_runtime::CompilerTransactionClose::Clean
+                    | tidepool_runtime::CompilerTransactionClose::NotStarted
+            ),
+            "source transaction did not retire cleanly: {:?}",
+            settled.close()
+        );
+        settled.into_outcome().action
     }
 
     fn bind(&mut self, text: &str) -> BoundBinder {
@@ -239,16 +279,18 @@ impl Notebook {
         let [binder] = bound.as_slice() else {
             panic!("{text:?} bound {} names", bound.len());
         };
-        let outcome = tidepool_testing::with_settlement(|settlement| {
-            self.session.run_bind_with_sites(
-                "residency_bind",
-                compiled.code(),
-                binder,
-                Generation(self.generation),
-                settlement,
-            )
-        })
-        .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
+        let generation = Generation(self.generation);
+        let outcome = self
+            .source_action(|session, settlement| {
+                session.run_bind_with_sites(
+                    "residency_bind",
+                    compiled.code(),
+                    binder,
+                    generation,
+                    settlement,
+                )
+            })
+            .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
         assert!(
             matches!(outcome, ResidentOutcome::Completed { .. }),
             "{text:?} did not complete: {outcome:?}"
@@ -283,12 +325,12 @@ fn structural_resume_classifies_rejection_and_consumed_failure() {
 
     let mut notebook = Notebook::with_effects(&[tidepool_mcp::console_decl()]);
     let success = notebook.prepare_expression("say \"pause\" >> pure (42 :: Int)");
-    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .run_with_sites("response_rejection", success.code(), settlement)
-    })
-    .unwrap() else {
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .source_action(|session, settlement| {
+            session.run_with_sites("response_rejection", success.code(), settlement)
+        })
+        .unwrap()
+    else {
         panic!("Console request must suspend");
     };
     let roots = notebook.session.persistent_roots_count();
@@ -319,12 +361,12 @@ fn structural_resume_classifies_rejection_and_consumed_failure() {
 
     let failure = notebook
         .prepare_expression("say \"pause\" >> (error \"after response\" :: Eff '[Console] Int)");
-    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .run_with_sites("consumed_response", failure.code(), settlement)
-    })
-    .unwrap() else {
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .source_action(|session, settlement| {
+            session.run_with_sites("consumed_response", failure.code(), settlement)
+        })
+        .unwrap()
+    else {
         panic!("Console request must suspend before its failure");
     };
     let error = tidepool_testing::with_settlement(|settlement| {
@@ -336,12 +378,12 @@ fn structural_resume_classifies_rejection_and_consumed_failure() {
         "{error:?}"
     );
     assert!(notebook.session.parked_holes().is_empty());
-    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .run_with_sites("after_consumed_failure", success.code(), settlement)
-    })
-    .unwrap() else {
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .source_action(|session, settlement| {
+            session.run_with_sites("after_consumed_failure", success.code(), settlement)
+        })
+        .unwrap()
+    else {
         panic!("the session must remain usable after a consumed failure");
     };
     assert!(matches!(
@@ -362,12 +404,12 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
     let mut notebook = Notebook::with_effects(&[tidepool_mcp::console_decl()]);
     notebook.bind("held <- pure ()");
     let success = notebook.prepare_expression("say \"pause\" >> pure (42 :: Int)");
-    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .run_with_sites("framed_rejection", success.code(), settlement)
-    })
-    .unwrap() else {
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .source_action(|session, settlement| {
+            session.run_with_sites("framed_rejection", success.code(), settlement)
+        })
+        .unwrap()
+    else {
         panic!("Console request must suspend");
     };
     let held = notebook
@@ -400,12 +442,12 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
 
     let failure = notebook
         .prepare_expression("say \"pause\" >> (error \"after handle\" :: Eff '[Console] Int)");
-    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .run_with_sites("consumed_handle", failure.code(), settlement)
-    })
-    .unwrap() else {
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .source_action(|session, settlement| {
+            session.run_with_sites("consumed_handle", failure.code(), settlement)
+        })
+        .unwrap()
+    else {
         panic!("Console request must suspend before its failure");
     };
     let held = notebook
@@ -464,18 +506,23 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     let [binder] = bound.as_slice() else {
         panic!("held must have one original binder");
     };
+    assert!(compiled.prepared().globals().iter().all(|global| {
+        tidepool_repr::SessionModule::from_module_name(&global.identity.module)
+            .is_none_or(|module| module.kind != tidepool_repr::SessionModuleKind::Lib)
+    }));
     let generation = Generation(left.generation);
     let install = |notebook: &mut Notebook| {
-        let outcome = tidepool_testing::with_settlement(|settlement| {
-            notebook.session.run_bind_with_sites(
-                "shared_held",
-                compiled.code(),
-                binder,
-                generation,
-                settlement,
-            )
-        })
-        .expect("install the original immutable binding in an independent machine");
+        let outcome = notebook
+            .source_action(|session, settlement| {
+                session.run_bind_with_sites(
+                    "shared_held",
+                    compiled.code(),
+                    binder,
+                    generation,
+                    settlement,
+                )
+            })
+            .expect("install the original immutable binding in an independent machine");
         assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
         notebook.generation = generation.0;
         notebook.injected.push(binder.module.clone());
@@ -528,22 +575,28 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
 
     let right_handles_before = right.session.value_handle_count();
     let right_programs_before = right.session.residency().unwrap().programs;
+    let right_visibility_before = right.session.public_visibility_snapshot_in(root).unwrap();
     let imported = right
         .session
         .import_parcel(parcel, tidepool_runtime::session::RealmId::ROOT)
         .expect("the parcel installs its source instance in the sibling machine");
     assert_eq!(
         right.session.value_handle_count(),
-        right_handles_before + 2,
-        "import mints the value handle and one retained source-binding handle"
+        right_handles_before + 1,
+        "a self-contained parcel mints its value handle without declaration-binding handles"
     );
     assert!(
         right.session.residency().unwrap().programs > right_programs_before,
         "import retains the left installation, even with the same code installed on the right"
     );
     assert_eq!(
-        right.session.current_binding_in(root, "held"),
-        Some(right_binding)
+        right.session.current_binding_in(root, "held").as_ref(),
+        Some(&right_binding)
+    );
+    assert_eq!(
+        right.session.public_visibility_snapshot_in(root).unwrap(),
+        right_visibility_before,
+        "native instance custody does not publish source bindings"
     );
     drop(left);
 
@@ -554,11 +607,14 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     assert_eq!(before, after, "the value round-trips byte-for-byte");
     assert_eq!(after, "999999");
 
-    // Releasing the imported custody leaves the source-binding handle rooted
-    // for the carried installation's import slot. The source machine's
-    // custody was already consumed by export.
+    // There are no declaration-binding imports to retain after releasing the
+    // transferred value. The receiver's independently installed binding survives.
     assert!(right.session.discard_custody(imported));
-    assert_eq!(right.session.value_handle_count(), right_handles_before + 1);
+    assert_eq!(right.session.value_handle_count(), right_handles_before);
+    assert_eq!(
+        right.session.current_binding_in(root, "held").as_ref(),
+        Some(&right_binding)
+    );
 }
 
 /// Fixture mirror of `PreparedEngine::MAJOR_COLLECTION_INSTALL_INTERVAL`
@@ -582,6 +638,41 @@ fn assert_counts_flat(
         old_bytes, previous_old_bytes,
         "{label}: old_bytes moved across collections"
     );
+}
+
+#[test]
+fn root_installation_checks_the_original_source_gate_before_mutation() {
+    use tidepool_runtime::session::{
+        ResidentError, SessionError, SourceAdmissionError, SourceAdmissionPhase,
+    };
+
+    let mut notebook = Notebook::new();
+    let expression = notebook.prepare_expression("1 + (2 :: Int)");
+    notebook.expression(&expression);
+    let before = notebook.session.residency();
+    let original_scope = notebook.source.scope();
+    let _fence = notebook
+        .source
+        .source_admission()
+        .fence()
+        .expect("close only the original source gate");
+
+    let error = notebook
+        .source_action(|session, settlement| {
+            session.run_with_sites("closed_original_source", expression.code(), settlement)
+        })
+        .expect_err("an open ROOT receiver cannot replace the original source authority");
+    assert!(
+        matches!(
+            error,
+            ResidentError::Session(SessionError::SourceAdmission(SourceAdmissionError::Closed {
+                scope,
+                phase: SourceAdmissionPhase::Fenced { .. },
+            })) if scope == original_scope
+        ),
+        "{error:?}"
+    );
+    assert_eq!(notebook.session.residency(), before);
 }
 
 /// Twenty installations of one prepared constant expression on the prepared route, each installing

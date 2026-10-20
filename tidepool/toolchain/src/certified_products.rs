@@ -17834,6 +17834,24 @@ pub(crate) mod tests {
                 )
                 .unwrap();
             assert!(output.selected_native_groups().is_empty());
+            assert!(selection.new_product_native_requirements().next().is_none());
+            let current_entry = output.entries().into_iter().find(|entry| {
+                matches!(&entry.payload, crate::artifact_inventory::ArtifactPayload::Original(product)
+                    if product.owner() == current.owner())
+            }).expect("actual output retains the current product");
+            let current_ref = selection
+                .current_product(
+                    crate::artifact_inventory::NativeGroupKey {
+                        artifact: current_entry.descriptor.id,
+                        original_ordinal: 5,
+                    },
+                    &current_entry,
+                )
+                .unwrap()
+                .expect("bound physical output needs no self dependency proof");
+            assert!(
+                matches!(current_ref.own_group_candidates().unwrap(), NativeGroupCandidates::NewProduct(groups) if groups.is_empty())
+            );
             let result = OriginalCompilerInputs::from_selection(&selection, &output);
             if !full {
                 assert!(
@@ -17893,6 +17911,72 @@ pub(crate) mod tests {
                 if row[1] == value_text(&dependency.owner().module) && interface_only {
                     assert_eq!(row[9], value_text("private-native"));
                 }
+            }
+            if interface_only {
+                use crate::artifact_inventory::{
+                    ArtifactInventoryFailure, NativeAdmissionRefusal, NativeGroupKey,
+                };
+                let input_view = next.compiler_inputs().artifacts();
+                let inventory = input_view.inventory();
+                let operation = InventoryOperation::new(Default::default());
+                let input_selection = CertifiedSourceSelection::from_compiler_inputs(
+                    next.compiler_inputs(),
+                    &operation,
+                )
+                .unwrap();
+                let original = input_selection
+                    .target_original(dependency.owner())
+                    .unwrap()
+                    .expect("real request retains private Full native output");
+                let key = NativeGroupKey {
+                    artifact: original.descriptor.id,
+                    original_ordinal: 9001,
+                };
+                assert!(input_selection.permits_native_group(
+                    key.artifact,
+                    dependency.owner(),
+                    key.original_ordinal
+                ));
+                assert!(
+                    input_selection
+                        .current_product(key, &original)
+                        .unwrap()
+                        .is_none(),
+                    "private Input availability is not current physical production"
+                );
+                let mut bound = inventory
+                    .bind_segment(input_view, vec![], &input_selection)
+                    .unwrap();
+                let before = bound.observed_binding_state();
+                let before_view = input_view.capture_graph_selection();
+                let mut binder = testing::identity("AvailableDependency", "entry_9001");
+                binder.unit = dependency.owner().unit.clone();
+                let imports = [PendingImportOwner::Source {
+                    owner: dependency.owner().clone(),
+                    original_ordinal: key.original_ordinal,
+                    binder,
+                }];
+                let error = inventory
+                    .admit_bound_target(
+                        &mut bound,
+                        input_view,
+                        NativeArtifactDemand::CertifiedTargetImports(&imports),
+                        vec![],
+                        &input_selection,
+                    )
+                    .err()
+                    .expect("private Full without a root choice cannot become a current root");
+                assert!(
+                    matches!(error, crate::CompileError::ArtifactInventory(ref error)
+                    if error.failure == ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact: key.artifact, original_ordinal: key.original_ordinal,
+                    } && error.native_refusal == Some(NativeAdmissionRefusal::CurrentProductNotCompleted {
+                        original: key.artifact, original_ordinal: key.original_ordinal,
+                    })),
+                    "actual Input refusal must preserve its native admission cause: {error:?}"
+                );
+                assert_eq!(bound.observed_binding_state(), before);
+                assert_eq!(input_view.capture_graph_selection(), before_view);
             }
         }
     }
