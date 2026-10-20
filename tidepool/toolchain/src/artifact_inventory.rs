@@ -14595,8 +14595,8 @@ mod tests {
                 assert!(
                     matches!(&missing_private, Err(CompileError::ArtifactInventory(error))
                     if matches!(&error.failure,
-                        ArtifactInventoryFailure::MissingDependency { required, dependency: ArtifactDependency::NativeGroup { dependent_ordinal: 12, required_ordinal: 7 }, .. }
-                        if required == &child.descriptor.owner)),
+                        ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 }
+                        if *artifact == child.descriptor.id)),
                     "missing private proof at executable demand returned {missing_private:?}"
                 );
             }
