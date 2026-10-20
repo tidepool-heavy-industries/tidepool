@@ -923,7 +923,6 @@ pub fn prepare_world_cell_program(
             let mut artifacts =
                 crate::declaration_context::bind_certified_segment_artifacts_with_validation(
                     &segment.originals,
-                    segment.artifacts(),
                     &mut validation,
                 )?;
             let mut native_prefix: Option<Arc<SealedTurnProducts>> = None;
@@ -2745,7 +2744,6 @@ impl SelectedModuleCandidateOffer {
                 let artifacts =
                     crate::declaration_context::bind_certified_segment_artifacts_with_validation(
                         source_segment.original_products(physical, &validation.inventory)?,
-                        segment_input.compiler_inputs().artifacts(),
                         &mut validation,
                     )?;
                 segment_timing.advance("initialize_segment_cursor");

@@ -467,7 +467,7 @@ pub(super) fn verified_current_product(
 fn current_product_dependencies(
     state: &mut InventoryState,
     parent: &ArtifactView,
-    entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    entries: &impl ArtifactEntryMap<ArtifactId>,
     incoming: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     offers: &mut Vec<IssuedNativeOffer>,
     current: &crate::certified_products::CurrentProductRef<'_>,
@@ -796,7 +796,7 @@ impl<'a> NativeSupportRef<'a> {
     fn acquire(
         &self,
         state: &mut InventoryState,
-        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        entries: &impl ArtifactEntryMap<ArtifactId>,
         incoming: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
         issued: &IssuedNativeBinding,
     ) -> Result<(), CompileError> {
@@ -836,7 +836,7 @@ impl<'a> NativeSupportRef<'a> {
 
     fn retain_payloads(
         &self,
-        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        entries: &impl ArtifactEntryMap<ArtifactId>,
         incoming: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
         owned: &BTreeSet<InventoryNodeKey>,
     ) -> Result<(), CompileError> {
@@ -877,7 +877,7 @@ pub(super) fn issued_carrier_pair(
 pub(super) fn bind_certified_input_demand(
     state: &mut InventoryState,
     parent: &ArtifactView,
-    entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    entries: &impl ArtifactEntryMap<ArtifactId>,
     mut incoming: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     demanded: &BTreeSet<NativeGroupKey>,
     selection: &crate::certified_products::CertifiedSourceSelection,
@@ -1058,7 +1058,7 @@ pub(super) fn bind_fresh_product_dependencies(
     state: &mut InventoryState,
     parent: &ArtifactView,
     consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
-    entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    entries: &impl ArtifactEntryMap<ArtifactId>,
     fresh: &BTreeSet<NativeGroupKey>,
     catalog: &NativeDependencyCatalog<'_>,
     required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
@@ -1125,7 +1125,7 @@ pub(super) fn bind_fresh_product_dependencies(
 impl CertifiedNativeDemandAcquisition {
     fn retain_dependency_groups(
         &self,
-        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        entries: &impl ArtifactEntryMap<ArtifactId>,
         consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
         required: &mut BTreeMap<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>,
     ) -> Result<(), CompileError> {
@@ -2893,7 +2893,9 @@ mod normalized_dependency_tests {
             &physical,
             entries,
         )
-        .unwrap();
+        .unwrap()
+        .issued_artifacts()
+        .clone();
         let inputs = OriginalCompilerInputs::from_selection(&selection, &completed).unwrap();
         assert_eq!(inputs.issued_offers().len(), 2);
         for offer in inputs.issued_offers() {
@@ -2996,7 +2998,9 @@ mod normalized_dependency_tests {
             &physical,
             entries,
         )
-        .unwrap();
+        .unwrap()
+        .issued_artifacts()
+        .clone();
         let inputs = OriginalCompilerInputs::from_selection(&selection, &completed).unwrap();
         let offer = inputs
             .issued_offers()

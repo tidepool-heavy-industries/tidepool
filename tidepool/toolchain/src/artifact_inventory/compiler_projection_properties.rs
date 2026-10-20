@@ -1434,7 +1434,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                         let private =
                             crate::declaration_context::OriginalCompilerInputs::from_selection(
                                 &physical_selection,
-                                &issued,
+                                issued.issued_artifacts(),
                             )
                             .unwrap();
                         let root_id = catalog.original(module, version).descriptor.id;

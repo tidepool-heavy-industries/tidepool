@@ -1797,7 +1797,9 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                 &base,
                 Vec::new(),
             )
-            .unwrap();
+            .unwrap()
+            .issued_artifacts()
+            .clone();
         let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
             &selection, &completed,
         )

@@ -151,12 +151,27 @@ fn prepare_checked(
     operand: Option<Arc<CompilerWorldCellOperand>>,
     values: &[(u64, &str)],
 ) -> Result<Arc<CheckedWorldCellProgram>, CompileError> {
+    let (body, template) = match operand.as_ref() {
+        Some(operand) => {
+            let symbol = operand.symbol();
+            (
+                body.replace("{{OPERAND_BINDER}}", &symbol.occurrence),
+                include_str!("../../tests/fixtures/world-native/SelectionTemplate.hs")
+                    .replace("{{OPERAND_MODULE}}", &symbol.module)
+                    .replace("{{OPERAND_BINDER}}", &symbol.occurrence),
+            )
+        }
+        None => (
+            body.into(),
+            include_str!("../../tests/fixtures/world-native/CellTemplate.hs").into(),
+        ),
+    };
     let plan = crate::compiler_world::plan_cell(
         endpoint,
         world,
         Arc::new(tidepool_extract_cmd::WorldCellRecipe {
-            source: body.into(),
-            template: include_str!("../../tests/fixtures/world-native/CellTemplate.hs").into(),
+            source: body,
+            template,
             turn_templates: Vec::new(),
         }),
         operand,
@@ -231,6 +246,15 @@ fn assert_physical_selection(
         &mut validation,
         crate::declaration_context::WorldProgramContinuation::begin(checked)?,
     )?;
+    let input = operand.checked_row().certified_interface().artifact_id();
+    assert!(
+        segment
+            .originals
+            .value_entries()
+            .iter()
+            .any(|entry| entry.descriptor.id == input),
+        "the actual helper RHS must select its operand interface before item projection"
+    );
     let relative = PathBuf::from("item-0");
     let path = checked
         .item(0)
@@ -283,7 +307,6 @@ fn assert_physical_selection(
         .originals
         .select_item(receipt, &target, Some(&first), &mut validation)
         .map_err(compiler_evidence_failure)?;
-    let input = operand.checked_row().certified_interface().artifact_id();
     let current = physical.current_interface(51)?.artifact_id();
     let later = physical.current_interface(52)?.artifact_id();
     assert!(certified
