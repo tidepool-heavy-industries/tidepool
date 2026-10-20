@@ -39,7 +39,8 @@ module Tidepool.GhcPipeline
   , CompilerScope, scopedCompile, scopedCompileCompleted, scopedReadExactScope, scopedRunGhc, scopedParserFlags
   , scopedEnsureWorld, scopedReadHeldWorld, scopedQueryWorld, scopedPlanWorldCell, scopedValidateWorldCell, scopedCompileWorldCell, scopedCommitWorldDependencies, HeldWorldQueryBinding
   , HeldWorldCellAdmission, heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
-  , HeldWorldCellStage, scopedPrepareWorldCellStage, heldWorldCellStagePlan, heldWorldCellStageSlots, heldWorldCellStageOffset, heldWorldCellStagePath, heldWorldCellStageTypedSource, heldWorldCellStageOriginal
+  , HeldWorldCellStage, scopedPrepareWorldCellStage, heldWorldCellStagePlan, heldWorldCellStageItems, heldWorldCellStageOffset, heldWorldCellStagePath, heldWorldCellStageTypedSource, heldWorldCellStageOriginal
+  , HeldWorldCellItem, heldWorldCellItemOrdinal, heldWorldCellItemSlot, heldWorldCellItemSourceDigest
   , WorldCellRefusal(..)
   , materializeWorldSources, worldMaterializationCharge, retainWorldMaterialization, releaseWorldMaterialization
   , worldMaterializationOwners, emitWorldAcquisitionRejection
@@ -2468,11 +2469,13 @@ observationInspection query = case query of
 -- The admission owner is the sole rendered-stage producer. Descriptive
 -- getters cannot replace the source, plan or purpose consumed at compilation.
 renderHeldWorldCellStage :: DynFlags -> WorldCellPrepareRequest -> CellSourcePlan
-  -> [(Word64,PlannedCellSlot)] -> Int -> IO HeldWorldCellStage
-renderHeldWorldCellStage flags question plan slots offset = do
+  -> [HeldWorldCellItem] -> Int -> IO HeldWorldCellStage
+renderHeldWorldCellStage flags question plan items offset = do
   let recipe = worldCellPrepareRecipe question
       directory = worldCellPrepareDirectory question </> "stage-" ++ show offset
       reservation = hexBytes (worldCellPrepareAdmission question)
+      slots :: [(Word64,PlannedCellSlot)]
+      slots = [(fromIntegral (heldWorldCellItemOrdinal item),heldWorldCellItemSlot item) | item <- items]
   createDirectoryIfMissing True directory
   rendered <- case (cellPlanItems plan,slots) of
     ([item],[(_,slot)]) | sbKind (cellAnalysisVerdict item) == KDecl -> do
@@ -2520,7 +2523,7 @@ renderHeldWorldCellStage flags question plan slots offset = do
               (TypedSegmentCompile (preparedTypedSegmentPlan source) (preparedTypedSegmentOperations source)
                 (CheckedItemCompile [] Nothing []))))
       pure (WorldRenderedTyped source purpose path)
-  pure (HeldWorldCellStage plan slots offset rendered)
+  pure (HeldWorldCellStage plan items offset rendered)
 
 worldPlannedDeclaration :: CompilePurpose -> Maybe PlannedDeclaration
 worldPlannedDeclaration (WorldPlannedDeclarationCompile planned) = Just planned
@@ -6601,7 +6604,21 @@ data WorldCellPrefix = WorldCellPrefix !Int HomePackageTable
 
 data WorldCellStageState = WorldStagePending | WorldStageRendered HeldWorldCellStage | WorldStageRetry CellSourcePlan
 
-data HeldWorldCellStage = HeldWorldCellStage CellSourcePlan [(Word64,PlannedCellSlot)] !Int WorldRenderedStage
+-- The admitted authored item and its reservation survive stage rendering and
+-- generated-instance retries. Generated source has separate compilation
+-- provenance; it cannot replace this original input fingerprint.
+data HeldWorldCellItem = HeldWorldCellItem !Int PlannedCellSlot !BS.ByteString
+
+heldWorldCellItemOrdinal :: HeldWorldCellItem -> Int
+heldWorldCellItemOrdinal (HeldWorldCellItem ordinal _ _) = ordinal
+
+heldWorldCellItemSlot :: HeldWorldCellItem -> PlannedCellSlot
+heldWorldCellItemSlot (HeldWorldCellItem _ slot _) = slot
+
+heldWorldCellItemSourceDigest :: HeldWorldCellItem -> BS.ByteString
+heldWorldCellItemSourceDigest (HeldWorldCellItem _ _ digest) = digest
+
+data HeldWorldCellStage = HeldWorldCellStage CellSourcePlan [HeldWorldCellItem] !Int WorldRenderedStage
 
 data WorldRenderedStage
   = WorldRenderedTyped PreparedTypedSegmentSource CompilePurpose FilePath
@@ -6610,8 +6627,8 @@ data WorldRenderedStage
 heldWorldCellStagePlan :: HeldWorldCellStage -> CellSourcePlan
 heldWorldCellStagePlan (HeldWorldCellStage plan _ _ _) = plan
 
-heldWorldCellStageSlots :: HeldWorldCellStage -> [(Word64,PlannedCellSlot)]
-heldWorldCellStageSlots (HeldWorldCellStage _ slots _ _) = slots
+heldWorldCellStageItems :: HeldWorldCellStage -> [HeldWorldCellItem]
+heldWorldCellStageItems (HeldWorldCellStage _ items _ _) = items
 
 heldWorldCellStageOffset :: HeldWorldCellStage -> Int
 heldWorldCellStageOffset (HeldWorldCellStage _ _ offset _) = offset
@@ -7188,14 +7205,22 @@ withResidentCompilerScopes baseIncludes useRequests = do
                             (_,[]) -> pure Nothing
                             (WorldStageRendered stage,_) -> pure (Just stage)
                             (_,current:_) -> do
-                              let slots = take (length (cellPlanItems current)) (drop offset (worldCellPrepareSlots question))
+                              let count = length (cellPlanItems current)
+                                  slots = take count (drop offset (worldCellPrepareSlots question))
+                                  authored = take count (drop offset (cellPlanItems plan))
+                                  items = zipWith (\(ordinal,slot) item ->
+                                    HeldWorldCellItem (fromIntegral ordinal) slot
+                                      (SHA256.hash (TextEncoding.encodeUtf8 (Text.pack (cellAnalysisSource item)))))
+                                    slots authored
                                   earlier = [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ snd (plannedOriginalOwner inventory))
                                     RetainedGeneratedImport [mkModuleName (snd (plannedOriginalOwner inventory))] | inventory <- inventories]
                                   prologue = cellPlanPrologue current
                                   base = current {cellPlanPrologue=prologue
                                     {prologueImports=inherited ++ earlier ++ prologueImports prologue}}
                                   selected = case state of WorldStageRetry retry -> retry; _ -> base
-                              stage <- renderHeldWorldCellStage parserFlags question selected slots offset
+                              unless (length slots == count && length authored == count)
+                                (throwIO WorldCellCorrupt)
+                              stage <- renderHeldWorldCellStage parserFlags question selected items offset
                               writeIORef prefixRef (WorldCellPrefix cursor homes inventories scope inherited (WorldStageRendered stage))
                               pure (Just stage)
                     _ -> throwIO WorldCellUnavailable
