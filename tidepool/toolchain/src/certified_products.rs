@@ -7094,6 +7094,31 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
     selected: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
+    certify_selected_owned_group_rows_in_context_with_validation(
+        available,
+        current_groups,
+        selected,
+        validation,
+    )
+    .map(|groups| groups.into_iter().map(|(_, group)| group).collect())
+}
+
+/// Preserve each checked original key at the owner that admits its group.
+/// Receiving target assembly must not rediscover it from a broader owner map.
+pub(crate) fn certify_selected_owned_group_rows_in_context_with_validation(
+    available: &BTreeMap<
+        crate::artifact_inventory::ArtifactId,
+        &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    >,
+    current_groups: &[PendingCertifiedGroup],
+    selected: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<
+    Vec<(
+        crate::artifact_inventory::NativeGroupKey,
+        PendingCertifiedGroup,
+    )>,
+> {
     validate_selected_originals_with_validation(
         available,
         current_groups,
@@ -7325,7 +7350,12 @@ fn validate_selected_originals_with_validation(
     validation: &mut PackageInterfaceValidation,
     native_use: OriginalNativeUse,
     validation_roots: Option<&BTreeSet<crate::artifact_inventory::NativeGroupKey>>,
-) -> CertResult<Vec<PendingCertifiedGroup>> {
+) -> CertResult<
+    Vec<(
+        crate::artifact_inventory::NativeGroupKey,
+        PendingCertifiedGroup,
+    )>,
+> {
     use crate::artifact_inventory::NativeGroupKey;
     let inventory = OriginalValidationInventory::new(available)?;
     let native_ids = &inventory.native_ids;
@@ -7373,7 +7403,7 @@ fn validate_selected_originals_with_validation(
         }
         inventory.validate_imports(key, &originals, |_| true, validation)?;
         if native_use == OriginalNativeUse::SelectedGroups && !inherited.contains(key) {
-            additional.push(group.admitted());
+            additional.push((*key, group.admitted()));
         }
     }
     Ok(additional)
@@ -19298,6 +19328,164 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn certified_group_bindings_preserve_exact_scopes_and_target_owner() {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeArtifactDemand};
+
+        let original = full_native_fixture("BoundGroup", vec![(8, vec![]), (11, vec![])], 7);
+        let other = full_native_fixture("OtherBoundGroup", vec![(12, vec![])], 7);
+        let mut candidates = original
+            .original_native()
+            .unwrap()
+            .groups
+            .iter()
+            .chain(other.original_native().unwrap().groups.iter())
+            .map(AuthenticatedOriginalGroup::admitted)
+            .collect::<Vec<_>>();
+        for group in &mut candidates {
+            group.origin = ProductOrigin::Fresh;
+        }
+        // An available but undemanded duplicate cannot compete with a solved row.
+        candidates.push(candidates[1].clone());
+        let issued =
+            IssuedGroupCandidates::bind(candidates.into(), &[original.clone(), other.clone()])
+                .unwrap();
+        let import = |group: &PendingCertifiedGroup| PendingImportOwner::Source {
+            owner: group.owner().clone(),
+            original_ordinal: group.group().original_ordinal(),
+            binder: group.group().binders().first().unwrap().clone(),
+        };
+        let own_imports = vec![import(&issued[0])];
+        let both_imports = vec![import(&issued[0]), import(&issued[2])];
+        let inventory = ArtifactInventory::default();
+        let mut validation = PackageInterfaceValidation::default();
+        let entries = [&original, &other]
+            .into_iter()
+            .map(|product| {
+                Arc::new(
+                    ArtifactEntry::original_with_validation(
+                        [1; 32],
+                        product.clone(),
+                        &mut validation,
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let admit = |imports: &[PendingImportOwner]| {
+            inventory
+                .admit_product_artifacts(
+                    &available,
+                    entries.clone(),
+                    NativeArtifactDemand::CertifiedTargetImports(imports),
+                    None,
+                )
+                .unwrap()
+                .into_target()
+                .unwrap()
+        };
+        let admitted = admit(&own_imports);
+        let owner = Arc::new(
+            crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+                admitted.artifacts(),
+                &issued,
+                &[],
+                &mut validation,
+            )
+            .unwrap(),
+        );
+        assert_eq!(owner.groups().len(), 1);
+        assert_eq!(owner.groups()[0].origin(), ProductOrigin::Fresh);
+        let (_, selected) = admitted.artifacts().selected_native_binding_rows();
+        let binding = *selected.first().unwrap();
+        assert_eq!(selected.len(), 1);
+        assert!(std::ptr::eq(
+            owner.get(binding).unwrap(),
+            &owner.groups()[0]
+        ));
+        assert!(owner.matches_view(&admitted.artifacts().clone()));
+
+        let first = admitted
+            .for_ordinary_target(own_imports.clone())
+            .unwrap()
+            .with_certified_groups(Arc::clone(&owner))
+            .unwrap();
+        let second = admitted
+            .for_ordinary_target(own_imports.clone())
+            .unwrap()
+            .with_certified_groups(Arc::clone(&owner))
+            .unwrap();
+        let first_rows = first.resolve_sources().unwrap();
+        let second_rows = second.resolve_sources().unwrap();
+        assert!(std::ptr::eq(
+            first_rows.group(binding).unwrap(),
+            second_rows.group(binding).unwrap()
+        ));
+
+        // Equal selected bindings do not establish the same acquisition owner.
+        let foreign = admit(&own_imports);
+        let foreign_owner = Arc::new(
+            crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+                foreign.artifacts(),
+                &issued,
+                &[],
+                &mut validation,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            foreign.artifacts().selected_native_binding_rows().1,
+            selected
+        );
+        assert!(!foreign_owner.matches_view(admitted.artifacts()));
+        assert!(admitted
+            .for_ordinary_target(own_imports.clone())
+            .unwrap()
+            .with_certified_groups(foreign_owner)
+            .is_err());
+
+        // A separate real demand issues a different scope for the same payload.
+        let independent = admit(&both_imports);
+        let (_, independent_bindings) = independent.artifacts().selected_native_binding_rows();
+        let independent_binding = *independent_bindings
+            .iter()
+            .find(|group| {
+                group.binding.artifact() == binding.binding.artifact()
+                    && group.original_ordinal == binding.original_ordinal
+            })
+            .unwrap();
+        assert_ne!(independent_binding, binding);
+        assert!(owner.get(independent_binding).is_none());
+
+        let joined = admitted
+            .artifacts()
+            .merge_fixture_selections(independent.artifacts())
+            .unwrap();
+        let joined_owner =
+            crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
+                &joined,
+                &issued,
+                &[],
+                &mut validation,
+            )
+            .unwrap();
+        assert!(
+            std::ptr::eq(
+                joined_owner.get(binding).unwrap(),
+                joined_owner.get(independent_binding).unwrap(),
+            ),
+            "independent exact edges share one certified physical row"
+        );
+        assert_eq!(joined_owner.groups().len(), 2);
     }
 
     #[test]
