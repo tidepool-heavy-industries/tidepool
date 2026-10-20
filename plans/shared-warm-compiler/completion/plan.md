@@ -74,6 +74,13 @@ a reason to preserve the finite engine while building another abstraction layer.
   references with exact weak observations. Actual admitted/completed operations,
   generations and executions retain strong custody. Abandonment and held-output
   controls must pass through the real producer before accepting this repair.
+- The core weak-association repair now has a real lost-successful-delivery pass
+  at `a7c8fe08df`, plus a separately executed completed-output hold control.
+  Prospective B constructors compile against the split at `4d6019aa34`.
+  Their joined reception remains distinct from those component results.
+  Per-site installed provenance exposed a separate whole-scope cycle; its
+  [canonical source-token repair](contracts/SOURCE-AUTHORITY-LIFETIME.md) is
+  accepted and assigned to the runtime/lifecycle/native receiving owners.
 - Query pins now share one observed compiler snapshot across verbs. Full
   lexical queries still need the active effect row and exact input/request type
   witnesses carried from their existing issuers; names or displayed types are
@@ -128,6 +135,7 @@ cell, early Persona acceptance or whole-bundle performance result is claimed.
 | --- | --- | --- |
 | Haskell + engine | Resolve target demand with its actual dependency HPT; distinguish compiler-induced code generation from authored options | Actual first and second actor cells, unchanged dangerous-option refusals |
 | Runtime + lifecycle | Weak installed associations and strong admitted/completed custody; original A/target B consumers | Lost successful birth delivery, abandoned B, held output, publication and transitive prerequisite retirement |
+| Runtime + provenance owners | Canonical source authority independent of lexical/native resource roots | Self and reciprocal transfers release resources, foreign source remains exact, explicit cutoff still refuses |
 | Haskell request + paired Rust receiver | Ordered full-language stages and genuine non-executable item proofs | Shipped mixed-cell template, precise prefixes, later error before any effect |
 | Native owners | Correct TYPE-only projection and carry actual source provenance through native installation | Historical custody property, actual World seal, source-dependent and package-alias provenance |
 | Queries | One typed actor/effect/request observation pin across all five verbs | Semantic query assertions and actual context mismatch refusals |

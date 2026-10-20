@@ -58,11 +58,11 @@ private constructors to manufacture the association.
 ### Association observations and operation custody
 
 An installed association is a cache of compiler facts about runtime owners. It
-must not strongly retain either its own target lease or the original-source
-lease. Otherwise the cache can keep an abandoned private scope or unpublished
+must not strongly retain either its own target lease or original-source owner.
+Otherwise the cache can keep an abandoned private scope or unpublished
 reload candidate alive after its actual owner disappears.
 
-Keep exact weak observations of both leases beside the existing immutable
+Keep exact weak observations of both owners beside the existing immutable
 base/key/epoch facts. A new admission upgrades those observations through the
 canonical owner and checks the required gates. Pointer equality can compare two
 observations of the same owner; it cannot manufacture missing ownership or
@@ -74,6 +74,8 @@ candidate and execution owners retain their actual leases independently.
 Do not weaken the runtime lease's transitive prerequisite DAG or reconstruct a
 source from an ambient scope map. A completed output waiting for installation
 must remain usable even though installed associations themselves hold no lease.
+The [source lifetime contract](SOURCE-AUTHORITY-LIFETIME.md) narrows the original
+member to a canonical source token while the target remains a real lexical lease.
 
 Fencing prevents new admission. It does not erase an already earned claim:
 accepted work may settle while its external prerequisite is fenced, provided
@@ -138,6 +140,21 @@ and remain tied to that plan. Do not enumerate all historical names in Rust.
 Declarations, imports, expressions, mixed cells and retained source-defined
 types are required; blanket refusals are temporary WIP, not the language contract.
 Host-carrier shape restrictions apply only to their actual purpose.
+
+### Operation-owned private operands
+
+A mounted host input is a private operand of this admitted operation, not a
+public World binding. Its actual `PendingHostValueWrite` and captured interface
+own the input identity. Bind that operand to the same plan/reservation and retain
+it through END and native installation. Do not mutate the public compiler World
+or add a free-standing extra-bindings API to make the private module visible.
+
+Input references distinguish BaseWorld, actual PriorStage and CellOperand.
+PriorStage names both producer and consuming stage, allowing the receiver to
+verify that the producer precedes its consumer. References use actual captured
+row/interface identities; none may fabricate a World identity. Runtime execution
+still requires the matching opaque write, source and target admission. Descriptive
+wire fields alone grant no access.
 
 ### Ordered full-language stages
 
