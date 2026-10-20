@@ -10443,15 +10443,13 @@ where
             .access
             .with_machine(context, move |session, _, _| {
                 let bindings = session.lease_bindings(&demanded_bindings);
-                if demanded_bindings.iter().any(|expected| {
-                    !bindings.retained_bindings().iter().any(|actual| actual.raw() == expected.0)
-                }) {
+                let mut retained = bindings.retained_bindings().iter().map(|id| id.raw()).collect::<Vec<_>>();
+                retained.sort_unstable();
+                if demanded_bindings.iter().any(|expected| retained.binary_search(&expected.0).is_err()) {
                     return Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(
                         tidepool_runtime::session::SessionError::StaleStagedDeclaration,
                     )));
                 }
-                let mut retained = bindings.retained_bindings().iter().map(|id| id.raw()).collect::<Vec<_>>();
-                retained.sort_unstable();
                 tracing::debug!(target: "exomonad_harness::timing",
                     logical_world = ?logical_world,
                     output_certificate = ?output_certificate,
