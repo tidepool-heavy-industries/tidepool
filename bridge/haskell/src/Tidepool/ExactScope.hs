@@ -47,6 +47,8 @@ module Tidepool.ExactScope
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
   , worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty
   , WorldLexicalSurface, WorldDeclarationSurface, worldInputsLexicalSurface
+  , WorldObservationProfile(..), WorldObservationScaffold, worldLexicalObservation
+  , worldObservationProfile, worldObservationFragment, worldObservationImports, worldObservationRequestTypes, worldObservationInputType
   , worldLexicalImports, worldLexicalDeclaration, worldDeclarationInterface
   , worldSourceRoots, worldSourceDomainSha256, worldSourceOrigin, worldSourceFiles
   , readWorldInputsWithOwner, readWorldSuccessorWithOwner, WorldSuccessorInputs
@@ -99,7 +101,7 @@ import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.DeclarationJoin (DeclarationExport(..), decodeDeclarationExports, interfaceExports, normalizeDeclarationExports)
 import Tidepool.CheckedCell
-  ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures
+  ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures, encodeCheckedSignature, encodeRequestTypeSignatures
   , CellExpressionPlan(..), ExpressionLiftPlan(..), decodeCellExpressionPlan
   , validateCheckedTypeWitnessBytes )
 import Tidepool.ExecutionSchema
@@ -2290,7 +2292,34 @@ worldFrontierBodies (VerifiedWorldFrontier blocks _ _ _ _) = blocks
 
 -- Ordered imports and an explicitly selected declaration facade belong to the
 -- logical product. Custody of other interfaces cannot populate this surface.
-data WorldLexicalSurface = WorldLexicalSurface [String] (Maybe WorldDeclarationSurface) (Integer,Int)
+data WorldLexicalSurface = WorldLexicalSurface [String] (Maybe WorldDeclarationSurface)
+  (Maybe WorldObservationScaffold) (Integer,Int)
+
+data WorldObservationProfile = WorldWorkbenchObservation | WorldHostCarrierObservation
+  deriving (Eq,Show)
+
+-- This immutable source/type witness is part of the logical lexical product.
+-- Its generated bodies are never runtime values or native execution inputs.
+data WorldObservationScaffold = WorldObservationScaffold WorldObservationProfile String [String]
+  (Maybe (RequestHelperRecipe,RequestTypeSignatures)) (Maybe CheckedSignature)
+
+worldLexicalObservation :: WorldLexicalSurface -> Maybe WorldObservationScaffold
+worldLexicalObservation (WorldLexicalSurface _ _ observation _) = observation
+
+worldObservationProfile :: WorldObservationScaffold -> WorldObservationProfile
+worldObservationProfile (WorldObservationScaffold profile _ _ _ _) = profile
+
+worldObservationFragment :: WorldObservationScaffold -> String
+worldObservationFragment (WorldObservationScaffold _ fragment _ _ _) = fragment
+
+worldObservationImports :: WorldObservationScaffold -> [String]
+worldObservationImports (WorldObservationScaffold _ _ imports _ _) = imports
+
+worldObservationRequestTypes :: WorldObservationScaffold -> Maybe (RequestHelperRecipe,RequestTypeSignatures)
+worldObservationRequestTypes (WorldObservationScaffold _ _ _ request _) = request
+
+worldObservationInputType :: WorldObservationScaffold -> Maybe CheckedSignature
+worldObservationInputType (WorldObservationScaffold _ _ _ _ input) = input
 
 data WorldDeclarationSurface = WorldDeclarationSurface ScopeInterfaceInput [DeclarationExport]
 
@@ -2298,13 +2327,13 @@ worldInputsLexicalSurface :: WorldInputFacts -> WorldLexicalSurface
 worldInputsLexicalSurface = ownedWorldInputsLexicalSurface
 
 worldLexicalImports :: WorldLexicalSurface -> [String]
-worldLexicalImports (WorldLexicalSurface imports _ _) = imports
+worldLexicalImports (WorldLexicalSurface imports _ _ _) = imports
 
 worldLexicalDeclaration :: WorldLexicalSurface -> Maybe WorldDeclarationSurface
-worldLexicalDeclaration (WorldLexicalSurface _ declaration _) = declaration
+worldLexicalDeclaration (WorldLexicalSurface _ declaration _ _) = declaration
 
 worldLexicalCharge :: WorldLexicalSurface -> (Integer,Int)
-worldLexicalCharge (WorldLexicalSurface _ _ charge) = charge
+worldLexicalCharge (WorldLexicalSurface _ _ _ charge) = charge
 
 worldDeclarationInterface :: WorldDeclarationSurface -> ExactIfaceArtifact
 worldDeclarationInterface (WorldDeclarationSurface (ScopeInterfaceInput (artifact,_,_) _) _) = artifact
@@ -3374,7 +3403,7 @@ readWorldLexicalSurface :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString
   -> WorldPrimaryFacts -> IO WorldLexicalSurface
 readWorldLexicalSurface frontier root primary = do
   body <- maybe (worldCorrupt "compiler world lexical surface is absent") pure (Map.lookup root frontier)
-  (imports,selected) <- decodeWorldBytes (decodeSurface body) body
+  (imports,selected,observation) <- decodeWorldBytes (decodeSurface body) body
   declaration <- forM selected $ \(owner,interface,encodedExports) -> do
     association <- maybe (worldCorrupt "world declaration facade has no primary selected role") pure
       (Map.lookup owner (worldPrimarySelected primary))
@@ -3389,18 +3418,16 @@ readWorldLexicalSurface frontier root primary = do
   let exports = maybe [] worldDeclarationExports declaration
       entries = 1 + toInteger (length imports) + toInteger (length exports)
         + sum [toInteger (length (exportChildren value)) | value <- exports]
+        + maybe 0 (\value -> 1 + toInteger (length (worldObservationImports value))) observation
   when (entries > toInteger (maxBound :: Int))
     (worldCorrupt "compiler world lexical retention count exceeds host range")
-  pure (WorldLexicalSurface imports declaration (toInteger (BS.length body),fromInteger entries))
+  pure (WorldLexicalSurface imports declaration observation (toInteger (BS.length body),fromInteger entries))
   where
     decodeSurface body = do
-      worldArray 3
+      worldArray 4
       magic <- decodeStringCanonical
-      unless (magic == "TPCWLEX1") (fail "unsupported compiler world lexical surface")
-      imports <- worldFactList (BS.length body) $ do
-        spec <- T.unpack <$> worldBindingText
-        when (any (`elem` ['\0','\n']) spec) (fail "invalid published compiler import specification")
-        pure spec
+      unless (magic == "TPCWLEX2") (fail "unsupported compiler world lexical surface")
+      imports <- importSpecs body
       selected <- peekTokenType >>= \case
         TypeNull -> decodeNull >> pure Nothing
         _ -> do
@@ -3410,15 +3437,54 @@ readWorldLexicalSurface frontier root primary = do
           artifact <- rawWorldDigestCanonical
           exports <- decodeBytesCanonical
           pure (Just ((unit,name),artifact,exports))
+      observation <- optional $ do
+        worldArray 4
+        profile <- decodeWordCanonical >>= \case
+          0 -> pure WorldWorkbenchObservation
+          1 -> pure WorldHostCarrierObservation
+          _ -> fail "unsupported world observation profile"
+        fragment <- T.unpack <$> decodeStringCanonical
+        when ('\0' `elem` fragment) (fail "invalid world observation source fragment")
+        staticImports <- importSpecs body
+        (request,input) <- optional (worldArray 2 >> ((,) <$> optional requestTypes <*> optional decodeCheckedSignature))
+          >>= pure . maybe (Nothing,Nothing) id
+        pure (WorldObservationScaffold profile fragment staticImports request input)
       let text = E.encodeString . T.pack
           encodedDeclaration = case selected of
             Nothing -> E.encodeNull
             Just ((unit,name),artifact,exports) -> E.encodeListLen 4 <> text unit <> text name
               <> E.encodeBytes artifact <> E.encodeBytes exports
-          canonical = toStrictByteString (E.encodeListLen 3 <> text "TPCWLEX1"
-            <> E.encodeListLen (fromIntegral (length imports)) <> foldMap text imports <> encodedDeclaration)
+          canonical = toStrictByteString (E.encodeListLen 4 <> text "TPCWLEX2"
+            <> encodeImports imports <> encodedDeclaration <> maybe E.encodeNull encodeObservation observation)
       unless (canonical == body) (fail "world lexical surface must be canonical CBOR")
-      pure (imports,selected)
+      pure (imports,selected,observation)
+    optional :: Decoder s value -> Decoder s (Maybe value)
+    optional decoder = peekTokenType >>= \case
+      TypeNull -> decodeNull >> pure Nothing
+      _ -> Just <$> decoder
+    importSpecs :: BS.ByteString -> Decoder s [String]
+    importSpecs body = worldFactList (BS.length body) $ do
+      spec <- T.unpack <$> worldBindingText
+      when (any (`elem` ['\0','\n']) spec) (fail "invalid published compiler import specification")
+      pure spec
+    requestTypes :: Decoder s (RequestHelperRecipe,RequestTypeSignatures)
+    requestTypes = do
+      worldArray 2
+      recipe <- decodeStringCanonical >>= \case
+        "none" -> pure NoRequestHelpers
+        "actor-reply" -> pure ActorReplyHelpers
+        _ -> fail "unsupported world observation request helper recipe"
+      (,) recipe <$> decodeRequestTypeSignatures
+    encodeImports imports = E.encodeListLen (fromIntegral (length imports))
+      <> foldMap (E.encodeString . T.pack) imports
+    encodeObservation (WorldObservationScaffold profile fragment imports request input) =
+      E.encodeListLen 4 <> E.encodeWord (case profile of WorldWorkbenchObservation -> 0; WorldHostCarrierObservation -> 1)
+        <> E.encodeString (T.pack fragment) <> encodeImports imports
+        <> (if isNothing request && isNothing input then E.encodeNull else E.encodeListLen 2
+          <> maybe E.encodeNull (\(recipe,types) -> E.encodeListLen 2
+            <> E.encodeString (case recipe of NoRequestHelpers -> "none"; ActorReplyHelpers -> "actor-reply")
+            <> encodeRequestTypeSignatures types) request
+          <> maybe E.encodeNull encodeCheckedSignature input)
 
 worldFactField :: String -> Decoder s ()
 worldFactField expected = do

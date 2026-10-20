@@ -521,7 +521,7 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
       && isNothing (worldLexicalDeclaration (worldInputsLexicalSurface original)))
     (fail "empty published lexical selection was inferred from other acquired interfaces")
   let orderedImports = ["qualified Data.List as L","Data.Map ()","Data.Set hiding (map)"]
-      importsBody = encode (TList [TString "TPCWLEX1",TList (map text orderedImports),TNull])
+      importsBody = encode (TList [TString "TPCWLEX2",TList (map text orderedImports),TNull,TNull])
   importsRoot <- worldFixtureCID importsBody
   importsPairs <- reachable [primary,association,emptyBinding,importsRoot]
     ((importsRoot,importsBody):blockPairs)
@@ -532,6 +532,30 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
       && isNothing (worldLexicalDeclaration (worldInputsLexicalSurface imported))
       && worldInputsIdentityBytes imported /= worldInputsIdentityBytes original)
     (fail "world product lost ordered import qualification, explicit empty selection or lexical identity")
+  let observationFragment = "module WorldObservation where\nobservation = let value = value in value\n"
+      observationTerm profile native = TList [profile,text observationFragment,TList (map text orderedImports),native]
+      observationPacket value = do
+        let body = encode (TList [TString "TPCWLEX2",TList [],TNull,value])
+        root <- worldFixtureCID body
+        pairs <- reachable [primary,association,emptyBinding,root] ((root,body):blockPairs)
+        pure (packet 4 (restorationWithLexical 4 primary association emptyBinding root)
+          primary pairs base [] acquisition emptyBinding)
+  forM_ [(0,WorldWorkbenchObservation),(1,WorldHostCarrierObservation)] $ \(profile,expected) -> do
+    offered <- observationPacket (observationTerm (TInt profile) TNull)
+    observed <- readPacket ("world-observation-profile-" ++ show profile) offered
+    case worldLexicalObservation (worldInputsLexicalSurface observed) of
+      Just scaffold | worldObservationProfile scaffold == expected
+        , worldObservationFragment scaffold == observationFragment
+        , worldObservationImports scaffold == orderedImports
+        , isNothing (worldObservationRequestTypes scaffold)
+        , isNothing (worldObservationInputType scaffold) -> pure ()
+      _ -> fail "World observation decoder lost its issued profile/source/type correlation"
+  forM_ [("profile",observationTerm (TInt 2) TNull)
+        ,("annotations",observationTerm (TInt 0) (TList [TNull]))
+        ,("redundant-annotations",observationTerm (TInt 0) (TList [TNull,TNull]))
+        ,("helper-recipe",observationTerm (TInt 0) (TList [TList [TString "unknown",TNull],TNull]))] $ \(label,value) -> do
+    offered <- observationPacket value
+    requireCorrupt Nothing ("world-observation-invalid-" ++ label) offered
   -- Use the same genuine cold facts as an independent full-read oracle. The
   -- successor carries only its changed lexical block, then returns to the old
   -- root without retaining either descriptor. Compatible alternate captures of
@@ -571,8 +595,8 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
     (successor product [(importsRoot,importsBody)])
   requireCorrupt (Just "compiler world block child is absent") "world-missing-lexical-root"
     (packet 4 product primary (filter ((/= lexical) . fst) blockPairs) base [] acquisition emptyBinding)
-  let unselectedBody = encode (TList [TString "TPCWLEX1",TList [],TList
-        [TString "main",TString "NeverSelected",TBytes (BS.replicate 32 0),TBytes (BS.singleton 0x80)]])
+  let unselectedBody = encode (TList [TString "TPCWLEX2",TList [],TList
+        [TString "main",TString "NeverSelected",TBytes (BS.replicate 32 0),TBytes (BS.singleton 0x80)],TNull])
   unselectedRoot <- worldFixtureCID unselectedBody
   unselectedPairs <- reachable [primary,association,emptyBinding,unselectedRoot]
     ((unselectedRoot,unselectedBody):blockPairs)
@@ -580,8 +604,8 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
     (packet 4 (restorationWithLexical 4 primary association emptyBinding unselectedRoot)
       primary unselectedPairs base [] acquisition emptyBinding)
   forM_ (take 1 selectedOwners) $ \(unit,name) -> do
-    let changed = encode (TList [TString "TPCWLEX1",TList [],TList
-          [text unit,text name,TBytes (BS.replicate 32 0),TBytes (BS.singleton 0x80)]])
+    let changed = encode (TList [TString "TPCWLEX2",TList [],TList
+          [text unit,text name,TBytes (BS.replicate 32 0),TBytes (BS.singleton 0x80)],TNull])
     changedRoot <- worldFixtureCID changed
     changedPairs <- reachable [primary,association,emptyBinding,changedRoot] ((changedRoot,changed):blockPairs)
     requireCorrupt (Just "world declaration facade has another selected interface artifact") "world-crossed-declaration-interface"
@@ -656,8 +680,8 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
     interface <- case interfaces of
       [value] | BS.length value == 32 -> pure value
       _ -> fail "lexical control needs one actual selected interface artifact"
-    let surface values = encode (TList [TString "TPCWLEX1",TList [],TList
-          [text unit,text name,TBytes interface,TBytes (encodeDeclarationExports values)]])
+    let surface values = encode (TList [TString "TPCWLEX2",TList [],TList
+          [text unit,text name,TBytes interface,TBytes (encodeDeclarationExports values)],TNull])
         changedExports = case exports of
           first:rest -> first {exportHead=(exportHead first) {exportModule="Foreign.Declaration"}}:rest
           [] -> error "lexical export refusal needs a genuine nonempty interface"
