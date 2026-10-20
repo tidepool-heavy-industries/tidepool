@@ -5326,6 +5326,33 @@ mod tests {
     }
 
     #[test]
+    fn retired_inherited_source_cannot_reappear_through_its_open_shared_gate() {
+        let mut session = PersistentSession::new(None, 1024);
+        let parent = session.mint_notebook_scope_with_lease(None).unwrap();
+        let child_scope = session.mint_scope(parent.scope()).unwrap();
+        let child = session.adopt_initial_notebook_scope(child_scope).unwrap();
+        let source = child.original_source().clone();
+        let target = session.mint_isolated_scope_with_lease().unwrap();
+        assert!(source
+            .source_admission()
+            .same_owner(parent.source_admission()));
+        assert!(!Arc::ptr_eq(&source, parent.original_source()));
+        source.with_open_target(&target, || ()).unwrap();
+        session.retire_scope(child_scope);
+        assert!(source.with_open_target(&target, || ()).is_err());
+        parent
+            .original_source()
+            .with_open_target(&target, || ())
+            .unwrap();
+        assert!(session.adopt_initial_notebook_scope(child_scope).is_err());
+        assert!(source.with_open_target(&target, || ()).is_err());
+        parent
+            .original_source()
+            .with_open_target(&target, || ())
+            .unwrap();
+    }
+
+    #[test]
     fn world_private_admission_requires_the_actual_transaction_original() {
         let root = tempfile::tempdir().unwrap();
         let lib =
