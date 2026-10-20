@@ -10,7 +10,7 @@ module Tidepool.CompilerProducts
   , requireOriginalExecutableGlobals
   , writeCertifiedProductsKeepingWithOriginals
   , StagedOriginalProducts, stagedOriginalEntryOrdinal, stagedFinalizedArtifacts, stagedOriginalOutputFiles
-  , stagedOriginalBinders, stagedOriginalPackageDemand, withPriorStagedOriginalProducts, newPreparedOriginalInterfaceArtifactsWithPrior
+  , StagedProductFailure(..), stagedOriginalBinders, validateStagedOriginalProducts, withStagedOriginalBindings, stagedOriginalPackageDemand, withPriorStagedOriginalProducts, newPreparedOriginalInterfaceArtifactsWithPrior
   , retainTypeInterfaceCaptures, retainedTypeInterfaceBody
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, writeCertifiedSegmentItemProductsWithInputs
   , stagedDeclarationInputReferences
@@ -30,10 +30,13 @@ import Tidepool.RequestCompletion (finishCompletion)
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Applicative ((<|>))
-import Control.Exception (throwIO, evaluate)
+import Control.Exception (Exception, throwIO, evaluate)
+import Control.Concurrent.MVar (MVar)
+import GHC.Types.Name.Cache (NameCache(nsNames,nsUniqChar), OrigNameCache)
 import Control.Monad ((>=>), foldM, forM, forM_, unless, when)
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
+import Data.List (sort, nub)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIORef')
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe, isJust, fromMaybe, isNothing)
@@ -52,7 +55,8 @@ import GHC.Core.TyCon (tyConClass_maybe, isNewTyCon)
 import GHC.Core.ConLike (ConLike(..))
 import GHC.Core.PatSyn (patSynMatcher, patSynBuilder)
 import GHC.Types.Var (Id)
-import GHC.Driver.Env (HscEnv, hsc_all_home_unit_ids, hsc_HPT, lookupType)
+import GHC.Unit.Module.ModSummary (ms_location)
+import GHC.Driver.Env (HscEnv, hsc_NC, hsc_all_home_unit_ids, hsc_HPT, lookupType)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
 import GHC.Iface.Syntax (IfaceClsInst(..))
 import GHC.Unit.Module (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName, mkModule)
@@ -72,7 +76,7 @@ import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts )
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), sameExactInterfaceIdentity, originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader )
+  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), sameExactInterfaceIdentity, originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader, exactInterfaceSummary )
 import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeRecipeOriginals, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs, revalidateExactScope
@@ -81,7 +85,7 @@ import Tidepool.ExactScope
   , writeRetainedExactCompilationWithOutputsAndPublication
   , scopeInterfaceToken, scopeOriginalBytes
   , canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
-  , CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), canonicalOrigin, isSourceOriginal
+  , CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), captureCanonicalMetadata, canonicalOrigin, isSourceOriginal
   , captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
   , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalCertificateBytes, canonicalCertificatePath, canonicalSourceSha256 )
@@ -118,9 +122,10 @@ import Tidepool.FinalizedModuleArtifacts
   )
 import Tidepool.GhcPipeline
   ( PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules
-  , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprAcceptedCandidates, prHscEnv, prCanonicalInterfaceAdmissions
+  , pprReuseContext, pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprAcceptedCandidates, prHscEnv, prCanonicalInterfaceAdmissions
   , prInjectedSessionInterfaces, prProducedSessionInterfaces, prTargetTcGblEnv, PreparedModuleObserver(..)
   , PreparedModuleCompletionInputs(..), PreparedSourceRoute(..), preparedSourceRoute
+  , acquireWorldSourceOriginal, worldSourceOriginalFinalization, captureWorldSourceOriginals
   , preparedFreshDependencies, preparedExactCompilation
   , preparedHomeRequirements, preparedCandidateOriginal, preparedCandidateProof
   , revalidatePreparedCandidateInputs )
@@ -132,7 +137,7 @@ import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthorityWithCanonicalIn
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedStg
   ( PreparedModule, pmModule, pmSitedSiblings, runPreparedModuleTask
-  , PreparedBodyCache, PreparedBodyReuse(..), newPreparedBodyCache, newPreparedOriginalModuleTaskPreparer )
+  , PreparedBodyCache, PreparedBodyReuse(..), newPreparedBodyCache, newPreparedOriginalModuleTaskPreparer, acquirePreparedModule )
 import Tidepool.CompilerExecution (CompilerExecutor, withCompilerExecutor, serialCompilerExecutionGrant, runCompilerTasks, runCompilerTasksWithAttempt)
 import Tidepool.HomeProducts
   ( AdmittedFinalizedOriginal, admittedOriginalModule, admitCompiledCanonicalOriginal, CandidateCoreFailure(..)
@@ -217,16 +222,47 @@ observeOriginalProjection completed retained auxiliaryRoots json
 
 data CertifiedOriginalProducts = CertifiedOriginalProducts
   { certifiedOriginalProducts :: [ModuleProductEncoding]
-  , certifiedSourceOriginals :: Map.Map (String,String) CanonicalInterfaceProof
+  , certifiedSourceCaptures :: Map.Map (String,String) SourceOriginalCapture
   , certifiedFinalizedArtifacts :: FinalizedModuleArtifacts
   , certifiedExecutionSource :: WorkerExecutionSource
   , certifiedRetainedOriginals :: Map.Map (String,String) CanonicalInterfaceProof
   , certifiedRetainedNativeVersions :: Map.Map (String,String) String
   , certifiedTargetContext :: Maybe TargetCertificationContext
+  , certifiedNameBindings :: !CertifiedNameBindings
   -- Final output readiness belongs to this certification, not the earlier
   -- interface-only prepared capture. Every publication issues these same facts.
   , certifiedFreshDependencies :: DependencyEvidence
   }
+
+-- The canonical certificate and exact local compiler-object capture are one
+-- source-availability owner. Neither claims that native groups were prepared.
+data SourceOriginalCapture = SourceOriginalCapture !CanonicalInterfaceProof !LocalFinalizedAdmission
+
+-- Names are valid in their actual compiler NameCache. No Id/details knot or
+-- environment is retained by this small native-availability projection.
+data StagedProductFailure
+  = StagedNameCacheMismatch
+  | StagedWorldMismatch
+  | CertifiedNameConflict SymbolIdentity SymbolIdentity
+  deriving Show
+instance Exception StagedProductFailure
+
+data CertifiedNameBindings = CertifiedNameBindings !(Char,MVar OrigNameCache) !(Map.Map Name SymbolIdentity)
+
+nameCacheIdentity :: HscEnv -> (Char,MVar OrigNameCache)
+nameCacheIdentity environment = let names = hsc_NC environment in (nsUniqChar names,nsNames names)
+
+mergeOriginalBindings :: Map.Map Name SymbolIdentity -> Map.Map Name SymbolIdentity
+  -> IO (Map.Map Name SymbolIdentity)
+mergeOriginalBindings previous additions = foldM insertBinding previous (Map.toAscList additions)
+  where
+    insertBinding known (name,identity) = case Map.lookup name known of
+      Just previous | previous /= identity -> throwIO (CertifiedNameConflict previous identity)
+      _ -> pure (Map.insert name identity known)
+
+
+certifiedSourceOriginals :: CertifiedOriginalProducts -> Map.Map (String,String) CanonicalInterfaceProof
+certifiedSourceOriginals = Map.map (\(SourceOriginalCapture proof _) -> proof) . certifiedSourceCaptures
 
 -- Segment facts remain in memory until the segment's terminal proof succeeds.
 -- Item products may borrow the target context without publishing this authority.
@@ -249,6 +285,32 @@ stagedFinalizedArtifacts (StagedOriginalProducts certified _ _ _ _) = certifiedF
 stagedOriginalBinders :: StagedOriginalProducts -> Set.Set SymbolIdentity
 stagedOriginalBinders (StagedOriginalProducts certified _ _ _ _) =
   maybe Set.empty certifiedContextBinders (certifiedTargetContext certified)
+
+-- The staged owner supplies both the names and their exact native certificate.
+-- Availability is not runtime demand and includes the preceding output roots.
+stagedOriginalBindings :: PreparedPipelineResult -> StagedOriginalProducts -> IO (Map.Map Name SymbolIdentity)
+stagedOriginalBindings prepared (StagedOriginalProducts certified _ _ _ _) = do
+  let CertifiedNameBindings names bindings = certifiedNameBindings certified
+  unless (names == nameCacheIdentity (prHscEnv (pprPipelineResult prepared)))
+    (throwIO StagedNameCacheMismatch)
+  unless (case (preparedSourceRoute prepared,certifiedExecutionSource certified) of
+      (PreparedWorldSource base domain,WorldExecutionSourceUnavailable oldBase oldDomain _) ->
+        base == oldBase && domain == oldDomain
+      _ -> False) (throwIO StagedWorldMismatch)
+  pure bindings
+
+validateStagedOriginalProducts :: PreparedPipelineResult -> StagedOriginalProducts -> IO ()
+validateStagedOriginalProducts prepared staged = do
+  _ <- stagedOriginalBindings prepared staged
+  pure ()
+
+withStagedOriginalBindings :: PreparedPipelineResult -> Maybe StagedOriginalProducts
+  -> ProjectionContext -> IO ProjectionContext
+withStagedOriginalBindings _ Nothing context = pure context
+withStagedOriginalBindings prepared (Just prior) context = do
+  names <- stagedOriginalBindings prepared prior
+  selected <- mergeOriginalBindings (projectionCurrentOriginals context) names
+  pure context {projectionCurrentOriginals=selected}
 
 stagedOriginalPackageDemand :: Maybe StagedOriginalProducts -> SymbolIdentity
   -> Either String (Maybe (Set.Set SymbolIdentity))
@@ -380,7 +442,8 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
                   (Map.lookup name (pprFinalizedModules prepared))
                 roots <- maybe (throwIO CandidateOriginalPackagesMismatch) pure
                   (Map.lookup name (pprPackageImports prepared))
-                admitted <- admitCompiledCanonicalOriginal environment proof original roots
+                metadata <- captureCanonicalMetadata (compilationScope <$> preparedExactCompilation prepared) proof
+                admitted <- admitCompiledCanonicalOriginal environment metadata original roots
                 pure [(owner,admitted)]
           _ -> pure []
       let selectedContext = productContext {preparedRetainedOriginals =
@@ -401,12 +464,14 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
                 (preparedExternalBinders selectedContext) withheld raw)}
             Just _ -> selectedContext
       (availability,products,packages) <- admitModuleProducts originalInterfaces admittedContext
-        (finalizedLocalAdmissions finalized) (pprProductInterfaces prepared)
-        (pprPackageImports prepared)
+        (finalizedLocalAdmissions finalized) (pprProductInterfaces prepared) (pprPackageImports prepared)
       reconciled <- either (ioError . userError) pure (reconcileOriginalProducts
         (compilationScope <$> preparedExactCompilation prepared)
         [(T.unpack unit, T.unpack name, map originalGroupFromProjected groups)
           | product <- products, let (unit,name,_,groups) = moduleProductInput (originalProductEncoding product)])
+      priorNames <- maybe (pure Map.empty) (stagedOriginalBindings prepared)
+        (preparedPriorOriginalProducts productContext)
+      externalNames <- mergeOriginalBindings priorNames (pprOriginalBindings prepared)
       let inventory = CurrentOriginalInventory
             { currentOriginalAvailability = availability
             , currentOriginalProducts = products
@@ -415,14 +480,10 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
             , currentReconciledOriginalProducts = reconciled
             , currentOriginalNames = preparedTopIdentityBindings (preparedProductModules productContext)
             , currentOriginalExternalNames = Map.filter (`Set.member` preparedExternalBinders productContext)
-                (pprOriginalBindings prepared)
+                externalNames
             }
       pure admittedContext {preparedCurrentOriginalInventory = Just inventory}
 
--- The completed inventory can include selected canonical and TYPE-only home
--- interfaces. Only actual fresh source evidence may issue a local original.
--- Every native encoding is independently required to have that local proof or
--- an admitted canonical original; an unaccounted native owner still refuses.
 capturePreparedFinalization :: OriginalInterfaceArtifacts -> FilePath
   -> PreparedPipelineResult -> Set.Set (String,String) -> IO FinalizedModuleArtifacts
 capturePreparedFinalization originals directory prepared freshOwners = do
@@ -497,16 +558,16 @@ prepareOriginalProductsWithCache
   :: PreparedBodyCache -> Maybe OriginalProjectionCollector -> CompilerExecutor
   -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
   -> Set.Set SymbolIdentity -> [PreparedModule] -> IO ([PreparedModule],PreparedProductContext)
-prepareOriginalProductsWithCache = prepareOriginalProductsWithCacheAndReuse Nothing
+prepareOriginalProductsWithCache cache collector executor = prepareOriginalProductsWithCacheAndReuse Nothing cache collector executor Nothing
 
 -- The fallback retains the issuing compile cycle. Its worklist finish owns
 -- the body/recovery/projection terminals, just as an acquired observer does.
 prepareOriginalProductsWithCacheAndReuse
   :: Maybe ReuseContext -> PreparedBodyCache -> Maybe OriginalProjectionCollector -> CompilerExecutor
-  -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
+  -> Maybe (PreparedPipelineResult,StagedOriginalProducts) -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
   -> Set.Set SymbolIdentity -> [PreparedModule] -> IO ([PreparedModule],PreparedProductContext)
-prepareOriginalProductsWithCacheAndReuse reuse cache collector executor =
-  prepareOriginalProductsUsingCollectorWithReuse collector (Just cache) executor reuse
+prepareOriginalProductsWithCacheAndReuse reuse cache collector executor sourceInputs =
+  prepareOriginalProductsUsingCollectorWithReuse collector (Just cache) executor reuse sourceInputs
 
 -- The coordinator owns incorporation and demand discovery. Workers publish
 -- only immutable raw leaves through the existing projection cache. This driver
@@ -532,7 +593,7 @@ observeOriginalProjectionWithRecovery collector cache executor retained auxiliar
     "__original_projection" auxiliaryRoots json
   let context = baseContext {projectionCurrentOriginals = completionExternalOriginalBindings inputs}
   worklist <- newOriginalProductWorklist collector cache executor (Just (completionReuseContext inputs)) env exact interfaces context
-    (completionExternalOriginals inputs) (completionSourceOwners inputs) (completionSiblings inputs)
+    (completionExternalOriginals inputs) (completionSourceOwners inputs) (completionSiblings inputs) Nothing
   pure (PreparedModuleObserver (worklistObserve worklist) (worklistComplete worklist),worklist)
 
 -- A later target may add relevant generations or host authority. Adoption
@@ -551,18 +612,20 @@ prepareOriginalProductsUsingCollector
   -> Map.Map ModuleName ModIface -> ProjectionContext -> Set.Set SymbolIdentity -> [PreparedModule]
   -> IO ([PreparedModule], PreparedProductContext)
 prepareOriginalProductsUsingCollector collector stable executor =
-  prepareOriginalProductsUsingCollectorWithReuse collector stable executor Nothing
+  prepareOriginalProductsUsingCollectorWithReuse collector stable executor Nothing Nothing
 
 prepareOriginalProductsUsingCollectorWithReuse
   :: Maybe OriginalProjectionCollector -> Maybe PreparedBodyCache -> CompilerExecutor
-  -> Maybe ReuseContext -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface
+  -> Maybe ReuseContext -> Maybe (PreparedPipelineResult,StagedOriginalProducts)
+  -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface
   -> ProjectionContext -> Set.Set SymbolIdentity -> [PreparedModule]
   -> IO ([PreparedModule],PreparedProductContext)
-prepareOriginalProductsUsingCollectorWithReuse collector stable executor reuse env exact interfaces context external initial = do
+prepareOriginalProductsUsingCollectorWithReuse collector stable executor reuse sourceInputs env exact interfaces context external initial = do
+  forM_ sourceInputs $ \(prepared,prior) -> validateStagedOriginalProducts prepared prior
   cache <- maybe newPreparedBodyCache pure stable
   completedRaw <- maybe newOriginalProjectionCache pure collector
   worklist <- newOriginalProductWorklist completedRaw cache executor reuse env exact interfaces context external
-    (Set.fromList (map pmModule initial)) (Map.unions (map pmSitedSiblings initial))
+    (Set.fromList (map pmModule initial)) (Map.unions (map pmSitedSiblings initial)) sourceInputs
   _ <- runCompilerTasks executor
     (\prepared -> worklistObserve worklist prepared >> pure prepared)
     (\_ prepared -> worklistComplete worklist prepared) initial
@@ -571,8 +634,8 @@ prepareOriginalProductsUsingCollectorWithReuse collector stable executor reuse e
 newOriginalProductWorklist :: OriginalProjectionCollector -> PreparedBodyCache -> CompilerExecutor
   -> Maybe ReuseContext -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
   -> Set.Set SymbolIdentity -> Set.Set Module -> Map.Map String Id
-  -> IO OriginalProductWorklist
-newOriginalProductWorklist completedRaw cache executor reuse env exact interfaces context external sourceOwners frozenSiblings = do
+  -> Maybe (PreparedPipelineResult,StagedOriginalProducts) -> IO OriginalProductWorklist
+newOriginalProductWorklist completedRaw cache executor reuse env exact interfaces context external sourceOwners frozenSiblings sourceInputs = do
   timing <- readTimingEnabled
   workRef <- newIORef (0 :: Integer,0 :: Integer)
   reuseRef <- newIORef (0 :: Integer,0 :: Integer)
@@ -595,7 +658,28 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
             _ -> Nothing
       report stage decision reason owner bytes = forM_ reuse $ \identity ->
         emitReuse timing identity stage decision reason owner 1 bytes
-      acquireOriginal siblings owner producer missing = case exact of
+      acquireOriginal siblings owner producer missing = do
+        local <- case sourceInputs of
+          Nothing -> pure Nothing
+          Just (prepared,StagedOriginalProducts certified _ _ _ _) -> case Map.lookup
+              (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+              (certifiedSourceCaptures certified) of
+            Nothing -> pure Nothing
+            Just (SourceOriginalCapture proof capture) -> do
+              completed <- acquireWorldSourceOriginal prepared owner capture
+              traverse (\original -> do
+                captured <- captureCanonicalMetadata Nothing proof
+                admitCompiledCanonicalOriginal env captured
+                  (worldSourceOriginalFinalization original) (localFinalizedPackageEvidence capture)) completed
+        case local of
+          Nothing -> acquireCanonical siblings owner producer missing
+          Just original -> do
+            let (artifact,_,_) = admittedOriginalInterface original
+            task <- acquirePreparedModule env (ms_location (exactInterfaceSummary env artifact))
+              siblings (admittedOriginalModule original)
+            emitCount timing "world.cell.prior_source_preparations" 1
+            pure (Just (original,PreparedBodyMiss,task))
+      acquireCanonical siblings owner producer missing = case exact of
         Nothing -> pure Nothing
         Just scope -> do
           when (any (\original -> (originalUnit original,originalModule original) ==
@@ -757,7 +841,7 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
                 maybe (pure False) (`samePhysical` oldRaw) selectedRaw
           pure (sameSource && sameRaw)
       fallback = prepareOriginalProductsUsingCollectorWithReuse
-        (Just completedRaw) (Just cache) executor reuse
+        (Just completedRaw) (Just cache) executor reuse sourceInputs
   pure (OriginalProductWorklist observe complete finish matches fallback)
 
 -- Captures come from the exact scope, including its admitted checked values,
@@ -931,8 +1015,8 @@ writeCertifiedProducts
 writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir prepared productContext targets = do
     let hscEnv = prHscEnv (pprPipelineResult prepared)
     timing <- readTimingEnabled
-    let dependencies = preparedFreshDependencies prepared
     issued <- traverse (admitCurrentOriginalProducts originalInterfaces outDir prepared) productContext
+    let dependencies = preparedFreshDependencies prepared
     capturedFinalization <- case issued >>= preparedCurrentOriginalInventory of
       Just inventory -> pure (currentOriginalFinalized inventory)
       Nothing -> timeDetailPhase timing "module_products" "capture_finalization" $
@@ -943,6 +1027,11 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
         retainedProofs = Map.fromList
           [((unitString (moduleUnit owner),moduleNameString (moduleName owner)),admittedOriginalProof original)
           | (owner,original) <- Map.toAscList retained]
+        -- A demanded prior source has its actual finalized interface here;
+        -- its source-less Finder location cannot reissue that compiler fact.
+        selectedInterfaces = Map.union (Map.fromList
+          [(moduleName owner,hm_iface (finalizedHomeModInfo (admittedOriginalModule original)))
+          | (owner,original) <- Map.toAscList retained]) (pprProductInterfaces prepared)
         inventory = issued >>= preparedCurrentOriginalInventory
         availability = maybe Map.empty currentOriginalAvailability inventory
         freshEncodings = maybe [] currentOriginalProducts inventory
@@ -1004,7 +1093,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
           priorContext = case previousContext of
             Nothing -> Nothing
             Just (StagedOriginalProducts previous _ _ _ _) -> certifiedTargetContext previous
-      certified <- encodeCertifiedOriginalProductsWithPrior priorContext (Just originalInterfaces) kind retainedProofs emittedSeals reconciled hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
+      certified <- encodeCertifiedOriginalProductsWithPrior priorContext (Just originalInterfaces) kind retainedProofs emittedSeals reconciled hscEnv sourceRecipe selectedInterfaces finalized (pprAcceptedCandidates prepared)
         (compilationScope <$> preparedExactCompilation prepared)
         (map moduleProductInput freshProducts) targets
         finalDependencies productBytes evidenceBytes
@@ -1015,12 +1104,36 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
           hPutStrLn stderr ("product certification unavailable: " ++ reason)
           unless (null freshProducts) $ fail ("native product certification failed: " ++ reason)
           pure (Map.empty,Nothing,BS.empty)
+    let previousNames = case preparedPriorOriginalProducts =<< productContext of
+          Just (StagedOriginalProducts previous _ _ _ _) ->
+            let CertifiedNameBindings _ bindings = certifiedNameBindings previous in bindings
+          Nothing -> Map.empty
+        currentNames = maybe Map.empty currentOriginalNames inventory
+        externalNames = maybe Map.empty currentOriginalExternalNames inventory
+    knownNames <- mergeOriginalBindings previousNames externalNames >>= (`mergeOriginalBindings` currentNames)
+    let nativeNames = Map.filter (\identity -> identity `Set.member` maybe Set.empty certifiedContextBinders targetContext) knownNames
+        nameBindings = CertifiedNameBindings (nameCacheIdentity hscEnv) nativeNames
     sourceOriginals <- case preparedExactCompilation prepared of
-      Nothing -> pure Map.empty
+      Nothing -> do
+        let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
+        captureWorldSourceOriginals originalInterfaces prepared
+          (unitString (moduleUnit owner),moduleNameString (moduleName owner)) finalized finalDependencies
       Just compilation -> do
         let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
         captureFinalizedSourceOriginals compilation (pprAcceptedCandidates prepared)
           (unitString (moduleUnit owner),moduleNameString (moduleName owner)) finalized finalDependencies
+    let previousCaptures = case preparedPriorOriginalProducts =<< productContext of
+          Just (StagedOriginalProducts previous _ _ _ _) -> certifiedSourceCaptures previous
+          Nothing -> Map.empty
+    sourceCaptures <- foldM (\known (key,proof) -> do
+      capture <- maybe (fail "source original certificate lacks its captured compiler owner") pure
+        (Map.lookup key (finalizedLocalAdmissions finalized))
+      case Map.lookup key known of
+        Nothing -> pure (Map.insert key (SourceOriginalCapture proof capture) known)
+        Just (SourceOriginalCapture old _) -> do
+          unless (canonicalCertificateBytes old == canonicalCertificateBytes proof)
+            (fail "source original conflicts with its earlier captured identity")
+          pure known) previousCaptures (Map.toAscList sourceOriginals)
     outputSeals <- either fail pure $ freshOutputSealsFromWrites
       (finalizedOutputs
         ++ inventoryOutputs
@@ -1037,7 +1150,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
         Nothing -> do
           revalidateExactScopesAtWithOutputs RetainedProductsPublication hscEnv [] outputSeals >>= either fail pure
           publishCertificate
-    pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe retainedProofs retainedVersions targetContext freshDependencies, certificateBytes, outputSeals)
+    pure (CertifiedOriginalProducts freshProducts sourceCaptures finalized sourceRecipe retainedProofs retainedVersions targetContext nameBindings freshDependencies, certificateBytes, outputSeals)
 
 
 -- An immutable original product needs captured finalized Core as well as its

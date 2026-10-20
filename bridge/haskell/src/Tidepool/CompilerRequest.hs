@@ -43,7 +43,7 @@ import Tidepool.CompilerProducts
   ( writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs
   , stagedOriginalEntryOrdinal, stagedOriginalOutputFiles, publishStagedOriginalProducts
   , certifiedOriginalProducts, certifiedFinalizedArtifacts
-  , StagedOriginalProducts, stagedOriginalBinders, stagedOriginalPackageDemand, withPriorStagedOriginalProducts
+  , StagedOriginalProducts, validateStagedOriginalProducts, withStagedOriginalBindings, stagedOriginalBinders, stagedOriginalPackageDemand, withPriorStagedOriginalProducts
   , stagedDeclarationInputReferences
   , newPreparedOriginalInterfaceArtifactsWithPrior
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, PreparedProductContext
@@ -335,16 +335,16 @@ withPreparedCompilation (PreparedCompilation result recovery executor guard work
 
 -- Projection inputs may legitimately change entry/generation/host authority.
 -- The actual compiler environment, cache references and worklist cannot change.
-prepareCompilationOriginals :: PreparedCompilation -> ProjectionContext -> Set.Set SymbolIdentity
+prepareCompilationOriginals :: PreparedCompilation -> Maybe CompletedWorldProducts -> ProjectionContext -> Set.Set SymbolIdentity
   -> IO ([PreparedModule],PreparedProductContext)
-prepareCompilationOriginals completion context external =
+prepareCompilationOriginals completion prior context external =
   withPreparedCompilation completion $ \prepared recovery executor worklist ->
-    prepareOriginals prepared recovery executor worklist context external
+    prepareOriginals prepared recovery executor worklist prior context external
 
 prepareOriginals :: PreparedPipelineResult -> CompilerRecoveryCaches -> CompilerExecutor
-  -> Maybe OriginalProductWorklist -> ProjectionContext -> Set.Set SymbolIdentity
+  -> Maybe OriginalProductWorklist -> Maybe CompletedWorldProducts -> ProjectionContext -> Set.Set SymbolIdentity
   -> IO ([PreparedModule],PreparedProductContext)
-prepareOriginals prepared recovery executor worklist context external =
+prepareOriginals prepared recovery executor worklist prior context external =
   let env = prHscEnv (pprPipelineResult prepared)
       exact = compilationScope <$> preparedExactCompilation prepared
       interfaces = pprProductInterfaces prepared
@@ -353,6 +353,7 @@ prepareOriginals prepared recovery executor worklist context external =
     Just completed -> prepareOriginalProductsWithWorklist completed env exact interfaces context external modules
     Nothing -> prepareOriginalProductsWithCacheAndReuse (Just (pprReuseContext prepared))
       (compilerPreparedBodies recovery) (Just (compilerOriginalProjections recovery)) executor
+      ((\previous -> (prepared,completedWorldNative previous)) <$> prior)
       env exact interfaces context external modules
 
 compileWithWorklist :: BoundCompilerRequest -> PipelineSelection result
@@ -519,14 +520,14 @@ prepareArtifactsWithProjection
 prepareArtifactsWithProjection = prepareArtifactsWithProjectionIntent Nothing NativeOriginals
 
 prepareArtifactsWithProjectionIntent
-  :: Maybe StagedOriginalProducts -> PreparedOutputIntent -> (forall a. Either ProjectionError a -> IO a)
+  :: Maybe CompletedWorldProducts -> PreparedOutputIntent -> (forall a. Either ProjectionError a -> IO a)
   -> OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
 prepareArtifactsWithProjectionIntent _ _ _ _ _ completion [] _ _ _ =
   withPreparedCompilation completion (\_ _ _ _ -> pure ([], Nothing))
 prepareArtifactsWithProjectionIntent prior intent project originalInterfaces outDir completion targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings =
-  withPreparedCompilation completion $ \prepared recoveryCaches executor _ -> do
+  withPreparedCompilation completion $ \prepared _ _ _ -> do
     timing <- readTimingEnabled
     let result = pprPipelineResult prepared
         hscEnv = prHscEnv result
@@ -539,14 +540,16 @@ prepareArtifactsWithProjectionIntent prior intent project originalInterfaces out
     preparedModule <- case matching of
       [value] -> pure value
       values -> ioError (userError ("prepared target module selection was not unique: " ++ show (length values)))
-    firstContext <- prepareCompilerProjectionContext prepared retainedGenerations (pmModule preparedModule)
+    baseContext <- prepareCompilerProjectionContext prepared retainedGenerations (pmModule preparedModule)
       firstTarget auxiliaryRoots (case mapMaybe hostBindingRepresentationJsonAuthority hostBindings of
         authority : _ -> Just authority
         [] -> Nothing)
+    let priorNative = completedWorldNative <$> prior
+    firstContext <- withStagedOriginalBindings prepared priorNative baseContext
     let contextFor target = firstContext
           { projectionEntry = (projectionEntry firstContext) {symbolOccurrence = T.pack target} }
     let exactProducts = maybe [] scopeAvailableOriginalProducts exactScope
-        externalOriginalBinders = Set.union (maybe Set.empty stagedOriginalBinders prior) $ Set.fromList
+        externalOriginalBinders = Set.union (maybe Set.empty stagedOriginalBinders priorNative) $ Set.fromList
           ([binder | exactProduct <- exactProducts, group <- originalGroups exactProduct
             , binder <- originalBinders group]
            ++ [binder | candidate <- candidates, group <- candidateGroups candidate
@@ -560,9 +563,9 @@ prepareArtifactsWithProjectionIntent prior intent project originalInterfaces out
         pure (modules,Nothing,Map.empty,Set.empty,[],[],const (Right []))
       NativeOriginals -> do
         (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
-          prepareCompilationOriginals completion (contextFor firstTarget) externalOriginalBinders
+          prepareCompilationOriginals completion prior (contextFor firstTarget) externalOriginalBinders
         productContext <- admitCurrentOriginalProducts originalInterfaces outDir prepared
-          (withPriorStagedOriginalProducts prior rawProductContext)
+          (withPriorStagedOriginalProducts priorNative rawProductContext)
         inventory <- maybe (fail "current original admission did not issue its inventory") pure
           (preparedCurrentOriginalInventory productContext)
         originalConstructors <- project (preparedModuleProductConstructors (preparedProductInventory productContext))
@@ -583,7 +586,7 @@ prepareArtifactsWithProjectionIntent prior intent project originalInterfaces out
               | originalProduct <- unrecoveredExactProducts (currentReconciledOriginalProducts inventory)]
             originalPackageGlobals = requiredOriginalPackageGlobalsWithPrior
               originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
-              (stagedOriginalPackageDemand prior)
+              (stagedOriginalPackageDemand priorNative)
         pure (originalModules,Just productContext,originalBindings,admittedOriginalBinders,
           originalConstructors,originalSites,originalPackageGlobals)
     let withOriginals context = context {projectionCurrentOriginals = originalBindings}
@@ -762,6 +765,22 @@ data PreparedWorldCellItem = PreparedWorldCellItem
   , preparedWorldCellObservation :: Maybe CellExpressionPlan
   }
 
+-- Pair the successful World completion with the certification issued from it.
+-- The handoff retains no HscEnv, task driver or mutable attempt. The pending
+-- dependency publication remains with its existing one-shot completion owner.
+data CompletedWorldProducts = CompletedWorldProducts !WorldCompilerCompletion !StagedOriginalProducts
+
+completedWorldNative :: CompletedWorldProducts -> StagedOriginalProducts
+completedWorldNative (CompletedWorldProducts _ native) = native
+
+completeWorldProducts :: PreparedCompilation -> StagedOriginalProducts -> IO CompletedWorldProducts
+completeWorldProducts completion staged = withPreparedCompilation completion $ \prepared _ _ _ ->
+  case completion of
+    PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion world) -> do
+      validateStagedOriginalProducts prepared staged
+      pure (CompletedWorldProducts world staged)
+    _ -> throwIO CheckedPurposeMismatch
+
 -- These outputs remain private until every admitted stage has completed. The
 -- admission owns the compiler cursor; this record owns only emitted DATA.
 data PreparedWorldCellStage = PreparedWorldCellStage
@@ -774,7 +793,7 @@ data PreparedWorldCellStage = PreparedWorldCellStage
   , preparedWorldStageTypedPlans :: [TypedSegmentPlan]
   , preparedWorldStageReceiptFields :: Encoding
   , preparedWorldStageCompletion :: PreparedCompilation
-  , preparedWorldStageNative :: StagedOriginalProducts
+  , preparedWorldStageProducts :: CompletedWorldProducts
   }
 
 correlateWorldCellItems
@@ -886,7 +905,7 @@ prepareWorldCellQuestion bound question = do
           unless (needed `Set.isSubsetOf` Set.fromList (map worldCellInputReferenceBinding (Set.toAscList selected)))
             (throwIO WorldCellCorrupt)
           let finalizedOutput = output {preparedWorldStageRuntimeReferences=Set.toAscList selected}
-          prepareStages preparation (Just (preparedWorldStageNative output))
+          prepareStages preparation (Just (preparedWorldStageProducts output))
             (Set.union earlierSelected selected) (finalizedOutput:reversed)
     nextStage preparation = case bound of
       BoundCompilerRequest scope _ _ _ _ _ -> scopedPrepareWorldCellStage scope preparation
@@ -956,7 +975,7 @@ prepareWorldCellQuestion bound question = do
                 ++ occNameString (nameOccName (idName (typedCaptureIdentifier capture)))) (typedCaptureType capture)
           pure (plannedItemOrdinal (typedItemPlan item),signatures)
         originalInterfaces <- newPreparedOriginalInterfaceArtifactsWithPrior prepared
-          (preparedCompilationWorldInputs completion) prior stageDirectory
+          (preparedCompilationWorldInputs completion) (completedWorldNative <$> prior) stageDirectory
         let producedGenerations = Map.fromList [(preparedRootIdentity global,generation)
               | (global,generation) <- typedSegmentSessionRetainedGlobals batch]
             retainedGenerations = maybe Map.empty worldCellRetainedGenerations (preparedCompilationWorldInputs completion)
@@ -1050,7 +1069,7 @@ prepareWorldCellQuestion bound question = do
         unless (plannedModule original == reserved && plannedSource original == plannedSource submitted)
           (throwIO WorldCellCorrupt)
         interfaces <- newPreparedOriginalInterfaceArtifactsWithPrior prepared
-          (preparedCompilationWorldInputs completion) prior stageDirectory
+          (preparedCompilationWorldInputs completion) (completedWorldNative <$> prior) stageDirectory
         let generations = maybe Map.empty worldCellRetainedGenerations (preparedCompilationWorldInputs completion)
         -- The existing original writer uses its real checking root to obtain
         -- the native inventory. No executable item or target packet is emitted.
@@ -1134,6 +1153,7 @@ prepareWorldCellQuestion bound question = do
               <> encodeListLen (fromIntegral (length ordinals)) <> foldMap (encodeWord64 . fromIntegral) ordinals
               <> encodeListLen 3 <> receiptRef
               <> fileRef (stageName "module-products.cbor") <> fileRef (stageName "certified-products.cbor")
+        completedProducts <- completeWorldProducts completion staged
         pure PreparedWorldCellStage
           { preparedWorldStageItems = preparedItems
           , preparedWorldStageSource = rendered
@@ -1144,7 +1164,7 @@ prepareWorldCellQuestion bound question = do
           , preparedWorldStageTypedPlans = plans
           , preparedWorldStageReceiptFields = stageReceiptFields
           , preparedWorldStageCompletion = completion
-          , preparedWorldStageNative = staged
+          , preparedWorldStageProducts = completedProducts
           }
     rawWorldID [] = BS.empty
     rawWorldID (a:b:rest) = BS.cons (fromIntegral (16 * digitToInt a + digitToInt b)) (rawWorldID rest)

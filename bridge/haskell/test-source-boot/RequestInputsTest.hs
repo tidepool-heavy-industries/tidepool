@@ -1956,6 +1956,11 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                 (const False) crossed)
               (fail "another compiler scope consumed the original scope's admission")
       outcome `seq` pure ()
+      forM_ ["CacheEntry","CacheEven","CacheOdd"] $ \name ->
+        unless (counterValues ("world.cell.source_frontends.main:" ++ name) diagnostics == [1])
+          (fail "later native demand replayed an already finalized SOURCE owner")
+      unless (sum (counterValues "world.cell.prior_source_preparations" diagnostics) > 0)
+        (fail "SOURCE history did not prepare its newly demanded prior source body")
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
       unless (admissionParses == replicate 9 1)
@@ -2215,7 +2220,7 @@ compilerTimingRoundtrip = withTiming $ withScratch $ \work -> do
           context <- prepareCompilerProjectionContext prepared Map.empty
             (mkModule (stringToUnit "main") (mkModuleName owner)) "__original_projection" [] Nothing
           void $ prepareOriginalProductsWithCacheAndReuse (Just (pprReuseContext prepared))
-            cache Nothing executor (prHscEnv (pprPipelineResult prepared)) Nothing
+            cache Nothing executor Nothing (prHscEnv (pprPipelineResult prepared)) Nothing
             (pprProductInterfaces prepared) context Set.empty (pprModules prepared)
     plain <- runPipelineSessionSelected
       (WithCompilerExecution grant executor (PreparedProducts Nothing)) Set.empty CertifyHomeProductsCompile

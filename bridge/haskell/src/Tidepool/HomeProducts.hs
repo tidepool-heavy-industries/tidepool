@@ -76,7 +76,7 @@ import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv, scopeRetainedModuleGraph)
 import Tidepool.Timing (emitCount, readTimingEnabled, timeDetailPhase)
 import Tidepool.ExactScope
-  ( ExactScope , scopeProducerSha256, scopeInterfaces, CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
+  ( ExactScope , scopeProducerSha256, scopeInterfaces, CanonicalInterfaceProof, CapturedCanonicalMetadata, capturedCanonicalMetadataProof, CanonicalInterfaceAdmission(..)
   , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements
   , scopeModuleInterfaceProofs, canonicalOrigin, isSourceOriginal, canonicalCoreArtifact
   , canonicalCoreSha256, canonicalCertificateSha256, canonicalRequirements, validateExactScopeEnvironment, admittedInterfaceCoreBytes, admittedInterfaceCoreBody
@@ -123,9 +123,10 @@ admittedOriginalLocation (AdmittedFinalizedOriginal _ _ _ location) = location
 -- only when it is the exact interface/Core/package pair already admitted.
 -- This grants no fresh source selection and never manufactures a scope.
 admitCompiledCanonicalOriginal
-  :: HscEnv -> CanonicalInterfaceProof -> FinalizedModule -> PackageImportEvidence
+  :: HscEnv -> CapturedCanonicalMetadata -> FinalizedModule -> PackageImportEvidence
   -> IO AdmittedFinalizedOriginal
-admitCompiledCanonicalOriginal env proof original packages = do
+admitCompiledCanonicalOriginal env metadata original packages = do
+  let proof = capturedCanonicalMetadataProof metadata
   let row@(artifact,packagePath,packageSha) = canonicalInterfaceInput proof
       owner = mi_module (hm_iface (finalizedHomeModInfo original))
   unless (isSourceOriginal (canonicalOrigin proof)

@@ -73,7 +73,7 @@ import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedH
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), admittedInterfaceCore
   , ExactScope, scopeManifestPath, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
-  , canonicalCertificatePath, canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope, captureCanonicalProofs, CanonicalInterfaceUse(..)
+  , canonicalCertificatePath, canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope, captureCanonicalProofs, captureCanonicalMetadata, CanonicalInterfaceUse(..)
   , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, admittedInterfaceCoreBody, canonicalProofOriginalBytes, extendExactScopeInputs, ExactInterfaceEvidence(..) )
 import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, captureFinalizedModuleTypeInterfaces, emptyFinalizedModuleArtifacts, finalizedTypeInterfaces, materializeFinalizedModuleArtifactsWithOutputs, finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedPackageEvidence, matchesCapturedFinalization, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts, FinalizedArtifactFailure(..))
 import Tidepool.HomeProducts (AdmittedFinalizedOriginal, admitCompiledCanonicalOriginal, admittedOriginalModule, admittedOriginalProof, CandidateCoreFailure(..))
@@ -362,11 +362,12 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   assert (bytes == artifactBytes rawBytes) "certification did not retain the original finalized Core bytes"
   roots <- maybe (fail "canonical admission control lost its compiler package facts") pure
     (Map.lookup name (pprPackageImports prepared))
-  canonical <- admitCompiledCanonicalOriginal env proof finalized roots
+  ready <- captureCanonicalMetadata (Just scope) proof
+  canonical <- admitCompiledCanonicalOriginal env ready finalized roots
   assert (admittedOriginalProof canonical == proof)
     "compiled canonical admission replaced its selected original proof"
   changedCore <- newFinalizedModule env (finalizedHomeModInfo finalized) guts {cg_binds=[]}
-  rejectedCore <- try (admitCompiledCanonicalOriginal env proof changedCore roots)
+  rejectedCore <- try (admitCompiledCanonicalOriginal env ready changedCore roots)
     :: IO (Either CandidateCoreFailure AdmittedFinalizedOriginal)
   assert (case rejectedCore of Left CandidateOriginalCoreMismatch -> True; _ -> False)
     "same interface with a different original Core passed canonical admission"
@@ -374,7 +375,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
         [] -> []
         root:rest -> root {packagePath=packagePath root ++ ".foreign"}:rest}
   assert (changedRoots /= roots) "canonical package refusal did not change a real package owner"
-  rejectedPackages <- try (admitCompiledCanonicalOriginal env proof finalized changedRoots)
+  rejectedPackages <- try (admitCompiledCanonicalOriginal env ready finalized changedRoots)
     :: IO (Either CandidateCoreFailure AdmittedFinalizedOriginal)
   assert (case rejectedPackages of Left CandidateOriginalPackagesMismatch -> True; _ -> False)
     "canonical admission accepted another package witness"
@@ -995,7 +996,8 @@ promotionScopeChecks env work scope proof finalized roots = do
         :: IO (Either IOException BS.ByteString)
       assert (either (const True) (const False) absentCore)
         "metadata proof unexpectedly held the absent original Core payload"
-      current <- admitCompiledCanonicalOriginal env captured finalized roots
+      ready <- captureCanonicalMetadata Nothing captured
+      current <- admitCompiledCanonicalOriginal env ready finalized roots
       assert (admittedOriginalProof current == captured)
         "current finalization replaced its metadata-only canonical proof"
       currentCore <- requireRight =<< captureFinalizedCore (admittedOriginalModule current)
@@ -1008,7 +1010,7 @@ promotionScopeChecks env work scope proof finalized roots = do
           "current canonical original lost its captured downstream package witness"
       changed <- newFinalizedModule env (finalizedHomeModInfo finalized)
         (finalizedTidyGuts finalized) {cg_binds=[]}
-      refused <- try (admitCompiledCanonicalOriginal env captured changed roots)
+      refused <- try (admitCompiledCanonicalOriginal env ready changed roots)
         :: IO (Either CandidateCoreFailure AdmittedFinalizedOriginal)
       assert (case refused of Left CandidateOriginalCoreMismatch -> True; _ -> False)
         "metadata-only canonical proof accepted different current Core"
