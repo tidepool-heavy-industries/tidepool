@@ -2854,10 +2854,6 @@ impl CheckedWorldCellProgram {
         &self.output.demanded_session_bindings
     }
 
-    pub fn visible_binding_count(&self) -> usize {
-        self.output.reservation.plan().world().restoration.inputs.bindings.entries.len()
-    }
-
     pub fn item(&self, ordinal: usize) -> Option<&CheckedWorldCellItem> {
         self.items.get(ordinal)
     }
@@ -3026,6 +3022,13 @@ impl CheckedWorldCellProgram {
         if certificate_sha256 == [0; 32] {
             return Err(source_failure("world cell output certificate is empty"));
         }
+        tracing::debug!(target: "exomonad_harness::timing",
+            logical_world = ?logical.logical_id(),
+            output_certificate = ?certificate_sha256,
+            visible_bindings = plan.world().restoration.inputs.bindings.entries.len(),
+            demanded_runtime_roots = output.demanded_session_bindings.len(),
+            retained_type_rows = output.demanded_rows.len(),
+            "checked World cell output admitted");
         Ok(Self {
             output,
             original,
@@ -3051,7 +3054,7 @@ fn world_cell_output_certificate(
         digest.update(&(bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     };
-    frame(b"TidepoolCheckedWorldCellProgram3");
+    frame(b"TidepoolCheckedWorldCellProgram4");
     frame(reservation.admission_digest());
     frame(&world_digest(reservation.plan().receipt()));
     frame(logical.logical_id());
@@ -3106,6 +3109,9 @@ fn world_cell_output_certificate(
                 frame(name.occurrence().as_bytes());
             }
         }
+    }
+    for id in &output.demanded_session_bindings {
+        frame(&id.raw().to_le_bytes());
     }
     for row in &output.demanded_rows {
         let (producer, interface) = row.world_issuer();
@@ -3580,7 +3586,7 @@ fn admit_world_preparation_response(
     let mut demanded = BTreeMap::<String, Arc<CheckedValueArtifact>>::new();
     let mut occurrences = std::collections::BTreeSet::new();
     let mut demanded_session_bindings = std::collections::BTreeSet::new();
-    validation.inventory.reserve::<tidepool_repr::SessionVarId>(input_refs.len())
+    validation.inventory.reserve::<(u64, [usize; 4])>(input_refs.len())
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     for input in input_refs {
         crate::host_work::checkpoint()?;
@@ -3603,7 +3609,7 @@ fn admit_world_preparation_response(
         {
             return Err(world_response_error(true));
         }
-        demanded_session_bindings.insert(actual.session_var);
+        demanded_session_bindings.insert(actual.session_var.raw());
         // The service returns the exact root-bound row fact, not a caller's
         // module/image guess or a fresh certificate.
         let row =
@@ -3669,7 +3675,8 @@ fn admit_world_preparation_response(
         segments,
         item_proofs,
         demanded_rows: demanded.into_values().collect(),
-        demanded_session_bindings: demanded_session_bindings.into_iter().collect(),
+        demanded_session_bindings: demanded_session_bindings.into_iter()
+            .map(tidepool_repr::SessionVarId::from_extract).collect(),
     }))
 }
 

@@ -3669,7 +3669,7 @@ impl HostInputRetirement {
         Ok(())
     }
 
-    async fn retire_for_publication(mut self) -> Result<(), ResidentActorWorkbenchError> {
+    async fn retire_for_publication(&mut self) -> Result<(), ResidentActorWorkbenchError> {
         let retire = self.retire_private.take().ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol("host input lacks its original private retirement owner".into())
         })?;
@@ -8928,8 +8928,7 @@ where
         tracing::debug!(target: "exomonad_harness::timing",
             logical_world = ?world_output.logical().logical_id(),
             output_certificate = ?world_output.certificate_sha256(),
-            leased_bindings = demanded_bindings.len(),
-            visible_bindings = world_output.visible_binding_count(),
+            leased_runtime_roots = demanded_bindings.len(),
             "checked World runtime binding demand");
         let item_capabilities = program
             .items()
@@ -8962,7 +8961,7 @@ where
             .collect::<Vec<_>>();
         let bindings = self
             .access
-            .with_machine(context, move |session, context, _| {
+            .with_machine(context, move |session, _, _| {
                 Ok(session.lease_bindings(&demanded_bindings))
             })
             .await?;
@@ -13993,7 +13992,7 @@ pub(crate) struct CellPreparationLease {
 
 impl CellPreparationLease {
     pub(crate) async fn retire_input_for_publication(&mut self) -> Result<(), ResidentActorWorkbenchError> {
-        if let Some(input) = self._input.take() {
+        if let Some(input) = self._input.as_mut() {
             input.retire_for_publication().await?;
         }
         Ok(())
