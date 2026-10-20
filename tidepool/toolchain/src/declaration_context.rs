@@ -788,7 +788,7 @@ impl OriginalCompilerInputs {
             "products.native_selection",
             "projection",
         );
-        let projection = selection
+        let mut projection = selection
             .compiler_projection(artifacts)
             .map_err(compiler_evidence_failure)?;
         timing.advance("continuation_rows");
@@ -827,6 +827,7 @@ impl OriginalCompilerInputs {
                 .merge(&issued.native_availability)?
                 .into_rows();
             native_offers.extend(issued.native_offers);
+            projection = issued.projection;
             issued.artifacts
         } else {
             artifacts.clone()
@@ -852,7 +853,11 @@ impl OriginalCompilerInputs {
         Ok(Self {
             native_fact_base: selection.native_fact_base().cloned(),
             native_availability,
-            demand: OriginalInputDemand::Issued(continuation.decisions),
+            demand: OriginalInputDemand::Issued(
+                crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
+                    selection, &projection,
+                )?,
+            ),
             projection,
             artifacts,
             native_offers,
@@ -948,8 +953,12 @@ impl OriginalCompilerInputs {
         Ok(Self {
             native_fact_base: completed.continuation.selection.native_fact_base().cloned(),
             native_availability,
-            demand: OriginalInputDemand::RolePolicy,
-            projection,
+            demand: OriginalInputDemand::Issued(
+                crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
+                    completed.continuation.selection, &effective,
+                )?,
+            ),
+            projection: effective,
             artifacts,
             native_offers,
         })

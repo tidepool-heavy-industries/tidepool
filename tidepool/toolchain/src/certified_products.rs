@@ -415,9 +415,12 @@ pub(crate) struct CertifiedSegmentOriginals {
         Arc<crate::artifact_inventory::ArtifactEntry>,
     >,
     original_sources: Arc<AvailableOriginalSources>,
-    physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
-    bound: Option<crate::artifact_inventory::BoundArtifactSelection>,
-    authored: bool,
+    admission: SegmentOriginalAdmission,
+}
+
+enum SegmentOriginalAdmission {
+    OriginalOnly(Arc<crate::declaration_context::OriginalCompilerInputs>),
+    Executable(crate::artifact_inventory::BoundArtifactSelection),
 }
 
 impl CertifiedSegmentOriginals {
@@ -552,6 +555,9 @@ impl CertifiedSegmentOriginals {
             ));
         }
         timing.advance("native_availability");
+        validation.inventory.reserve::<Arc<crate::artifact_inventory::ArtifactEntry>>(
+            artifact_entries.len() + value_entries.len(),
+        )?;
         let entries = artifact_entries
             .iter()
             .chain(&value_entries)
@@ -563,7 +569,7 @@ impl CertifiedSegmentOriginals {
                 compiler_inputs.artifacts(),
                 entries,
             )
-            .map(|physical| (Arc::new(physical), None))
+            .map(|physical| SegmentOriginalAdmission::OriginalOnly(Arc::new(physical)))
         } else {
             compiler_inputs
                 .artifacts()
@@ -575,10 +581,10 @@ impl CertifiedSegmentOriginals {
                 )
                 .map(|bound| {
                     products.source_selection = bound.source_selection().clone();
-                    (Arc::clone(bound.physical_inputs()), Some(bound))
+                    SegmentOriginalAdmission::Executable(bound)
                 })
         };
-        let (physical, bound) = admitted.map_err(|error| {
+        let admission = admitted.map_err(|error| {
             tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                 stage = "segment_native_availability", %error,
                 "compiler original selection refused");
@@ -594,9 +600,7 @@ impl CertifiedSegmentOriginals {
             value_entry_index,
             value_entries: value_entries.into(),
             original_sources,
-            physical_inputs: physical,
-            bound,
-            authored: authored.is_some(),
+            admission,
             package_availability,
             raw,
             receipt,
@@ -634,26 +638,32 @@ impl CertifiedSegmentOriginals {
     pub(crate) fn authored_artifacts(
         &self,
     ) -> CertResult<&crate::artifact_inventory::ArtifactView> {
-        if !self.authored {
-            return Err(CertificationError::Mismatch(
+        match &self.admission {
+            SegmentOriginalAdmission::OriginalOnly(inputs) => Ok(inputs.issued_artifacts()),
+            SegmentOriginalAdmission::Executable(_) => Err(CertificationError::Mismatch(
                 "executable segment has no authored original stage",
-            ));
+            )),
         }
-        Ok(self.physical_inputs().issued_artifacts())
     }
 
     pub(crate) fn physical_inputs(
         &self,
     ) -> &Arc<crate::declaration_context::OriginalCompilerInputs> {
-        &self.physical_inputs
+        match &self.admission {
+            SegmentOriginalAdmission::OriginalOnly(inputs) => inputs,
+            SegmentOriginalAdmission::Executable(bound) => bound.physical_inputs(),
+        }
     }
 
     pub(crate) fn bound_artifacts(
         &self,
     ) -> CertResult<crate::artifact_inventory::BoundArtifactSelection> {
-        self.bound.clone().ok_or(CertificationError::Mismatch(
-            "authored original stage has no executable cursor",
-        ))
+        match &self.admission {
+            SegmentOriginalAdmission::Executable(bound) => Ok(bound.clone()),
+            SegmentOriginalAdmission::OriginalOnly(_) => Err(CertificationError::Mismatch(
+                "authored original stage has no executable cursor",
+            )),
+        }
     }
 
     pub(crate) fn original_sources(&self) -> &Arc<AvailableOriginalSources> {
