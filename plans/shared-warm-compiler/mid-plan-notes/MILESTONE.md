@@ -1,5 +1,9 @@
 # Milestone: shared-warm integration join
 
+> Historical execution record, corrected by source audit at `6f7ae09b3b`.
+> [The completion plan](../completion/plan.md) now owns delivery sequencing and
+> readiness. The corrections below do not claim new builds or passing tests.
+
 This note records the state of the shared-warm compiler campaign at the
 integration join. It is written for a reviewer who did not participate in the
 campaign. Evidence lives outside Git under
@@ -42,10 +46,15 @@ extra `is_full` guard and a negative coverage control.
   `typeOfExpression`, `typeSearch`, `scopeBindings`) generated from the
   protocol schema and reachable through the resident workbench. `moduleExports`
   and its answer wire types are deleted rather than retained as an adapter.
-- One compile view per actor with entry-pin and post-reply drift refusal for
-  every query, including unpinned queries.
-- Warm-cell publication: exact source selection, issued native custody, and
-  atomic successor adoption.
+- Compiler-backed query answers use entry/currentness observations. The
+  immediate `currentScopeView` result is an entry snapshot, not a universal
+  reply-time fence. `scopeBindings` still needs its final check and resumption
+  joined in one checkout; see the completion query plan.
+- World planning/output and publication foundations. Ordinary actor cells
+  still select finite admission; `admit_world_cell_program` has no production
+  caller, `retainHeldWorldSuccessor` is definition-only, and world item/final
+  promotion paths refuse missing capabilities. Atomic ordinary world-cell
+  successor adoption is not delivered by this join.
 - The original reload parcel (`eadc18a6fe`): unsealed preview installation
   refuses, spent admissions are not reusable, cached renderers require fresh
   admission. Its follow-up branch is blocked; see `OPEN-PARCELS.md`.
@@ -89,8 +98,10 @@ It is not green. `final-join/TOOLCHAIN-SWEEP.md` classifies the 32 failures as
   effect of the named selectors. No runtime unit-test link is retained.
 - `A1c` (`published_introspection_example_returns_structured_declaration`) is
   red at this tip: 0 passed / 1 failed, exit 1 (`15-*`). The workbench refuses
-  before the Haskell probe runs, because `Tidepool.Session.Lib.G4`'s native
-  group 4 requires an unavailable `Tidepool.Effects.Core`. Details and the
+  while compiling the later structured Haskell probe, after the initial
+  example's display/string check passed. `Tidepool.Session.Lib.G4`'s native
+  group 4 cannot resolve its exact `Tidepool.Effects.Core` owner. That does not
+  prove every retained/private implementation is absent. Details and the
   divergent scratch-tree trace are in `OPEN-PARCELS.md` and
   `reviews/A1C-TIP-FINDING.md`.
 - The 44-name trunk-red ledger was not rerun on the join as a ledger; the full
@@ -105,9 +116,11 @@ It is not green. `final-join/TOOLCHAIN-SWEEP.md` classifies the 32 failures as
 
 ## Honest summary
 
-The code at `92fa518105` builds, the five-verb surface is consistent across
-protocol, generated bridge, Haskell helpers, prompts and fixture, and the named
-selectors pass. The toolchain suite is 32 red, the second-cell off-checkout
+The retained build and named passes at `92fa518105` establish the table's limited
+boundaries. The five-verb surface exists across protocol, bridge and Haskell;
+its complete semantic composition and ordinary world-cell route remain unqualified.
+The toolchain suite is 32 red, the second-cell off-checkout
 case is red by design after removing a false fact, A1c is red at this tip on an
 unavailable native dependency, and five repair parcels are blocked in review.
-This is a coherent integration state, not a release.
+The completion plan replaces the earlier overstatement of warm-cell delivery;
+this is an incomplete integration checkpoint, not a release.

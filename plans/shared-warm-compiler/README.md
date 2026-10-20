@@ -1,13 +1,15 @@
 # Shared warm compiler: delivery plan
 
-> **Current state (2026-10-19).** The material below this banner is the
-> campaign-era delivery plan. The work has since advanced to
-> `/srv/swarm/checkouts/tidepool-join-final-20261019`, branch
-> `integration/compiler-query-warm-final`, code tip `92fa518105`. Read
-> [mid-plan-notes/MILESTONE.md](mid-plan-notes/MILESTONE.md) for what landed and
-> what was actually executed, and [mid-plan-notes/OPEN-PARCELS.md](mid-plan-notes/OPEN-PARCELS.md)
-> for unmerged parcels. Checkout paths, branch names and product OIDs below are
-> historical.
+> **Current entry point:** [completion/plan.md](completion/plan.md), with
+> [locked contracts](completion/contracts.md) and its linked worker subplans.
+> The reviewed base is `6f7ae09b3b` on the published
+> `integration/compiler-query-warm-final` branch; code tip `92fa518105`.
+> The completion plan requires the sole compiler-service cell route, deletion
+> of finite admission and fixture authority, and an early qualified Persona run
+> before the final mandatory campaign gates. The material below is historical;
+> its old worker ownership, pause instructions and readiness claims do not govern
+> the next wave. [Join evidence](mid-plan-notes/MILESTONE.md) and
+> [old parcels](mid-plan-notes/OPEN-PARCELS.md) remain available as source material.
 
 Current user boundary: all existing workers reached **READY_FOR_BACKEND_HANDOFF**.
 Read [TAKEOVER.md](TAKEOVER.md) and [STATUS.md](STATUS.md) before resuming.

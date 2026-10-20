@@ -1,5 +1,11 @@
 # Open parcels at the integration join
 
+> Current disposition: [completion/plan.md](../completion/plan.md) and the
+> native, lifecycle and tests subplans govern reviewed forward repairs. These
+> parcels are retained source material, not a queue approved for wholesale merge.
+> Keep their useful behavior while deleting finite admission and test authority
+> factories in the integrated replacement.
+
 Code tip: `92fa518105`. Adversarial reviews are under
 `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/reviews/ADVERSARIAL-*.md`.
 A parcel is merge-ready only when its review allows the merge *and* its counted

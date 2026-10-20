@@ -1,4 +1,11 @@
-# Next stage: reviewer brief
+# Historical next-stage reviewer brief
+
+> This review has now been performed. Its decisions are incorporated into
+> [the completion plan](../completion/plan.md),
+> [locked contracts](../completion/contracts.md) and
+> [review record](../completion/review.md). Use those worker assignments for
+> implementation; the questions and ordering below are historical leads, not
+> outstanding approvals or the current release gate.
 
 This is a seed prompt for a peer++ reviewer taking over the shared-warm
 campaign. Replace the OID if the branch has advanced; only the documentation

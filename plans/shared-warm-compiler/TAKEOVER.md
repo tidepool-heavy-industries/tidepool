@@ -1,11 +1,11 @@
 # Shared warm compiler: backend takeover
 
-> **Superseded (2026-10-19).** This takeover predates the integration join.
-> Current state: `/srv/swarm/checkouts/tidepool-join-final-20261019`, branch
-> `integration/compiler-query-warm-final`, code tip `92fa518105`; see
-> [mid-plan-notes/MILESTONE.md](mid-plan-notes/MILESTONE.md) and
-> [mid-plan-notes/OPEN-PARCELS.md](mid-plan-notes/OPEN-PARCELS.md). Checkout and
-> product OIDs below are historical.
+> **Historical handoff.** Start at [completion/plan.md](completion/plan.md)
+> and [completion/contracts.md](completion/contracts.md). They govern the next
+> wave from reviewed join `6f7ae09b3b` on the published
+> `integration/compiler-query-warm-final` branch. This earlier takeover's pause,
+> worker ownership, checkout and product claims are historical. Its evidence
+> remains useful, but it does not establish completed ordinary world cells.
 
 Status: READY_FOR_BACKEND_HANDOFF. All five area supervisors and all nine leaves reached clean, durable natural boundaries and released implementation ownership. All native commands and verification jobs are terminal. The feature is incomplete; this is a backend transition, not campaign acceptance. No new implementation waves or DeepSeek jobs have started. The verified index is `campaign/TAKEOVER-INDEX.json` under this evidence root.
 
