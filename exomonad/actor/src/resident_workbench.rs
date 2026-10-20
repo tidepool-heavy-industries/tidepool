@@ -21972,7 +21972,7 @@ pub(crate) mod request_tests {
                             .capture_inspection_world_in(
                                 original.scope(),
                                 &installed_reference,
-                                &original,
+                                original.original_source(),
                             )
                             .map_err(ResidentError::Session)
                             .map_err(ResidentActorWorkbenchError::from)
