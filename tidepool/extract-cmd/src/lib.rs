@@ -54,11 +54,11 @@ pub use endpoint::{
 };
 use exec_check::is_readable_executable_file;
 pub use request::{
-    CompileWorkload, EnsureExactInputsOutcome, WorldResidency, WorldNonRetentionReason, ExactInputsAcquisition, ExactInputsRejection,
+    CompileWorkload, EnsureExactInputsOutcome, ExactInputsAcquisition, ExactInputsRejection,
     ExactInputsRequest, ExtractRequest, InspectionNamespace, InspectionScope, PlannedCellSlot,
     PlannedCellSlotRef, ProtocolError, StructuredInspection, SymbolIdentity,
     WorldCellOperandRequest, WorldCellPlanRequest, WorldCellPrepareRequest, WorldCellRecipe,
-    WorldQueryQuestion, WorldQueryRequest,
+    WorldNonRetentionReason, WorldQueryQuestion, WorldQueryRequest, WorldResidency,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.

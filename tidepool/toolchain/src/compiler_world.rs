@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use sha2::{Digest, Sha256};
 use tidepool_extract_cmd::{InspectionNamespace, InspectionScope, StructuredInspection};
 
-use crate::artifact_inventory::{ArtifactBinding, CanonicalProducerIdentity};
+use crate::artifact_inventory::CanonicalProducerIdentity;
 use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
 use crate::declaration_context::ExactDeclarationContext;
@@ -1141,7 +1141,9 @@ impl CompilerWorldRestoration {
             .inputs
             .clone()
             .prepare_for(self.producer, self.profile)?;
-        if cold.logical_id != self.logical_id || cold.compiler_input_identity != self.compiler_input_identity {
+        if cold.logical_id != self.logical_id
+            || cold.compiler_input_identity != self.compiler_input_identity
+        {
             return Err(source_failure(
                 "successor cold restoration changed logical product",
             ));
@@ -1801,10 +1803,18 @@ impl CompilerWorld {
             diagnostics: None,
         };
         let mut runtime_materializer = Materializer::new(&prior.runtime_context_blocks);
-        let primary_root = runtime_materializer.materialize_context(Some(&prior.primary_root), &inputs.primary_context.snapshot())
+        let primary_root = runtime_materializer
+            .materialize_context(
+                Some(&prior.primary_root),
+                &inputs.primary_context.snapshot(),
+            )
             .map_err(|error| source_failure(error.to_string()))?;
-        let runtime_staged = runtime_materializer.finish().map_err(|error| source_failure(error.to_string()))?;
-        let runtime_context_blocks = prior.runtime_context_blocks.replace_roots(&runtime_staged, vec![*primary_root.root().cid()])
+        let runtime_staged = runtime_materializer
+            .finish()
+            .map_err(|error| source_failure(error.to_string()))?;
+        let runtime_context_blocks = prior
+            .runtime_context_blocks
+            .replace_roots(&runtime_staged, vec![*primary_root.root().cid()])
             .map_err(|error| source_failure(error.to_string()))?;
         let mut materializer = Materializer::new(&prior.primary_blocks);
         let mut association_facts = prior.primary_associations.facts().clone();
@@ -1860,13 +1870,17 @@ impl CompilerWorld {
             .map(|(cid, bytes)| world_array(vec![world_blob(cid.to_bytes()), world_blob(bytes)]))
             .collect();
         let roots = SemanticRoots {
-                    primary: *primary_root.root().cid(),
-                    associations: *primary_associations.root().cid(),
-                    bindings: *prior.bindings.root().cid(),
-                    lexical: lexical_root,
-                };
+            primary: *primary_root.root().cid(),
+            associations: *primary_associations.root().cid(),
+            bindings: *prior.bindings.root().cid(),
+            lexical: lexical_root,
+        };
         let primary_blocks = prior
-            .primary_blocks.replace_roots(&staged, vec![roots.associations, roots.bindings, roots.lexical])
+            .primary_blocks
+            .replace_roots(
+                &staged,
+                vec![roots.associations, roots.bindings, roots.lexical],
+            )
             .map_err(|error| source_failure(error.to_string()))?;
         let product = world_restoration_product(
             &roots,
@@ -1876,7 +1890,13 @@ impl CompilerWorld {
             inputs.bindings.query_scope,
         )?;
         let logical_id = world_digest(&product);
-        let compiler_input_identity = compiler_input_identity(&roots, inputs.sources.seal(), &prior.producer, &prior.profile, inputs.bindings.query_scope)?;
+        let compiler_input_identity = compiler_input_identity(
+            &roots,
+            inputs.sources.seal(),
+            &prior.producer,
+            &prior.profile,
+            inputs.bindings.query_scope,
+        )?;
         let files: Vec<_> = rows.files.into_values().collect();
         let acquisition = rows
             .arenas
@@ -1977,8 +1997,12 @@ impl CompilerWorld {
                     &inputs.primary_context.snapshot(),
                 )
                 .map_err(|error| source_failure(error.to_string()))?;
-            let runtime_staged = runtime_materializer.finish().map_err(|error| source_failure(error.to_string()))?;
-            runtime_context_blocks = prior.runtime_context_blocks.replace_roots(&runtime_staged, vec![*primary_root.root().cid()])
+            let runtime_staged = runtime_materializer
+                .finish()
+                .map_err(|error| source_failure(error.to_string()))?;
+            runtime_context_blocks = prior
+                .runtime_context_blocks
+                .replace_roots(&runtime_staged, vec![*primary_root.root().cid()])
                 .map_err(|error| source_failure(error.to_string()))?;
             let mut associations = prior.primary_associations.facts().clone();
             let mut remaining = capture_allowance()?;
@@ -2161,13 +2185,17 @@ impl CompilerWorld {
             .map(|(cid, bytes)| world_array(vec![world_blob(cid.to_bytes()), world_blob(bytes)]))
             .collect();
         let roots = SemanticRoots {
-                    primary: *primary_root.root().cid(),
-                    associations: *primary_associations.root().cid(),
-                    bindings: *bindings.root().cid(),
-                    lexical: lexical_root,
-                };
+            primary: *primary_root.root().cid(),
+            associations: *primary_associations.root().cid(),
+            bindings: *bindings.root().cid(),
+            lexical: lexical_root,
+        };
         let primary_blocks = prior
-            .primary_blocks.replace_roots(&staged, vec![roots.associations, roots.bindings, roots.lexical])
+            .primary_blocks
+            .replace_roots(
+                &staged,
+                vec![roots.associations, roots.bindings, roots.lexical],
+            )
             .map_err(|error| source_failure(error.to_string()))?;
         let product = world_restoration_product(
             &roots,
@@ -2177,7 +2205,13 @@ impl CompilerWorld {
             query_scope,
         )?;
         let logical_id = world_digest(&product);
-        let compiler_input_identity = compiler_input_identity(&roots, inputs.sources.seal(), &prior.producer, &prior.profile, inputs.bindings.query_scope)?;
+        let compiler_input_identity = compiler_input_identity(
+            &roots,
+            inputs.sources.seal(),
+            &prior.producer,
+            &prior.profile,
+            inputs.bindings.query_scope,
+        )?;
         let files: Vec<_> = rows.files.into_values().collect();
         let acquisition = rows
             .arenas
@@ -2856,13 +2890,25 @@ fn materialize_primary_association<BS: fvm_ipld_blockstore::Blockstore>(
     semantic: &ciborium::value::Value,
 ) -> Result<cid::Cid, CompileError> {
     let binding = match selected.original() {
-        None => world_array(vec![0u64.into(), ciborium::value::Value::serialized(&selected.interface())
-            .map_err(|error| source_failure(error.to_string()))?]),
-        Some(original) => world_array(vec![1u64.into(),
-            ciborium::value::Value::serialized(&selected.interface()).map_err(|error| source_failure(error.to_string()))?,
-            ciborium::value::Value::serialized(&original).map_err(|error| source_failure(error.to_string()))?]),
+        None => world_array(vec![
+            0u64.into(),
+            ciborium::value::Value::serialized(&selected.interface())
+                .map_err(|error| source_failure(error.to_string()))?,
+        ]),
+        Some(original) => world_array(vec![
+            1u64.into(),
+            ciborium::value::Value::serialized(&selected.interface())
+                .map_err(|error| source_failure(error.to_string()))?,
+            ciborium::value::Value::serialized(&original)
+                .map_err(|error| source_failure(error.to_string()))?,
+        ]),
     };
-    materializer.materialize_value(&world_array(vec![world_text("TPCWPRIMARY2"), binding, semantic.clone()]))
+    materializer
+        .materialize_value(&world_array(vec![
+            world_text("TPCWPRIMARY2"),
+            binding,
+            semantic.clone(),
+        ]))
         .map_err(|error| source_failure(error.to_string()))
 }
 
@@ -2931,11 +2977,7 @@ fn materialize_primary_type_row<BS: fvm_ipld_blockstore::Blockstore>(
         .collect::<Result<Vec<_>, CompileError>>()?;
     let row = rows.row(entry, parts)?.0;
     let semantic = world_semantic_row(&row, producer)?;
-    let fact = materialize_primary_association(
-        materializer,
-        selected,
-        &semantic,
-    )?;
+    let fact = materialize_primary_association(materializer, selected, &semantic)?;
     Ok((row, fact))
 }
 
@@ -3151,7 +3193,8 @@ impl CompilerWorldOpenInputs {
             .with_type_interfaces(self.lexical.observation_type_contexts())?;
         self.primary_context = type_advance.context;
         let primary_compiler_inputs = type_advance.inputs;
-        let (primary_context, primary_root, runtime_context_blocks) = self.materialize_primary(producer)?;
+        let (primary_context, primary_root, runtime_context_blocks) =
+            self.materialize_primary(producer)?;
         let primary_blocks = ReachableBlocks::default();
         self.primary_context = primary_context;
         crate::host_work::record_host_work(
@@ -3244,12 +3287,20 @@ impl CompilerWorldOpenInputs {
             .finish()
             .map_err(|error| source_failure(error.to_string()))?;
         let semantic_roots = SemanticRoots {
-                    primary: *primary_root.root().cid(),
-                    associations: *primary_associations.root().cid(),
-                    bindings: *bindings.root().cid(),
-                    lexical: lexical_root,
-                };
-        let primary_blocks = primary_blocks.replace_roots(&staged, vec![semantic_roots.associations, semantic_roots.bindings, semantic_roots.lexical])
+            primary: *primary_root.root().cid(),
+            associations: *primary_associations.root().cid(),
+            bindings: *bindings.root().cid(),
+            lexical: lexical_root,
+        };
+        let primary_blocks = primary_blocks
+            .replace_roots(
+                &staged,
+                vec![
+                    semantic_roots.associations,
+                    semantic_roots.bindings,
+                    semantic_roots.lexical,
+                ],
+            )
             .map_err(|error| source_failure(error.to_string()))?;
         let work = primary_blocks.work();
         crate::host_work::record_host_work(
@@ -3279,7 +3330,13 @@ impl CompilerWorldOpenInputs {
             self.bindings.query_scope,
         )?;
         let logical_id = world_digest(&product);
-        let compiler_input_identity = compiler_input_identity(&semantic_roots, self.sources.seal(), &producer, &profile, self.bindings.query_scope)?;
+        let compiler_input_identity = compiler_input_identity(
+            &semantic_roots,
+            self.sources.seal(),
+            &producer,
+            &profile,
+            self.bindings.query_scope,
+        )?;
         let source_path = self.directory.path().join("sources.bin");
         std::fs::write(&source_path, self.sources.encoded())?;
         let files = rows.files.into_values().collect();
@@ -3400,7 +3457,9 @@ fn ensure_world(
     let run = world_execute(&cmd, endpoint, Vec::new())?;
     let response = O::decode(&run.output.stdout).map_err(|_| world_response_error(false))?;
     let realized = match response {
-        O::Ready { world, realization, .. } if world == root => {
+        O::Ready {
+            world, realization, ..
+        } if world == root => {
             crate::host_work::record_host_work(
                 crate::host_work::HostWorkCounter::WorldEnsureResidentHit,
                 1,
@@ -3493,7 +3552,9 @@ fn ensure_world(
                 (response, _) => response,
             };
             match response {
-                O::Ready { world, realization, .. } if world == root => {
+                O::Ready {
+                    world, realization, ..
+                } if world == root => {
                     crate::host_work::record_host_work(
                         crate::host_work::HostWorkCounter::WorldEnsureCompleteReady,
                         1,
@@ -5458,9 +5519,8 @@ fn admit_world_preparation_response(
                     .reserve::<(String, Arc<CheckedValueArtifact>)>(stage.demanded_rows().len())
             })
             .map_err(|e| CompileError::CompilerEvidence(Box::new(e.into())))?;
-        demanded_session_bindings.extend(
-            stage.demanded_session_bindings().iter().map(|id| id.raw()),
-        );
+        demanded_session_bindings
+            .extend(stage.demanded_session_bindings().iter().map(|id| id.raw()));
         for row in stage.demanded_rows() {
             validation
                 .inventory
@@ -6939,21 +6999,45 @@ mod answer_tests {
     fn compiler_identity_excludes_only_passive_runtime_commitment() {
         use cid::multihash::Multihash;
         let cid = |byte| cid::Cid::new_v1(0x71, Multihash::<64>::wrap(0x12, &[byte; 32]).unwrap());
-        let roots = SemanticRoots { primary: cid(1), associations: cid(2), bindings: cid(3), lexical: cid(4) };
-        let compiler = |roots: &SemanticRoots, source, producer, profile, scope|
-            compiler_input_identity(roots, &[source; 32], &[producer; 32], &[profile; 32], scope).unwrap();
-        let runtime = |roots: &SemanticRoots|
-            world_digest(&world_restoration_product(roots, &[5; 32], &[6; 32], &[7; 32], 8).unwrap());
+        let roots = SemanticRoots {
+            primary: cid(1),
+            associations: cid(2),
+            bindings: cid(3),
+            lexical: cid(4),
+        };
+        let compiler = |roots: &SemanticRoots, source, producer, profile, scope| {
+            compiler_input_identity(roots, &[source; 32], &[producer; 32], &[profile; 32], scope)
+                .unwrap()
+        };
+        let runtime = |roots: &SemanticRoots| {
+            world_digest(
+                &world_restoration_product(roots, &[5; 32], &[6; 32], &[7; 32], 8).unwrap(),
+            )
+        };
         let initial = compiler(&roots, 5, 6, 7, 8);
-        let passive = SemanticRoots { primary: cid(9), ..roots.clone() };
+        let passive = SemanticRoots {
+            primary: cid(9),
+            ..roots.clone()
+        };
         assert_ne!(runtime(&roots), runtime(&passive));
         assert_eq!(initial, compiler(&passive, 5, 6, 7, 8));
         for changed in [
-            SemanticRoots { associations: cid(9), ..roots.clone() },
-            SemanticRoots { bindings: cid(9), ..roots.clone() },
-            SemanticRoots { lexical: cid(9), ..roots.clone() },
-        ] { assert_ne!(initial, compiler(&changed, 5, 6, 7, 8)); }
-        for args in [(9,6,7,8), (5,9,7,8), (5,6,9,8), (5,6,7,9)] {
+            SemanticRoots {
+                associations: cid(9),
+                ..roots.clone()
+            },
+            SemanticRoots {
+                bindings: cid(9),
+                ..roots.clone()
+            },
+            SemanticRoots {
+                lexical: cid(9),
+                ..roots.clone()
+            },
+        ] {
+            assert_ne!(initial, compiler(&changed, 5, 6, 7, 8));
+        }
+        for args in [(9, 6, 7, 8), (5, 9, 7, 8), (5, 6, 9, 8), (5, 6, 7, 9)] {
             assert_ne!(initial, compiler(&roots, args.0, args.1, args.2, args.3));
         }
     }
@@ -6971,7 +7055,12 @@ mod answer_tests {
         assert_eq!(fields.len(), 6);
         assert!(fields[2].as_array().unwrap().is_empty());
         let blocks = fields[4].as_array().unwrap();
-        assert!(!blocks.iter().any(|block| &block.as_array().unwrap()[0] == &fields[0]), "opaque runtime Context is not exported");
+        assert!(
+            !blocks
+                .iter()
+                .any(|block| &block.as_array().unwrap()[0] == &fields[0]),
+            "opaque runtime Context is not exported"
+        );
         for root in [&fields[1], &fields[5]] {
             assert!(blocks
                 .iter()

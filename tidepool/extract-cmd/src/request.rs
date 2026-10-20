@@ -62,7 +62,11 @@ pub enum ExactInputsRejection {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnsureExactInputsOutcome {
-    Ready { world: String, realization: String, residency: WorldResidency },
+    Ready {
+        world: String,
+        realization: String,
+        residency: WorldResidency,
+    },
     NeedsAcquisition(String),
     Rejected(ExactInputsRejection),
 }
@@ -76,7 +80,10 @@ pub enum WorldResidency {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorldNonRetentionReason {
-    StorageAllowanceExceeded { required_bytes: u64, limit_bytes: u64 },
+    StorageAllowanceExceeded {
+        required_bytes: u64,
+        limit_bytes: u64,
+    },
 }
 
 impl EnsureExactInputsOutcome {
@@ -94,10 +101,12 @@ impl EnsureExactInputsOutcome {
                 }
                 let residency = match decoder.byte()? {
                     0 => WorldResidency::RetainedAtAdmission,
-                    1 => WorldResidency::ActiveOnly(WorldNonRetentionReason::StorageAllowanceExceeded {
-                        required_bytes: decoder.u64()?,
-                        limit_bytes: decoder.u64()?,
-                    }),
+                    1 => WorldResidency::ActiveOnly(
+                        WorldNonRetentionReason::StorageAllowanceExceeded {
+                            required_bytes: decoder.u64()?,
+                            limit_bytes: decoder.u64()?,
+                        },
+                    ),
                     _ => return Err(ProtocolError::InvalidExactInputs),
                 };
                 decoder.finish()?;
@@ -3149,7 +3158,7 @@ mod tests {
         let query = WorldQueryRequest {
             world: "a".repeat(64),
             realization: "realized".into(),
-                    residency: WorldResidency::RetainedAtAdmission,
+            residency: WorldResidency::RetainedAtAdmission,
             question: WorldQueryQuestion::PublicInfo(StructuredInspection {
                 scope: InspectionScope::PublicModule("Data.List".into()),
                 namespace: InspectionNamespace::Value,

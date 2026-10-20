@@ -3394,9 +3394,6 @@ worldCID = do
 worldArrayDigest :: Decoder s BS.ByteString
 worldArrayDigest = worldArray 32 >> BS.pack <$> replicateM 32 decodeWord8Canonical
 
-encodeWorldArrayDigest :: BS.ByteString -> E.Encoding
-encodeWorldArrayDigest bytes = E.encodeListLen 32 <> foldMap E.encodeWord8 (BS.unpack bytes)
-
 decodeWorldModuleKey :: Decoder s (String,String)
 decodeWorldModuleKey = do
   count <- decodeMapLenCanonical
@@ -3425,11 +3422,6 @@ decodeWorldBinding = do
   unless (artifactField == "artifact" && selectionField == "selection")
     (fail "invalid compiler world artifact binding fields")
   pure (artifact,selection)
-
-encodeWorldBinding :: (BS.ByteString,BS.ByteString) -> E.Encoding
-encodeWorldBinding (artifact,selection) = E.encodeMapLen 2
-  <> E.encodeString "artifact" <> encodeWorldArrayDigest artifact
-  <> E.encodeString "selection" <> encodeWorldArrayDigest selection
 
 -- These are immutable logical facts under the existing world/input owner.
 -- Artifact IDs, binding scopes and private Rust certification stay provenance;
@@ -3547,15 +3539,6 @@ readWorldLexicalSurface frontier root primary = do
             <> E.encodeString (case recipe of NoRequestHelpers -> "none"; ActorReplyHelpers -> "actor-reply")
             <> encodeRequestTypeSignatures types) request
           <> maybe E.encodeNull encodeCheckedSignature input)
-
-worldFactField :: String -> Decoder s ()
-worldFactField expected = do
-  actual <- decodeStringCanonical
-  unless (actual == T.pack expected) (fail "invalid compiler world fact fields")
-
-worldFactMap :: Int -> Decoder s ()
-worldFactMap expected = decodeMapLenCanonical >>= \actual ->
-  unless (actual == expected) (fail "invalid compiler world fact map")
 
 worldFactList :: Int -> Decoder s a -> Decoder s [a]
 worldFactList bytes item = do

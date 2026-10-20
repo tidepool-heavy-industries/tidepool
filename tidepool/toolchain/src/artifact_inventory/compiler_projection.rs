@@ -916,10 +916,18 @@ impl<'a> CompilerPrimaryInput<'a> {
             Self::InterfaceOnly(row) | Self::Original(row) => row,
         }
     }
-    pub(crate) fn owner(&self) -> &'a ExactModuleIdentity { self.row().owner }
-    pub(crate) fn interface(&self) -> ArtifactBinding { self.row().row.interface.0 }
+    pub(crate) fn owner(&self) -> &'a ExactModuleIdentity {
+        self.row().owner
+    }
+    pub(crate) fn interface(&self) -> ArtifactBinding {
+        self.row().row.interface.0
+    }
     pub(crate) fn original(&self) -> Option<ArtifactBinding> {
-        self.row().row.original.as_ref().map(|(binding, _)| *binding)
+        self.row()
+            .row
+            .original
+            .as_ref()
+            .map(|(binding, _)| *binding)
     }
     pub(crate) fn entry(&self) -> &'a Arc<ArtifactEntry> {
         let row = self.row().row;
@@ -1843,15 +1851,20 @@ impl CompilerSourceSupport {
     pub(crate) fn compiler_primary_inputs(
         &self,
     ) -> impl Iterator<Item = Result<CompilerPrimaryInput<'_>, CompileError>> {
-        self.selected.iter().map(|(owner, row)| self.issue_compiler_primary_input(owner, row))
+        self.selected
+            .iter()
+            .map(|(owner, row)| self.issue_compiler_primary_input(owner, row))
     }
 
     pub(crate) fn compiler_primary_input(
         &self,
         owner: &ExactModuleIdentity,
     ) -> Result<Option<CompilerPrimaryInput<'_>>, CompileError> {
-        self.selected.rows.get_key_value(owner)
-            .map(|(owner, row)| self.issue_compiler_primary_input(owner, row)).transpose()
+        self.selected
+            .rows
+            .get_key_value(owner)
+            .map(|(owner, row)| self.issue_compiler_primary_input(owner, row))
+            .transpose()
     }
 
     fn issue_compiler_primary_input<'a>(
@@ -1861,21 +1874,56 @@ impl CompilerSourceSupport {
     ) -> Result<CompilerPrimaryInput<'a>, CompileError> {
         for (binding, entry) in std::iter::once(&row.interface).chain(row.original.iter()) {
             if &entry.descriptor.owner != owner
-                || self.artifacts.lease.selection.namespace.get(&binding.artifact) != Some(binding)
-                || self.artifacts.lease.payloads.get(&binding.artifact)
+                || self
+                    .artifacts
+                    .lease
+                    .selection
+                    .namespace
+                    .get(&binding.artifact)
+                    != Some(binding)
+                || self
+                    .artifacts
+                    .lease
+                    .payloads
+                    .get(&binding.artifact)
                     .is_none_or(|held| !Arc::ptr_eq(held, entry))
-                || self.artifacts.lease.selection.scopes.get(&binding.selection)
-                    .is_none_or(|proof| proof.proof().nodes.binary_search(&ArtifactBindingNode::Artifact(*binding)).is_err())
+                || self
+                    .artifacts
+                    .lease
+                    .selection
+                    .scopes
+                    .get(&binding.selection)
+                    .is_none_or(|proof| {
+                        proof
+                            .proof()
+                            .nodes
+                            .binary_search(&ArtifactBindingNode::Artifact(*binding))
+                            .is_err()
+                    })
             {
-                return Err(failure("compiler primary row differs from its acquired owner"));
+                return Err(failure(
+                    "compiler primary row differs from its acquired owner",
+                ));
             }
         }
         if let Some((original, _)) = row.original.as_ref() {
-            let state = self.artifacts.lease.inventory.0.lock().expect("inventory lock");
+            let state = self
+                .artifacts
+                .lease
+                .inventory
+                .0
+                .lock()
+                .expect("inventory lock");
             ResolvedCompilerRole::validate_original_pair(&state, row.interface.0, *original)?;
-            Ok(CompilerPrimaryInput::Original(CompilerPrimaryRow { owner, row }))
+            Ok(CompilerPrimaryInput::Original(CompilerPrimaryRow {
+                owner,
+                row,
+            }))
         } else {
-            Ok(CompilerPrimaryInput::InterfaceOnly(CompilerPrimaryRow { owner, row }))
+            Ok(CompilerPrimaryInput::InterfaceOnly(CompilerPrimaryRow {
+                owner,
+                row,
+            }))
         }
     }
 
@@ -2761,34 +2809,48 @@ impl CompilerSourceSupport {
         output: &crate::declaration_context::IssuedOriginalOutput,
     ) -> Result<Self, CompileError> {
         if !source.matches_world_stage(program, stage.index(), source_text)? {
-            return Err(failure("program source fragment belongs to another World stage"));
+            return Err(failure(
+                "program source fragment belongs to another World stage",
+            ));
         }
         let generated = source.generated_source_owner()?;
         let mut owners = source.home_imports()?.into_keys().collect::<BTreeSet<_>>();
-        let executable = matches!(stage.identity(), crate::compiler_world::WorldCellStageIdentity::Executable { .. });
+        let executable = matches!(
+            stage.identity(),
+            crate::compiler_world::WorldCellStageIdentity::Executable { .. }
+        );
         let inputs = output.compiler_inputs();
         let artifacts = inputs.issued_artifacts();
         let mut projection = inputs.role_projection().clone();
         if executable {
             owners.remove(&generated);
-            projection = projection.project_roles(|owner, role| {
-                (owner != &generated).then(|| role.clone())
-            });
+            projection =
+                projection.project_roles(|owner, role| (owner != &generated).then(|| role.clone()));
         }
         projection = projection.for_source_owners(&owners);
         let selected = projection.resolve_source_associations(artifacts)?;
         projection.validate_requirements(
-            selected.values().flat_map(|row| std::iter::once(&row.interface)
-                .chain(row.original.iter()).map(|(_, entry)| entry.as_ref())),
+            selected.values().flat_map(|row| {
+                std::iter::once(&row.interface)
+                    .chain(row.original.iter())
+                    .map(|(_, entry)| entry.as_ref())
+            }),
             |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
         )?;
-        let input_decisions = inputs.issued_input_decisions().cloned().unwrap_or_default()
+        let input_decisions = inputs
+            .issued_input_decisions()
+            .cloned()
+            .unwrap_or_default()
             .for_exact_roles(&projection);
-        let native_availability = inputs.native_availability()
+        let native_availability = inputs
+            .native_availability()
             .for_compiler_roles(&projection, artifacts)?;
-        if executable && native_availability.rows().any(|row| {
-            row.original_owner().unit == generated.unit && row.original_owner().module == generated.module
-        }) {
+        if executable
+            && native_availability.rows().any(|row| {
+                row.original_owner().unit == generated.unit
+                    && row.original_owner().module == generated.module
+            })
+        {
             return Err(failure("program support depends on its generated scaffold"));
         }
         let mut offers = Vec::new();
@@ -2801,10 +2863,16 @@ impl CompilerSourceSupport {
             }
         }
         Self {
-            projection, artifacts: artifacts.clone(), native_fact_owner: inputs.native_fact_base().cloned(),
-            native_offers: offers.into(), native_offer_facts, native_availability,
-            selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)), input_decisions,
-        }.refreshed_native_facts()
+            projection,
+            artifacts: artifacts.clone(),
+            native_fact_owner: inputs.native_fact_base().cloned(),
+            native_offers: offers.into(),
+            native_offer_facts,
+            native_availability,
+            selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
+            input_decisions,
+        }
+        .refreshed_native_facts()
     }
 
     pub(crate) fn extend_program_source(
@@ -4335,30 +4403,54 @@ mod tests {
         let inventory = ArtifactInventory::default();
         let issue = |marker: &str| {
             let mut issued = entries.clone();
-            issued.push(Arc::new(crate::artifact_inventory::tests::entry(marker, &[])));
-            let view = inventory.admit_shared_with_demand(
-                &inventory.empty_view(), issued, NativeArtifactDemand::AllGroups,
-            ).unwrap();
+            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                marker,
+                &[],
+            )));
+            let view = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    issued,
+                    NativeArtifactDemand::AllGroups,
+                )
+                .unwrap();
             CompilerSourceSupport::from_selected_issuance(
-                CompilerInputProjection::from_issued_entries(&entries).unwrap(), view,
-            ).unwrap()
+                CompilerInputProjection::from_issued_entries(&entries).unwrap(),
+                view,
+            )
+            .unwrap()
         };
         let first = issue("PrimaryFirst");
         let second = issue("PrimarySecond");
         let owner = &entries[1].descriptor.owner;
         let row = &first.selected[owner];
         let foreign = &second.selected[owner];
-        assert_ne!(row.original.as_ref().unwrap().0, foreign.original.as_ref().unwrap().0);
+        assert_ne!(
+            row.original.as_ref().unwrap().0,
+            foreign.original.as_ref().unwrap().0
+        );
         let primary = first.compiler_primary_input(owner).unwrap().unwrap();
         assert_eq!(primary.original(), Some(row.original.as_ref().unwrap().0));
-        assert!(Arc::ptr_eq(primary.entry(), &row.original.as_ref().unwrap().1));
+        assert!(Arc::ptr_eq(
+            primary.entry(),
+            &row.original.as_ref().unwrap().1
+        ));
         assert!(first.issue_compiler_primary_input(owner, foreign).is_err());
         assert!(second.issue_compiler_primary_input(owner, row).is_err());
         let mut wrong_canonical = row.clone();
-        wrong_canonical.interface = first.selected[&entries[2].descriptor.owner].interface.clone();
-        assert!(first.issue_compiler_primary_input(owner, &wrong_canonical).is_err());
-        assert!(first.issue_compiler_primary_input(&entries[2].descriptor.owner, row).is_err());
-        assert_eq!(first.compiler_primary_inputs().count(), first.selected.len());
+        wrong_canonical.interface = first.selected[&entries[2].descriptor.owner]
+            .interface
+            .clone();
+        assert!(first
+            .issue_compiler_primary_input(owner, &wrong_canonical)
+            .is_err());
+        assert!(first
+            .issue_compiler_primary_input(&entries[2].descriptor.owner, row)
+            .is_err());
+        assert_eq!(
+            first.compiler_primary_inputs().count(),
+            first.selected.len()
+        );
     }
 
     #[test]
@@ -4545,10 +4637,14 @@ mod tests {
                 .unwrap();
             assert!(empty.owners().is_empty());
             assert_eq!(empty.work(), DemandCompilerProjectionWork::default());
-            let empty_native = changed.inputs
+            let empty_native = changed
+                .inputs
                 .demanded_native_inputs(empty, &BTreeSet::new(), &empty_budget)
                 .unwrap();
-            assert!(empty_native.native_availability().persistent_facts().is_empty());
+            assert!(empty_native
+                .native_availability()
+                .persistent_facts()
+                .is_empty());
             assert_eq!(empty_budget.work_usage().unwrap(), (0, 0));
             let operation = InventoryOperation::new(Default::default());
             let demanded = changed
