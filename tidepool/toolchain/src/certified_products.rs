@@ -3457,26 +3457,7 @@ impl CertifiedSourceSelection {
             crate::artifact_inventory::ArtifactId,
         >,
     ) -> CertResult<BTreeSet<crate::artifact_inventory::ArtifactId>> {
-        let mut native = BTreeMap::new();
-        let mut ambiguous = BTreeSet::new();
-        for (id, entry) in entries.iter() {
-            if let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload {
-                let key = crate::artifact_inventory::NativeOwnerKey::from_owner(product.owner());
-                if native.insert(key.clone(), *id).is_some() {
-                    ambiguous.insert(key);
-                }
-            }
-        }
-        if self.compiler_namespace_originals().any(|selected| {
-            ambiguous.contains(&crate::artifact_inventory::NativeOwnerKey::from_owner(
-                &selected.owner,
-            ))
-        }) {
-            return Err(CertificationError::Mismatch(
-                "ambiguous issued compiler native artifact",
-            ));
-        }
-        self.artifact_ids_with_owners(entries, &native, None)
+        self.artifact_ids_with_owners(entries, None, None)
     }
 
     pub(crate) fn artifact_ids_from_bound_entries(
@@ -3491,7 +3472,7 @@ impl CertifiedSourceSelection {
         parent: &crate::artifact_inventory::ArtifactView,
         allowed_values: &BTreeSet<crate::artifact_inventory::ArtifactId>,
     ) -> CertResult<BTreeSet<crate::artifact_inventory::ArtifactId>> {
-        self.artifact_ids_with_owners(entries, native, Some((parent, allowed_values)))
+        self.artifact_ids_with_owners(entries, Some(native), Some((parent, allowed_values)))
     }
 
     fn artifact_ids_with_owners(
@@ -3499,9 +3480,11 @@ impl CertifiedSourceSelection {
         entries: &impl crate::artifact_inventory::ArtifactEntryMap<
             crate::artifact_inventory::ArtifactId,
         >,
-        native: &BTreeMap<
-            crate::artifact_inventory::NativeOwnerKey,
-            crate::artifact_inventory::ArtifactId,
+        native: Option<
+            &BTreeMap<
+                crate::artifact_inventory::NativeOwnerKey,
+                crate::artifact_inventory::ArtifactId,
+            >,
         >,
         allowed_values: Option<(
             &crate::artifact_inventory::ArtifactView,
@@ -3526,15 +3509,16 @@ impl CertifiedSourceSelection {
             }
             ids.insert(interface);
             if let Some(selected_native) = selected.original {
-                let id = native
-                    .get(&NativeOwnerKey::from_owner(&selected_native.owner))
-                    .ok_or(CertificationError::Mismatch(
+                let entry = selected_native.original_entry_from(interface, |id| entries.get(id))?;
+                let id = entry.descriptor.id;
+                if native.is_some_and(|native| {
+                    native.get(&NativeOwnerKey::from_owner(&selected_native.owner)) != Some(&id)
+                }) {
+                    return Err(CertificationError::Mismatch(
                         "issued compiler native artifact",
-                    ))?;
-                if !entries.get(id).is_some_and(|entry| matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == &selected_native.owner)) {
-                    return Err(CertificationError::Mismatch("issued compiler native artifact"));
+                    ));
                 }
-                ids.insert(*id);
+                ids.insert(id);
             }
         }
         Ok(ids)
@@ -12801,7 +12785,9 @@ pub(crate) mod tests {
 
     #[test]
     fn receipt_original_identity_selects_exact_issued_artifact_among_equal_owners() {
-        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, CompilerInputProjection};
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
+        };
         let product = full_native_fixture("ExactReceiptIdentity", vec![(7, vec![])], 1);
         let producer = product.module_interface().unwrap().producer_sha256();
         let entry = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
@@ -12809,7 +12795,8 @@ pub(crate) mod tests {
             ArtifactEntry::original([3; 32], fixture_finalized_product(product.clone(), [3; 32]))
                 .unwrap(),
         );
-        let crate::artifact_inventory::ArtifactPayload::Original(other_product) = &other.payload else {
+        let crate::artifact_inventory::ArtifactPayload::Original(other_product) = &other.payload
+        else {
             unreachable!();
         };
         assert_eq!(product.owner(), other_product.owner());
@@ -12896,8 +12883,34 @@ pub(crate) mod tests {
             .find(|offer| offer.original() == entry.descriptor.id && offer.proof().is_some())
             .unwrap();
         assert!(own.same_issuance(offered));
+        assert_eq!(
+            selected
+                .artifact_ids_from_entries(&metadata.artifacts)
+                .unwrap(),
+            BTreeSet::from([entry.descriptor.id, projection.roles()[0].interface()]),
+        );
+        let wrong_owner = BTreeMap::from([(
+            crate::artifact_inventory::NativeOwnerKey::from_owner(product.owner()),
+            other.descriptor.id,
+        )]);
+        assert!(matches!(
+            selected.artifact_ids_from_bound_entries(
+                &metadata.artifacts,
+                &wrong_owner,
+                &both,
+                &BTreeSet::new(),
+            ),
+            Err(CertificationError::Mismatch(
+                "issued compiler native artifact"
+            )),
+        ));
         let mut missing = metadata.as_ref().clone();
         missing.artifacts.remove(&entry.descriptor.id);
+        assert!(matches!(
+            selected.artifact_ids_from_entries(&missing.artifacts),
+            Err(CertificationError::MissingRetainedCustody { artifact })
+                if artifact == entry.descriptor.id,
+        ));
         assert!(
             selected
                 .compiler_projection_from_metadata(&missing, &BTreeSet::new())
@@ -12908,11 +12921,14 @@ pub(crate) mod tests {
 
     #[test]
     fn receipt_new_product_identity_binds_only_actual_producing_cohort() {
-        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, CompilerInputProjection};
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
+        };
         let product = full_native_fixture("ProducedReceiptIdentity", vec![(7, vec![])], 1);
         let canonical = product.module_interface().unwrap();
-        let entry =
-            Arc::new(ArtifactEntry::original(canonical.producer_sha256(), product.clone()).unwrap());
+        let entry = Arc::new(
+            ArtifactEntry::original(canonical.producer_sha256(), product.clone()).unwrap(),
+        );
         let inventory = ArtifactInventory::default();
         let view = inventory
             .admit_shared(&inventory.empty_view(), vec![entry.clone()])
