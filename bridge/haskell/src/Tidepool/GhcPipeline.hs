@@ -231,7 +231,7 @@ import Tidepool.PlannedDeclaration
 import Tidepool.CheckedPrefixImports
   ( CompletedValueImport(..), CompletedValueImports, hydrateCompletedValueImportsWithVerifiedDependencies
   , transformCompletedValueImports, refineParsedDeclarationImports, selectedImportNames
-  , hydrateCompletedValueAliases, transformCompletedValueAliases )
+  , CompletedValueAliases, hydrateCompletedValueAliases, transformCompletedValueAliases )
 import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironmentFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, boundedUtf8, trySynchronous)
@@ -298,7 +298,7 @@ import Tidepool.ExactScope
   , worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsBindings
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow, worldBindingRowFactCID
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
-  , worldTypeEntryArtifact, worldTypeEntryInterface, hydrateWorldDeclarationInputs
+  , WorldTypeClosureEntry, worldTypeEntryArtifact, worldTypeEntryInterface, hydrateWorldDeclarationInputs
   , WorldInputsFailure(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
@@ -499,7 +499,7 @@ preparedDependencies
   :: HscEnv -> PipelineVariant -> DependencyEvidence -> Maybe ExactCompilation
   -> IO PreparedDependencies
 preparedDependencies _ variant fresh exact
-  | Just (WorldSourceInputBasis _ facts _ _ _) <- pvWorldSources variant = case exact of
+  | Just (WorldSourceInputBasis _ facts _ _) <- pvWorldSources variant = case exact of
       Nothing -> pure (WorldScoped fresh (worldInputsIdentityBytes facts)
         (worldSourceDomainSha256 (worldInputsSources facts)))
       Just _ -> throwIO CheckedPurposeMismatch
@@ -1216,7 +1216,7 @@ data PipelineVariant = PipelineVariant
 
 -- Operation-local source admission reuses the actual held facts. Only its
 -- explicit selected-source receipt leaves the compile; no callback owns a world.
-data WorldSourceInputBasis = WorldSourceInputBasis ExactInputOwner WorldInputFacts [ExactIfaceArtifact]
+data WorldSourceInputBasis = WorldSourceInputBasis ExactInputOwner WorldInputFacts
   (IORef (Maybe (Maybe SourceSelectedOriginals,[((String,String,Bool),[(DependencyQualifier,String,Bool,String)])])))
   ParsedSegmentDemand
 
@@ -2083,52 +2083,37 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
     emitWorldAcquisitionRejection "world declaration type input" path reason
     throwIO WorldCellCorrupt) pure declarationInputs
   setSession current
-  demandScope <- liftIO $ do
-    WorldPreparedModules table receipts dependencies retainedScope <- readIORef preparedRef
-    case retainedScope of
-      Just issued -> pure issued
-      Nothing -> do
-        emitCount timing "world.cell.demand_scope_builds" 1
-        emitCount timing "world.cell.demand_scope_aliases" (toInteger (Map.size (worldInputsBindings facts)))
-        issued <- newSegmentDemandScope current (worldInputsBindings facts)
-        writeIORef preparedRef (WorldPreparedModules table receipts dependencies (Just issued))
-        pure issued
-  demand <- liftIO (typedSegmentInputOccurrences current demandScope parsedDemand)
-  demanded <- either (\failure -> liftIO $ do
-    emitWorldAcquisitionRejection "world cell demand" path (case failure of
-      InputDemandRenameRejected diagnostic -> diagnostic
-      _ -> show failure)
-    throwIO WorldCellUnsupported) pure demand
-  let occurrences = map fst demanded
-  let rejectValueImport :: String -> IO value
-      rejectValueImport reason = emitWorldAcquisitionRejection "world value import" path reason
-        >> throwIO WorldCellCorrupt
-  readback <- liftIO (readWorldBindingInputs (universeOriginalInputs universe) current facts occurrences)
-  (inputs,bodies,typeInputs) <- either (liftIO . rejectValueImport) pure readback
-  withTypes <- liftIO (hydrateExactScope current
-    [(worldTypeEntryArtifact entry,worldTypeEntryInterface entry) | entry <- Map.elems typeInputs])
-  (injected,reversedCaptures,reversedInterfaces) <- liftIO $ foldM (\(environment,captures,interfaces) (artifact,body,packages) -> do
-    owner <- maybe (throwIO WorldCellCorrupt) pure (parseSessionModule (exactModule artifact))
-    (ready,_,captured) <- injectCapturedSessionIfaceWithBindings owner body packages (exactRequirements artifact) environment
-    home <- maybe (throwIO WorldCellCorrupt) pure (lookupHpt (hsc_HPT ready) (mkModuleName (exactModule artifact)))
-    unless (mi_module (hm_iface home) == mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact)))
-      (throwIO WorldCellCorrupt)
-    pure (ready,captured:captures,(artifact,hm_iface home):interfaces)) (withTypes,[],[]) bodies
-  let interfaces = reverse reversedInterfaces
-      inputCaptures = reverse reversedCaptures
-  let requested = [(name,worldBindingSymbol binding,worldBindingInterfaceArtifact binding) | (name,binding) <- inputs]
-      generations = Map.fromList [(worldBindingSymbol binding,worldBindingGeneration binding) | (_,binding) <- inputs]
-      references = [(name,worldBindingSymbol binding,worldBindingSessionVar binding,worldBindingScope binding
-          ,worldBindingGeneration binding,worldBindingRowFactCID (worldBindingRow binding)) | (name,binding) <- inputs]
-      hydrate environment = hydrateCompletedValueAliases requested interfaces environment
-        >>= either rejectValueImport pure
-  unless (all (\(_,binding) -> Map.lookup (worldBindingSymbol binding) generations == Just (worldBindingGeneration binding)) inputs)
-    (liftIO (throwIO WorldCellCorrupt))
-  (hydrated,aliases) <- liftIO (hydrate injected)
-  aliasesRef <- liftIO (newIORef aliases)
+  resolvedRef <- liftIO (newIORef Nothing)
+  let requireResolved = readIORef resolvedRef >>= maybe (throwIO WorldCellCorrupt) pure
+      resolveInputs environment sourceOwners = do
+        existing <- readIORef resolvedRef
+        case existing of
+          Just resolved -> do
+            emitCount timing "world.cell.demand_rehydrations" 1
+            ready <- hydrateWorldCellResolvedInputs environment resolved
+            pure (ready,resolved)
+          Nothing -> do
+            demandScope <- do
+              WorldPreparedModules table receipts dependencies retainedScope <- readIORef preparedRef
+              case retainedScope of
+                Just issued -> pure issued
+                Nothing -> do
+                  emitCount timing "world.cell.demand_scope_builds" 1
+                  emitCount timing "world.cell.demand_scope_aliases" (toInteger (Map.size (worldInputsBindings facts)))
+                  issued <- newSegmentDemandScope environment (worldInputsBindings facts)
+                  writeIORef preparedRef (WorldPreparedModules table receipts dependencies (Just issued))
+                  pure issued
+            emitCount timing "world.cell.demand_resolutions" 1
+            (ready,resolved) <- resolveWorldCellInputs (universeOriginalInputs universe) facts path
+              sourceOwners environment demandScope parsedDemand
+            writeIORef resolvedRef (Just resolved)
+            pure (ready,resolved)
+      policyFor resolved = retainedContext
+        (Set.union retained (Map.keysSet (worldResolvedGenerations resolved)))
   importsRef <- liftIO (newIORef Nothing)
-  let policy = retainedContext (Set.union retained (Map.keysSet generations))
-  setSession (installRetainedUnfoldingsPlugin policy hydrated)
+  -- Demanded values have source-less owners. Dependencies retain their own
+  -- module-local policy; the target hook installs the resolved value policy.
+  let policy = retainedContext retained
   dependencies <- liftIO (beginHeldWorldDependencyAttempt universe world)
   identity <- liftIO newTimingRequestIdentity
   start <- monotonicTime
@@ -2136,31 +2121,33 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   let cycle = worldDependencyCycle dependencies universe attempt
       withAliases = variant
         { pvCompilerProducer=producer,pvWorldOnly=True
-        , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts
-            ([artifact | (artifact,_,_) <- bodies] ++ [worldTypeEntryArtifact entry | entry <- Map.elems typeInputs
-              , let artifact = worldTypeEntryArtifact entry
-              , not (worldHasSelectedSource facts (exactUnit artifact,exactModule artifact))]) importsRef parsedDemand)
+        , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand)
         , pvTransformParsed = \target environment summary parsed -> do
             annotated <- pvTransformParsed variant target environment summary parsed
             if ms_mod_name summary /= target then pure annotated else do
-              captured <- readIORef aliasesRef
-              thenNativeModule annotated (transformCompletedValueAliases captured environment)
+              resolved <- requireResolved
+              thenNativeModule annotated (transformCompletedValueAliases (worldResolvedAliases resolved) environment)
         , pvPlan = \directory enabled target graph exact -> do
             planned <- pvPlan variant directory enabled target graph exact
+            let sourceOwners = Set.fromList
+                  [(unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary))
+                  | ModuleNode _ summary <- mgModSummaries' graph]
             pure planned
               { cpBeforeModule = \summary -> do
                   cpBeforeModule planned summary
                   when (ms_mod_name summary == target) $ do
                     environment <- getSession
-                    (ready,captured) <- liftIO (hydrate environment)
-                    liftIO (writeIORef aliasesRef captured)
-                    setSession ready
-              , cpInjectedSessionInterfaces = (inputCaptures ++) <$> cpInjectedSessionInterfaces planned
+                    (ready,resolved) <- liftIO (resolveInputs environment sourceOwners)
+                    setSession (installRetainedUnfoldingsPlugin (policyFor resolved) ready)
+              , cpInjectedSessionInterfaces = do
+                  resolved <- requireResolved
+                  (worldResolvedCaptures resolved ++) <$> cpInjectedSessionInterfaces planned
               }
         }
   result <- runCompileCycle (WithCompilerExecution grant executor selection) cycle policy
     Nothing timing identity start resources withAliases path
   final <- getSession
+  resolved <- liftIO requireResolved
   pending <- liftIO (stageHeldWorldDependencies executor dependencies withAliases final path)
   recovery <- liftIO (worldDependencyRecovery dependencies)
   (sourceSelection,imports) <- liftIO (readIORef importsRef >>= maybe (throwIO WorldCellCorrupt) pure)
@@ -2169,8 +2156,77 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
     unless unchanged (liftIO (throwIO WorldCellUnavailable))
   pure (CompletedWorldCompilerResult result recovery guard
     (WorldCompilerCompletion
-      (WorldCellInputs generations references (target,SHA256.hash source) imports sourceSelection roots)
+      (WorldCellInputs (worldResolvedGenerations resolved) (worldResolvedReferences resolved)
+        (target,SHA256.hash source) imports sourceSelection roots)
       pending))
+
+-- A request-local result of actual demand under the target's dependency HPT.
+-- It owns only selected immutable input products, never a saved HscEnv. Every
+-- target visit installs the same products and the same resolved alias Names.
+data WorldCellResolvedInputs = WorldCellResolvedInputs
+  [(String,WorldBinding)] [WorldTypeClosureEntry] [(ExactIfaceArtifact,ModIface)]
+  [CapturedSessionInterface] CompletedValueAliases
+
+worldResolvedAliases :: WorldCellResolvedInputs -> CompletedValueAliases
+worldResolvedAliases (WorldCellResolvedInputs _ _ _ _ aliases) = aliases
+
+worldResolvedCaptures :: WorldCellResolvedInputs -> [CapturedSessionInterface]
+worldResolvedCaptures (WorldCellResolvedInputs _ _ _ captures _) = captures
+
+worldResolvedGenerations :: WorldCellResolvedInputs -> Map.Map SymbolIdentity Word64
+worldResolvedGenerations (WorldCellResolvedInputs inputs _ _ _ _) = Map.fromList
+  [(worldBindingSymbol binding,worldBindingGeneration binding) | (_,binding) <- inputs]
+
+worldResolvedReferences :: WorldCellResolvedInputs -> [(String,SymbolIdentity,Word64,Word64,Word64,BS.ByteString)]
+worldResolvedReferences (WorldCellResolvedInputs inputs _ _ _ _) =
+  [(name,worldBindingSymbol binding,worldBindingSessionVar binding,worldBindingScope binding
+    ,worldBindingGeneration binding,worldBindingRowFactCID (worldBindingRow binding)) | (name,binding) <- inputs]
+
+hydrateWorldCellResolvedInputs :: HscEnv -> WorldCellResolvedInputs -> IO HscEnv
+hydrateWorldCellResolvedInputs environment (WorldCellResolvedInputs inputs types interfaces _ _) = do
+  ready <- hydrateExactScope environment
+    ([(worldTypeEntryArtifact entry,worldTypeEntryInterface entry) | entry <- types] ++ interfaces)
+  let requested = [(name,worldBindingSymbol binding,worldBindingInterfaceArtifact binding) | (name,binding) <- inputs]
+  fst <$> (hydrateCompletedValueAliases requested interfaces ready >>= either reject pure)
+  where reject reason = emitWorldAcquisitionRejection "world value rehydration" "<target input projection>" reason
+          >> throwIO WorldCellCorrupt
+
+resolveWorldCellInputs :: ExactInputOwner -> WorldInputFacts -> FilePath -> Set.Set (String,String)
+  -> HscEnv -> SegmentDemandScope WorldBinding -> ParsedSegmentDemand -> IO (HscEnv,WorldCellResolvedInputs)
+resolveWorldCellInputs owner facts path sourceOwners environment scope parsedDemand = do
+  demand <- typedSegmentInputOccurrences environment scope parsedDemand
+  demanded <- either (\failure -> do
+    emitWorldAcquisitionRejection "world cell demand" path (case failure of
+      InputDemandRenameRejected diagnostic -> diagnostic
+      _ -> show failure)
+    throwIO WorldCellUnsupported) pure demand
+  let reject :: String -> IO value
+      reject reason = emitWorldAcquisitionRejection "world value import" path reason >> throwIO WorldCellCorrupt
+  readback <- readWorldBindingInputs owner environment facts (map fst demanded)
+  (inputs,bodies,typeInputs) <- either reject pure readback
+  -- Value owners must never be source summaries: adding their retained policy
+  -- at the target cannot change a dependency's earlier memo fingerprint.
+  unless (all (\(artifact,_,_) -> (exactUnit artifact,exactModule artifact) `Set.notMember` sourceOwners) bodies
+      && all (\(_,binding) -> let symbol = worldBindingSymbol binding
+        in (Text.unpack (symbolUnit symbol),Text.unpack (symbolModule symbol)) `Set.notMember` sourceOwners) inputs)
+    (reject "selected value owner is also a source module")
+  withTypes <- hydrateExactScope environment
+    [(worldTypeEntryArtifact entry,worldTypeEntryInterface entry) | entry <- Map.elems typeInputs]
+  (injected,reversedCaptures,reversedInterfaces) <- foldM (\(current,captures,interfaces) (artifact,body,packages) -> do
+    selected <- maybe (throwIO WorldCellCorrupt) pure (parseSessionModule (exactModule artifact))
+    (ready,_,captured) <- injectCapturedSessionIfaceWithBindings selected body packages (exactRequirements artifact) current
+    home <- maybe (throwIO WorldCellCorrupt) pure (lookupHpt (hsc_HPT ready) (mkModuleName (exactModule artifact)))
+    unless (mi_module (hm_iface home) == mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact)))
+      (throwIO WorldCellCorrupt)
+    pure (ready,captured:captures,(artifact,hm_iface home):interfaces)) (withTypes,[],[]) bodies
+  let interfaces = reverse reversedInterfaces
+      requested = [(name,worldBindingSymbol binding,worldBindingInterfaceArtifact binding) | (name,binding) <- inputs]
+  (hydrated,aliases) <- hydrateCompletedValueAliases requested interfaces injected >>= either reject pure
+  let resolved = WorldCellResolvedInputs inputs (Map.elems typeInputs) interfaces (reverse reversedCaptures) aliases
+      generations = worldResolvedGenerations resolved
+  unless (all (\(_,binding) -> Map.lookup (worldBindingSymbol binding) generations == Just (worldBindingGeneration binding)) inputs)
+    (throwIO WorldCellCorrupt)
+  pure (hydrated,resolved)
 
 closedWorldCellPurpose :: CompilePurpose -> Bool
 closedWorldCellPurpose (ParsedImportSelection _ (GeneratedScaffoldCompile _
@@ -3272,7 +3328,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       then Just <$> liftIO (targetModuleFor modGraphDownsweep path)
       else pure Nothing
     targetQuoteProof <- case (pvWorldSources variant,capturedTarget,policyTarget) of
-      (Just (WorldSourceInputBasis _ _ _ _ proof),Just bytes,Just owner)
+      (Just (WorldSourceInputBasis _ _ _ proof),Just bytes,Just owner)
         | segmentDemandMatchesSource proof path bytes -> pure (Just (owner,proof))
         | otherwise -> liftIO (throwIO WorldCellCorrupt)
       (Nothing,_,_) -> pure Nothing
@@ -3642,9 +3698,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     let sourceOrder = [summary
           | ModuleNode _ summary <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing)
           , ms_hsc_src summary == HsSrcFile]
-    worldSources <- forM (pvWorldSources variant) $ \(WorldSourceInputBasis owner facts values receipt _) -> do
+    worldSources <- forM (pvWorldSources variant) $ \(WorldSourceInputBasis owner facts receipt _) -> do
       when (isJust (pvExactScope variant)) (liftIO (throwIO WorldCellCorrupt))
-      selected <- withHeldWorldSourceRefusal (captureHeldWorldSourceSelection owner facts values modGraphRaw)
+      selected <- withHeldWorldSourceRefusal (captureHeldWorldSourceSelection owner facts modGraphRaw)
       liftIO (writeIORef receipt (Just selected))
       pure selected
     sourceSelection <- case pvExactScope variant of
@@ -7334,9 +7390,9 @@ withHeldWorldSourceRefusal action = reifyGhc $ \session ->
       emitWorldAcquisitionRejection "world source import" "<held captured source>" (show failure)
       throwIO WorldCellUnavailable
 
-captureHeldWorldSourceSelection :: ExactInputOwner -> WorldInputFacts -> [ExactIfaceArtifact] -> ModuleGraph
+captureHeldWorldSourceSelection :: ExactInputOwner -> WorldInputFacts -> ModuleGraph
   -> Ghc (Maybe SourceSelectedOriginals,[((String,String,Bool),[(DependencyQualifier,String,Bool,String)])])
-captureHeldWorldSourceSelection owner facts values graph = do
+captureHeldWorldSourceSelection owner facts graph = do
   let ownerKey owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
       demanded = Set.fromList [ownerKey (ms_mod summary)
         | ModuleNode _ summary <- mgModSummaries' graph
@@ -7359,8 +7415,12 @@ captureHeldWorldSourceSelection owner facts values graph = do
         proofs = Map.map worldSourceEntryProof entries
         readPackages key = maybe (throwIO (ExecutionSourcePackageChanged key))
           (pure . worldSourceEntryPackages) (Map.lookup key entries)
-    (validation,selectedKeys) <- validateCanonicalSourceInputs True proofs interfaces (artifacts ++ values)
-      (map (mkModuleName . exactModule) values) readPackages graph
+    -- The selected SOURCE roots bring their entire exact TYPE requirement
+    -- closure. The shared validator derives source-less Finder locations and
+    -- downsweep exclusions from every noncanonical artifact in that closure.
+    -- Checked values are never promoted into a SOURCE module's TYPE closure.
+    (validation,selectedKeys) <- validateCanonicalSourceInputs True proofs interfaces artifacts
+      [] readPackages graph
       (Set.toAscList demanded)
     let selectedGraph = mkModuleGraph [node | node@(ModuleNode _ summary) <-
           mgModSummaries' (validatedOriginalGraph validation),ownerKey (ms_mod summary) `Set.member` selectedKeys]
