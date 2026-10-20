@@ -487,6 +487,153 @@ impl RunControlClient {
         }
     }
 
+    pub(crate) async fn assert_generation_publication_delivery_lost(
+        &self,
+        owner_task: ractor::concurrency::JoinHandle<()>,
+        preparation: ActorGenerationRetirementPreparation,
+        state: Arc<InstalledToolsState>,
+        expected: Arc<ActorGeneration>,
+        decision: Arc<tidepool_runtime::session::PublicationDecision>,
+        target: GenerationDependency,
+        lifecycle: crate::LifecycleHandle,
+    ) {
+        let actor = preparation.actor();
+        let candidate = preparation.candidate_custody();
+        let retained = self.native_cleanup.clone();
+        let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        assert_eq!(lifecycle.identity(), actor);
+        assert!(Arc::ptr_eq(
+            preparation.expected_generation().unwrap(),
+            &expected
+        ));
+        let (reply, answer) = oneshot::channel();
+        self.owner
+            .send_message(RunControlMessage::BeginGenerationRetirement {
+                preparation,
+                inventory: GenerationRetirementInventory::Unavailable,
+                diagnostic: GenerationRetirementDiagnostic::CancelledComponent,
+                reply: GenerationRetirementBeginReply::Observe(reply),
+            })
+            .unwrap();
+        let observer = expect_begin(answer.await.unwrap());
+        let (reply, answer) = oneshot::channel();
+        self.owner
+            .send_message(
+                RunControlMessage::DispatchDeliveryLostGenerationPublication {
+                    actor,
+                    observer: observer.clone(),
+                    lifecycle: lifecycle.clone(),
+                    reply,
+                },
+            )
+            .unwrap();
+        let terminal = answer.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while terminal.get().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            terminal.get(),
+            Some(preparation::PublicationTerminalObservation::Completed {
+                outcome: preparation::PublicationOutcomeObservation::Published,
+                notification: preparation::PublicationNotificationObservation::Accepted,
+            })
+        ));
+        // The ready notification precedes this ordinary directory round trip.
+        assert_eq!(
+            self.resolve(actor).await.unwrap().unwrap().identity(),
+            actor
+        );
+        let published = state.current_generation().unwrap();
+        assert_eq!(published.id(), target.generation());
+        assert!(!Arc::ptr_eq(&published, &expected));
+        let actual_owner = lifecycle
+            .public_owner(Some(published.public_owner().clone()), false)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&actual_owner, published.public_owner()));
+        assert_eq!(
+            decision.phase(),
+            tidepool_runtime::session::PublicationPhase::Published
+        );
+        assert!(matches!(
+            SourceDependency::Generation(expected.dependency().clone()).claim(),
+            Err(
+                crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed {
+                    phase: tidepool_runtime::session::SourceAdmissionPhase::Fenced { .. },
+                    ..
+                }
+            )
+        ));
+        drop(
+            SourceDependency::Generation(target.clone())
+                .claim()
+                .unwrap(),
+        );
+        self.owner.get_cell().kill();
+        tokio::time::timeout(Duration::from_secs(10), owner_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut recovery = retained.take_recovery().unwrap();
+        for _ in 0..2 {
+            recovery.reconcile_publications();
+            let custody = recovery.custody.as_ref().unwrap();
+            assert_eq!(custody.attempts.len(), 1);
+            let attempt = custody.attempts[0].active_for_test();
+            assert!(candidate.same_candidate(&attempt.candidate));
+            assert!(Arc::ptr_eq(&attempt.expected, &expected));
+            let GenerationRetirementPhase::Entered {
+                observer: actual,
+                cutoff: GenerationRetirementCutoffPhase::Captured { fence, .. },
+                custody: publication,
+            } = &attempt.phase
+            else {
+                panic!("lost affine delivery must retain the actual A fence");
+            };
+            assert!(actual.same_attempt(&observer));
+            assert!(fence.dependency().same_owner(expected.dependency()));
+            let GenerationPublicationCustody::DeliveryLost { terminal: actual } = publication
+            else {
+                panic!("closed receiver must retain the SAME terminal publication metadata");
+            };
+            assert!(Arc::ptr_eq(actual, &terminal));
+            assert!(publication.published());
+            assert_eq!(
+                publication.notification(),
+                preparation::PublicationNotificationObservation::Accepted
+            );
+            let (obligations, _) = custody.attempts[0]
+                .operational_obligations(&GenerationRetirementReplyOwner::Native(&recovery));
+            assert!(obligations.contains(&tidepool_bridge_effects::RlRetirementObligation::ReloadCandidateSettlementObligation(
+                tidepool_bridge_effects::RlObligationObservation::ReloadObligationUnconfirmed,
+            )));
+            assert!(obligations.contains(&tidepool_bridge_effects::RlRetirementObligation::ReloadOriginalRetirementObligation(
+                tidepool_bridge_effects::RlObligationObservation::ReloadObligationPending,
+            )));
+            assert!(!obligations.iter().any(|obligation| matches!(obligation,
+                tidepool_bridge_effects::RlRetirementObligation::ReloadPublicationNotificationObligation(_),
+            )));
+
+            assert!(Arc::ptr_eq(
+                &state.current_generation().unwrap(),
+                &published
+            ));
+            assert_eq!(
+                decision.phase(),
+                tidepool_runtime::session::PublicationPhase::Published
+            );
+            assert!(matches!(SourceDependency::Generation(expected.dependency().clone()).claim(),
+                Err(crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed {
+                    phase: tidepool_runtime::session::SourceAdmissionPhase::Fenced { .. }, ..
+                })));
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), compiler_calls);
+        }
+    }
+
     pub(crate) async fn assert_generation_retirement_reservation_failed(
         &self,
         owner_task: ractor::concurrency::JoinHandle<()>,

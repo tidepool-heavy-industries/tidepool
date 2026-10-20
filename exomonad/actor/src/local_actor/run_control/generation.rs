@@ -763,6 +763,8 @@ impl GenerationRetirementCore {
                                 custody,
                                 GenerationPublicationCustody::ProducerLostAfterExecute
                             )
+                            || matches!(custody, GenerationPublicationCustody::DeliveryLost { terminal }
+                                if matches!(terminal.get(), None | Some(preparation::PublicationTerminalObservation::ProducerLostAfterExecute)))
                         {
                             let notification = match custody.notification() {
                                 preparation::PublicationNotificationObservation::Accepted => None,
@@ -1172,6 +1174,11 @@ enum GenerationPublicationCustody {
         receiver: oneshot::Receiver<preparation::PublicationDelivery>,
         terminal: Arc<std::sync::OnceLock<preparation::PublicationTerminalObservation>>,
     },
+    // Terminal metadata preserves known publication facts even if the sole
+    // affine delivery is lost. It cannot settle or recreate that delivery.
+    DeliveryLost {
+        terminal: Arc<std::sync::OnceLock<preparation::PublicationTerminalObservation>>,
+    },
     // Install the actual affine settlement before diagnostic projection can
     // allocate, render an error, or enter its existing operation journal.
     Received {
@@ -1207,11 +1214,14 @@ enum PublicationSourceRestoredPending {
     },
 }
 
-#[derive(Clone, Copy, Debug)]
 enum GenerationPublicationAuthorization {
     EmptyCapture,
     #[cfg(test)]
     CancelledComponent,
+    #[cfg(test)]
+    DeliveryLossComponent {
+        lifecycle: crate::LifecycleHandle,
+    },
 }
 
 #[derive(Debug)]
@@ -1220,6 +1230,8 @@ pub(super) enum GenerationPublicationDispatchFailure {
     AttemptChanged,
     NotCaptured,
     NotCancelled,
+    #[cfg(test)]
+    NotRunning,
 }
 
 enum GenerationRetirementCutoffPhase {
@@ -1701,7 +1713,7 @@ pub(crate) enum GenerationRetirementBeginFailure {
 impl GenerationPublicationCustody {
     fn published(&self) -> bool {
         match self {
-            Self::Waiting { terminal, .. } => matches!(
+            Self::Waiting { terminal, .. } | Self::DeliveryLost { terminal } => matches!(
                 terminal.get(),
                 Some(preparation::PublicationTerminalObservation::Completed {
                     outcome: preparation::PublicationOutcomeObservation::Published,
@@ -1729,23 +1741,26 @@ impl GenerationPublicationCustody {
             Self::Received { notification, .. } | Self::Settled { notification, .. } => {
                 *notification
             }
-            Self::Waiting { terminal, .. } => match terminal.get() {
-                Some(Terminal::Completed { notification, .. }) => *notification,
-                _ => Notification::Unobserved,
-            },
+            Self::Waiting { terminal, .. } | Self::DeliveryLost { terminal } => {
+                match terminal.get() {
+                    Some(Terminal::Completed { notification, .. }) => *notification,
+                    _ => Notification::Unobserved,
+                }
+            }
             _ => Notification::Unobserved,
         }
     }
 
     fn observe(&mut self) {
-        let Self::Waiting { receiver, .. } = self else {
+        let Self::Waiting { receiver, terminal } = self else {
             return;
         };
         let delivery = match receiver.try_recv() {
             Ok(delivery) => delivery,
             Err(oneshot::error::TryRecvError::Empty) => return,
             Err(oneshot::error::TryRecvError::Closed) => {
-                *self = Self::ProducerLostAfterExecute;
+                let terminal = terminal.clone();
+                *self = Self::DeliveryLost { terminal };
                 return;
             }
         };
@@ -2499,6 +2514,25 @@ impl RunState {
         )
     }
 
+    #[cfg(test)]
+    pub(super) fn dispatch_delivery_lost_generation_publication(
+        &mut self,
+        myself: &RactorRef<RunControlMessage>,
+        actor: ActorRef,
+        observer: ActorPublicationAttemptObserver,
+        lifecycle: crate::LifecycleHandle,
+    ) -> Result<
+        Arc<std::sync::OnceLock<preparation::PublicationTerminalObservation>>,
+        GenerationPublicationDispatchFailure,
+    > {
+        self.dispatch_generation_publication(
+            myself,
+            actor,
+            observer,
+            GenerationPublicationAuthorization::DeliveryLossComponent { lifecycle },
+        )
+    }
+
     fn dispatch_generation_publication(
         &mut self,
         myself: &RactorRef<RunControlMessage>,
@@ -2540,7 +2574,12 @@ impl RunState {
         let Some(reserved) = publication.reserved_mut() else {
             return Err(GenerationPublicationDispatchFailure::AttemptChanged);
         };
-        match authorization {
+        #[cfg(test)]
+        let lose_delivery = matches!(
+            &authorization,
+            GenerationPublicationAuthorization::DeliveryLossComponent { .. }
+        );
+        let publication_owner = match authorization {
             GenerationPublicationAuthorization::EmptyCapture => {
                 if !matches!(progress, GenerationUnstartedProgress::ReadyForPublication) {
                     return Err(GenerationPublicationDispatchFailure::NotCaptured);
@@ -2553,6 +2592,7 @@ impl RunState {
                 {
                     return Err(GenerationPublicationDispatchFailure::NotCaptured);
                 }
+                None
             }
             #[cfg(test)]
             GenerationPublicationAuthorization::CancelledComponent => {
@@ -2564,8 +2604,27 @@ impl RunState {
                 {
                     return Err(GenerationPublicationDispatchFailure::NotCancelled);
                 }
+                None
             }
-        }
+            #[cfg(test)]
+            GenerationPublicationAuthorization::DeliveryLossComponent { lifecycle } => {
+                if lifecycle.identity() != actor {
+                    return Err(GenerationPublicationDispatchFailure::AttemptChanged);
+                }
+                if !matches!(progress, GenerationUnstartedProgress::AwaitingDecision) {
+                    return Err(GenerationPublicationDispatchFailure::AttemptChanged);
+                }
+                if reserved.publication_phase()
+                    != tidepool_runtime::session::PublicationPhase::Running
+                {
+                    return Err(GenerationPublicationDispatchFailure::NotRunning);
+                }
+                Some(GenerationRetirementPublicationOwner::Pending {
+                    lifecycle,
+                    control: None,
+                })
+            }
+        };
         if !matches!(
             record.retirement.driver.action,
             GenerationRetirementAction::Publication(_)
@@ -2575,6 +2634,12 @@ impl RunState {
         // Allocate delivery while all actual authority is still installed.
         let (writer, receiver, terminal) =
             preparation::PublicationTransfer::channel(actor, observer.clone(), myself.clone());
+        #[cfg(test)]
+        let writer = if lose_delivery {
+            writer.lose_delivery_after_completion_for_test()
+        } else {
+            writer
+        };
         let old = std::mem::replace(&mut attempt.phase, GenerationRetirementPhase::Reserving);
         let GenerationRetirementPhase::Unstarted {
             publication: GenerationUnstartedPublication::Available(reserved),
@@ -2599,11 +2664,13 @@ impl RunState {
         ) else {
             unreachable!()
         };
-        let publication_owner = record.retirement.driver.reply.as_mut().map(|reply| {
-            std::mem::replace(
-                &mut reply.publication_owner,
-                GenerationRetirementPublicationOwner::Transferred,
-            )
+        let publication_owner = publication_owner.or_else(|| {
+            record.retirement.driver.reply.as_mut().map(|reply| {
+                std::mem::replace(
+                    &mut reply.publication_owner,
+                    GenerationRetirementPublicationOwner::Transferred,
+                )
+            })
         });
         let transfer =
             preparation::PublicationTransfer::new(reserved, publisher, publication_owner, writer);
@@ -3973,6 +4040,7 @@ pub(crate) enum GenerationRetirementNativeControl {
     PublicationBodyRefusal,
     WorkerLiveRefusal,
     WorkerNativeLossAfterBody,
+    WorkerPublishedDeliveryLost,
     BeforeSend,
     QueuedBeforeReceive,
     KillAfterReserve,

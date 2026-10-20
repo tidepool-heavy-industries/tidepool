@@ -808,6 +808,18 @@ pub(super) enum RunControlMessage {
         >,
     },
     #[cfg(test)]
+    DispatchDeliveryLostGenerationPublication {
+        actor: ActorRef,
+        observer: crate::resident_workbench::ActorPublicationAttemptObserver,
+        lifecycle: crate::LifecycleHandle,
+        reply: oneshot::Sender<
+            Result<
+                Arc<std::sync::OnceLock<preparation::PublicationTerminalObservation>>,
+                generation::GenerationPublicationDispatchFailure,
+            >,
+        >,
+    },
+    #[cfg(test)]
     ObserveGenerationRetirementCompletion {
         actor: ActorRef,
         reply: oneshot::Sender<Option<generation::GenerationRetirementCompletion>>,
@@ -1313,6 +1325,14 @@ impl Actor for RunControl {
                 let _ = reply.send(
                     state.dispatch_cancelled_generation_publication(&myself, actor, observer),
                 );
+            }
+            #[cfg(test)]
+            RunControlMessage::DispatchDeliveryLostGenerationPublication {
+                actor, observer, lifecycle, reply,
+            } => {
+                let _ = reply.send(state.dispatch_delivery_lost_generation_publication(
+                    &myself, actor, observer, lifecycle,
+                ));
             }
             RunControlMessage::CaptureGenerationRetirement { actor, observer } => {
                 state.capture_generation_retirement(&myself, actor, observer);

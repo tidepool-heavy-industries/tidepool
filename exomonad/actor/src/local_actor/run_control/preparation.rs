@@ -85,9 +85,17 @@ pub(super) struct PublicationWriter {
     actor: ActorRef,
     observer: ActorPublicationAttemptObserver,
     control: RactorRef<RunControlMessage>,
+    #[cfg(test)]
+    lose_delivery_after_completion: bool,
 }
 
 impl PublicationWriter {
+    #[cfg(test)]
+    pub(super) fn lose_delivery_after_completion_for_test(mut self) -> Self {
+        self.lose_delivery_after_completion = true;
+        self
+    }
+
     fn deliver(&mut self, delivery: PublicationDelivery) {
         let observed = match &delivery {
             PublicationDelivery::NotStarted { reason, .. } => {
@@ -121,6 +129,15 @@ impl PublicationWriter {
         // Publish compact completion before either the oneshot receiver or
         // the serial owner can wake. The actual delivery remains owned here.
         let _ = self.terminal.set(observed);
+        #[cfg(test)]
+        if self.lose_delivery_after_completion {
+            // The actual body result and notification were observed above;
+            // remove only their sole affine delivery at this controlled seam.
+            drop(self.sender.take());
+            self.notify();
+            drop(delivery);
+            return;
+        }
         let rejected = self
             .sender
             .take()
@@ -180,6 +197,8 @@ impl PublicationTransfer {
             actor,
             observer,
             control,
+            #[cfg(test)]
+            lose_delivery_after_completion: false,
         };
         (writer, receiver, terminal)
     }
