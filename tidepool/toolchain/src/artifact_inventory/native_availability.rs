@@ -1103,6 +1103,7 @@ struct NativeOfferCustody {
     reachable: imbl::OrdSet<ArtifactBindingNode>,
     native_originals: BTreeSet<ArtifactId>,
     artifact_carriers: BTreeSet<ArtifactBinding>,
+    required_scopes: BTreeSet<ArtifactSelectionId>,
 }
 
 impl NativeOfferCustody {
@@ -1112,15 +1113,18 @@ impl NativeOfferCustody {
     ) -> Result<Self, CompileError> {
         let mut native_originals = BTreeSet::new();
         let mut artifact_carriers = BTreeSet::new();
+        let mut required_scopes = BTreeSet::new();
         let state = lease.inventory.0.lock().expect("inventory lock");
         for node in &reachable {
             let group = match node {
                 ArtifactBindingNode::Artifact(carrier) => {
                     artifact_carriers.insert(*carrier);
+                    required_scopes.insert(carrier.selection);
                     continue;
                 }
                 ArtifactBindingNode::Group(group) => group,
             };
+            required_scopes.insert(group.binding.selection());
             let mut carriers = state
                 .outgoing(*node)
                 .filter_map(|(target, edge)| match target {
@@ -1190,6 +1194,7 @@ impl NativeOfferCustody {
             reachable,
             native_originals,
             artifact_carriers,
+            required_scopes,
         })
     }
 }
@@ -2194,6 +2199,12 @@ impl IssuedNativeOffer {
         &self.0.custody.artifact_carriers
     }
 
+    /// Scopes of actual checked artifact carriers and group issuers. A group
+    /// can be issued separately from the scope owning its carrier edge.
+    pub(crate) fn required_scopes(&self) -> &BTreeSet<ArtifactSelectionId> {
+        &self.0.custody.required_scopes
+    }
+
     pub(super) fn offers_groups_for(&self, originals: &BTreeSet<ArtifactId>) -> bool {
         !self.0.custody.native_originals.is_disjoint(originals)
     }
@@ -3108,10 +3119,7 @@ mod normalized_dependency_tests {
         selection
             .finish_new_product_availability(
                 &parent.metadata_snapshot(),
-                &BTreeMap::from([(
-                    root_id,
-                    Arc::clone(complete.native_availability().issued_row(root_id).unwrap()),
-                )]),
+                complete.native_availability(),
             )
             .unwrap();
         let canonical = Arc::new(ArtifactEntry::canonical(
@@ -3398,13 +3406,11 @@ mod normalized_dependency_tests {
             artifacts.clone(),
         )
         .unwrap();
-        let issued = support
-            .native_availability()
-            .rows()
-            .map(|row| (row.original_artifact_id(), Arc::clone(row)))
-            .collect();
         selection
-            .finish_new_product_availability(&artifacts.metadata_snapshot(), &issued)
+            .finish_new_product_availability(
+                &artifacts.metadata_snapshot(),
+                support.native_availability(),
+            )
             .unwrap();
         (entry, selection)
     }

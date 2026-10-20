@@ -1454,6 +1454,37 @@ impl ArtifactOwnerConflictEvidence {
         }
     }
     fn metadata(&self) -> serde_json::Value {
+        // Existing commitments identify the exact birth without expanding its
+        // historical facts, selection proofs or per-view native acquisition.
+        fn role(role: &CompilerInputRole) -> serde_json::Value {
+            match role {
+                CompilerInputRole::InterfaceOnly { interface } => serde_json::json!({
+                    "kind": "interface_only",
+                    "interface": interface,
+                }),
+                CompilerInputRole::ReusableOriginal {
+                    interface,
+                    original,
+                } => serde_json::json!({
+                    "kind": "reusable_original",
+                    "interface": interface,
+                    "original": original,
+                }),
+                CompilerInputRole::PublishedSourceOriginal {
+                    interface,
+                    original,
+                    selection_sha256,
+                    native_authority,
+                    ..
+                } => serde_json::json!({
+                    "kind": "published_source_original",
+                    "interface": interface,
+                    "original": original,
+                    "selection_sha256": selection_sha256,
+                    "native_authority_cid": native_authority.facts().commitment(),
+                }),
+            }
+        }
         match self {
             Self::ArtifactSelection {
                 existing,
@@ -1472,8 +1503,8 @@ impl ArtifactOwnerConflictEvidence {
             }),
             Self::CompilerRole { existing, incoming } => serde_json::json!({
                 "boundary": "compiler_role",
-                "existing_role": existing,
-                "incoming_role": incoming,
+                "existing_role": role(existing),
+                "incoming_role": role(incoming),
             }),
         }
     }
@@ -6347,6 +6378,9 @@ pub(crate) struct RetainedArtifactMetadata {
     pub entries: imbl::OrdMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
     pub artifacts: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
     pub ambiguous_native_owners: Arc<BTreeSet<ExactModuleIdentity>>,
+    // Deterministic fallback for owners with multiple native carriers. This is
+    // catalog metadata, not compiler role selection or native permission.
+    interface_representatives: imbl::OrdMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
     dependencies: imbl::OrdSet<(ArtifactId, ArtifactId, ArtifactDependency)>,
     pub(crate) selected_native_groups: Arc<BTreeSet<NativeGroupKey>>,
 }
@@ -6787,6 +6821,10 @@ impl ArtifactView {
                 }
                 artifacts.insert(id, Arc::clone(entry));
             }
+            let interface_representatives = entries
+                .iter()
+                .map(|(owner, id)| (owner.clone(), Arc::clone(&artifacts[id])))
+                .collect();
             let mut ambiguous_native_owners = BTreeSet::new();
             for (owner, ids) in natives {
                 if ids.len() == 1 {
@@ -6807,6 +6845,7 @@ impl ArtifactView {
                 artifacts: artifacts.into_iter().collect(),
                 dependencies,
                 ambiguous_native_owners: Arc::new(ambiguous_native_owners),
+                interface_representatives,
                 selected_native_groups: Arc::new(selected_native_groups),
             })
         }))
@@ -7174,6 +7213,16 @@ impl ArtifactView {
             Vec::new(),
             Vec::new(),
         ))
+    }
+
+    /// Physical observations for an issuer that already owns exact role IDs.
+    /// These lookups do not select namespace bindings or native groups.
+    pub(crate) fn observed_payload(&self, id: &ArtifactId) -> Option<&Arc<ArtifactEntry>> {
+        self.lease.payloads.get(id)
+    }
+
+    pub(crate) fn has_observed_owner(&self, owner: &ExactModuleIdentity) -> bool {
+        self.lease.has_acquired_owner(owner)
     }
 
     pub(crate) fn contains_namespace_artifact(&self, id: ArtifactId) -> bool {
@@ -7902,17 +7951,36 @@ impl ArtifactView {
         if roots.iter().any(|id| !namespace.contains_key(id)) {
             return Err(failure("issued root lacks exact namespace binding"));
         }
-        let selected = graph.roots.clone();
-        let custody = graph.custody_roots.clone();
+        for (scope, requested) in &selection.snapshot().scopes {
+            let acquired =
+                self.lease.selection.scopes.get(scope).ok_or_else(|| {
+                    failure("issued selection scope is outside acquisition custody")
+                })?;
+            if acquired != requested {
+                return Err(failure(
+                    "issued selection scope proof differs from acquisition custody",
+                ));
+            }
+        }
         validate_issued_selection(&state, owned, graph)?;
         drop(state);
-        let mut retained = self
-            .lease
-            .inventory
-            .retain(selected, custody, Vec::new(), Vec::new());
-        retained.replace_namespace(&namespace);
+        // The issuer can retain proof-only scopes for recorded native offers.
+        // Graph reachability grants payload custody but cannot recreate those facts.
+        let retained = Self::new(ViewDraft {
+            roots: graph.roots.clone(),
+            selection: Arc::clone(selection.snapshot()),
+            inventory: self.lease.inventory.clone(),
+            parents: Vec::new(),
+            issuing_payloads: BTreeMap::new(),
+            materialization_parents: Vec::new(),
+            materialization: Mutex::new(BTreeMap::new()),
+        });
         let mut retained = self.retain_projected_materializations(retained)?;
-        retained.replace_namespace(&namespace);
+        // Materialization projection can infer a namespace for an empty view.
+        // Reopening preserves the issuer's exact choice, including an empty one.
+        Arc::get_mut(&mut retained.lease)
+            .expect("new issued selection lease")
+            .selection = Arc::clone(selection.snapshot());
         Ok(retained)
     }
 
@@ -18862,7 +18930,7 @@ mod tests {
     }
 
     #[test]
-    fn compiler_role_conflict_reports_bounded_exact_ids_and_retains_full_selection() {
+    fn compiler_role_conflict_reports_bounded_exact_ids_and_commitments() {
         let owner = ExactModuleIdentity {
             unit: "unit".into(),
             module: "Shared".into(),
@@ -18878,13 +18946,10 @@ mod tests {
             selection: ExactArtifactSelection::from_recovered_graph_selection(
                 ArtifactGraphSelection {
                     selections: vec![],
-                    bindings: vec![
-                        ArtifactBinding {
-                            artifact: ArtifactId([4; 32]),
-                            selection: ArtifactSelectionId([6; 32])
-                        };
-                        10_000
-                    ],
+                    bindings: vec![ArtifactBinding {
+                        artifact: ArtifactId([4; 32]),
+                        selection: ArtifactSelectionId([6; 32]),
+                    }],
                     namespace: vec![],
                     roots: vec![],
                     native_groups: vec![],
@@ -18928,9 +18993,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(index["boundary"], "compiler_role");
+        assert_eq!(index["incoming_role"]["kind"], "published_source_original");
         assert_eq!(
-            index["incoming_role"],
-            serde_json::to_value(incoming).unwrap()
+            index["incoming_role"]["interface"],
+            serde_json::to_value(incoming.interface()).unwrap()
+        );
+        let CompilerInputRole::PublishedSourceOriginal {
+            original,
+            selection_sha256,
+            native_authority,
+            ..
+        } = incoming
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            index["incoming_role"]["original"],
+            serde_json::to_value(original).unwrap()
+        );
+        assert_eq!(
+            index["incoming_role"]["selection_sha256"],
+            serde_json::to_value(selection_sha256).unwrap()
+        );
+        assert_eq!(
+            index["incoming_role"]["native_authority_cid"],
+            serde_json::to_value(native_authority.facts().commitment()).unwrap()
+        );
+        assert_eq!(index["incoming_role"].as_object().unwrap().len(), 5);
+        assert!(
+            std::fs::metadata(destination.path().join("owner-conflict/index.json"))
+                .unwrap()
+                .len()
+                < 4096
         );
     }
 

@@ -88,7 +88,7 @@ import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
   , encodeEnsureExactInputsOutcomeWithin
   , WorldPublicModuleRequest(..), WorldQueryMode(..)
-  , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
+  , WorldCellRecipe(..), WorldCellOperandRequest(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
   , StructuredInspection(..), InspectionProvenance(..)
   , InspectionRequest(..), RequestField(..), RequestShapeError(..), RequestOperation(..), WorkerRequest(..)
   , ExactNameInspection(..), StructuredNameScope(..), StructuredNameNamespace(..)
@@ -989,9 +989,9 @@ checkingSourceRequestRoundTrip = do
       resident = ExactInputsRequest world (ResidentExactInputs "realized")
       exactFields = [EnsureExactInputs resident]
   [exactFlag, exactPayload] <- pure (workerArgv exactFields)
-  assertEqual "source-free launcher flag matches the independent Rust grammar" "--worker-request-v25" exactFlag
+  assertEqual "source-free launcher flag matches the independent Rust grammar" "--worker-request-v26" exactFlag
   assertEqual "source-free request matches independent Rust fixture"
-    "54505245513032350001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564" exactPayload
+    "54505245513032360001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564" exactPayload
   forM_ [resident, ExactInputsRequest world (CompleteExactInputs "/scope.cbor")
     , ExactInputsRequest world (SuccessorExactInputs (replicate 64 'b') "predecessor-realization" "/successor.cbor")] $ \inputs ->
     case workerRequestFromArgv (workerArgv [EnsureExactInputs inputs]) of
@@ -1054,7 +1054,7 @@ checkingSourceRequestRoundTrip = do
           (InspectionProvenance 1 "display-only")) "answer.bin"
   [_, queryPayload] <- pure (workerArgv [WorldPublicModule query])
   assertEqual "world public query matches the frozen field 58 byte layout"
-    "5450524551303235000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e" queryPayload
+    "5450524551303236000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e" queryPayload
   forM_ [WorldStructuredInfo, WorldStructuredType] $ \mode -> do
     let selected = query { worldQueryMode = mode }
     case workerRequestFromArgv (workerArgv [WorldPublicModule selected]) of
@@ -1075,11 +1075,20 @@ checkingSourceRequestRoundTrip = do
         other -> fail ("invalid world query accepted: " ++ show other)
 
   let cellRecipe = WorldCellRecipe "x <- pure 1" "{{CELL_IMPORTS}}\n{{CELL_BODY}}" [("bind","module Bind where")]
-      cellPlan = WorldCellPlanRequest world "held" cellRecipe "plan.cbor"
-      cellPrepare = WorldCellPrepareRequest world "held" cellRecipe "plan-receipt" (BS.replicate 32 98)
+      cellPlan = WorldCellPlanRequest world "held" cellRecipe Nothing "plan.cbor"
+      cellPrepare = WorldCellPrepareRequest world "held" cellRecipe Nothing "plan-receipt" (BS.replicate 32 98) 17
         [(0,PlannedBind 7),(1,PlannedExpression 8 "it")] "operation" "prepared.cbor"
-      cases = [(WorldCellPlan cellPlan,WorldCellPlanOperation cellPlan,"5450524551303235000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72")
-              ,(WorldCellPrepare cellPrepare,WorldCellPrepareOperation cellPrepare,"5450524551303235000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72")]
+      cases = [(WorldCellPlan cellPlan,WorldCellPlanOperation cellPlan,"5450524551303236000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650009000000706c616e2e63626f72")
+              ,(WorldCellPrepare cellPrepare,WorldCellPrepareOperation cellPrepare,"5450524551303236000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e64207768657265000c000000706c616e2d72656365697074626262626262626262626262626262626262626262626262626262626262626211000000000000000200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72")]
+  let operand = Just (WorldCellOperandRequest "private-input.cbor" (BS.replicate 32 7))
+  forM_ [WorldCellPlan cellPlan {worldCellPlanOperand=operand}
+    ,WorldCellPrepare cellPrepare {worldCellPrepareOperand=operand}] $ \field -> do
+      case workerRequestFromArgv (workerArgv [field]) of
+        Right (Just request) -> assertEqual "one sealed private operand roundtrips"
+          (case field of WorldCellPlan value -> Right (WorldCellPlanOperation value)
+                         WorldCellPrepare value -> Right (WorldCellPrepareOperation value)
+                         _ -> error "closed operand fixture") (admitRequestOperation request)
+        other -> fail ("private operand framing refused: " ++ show other)
   forM_ cases $ \(field,operation,expected) -> do
     [flag,payload] <- pure (workerArgv [field])
     assertEqual "held cell operation matches independent Rust framing" expected payload

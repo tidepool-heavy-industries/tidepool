@@ -352,6 +352,14 @@ pub(crate) struct CompilerSourceSupport {
     input_decisions: IssuedInputNativeDecisions,
 }
 
+/// One authenticated program insertion retains whether the existing full
+/// qualifier was required by a change from type-only to an Original role.
+pub(crate) struct ProgramSupportDelta {
+    pub(crate) support: CompilerSourceSupport,
+    pub(crate) changed_owners: Vec<ExactModuleIdentity>,
+    pub(crate) promotion_qualifier_invocations: usize,
+}
+
 /// An operation's role closure borrows its original complete issuer. Native
 /// availability, input choices and instance authority remain with that issuer.
 pub(crate) struct DemandCompilerProjection {
@@ -890,6 +898,11 @@ pub(crate) struct SelectedCompilerInterfaces<'a> {
     selected: &'a AdmittedCompilerRoles,
 }
 
+enum InterfaceProjectionPurpose {
+    PreserveCustody,
+    TypeNames,
+}
+
 impl SelectedCompilerInterfaces<'_> {
     pub(crate) fn get(&self, owner: &ExactModuleIdentity) -> Option<&Arc<ArtifactEntry>> {
         self.selected.get(owner).map(|row| &row.interface.1)
@@ -913,6 +926,23 @@ impl SelectedCompilerInterfaces<'_> {
         &self,
         owners: Vec<ExactModuleIdentity>,
     ) -> Result<CompilerSourceSupport, CompileError> {
+        self.project_interfaces(owners, InterfaceProjectionPurpose::PreserveCustody)
+    }
+
+    /// Only the signature/witness-authenticated type boundary requests this
+    /// projection. Its execution owner is retained separately by that caller.
+    pub(crate) fn type_interfaces_for_owners(
+        &self,
+        owners: Vec<ExactModuleIdentity>,
+    ) -> Result<CompilerSourceSupport, CompileError> {
+        self.project_interfaces(owners, InterfaceProjectionPurpose::TypeNames)
+    }
+
+    fn project_interfaces(
+        &self,
+        owners: Vec<ExactModuleIdentity>,
+        purpose: InterfaceProjectionPurpose,
+    ) -> Result<CompilerSourceSupport, CompileError> {
         let mut projection = CompilerInputProjection::default();
         let mut pending = owners;
         while let Some(owner) = pending.pop() {
@@ -930,7 +960,6 @@ impl SelectedCompilerInterfaces<'_> {
                 },
             )?;
         }
-        let artifacts = self.select_owners(projection.roles.keys().cloned().collect())?;
         let mut selected = projection
             .roles
             .keys()
@@ -947,6 +976,25 @@ impl SelectedCompilerInterfaces<'_> {
             .map(|row| (row.interface.0.artifact, Arc::clone(&row.interface.1)))
             .collect();
         projection.entries_from_artifacts(&entries)?;
+        let artifacts = match purpose {
+            InterfaceProjectionPurpose::PreserveCustody => {
+                self.select_owners(projection.roles.keys().cloned().collect())?
+            }
+            InterfaceProjectionPurpose::TypeNames => {
+                // The validated type closure already has exact admitted rows.
+                // Execution remains with the original source/checked-value owner.
+                let empty = self.artifacts.inventory().empty_view();
+                if selected.is_empty() {
+                    empty
+                } else {
+                    let additions = selected
+                        .values()
+                        .map(|row| (self.artifacts.clone(), row.clone()))
+                        .collect::<Vec<_>>();
+                    empty.append_type_interfaces(&additions)?
+                }
+            }
+        };
         for row in selected.values_mut() {
             row.retain_acquisitions(&artifacts)?;
         }
@@ -1009,18 +1057,54 @@ impl ArtifactView {
         &self,
         additions: impl IntoIterator<Item = &'a (ArtifactView, ResolvedCompilerRole)>,
     ) -> Result<Self, CompileError> {
+        self.append_admitted_custody(
+            additions
+                .into_iter()
+                .map(|(source, row)| (source.lease.as_ref(), row.interface.0, &row.interface.1)),
+            &[],
+        )
+    }
+
+    /// Append exact admitted bindings and the custody of opaque native offers.
+    /// Group proof scopes stay distinct from their artifact-carrier scopes;
+    /// executable roots remain with the issuing offers.
+    fn append_admitted_custody<'a>(
+        &self,
+        bindings: impl IntoIterator<Item = (&'a ViewLease, ArtifactBinding, &'a Arc<ArtifactEntry>)>,
+        offers: &[IssuedNativeOffer],
+    ) -> Result<Self, CompileError> {
         let mut selection = self.lease.selection.as_ref().clone();
         let mut payloads = self.lease.payloads.clone();
         let mut acquired_owner_counts = self.lease.acquired_owner_counts.clone();
         let mut pending_scopes = Vec::new();
         let mut scope_sources = BTreeMap::new();
         let mut introduced = Vec::new();
-        for (source, row) in additions {
-            let (binding, entry) = &row.interface;
+        let mut materialization_sources = self.lease.materialization_sources.clone();
+        let mut materialization_parents = BTreeSet::from([self.lease.materialization.id()]);
+        let mut retain_payload = |binding: ArtifactBinding, entry: &Arc<ArtifactEntry>| {
+            let retained = match payloads.get(&binding.artifact) {
+                Some(previous) => ArtifactEntry::merge_catalog_input_custody(previous, entry)?,
+                None => Arc::clone(entry),
+            };
+            if payloads
+                .get(&binding.artifact)
+                .is_none_or(|prior| !Arc::ptr_eq(prior, &retained))
+            {
+                ViewLease::insert_payload(
+                    &mut payloads,
+                    &mut acquired_owner_counts,
+                    binding.artifact,
+                    Arc::clone(&retained),
+                );
+                introduced.push((binding.artifact, retained));
+            }
+            Ok::<_, CompileError>(())
+        };
+        for (source, binding, entry) in bindings {
             if selection
                 .namespace
                 .get(&binding.artifact)
-                .is_some_and(|prior| prior != binding)
+                .is_some_and(|prior| *prior != binding)
             {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::BindingAmbiguity {
@@ -1028,39 +1112,32 @@ impl ArtifactView {
                     },
                 ));
             }
-            selection.namespace.insert(binding.artifact, *binding);
+            selection.namespace.insert(binding.artifact, binding);
             selection
                 .roots
-                .insert(InventoryNodeKey::Artifact(*binding), ());
-            if !payloads.contains_key(&binding.artifact) {
-                ViewLease::insert_payload(
-                    &mut payloads,
-                    &mut acquired_owner_counts,
-                    binding.artifact,
-                    Arc::clone(entry),
-                );
-                introduced.push((binding.artifact, Arc::clone(entry)));
-            } else if payloads[&binding.artifact].as_ref() != entry.as_ref() {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::MetadataConflict {
-                        artifact: binding.artifact,
-                    },
-                ));
-            }
-            if !Arc::ptr_eq(&payloads[&binding.artifact], entry) {
-                ViewLease::insert_payload(
-                    &mut payloads,
-                    &mut acquired_owner_counts,
-                    binding.artifact,
-                    Arc::clone(entry),
-                );
-                introduced.push((binding.artifact, Arc::clone(entry)));
-            }
+                .insert(InventoryNodeKey::Artifact(binding), ());
+            retain_payload(binding, entry)?;
             pending_scopes.push((binding.selection, source));
+        }
+        for offer in offers {
+            let source = offer.custody_lease().as_ref();
+            for carrier in offer.artifact_carriers() {
+                let entry = source
+                    .payloads
+                    .get(&carrier.artifact)
+                    .ok_or_else(|| failure("issued native carrier lacks its acquired payload"))?;
+                retain_payload(*carrier, entry)?;
+                selection
+                    .custody_roots
+                    .insert(InventoryNodeKey::Artifact(*carrier), ());
+            }
+            pending_scopes.extend(offer.required_scopes().iter().map(|scope| (*scope, source)));
+            materialization_sources
+                .insert(source.materialization.id(), source.materialization.clone());
+            materialization_parents.insert(source.materialization.id());
         }
         while let Some((scope, source)) = pending_scopes.pop() {
             let proof = source
-                .lease
                 .selection
                 .scopes
                 .get(&scope)
@@ -1075,23 +1152,22 @@ impl ArtifactView {
             }
             pending_scopes.extend(
                 proof
-                    .proof()
-                    .scope_dependencies()
-                    .into_iter()
+                    .direct_ancestors()
+                    .iter()
+                    .copied()
                     .map(|ancestor| (ancestor, source)),
             );
             selection.scopes.insert(scope, proof.clone());
-            scope_sources.insert(scope, Arc::clone(proof.proof()));
+            scope_sources.insert(scope, proof.clone());
         }
         {
             let mut state = self.lease.inventory.0.lock().expect("inventory lock");
-            let proofs = scope_proof::prepare_install(&state, scope_sources.into_values())?;
+            let proofs = scope_proof::prepare_issued_install(&state, scope_sources.into_values())?;
             scope_proof::install(&mut state, proofs);
             for (id, entry) in introduced {
                 state.intern(id, &entry);
             }
         }
-        let mut materialization_sources = self.lease.materialization_sources.clone();
         materialization_sources.insert(
             self.lease.materialization.id(),
             self.lease.materialization.clone(),
@@ -1108,7 +1184,7 @@ impl ArtifactView {
             materialization_sources,
             materialization: MaterializationSource {
                 cache: Arc::new(Mutex::new(BTreeMap::new())),
-                parents: Arc::from([self.lease.materialization.id()]),
+                parents: materialization_parents.into_iter().collect(),
                 fixed: Default::default(),
             },
         });
@@ -1849,6 +1925,275 @@ impl CompilerSourceSupport {
         Ok((result.refreshed_native_facts()?, changed))
     }
 
+    pub(crate) fn same_interface_binding(
+        &self,
+        issued: &Self,
+        owner: &ExactModuleIdentity,
+        interface: ArtifactId,
+    ) -> bool {
+        match (self.selected.get(owner), issued.selected.get(owner)) {
+            (Some(actual), Some(expected)) => {
+                actual.interface.0 == expected.interface.0
+                    && actual.interface.0.artifact == interface
+            }
+            _ => false,
+        }
+    }
+
+    /// Add the actual closed support fragment issued for one program prefix.
+    /// Unchanged roles and native facts share their persistent owners. Incoming
+    /// offers retain custody without choosing additional executable roots.
+    pub(crate) fn append_program_fragment(
+        &self,
+        incoming: &Self,
+    ) -> Result<ProgramSupportDelta, CompileError> {
+        let mut projection = self.projection.clone();
+        let mut selected = self.selected.as_ref().clone();
+        let mut home_units = self.selected.home_units.as_ref().clone();
+        let mut changed = BTreeSet::new();
+        let mut promotion = false;
+        for (owner, row) in incoming.selected.iter() {
+            crate::host_work::checkpoint()?;
+            let role = &incoming.projection.roles[owner];
+            if let Some(previous) = selected.get(owner) {
+                promotion |= previous.original.is_none() && row.original.is_some();
+                if previous.interface.0.artifact != row.interface.0.artifact {
+                    return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
+                        owner: owner.clone(),
+                    }));
+                }
+                if previous.interface.0 != row.interface.0 {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::BindingAmbiguity {
+                            artifact: row.interface.0.artifact,
+                        },
+                    ));
+                }
+                if let (Some((old, _)), Some((new, _))) = (&previous.original, &row.original) {
+                    if old != new {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::BindingAmbiguity {
+                                artifact: new.artifact,
+                            },
+                        ));
+                    }
+                }
+            }
+            projection.admit_role(owner.clone(), role.clone())?;
+            let effective = &projection.roles[owner];
+            let mut retained = row.clone();
+            if effective.original().is_some() && retained.original.is_none() {
+                retained.original = selected.get(owner).and_then(|prior| prior.original.clone());
+            }
+            if selected.get(owner) != Some(&retained) {
+                if let ArtifactPayload::Canonical(interface) = &row.interface.1.payload {
+                    home_units.extend(interface.home_units().iter().cloned());
+                }
+                selected.rows.insert(owner.clone(), retained);
+                changed.insert(owner.clone());
+            }
+        }
+        projection.validate_requirements(
+            incoming.selected.iter().flat_map(|(_, row)| {
+                std::iter::once(&row.interface)
+                    .chain(row.original.iter())
+                    .map(|(_, entry)| entry.as_ref())
+            }),
+            |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
+        )?;
+        let mut offers = self.native_offers.to_vec();
+        let mut native_offer_facts = self.native_offer_facts.clone();
+        let mut new_offers = Vec::new();
+        for offer in incoming.native_offers.iter() {
+            let id = offer.snapshot_identity()?;
+            if let Some(previous) = native_offer_facts.get(&id) {
+                if previous != &offer.snapshot_facts() {
+                    return Err(failure("program support changed an issued native offer"));
+                }
+                continue;
+            }
+            native_offer_facts.insert(id, offer.snapshot_facts());
+            new_offers.push(offer.clone());
+            offers.push(offer.clone());
+        }
+        let artifacts = self.artifacts.append_admitted_custody(
+            incoming.selected.iter().flat_map(|(_, row)| {
+                std::iter::once(&row.interface)
+                    .chain(row.original.iter())
+                    .map(|(binding, entry)| (incoming.artifacts.lease.as_ref(), *binding, entry))
+            }),
+            &new_offers,
+        )?;
+        for (owner, _) in incoming.selected.iter() {
+            let row = selected.rows.get_mut(owner).expect("incoming admitted row");
+            let interface = &artifacts.lease.payloads[&row.interface.0.artifact];
+            let mut custody_changed = !Arc::ptr_eq(&row.interface.1, interface);
+            row.interface.1 = Arc::clone(interface);
+            if let Some((binding, entry)) = &mut row.original {
+                let retained = &artifacts.lease.payloads[&binding.artifact];
+                custody_changed |= !Arc::ptr_eq(entry, retained);
+                *entry = Arc::clone(retained);
+            }
+            if custody_changed {
+                changed.insert(owner.clone());
+            }
+        }
+        let mut input_decisions = self.input_decisions.clone();
+        input_decisions.merge_selected(&incoming.input_decisions.for_exact_roles(&projection))?;
+        let mut native_availability = match self
+            .native_availability
+            .merge(&incoming.native_availability)?
+        {
+            crate::declaration_context::NativeAvailabilityMerge::Unchanged(rows)
+            | crate::declaration_context::NativeAvailabilityMerge::Changed(rows) => rows,
+        };
+        if promotion {
+            // Only this semantic transition can change qualification of prior
+            // optional Full rows. The existing qualifier preserves exact
+            // historical dependencies independently of direct root choices.
+            native_availability =
+                native_availability.for_compiler_roles(&projection, &artifacts)?;
+        }
+        selected.home_units = Arc::new(home_units);
+        Ok(ProgramSupportDelta {
+            support: Self {
+                projection,
+                artifacts,
+                native_fact_owner: self.native_fact_owner.clone(),
+                native_offers: offers.into(),
+                native_offer_facts,
+                native_availability,
+                selected: Arc::new(selected),
+                input_decisions,
+            }
+            .refreshed_native_facts()?,
+            changed_owners: changed.into_iter().collect(),
+            promotion_qualifier_invocations: usize::from(promotion),
+        })
+    }
+
+    /// Maintain the catalog representatives and flattened dependency facts for
+    /// the exact bindings just appended. Compiler role selection remains the
+    /// independent `entries` map below; representatives never grant a role.
+    pub(crate) fn program_fragment_metadata(
+        &self,
+        prior: &CompilerArtifactMetadata,
+        incoming: &Self,
+        changed_owners: &[ExactModuleIdentity],
+    ) -> Result<CompilerArtifactMetadata, CompileError> {
+        let mut entries = prior.entries.clone();
+        for owner in changed_owners {
+            let row = self
+                .selected
+                .get(owner)
+                .ok_or_else(|| failure("program metadata lacks its changed role"))?;
+            entries.insert(
+                owner.clone(),
+                Arc::clone(&row.original.as_ref().unwrap_or(&row.interface).1),
+            );
+        }
+        let mut retained = prior.retained.as_ref().clone();
+        let mut bindings = BTreeSet::new();
+        for (_, row) in incoming.selected.iter() {
+            bindings.insert(row.interface.0);
+            bindings.extend(row.original.iter().map(|(binding, _)| *binding));
+        }
+        for offer in incoming.native_offers.iter() {
+            bindings.extend(offer.artifact_carriers());
+        }
+        let mut touched = BTreeSet::new();
+        for binding in bindings {
+            let entry = self
+                .artifacts
+                .lease
+                .payloads
+                .get(&binding.artifact)
+                .ok_or_else(|| failure("program metadata lacks its acquired payload"))?;
+            if touched.insert(binding.artifact) {
+                let owner = &entry.descriptor.owner;
+                let new_payload = !retained.artifacts.contains_key(&binding.artifact);
+                retained
+                    .artifacts
+                    .insert(binding.artifact, Arc::clone(entry));
+                if !entry.is_native() {
+                    if retained
+                        .interface_representatives
+                        .get(owner)
+                        .is_none_or(|prior| prior.descriptor.id <= binding.artifact)
+                    {
+                        retained
+                            .interface_representatives
+                            .insert(owner.clone(), Arc::clone(entry));
+                    }
+                    if retained
+                        .entries
+                        .get(owner)
+                        .is_none_or(|prior| !prior.is_native())
+                    {
+                        let representative = &retained.interface_representatives[owner];
+                        retained
+                            .entries
+                            .insert(owner.clone(), Arc::clone(representative));
+                    }
+                } else if new_payload {
+                    if retained.ambiguous_native_owners.contains(owner) {
+                        // The prior exact historical variants remain custody.
+                    } else if retained
+                        .entries
+                        .get(owner)
+                        .is_some_and(|prior| prior.is_native())
+                    {
+                        Arc::make_mut(&mut retained.ambiguous_native_owners).insert(owner.clone());
+                        match retained.interface_representatives.get(owner) {
+                            Some(interface) => {
+                                retained
+                                    .entries
+                                    .insert(owner.clone(), Arc::clone(interface));
+                            }
+                            None => {
+                                retained.entries.remove(owner);
+                            }
+                        }
+                    } else {
+                        retained.entries.insert(owner.clone(), Arc::clone(entry));
+                    }
+                } else if retained
+                    .entries
+                    .get(owner)
+                    .is_some_and(|prior| prior.descriptor.id == binding.artifact)
+                {
+                    retained.entries.insert(owner.clone(), Arc::clone(entry));
+                }
+            }
+            let node = InventoryNodeKey::Artifact(binding);
+            let proof = self
+                .artifacts
+                .lease
+                .selection
+                .scopes
+                .get(&binding.selection)
+                .ok_or_else(|| failure("program metadata lacks its issuing proof"))?
+                .proof();
+            let start = proof
+                .dependencies
+                .partition_point(|(source, _, _)| *source < node);
+            for (_, target, dependency) in proof.dependencies[start..]
+                .iter()
+                .take_while(|(source, _, _)| *source == node)
+            {
+                retained.dependencies.insert((
+                    binding.artifact,
+                    target.artifact(),
+                    dependency.clone(),
+                ));
+            }
+        }
+        Ok(CompilerArtifactMetadata {
+            entries,
+            retained: Arc::new(retained),
+        })
+    }
+
     pub(crate) fn type_interface_metadata(
         &self,
         prior: &CompilerArtifactMetadata,
@@ -1863,6 +2208,15 @@ impl CompilerSourceSupport {
             retained
                 .artifacts
                 .insert(binding.artifact, Arc::clone(entry));
+            if retained
+                .interface_representatives
+                .get(owner)
+                .is_none_or(|prior| prior.descriptor.id < binding.artifact)
+            {
+                retained
+                    .interface_representatives
+                    .insert(owner.clone(), Arc::clone(entry));
+            }
             // The retained catalog uses the greatest canonical ID, unless a
             // unique native carrier already owns the representative position.
             if retained
@@ -4929,7 +5283,7 @@ mod tests {
     #[test]
     fn ordinary_native_fact_successors_encode_only_changed_facts() {
         use crate::exact_context::{take_native_fact_work, NativeFactWork};
-        for unrelated in [0, 16, 128] {
+        for unrelated in [1, 32, 128] {
             let inventory = ArtifactInventory::default();
             let mut entries = decision_affinity_entries();
             entries.extend((0..unrelated).map(|index| {
@@ -4988,9 +5342,41 @@ mod tests {
                 .unwrap();
             let incoming =
                 CompilerSourceSupport::new(projection, view, [], Default::default()).unwrap();
+            let prior_projection = source.projection.clone();
+            let prior_view = source.artifacts.capture_graph_selection();
+            let expected = source.merge(&incoming).unwrap();
             take_native_fact_work();
-            let changed = source.merge(&incoming).unwrap();
+            let inserted = source.append_program_fragment(&incoming).unwrap();
+            let changed = inserted.support;
             let delta = take_native_fact_work();
+            assert_eq!(inserted.promotion_qualifier_invocations, 0);
+            assert_eq!(
+                inserted.changed_owners,
+                incoming
+                    .projection
+                    .roles
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(changed.projection, expected.projection);
+            assert_eq!(changed.native_offer_facts, expected.native_offer_facts);
+            assert_eq!(changed.native_availability, expected.native_availability);
+            assert_eq!(changed.input_decisions, expected.input_decisions);
+            assert_eq!(source.projection, prior_projection);
+            assert_eq!(source.artifacts.capture_graph_selection(), prior_view);
+            for (owner, prior) in source.selected.iter() {
+                assert!(Arc::ptr_eq(
+                    &changed.selected.rows[owner].interface.1,
+                    &prior.interface.1
+                ));
+                if let Some((_, original)) = &prior.original {
+                    assert!(Arc::ptr_eq(
+                        &changed.selected.rows[owner].original.as_ref().unwrap().1,
+                        original
+                    ));
+                }
+            }
             assert_eq!(
                 delta.changed_entries, 1,
                 "only one new typed role: {delta:?}"
@@ -5020,6 +5406,196 @@ mod tests {
             eprintln!(
                 "native-fact-successor unrelated={unrelated} cold={cold:?} changed={delta:?}"
             );
+        }
+    }
+
+    #[test]
+    fn program_original_promotion_qualifies_once_and_keeps_issued_dependencies() {
+        let entries = decision_affinity_entries();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let inventory = ArtifactInventory::default();
+        let issued = CompilerSourceSupport::from_selected_issuance(
+            projection,
+            inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .unwrap(),
+        )
+        .unwrap();
+        let child = ExactModuleIdentity {
+            unit: "fixture".into(),
+            module: "AffinityChild".into(),
+        };
+        let ancestors = BTreeSet::from([
+            ExactModuleIdentity {
+                unit: "fixture".into(),
+                module: "AffinityParent".into(),
+            },
+            ExactModuleIdentity {
+                unit: "fixture".into(),
+                module: "AffinityCaller".into(),
+            },
+        ]);
+        let previous = issued.for_source_owners(&ancestors).unwrap();
+        let incoming = issued
+            .source_support(&BTreeSet::from([child.clone()]))
+            .unwrap();
+        assert!(previous.projection.roles[&child].original().is_none());
+        let child_id = incoming.projection.roles[&child].original().unwrap();
+        let old_rows = previous.native_availability.snapshot_facts().unwrap();
+        let old_view = previous.artifacts.capture_graph_selection();
+        let expected = previous.merge(&incoming).unwrap();
+        let inserted = previous.append_program_fragment(&incoming).unwrap();
+        assert_eq!(inserted.promotion_qualifier_invocations, 1);
+        assert_eq!(inserted.support.projection, expected.projection);
+        let summarize = |support: &CompilerSourceSupport| {
+            support
+                .native_availability
+                .snapshot_facts()
+                .unwrap()
+                .into_iter()
+                .map(|(id, fact)| {
+                    (
+                        id,
+                        fact.mode,
+                        fact.contributions.keys().copied().collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            inserted
+                .support
+                .native_availability
+                .snapshot_facts()
+                .unwrap()
+                == expected.native_availability.snapshot_facts().unwrap(),
+            "actual={:?} expected={:?}",
+            summarize(&inserted.support),
+            summarize(&expected)
+        );
+        assert_eq!(
+            previous.native_availability.snapshot_facts().unwrap(),
+            old_rows
+        );
+        assert_eq!(previous.artifacts.capture_graph_selection(), old_view);
+        assert_eq!(
+            inserted.support.projection.roles[&child].original(),
+            Some(child_id)
+        );
+        for offer in previous.native_offers.iter() {
+            let retained = inserted
+                .support
+                .native_offers
+                .iter()
+                .find(|candidate| candidate.same_issuance(offer))
+                .unwrap();
+            assert_eq!(
+                retained.issued_group_carriers().unwrap(),
+                offer.issued_group_carriers().unwrap()
+            );
+            assert_eq!(retained.snapshot_facts(), offer.snapshot_facts());
+        }
+        assert!(inserted
+            .support
+            .native_availability
+            .issued_row(child_id)
+            .unwrap()
+            .permits(9));
+        let repeated = inserted.support.append_program_fragment(&incoming).unwrap();
+        assert_eq!(repeated.promotion_qualifier_invocations, 0);
+        assert_eq!(repeated.support.projection, inserted.support.projection);
+    }
+
+    #[test]
+    fn program_fragment_metadata_matches_cold_multiversion_representatives_and_releases() {
+        for reverse in [false, true] {
+            let (metadata, previous, weak) = {
+                let entries = [1, 2].map(|version| {
+                    Arc::new(ArtifactEntry::original([2; 32],
+                        crate::certified_products::fixture_finalized_product(
+                            crate::certified_products::tests::original_groups_fixture_with_interface(
+                                "MetadataBody", vec![(7, vec![])], version,
+                                &BTreeMap::new(), b"same sealed interface".to_vec(),
+                            ), [2; 32],
+                        ),
+                    ).unwrap())
+                });
+                let [first, second] = if reverse {
+                    [entries[1].clone(), entries[0].clone()]
+                } else {
+                    entries.clone()
+                };
+                assert_ne!(first.descriptor.id, second.descriptor.id);
+                let inventory = ArtifactInventory::default();
+                let initial = inventory
+                    .admit_shared(&inventory.empty_view(), vec![first.clone()])
+                    .unwrap();
+                let first_support = CompilerSourceSupport::from_selected_issuance(
+                    CompilerInputProjection::from_issued_entries(&[first]).unwrap(),
+                    initial,
+                )
+                .unwrap()
+                .for_source_owners(&BTreeSet::new())
+                .unwrap();
+                let previous = first_support
+                    .projection
+                    .project_metadata(first_support.artifacts.metadata_snapshot())
+                    .unwrap();
+                let before = previous.retained.entries.clone();
+                let before_artifacts = previous.retained.artifacts.clone();
+                let expanded = inventory
+                    .admit_shared(&first_support.artifacts, vec![second.clone()])
+                    .unwrap();
+                let incoming = CompilerSourceSupport::from_selected_issuance(
+                    CompilerInputProjection::from_issued_entries(&[second.clone()]).unwrap(),
+                    expanded,
+                )
+                .unwrap()
+                .for_source_owners(&BTreeSet::new())
+                .unwrap();
+                let delta = first_support.append_program_fragment(&incoming).unwrap();
+                assert_eq!(delta.promotion_qualifier_invocations, 0);
+                let maintained = delta
+                    .support
+                    .program_fragment_metadata(&previous, &incoming, &delta.changed_owners)
+                    .unwrap();
+                let cold = delta
+                    .support
+                    .projection
+                    .project_metadata(delta.support.artifacts.metadata_snapshot())
+                    .unwrap();
+                assert_eq!(maintained.entries, cold.entries);
+                assert_eq!(maintained.retained.entries, cold.retained.entries);
+                assert_eq!(
+                    maintained.retained.interface_representatives,
+                    cold.retained.interface_representatives
+                );
+                assert_eq!(maintained.retained.artifacts, cold.retained.artifacts);
+                assert_eq!(maintained.retained.dependencies, cold.retained.dependencies);
+                assert_eq!(
+                    maintained.retained.ambiguous_native_owners,
+                    cold.retained.ambiguous_native_owners
+                );
+                assert_eq!(
+                    maintained.retained.selected_native_groups,
+                    cold.retained.selected_native_groups
+                );
+                assert_eq!(previous.retained.entries, before);
+                assert_eq!(previous.retained.artifacts, before_artifacts);
+                assert_eq!(maintained.retained.ambiguous_native_owners.len(), 1);
+                let weak = Arc::downgrade(&maintained.retained.artifacts[&second.descriptor.id]);
+                (maintained, previous, weak)
+            };
+            assert!(
+                weak.upgrade().is_some(),
+                "metadata owns the actual incoming native payload"
+            );
+            drop(metadata);
+            assert!(
+                weak.upgrade().is_none(),
+                "the prior snapshot must not retain a future payload"
+            );
+            assert_eq!(previous.retained.ambiguous_native_owners.len(), 0);
         }
     }
 
@@ -5246,6 +5822,140 @@ mod tests {
             source.with_type_interfaces(&[&native], [2; 32]).is_err(),
             "type-only ingress must not import implementation roles"
         );
+    }
+
+    #[test]
+    fn type_projection_and_delta_do_not_rescan_a_broad_incoming_issuer() {
+        let mut semantic_work = None;
+        for groups in [1, 32, 128] {
+            scope_proof::take_ancestry_edge_visits();
+            let product = crate::certified_products::fixture_finalized_product(
+                crate::certified_products::tests::original_groups_fixture(
+                    "WideTypeIssuer",
+                    (0..groups).map(|ordinal| (ordinal, vec![])).collect(),
+                    1,
+                    &BTreeMap::new(),
+                ),
+                [2; 32],
+            );
+            let native = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+            let native_id = native.descriptor.id;
+            let required = Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    [2; 32],
+                    "types",
+                    "Required",
+                    BTreeMap::new(),
+                ),
+            ));
+            let added = Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    [2; 32],
+                    "types",
+                    "Added",
+                    BTreeMap::from([(
+                        ("types".into(), "Required".into()),
+                        required.descriptor.interface_sha256,
+                    )]),
+                ),
+            ));
+            let owner = added.descriptor.owner.clone();
+            let inventory = ArtifactInventory::default();
+            let entries = vec![native, required, added];
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .unwrap();
+            let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+            let execution = Arc::new(
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                    [2; 32],
+                    source.artifacts(),
+                    source.projection.clone(),
+                )
+                .unwrap(),
+            );
+            let original =
+                crate::declaration_context::ValidatedOriginalSource::inputs_from(&execution);
+            assert!(execution
+                .artifact_view()
+                .entries()
+                .iter()
+                .any(|entry| entry.descriptor.id == native_id && entry.is_native()));
+            let signature = type_signature(&owner.unit, &owner.module);
+            let birth_edges = scope_proof::take_ancestry_edge_visits();
+            assert!(
+                birth_edges >= groups as usize,
+                "the actual issuer contains the wide native graph"
+            );
+            let baseline_inventory = ArtifactInventory::default();
+            let baseline = CompilerSourceSupport::new(
+                Default::default(),
+                baseline_inventory.empty_view(),
+                [],
+                Default::default(),
+            )
+            .unwrap();
+            let metadata = baseline
+                .projection
+                .project_metadata(baseline.artifacts.metadata_snapshot())
+                .unwrap();
+            let before = inventory.metrics();
+            type_query_work::take();
+            scope_proof::take_ancestry_edge_visits();
+            let projected_context = original
+                .project_type_interfaces(&[], &[&signature])
+                .unwrap();
+            let projected = projected_context.compiler_source_support();
+            let (changed, owners) = baseline
+                .with_type_interfaces(&[projected], [2; 32])
+                .unwrap();
+            let maintained = changed.type_interface_metadata(&metadata, &owners).unwrap();
+            let work = type_query_work::take();
+            let warm_ancestry_edges = scope_proof::take_ancestry_edge_visits();
+            let after = inventory.metrics();
+            assert_eq!(
+                warm_ancestry_edges, 0,
+                "reuse the direct-ancestor index on the same issued proof owner"
+            );
+            assert_eq!(after.graph_visits, before.graph_visits);
+            assert_eq!(after.entry_handle_copies, before.entry_handle_copies);
+            assert_eq!(projected.selected.rows.len(), 2);
+            assert!(projected.native_offers.is_empty());
+            assert!(projected.native_availability.rows().next().is_none());
+            assert_eq!(changed.artifacts.retained_payload_handles(), 2);
+            assert!(Arc::ptr_eq(&original.execution_context(), &execution));
+            assert!(execution
+                .artifact_view()
+                .entries()
+                .iter()
+                .any(|entry| entry.descriptor.id == native_id && entry.is_native()));
+            if let Some(expected) = semantic_work {
+                assert_eq!(work, expected);
+            }
+            semantic_work = Some(work);
+            let complete = changed.artifacts.metadata_snapshot();
+            assert_eq!(complete.artifacts, maintained.retained.artifacts);
+            assert_eq!(complete.dependencies, maintained.retained.dependencies);
+            // Preserve the general native-custody projector as an independent
+            // result and sensitizing cost oracle, outside the measured path.
+            let mut oracle_source = source.clone();
+            oracle_source.artifacts =
+                ArtifactView::from_custody(Arc::clone(&source.artifacts.lease));
+            let oracle_before = inventory.metrics();
+            let general = oracle_source
+                .selected_interfaces()
+                .unwrap()
+                .select_owners(projected.projection.roles.keys().cloned().collect())
+                .unwrap();
+            let oracle_after = inventory.metrics();
+            assert!(oracle_after.graph_visits > oracle_before.graph_visits);
+            assert_eq!(
+                projected.artifacts.capture_graph_selection(),
+                general.capture_graph_selection()
+            );
+            eprintln!("type projection wide issuer: groups={groups}, cold_ancestor_edges={birth_edges}, warm_ancestor_edges={warm_ancestry_edges}, work={work:?}, old_projection_graph_visits={}", oracle_after.graph_visits - oracle_before.graph_visits);
+        }
     }
 
     #[test]

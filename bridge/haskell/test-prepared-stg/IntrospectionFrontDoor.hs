@@ -1,114 +1,170 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module IntrospectionFrontDoor where
+module IntrospectionFrontDoor
+  ( ProbeToken (..)
+  , echoToken
+  , frontDoor
+  , expectStale
+  , result
+  ) where
 
+import Prelude hiding (FilePath)
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Tidepool.Introspection as Introspection
+import qualified Tidepool.Effects.Authored as Effects
+import Tidepool.FilePath (FilePath)
+import qualified Tidepool.Introspection as I
 
--- Every shipped front-door verb compiled against one caller-supplied compile
--- view.
--- The probes are compiled by the resident handler, never evaluated here.
+-- A nominal type makes search distinguish the published binding from unrelated
+-- Int -> Int functions. The hosted caller publishes its own queryEcho alias.
+data ProbeToken = ProbeToken Int
+
+echoToken :: ProbeToken -> ProbeToken
+echoToken value = value
+
+require :: Bool -> Text -> Eff effects ()
+require condition message =
+  if condition then pure () else error (Text.unpack message)
+
+answer :: Text -> Either I.QueryError value -> Eff effects value
+answer label outcome = case outcome of
+  Right value -> pure value
+  Left issue -> error (Text.unpack (label <> ": " <> Text.pack (show issue)))
+
+valueType :: I.IdentifierInfo -> I.TypeExpression
+valueType detail = case I.identifierDeclaration detail of
+  I.ValueDeclaration expression -> expression
+  _ -> error "discovered value has a non-value declaration"
+
+-- GHC may qualify the same nominal type when presenting a selected alias.
+-- Remove only this known source module qualifier, then compare the full type.
+tokenType :: Text -> Text
+tokenType = Text.replace "IntrospectionFrontDoor." ""
+
+fingerprint :: I.ScopeProvenance -> Text
+fingerprint = I.provenanceFingerprint
+
+-- This is a read-only discovery program until the final ordinary readFile.
+-- FitAvailable describes a compiler row check; the read still needs the real
+-- FsRead interpreter and its runtime file authority.
 frontDoor
-  :: Member Introspection.Introspection effects
-  => Maybe Introspection.ScopeProvenance
-  -> Introspection.IdentifierRef
-  -> Eff
-       effects
-       ( Either Introspection.QueryError Introspection.ScopeProvenance
-       , Either Introspection.QueryError Introspection.NameRefList
-       , Either Introspection.QueryError Introspection.Fit
-       , Either Introspection.QueryError Introspection.ExpressionType
-       , Either Introspection.QueryError Introspection.TypeMatches
-       )
-frontDoor expectedScope identifier = do
-  view <- Introspection.currentScopeView
-  bindings <- Introspection.scopeBindings expectedScope
-  fit <- Introspection.rowFit expectedScope identifier
-  expression <- Introspection.typeOfExpression expectedScope "readFile"
-  matches <- Introspection.typeSearch expectedScope "Int -> Int"
-  pure (view, bindings, fit, expression, matches)
+  :: (Member I.Introspection effects, Member Effects.FsRead effects)
+  => FilePath
+  -> Eff effects Text
+frontDoor path = do
+  view <- answer "currentScopeView" =<< I.currentScopeView
+  require (I.provenanceScope view == I.CurrentScope) "wrong current scope"
+  require (I.provenanceGeneration view >= 0 && Text.length (fingerprint view) == 64)
+    "missing scope identity"
 
--- Binding enumeration carries identity only; presentation and row
--- availability stay on `Introspection.info`.
-nameRefListProjection
-  :: Introspection.NameRefList
-  -> ([Introspection.IdentifierRef], Int, Int, Introspection.ScopeProvenance)
-nameRefListProjection bindings =
-  ( Introspection.refs bindings
-  , Introspection.refsObserved bindings
-  , Introspection.refsLimit bindings
-  , Introspection.refListProvenance bindings
-  )
+  echo <- answer "info queryEcho" =<< I.info (I.NameQuery I.CurrentScope I.ValueName "queryEcho")
+  let echoRef = I.inspectedIdentifier echo
+      echoType = valueType echo
+  require (I.identifierName echoRef == "queryEcho"
+    && I.identifierNamespace echoRef == I.ValueIdentifier
+    && not (Text.null (I.identifierModule echoRef))) "wrong published symbol"
+  require (tokenType (I.typeCanonical echoType) == "ProbeToken -> ProbeToken"
+    && null (I.typeVariables echoType) && null (I.typeConstraints echoType))
+    "wrong published symbol type"
+  require (I.identifierProvenance echo == view) "info used another scope"
 
-fitRecordProjection
-  :: Introspection.Fit
-  -> ( Introspection.FitAvailability
-     , Introspection.IdentifierRef
-     , Introspection.ScopeProvenance
-     )
-fitRecordProjection fit =
-  ( Introspection.fitAvailability fit
-  , Introspection.fitIdentifier fit
-  , Introspection.fitProvenance fit
-  )
+  bindings <- answer "scopeBindings" =<< I.scopeBindings (Just view)
+  require (echoRef `elem` I.refs bindings) "enumeration lost the discovered symbol"
+  require (I.refListProvenance bindings == view
+    && I.refsLimit bindings > 0
+    && length (I.refs bindings) == min (I.refsObserved bindings) (I.refsLimit bindings))
+    "wrong binding count or scope"
 
-expressionProjection
-  :: Introspection.ExpressionType
-  -> (Text, Text, Introspection.FitAvailability, Introspection.ScopeProvenance)
-expressionProjection expression =
-  ( Introspection.expressionSource expression
-  , Introspection.expressionDisplay expression
-  , Introspection.expressionAvailability expression
-  , Introspection.expressionProvenance expression
-  )
+  operation <- answer "info readFile" =<< I.info (I.NameQuery I.CurrentScope I.ValueName "readFile")
+  let operationRef = I.inspectedIdentifier operation
+      operationType = I.typeCanonical (valueType operation)
+  require (operationRef == I.IdentifierRef "Tidepool.Effects.Core" "readFile" I.ValueIdentifier)
+    "discovered the wrong ordinary operation"
+  require (operationType == "forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError Text)"
+    && I.identifierProvenance operation == view) "wrong readFile declaration or source"
 
-typeMatchProjection
-  :: Introspection.TypeMatches
-  -> [(Text, Introspection.TypeMatchQuality, Introspection.FitAvailability)]
-typeMatchProjection matches =
-  [ ( Introspection.typeMatchName match
-    , Introspection.typeMatchQuality match
-    , Introspection.typeMatchAvailability match
-    )
-  | match <- Introspection.typeMatches matches
-  ]
+  fit <- answer "rowFit" =<< I.rowFit (Just view) operationRef
+  require (I.fitIdentifier fit == operationRef && I.fitAvailability fit == I.FitAvailable
+    && I.fitProvenance fit == view) "wrong keyed row fit"
 
--- A stale caller view is a typed refusal carrying both provenances.
-scopeOutcome :: Either Introspection.QueryError Introspection.ScopeProvenance -> Text
-scopeOutcome outcome = case outcome of
-  Right provenance -> Introspection.provenanceFingerprint provenance
-  Left (Introspection.ScopeChanged expected current) ->
-    Introspection.provenanceFingerprint expected
-      <> " -> "
-      <> Introspection.provenanceFingerprint current
-  Left (Introspection.ExpressionRejected diagnostics) ->
-    Text.intercalate "; " (map renderDiagnostic diagnostics)
-  Left _ -> "other introspection refusal"
+  expression <- answer "typeOfExpression" =<< I.typeOfExpression (Just view) "queryEcho"
+  require (I.expressionSource expression == "queryEcho"
+    && tokenType (I.expressionDisplay expression) == "ProbeToken -> ProbeToken"
+    && I.expressionAvailability expression == I.FitAvailable
+    && I.expressionProvenance expression == view) "wrong expression type or source"
 
-renderDiagnostic :: Introspection.Diagnostic -> Text
-renderDiagnostic diagnostic =
-  severity (Introspection.diagnosticSeverity diagnostic)
-    <> maybe Text.empty renderSpan (Introspection.diagnosticSpan diagnostic)
-    <> ": "
-    <> Introspection.diagnosticMessage diagnostic
-  where
-    severity Introspection.DiagnosticError = "error"
-    severity Introspection.DiagnosticWarning = "warning"
-    renderSpan location =
-      " ["
-        <> Introspection.spanFile location
-        <> ":"
-        <> Text.pack (show (Introspection.spanStartLine location))
-        <> ":"
-        <> Text.pack (show (Introspection.spanStartCol location))
-        <> "-"
-        <> Text.pack (show (Introspection.spanEndLine location))
-        <> ":"
-        <> Text.pack (show (Introspection.spanEndCol location))
-        <> "]"
+  matches <- answer "typeSearch" =<< I.typeSearch (Just view)
+    "IntrospectionFrontDoor.ProbeToken -> IntrospectionFrontDoor.ProbeToken"
+  match <- case filter ((== echoRef) . I.typeMatchReference) (I.typeMatches matches) of
+    [found] -> pure found
+    _ -> error ("type search did not retain the actual discovered symbol: "
+      <> show (map I.typeMatchReference (I.typeMatches matches)))
+  require (I.typeMatchName match == "queryEcho"
+    && I.typeMatchModule match == Just (I.identifierModule echoRef)
+    && tokenType (I.typeMatchSignature match) == "ProbeToken -> ProbeToken"
+    && I.typeMatchQuality match == I.TypeMatchExact
+    && I.typeMatchAvailability match == I.FitAvailable
+    && I.typeMatchesProvenance matches == view
+    && I.typeMatchesObserved matches == length (I.typeMatches matches)
+    && I.typeMatchesLimit matches > 0
+    && I.typeMatchesObserved matches <= I.typeMatchesLimit matches)
+    "wrong type-search identity, signature, quality, availability or bound"
 
-result :: Eff '[] Int
-result = pure 43
+  after <- answer "scopeBindings after queries" =<< I.scopeBindings (Just view)
+  finalView <- answer "currentScopeView after queries" =<< I.currentScopeView
+  require (after == bindings && finalView == view) "read-only queries published a name"
+
+  -- Haskell applies the known operation only after validating its discovered
+  -- identity. Its result comes from the ordinary effect interpreter, not a
+  -- query response or a forged successful file result.
+  contents <- case operationRef of
+    I.IdentifierRef "Tidepool.Effects.Core" "readFile" I.ValueIdentifier -> do
+      readResult <- Effects.readFile path
+      case readResult of
+        Right text -> pure text
+        Left issue -> error ("ordinary readFile failed: " <> show issue)
+    _ -> error "cannot invoke the discovered operation"
+  pure (Text.intercalate "\n"
+    [ "scope|" <> Text.pack (show (I.provenanceScope view)) <> "|"
+        <> Text.pack (show (I.provenanceGeneration view)) <> "|" <> fingerprint view
+    , "bindings|" <> I.identifierModule echoRef <> "|" <> I.identifierName echoRef <> "|"
+        <> Text.pack (show (I.refsObserved bindings)) <> "|"
+        <> Text.pack (show (I.refsLimit bindings)) <> "|" <> fingerprint (I.refListProvenance bindings)
+    , "operation|" <> I.identifierModule operationRef <> "|" <> I.identifierName operationRef
+        <> "|" <> Text.pack (show (I.identifierNamespace operationRef)) <> "|" <> operationType
+    , "fit|" <> I.identifierModule (I.fitIdentifier fit) <> "|"
+        <> I.identifierName (I.fitIdentifier fit) <> "|" <> Text.pack (show (I.fitAvailability fit))
+        <> "|" <> fingerprint (I.fitProvenance fit)
+    , "expression|" <> I.expressionSource expression <> "|" <> tokenType (I.expressionDisplay expression)
+        <> "|" <> Text.pack (show (I.expressionAvailability expression))
+        <> "|" <> fingerprint (I.expressionProvenance expression)
+    , "search|" <> I.typeMatchName match <> "|" <> tokenType (I.typeMatchSignature match)
+        <> "|" <> Text.pack (show (I.typeMatchQuality match))
+        <> "|" <> Text.pack (show (I.typeMatchAvailability match))
+        <> "|" <> fingerprint (I.typeMatchesProvenance matches)
+    , "read|" <> contents
+    ])
+
+-- The caller retains a real entry snapshot, then publishes another cell before
+-- consuming it. Both returned views must come from the ordinary query effect.
+expectStale
+  :: Member I.Introspection effects
+  => I.ScopeProvenance
+  -> Eff effects Text
+expectStale expected = do
+  outcome <- I.scopeBindings (Just expected)
+  case outcome of
+    Left (I.ScopeChanged before after) -> do
+      current <- answer "current scope after stale refusal" =<< I.currentScopeView
+      require (before == expected && after == current && before /= after)
+        "stale refusal lost its actual views"
+      pure ("stale|ScopeChanged|" <> fingerprint before <> "|" <> fingerprint after)
+    _ -> error ("a real publication did not invalidate the consumed pin: " <> show outcome)
+
+-- The existing build owner compiles this effectful specialization. Hosted
+-- execution supplies the published queryEcho binding and the real input file.
+result :: Eff '[I.Introspection, Effects.FsRead] Text
+result = frontDoor "query-input.txt"

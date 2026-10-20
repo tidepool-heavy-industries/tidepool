@@ -882,24 +882,36 @@ pub fn prepare_world_cell_program(
         SelectedSessionValueOwners::capture(names.iter().map(std::ffi::OsStr::new))?;
     let produced_outputs =
         checked_cell::CheckedValueInputs::capture_world_produced_types(&program, &mut validation)?;
-    let decoded = crate::declaration_context::decode_world_source_receipt(
-        &program,
-        0,
-        Path::new("world-source.cbor"),
-    )?;
+    let stage = program.stages().first().ok_or_else(|| {
+        CompileError::ExtractFailed("World output lacks its checked stage".into())
+    })?;
+    let stage_root = root.join(
+        stage
+            .outputs()
+            .source_receipt()
+            .relative()
+            .parent()
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("World stage source output has no namespace".into())
+            })?,
+    );
+    let decoded = crate::declaration_context::decode_world_source_receipt(&program, 0)?;
     let (packages_path, packages) = decoded.package_imports();
     validation
         .record_captured_bytes(packages_path, packages)
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     let raw = certified_products::ParsedModuleProducts::decode_with_operation(
-        checked_cell::world_output_bytes(&program, Path::new("module-products.cbor"))?,
+        checked_cell::world_output_bytes(&program, stage.outputs().module_products().relative())?,
         packages,
         validation.inventory.clone(),
     )
     .map_err(compiler_evidence_failure)?;
     let receipt = certified_products::decode_segment_originals_with_operation(
-        checked_cell::world_output_bytes(&program, Path::new("certified-products.cbor"))?,
-        root,
+        checked_cell::world_output_bytes(
+            &program,
+            stage.outputs().certified_products().relative(),
+        )?,
+        &stage_root,
         &validation.inventory,
     )
     .map_err(compiler_evidence_failure)?;
@@ -911,11 +923,11 @@ pub fn prepare_world_cell_program(
         Some(&produced_outputs),
         &mut validation,
     )?;
-    let checked = checked_cell::admit_world_executable_cell(
+    let checked = checked_cell::admit_world_cell(
         program.clone(),
-        segment.source(),
-        segment.source_text(),
+        &[(segment.source(), segment.source_text())],
         segment.aliases(),
+        BTreeMap::new(),
     )?;
     let mut artifacts =
         crate::declaration_context::bind_certified_segment_artifacts_with_validation(
@@ -948,6 +960,10 @@ pub fn prepare_world_cell_program(
             CompileError::ExtractFailed("World output lacks its reserved item".into())
         })?;
         let prepared_path = item
+            .executable()
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("World original has no executable manifest".into())
+            })?
             .manifest()
             .keys()
             .find(|path| {
@@ -2903,6 +2919,7 @@ impl SelectedModuleCandidateOffer {
             root,
             &self.producer,
             &self.include,
+            None,
             self.selected.as_deref(),
             &self.selected_session_values,
             Some(produced),
@@ -8416,6 +8433,7 @@ mod module_product_tests {
                             .into(),
                             turn_templates: Vec::new(),
                         }),
+                        None,
                     )?;
                     assert_eq!(plan.items().len(), 1);
                     let origin =
@@ -8518,6 +8536,33 @@ mod module_product_tests {
                 .expect("actual binding native program");
             assert_eq!(native.item().binders(), &["answer"]);
             assert!(native.value_interface().is_some());
+            let value = native.value_interface_certificate().unwrap();
+            let [signature] = native.item().signatures() else {
+                panic!("the actual Int binding has one checked signature")
+            };
+            let types =
+                crate::declaration_context::ExactDeclarationContext::checked_value_type_interfaces(
+                    &value, signature,
+                )
+                .expect("actual checked-value type projection");
+            assert!(
+                types.compiler_input_roles().is_empty(),
+                "Int has only package type owners"
+            );
+            assert_eq!(
+                types.toolchain_identity_sha256(),
+                value
+                    .certified_interface()
+                    .interface()
+                    .toolchain_identity_sha256()
+            );
+            assert!(
+                Arc::ptr_eq(&value, &native.value_interface_certificate().unwrap()),
+                "type projection preserves the actual compiled value owner"
+            );
+            value
+                .world_type_parts()
+                .expect("the original value retains its actual row input owners");
             program
                 .validate_typed_entries()
                 .expect("actual native entry belongs to normalized item");
@@ -8612,6 +8657,7 @@ mod module_product_tests {
                             .into(),
                             turn_templates: Vec::new(),
                         }),
+                        None,
                     )?;
                     assert_eq!(plan.items().len(), item_count);
                     let origin =
@@ -8682,7 +8728,7 @@ mod module_product_tests {
                 panic!("World basis")
             };
             let checked = checked.clone();
-            let mut current = Arc::new(checked.reservation().plan().world().clone());
+            let mut current = Arc::clone(checked.reservation().plan().world_owned());
             let history_observations = observations.join(format!("history-{item_count}"));
             current
                 .restoration()

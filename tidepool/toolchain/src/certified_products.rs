@@ -414,6 +414,7 @@ pub(crate) struct CertifiedSegmentOriginals {
         Arc<crate::artifact_inventory::ArtifactEntry>,
     >,
     original_sources: Arc<AvailableOriginalSources>,
+    authored_artifacts: Option<crate::artifact_inventory::ArtifactView>,
 }
 
 impl CertifiedSegmentOriginals {
@@ -432,6 +433,7 @@ impl CertifiedSegmentOriginals {
         root: &Path,
         producer: &[u8],
         include: &[PathBuf],
+        authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
         candidates: Option<&CandidateSet>,
         selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
@@ -456,7 +458,7 @@ impl CertifiedSegmentOriginals {
             root,
             producer,
             include,
-            None,
+            authored,
             selected_values,
             produced,
             validation,
@@ -546,9 +548,9 @@ impl CertifiedSegmentOriginals {
             ));
         }
         timing.advance("native_availability");
-        // Completed selection rows already retain this physical custody. The
-        // segment owner needs their issuances, not another view handle here.
-        let _ =
+        // Original stages have no target view. Keep this same physical issuer
+        // for their authored closure; executable items use their bound cursor.
+        let physical =
             crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
                 &mut products.source_selection,
                 compiler_inputs.artifacts(),
@@ -574,6 +576,7 @@ impl CertifiedSegmentOriginals {
             value_entry_index,
             value_entries: value_entries.into(),
             original_sources,
+            authored_artifacts: authored.map(|_| physical),
             package_availability,
             raw,
             receipt,
@@ -606,6 +609,16 @@ impl CertifiedSegmentOriginals {
 
     pub(crate) fn artifact_entries(&self) -> &[Arc<crate::artifact_inventory::ArtifactEntry>] {
         &self.artifact_entries
+    }
+
+    pub(crate) fn authored_artifacts(
+        &self,
+    ) -> CertResult<&crate::artifact_inventory::ArtifactView> {
+        self.authored_artifacts
+            .as_ref()
+            .ok_or(CertificationError::Mismatch(
+                "executable segment has no authored original stage",
+            ))
     }
 
     pub(crate) fn original_sources(&self) -> &Arc<AvailableOriginalSources> {
@@ -2777,21 +2790,26 @@ impl ReceiptNativeSelection {
         interface: crate::artifact_inventory::ArtifactId,
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
     ) -> CertResult<Arc<crate::artifact_inventory::ArtifactEntry>> {
+        self.original_entry_from(interface, |id| metadata.artifacts.get(id))
+    }
+
+    fn original_entry_from<'a>(
+        &self,
+        interface: crate::artifact_inventory::ArtifactId,
+        observed: impl Fn(
+            &crate::artifact_inventory::ArtifactId,
+        ) -> Option<&'a Arc<crate::artifact_inventory::ArtifactEntry>>,
+    ) -> CertResult<Arc<crate::artifact_inventory::ArtifactEntry>> {
         use crate::artifact_inventory::ArtifactPayload;
         let id = self.original_artifact_id()?;
-        let retained = metadata
-            .artifacts
-            .get(&id)
-            .ok_or(CertificationError::MissingRetainedCustody { artifact: id })?;
+        let retained =
+            observed(&id).ok_or(CertificationError::MissingRetainedCustody { artifact: id })?;
         let ArtifactPayload::Original(product) = &retained.payload else {
             return Err(CertificationError::Mismatch("selected original payload"));
         };
-        let canonical = metadata
-            .artifacts
-            .get(&interface)
-            .ok_or(CertificationError::Mismatch(
-                "selected original canonical custody",
-            ))?;
+        let canonical = observed(&interface).ok_or(CertificationError::Mismatch(
+            "selected original canonical custody",
+        ))?;
         if retained.descriptor.id != id
             || product.owner() != &self.owner
             || !matches!(&canonical.payload, ArtifactPayload::Canonical(current) if Some(current) == product.module_interface())
@@ -3096,10 +3114,7 @@ impl CertifiedSourceSelection {
     pub(crate) fn finish_new_product_availability(
         &mut self,
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
-        issued: &BTreeMap<
-            crate::artifact_inventory::ArtifactId,
-            Arc<crate::declaration_context::NativeTransportAvailability>,
-        >,
+        issued: &crate::declaration_context::RequestNativeAvailability,
     ) -> CertResult<()> {
         for selected in Arc::make_mut(&mut self.modules).values_mut() {
             let ReceiptSourceSelection::Native { interface, native } = selected else {
@@ -3112,7 +3127,7 @@ impl CertifiedSourceSelection {
                 continue;
             }
             let id = native.original_artifact_id()?;
-            let original = issued.get(&id).ok_or(CertificationError::Mismatch(
+            let original = issued.issued_row(id).ok_or(CertificationError::Mismatch(
                 "new product lacks exact issued native availability",
             ))?;
             let entry = native.original_entry(*interface, metadata)?;
@@ -3874,25 +3889,35 @@ impl CertifiedSourceSelection {
         view: &crate::artifact_inventory::ArtifactView,
         admissions: &[crate::declaration_context::ExactSourceAdmission],
     ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
-        let metadata = view.metadata_snapshot();
-        let present = metadata
-            .artifacts
-            .values()
-            .map(|entry| &entry.descriptor.owner)
-            .collect::<BTreeSet<_>>();
         let omitted_generated = admissions
             .iter()
             // An admission need not contain a generated scaffold. Only a
             // successfully authenticated owner can authorize its omission.
             .filter_map(|admission| admission.generated_source_owner().ok())
-            .filter(|owner| !present.contains(owner))
+            .filter(|owner| !view.has_observed_owner(owner))
             .collect();
-        self.compiler_projection_from_metadata(&metadata, &omitted_generated)
+        self.compiler_projection_from_observations(
+            |id| view.observed_payload(id),
+            &omitted_generated,
+        )
     }
 
     fn compiler_projection_from_metadata(
         &self,
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
+        omitted_generated: &BTreeSet<crate::declaration_join::ExactModuleIdentity>,
+    ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
+        self.compiler_projection_from_observations(
+            |id| metadata.artifacts.get(id),
+            omitted_generated,
+        )
+    }
+
+    fn compiler_projection_from_observations<'a>(
+        &self,
+        observed: impl Fn(
+            &crate::artifact_inventory::ArtifactId,
+        ) -> Option<&'a Arc<crate::artifact_inventory::ArtifactEntry>>,
         omitted_generated: &BTreeSet<crate::declaration_join::ExactModuleIdentity>,
     ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
         use crate::artifact_inventory::CompilerInputProjection;
@@ -3904,9 +3929,7 @@ impl CertifiedSourceSelection {
             {
                 continue;
             }
-            let interface = metadata
-                .artifacts
-                .get(&selected.interface)
+            let interface = observed(&selected.interface)
                 .filter(|entry| {
                     !matches!(
                         &entry.payload,
@@ -3916,9 +3939,16 @@ impl CertifiedSourceSelection {
                 .ok_or(CertificationError::Mismatch(
                     "issued compiler interface artifact",
                 ))?;
+            if interface.descriptor.owner.unit != *unit
+                || interface.descriptor.owner.module != *module
+            {
+                return Err(CertificationError::Mismatch(
+                    "issued compiler interface owner",
+                ));
+            }
             entries.push(Arc::clone(interface));
             if let Some(native) = selected.original {
-                entries.push(native.original_entry(selected.interface, metadata)?);
+                entries.push(native.original_entry_from(selected.interface, &observed)?);
             }
         }
         // The typed issuer already certified these roles and their original
@@ -12674,11 +12704,7 @@ pub(crate) mod tests {
         let mut selected =
             CertifiedSourceSelection::from_compiler_projection(&projection, &metadata, &operation)
                 .unwrap();
-        let issued = support
-            .native_availability()
-            .rows()
-            .map(|row| (row.original_artifact_id(), Arc::clone(row)))
-            .collect();
+        let issued = support.native_availability();
         selected
             .finish_new_product_availability(&metadata, &issued)
             .unwrap();
@@ -12694,7 +12720,9 @@ pub(crate) mod tests {
             .unwrap();
         assert!(Arc::ptr_eq(
             &actual,
-            issued[&entry.descriptor.id]
+            issued
+                .issued_row(entry.descriptor.id)
+                .unwrap()
                 .target_original(product.owner())
                 .unwrap()
         ));
@@ -12759,17 +12787,13 @@ pub(crate) mod tests {
             &completed[0],
             &view.metadata_snapshot().artifacts[&entry.descriptor.id]
         ));
-        let issued = support
-            .native_availability()
-            .rows()
-            .map(|row| (row.original_artifact_id(), Arc::clone(row)))
-            .collect();
+        let issued = support.native_availability();
         selected
             .finish_new_product_availability(&view.metadata_snapshot(), &issued)
             .unwrap();
         assert!(Arc::ptr_eq(
             selected.issued_native_availability().next().unwrap(),
-            &issued[&entry.descriptor.id]
+            issued.issued_row(entry.descriptor.id).unwrap()
         ));
         assert!(
             selected.complete_native_entries(&view).unwrap().is_empty(),
@@ -17274,6 +17298,96 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn source_support_projection_uses_only_issued_keys_and_keeps_all_interface_kinds() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection, JoinedInterfaceRole,
+        };
+        let producer = [2; 32];
+        let canonical = Arc::new(ArtifactEntry::canonical(fixture_module_interface(
+            producer,
+            "fixture",
+            "Canonical",
+            BTreeMap::new(),
+        )));
+        let joined = |module: &str, role| {
+            let interface = fixture_module_interface(producer, "fixture", module, BTreeMap::new());
+            Arc::new(ArtifactEntry::interface(
+                crate::recovery_artifacts::CertifiedJoinedInterface::from_certification(
+                    producer,
+                    "fixture".into(),
+                    module.into(),
+                    interface.interface_bytes().to_vec(),
+                    interface.package_imports_bytes().to_vec(),
+                )
+                .unwrap(),
+                role,
+                vec![],
+            ))
+        };
+        let selected = vec![
+            canonical,
+            joined("CapturedValue", JoinedInterfaceRole::ValueInterface),
+            joined("LexicalFacade", JoinedInterfaceRole::LexicalJoin),
+        ];
+        let projection = CompilerInputProjection::from_issued_entries(&selected).unwrap();
+        let narrow_inventory = ArtifactInventory::default();
+        let narrow = narrow_inventory
+            .admit_shared(&narrow_inventory.empty_view(), selected.clone())
+            .unwrap();
+        let selection = CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &narrow.metadata_snapshot(),
+            &InventoryOperation::new(Default::default()),
+        )
+        .unwrap();
+        for unrelated in [1, 32, 128] {
+            let inventory = ArtifactInventory::default();
+            let mut entries = selected.clone();
+            entries.extend((0..unrelated).map(|index| {
+                Arc::new(ArtifactEntry::canonical(fixture_module_interface(
+                    producer,
+                    "other",
+                    &format!("Unrelated{index}"),
+                    BTreeMap::new(),
+                )))
+            }));
+            let broad = inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .unwrap();
+            let before = inventory.metrics();
+            let actual = selection.compiler_support_projection(&broad, &[]).unwrap();
+            let after = inventory.metrics();
+            assert_eq!(actual, projection);
+            assert_eq!(after.view_queries - before.view_queries, 0);
+            assert_eq!(after.graph_visits - before.graph_visits, 0);
+            assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 0);
+            let expected = selection
+                .compiler_projection_from_metadata(&broad.metadata_snapshot(), &BTreeSet::new())
+                .unwrap();
+            assert_eq!(actual, expected);
+            eprintln!("source_support_projection unrelated={unrelated} selected_roles={} view_queries=0 graph_visits=0 metadata_handle_copies=0", actual.snapshot_roles().len());
+        }
+        let mut crossed = selection.clone();
+        let modules = Arc::make_mut(&mut crossed.modules);
+        let row = modules
+            .remove(&("fixture".into(), "CapturedValue".into()))
+            .unwrap();
+        modules.insert(("fixture".into(), "WrongOwner".into()), row);
+        assert!(matches!(
+            crossed.compiler_support_projection(&narrow, &[]),
+            Err(CertificationError::Mismatch(
+                "issued compiler interface owner"
+            ))
+        ));
+        assert!(matches!(
+            selection.compiler_support_projection(&narrow_inventory.empty_view(), &[]),
+            Err(CertificationError::Mismatch(
+                "issued compiler interface artifact"
+            ))
+        ));
+    }
+
+    #[test]
     fn physical_native_issuance_survives_item_type_projection_without_future_demand() {
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
@@ -17401,6 +17515,19 @@ pub(crate) mod tests {
             .collect::<BTreeMap<_, _>>();
         assert_eq!(issued_groups.len(), groups.len());
         assert_eq!(issued_groups, issued_offer.issued_group_carriers().unwrap());
+        let required_scopes = proof_graph
+            .bindings
+            .iter()
+            .map(|binding| binding.selection)
+            .chain(groups.iter().map(|group| group.binding.selection()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(issued_offer.required_scopes(), &required_scopes);
+        assert!(
+            issued_groups
+                .iter()
+                .any(|(group, carrier)| { group.binding.selection() != carrier.selection }),
+            "the control must exercise independent group and carrier scopes"
+        );
         let before = inventory.metrics();
         let mut item = physical.clone();
         Arc::make_mut(&mut item.modules)
