@@ -1735,7 +1735,7 @@ impl CheckedNativeAvailability {
         let advertised = self.advertised_groups(baseline_groups)?;
         let preferred =
             catalog.qualified_availability(projection, namespace, &advertised, &self.offers)?;
-        self.validate_advertised(advertised, &preferred, validation)
+        self.validate_advertised(advertised, &preferred, projection, validation)
     }
 
     fn advertised_groups(
@@ -1767,16 +1767,9 @@ impl CheckedNativeAvailability {
         self,
         advertised: BTreeSet<NativeGroupKey>,
         preferred: &[QualifiedNativeAvailability],
+        projection: &CompilerInputProjection,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
-        let originals = self
-            .entries
-            .iter()
-            .filter_map(|(id, entry)| match &entry.payload {
-                ArtifactPayload::Original(product) => Some((*id, product)),
-                _ => None,
-            })
-            .collect::<BTreeMap<_, _>>();
         let mut qualifications = BTreeMap::new();
         for qualification in preferred {
             if qualifications
@@ -1804,6 +1797,30 @@ impl CheckedNativeAvailability {
                 }
             }
         }
+        // Full validation covers the advertised products and their issued
+        // dependency closures. Other retained bodies are byte custody, not
+        // competing members of this request's original namespace.
+        let mut required_originals = self.roots.clone();
+        required_originals.extend(advertised.iter().map(|key| key.artifact));
+        required_originals.extend(projection.roles().iter().filter_map(|role| role.original()));
+        for qualification in qualifications.values() {
+            required_originals.insert(qualification.original());
+            required_originals.extend(
+                qualification
+                    .groups()
+                    .iter()
+                    .map(|group| group.binding.artifact()),
+            );
+        }
+        let originals = self
+            .entries
+            .iter()
+            .filter(|(id, _)| required_originals.contains(id))
+            .filter_map(|(id, entry)| match &entry.payload {
+                ArtifactPayload::Original(product) => Some((*id, product)),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
         crate::certified_products::validate_available_originals_with_validation(
             &originals,
             &advertised,
