@@ -2037,6 +2037,10 @@ impl ReservedActorGeneration {
         ActorGenerationCandidateCustody(self.prepared.candidate.clone())
     }
 
+    pub(crate) fn publication_phase(&self) -> tidepool_runtime::session::PublicationPhase {
+        self.guard.decision.phase()
+    }
+
     pub(crate) fn attempt_observer(&self) -> ActorPublicationAttemptObserver {
         ActorPublicationAttemptObserver(self.guard.attempt.clone())
     }
