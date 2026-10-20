@@ -10113,6 +10113,7 @@ where
         }))
         .await
         .map_err(ResidentActorWorkbenchError::Join)??;
+        let authority_digest = authority.authority_digest();
         let (admission, leased_input) = self
             .access
             .with_compiler_machine(context.clone(), move |session, context, _, _| {
@@ -10123,6 +10124,7 @@ where
                             plan,
                             binding,
                             expected,
+                            authority_digest,
                         ),
                     CellPreparationPurpose::PrivateExecution(execution) => session
                         .admit_world_planned_cell_with_input(
