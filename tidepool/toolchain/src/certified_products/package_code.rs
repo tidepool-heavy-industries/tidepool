@@ -4,6 +4,70 @@
 use super::*;
 use tidepool_repr::execution_schema::{PackageCodeOwner, PackageGroupCode};
 
+/// The exact interface body captured by the same completed package producer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CertifiedPackageCodeInterface {
+    unit: String,
+    module: String,
+    sha256: [u8; 32],
+    bytes: Arc<[u8]>,
+}
+
+impl CertifiedPackageCodeInterface {
+    pub fn unit(&self) -> &str {
+        &self.unit
+    }
+    pub fn module(&self) -> &str {
+        &self.module
+    }
+    pub fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
+    pub fn bytes(&self) -> &Arc<[u8]> {
+        &self.bytes
+    }
+
+    fn from_world_output(
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        unit: &str,
+        module: &str,
+        witness: &PackageInterfaceWitness,
+        operation: &InventoryOperation,
+    ) -> CertResult<Arc<Self>> {
+        let relative = witness
+            .selected_path
+            .strip_prefix(program.directory().path())
+            .map_err(|_| {
+                CertificationError::Mismatch("package interface is outside completed output")
+            })?;
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(CertificationError::Mismatch(
+                "package interface output path",
+            ));
+        }
+        let bytes = crate::checked_cell::world_output_bytes(program, relative)
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        operation.charge(bytes.len())?;
+        if sha(bytes) != witness.sha256 {
+            return Err(CertificationError::Mismatch(
+                "package interface captured digest",
+            ));
+        }
+        operation.reserve::<Self>(1)?;
+        operation.charge(unit.len().saturating_add(module.len()))?;
+        Ok(Arc::new(Self {
+            unit: unit.to_owned(),
+            module: module.to_owned(),
+            sha256: witness.sha256,
+            bytes: Arc::clone(bytes),
+        }))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CertifiedPackageCodeProduct {
     code: PackageGroupCode,
@@ -11,9 +75,18 @@ pub struct CertifiedPackageCodeProduct {
     product_sha256: [u8; 32],
     // Positional provenance for the same code.globals(), not a namespace map.
     import_interfaces: Arc<[[u8; 32]]>,
+    defining_interface: Arc<CertifiedPackageCodeInterface>,
+    import_interface_witnesses: Arc<[Arc<CertifiedPackageCodeInterface>]>,
 }
 
 impl CertifiedPackageCodeProduct {
+    pub fn defining_interface(&self) -> &Arc<CertifiedPackageCodeInterface> {
+        &self.defining_interface
+    }
+    pub fn import_interface_witnesses(&self) -> &[Arc<CertifiedPackageCodeInterface>] {
+        &self.import_interface_witnesses
+    }
+
     pub fn code(&self) -> &PackageGroupCode {
         &self.code
     }
@@ -49,6 +122,7 @@ impl CertifiedPackageCodeProduct {
         let relative = relative_prefix.join(&output.relative_path);
         let bytes = crate::checked_cell::world_output_bytes(program, &relative)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        validation.inventory.charge(bytes.len())?;
         if sha(bytes) != output.sha256 {
             return Err(CertificationError::Mismatch("package code output digest"));
         }
@@ -96,6 +170,13 @@ impl CertifiedPackageCodeProduct {
             .ok_or(CertificationError::Mismatch(
                 "package code defining interface",
             ))?;
+        let defining_interface = CertifiedPackageCodeInterface::from_world_output(
+            program,
+            &owner.unit,
+            &owner.module,
+            interface,
+            &operation,
+        )?;
         verify_package_interface(validation, interface)?;
         let Value::Bytes(group) = &packet[2] else {
             return Err(CertificationError::Receipt("package code group bytes"));
@@ -104,6 +185,8 @@ impl CertifiedPackageCodeProduct {
         let group = operation.parse_projected_group(group, &requirements)?;
         let code = PackageGroupCode::admit(owner, group)?;
         operation.reserve::<[u8; 32]>(code.globals().len())?;
+        operation.reserve::<Arc<CertifiedPackageCodeInterface>>(code.globals().len())?;
+        let mut import_interface_witnesses = Vec::with_capacity(code.globals().len());
         let mut import_interfaces = Vec::with_capacity(code.globals().len());
         for global in code.globals() {
             crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
@@ -131,6 +214,13 @@ impl CertifiedPackageCodeProduct {
                 &receipt.packages,
                 validation,
             )?;
+            import_interface_witnesses.push(CertifiedPackageCodeInterface::from_world_output(
+                program,
+                &global.identity.unit,
+                &global.identity.module,
+                witness,
+                &operation,
+            )?);
             import_interfaces.push(witness.sha256);
         }
         // Import seals are part of product identity. Exact dependency binding
@@ -147,6 +237,8 @@ impl CertifiedPackageCodeProduct {
             bytes: Arc::clone(bytes),
             product_sha256,
             import_interfaces: import_interfaces.into(),
+            defining_interface,
+            import_interface_witnesses: import_interface_witnesses.into(),
         }))
     }
 }

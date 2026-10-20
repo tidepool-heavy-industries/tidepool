@@ -2287,6 +2287,7 @@ pub(crate) struct NativePackageObligation {
 
 /// One selected immutable body occurrence and its exact inherited native edges.
 /// Code equality cannot merge these occurrence-specific dependency choices.
+#[derive(Clone)]
 pub(crate) struct SelectedNativeGroupRow {
     product: PendingCertifiedGroup,
     dependencies: Vec<crate::artifact_inventory::NativeGroupBinding>,
@@ -2309,6 +2310,7 @@ impl SelectedNativeGroupRow {
 /// admitted them. Pending group payloads alone do not carry those choices.
 pub(crate) struct DemandCertifiedGroups {
     basis: Arc<RequestCompilerInputs>,
+    operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     rows: BTreeMap<crate::artifact_inventory::NativeGroupBinding, SelectedNativeGroupRow>,
     // Derived immutable code/signature input for product validation. Exact
     // execution association is available only through the paired rows below.
@@ -2319,6 +2321,60 @@ pub(crate) struct DemandCertifiedGroups {
 }
 
 impl DemandCertifiedGroups {
+    /// Append only already resolved batches from this same request. Each
+    /// scoped occurrence keeps its own ordered links, even when code is shared.
+    pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
+        if !Arc::ptr_eq(&self.basis, &other.basis) || !Arc::ptr_eq(&self.operation, &other.operation) {
+            return Err(failure("native demand batches belong to different input operations"));
+        }
+        let budget = NativeDemandBudget(Some(&self.operation));
+        let resolved_originals = match (&self.resolved_originals, &other.resolved_originals) {
+            (Some(left), Some(right)) => Some(left.merge(right).map_err(compiler_evidence_failure)?),
+            _ => return Err(failure("native demand batch lost its Original resolution owner")),
+        };
+        budget.reserve::<(crate::artifact_inventory::NativeGroupBinding, SelectedNativeGroupRow)>(
+            self.rows.len().saturating_add(other.rows.len()),
+        )?;
+        let mut rows = BTreeMap::<crate::artifact_inventory::NativeGroupBinding, SelectedNativeGroupRow>::new();
+        for (binding, row) in self.rows.iter().chain(&other.rows) {
+            budget.checkpoint()?;
+            if let Some(prior) = rows.get(binding) {
+                if !prior.product.same_issuance(&row.product)
+                    || prior.dependencies != row.dependencies || prior.imports != row.imports {
+                    return Err(failure("native demand changed an issued occurrence"));
+                }
+            } else {
+                budget.reserve::<crate::artifact_inventory::NativeGroupBinding>(row.dependencies.len())?;
+                rows.insert(*binding, row.clone());
+            }
+        }
+        budget.reserve::<PendingCertifiedGroup>(rows.len())?;
+        let products = rows.values().map(|row| row.product.clone()).collect();
+        let mut retained_bindings = BTreeSet::new();
+        for requirement in self.retained_bindings.iter().chain(&other.retained_bindings) {
+            budget.reserve::<crate::artifact_inventory::NativeBindingRequirement>(1)?;
+            let identity = &requirement.identity;
+            budget.strings(identity.unit.len().saturating_add(identity.module.len())
+                .saturating_add(identity.namespace.len()).saturating_add(identity.occurrence.len())
+                .saturating_add(identity.record_parent.as_ref().map_or(0, String::len)))?;
+            retained_bindings.insert(requirement.clone());
+        }
+        let mut package_obligations = BTreeSet::new();
+        for requirement in self.package_obligations.iter().chain(&other.package_obligations) {
+            budget.reserve::<NativePackageObligation>(1)?;
+            let identity = &requirement.identity;
+            budget.strings(identity.unit.len().saturating_add(identity.module.len())
+                .saturating_add(identity.namespace.len()).saturating_add(identity.occurrence.len())
+                .saturating_add(identity.record_parent.as_ref().map_or(0, String::len)))?;
+            package_obligations.insert(requirement.clone());
+        }
+        budget.reserve::<crate::artifact_inventory::NativeBindingRequirement>(retained_bindings.len())?;
+        budget.reserve::<NativePackageObligation>(package_obligations.len())?;
+        Ok(Self { basis: Arc::clone(&self.basis), operation: Arc::clone(&self.operation),
+            rows, products, resolved_originals, retained_bindings: retained_bindings.into_iter().collect(),
+            package_obligations: package_obligations.into_iter().collect() })
+    }
+
     pub(crate) fn belongs_to_source(
         &self,
         source: &Arc<crate::artifact_inventory::CompilerSourceSupport>,
@@ -2821,6 +2877,7 @@ impl DemandNativeInputs {
         }
         Ok(DemandCertifiedGroups {
             basis: Arc::clone(&self.cold),
+            operation,
             rows,
             products,
             resolved_originals: inputs.resolved_originals.clone(),
@@ -2846,6 +2903,8 @@ impl ResolvedNativeDemand {
     pub(crate) fn belongs_to(&self, inputs: &Arc<RequestCompilerInputs>) -> bool {
         Arc::ptr_eq(self.demand.cold(), inputs)
     }
+
+    pub(crate) fn into_groups(self) -> DemandCertifiedGroups { self.groups }
 }
 
 impl RequestCompilerInputs {
