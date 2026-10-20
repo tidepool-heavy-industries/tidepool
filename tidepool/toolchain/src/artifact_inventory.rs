@@ -5149,7 +5149,7 @@ impl ArtifactInventory {
             .filter(|(_, matching)| !matching.is_empty())
             .map(|(key, matching)| (key, *matching.first().unwrap()))
             .collect::<BTreeMap<_, _>>();
-        let resolve_target = |target: PlannedTarget, scope: Option<ArtifactSelectionId>| {
+        let resolve_target = |target: PlannedTarget, scope: Option<ArtifactSelectionId>| -> Result<InventoryNodeKey, CompileError> {
             let existing = match target {
                 PlannedTarget::ExactGroup(binding) => Some(InventoryNodeKey::Group(binding)),
                 PlannedTarget::NewGroup(group) => {
