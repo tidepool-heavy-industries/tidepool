@@ -11020,26 +11020,27 @@ mod tests {
             for view in [capture("InheritedLeft"), capture("InheritedRight")] {
                 let projection =
                     CompilerInputProjection::from_issued_entries(&view.entries()).unwrap();
-                let selection =
+                let mut selection =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &projection,
                         &view.metadata_snapshot(),
                         &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
                     )
                     .unwrap();
+                let issued =
+                    crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                        &mut selection,
+                        &view,
+                        view.entries(),
+                    )
+                    .unwrap();
                 let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                    &selection, &view,
+                    &selection, &issued,
                 )
                 .unwrap();
                 let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
-                supports.push(
-                    completed
-                        .close_request(
-                            None,
-                            &crate::declaration_context::ProtectedScaffoldRequirements::default(),
-                        )
-                        .unwrap(),
-                );
+                let closure = selection.selected_original_closure(&issued).unwrap();
+                supports.push(completed.certify_original_closure(&closure).unwrap());
             }
             let left = &supports[0];
             let right = &supports[1];
@@ -14435,8 +14436,17 @@ mod tests {
                 .roles()
                 .iter()
                 .any(|role| role.original() == Some(child.descriptor.id));
-            let facts =
+            let mut facts =
                 NativeOriginalRequirement::for_projection(&projection, issuer, &[]).unwrap();
+            if child_reusable {
+                let child_own =
+                    NativeOriginalRequirement::from_selected_view(child.descriptor.id, issuer)
+                        .unwrap()
+                        .unwrap();
+                if !facts.contains(&child_own) {
+                    facts.push(child_own);
+                }
+            }
             let mut receipt =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,

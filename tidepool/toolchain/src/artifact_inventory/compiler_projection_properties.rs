@@ -680,29 +680,65 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             .admit_shared_with_demand(
                 &inventory.empty_view(),
                 entries.clone(),
-                NativeArtifactDemand::AllGroups,
+                NativeArtifactDemand::ScopeInterfaces,
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let selection =
+        let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &physical.metadata_snapshot(),
                 &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
             )
             .unwrap();
-        let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-            &selection, &physical,
-        )
-        .unwrap();
-        let support = CompilerSourceSupport::close_complete_output(&output)
+        let issued =
+            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selection,
+                &physical,
+                entries,
+            )
+            .unwrap();
+        let output =
+            crate::declaration_context::OriginalCompilerInputs::from_selection(&selection, &issued)
+                .unwrap();
+        let empty = CompilerSourceSupport::close_complete_output(&output)
             .unwrap()
             .close_request(
                 None,
                 &crate::declaration_context::ProtectedScaffoldRequirements::default(),
             )
             .unwrap();
-        // All three current outputs retain their complete selected bodies here;
+        assert!(empty.artifacts().selected_native_groups().is_empty());
+        assert!(!empty.native_offers().is_empty());
+        assert!(empty.native_offers().iter().all(|offer| offer.is_full()));
+        let ArtifactPayload::Original(product) = &catalog.original(0, version).payload else {
+            unreachable!()
+        };
+        let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap());
+        let unchanged = empty
+            .close_request(
+                None,
+                &crate::declaration_context::ProtectedScaffoldRequirements::default(),
+            )
+            .unwrap();
+        for support in [&empty, &unchanged] {
+            match support
+                .checked_native_input_decision(
+                    catalog.original(0, version).descriptor.id,
+                    canonical,
+                    product.owner(),
+                )
+                .unwrap()
+            {
+                InputNativeDecision::IssuedChoices(choices) => assert!(choices.is_empty()),
+                InputNativeDecision::UnissuedPolicy => {
+                    panic!("Full availability cannot erase an issued empty choice")
+                }
+            }
+        }
+        let closure = selection.selected_original_closure(&issued).unwrap();
+        let support = empty.certify_original_closure(&closure).unwrap();
+        // The explicit selection consumes all three completed output bodies here;
         // the later target demand independently selects only its exact closure.
         let expected = (0..MODULES)
             .flat_map(|module| ORDINALS.map(|ordinal| (module, version, ordinal)))
