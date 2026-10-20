@@ -18436,7 +18436,7 @@ pub(crate) mod request_tests {
             );
             workbench_runner_for_test(&workbench)
                 .adopt_final_source_scope(context.clone()).await.unwrap();
-            workbench.access.ensure_compiler_world(context.clone()).await.unwrap();
+            workbench.access.with_compiler_world(context.clone(), None, |_, _, _| Ok(())).await.unwrap();
             let before = workbench.access.with_machine(context.clone(), |session, context, _| {
                 Ok((session.heap_stats(), session.workbench_bindings_in(context.placement.lexical_scope)))
             }).await.unwrap();
