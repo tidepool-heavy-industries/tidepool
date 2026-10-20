@@ -5036,16 +5036,18 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             Value::Array(vec![Value::Integer(7.into())])
         ])
     );
+    let helper_artifact = request
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.interface.module == "TypeOnlyHelper")
+        .unwrap();
     assert!(
-        request
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.interface.module == "TypeOnlyHelper")
-            .unwrap()
-            .product
-            .is_none(),
-        "transport availability does not upgrade compiler roles"
+        helper_artifact.product.is_some(),
+        "the issued-groups row keeps its transported native product anchor"
     );
+    request
+        .validate_artifacts()
+        .expect("issued-groups transport row keeps a valid native anchor");
     assert!(!request.input_transport_files().is_empty());
     let availability = request
         .compiler_inputs()
