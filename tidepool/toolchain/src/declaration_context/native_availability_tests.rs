@@ -2750,13 +2750,22 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
         text("private-native")
     );
     assert!(wire_groups(&request)["PrivateFullInterface"].is_empty());
-    assert!(request
+    let private_artifact = request
         .artifacts
         .iter()
         .find(|artifact| artifact.interface.module == "PrivateFullInterface")
-        .unwrap()
-        .product
-        .is_none());
+        .unwrap();
+    assert_eq!(
+        private_artifact
+            .product
+            .as_ref()
+            .expect("private-native original keeps its product anchor")
+            .module,
+        "PrivateFullInterface"
+    );
+    request
+        .validate_artifacts()
+        .expect("the transported row owns the private-native product evidence");
     assert!(inputs
         .projection()
         .roles()
@@ -2951,6 +2960,104 @@ fn interface_only_full_availability_preserves_roles_and_admits_later_exact_deman
     assert_eq!(expected.len(), 1);
     assert_eq!(groups.into_iter().collect::<BTreeSet<_>>(), expected);
     assert_eq!(context.as_ref(), &before);
+}
+
+#[test]
+fn private_native_scope_artifacts_keep_their_product_anchor() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let native = product("PrivateScopeProduct", 131);
+    let plain_product = product("PlainScopeInterface", 132);
+    let native_entry =
+        Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+    let plain_entry = Arc::new(ArtifactEntry::canonical(
+        plain_product.module_interface().unwrap().clone(),
+    ));
+    let inventory = ArtifactInventory::default();
+    let full = inventory
+        .admit_shared(
+            &inventory.empty_view(),
+            vec![native_entry.clone(), plain_entry.clone()],
+        )
+        .unwrap();
+    let proof = NativeOriginalRequirement::from_selected_view(native_entry.descriptor.id, &full)
+        .unwrap()
+        .unwrap();
+    let offer = IssuedNativeOffer::issue(native_entry.descriptor.id, &full, Some(proof)).unwrap();
+    let issued = recover_fixture_compiler_support(
+        CompilerInputProjection::from_issued_entries(&[native_entry.clone(), plain_entry.clone()])
+            .unwrap(),
+        full.clone(),
+        [],
+    )
+    .unwrap();
+    // Both owners retain interface-only compiler roles; the native original is
+    // available only through the issued offer, as in the failing exact scope.
+    let interfaces = issued
+        .selected_interfaces()
+        .unwrap()
+        .support_for_owners(vec![
+            native_entry.descriptor.owner.clone(),
+            plain_entry.descriptor.owner.clone(),
+        ])
+        .unwrap();
+    let support = fixture_support_with_issued_offers(
+        interfaces.projection().clone(),
+        interfaces.artifacts().clone(),
+        [offer],
+    )
+    .unwrap();
+    let context = Arc::new(ExactDeclarationContext::from_facts(
+        DeclarationContextFacts {
+            producer: producer.sha256(),
+            compiler_support: support,
+            lexical: Default::default(),
+            template_imports: None,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+        },
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(context)
+        .prepare_compilation(root.path(), PRODUCER)
+        .unwrap();
+    // The scope advertises the module as a full private-native carrier...
+    assert_eq!(wire_mode(&request, "PrivateScopeProduct"), full_mode());
+    assert_eq!(
+        wire_classification(&request, "PrivateScopeProduct"),
+        text("private-native")
+    );
+    // ...so its request artifact keeps the product anchor the availability row
+    // carries instead of the compiler's canonical role demoting it.
+    let artifact = request
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.interface.module == "PrivateScopeProduct")
+        .unwrap();
+    let product = artifact
+        .product
+        .as_ref()
+        .expect("private-native original keeps its product anchor");
+    assert_eq!(product.module, "PrivateScopeProduct");
+    assert!(
+        product.path.to_string_lossy().ends_with(".products.cbor"),
+        "product anchor is the products sidecar: {:?}",
+        product.path
+    );
+    assert_eq!(
+        crate::checked_cell::hash(&std::fs::read(&product.path).unwrap()),
+        product.sha256
+    );
+    // A compiler-role interface stays product-free.
+    let plain = request
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.interface.module == "PlainScopeInterface")
+        .unwrap();
+    assert!(
+        plain.product.is_none(),
+        "a canonical interface carries no executable product"
+    );
+    request.validate_artifacts().unwrap();
 }
 
 #[test]

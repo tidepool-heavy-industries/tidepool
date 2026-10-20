@@ -7201,9 +7201,11 @@ impl ExactCompilationRequest {
 
     /// Validate the issued request roles, including private native availability.
     /// Persistent declarations retain their independent lexical and type roles.
+    /// The transported view owns product evidence: an advertised original
+    /// replaces the compiler's canonical role for the same owner there.
     pub(crate) fn validate_artifacts(&self) -> Result<(), CompileError> {
         self.context()
-            .validate_artifacts_from_metadata(&self.artifacts, &self.compiler_inputs().metadata)
+            .validate_artifacts_from_metadata(&self.artifacts, &self.transport_metadata)
     }
 
     /// Original offers authenticated by this request's compiler namespace.
@@ -11520,19 +11522,20 @@ impl ExactDeclarationContext {
             .as_ref()
             .map(|scope| compiler_execution_scope(scope, compiler_metadata))
             .transpose()?;
+        // Compiler role membership gates which owners this request issues, but
+        // the executable product belongs to the transported row. Re-deriving
+        // the role from the compiler's metadata demoted an owner that is both
+        // a compiler-role interface and an advertised private-native original,
+        // leaving its native group without a product anchor downstream.
         let artifacts = transported_artifacts
             .iter()
-            .filter_map(|artifact| {
-                let entry = compiler_metadata.entries.get(&identity(
+            .filter(|artifact| {
+                compiler_metadata.entries.contains_key(&identity(
                     &artifact.interface.unit,
                     &artifact.interface.module,
-                ))?;
-                let mut artifact = artifact.clone();
-                if !matches!(entry.payload, ArtifactPayload::Original(_)) {
-                    artifact.product = None;
-                }
-                Some(artifact)
+                ))
             })
+            .cloned()
             .collect::<Vec<_>>();
         let fields = vec![
             text("TPEXACTSCOPE"),
