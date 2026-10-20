@@ -455,7 +455,7 @@ fn install_compiled_target(
     let resolved =
         state.resolve_certification_in(scope, target.prepared.prepared(), &certification)?;
     let registry = state.certified_image_registry();
-    let (target, demanded) = ScopedTargetImage::compile_scoped(
+    let target = ScopedTargetImage::compile_scoped(
         target.prepared.prepared().clone(),
         &resolved,
         &registry,
@@ -466,7 +466,6 @@ fn install_compiled_target(
             &artifacts.table,
             target,
             &resolved.source_evidence,
-            demanded,
             &resolved.inherited_needed,
             &|_| None,
         )?

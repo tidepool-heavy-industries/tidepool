@@ -760,6 +760,7 @@ pub(crate) struct ScopedTargetImage {
     base: ImageTarget,
     plan: super::persistent::ResolvedSourceDomainPlan,
     owners: Arc<[ImportOwner]>,
+    demanded: Vec<DemandedImage>,
 }
 
 impl std::ops::Deref for ScopedTargetImage {
@@ -774,6 +775,10 @@ impl std::ops::Deref for ScopedTargetImage {
 }
 
 impl ScopedTargetImage {
+    pub(crate) fn demanded(&self) -> &[DemandedImage] {
+        &self.demanded
+    }
+
     pub(crate) fn owners(&self) -> &[ImportOwner] {
         &self.owners
     }
@@ -1138,11 +1143,12 @@ impl PreparedSourceEntry {
             &compiled.prepared(),
             certification,
         )?;
-        let (target, demanded) = ScopedTargetImage::compile_scoped(
+        let target = ScopedTargetImage::compile_scoped(
             compiled.prepared().as_ref().clone(),
             &resolved,
             &registry,
         )?;
+        let demanded = target.demanded();
         let mut images = Vec::with_capacity(demanded.len() + 1);
         images.push(Arc::clone(&target.image));
         images.extend(demanded.iter().map(|image| Arc::clone(image.image())));
@@ -1307,7 +1313,7 @@ impl ImageTarget {
         prepared: PreparedProgram,
         resolved: &super::persistent::ResolvedCertifiedTurn,
         images: NativeImageAcquisition<'_>,
-    ) -> Result<(ScopedTargetImage, Vec<DemandedImage>), PreparedRuntimeError> {
+    ) -> Result<ScopedTargetImage, PreparedRuntimeError> {
         let groups = resolved
             .groups
             .iter()
@@ -1327,11 +1333,9 @@ impl ImageTarget {
                 ScopedDemandedImage::admit(image, group).map(ScopedDemandedImage::into_image)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok((
-            target.with_source_plan(
-                resolved.source_plan.clone(),
-                Arc::from(resolved.target_owners.clone()),
-            ),
+        Ok(target.with_source_plan(
+            resolved.source_plan.clone(),
+            Arc::from(resolved.target_owners.clone()),
             demanded,
         ))
     }
@@ -1462,11 +1466,13 @@ impl ImageTarget {
         self,
         plan: super::persistent::ResolvedSourceDomainPlan,
         owners: Arc<[ImportOwner]>,
+        demanded: Vec<DemandedImage>,
     ) -> ScopedTargetImage {
         ScopedTargetImage {
             base: self,
             plan,
             owners,
+            demanded,
         }
     }
 
@@ -1484,7 +1490,7 @@ impl ScopedTargetImage {
         prepared: PreparedProgram,
         resolved: &super::persistent::ResolvedCertifiedTurn,
         registry: &ImageRegistry,
-    ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
+    ) -> Result<Self, PreparedRuntimeError> {
         ImageTarget::acquire_scoped(
             prepared,
             resolved,
@@ -1496,7 +1502,7 @@ impl ScopedTargetImage {
         prepared: PreparedProgram,
         resolved: &super::persistent::ResolvedCertifiedTurn,
         bundle: &NativeImageBundle,
-    ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
+    ) -> Result<Self, PreparedRuntimeError> {
         ImageTarget::acquire_scoped(
             prepared,
             resolved,
@@ -4404,13 +4410,13 @@ impl PreparedEngine {
         &mut self,
         target: ScopedTargetImage,
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
         inherited: &BTreeMap<ScopedSourceBinder, SourceInstanceLease>,
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
         bindings: &BindingTable,
         retained_sources: &HashMap<ImportOwner, NativeSourceCustody>,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
+        let demanded = target.demanded();
         let target_owners = target.owners();
         let mut target_exports: BTreeMap<_, _> = exportable_code_tops(&target.prepared)
             .into_iter()
@@ -4531,7 +4537,6 @@ impl PreparedEngine {
         self.install_certified_turn_admitted(
             target,
             source_evidence,
-            demanded,
             inherited_needed,
             inherited,
             exact_external,
@@ -4547,9 +4552,8 @@ impl PreparedEngine {
     // checks their full identity, representation and callable signature.
     fn install_certified_turn_admitted(
         &mut self,
-        target: ScopedTargetImage,
+        mut target: ScopedTargetImage,
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
         inherited: &BTreeMap<ScopedSourceBinder, SourceInstanceLease>,
         exact_external: &HashMap<ImportOwner, PreparedHandle>,
@@ -4558,6 +4562,7 @@ impl PreparedEngine {
         target_packages: BTreeMap<SymbolIdentity, (ValueId, [u8; 32])>,
         certified_exports: BTreeMap<SymbolIdentity, [u8; 32]>,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
+        let demanded = std::mem::take(&mut target.demanded);
         let target_owners = target.owners();
         struct DiagnosticDigest<'a>(&'a [u8]);
         impl std::fmt::Display for DiagnosticDigest<'_> {

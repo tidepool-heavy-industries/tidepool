@@ -1040,11 +1040,11 @@ impl PersistentSession {
         metadata: &DataConTable,
         target: ScopedTargetImage,
         source_evidence: &BTreeMap<SourceBinder, (CachedHomeOwner, u32)>,
-        demanded: Vec<DemandedImage>,
         inherited_needed: &[InheritedSourceDemand],
         retained_sources: &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
     ) -> Result<InstalledCertifiedTurn, PreparedRuntimeError> {
         let plan = target.source_plan();
+        let demanded = target.demanded();
         self.admit_source_work_in(scope)?;
 
         if !self.scopes.is_live(scope) {
@@ -1120,7 +1120,6 @@ impl PersistentSession {
         let mut staged = engine.install_certified_turn(
             target,
             source_evidence,
-            demanded,
             inherited_needed,
             &inherited,
             &exact_external,
