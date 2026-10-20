@@ -3496,9 +3496,9 @@ mod normalized_dependency_tests {
             drop(state);
             assert_eq!(receiving.capture_graph_selection(), before_receiving);
         }
-        // Carry the same historical offer through an actual compiler request
-        // and bound target. Catalogue admission alone does not cover this later
-        // certified-selection consumer.
+        // Carry the same historical offer through an actual compiler request.
+        // Its private body permission cannot substitute for a direct root choice;
+        // the parent-edge acquisition above remains independently accepted.
         let hidden_owner = canonical.descriptor.owner.clone();
         let visible = interfaces
             .support_for_owners(vec![hidden_owner.clone()])
@@ -3537,7 +3537,8 @@ mod normalized_dependency_tests {
                 "entry_7",
             ),
         }];
-        let admitted = inventory
+        let before_bound = fixed.observed_binding_state();
+        let error = inventory
             .admit_bound_target(
                 &mut fixed,
                 &inventory.empty_view(),
@@ -3545,12 +3546,16 @@ mod normalized_dependency_tests {
                 vec![],
                 &selection,
             )
-            .unwrap();
-        assert!(admitted
-            .artifacts
-            .roots()
-            .contains(&InventoryNodeKey::Group(expected_group)));
-        assert!(!admitted.artifacts.namespace().contains_key(&hidden_id));
+            .err()
+            .expect("a direct private Input demand lacks a root choice or current product");
+        assert!(
+            matches!(error, CompileError::ArtifactInventory(ref error)
+            if error.native_refusal == Some(NativeAdmissionRefusal::CurrentProductNotCompleted {
+                original: hidden_id, original_ordinal: 7,
+            })),
+            "a sole private issued candidate cannot bypass root choice: {error:?}"
+        );
+        assert_eq!(fixed.observed_binding_state(), before_bound);
         assert_eq!(receiving.capture_graph_selection(), before_receiving);
 
         let empty_source = CompilerSourceSupport::empty();
