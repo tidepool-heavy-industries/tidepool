@@ -1820,6 +1820,11 @@ tidepool_buildscript_run(
                 retirement_tests = [
                     "resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate",
                     "resident_workbench::request_tests::actual_retirement_owner_loss_retains_candidate_before_publisher_disposal_panic",
+                    "resident_workbench::request_tests::actual_retirement_owner_loss_before_send_keeps_original_open",
+                    "resident_workbench::request_tests::actual_retirement_queued_owner_loss_keeps_original_open",
+                    "resident_workbench::request_tests::actual_retirement_handler_panic_retains_frozen_candidate",
+                    "resident_workbench::request_tests::actual_retirement_waiter_loss_retains_frozen_candidate",
+                    "resident_workbench::request_tests::actual_retirement_owner_loss_after_capture_retains_guarded_membership",
                 ]
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",

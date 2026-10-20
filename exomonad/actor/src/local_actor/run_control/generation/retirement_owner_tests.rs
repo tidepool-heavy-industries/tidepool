@@ -113,6 +113,11 @@ impl RunControlClient {
         );
         if !before_reserve {
             assert_eq!(
+                decision.phase(),
+                tidepool_runtime::session::PublicationPhase::Running,
+                "losing an observer does not request publication cancellation"
+            );
+            assert_eq!(
                 decision.request_cancellation(),
                 tidepool_runtime::session::PublicationCancellation::RequestedBeforeCommit
             );
@@ -198,8 +203,7 @@ impl RunControlClient {
                         &capture.physical_closure;
                     assert!(actors.contains(&actor));
                     assert!(capture.actors.iter().any(|captured| {
-                        captured.identity() == actor
-                            && cells.contains(&captured.address().get_id())
+                        captured.identity() == actor && cells.contains(&captured.address().get_id())
                     }));
                 }
                 (
@@ -222,6 +226,12 @@ impl RunControlClient {
                 tidepool_runtime::session::PublicationPhase::CancellationRequested
             );
         }
+        let external = expected.dependency().prerequisite().as_ref().unwrap();
+        drop(
+            SourceDependency::Generation(external.clone())
+                .claim()
+                .unwrap(),
+        );
         assert_eq!(
             tidepool_extract_cmd::extract_spawn_count(),
             compiler_calls,

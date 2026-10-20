@@ -2436,6 +2436,18 @@ mod tests {
     ) {
         assert_eq!(expected.context().actor, context.actor);
         assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
+        let external = expected.dependency().prerequisite().as_ref().unwrap();
+        assert_eq!(external.actor(), crate::ActorRef::first(crate::ActorId(99)));
+        assert!(prepared
+            .candidate
+            .installation
+            .source_dependency()
+            .generation()
+            .unwrap()
+            .prerequisite()
+            .as_ref()
+            .unwrap()
+            .same_owner(external));
         let (directory, directory_task) = crate::LocalActorDirectory::start().await.unwrap();
         let (start_entered, starting) = tokio::sync::oneshot::channel();
         let (start_release, continue_start) = tokio::sync::oneshot::channel();
