@@ -50,6 +50,13 @@ pub(super) struct PrivateHostRetirement {
     after: super::persistent::CompileViewKey,
     binder: SessionVarId,
     name: BindingName,
+    public_before: Arc<super::inspection::InspectionWorldAssociation>,
+    public_after: Arc<super::inspection::InspectionWorldAssociation>,
+}
+
+enum PrivateHostVisibilityMutation {
+    Hide,
+    Retire,
 }
 
 impl PrivateHostRetirement {
@@ -63,6 +70,19 @@ impl PrivateHostRetirement {
         (Arc::ptr_eq(&self.association, association)
             && Arc::ptr_eq(&self.scope, scope)
             && &self.before == before
+            && Arc::ptr_eq(&self.public_before.world, &self.public_after.world)
+            && Arc::ptr_eq(
+                &self.public_before.base.source,
+                &self.public_after.base.source,
+            )
+            && Arc::ptr_eq(
+                &self.public_before.base.original_source,
+                &self.public_after.base.original_source,
+            )
+            && Arc::ptr_eq(
+                &self.public_before.base.target,
+                &self.public_after.base.target,
+            )
             && session
                 .resolve_in(scope.scope(), &self.name.0)
                 .is_none_or(|entry| entry.id != self.binder))
@@ -6135,21 +6155,17 @@ where
                 "host binding identity changed before hiding".into(),
             ))));
         }
+        self.hide_current_host_binding(scope, id);
+        Ok(())
+    }
+
+    fn hide_current_host_binding(&mut self, scope: ScopeId, id: SessionVarId) {
         if self.hidden_host_bindings.insert(id, ()).is_none() {
             self.state.advance_compiler_input_revision();
             self.advance_public_visibility(scope);
         }
-        Ok(())
     }
 
-    /// Withdraw a private request carrier from future source views while any
-    /// prepared work that already leased it retains its exact generation.
-    ///
-    /// `session_root` is used only to reap a stub generation's `.hs` source
-    /// if this retirement is what drops it to zero live references (see
-    /// [`Self::reap_evicted_stub_sources_in`]); an ordinary compiler-issued
-    /// binding has no stub source and this is then a no-op past the retire
-    /// itself.
     /// Retire the exact private host carrier and retain the owning key transition
     /// for final World publication. Generic cleanup remains separately available
     /// after source fencing and never issues publication evidence.
@@ -6158,13 +6174,53 @@ where
         execution: &super::PrivateExecutionAdmission,
         binder: &BoundBinder,
     ) -> Result<(), ResidentError> {
+        self.change_private_host_visibility(
+            execution,
+            binder,
+            PrivateHostVisibilityMutation::Retire,
+        )
+    }
+
+    /// Hide a freshly mounted private carrier before its first checked cell.
+    /// Only the private admission can preserve an unrelated public World across
+    /// this exact hidden-ID change. General ancestor hiding stays unchanged.
+    pub fn hide_private_host_binding_in(
+        &mut self,
+        execution: &super::PrivateExecutionAdmission,
+        binder: &BoundBinder,
+    ) -> Result<(), ResidentError> {
+        self.change_private_host_visibility(execution, binder, PrivateHostVisibilityMutation::Hide)
+    }
+
+    fn change_private_host_visibility(
+        &mut self,
+        execution: &super::PrivateExecutionAdmission,
+        binder: &BoundBinder,
+        mutation: PrivateHostVisibilityMutation,
+    ) -> Result<(), ResidentError> {
         self.settle_dropped_custody();
+        self.prune_binding_metadata();
         let facts = execution
             .world_execution_facts()
             .ok_or(SessionError::WorldCellRequiresServicePreparation)?;
+        if !self.state.has_lib() {
+            return Err(SessionError::MissingDeclarationLibrary.into());
+        }
+        let public = self
+            .state
+            .lib()
+            .tips
+            .get(&execution.public_scope())
+            .and_then(|tip| tip.inspection_world.clone())
+            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
         let target = execution.retained_lexical_scope();
         super::RuntimeLexicalScopeLease::with_source_leases(
-            [facts.original_source.clone(), target.clone()],
+            [
+                facts.original_source.clone(),
+                target.clone(),
+                public.base.original_source.clone(),
+                public.base.target.clone(),
+            ],
             |leases| {
                 super::RuntimeSourceAdmission::with_open_admissions(
                     leases.iter().map(|lease| lease.source_admission()),
@@ -6180,61 +6236,133 @@ where
                                 .state
                                 .source_lease_in(scope)
                                 .is_ok_and(|live| Arc::ptr_eq(&live, &target))
-                            || !self.hidden_host_bindings.contains_key(&id)
+                            || !Arc::ptr_eq(&public.base.target, &facts.published.base.target)
+                            || !self.state.inspection_world_base_is_current(
+                                &public.base,
+                                &public.base.source,
+                                &public.base.original_source,
+                            )
                             || self
                                 .state
-                                .resolve_in(scope, &binder.name)
-                                .is_none_or(|entry| entry.id != id || entry.scope != scope)
+                                .lib()
+                                .tips
+                                .get(&execution.public_scope())
+                                .and_then(|tip| tip.inspection_world.as_ref())
+                                .is_none_or(|live| !Arc::ptr_eq(live, &public))
                         {
-                            return Err(SessionError::StaleStagedDeclaration);
+                            return Err(SessionError::WorldCellPublicationBaseStale);
+                        }
+                        let entry = self
+                            .state
+                            .resolve_in(scope, &binder.name)
+                            .filter(|entry| entry.id == id && entry.scope == scope)
+                            .ok_or(SessionError::StaleStagedDeclaration)?;
+                        if self.state.is_stub_module(entry.module)
+                            || self
+                                .state
+                                .bindings()
+                                .is_binding_visible_in(
+                                    self.state.scope_tree(),
+                                    execution.public_scope(),
+                                    id,
+                                )
+                                .map_err(SessionError::InvalidPublicBindingPromotion)?
+                        {
+                            return Err(SessionError::WorldCellPublicationBaseStale);
                         }
                         let association = self
                             .state
                             .lib()
                             .tips
                             .get(&scope)
-                            .and_then(|tip| tip.inspection_world.clone())
-                            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                            .and_then(|tip| tip.inspection_world.clone());
                         let before = self
                             .state
                             .compile_view_key_in(scope)
                             .ok_or(SessionError::StaleStagedDeclaration)?;
                         let mut records = execution.host_retirements.lock();
-                        let mut expected = &association.base.key;
-                        for record in records.iter() {
-                            expected = record
-                                .following_key(&self.state, &association, &target, expected)
-                                .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                        let retirement = match mutation {
+                            PrivateHostVisibilityMutation::Hide => {
+                                // A fresh carrier is not a logical checked value. Once a
+                                // private World exists, changing its lexical inventory needs
+                                // that compiler owner's checked projection product.
+                                if association.is_some() || !records.is_empty() {
+                                    return Err(SessionError::WorldCellRequiresServicePreparation);
+                                }
+                                None
+                            }
+                            PrivateHostVisibilityMutation::Retire => {
+                                if !self.hidden_host_bindings.contains_key(&id) {
+                                    return Err(SessionError::StaleStagedDeclaration);
+                                }
+                                let association = association
+                                    .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                                let mut expected = &association.base.key;
+                                for record in records.iter() {
+                                    expected = record
+                                        .following_key(&self.state, &association, &target, expected)
+                                        .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                                }
+                                if expected != &before
+                                    || !Arc::ptr_eq(
+                                        &association.base.original_source,
+                                        &facts.original_source,
+                                    )
+                                    || !Arc::ptr_eq(&association.base.target, &target)
+                                    || association.base.source.sha256() != facts.source.sha256()
+                                {
+                                    return Err(SessionError::WorldCellPublicationBaseStale);
+                                }
+                                records.try_reserve(1).map_err(|error| {
+                                    SessionError::RecoveryManifest {
+                                        path: self.state.lib().root.clone(),
+                                        detail: error.to_string(),
+                                    }
+                                })?;
+                                Some(association)
+                            }
+                        };
+                        match mutation {
+                            PrivateHostVisibilityMutation::Hide => {
+                                self.hide_current_host_binding(scope, id)
+                            }
+                            PrivateHostVisibilityMutation::Retire => {
+                                self.retire_binding_owner_settled(id)
+                            }
                         }
-                        if expected != &before
-                            || !Arc::ptr_eq(
-                                &association.base.original_source,
-                                &facts.original_source,
-                            )
-                            || !Arc::ptr_eq(&association.base.target, &target)
-                            || association.base.source.sha256() != facts.source.sha256()
-                        {
-                            return Err(SessionError::WorldCellPublicationBaseStale);
-                        }
-                        records
-                            .try_reserve(1)
-                            .map_err(|error| SessionError::RecoveryManifest {
-                                path: self.state.lib().root.clone(),
-                                detail: error.to_string(),
-                            })?;
-                        self.retire_binding_owner_settled(id);
                         let after = self
                             .state
                             .compile_view_key_in(scope)
                             .ok_or(SessionError::StaleStagedDeclaration)?;
-                        records.push(PrivateHostRetirement {
-                            association,
-                            scope: target.clone(),
-                            before,
-                            after,
-                            binder: id,
-                            name: BindingName(binder.name.clone()),
-                        });
+                        let public_after_key = self
+                            .state
+                            .compile_view_key_in(execution.public_scope())
+                            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                        let mut base = public.base.clone();
+                        base.key = public_after_key;
+                        let public_after =
+                            Arc::new(super::inspection::InspectionWorldAssociation {
+                                base,
+                                world: public.world.clone(),
+                            });
+                        self.state
+                            .lib_mut()
+                            .tips
+                            .get_mut(&execution.public_scope())
+                            .expect("the public association was checked")
+                            .inspection_world = Some(public_after.clone());
+                        if let Some(association) = retirement {
+                            records.push(PrivateHostRetirement {
+                                association,
+                                scope: target.clone(),
+                                before,
+                                after,
+                                binder: id,
+                                name: BindingName(binder.name.clone()),
+                                public_before: public.clone(),
+                                public_after,
+                            });
+                        }
                         self.reap_evicted_stub_sources_in(&self.state.lib().root.clone());
                         Ok(())
                     },
@@ -6245,6 +6373,14 @@ where
         Ok(())
     }
 
+    /// Withdraw a private request carrier from future source views while any
+    /// prepared work that already leased it retains its exact generation.
+    ///
+    /// `session_root` is used only to reap a stub generation's `.hs` source
+    /// if this retirement is what drops it to zero live references (see
+    /// [`Self::reap_evicted_stub_sources_in`]); an ordinary compiler-issued
+    /// binding has no stub source and this is then a no-op past the retire
+    /// itself.
     pub fn retire_host_binding_owner(&mut self, session_root: &Path, binder: &BoundBinder) {
         let id = SessionVarId::from_extract(binder.var_id);
         self.retire_binding_owner(id);
@@ -9414,10 +9550,7 @@ mod authored_publication_tests {
         })
         .unwrap();
         let first = checked.checked_item(0).unwrap();
-        let prefix = state
-            .begin_cell_program(program)
-            .unwrap()
-            .unwrap();
+        let prefix = state.begin_cell_program(program).unwrap().unwrap();
         let mut resident = TestSession::from_persistent_for_test(frunk::HNil, EmptyOutput, state);
         resident
             .set_run_context(SessionRunContext {
@@ -11697,10 +11830,7 @@ mod authored_publication_tests {
         })
         .unwrap();
         let item = checked.checked_item(0).unwrap();
-        let prefix = session
-            .begin_cell_program(program)
-            .unwrap()
-            .unwrap();
+        let prefix = session.begin_cell_program(program).unwrap().unwrap();
         let item_admission = session.admit_checked_item(prefix.clone(), item).unwrap();
         let generation = item_admission.generation();
         let TurnResult::Bind {
