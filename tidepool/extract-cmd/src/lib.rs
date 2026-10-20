@@ -34,6 +34,10 @@ pub mod diagnostics;
 mod endpoint;
 pub mod exec_check;
 pub mod frontend;
+mod native_demand;
+pub use native_demand::{
+    NativeDemand, NativeDemandControl, NativeDemandOwner, NativeDemandResolver, NativeReply,
+};
 mod package_source;
 mod process;
 mod request;

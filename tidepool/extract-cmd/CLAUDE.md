@@ -43,6 +43,21 @@ owners. Typed control results travel on the machine channel; captured stdout
 remains diagnostic text. Malformed accepted control responses poison the same
 transaction and retain END/input ownership without replay. Framing alone does
 not authenticate a root or issue a reusable realization.
+World preparation uses `execute_with_native_demand` in that same explicit
+transaction. The request's held semantic owner supplies `NativeDemandResolver`;
+the daemon only relays its bounded `NativeDemand`/`NativeReply` exchange. A fresh
+request nonce, full admission/World/input identities, actual stage and monotonic
+request sequence correlate replies; they confer no authority. Semantic refusal
+is distinct from transport failure and permits one failed terminal response.
+The same absolute same-host `CLOCK_MONOTONIC` deadline covers worker IO, relay
+IO and cooperative host resolution. Existing host checkpoints inherit that
+deadline and cancellation observer without borrowing the mutable transaction.
+Intermediate frames share the response payload budget and never count as
+terminal outputs. A one-shot EOF endpoint refuses exchange-dependent work.
+Readiness checks require an unbuffered sole reader: buffered bytes may already
+exist when the kernel descriptor reports no readiness. Retirement unblocks the
+exact client read half before joining relay IO and retains the write half for
+worker retirement evidence.
 An ordinary one-shot response is delivered only after the worker acknowledges
 transaction cleanup, so a client closing after receiving it preserves the warm
 worker. Explicit transactions stream request responses and acknowledge cleanup
@@ -114,7 +129,7 @@ STOP and deployment changes drain accepted work before rejecting the backlog.
 
 Daemon acceptance issues an admission identity before the queued worker starts.
 Only a successful worker BEGIN issues the actual daemon epoch, slot and existing
-worker boot nonce. The v5 transaction stream carries that location once before
+worker boot nonce. The v6 transaction stream carries that location once before
 output or END acknowledgement; malformed, duplicate, late or wrong-epoch metadata
 poisons accepted framing without replay. Failure before BEGIN leaves location
 unobserved. Returned daemon transaction results carry this actual location;
