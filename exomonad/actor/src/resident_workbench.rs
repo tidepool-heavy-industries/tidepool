@@ -23002,6 +23002,55 @@ pub(crate) mod request_tests {
         );
     }
 
+    fn run_closed_source_probe_startup(
+        session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        context: &crate::ActorSessionContext,
+        prepared: &tidepool_runtime::session::PreparedSourceEntry,
+    ) -> (
+        Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        ResidentOutcome,
+    ) {
+        context
+            .source_dependency()
+            .adopt_final_scope(session, context.placement.lexical_scope)
+            .unwrap();
+        let source = context.source_dependency().source_lease().unwrap();
+        let entry = session
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| session.prepare_source_startup_entry(prepared),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        let installation = entry.installation_scope().clone();
+        session
+            .set_run_context(tidepool_runtime::session::SessionRunContext {
+                lexical_scope: installation.scope(),
+                ..session.run_context()
+            })
+            .unwrap();
+        let outcome = session
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.run_source_startup_entry(entry, settlement),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        (installation, outcome)
+    }
+
     async fn run_native_instance_effect_probe(
         source: BoundActorWorkbenchSource,
         prepared: &PreparedSourceToolset,
@@ -23010,15 +23059,9 @@ pub(crate) mod request_tests {
     ) {
         let (mut session, context, _, _session_root) = host_mount_fixture();
         session.set_image_registry(Arc::clone(prepared.prepared.entry.image_registry()));
-        let entry = session
-            .prepare_startup_entry(prepared.prepared.entry.compiled().code())
-            .unwrap();
-        let ResidentOutcome::Suspended { hole, request, .. } =
-            tidepool_testing::with_settlement(|settlement| {
-                session.run_startup_entry(entry, settlement)
-            })
-            .unwrap()
-        else {
+        let (_installation, outcome) =
+            run_closed_source_probe_startup(&mut session, &context, &prepared.prepared.entry);
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
             panic!("source-owned installer must publish its native dispatcher");
         };
         let ResidentRequest::AgentTools(
@@ -23049,11 +23092,31 @@ pub(crate) mod request_tests {
             .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
             .unwrap()
             .expect("original native dispatcher");
-        assert!(matches!(
-            tidepool_testing::with_settlement(|settlement| session.resume(hole, (), settlement))
-                .unwrap(),
-            ResidentOutcome::Completed { .. }
-        ));
+        let resumed = session
+            .with_source_compiler_transaction(
+                context
+                    .source_dependency()
+                    .source_lease()
+                    .unwrap()
+                    .original_source()
+                    .clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.resume(hole, (), settlement),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        assert!(matches!(resumed, ResidentOutcome::Completed { .. }));
+        session
+            .set_run_context(tidepool_runtime::session::SessionRunContext {
+                lexical_scope: context.placement.lexical_scope,
+                ..session.run_context()
+            })
+            .unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
         let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
@@ -23112,15 +23175,9 @@ pub(crate) mod request_tests {
     ) {
         let before = tidepool_extract_cmd::extract_spawn_count();
         session.set_image_registry(Arc::clone(prepared.image_registry()));
-        let entry = session
-            .prepare_startup_entry(prepared.compiled().code())
-            .unwrap();
-        let ResidentOutcome::Suspended { hole, request, .. } =
-            tidepool_testing::with_settlement(|settlement| {
-                session.run_startup_entry(entry, settlement)
-            })
-            .unwrap()
-        else {
+        let (_installation, outcome) =
+            run_closed_source_probe_startup(&mut session, &context, prepared);
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
             panic!("selected original must execute its actual installer");
         };
         assert!(matches!(
@@ -23133,11 +23190,31 @@ pub(crate) mod request_tests {
             .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
             .unwrap()
             .expect("installed dispatcher");
-        assert!(matches!(
-            tidepool_testing::with_settlement(|settlement| session.resume(hole, (), settlement))
-                .unwrap(),
-            ResidentOutcome::Completed { .. }
-        ));
+        let resumed = session
+            .with_source_compiler_transaction(
+                context
+                    .source_dependency()
+                    .source_lease()
+                    .unwrap()
+                    .original_source()
+                    .clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| session.resume(hole, (), settlement),
+            )
+            .unwrap()
+            .into_outcome()
+            .action
+            .unwrap();
+        assert!(matches!(resumed, ResidentOutcome::Completed { .. }));
+        session
+            .set_run_context(tidepool_runtime::session::SessionRunContext {
+                lexical_scope: context.placement.lexical_scope,
+                ..session.run_context()
+            })
+            .unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
         let workbench = ResidentActorWorkbench::new(machines, source, None);
