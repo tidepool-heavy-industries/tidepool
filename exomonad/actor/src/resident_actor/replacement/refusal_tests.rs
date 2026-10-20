@@ -1143,7 +1143,7 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
     use crate::request::sources::tests::{receive, DirectoryFixture};
     use crate::request::sources::{CallbackExecution, SourceBinding, SourceEvent};
     use crate::resident_actor::source_slots::{
-        SourceDeliveryAdmission, SourceRegistrationState, SourceSlots,
+        SourceDeliveryAdmission, SourceRegistrationFailure, SourceRegistrationState, SourceSlots,
     };
 
     // Both executable mappings come from this one actual compiled fixture;
@@ -1418,6 +1418,50 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
         "only A's native subscription was detached"
     );
     assert!(events.try_recv().is_err());
+    assert!(recipient.terminal().requested_shutdown().is_none());
+    // Retirement is a permanent producer refusal, distinct from temporary
+    // fencing. The same real owner retains the original without retrying it.
+    source_b
+        .source_admission()
+        .fence()
+        .unwrap()
+        .retire(tidepool_runtime::session::NotebookGenerationId::INITIAL)
+        .unwrap();
+    let refused_b = slots.capture_source(source_b.source_admission());
+    assert!(matches!(
+        slots.admit_delivery(independent.clone()),
+        SourceDeliveryAdmission::Refused(
+            _,
+            crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed {
+                phase: tidepool_runtime::session::SourceAdmissionPhase::Retired { .. },
+                ..
+            }
+        )
+    ));
+    for _ in 0..2 {
+        assert!(matches!(refused_b[0].resume_deferred().state,
+            SourceRegistrationState::Open { deferred: 1, resume_failure: Some(SourceRegistrationFailure::Admission(
+                crate::resident_workbench::generation_admission::GenerationAdmissionError::Closed {
+                    phase: tidepool_runtime::session::SourceAdmissionPhase::Retired { .. }, ..
+                }
+            )) }));
+        assert!(
+            events.try_recv().is_err(),
+            "retired source input is not automatically retried"
+        );
+    }
+    assert!(matches!(
+        slots.admit_delivery(independent),
+        SourceDeliveryAdmission::Refused(_, _)
+    ));
+    assert!(matches!(
+        refused_b[0].observation().state,
+        SourceRegistrationState::Open { deferred: 2, .. }
+    ));
+    assert!(matches!(
+        refused_b[0].close().state,
+        SourceRegistrationState::Closed { rejected: 2 }
+    ));
     assert!(recipient.terminal().requested_shutdown().is_none());
     fence
         .reopen_with(source_a.original_source(), |reopen| {

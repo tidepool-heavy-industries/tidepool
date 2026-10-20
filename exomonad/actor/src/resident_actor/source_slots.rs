@@ -4,7 +4,9 @@ use super::*;
 use crate::request::sources::{
     ActorSourceConnections, SourceBinding, SourceDelivery, SourceTarget,
 };
-use crate::resident_workbench::generation_admission::{GenerationDependency, SourceDependency};
+use crate::resident_workbench::generation_admission::{
+    GenerationAdmissionError, GenerationDependency, SourceDependency,
+};
 use std::collections::VecDeque;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,11 +28,37 @@ pub(crate) enum SourceRegistrationDependency {
 pub(crate) enum SourceRegistrationState {
     Open {
         deferred: usize,
-        resume_failure: Option<String>,
+        resume_failure: Option<SourceRegistrationFailure>,
     },
     Closed {
         rejected: usize,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SourceRegistrationFailure {
+    Admission(GenerationAdmissionError),
+    DestinationUnavailable,
+    Dispatch(String),
+}
+impl std::fmt::Display for SourceRegistrationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Admission(error) => write!(f, "{error}"),
+            Self::DestinationUnavailable => f.write_str("source subscription is unavailable"),
+            Self::Dispatch(error) => f.write_str(error),
+        }
+    }
+}
+
+fn temporarily_fenced(error: &GenerationAdmissionError) -> bool {
+    matches!(
+        error,
+        GenerationAdmissionError::Closed {
+            phase: tidepool_runtime::session::SourceAdmissionPhase::Fenced { .. },
+            ..
+        }
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,7 +74,7 @@ struct OpenSourceSlot {
     deferred: VecDeque<(u64, SourceDelivery)>,
     next_delivery: u64,
     redispatched: Option<u64>,
-    resume_failure: Option<String>,
+    resume_failure: Option<SourceRegistrationFailure>,
 }
 enum SourceSlotState {
     Open(OpenSourceSlot),
@@ -187,6 +215,7 @@ impl Drop for AdmittedSourceDelivery {
 pub(super) enum SourceDeliveryAdmission {
     Admitted(AdmittedSourceDelivery),
     Deferred(SourceRegistrationIdentity),
+    Refused(SourceRegistrationIdentity, GenerationAdmissionError),
     Closed(SourceRegistrationIdentity),
     Rejected(String),
 }
@@ -435,7 +464,19 @@ impl SourceSlots {
             Ok(claim) => (Some(claim), None),
             Err(error) => (None, Some(error)),
         };
-        if claim.is_some() && (delivery.slot_delivery.is_some() || open.deferred.is_empty()) {
+        let refusal = match &open.resume_failure {
+            Some(SourceRegistrationFailure::Admission(error)) if !temporarily_fenced(error) => {
+                Some(error.clone())
+            }
+            _ => failure
+                .as_ref()
+                .filter(|error| !temporarily_fenced(error))
+                .cloned(),
+        };
+        if claim.is_some()
+            && refusal.is_none()
+            && (delivery.slot_delivery.is_some() || open.deferred.is_empty())
+        {
             if delivery.slot_delivery.take().is_some() {
                 delivery = open
                     .deferred
@@ -463,9 +504,15 @@ impl SourceSlots {
             open.next_delivery = next;
             open.deferred.push_back((marker, delivery));
         }
-        open.resume_failure = failure.map(|error| error.to_string());
+        open.resume_failure = refusal
+            .clone()
+            .or(failure)
+            .map(SourceRegistrationFailure::Admission);
         drop(state);
         drop(claim);
+        if let Some(error) = refusal {
+            return SourceDeliveryAdmission::Refused(slot.identity.clone(), error);
+        }
         // Post-store recheck closes reopen racing the first failed claim. The
         // same marked head is retained until admitted, never remapped on retry.
         resume_slot(&slot);
@@ -545,7 +592,8 @@ impl SourceSlots {
                 let mut slot_state = slot.state.lock();
                 match (&mut *slot_state, binding) {
                     (SourceSlotState::Open(open), Some(binding)) => {
-                        discarded.push(std::mem::replace(&mut open.binding, binding))
+                        discarded.push(std::mem::replace(&mut open.binding, binding));
+                        open.resume_failure = None;
                     }
                     (SourceSlotState::Closed { .. }, binding) => discarded.extend(binding),
                     (SourceSlotState::Open(_), None) => {
@@ -587,7 +635,11 @@ impl SourceSlots {
 
 fn resume_slot(slot: &Arc<SourceSlot>) {
     let execution = match &*slot.state.lock() {
-        SourceSlotState::Open(open) if !open.deferred.is_empty() && open.redispatched.is_none() => {
+        SourceSlotState::Open(open)
+            if !open.deferred.is_empty()
+                && open.redispatched.is_none()
+                && !matches!(&open.resume_failure, Some(SourceRegistrationFailure::Admission(error)) if !temporarily_fenced(error)) =>
+        {
             Some(open.binding.execution.clone())
         }
         _ => None,
@@ -595,7 +647,7 @@ fn resume_slot(slot: &Arc<SourceSlot>) {
     let Some(execution) = execution else { return };
     if let Err(error) = execution.admit_activation() {
         if let SourceSlotState::Open(open) = &mut *slot.state.lock() {
-            open.resume_failure = Some(error.to_string());
+            open.resume_failure = Some(SourceRegistrationFailure::Admission(error));
         }
         return;
     }
@@ -620,11 +672,11 @@ fn resume_slot(slot: &Arc<SourceSlot>) {
     let result = open
         .connection
         .as_ref()
-        .ok_or_else(|| "source subscription is unavailable".to_string())
+        .ok_or(SourceRegistrationFailure::DestinationUnavailable)
         .and_then(|connection| {
             connection
                 .dispatch(delivery)
-                .map_err(|error| error.to_string())
+                .map_err(|error| SourceRegistrationFailure::Dispatch(error.to_string()))
         });
     match result {
         Ok(()) => {

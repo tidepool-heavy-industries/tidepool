@@ -12198,6 +12198,10 @@ where
                             tracing::debug!(?identity, "source delivery retained before mapping while fenced");
                             return Ok(KernelStep::Continue(()));
                         }
+                        source_slots::SourceDeliveryAdmission::Refused(identity, error) => {
+                            tracing::warn!(?identity, %error, "source delivery retained with refused admission");
+                            return Ok(KernelStep::Continue(()));
+                        }
                         source_slots::SourceDeliveryAdmission::Closed(identity) => {
                             tracing::debug!(?identity, "source delivery refused by closed registration");
                             return Ok(KernelStep::Continue(()));
