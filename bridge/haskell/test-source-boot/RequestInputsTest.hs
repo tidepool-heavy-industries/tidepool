@@ -1658,6 +1658,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
     facts <- readWorldInputsWithOwner owner packetPath
     let identity = worldInputsIdentity facts
     worldDirectory <- canonicalizePath work
+    ifaceTrace <- lookupEnv "TIDEPOOL_IFACE_DEBUG"
     withRootedCompilerEnvironment worldDirectory $ do
       (outcome,diagnostics) <- withQuietStdout $ captureDiagnostics $
         withResidentCompilerScopes [] $ \runScope -> do
@@ -1671,6 +1672,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
             -- lexical base under the shipped NoImplicitPrelude dialect.
             let template = unlines
                   ["{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
+                  ,if ifaceTrace == Just "1" then "{-# OPTIONS_GHC -ddump-if-trace #-}" else ""
                   ,"{{CELL_PRAGMAS}}","module CellCheck where"
                   ,"import Prelude","import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
                   ,"__tidepoolInEffectRow :: Eff '[] value -> Eff '[] value"
@@ -1980,7 +1982,7 @@ writeWorldCellAdmissionPacket handles work producer profile parcelBytes = do
   let word32 value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..3 :: Int]]
       frame bytes = word32 (BS.length bytes) <> bytes
       sources = "TPCSRC01" <> frame "world-stage-source" <> word32 1 <> word32 (length captured)
-        <> foldMap (\(name,body) -> frame name <> frame body) captured
+        <> foldMap (\(name,body) -> frame name <> frame body) (sortOn fst captured)
       sourcePath = work </> "world-admission-sources.bin"
       text = TString . T.pack
       blocks values = TList [TList [TBytes cid,TBytes body] | (cid,body) <- values]
