@@ -9657,6 +9657,63 @@ where
         .await
     }
 
+    fn world_cell_recipe(
+        &self,
+        context: &crate::ActorSessionContext,
+        cell_source: String,
+        purpose: &CellPreparationPurpose,
+        input: Option<&MountedHostInput>,
+    ) -> Result<Arc<tidepool_extract_cmd::WorldCellRecipe>, ResidentActorWorkbenchError> {
+        let pure_host_carrier = matches!(purpose, CellPreparationPurpose::HostCarrier { .. });
+        let mut source = self
+            .access
+            .source
+            .config
+            .clone()
+            .for_workbench(&context, self.request_scope.as_ref());
+        if let Some(input) = input {
+            source
+                .workbench_imports
+                .extend_text(&format!("qualified {} as TidepoolHostInput", input.module));
+            source.preamble = format!(
+                "{}\ninput = TidepoolHostInput.{}\n",
+                source.preamble, input.name
+            )
+            .into();
+        }
+        let effects = if pure_host_carrier {
+            "'[]"
+        } else {
+            context.haskell_effects_alias.expression()
+        };
+        let preamble = cell_module_preamble(
+            &hide_preamble_exports(
+                &source.preamble,
+                &["print"]
+                    .map(|name| tidepool_runtime::session::ExportItem::Value { name: name.into() }),
+            ),
+            "CellCheck",
+        )?;
+        let imports = source.template_imports(&context).template_text();
+        let templates = resident_workbench_templates(&preamble, effects, &imports);
+        Ok(Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+            source: cell_source,
+            template: resident_cell_check_template(&preamble, effects, &imports),
+            turn_templates: templates
+                .into_iter()
+                .map(|template| {
+                    let kind = match template.kind {
+                        tidepool_runtime::session::TemplateSelector::Decl => "decl",
+                        tidepool_runtime::session::TemplateSelector::Bind => "bind",
+                        tidepool_runtime::session::TemplateSelector::BindDiscard => "binddiscard",
+                        tidepool_runtime::session::TemplateSelector::Expr => "expr",
+                    };
+                    (kind.to_owned(), template.source)
+                })
+                .collect(),
+        }))
+    }
+
     #[tracing::instrument(target = "exomonad_actor::workbench_phase", name = "cell_prepare", skip_all, fields(actor = %context.actor, source_bytes = cell_source.len()))]
     async fn prepare_checked_host_cell(
         &self,
@@ -9689,54 +9746,10 @@ where
                     .await?
             }
         };
-        let pure_host_carrier = matches!(purpose, CellPreparationPurpose::HostCarrier { .. });
-        let mut source = self
-            .access
-            .source
-            .config
-            .clone()
-            .for_workbench(&context, self.request_scope.as_ref());
-        if let Some(input) = leased_input.as_ref().map(|guard| guard.mounted_input()) {
-            source
-                .workbench_imports
-                .extend_text(&format!("qualified {} as TidepoolHostInput", input.module));
-            source.preamble = format!(
-                "{}\ninput = TidepoolHostInput.{}\n",
-                source.preamble, input.name
-            )
-            .into();
-        }
-        let effects = if pure_host_carrier {
-            "'[]"
-        } else {
-            context.haskell_effects_alias.expression()
-        };
-        let preamble = cell_module_preamble(
-            &hide_preamble_exports(
-                &source.preamble,
-                &["print"]
-                    .map(|name| tidepool_runtime::session::ExportItem::Value { name: name.into() }),
-            ),
-            "CellCheck",
+        let specification = self.world_cell_recipe(
+            &context, cell_source, &purpose,
+            leased_input.as_ref().map(|guard| guard.mounted_input()),
         )?;
-        let imports = source.template_imports(&context).template_text();
-        let templates = resident_workbench_templates(&preamble, effects, &imports);
-        let specification = Arc::new(tidepool_extract_cmd::WorldCellRecipe {
-            source: cell_source,
-            template: resident_cell_check_template(&preamble, effects, &imports),
-            turn_templates: templates
-                .into_iter()
-                .map(|template| {
-                    let kind = match template.kind {
-                        tidepool_runtime::session::TemplateSelector::Decl => "decl",
-                        tidepool_runtime::session::TemplateSelector::Bind => "bind",
-                        tidepool_runtime::session::TemplateSelector::BindDiscard => "binddiscard",
-                        tidepool_runtime::session::TemplateSelector::Expr => "expr",
-                    };
-                    (kind.to_owned(), template.source)
-                })
-                .collect(),
-        });
         let (cell_operand, leased_input) = if let Some(input) = leased_input {
             let execution = purpose.execution().ok_or_else(|| {
                 ResidentActorWorkbenchError::ActorProtocol(
