@@ -297,9 +297,10 @@ impl RunControlClient {
         .unwrap();
         assert!(matches!(
             terminal.get(),
-            Some(preparation::PublicationTerminalObservation::Completed(
-                preparation::PublicationOutcomeObservation::Refused
-            ))
+            Some(preparation::PublicationTerminalObservation::Completed {
+                outcome: preparation::PublicationOutcomeObservation::Refused,
+                notification: preparation::PublicationNotificationObservation::NotRequired,
+            })
         ));
         if control == GenerationRetirementNativeControl::WorkerNativeLossAfterBody {
             assert!(state.current_generation().is_none());

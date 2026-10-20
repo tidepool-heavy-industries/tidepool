@@ -45,7 +45,10 @@ pub(super) enum PublicationDelivery {
         reserved: ReservedActorGeneration,
         reason: PublicationNonStart,
     },
-    Settled(ActorGenerationPublicationSettlement),
+    Settled {
+        settlement: ActorGenerationPublicationSettlement,
+        notification: PublicationNotificationObservation,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -56,10 +59,21 @@ pub(super) enum PublicationOutcomeObservation {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PublicationNotificationObservation {
+    NotRequired,
+    Accepted,
+    Refused,
+    Unobserved,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum PublicationTerminalObservation {
     NotStarted(PublicationNonStartKind),
-    Completed(PublicationOutcomeObservation),
+    Completed {
+        outcome: PublicationOutcomeObservation,
+        notification: PublicationNotificationObservation,
+    },
     ProducerLostAfterExecute,
 }
 
@@ -79,21 +93,29 @@ impl PublicationWriter {
             PublicationDelivery::NotStarted { reason, .. } => {
                 PublicationTerminalObservation::NotStarted(reason.kind())
             }
-            PublicationDelivery::Settled(settlement) => {
+            PublicationDelivery::Settled {
+                settlement,
+                notification,
+            } => {
                 let outcome = match settlement {
                     ActorGenerationPublicationSettlement::Unpublished(refusal) => refusal.outcome(),
                     ActorGenerationPublicationSettlement::Settled(outcome) => outcome,
                 };
-                PublicationTerminalObservation::Completed(match outcome.as_ref() {
-                    Ok(ActorGenerationCommit::Published { .. }) => {
-                        PublicationOutcomeObservation::Published
-                    }
-                    Ok(ActorGenerationCommit::Refused(_)) => PublicationOutcomeObservation::Refused,
-                    Ok(ActorGenerationCommit::Unconfirmed(_)) => {
-                        PublicationOutcomeObservation::Unconfirmed
-                    }
-                    Err(_) => PublicationOutcomeObservation::Failed,
-                })
+                PublicationTerminalObservation::Completed {
+                    outcome: match outcome.as_ref() {
+                        Ok(ActorGenerationCommit::Published { .. }) => {
+                            PublicationOutcomeObservation::Published
+                        }
+                        Ok(ActorGenerationCommit::Refused(_)) => {
+                            PublicationOutcomeObservation::Refused
+                        }
+                        Ok(ActorGenerationCommit::Unconfirmed(_)) => {
+                            PublicationOutcomeObservation::Unconfirmed
+                        }
+                        Err(_) => PublicationOutcomeObservation::Failed,
+                    },
+                    notification: *notification,
+                }
             }
         };
         // Publish compact completion before either the oneshot receiver or
@@ -186,11 +208,20 @@ impl PublicationTransfer {
         };
         match publisher.run(reserved).await {
             Ok(settlement) => {
-                if let Some(owner) = self.publication_owner.as_mut() {
-                    owner.observe(&settlement);
-                }
-                self.writer
-                    .deliver(PublicationDelivery::Settled(settlement));
+                let notification = if let Some(owner) = self.publication_owner.as_mut() {
+                    owner.observe(&settlement)
+                } else if matches!(&settlement,
+                    ActorGenerationPublicationSettlement::Settled(outcome)
+                        if matches!(outcome.as_ref(), Ok(ActorGenerationCommit::Published { .. })))
+                {
+                    PublicationNotificationObservation::Unobserved
+                } else {
+                    PublicationNotificationObservation::NotRequired
+                };
+                self.writer.deliver(PublicationDelivery::Settled {
+                    settlement,
+                    notification,
+                });
             }
             Err((reserved, publisher)) => {
                 self.writer.deliver(PublicationDelivery::NotStarted {
