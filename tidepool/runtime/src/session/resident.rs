@@ -115,13 +115,13 @@ pub struct ProgramProvenance {
 /// Unknown retains every known contributor and cannot be repaired by a later merge.
 #[derive(Clone, Debug)]
 enum RuntimeSourceOrigin {
-    Known(Arc<super::RuntimeLexicalScopeLease>),
-    Ambiguous(Vec<Arc<super::RuntimeLexicalScopeLease>>),
-    Unknown(Vec<Arc<super::RuntimeLexicalScopeLease>>),
+    Known(Arc<super::RuntimeOriginalSource>),
+    Ambiguous(Vec<Arc<super::RuntimeOriginalSource>>),
+    Unknown(Vec<Arc<super::RuntimeOriginalSource>>),
 }
 
 impl RuntimeSourceOrigin {
-    fn known(&self) -> &[Arc<super::RuntimeLexicalScopeLease>] {
+    fn known(&self) -> &[Arc<super::RuntimeOriginalSource>] {
         match self {
             Self::Known(source) => std::slice::from_ref(source),
             Self::Ambiguous(sources) | Self::Unknown(sources) => sources,
@@ -148,7 +148,7 @@ impl RuntimeSourceOrigin {
     fn require_unique(
         &self,
         site: u64,
-    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, ResidentError> {
+    ) -> Result<Arc<super::RuntimeOriginalSource>, ResidentError> {
         match self {
             Self::Known(source) => Ok(source.clone()),
             Self::Ambiguous(sources) => Err(ResidentError::AmbiguousOriginalSource {
@@ -169,7 +169,6 @@ enum RuntimeSourceContribution<'a> {
         provenance: &'a Arc<ProgramProvenance>,
     },
     MissingNative,
-    SourceNeutral,
 }
 
 fn classify_import_source<'a>(
@@ -184,10 +183,9 @@ fn classify_import_source<'a>(
             },
             None => RuntimeSourceContribution::MissingNative,
         },
-        ImportOwner::Source { .. } | ImportOwner::CodeExport { .. } => {
-            RuntimeSourceContribution::MissingNative
-        }
-        ImportOwner::Package { .. } => RuntimeSourceContribution::SourceNeutral,
+        ImportOwner::Source { .. }
+        | ImportOwner::CodeExport { .. }
+        | ImportOwner::Package { .. } => RuntimeSourceContribution::MissingNative,
     }
 }
 
@@ -207,7 +205,6 @@ fn contribute_import_sources<'a>(
                 retained.entry(id).or_insert(provenance);
             }
             RuntimeSourceContribution::MissingNative => unresolved_native = true,
-            RuntimeSourceContribution::SourceNeutral => {}
         }
     }
     for original in retained.values() {
@@ -5129,7 +5126,7 @@ where
     pub fn parked_original_source(
         &mut self,
         hole: &ResidentHole,
-    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, ResidentError> {
+    ) -> Result<Arc<super::RuntimeOriginalSource>, ResidentError> {
         let invalid = || ResidentError::MissingOriginalSourceContinuation {
             hole: hole.cont_id().to_owned(),
         };
@@ -7505,7 +7502,7 @@ where
         let mut sources = BTreeMap::<u64, RuntimeSourceOrigin>::new();
         let source = match code.certification().map(|proof| proof.purpose()) {
             Some(TurnPurpose::Execution { prefix, .. }) => {
-                Some(prefix.admission().original_source_lease()?)
+                Some(prefix.admission().original_source()?)
             }
             Some(TurnPurpose::Ordinary { original: Some(_) } | TurnPurpose::HostPrototype(_)) => {
                 self.state
@@ -12944,7 +12941,7 @@ mod source_origin_tests {
 
     fn issued(
         site_id: u64,
-        source: &Arc<super::super::RuntimeLexicalScopeLease>,
+        source: &Arc<super::super::RuntimeOriginalSource>,
     ) -> ProgramProvenance {
         let mut provenance = ProgramProvenance::from_sites(&[site(site_id)]).unwrap();
         provenance
@@ -12957,8 +12954,10 @@ mod source_origin_tests {
     fn independent_source_owners_survive_identical_compiler_evidence() {
         let mut a = PersistentSession::new(None, 1024);
         let mut b = PersistentSession::new(None, 1024);
-        let source_a = a.mint_notebook_scope_with_lease(None).unwrap();
-        let source_b = b.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical_a = a.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical_b = b.mint_notebook_scope_with_lease(None).unwrap();
+        let source_a = lexical_a.original_source().clone();
+        let source_b = lexical_b.original_source().clone();
         source_a.validate_source_issuer().unwrap();
         source_b.validate_source_issuer().unwrap();
         assert_ne!(source_a.scope(), ScopeId::ROOT);
@@ -12966,6 +12965,14 @@ mod source_origin_tests {
         assert!(!Arc::ptr_eq(&source_a, &source_b));
         let mut provenance = issued(17, &source_a);
         provenance.merge(&issued(17, &source_a)).unwrap();
+        drop(lexical_a);
+        drop(lexical_b);
+        a.reap_admission_leases();
+        b.reap_admission_leases();
+        assert!(!a.scope_tree().is_live(source_a.scope()));
+        assert!(!b.scope_tree().is_live(source_b.scope()));
+        source_a.validate_source_issuer().unwrap();
+        source_b.validate_source_issuer().unwrap();
         assert!(Arc::ptr_eq(
             &provenance.original_sources[&17].require_unique(17).unwrap(),
             &source_a
@@ -12983,7 +12990,8 @@ mod source_origin_tests {
     #[test]
     fn unknown_same_site_stays_missing_in_both_merge_orders() {
         let mut owner = PersistentSession::new(None, 1024);
-        let source = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let source = lexical.original_source().clone();
         source.validate_source_issuer().unwrap();
         assert_ne!(source.scope(), ScopeId::ROOT);
         let known = issued(17, &source);
@@ -13004,8 +13012,10 @@ mod source_origin_tests {
     #[test]
     fn fresh_target_and_retained_dependency_keep_distinct_site_owners() {
         let mut owner = PersistentSession::new(None, 1024);
-        let source_a = owner.mint_notebook_scope_with_lease(None).unwrap();
-        let source_b = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical_a = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical_b = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let source_a = lexical_a.original_source().clone();
+        let source_b = lexical_b.original_source().clone();
         source_a.validate_source_issuer().unwrap();
         source_b.validate_source_issuer().unwrap();
         assert_ne!(source_a.scope(), ScopeId::ROOT);
@@ -13026,7 +13036,8 @@ mod source_origin_tests {
     #[test]
     fn unresolved_import_owners_poison_only_selected_native_sites() {
         let mut owner = PersistentSession::new(None, 1024);
-        let source = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let source = lexical.original_source().clone();
         source.validate_source_issuer().unwrap();
         assert_ne!(source.scope(), ScopeId::ROOT);
         let binder = SymbolIdentity {
@@ -13053,10 +13064,16 @@ mod source_origin_tests {
                 binder: binder.clone(),
             },
             ImportOwner::CodeExport {
-                binder,
+                binder: binder.clone(),
                 generation: 1,
                 root_id: 9,
                 interface_digest: None,
+            },
+            ImportOwner::Package {
+                unit: binder.unit.clone(),
+                module: binder.module.clone(),
+                binder,
+                interface_digest: [2; 32],
             },
         ];
         for missing in &missing_owners {
@@ -13107,7 +13124,8 @@ mod source_origin_tests {
     #[test]
     fn missing_per_site_runtime_evidence_is_unknown_at_owner_boundaries() {
         let mut owner = PersistentSession::new(None, 1024);
-        let source = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let source = lexical.original_source().clone();
         source.validate_source_issuer().unwrap();
         let known = issued(17, &source);
         let mut missing = known.clone();
@@ -13153,20 +13171,24 @@ mod source_origin_tests {
             history in prop::collection::vec((0u64..5, 0usize..3, any::<bool>()), 1..80),
         ) {
             let mut owner = PersistentSession::new(None, 1024);
-            let leases = (0..3).map(|_| owner.mint_notebook_scope_with_lease(None).unwrap()).collect::<Vec<_>>();
-            for (index, lease) in leases.iter().enumerate() {
-                lease.validate_source_issuer().unwrap();
-                prop_assert_ne!(lease.scope(), ScopeId::ROOT);
-                for previous in &leases[..index] {
-                    prop_assert!(!Arc::ptr_eq(lease, previous));
+            let lexical = (0..3).map(|_| owner.mint_notebook_scope_with_lease(None).unwrap()).collect::<Vec<_>>();
+            let sources = lexical.iter().map(|lease| lease.original_source().clone()).collect::<Vec<_>>();
+            drop(lexical);
+            owner.reap_admission_leases();
+            for (index, source) in sources.iter().enumerate() {
+                source.validate_source_issuer().unwrap();
+                prop_assert_ne!(source.scope(), ScopeId::ROOT);
+                prop_assert!(!owner.scope_tree().is_live(source.scope()));
+                for previous in &sources[..index] {
+                    prop_assert!(!Arc::ptr_eq(source, previous));
                 }
             }
             let mut actual = ProgramProvenance::default();
             let mut model = BTreeMap::<u64, (BTreeSet<usize>, bool)>::new();
             for (site_id, source, missing) in history {
-                let mut contribution = issued(site_id, &leases[source]);
+                let mut contribution = issued(site_id, &sources[source]);
                 if missing {
-                    contribution.original_sources.insert(site_id, RuntimeSourceOrigin::Unknown(vec![leases[source].clone()]));
+                    contribution.original_sources.insert(site_id, RuntimeSourceOrigin::Unknown(vec![sources[source].clone()]));
                 }
                 actual.merge(&contribution).unwrap();
                 let expected = model.entry(site_id).or_default();
@@ -13175,14 +13197,14 @@ mod source_origin_tests {
                 for (site_id, (owners, unresolved)) in &model {
                     let observed = &actual.original_sources[site_id];
                     let actual_owners = observed.known().iter().map(|lease| {
-                        leases.iter().position(|issued| Arc::ptr_eq(issued, lease)).unwrap()
+                        sources.iter().position(|issued| Arc::ptr_eq(issued, lease)).unwrap()
                     }).collect::<BTreeSet<_>>();
                     prop_assert_eq!(&actual_owners, owners);
                     prop_assert_eq!(observed.known().len(), owners.len());
                     match observed.require_unique(*site_id) {
                         Ok(lease) => {
                             prop_assert!(!unresolved && owners.len() == 1);
-                            prop_assert!(Arc::ptr_eq(&lease, &leases[*owners.first().unwrap()]));
+                            prop_assert!(Arc::ptr_eq(&lease, &sources[*owners.first().unwrap()]));
                         }
                         Err(ResidentError::MissingOriginalSource { known_origins, .. }) => {
                             prop_assert!(*unresolved);
