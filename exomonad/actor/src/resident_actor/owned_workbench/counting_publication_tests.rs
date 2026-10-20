@@ -99,7 +99,7 @@ async fn admit(
             .unwrap_or_else(|error| panic!("owner admits compilation: {error:?}"));
     let execution = Arc::new(
         runner
-            .begin_private_execution(context.clone(), owner, PublicationDecision::new())
+            .begin_private_execution(context.clone(), owner, PublicationDecision::new(), None)
             .await
             .unwrap(),
     );
@@ -421,6 +421,7 @@ async fn activation_metadata_history(preparation: crate::CompilerPreparationClie
                 context.clone(),
                 Arc::clone(&owners[0].1),
                 PublicationDecision::new(),
+                None,
             )
             .await
             .unwrap(),

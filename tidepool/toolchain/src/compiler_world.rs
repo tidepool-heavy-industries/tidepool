@@ -556,7 +556,7 @@ pub enum WorldObservationProfile {
 
 /// Source-independent declarations issued by the actor's common source producer.
 /// Native request types retain their original checked-signature representation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct WorldObservationScaffold {
     profile: WorldObservationProfile,
     fragment: Arc<str>,
@@ -569,6 +569,17 @@ pub struct WorldObservationScaffold {
     type_contexts: Arc<[Arc<ExactDeclarationContext>]>,
     metadata_bytes: u64,
 }
+
+impl PartialEq for WorldObservationScaffold {
+    fn eq(&self, other: &Self) -> bool {
+        self.profile == other.profile
+            && self.fragment == other.fragment
+            && self.static_imports == other.static_imports
+            && self.request_types == other.request_types
+            && self.input_type == other.input_type
+    }
+}
+impl Eq for WorldObservationScaffold {}
 
 impl WorldObservationScaffold {
     pub fn new(
@@ -669,6 +680,11 @@ pub struct CompilerWorldLexicalSurface {
 }
 
 impl CompilerWorldLexicalSurface {
+    /// Original TYPE selections attached by the protected source issuer.
+    pub(crate) fn observation_type_contexts(&self) -> &[Arc<ExactDeclarationContext>] {
+        self.observation.as_ref().map_or(&[], |scaffold| scaffold.type_contexts())
+    }
+
     pub fn from_publication(
         import_specs: Vec<String>,
         declaration: Option<WorldDeclarationSelection>,
@@ -715,7 +731,7 @@ impl CompilerWorldLexicalSurface {
         })
     }
 
-    fn with_observation(
+    pub fn with_observation(
         mut self,
         observation: Option<Arc<WorldObservationScaffold>>,
     ) -> Result<Self, CompileError> {

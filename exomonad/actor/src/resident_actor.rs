@@ -8368,6 +8368,14 @@ where
                     "request presentation was rejected: {error:?}"
                 ))
             })?;
+        let installed_tools = prepared
+            .as_ref()
+            .and_then(|prepared| prepared.installation.prepared_tools.clone())
+            .or_else(|| self.installed_tools.current());
+        let activation_source = match &installed_tools {
+            Some(lease) => lease.source().clone(),
+            None => self.freeze_installed_source(context.actor)?,
+        };
         let already_installed = self.policy_installed;
         let (owner, bootstrap, prepared_installation) = match prepared {
             Some(prepared) => (
@@ -8394,26 +8402,29 @@ where
             drop(input);
             return Ok(InteractivePark::Cancelled(request.request));
         }
+        let (public_compile_context, public_authority) = WorkbenchCompilationAuthority::admit(
+            context.clone(), activation_source.clone(), installed_tools.clone(),
+            self.environment.source_layers.as_ref(),
+        ).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let workbench = self.environment.request_workbench(
+            request.response.clone(), request.request, request.type_evidence.clone(),
+        ).with_compilation_authority(public_authority);
+        let observation = workbench.capture_activation_observation_scaffold(
+            &public_compile_context, &input,
+        )?;
         let private = Arc::new(
             self.environment
                 .runner
                 .begin_private_execution(
-                    context.clone(),
+                    public_compile_context,
                     owner.clone(),
                     tidepool_runtime::session::PublicationDecision::new(),
+                    Some(observation),
                 )
                 .await?,
         );
         let mut private_context = context.clone();
         private_context.placement.lexical_scope = private.private_scope;
-        let installed_tools = prepared_installation
-            .as_ref()
-            .and_then(|installation| installation.prepared_tools.clone())
-            .or_else(|| self.installed_tools.current());
-        let activation_source = match &installed_tools {
-            Some(lease) => lease.source().clone(),
-            None => self.freeze_installed_source(context.actor)?,
-        };
         let (compile_context, authority) = WorkbenchCompilationAuthority::admit(
             private_context.clone(),
             activation_source.clone(),
@@ -8421,13 +8432,7 @@ where
             self.environment.source_layers.as_ref(),
         )
         .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-        let workbench = self
-            .environment
-            .request_workbench(
-                request.response.clone(),
-                request.request,
-                request.type_evidence.clone(),
-            )
+        let workbench = workbench
             .with_compilation_authority(authority)
             .with_private_execution(private.clone());
         #[cfg(test)]

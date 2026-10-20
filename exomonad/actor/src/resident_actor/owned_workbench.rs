@@ -1096,6 +1096,9 @@ where
                         .as_ref()
                         .expect("owned execution retains its original control")
                         .publication_decision();
+                    let observation = owned.workbench.as_ref()
+                        .expect("original source-authorized workbench precedes admission")
+                        .capture_observation_scaffold(&context).await?;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "private_begin_started", "workbench phase");
                     let private = Arc::new(
                         runner
@@ -1103,6 +1106,7 @@ where
                                 context,
                                 owned.resources.public.clone(),
                                 decision,
+                                Some(observation),
                             )
                             .await?,
                     );

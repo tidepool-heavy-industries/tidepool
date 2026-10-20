@@ -1265,6 +1265,16 @@ pub struct RuntimeActivationInput {
 static_assertions::assert_not_impl_any!(RuntimeActivationInput: Clone, Copy);
 
 impl RuntimeActivationInput {
+    /// The binding issued by the original activation-input admission.
+    pub fn binding_name() -> &'static str {
+        "sessionInput"
+    }
+
+    /// Original checked TYPE metadata, without mounting or exposing the value.
+    pub fn type_prototype(&self) -> &Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype> {
+        &self.prototype
+    }
+
     pub fn input_type(&self) -> &str {
         &self.input_type
     }
@@ -3898,7 +3908,7 @@ where
         digest.update(&self.run_context.principal.incarnation.to_le_bytes());
         let reservation = self.state.admit_binding_interface(
             scope,
-            "sessionInput".into(),
+            RuntimeActivationInput::binding_name().into(),
             input.prototype.clone(),
             *digest.finalize().as_bytes(),
         )?;

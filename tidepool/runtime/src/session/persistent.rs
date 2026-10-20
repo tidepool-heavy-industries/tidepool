@@ -1692,6 +1692,7 @@ impl PersistentSession {
             return Ok(AdmittedInspectionWorld {
                 base: association.base.clone(),
                 inputs: InspectionWorldInputs::Published(association.world.clone()),
+                observation: None,
             });
         }
         tidepool_toolchain::timing::record_host_work(
@@ -1781,6 +1782,7 @@ impl PersistentSession {
                 bindings,
                 lexical,
             },
+            observation: None,
         })
     }
 

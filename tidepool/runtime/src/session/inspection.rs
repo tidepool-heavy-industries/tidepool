@@ -342,6 +342,7 @@ impl AdmittedInspectionInputs {
 pub struct AdmittedInspectionWorld {
     pub(super) base: InspectionWorldBase,
     pub(super) inputs: InspectionWorldInputs,
+    pub(super) observation: Option<std::sync::Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>>,
 }
 
 #[derive(Clone)]
@@ -452,7 +453,7 @@ pub fn run_admitted_compiler_world(
         CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
     )?;
     let cold = admitted.needs_source_capture();
-    let world = acquire_compiler_world(admitted.inputs, &admitted.base, capture_sources)?;
+    let world = acquire_compiler_world(admitted.inputs, &admitted.base, admitted.observation, capture_sources)?;
     tracing::debug!(
         target: "exomonad_harness::timing",
         cold,
@@ -517,6 +518,7 @@ pub(super) fn finish_world_operation<T>(
 fn acquire_compiler_world(
     inputs: InspectionWorldInputs,
     base: &InspectionWorldBase,
+    observation: Option<std::sync::Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>>,
     capture_sources: impl FnOnce() -> Result<
         Option<std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
         WorldInspectionError,
@@ -524,7 +526,11 @@ fn acquire_compiler_world(
 ) -> Result<std::sync::Arc<tidepool_toolchain::compiler_world::CompilerWorld>, WorldInspectionError>
 {
     match inputs {
-        InspectionWorldInputs::Published(world) => Ok(world),
+        InspectionWorldInputs::Published(world) => match observation {
+            None => Ok(world),
+            Some(observation) => Ok(world.with_type_interfaces(observation.type_contexts())?
+                .with_observation_scaffold(Some(observation))?),
+        },
         InspectionWorldInputs::Cold {
             primary,
             bindings,
@@ -534,6 +540,10 @@ fn acquire_compiler_world(
             if sources.origin() != base.source.bytes() {
                 return Err(invalid("cold sources differ from the admitted source owner").into());
             }
+            let lexical = match observation {
+                None => lexical,
+                Some(observation) => lexical.with_observation(Some(observation))?,
+            };
             let cold = tidepool_toolchain::artifacts::ModuleCandidateOffer::compiler_world_inputs(
                 primary, bindings, sources, lexical,
             )?;
@@ -567,6 +577,15 @@ pub struct ScopeBindingsAnswer {
 }
 
 impl AdmittedInspectionWorld {
+    /// Attach source-issued compiler description before any World acquisition.
+    /// This does not change the captured runtime/source admission.
+    pub fn with_observation_scaffold(mut self,
+        observation: std::sync::Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>,
+    ) -> Self {
+        self.observation = Some(observation);
+        self
+    }
+
     pub fn needs_source_capture(&self) -> bool {
         matches!(self.inputs, InspectionWorldInputs::Cold { .. })
     }
@@ -738,7 +757,7 @@ fn run_admitted_world_inspection_inner(
         InspectionWorldInputs::Published(world) => Some(*world.logical_id()),
         InspectionWorldInputs::Cold { .. } => None,
     };
-    let world = acquire_compiler_world(admitted.inputs, &admitted.base, capture_sources)?;
+    let world = acquire_compiler_world(admitted.inputs, &admitted.base, admitted.observation, capture_sources)?;
     let result = compiler_world::query_public_module(&endpoint()?, &world, question.clone())?;
     if expected_world.is_some_and(|expected| &expected != result.world().logical_id()) {
         return Err(invalid("world query returned a different logical world").into());
