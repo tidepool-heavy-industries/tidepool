@@ -303,6 +303,8 @@ pub enum PreparedRuntimeError {
     Cancelled,
     #[error("prepared compilation rejected: {0}")]
     Compile(CompileError),
+    #[error("native source evidence refused: {0}")]
+    NativeSourceEvidence(#[source] Box<tidepool_toolchain::CompileError>),
     #[error("prepared installation failed: {0}")]
     Install(ExecutionError),
     #[error(transparent)]
@@ -542,6 +544,7 @@ impl PreparedRuntimeError {
             | Self::ConstructorMetadataCollision(_)
             | Self::Link(_)
             | Self::Compile(_)
+            | Self::NativeSourceEvidence(_)
             | Self::Install(_)
             | Self::Demand(_)
             | Self::MissingPreparedNativeImage
@@ -650,7 +653,9 @@ impl PreparedRuntimeError {
             },
             Self::MissingPreparedNativeImage => PreparedFailureKind::Integrity,
             Self::Cancelled => PreparedFailureKind::Cancelled,
-            Self::Compile(_) | Self::SourceAdmission(_) => PreparedFailureKind::Rejected,
+            Self::Compile(_) | Self::NativeSourceEvidence(_) | Self::SourceAdmission(_) => {
+                PreparedFailureKind::Rejected
+            }
             // A handler fault is this turn's own failure, so the machine stays reusable.
             Self::Handler { .. } => PreparedFailureKind::Language,
             Self::Install(error) | Self::Run(error) => match error {
@@ -760,7 +765,44 @@ pub(crate) struct ScopedTargetImage {
     base: ImageTarget,
     plan: super::persistent::ResolvedSourceDomainPlan,
     owners: Arc<[ImportOwner]>,
-    demanded: Vec<DemandedImage>,
+    demanded: Vec<SelectedNativeImage>,
+    sources: NativeSourceCustody,
+}
+
+/// Native code and source evidence from the same selected runtime group.
+pub(crate) struct SelectedNativeImage {
+    native: DemandedImage,
+    sources: NativeSourceCustody,
+}
+
+impl SelectedNativeImage {
+    #[cfg(test)]
+    fn unqualified(native: DemandedImage) -> Self {
+        let sources = NativeSourceCustody::unknown(
+            native
+                .group()
+                .definitions()
+                .sites()
+                .iter()
+                .map(|site| site.site),
+        );
+        Self { native, sources }
+    }
+    pub(crate) fn group(&self) -> &CertifiedGroup {
+        self.native.group()
+    }
+    pub(crate) fn image(&self) -> &Arc<CompiledProgram> {
+        self.native.image()
+    }
+    pub(super) fn domain(&self) -> tidepool_codegen::prepared_program::SourceInstanceDomain {
+        self.native.domain()
+    }
+    pub(super) fn qualified_source(
+        &self,
+        source: &SourceBinder,
+    ) -> Result<ScopedSourceBinder, DemandError> {
+        self.native.qualified_source(source)
+    }
 }
 
 impl std::ops::Deref for ScopedTargetImage {
@@ -775,7 +817,7 @@ impl std::ops::Deref for ScopedTargetImage {
 }
 
 impl ScopedTargetImage {
-    pub(crate) fn demanded(&self) -> &[DemandedImage] {
+    pub(crate) fn demanded(&self) -> &[SelectedNativeImage] {
         &self.demanded
     }
 
@@ -1317,7 +1359,7 @@ impl ImageTarget {
         let groups = resolved
             .groups
             .iter()
-            .map(|group| group.original().clone())
+            .map(|group| group.group().original().clone())
             .collect();
         let (target, compiled) = Self::acquire_originals(
             prepared,
@@ -1330,13 +1372,18 @@ impl ImageTarget {
             .into_iter()
             .zip(resolved.groups.iter().cloned())
             .map(|(image, group)| {
-                ScopedDemandedImage::admit(image, group).map(ScopedDemandedImage::into_image)
+                let (group, sources) = group.into_parts();
+                ScopedDemandedImage::admit(image, group).map(|image| SelectedNativeImage {
+                    native: image.into_image(),
+                    sources,
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(target.with_source_plan(
             resolved.source_plan.clone(),
             Arc::from(resolved.target_owners.clone()),
             demanded,
+            resolved.target_sources.clone(),
         ))
     }
 
@@ -1466,13 +1513,15 @@ impl ImageTarget {
         self,
         plan: super::persistent::ResolvedSourceDomainPlan,
         owners: Arc<[ImportOwner]>,
-        demanded: Vec<DemandedImage>,
+        demanded: Vec<SelectedNativeImage>,
+        sources: NativeSourceCustody,
     ) -> ScopedTargetImage {
         ScopedTargetImage {
             base: self,
             plan,
             owners,
             demanded,
+            sources,
         }
     }
 
@@ -3237,7 +3286,7 @@ impl CodeExportOwnerRef<'_> {
 fn certified_package_owner_diagnostic(
     target: &ImageTarget,
     target_owners: &[ImportOwner],
-    demanded: &[DemandedImage],
+    demanded: &[SelectedNativeImage],
     owner: PackageOwnerRef<'_>,
     target_exports: &BTreeMap<SymbolIdentity, ValueId>,
     code_exports: &BTreeMap<SymbolIdentity, CodeExport>,
@@ -4779,12 +4828,22 @@ impl PreparedEngine {
         let result = (|| -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
             let mut facts: Vec<_> = demanded
                 .iter()
-                .map(|selected| ProgramFacts::from_image(selected.image(), None))
+                .map(|selected| {
+                    let mut facts = ProgramFacts::from_image(selected.image(), None);
+                    facts.native_sources = selected
+                        .sources
+                        .select(facts.sites.iter().map(|site| site.site));
+                    facts
+                })
                 .collect();
             facts.push(ProgramFacts::from_image(
                 &target.image,
                 Some(target.prepared.entry()),
             ));
+            let target_facts = facts.last_mut().expect("target facts are final");
+            target_facts.native_sources = target
+                .sources
+                .select(target_facts.sites.iter().map(|site| site.site));
             // A reduced target need not redeclare the Settled constructors:
             // it may reuse the exact original definitions already installed
             // by an earlier target or one of this batch's source groups.
@@ -5075,7 +5134,7 @@ impl PreparedEngine {
                     let &(group, _) = source
                         .get(binder)
                         .expect("source edge selected an in-batch binder");
-                    BatchLeaseRequest::for_demanded(group, &demanded[group], &binder.source)
+                    BatchLeaseRequest::for_demanded(group, &demanded[group].native, &binder.source)
                         .map_err(PreparedRuntimeError::Install)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -6775,6 +6834,131 @@ pub(crate) fn assert_parked_receive_schema(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn physical_current_source_requires_its_actual_runtime_output_owner() {
+        tidepool_testing::eval_harness::require_extract();
+        let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
+            tidepool_mcp::actor_local_decl(),
+        ])
+        .unwrap();
+        let files = tempfile::tempdir().unwrap();
+        std::fs::write(
+            files.path().join("RetainedReceiveOwner.hs"),
+            include_str!("../../tests/fixtures/RetainedReceiveOwner.hs"),
+        )
+        .unwrap();
+        std::fs::write(
+            files.path().join("RetainedReceiveSupport.hs"),
+            include_str!("../../tests/fixtures/RetainedReceiveSupport.hs"),
+        )
+        .unwrap();
+        let mut include = vec![files.path().to_path_buf()];
+        include.extend(
+            surface
+                .include_path_refs()
+                .into_iter()
+                .map(|path| path.to_path_buf()),
+        );
+        let products = tidepool_testing::with_settlement(|settlement| {
+            crate::compile_runtime_targets(
+                &tidepool_toolchain::artifacts::CompileInvocation {
+                    source: include_str!("../../tests/fixtures/RetainedReceiveConsumer.hs"),
+                    targets: &["__prepared"],
+                    include: &include,
+                    fallback_module_name: "RetainedReceiveConsumer",
+                },
+                |_, _, _| {},
+                settlement,
+            )
+        })
+        .unwrap();
+        let site = products.artifacts.targets["__prepared"]
+            .asks
+            .sites()
+            .into_iter()
+            .find(|site| site.origin == "RetainedReceiveOwner.result")
+            .expect("actual emitted receive site")
+            .site;
+        let expected = products.source.clone();
+        let mut actual = super::super::PersistentSession::new(None, 4096);
+        let (program, _placement) = products.install_in(&mut actual, "__prepared").unwrap();
+        let source = actual.prepared().unwrap().programs[&program]
+            .native_sources
+            .require_unique(site)
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&source, &expected),
+            "the physical producer supplies its exact source token"
+        );
+
+        // Equal compiler products inside another live transaction cannot issue
+        // a runtime origin without their actual completed runtime owner.
+        let mut raw = super::super::PersistentSession::new(None, 4096);
+        let lexical = raw.mint_isolated_scope_with_lease().unwrap();
+        let scope = lexical.scope();
+        let settled = raw
+            .with_source_compiler_transaction(
+                lexical.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |raw, _| {
+                    let target = &products.artifacts.targets["__prepared"];
+                    let certification = super::super::turn::TurnCertification::from_artifacts(
+                        &products.artifacts,
+                        target,
+                    );
+                    let resolved = raw
+                        .resolve_certification_in(scope, target.prepared.prepared(), &certification)
+                        .unwrap();
+                    let image = ScopedTargetImage::compile_scoped(
+                        target.prepared.prepared().clone(),
+                        &resolved,
+                        &raw.certified_image_registry(),
+                    )
+                    .unwrap();
+                    let (program, _, sources) = raw
+                        .install_certified_turn_in(
+                            scope,
+                            &products.artifacts.table,
+                            image,
+                            &resolved.source_evidence,
+                            &resolved.inherited_needed,
+                            &|_| None,
+                        )
+                        .unwrap()
+                        .into_parts();
+                    assert!(matches!(
+                        sources.require_unique(site),
+                        Err(
+                            super::super::resident::ResidentError::MissingOriginalSource {
+                                known_origins: 0,
+                                ..
+                            }
+                        )
+                    ));
+                    assert!(matches!(
+                        raw.prepared().unwrap().programs[&program]
+                            .native_sources
+                            .require_unique(site),
+                        Err(
+                            super::super::resident::ResidentError::MissingOriginalSource {
+                                known_origins: 0,
+                                ..
+                            }
+                        )
+                    ));
+                },
+            )
+            .unwrap()
+            .into_outcome();
+        assert!(matches!(
+            settled.close,
+            crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted
+        ));
+    }
     use tidepool_bridge::ToHaskell;
     use tidepool_codegen::host_fns::RuntimeError;
     use tidepool_codegen::machine_state::MachineFailure;
@@ -6836,6 +7020,7 @@ pub(super) mod tests {
             super::super::persistent::ResolvedSourceDomainPlan::fixture(plan, selection, snapshot),
             Arc::from(owners),
             Vec::new(),
+            NativeSourceCustody::default(),
         )
     }
 
@@ -7114,7 +7299,11 @@ pub(super) mod tests {
                 .unwrap();
         assert!(inherited.is_empty());
         let resolved = super::super::persistent::ResolvedCertifiedTurn {
-            groups: selected,
+            target_sources: NativeSourceCustody::default(),
+            groups: selected
+                .into_iter()
+                .map(super::super::persistent::ResolvedSourceGroup::unqualified)
+                .collect(),
             target_owners: owners,
             package_interfaces: CertifiedTargetPackageInterfaces::default(),
             source_evidence: certified_source_evidence(&groups),
@@ -7262,7 +7451,10 @@ pub(super) mod tests {
             assert!(matches!(
                 engine.install_certified_turn(
                     ScopedTargetImage {
-                        demanded: demanded(),
+                        demanded: (demanded())
+                            .into_iter()
+                            .map(SelectedNativeImage::unqualified)
+                            .collect(),
                         ..target()
                     },
                     &wrong,
@@ -7279,7 +7471,10 @@ pub(super) mod tests {
         let mut installed = engine
             .install_certified_turn(
                 ScopedTargetImage {
-                    demanded: demanded(),
+                    demanded: (demanded())
+                        .into_iter()
+                        .map(SelectedNativeImage::unqualified)
+                        .collect(),
                     ..target()
                 },
                 &evidence,
@@ -7363,7 +7558,11 @@ pub(super) mod tests {
                 .unwrap();
         assert!(inherited.is_empty());
         let resolved = super::super::persistent::ResolvedCertifiedTurn {
-            groups: selected,
+            target_sources: NativeSourceCustody::default(),
+            groups: selected
+                .into_iter()
+                .map(super::super::persistent::ResolvedSourceGroup::unqualified)
+                .collect(),
             target_owners: owners.clone(),
             package_interfaces: CertifiedTargetPackageInterfaces::default(),
             source_evidence: evidence.clone(),
@@ -7804,7 +8003,7 @@ pub(super) mod tests {
             binder: testing::identity("Fixture", "z"),
         };
         assert!(matches!(
-                    engine.install_certified_turn(ScopedTargetImage { demanded: vec![compile(), compile()], ..target() },
+                    engine.install_certified_turn(ScopedTargetImage { demanded: (vec![compile(), compile()]).into_iter().map(SelectedNativeImage::unqualified).collect(), ..target() },
         &source_evidence,
         &[],
         &BTreeMap::new(),
@@ -7817,7 +8016,10 @@ pub(super) mod tests {
         let mut installed = engine
             .install_certified_turn(
                 ScopedTargetImage {
-                    demanded: vec![compile()],
+                    demanded: (vec![compile()])
+                        .into_iter()
+                        .map(SelectedNativeImage::unqualified)
+                        .collect(),
                     ..target()
                 },
                 &source_evidence,
@@ -7906,7 +8108,10 @@ pub(super) mod tests {
             engine
                 .install_certified_turn(
                     ScopedTargetImage {
-                        demanded: demand.compile(&registry).unwrap(),
+                        demanded: (demand.compile(&registry).unwrap())
+                            .into_iter()
+                            .map(SelectedNativeImage::unqualified)
+                            .collect(),
                         ..target()
                     },
                     &evidence,
@@ -7982,6 +8187,7 @@ pub(super) mod tests {
         let target =
             || scoped_single_domain_target(target_prepared.clone(), &registry, vec![owner.clone()]);
         let unmatched_owners = || ScopedTargetImage {
+            sources: NativeSourceCustody::default(),
             base: ImageTarget::compile(target_prepared.clone(), &registry).unwrap(),
             plan: target().plan.clone(),
             owners: Arc::from(Vec::new()),
@@ -7999,7 +8205,10 @@ pub(super) mod tests {
         assert!(matches!(
             engine.install_certified_turn(
                 ScopedTargetImage {
-                    demanded: demand.compile(&registry).unwrap(),
+                    demanded: (demand.compile(&registry).unwrap())
+                        .into_iter()
+                        .map(SelectedNativeImage::unqualified)
+                        .collect(),
                     ..target()
                 },
                 &wrong_source_evidence,
@@ -8015,7 +8224,10 @@ pub(super) mod tests {
         assert!(matches!(
             engine.install_certified_turn(
                 ScopedTargetImage {
-                    demanded: demand.compile(&registry).unwrap(),
+                    demanded: (demand.compile(&registry).unwrap())
+                        .into_iter()
+                        .map(SelectedNativeImage::unqualified)
+                        .collect(),
                     ..unmatched_owners()
                 },
                 &source_evidence,
@@ -8041,7 +8253,10 @@ pub(super) mod tests {
         assert!(matches!(
             engine.install_certified_turn(
                 ScopedTargetImage {
-                    demanded: with_unused.compile(&registry).unwrap(),
+                    demanded: (with_unused.compile(&registry).unwrap())
+                        .into_iter()
+                        .map(SelectedNativeImage::unqualified)
+                        .collect(),
                     ..target()
                 },
                 &source_evidence,
@@ -8057,7 +8272,10 @@ pub(super) mod tests {
         let mut installed = engine
             .install_certified_turn(
                 ScopedTargetImage {
-                    demanded: demand.compile(&registry).unwrap(),
+                    demanded: (demand.compile(&registry).unwrap())
+                        .into_iter()
+                        .map(SelectedNativeImage::unqualified)
+                        .collect(),
                     ..target()
                 },
                 &source_evidence,
@@ -8179,7 +8397,10 @@ pub(super) mod tests {
         let mut aborted = engine
             .install_certified_turn(
                 ScopedTargetImage {
-                    demanded: demand.compile(&registry).unwrap(),
+                    demanded: (demand.compile(&registry).unwrap())
+                        .into_iter()
+                        .map(SelectedNativeImage::unqualified)
+                        .collect(),
                     ..target()
                 },
                 &source_evidence,
@@ -8326,7 +8547,11 @@ pub(super) mod tests {
             })
             .collect::<Vec<_>>();
         let resolved = super::super::persistent::ResolvedCertifiedTurn {
-            groups: selected,
+            target_sources: NativeSourceCustody::default(),
+            groups: selected
+                .into_iter()
+                .map(super::super::persistent::ResolvedSourceGroup::unqualified)
+                .collect(),
             target_owners: owners,
             package_interfaces: Default::default(),
             source_evidence: certified_source_evidence(groups),
@@ -8386,6 +8611,7 @@ pub(super) mod tests {
                                 .unwrap(),
                         );
                         let resolved = super::super::persistent::ResolvedCertifiedTurn {
+                            target_sources: NativeSourceCustody::default(),
                             groups: Vec::new(),
                             target_owners: Vec::new(),
                             package_interfaces: Default::default(),
@@ -8682,7 +8908,11 @@ pub(super) mod tests {
                 binder: root.binder.clone(),
             };
             let resolved = super::super::persistent::ResolvedCertifiedTurn {
-                groups,
+                target_sources: NativeSourceCustody::default(),
+                groups: groups
+                    .into_iter()
+                    .map(super::super::persistent::ResolvedSourceGroup::unqualified)
+                    .collect(),
                 target_owners: vec![owner.clone()],
                 package_interfaces: Default::default(),
                 source_evidence: BTreeMap::new(),
@@ -8853,7 +9083,10 @@ pub(super) mod tests {
         let mut first = engine
             .install_certified_turn(
                 ScopedTargetImage {
-                    demanded: first_demand.compile(&registry).unwrap(),
+                    demanded: (first_demand.compile(&registry).unwrap())
+                        .into_iter()
+                        .map(SelectedNativeImage::unqualified)
+                        .collect(),
                     ..target("a", &registry)
                 },
                 &source_evidence,
@@ -9360,7 +9593,10 @@ pub(super) mod tests {
                 .unwrap();
             engine.install_certified_turn(
                 ScopedTargetImage {
-                    demanded: demand,
+                    demanded: (demand)
+                        .into_iter()
+                        .map(SelectedNativeImage::unqualified)
+                        .collect(),
                     ..scoped_single_domain_target(
                         testing::prepare(wire).unwrap(),
                         &registry,
@@ -9621,7 +9857,7 @@ pub(super) mod tests {
         // it has the same identity. Producer-sealed admission is tested by the
         // real compiler lane; these fixtures exercise its native transaction.
         assert!(
-            matches!(engine.install_certified_turn(ScopedTargetImage { demanded: selected(&good), ..target(true) },
+            matches!(engine.install_certified_turn(ScopedTargetImage { demanded: (selected(&good)).into_iter().map(SelectedNativeImage::unqualified).collect(), ..target(true) },
 &evidence,
 &[],
 &BTreeMap::new(),
@@ -9652,7 +9888,7 @@ pub(super) mod tests {
         );
         assert_eq!(engine.residency(), before);
         assert!(
-            matches!(engine.install_certified_turn(ScopedTargetImage { demanded: selected(&good), ..target(false) },
+            matches!(engine.install_certified_turn(ScopedTargetImage { demanded: (selected(&good)).into_iter().map(SelectedNativeImage::unqualified).collect(), ..target(false) },
 &evidence,
 &[],
 &BTreeMap::new(),
@@ -9691,7 +9927,10 @@ pub(super) mod tests {
         let capped_diagnostic = certified_package_owner_diagnostic(
             &capped_target,
             std::slice::from_ref(&source_owner),
-            &capped_demanded,
+            &capped_demanded
+                .into_iter()
+                .map(SelectedNativeImage::unqualified)
+                .collect::<Vec<_>>(),
             PackageOwnerRef {
                 unit,
                 module,
@@ -9724,7 +9963,10 @@ pub(super) mod tests {
         let install = |engine: &mut PreparedEngine, group: &CertifiedGroup| {
             engine.install_certified_turn_admitted(
                 ScopedTargetImage {
-                    demanded: selected(group),
+                    demanded: (selected(group))
+                        .into_iter()
+                        .map(SelectedNativeImage::unqualified)
+                        .collect(),
                     ..target(true)
                 },
                 &evidence,
@@ -9907,7 +10149,7 @@ pub(super) mod tests {
             }],
         );
         assert!(matches!(
-                    engine.install_certified_turn(ScopedTargetImage { demanded: demand.compile(&registry).unwrap(), ..target },
+                    engine.install_certified_turn(ScopedTargetImage { demanded: (demand.compile(&registry).unwrap()).into_iter().map(SelectedNativeImage::unqualified).collect(), ..target },
         &certified_source_evidence(&groups),
         &[],
         &BTreeMap::new(),
@@ -10012,7 +10254,10 @@ pub(super) mod tests {
                        exact: &HashMap<ImportOwner, PreparedHandle>| {
             engine.install_certified_turn(
                 ScopedTargetImage {
-                    demanded: selected(groups),
+                    demanded: (selected(groups))
+                        .into_iter()
+                        .map(SelectedNativeImage::unqualified)
+                        .collect(),
                     ..target(&groups[0])
                 },
                 &certified_source_evidence(groups),

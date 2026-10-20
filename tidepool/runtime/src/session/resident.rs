@@ -169,6 +169,10 @@ impl RuntimeSourceOrigin {
 pub(super) struct CapturedSourceOrigin(Arc<super::RuntimeOriginalSource>);
 
 impl CapturedSourceOrigin {
+    pub(super) fn from_runtime_targets(targets: &crate::RuntimePreparedTargets) -> Self {
+        Self(targets.source.clone())
+    }
+
     pub(super) fn capture(
         source: &super::RuntimeSourceCompilerTransaction,
     ) -> Result<Self, super::SourceAdmissionError> {
@@ -7557,7 +7561,7 @@ where
                 resolved
                     .groups
                     .iter()
-                    .flat_map(|group| group.original().imports()),
+                    .flat_map(|group| group.group().original().imports()),
             );
             retained = retained_import_metadata(imports, &self.binding_provenance);
         }
