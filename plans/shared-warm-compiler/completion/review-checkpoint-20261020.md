@@ -4,6 +4,11 @@ Review source: `d91f6a67a68c69e23feb50ea88d360743e35da08`.
 Integration branch: `integration/compiler-query-warm-final`.
 This is a review checkpoint, not a release or Persona qualification.
 
+## Superseded planning checkpoint
+
+Implementation is governed by [ownership-completion.md](ownership-completion.md).
+The evidence below remains the frozen pre-repair baseline.
+
 ## Scope freeze
 
 Finish the already approved typed-reference and native-availability repairs to
