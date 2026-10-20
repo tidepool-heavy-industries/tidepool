@@ -51,6 +51,7 @@ impl CertifiedPackageCodeInterface {
         }
         let bytes = crate::checked_cell::world_output_bytes(program, relative)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        operation.charge(bytes.len())?;
         if sha(bytes) != witness.sha256 {
             return Err(CertificationError::Mismatch(
                 "package interface captured digest",
@@ -121,6 +122,7 @@ impl CertifiedPackageCodeProduct {
         let relative = relative_prefix.join(&output.relative_path);
         let bytes = crate::checked_cell::world_output_bytes(program, &relative)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        validation.inventory.charge(bytes.len())?;
         if sha(bytes) != output.sha256 {
             return Err(CertificationError::Mismatch("package code output digest"));
         }
