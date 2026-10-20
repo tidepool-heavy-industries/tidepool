@@ -2511,24 +2511,6 @@ mod failure_layer_tests {
     }
 }
 
-enum ValueInterfaceSource {
-    /// Ordinary checked settlement retains the interface in its deferred prefix.
-    Checked,
-    /// Checked native mounts commit this owned certificate with the binding.
-    Staged(super::persistent::StagedCheckedValueInterface),
-    LegacyDisk,
-}
-
-impl ValueInterfaceSource {
-    fn for_checked(is_checked: bool) -> Self {
-        if is_checked {
-            Self::Checked
-        } else {
-            Self::LegacyDisk
-        }
-    }
-}
-
 /// Complete protocol values feed typed native decoders; presentation values
 /// remain bounded observations. The purpose follows a parked continuation.
 #[derive(Clone, Copy, Debug)]
@@ -2553,82 +2535,6 @@ enum PreparedTurnMode<'a> {
         binders: &'a [BoundBinder],
         generation: Generation,
     },
-}
-
-/// Owned counterpart of [`PreparedTurnMode`], built from data the caller
-/// already owns (a `TurnResult::Bind`'s `bound`/`generation`), so it can
-/// cross the async gap between [`ResidentSession::snapshot_run_prepared`]'s
-/// checkout and [`ResidentSession::revalidate_and_run_prepared`]'s. `as_mode`
-/// borrows back into a [`PreparedTurnMode`] at the point of use, exactly as
-/// a caller of the single-checkout [`ResidentSession::run_prepared`] would
-/// have constructed one directly.
-pub enum PendingPreparedMode {
-    Value,
-    Binding {
-        binder: BoundBinder,
-        generation: Generation,
-        observation: Option<Vec<tidepool_repr::VarId>>,
-    },
-    Projected {
-        binders: Vec<BoundBinder>,
-        generation: Generation,
-    },
-}
-
-impl PendingPreparedMode {
-    fn as_mode(&self) -> PreparedTurnMode<'_> {
-        match self {
-            PendingPreparedMode::Value => PreparedTurnMode::Value(ResultObservation::Presentation),
-            PendingPreparedMode::Binding {
-                binder,
-                generation,
-                observation,
-            } => PreparedTurnMode::Binding {
-                binder,
-                generation: *generation,
-                observation: observation.clone(),
-            },
-            PendingPreparedMode::Projected {
-                binders,
-                generation,
-            } => PreparedTurnMode::Projected {
-                binders,
-                generation: *generation,
-            },
-        }
-    }
-
-    fn generation(&self) -> Option<Generation> {
-        match self {
-            PendingPreparedMode::Value => None,
-            PendingPreparedMode::Binding { generation, .. }
-            | PendingPreparedMode::Projected { generation, .. } => Some(*generation),
-        }
-    }
-}
-
-/// Everything [`ResidentSession::snapshot_run_prepared`] produces under a
-/// machine checkout for an off-checkout Cranelift compile: owned data with
-/// no reference to the machine or its checkout, `Send` so it can cross the
-/// gap to a blocking-pool compile and back. Finish it with
-/// [`Self::compile_off_checkout`] then
-/// [`ResidentSession::revalidate_and_run_prepared`].
-pub struct PendingPreparedInstall {
-    source: Arc<super::RuntimeLexicalScopeLease>,
-    snapshot: PendingPreparedSource,
-    metadata: PreparedInstallMetadata,
-}
-
-struct PreparedInstallMetadata {
-    target: Arc<super::RuntimeLexicalScopeLease>,
-    constructor_table: DataConTable,
-    mode: PendingPreparedMode,
-    argument: Option<PreparedHandle>,
-    provenance: Arc<ProgramProvenance>,
-    realm: RealmId,
-    lexical_scope: ScopeId,
-    park: ParkPolicy,
-    checked: Option<PreparedCheckedTurn>,
 }
 
 struct PreparedCheckedTurn {
@@ -2792,91 +2698,6 @@ struct InstalledAdmittedTurn<'a> {
         std::borrow::Cow<'a, [YieldSite]>,
         std::borrow::Cow<'a, Option<super::turn::TurnCertification>>,
     ),
-}
-
-enum PendingPreparedSource {
-    Legacy(super::prepared::InstallSnapshot),
-    Certified {
-        prepared: PreparedProgram,
-        resolved: super::persistent::ResolvedCertifiedTurn,
-        registry: Arc<ImageRegistry>,
-        admitted_public: super::PublicVisibilitySnapshot,
-    },
-}
-
-impl PendingPreparedSource {
-    fn compile_off_checkout(self) -> Result<ReadyPreparedSource, PreparedRuntimeError> {
-        match self {
-            Self::Legacy(mut snapshot) => {
-                let image = super::prepared::PreparedEngine::compile_off_checkout(&mut snapshot)
-                    .map_err(PreparedRuntimeError::Compile)?;
-                Ok(ReadyPreparedSource::Legacy { snapshot, image })
-            }
-            Self::Certified {
-                prepared,
-                resolved,
-                registry,
-                admitted_public,
-            } => {
-                let (target, demanded) = super::prepared::ScopedTargetImage::compile_scoped(
-                    prepared, &resolved, &registry,
-                )?;
-                Ok(ReadyPreparedSource::Certified {
-                    resolved,
-                    admitted_public,
-                    target,
-                    demanded,
-                })
-            }
-        }
-    }
-}
-
-enum ReadyPreparedSource {
-    Legacy {
-        snapshot: super::prepared::InstallSnapshot,
-        image: Arc<tidepool_codegen::prepared_program::CompiledProgram>,
-    },
-    Certified {
-        resolved: super::persistent::ResolvedCertifiedTurn,
-        admitted_public: super::PublicVisibilitySnapshot,
-        target: super::prepared::ScopedTargetImage,
-        demanded: Vec<DemandedImage>,
-    },
-}
-
-/// One compiled install with its original source snapshot and completion
-/// metadata. Only consuming a pending install can construct this capsule.
-pub struct ReadyPreparedInstall {
-    original: Arc<super::RuntimeLexicalScopeLease>,
-    source: ReadyPreparedSource,
-    metadata: PreparedInstallMetadata,
-}
-
-impl PendingPreparedInstall {
-    /// Compile this install off checkout, consuming its source and completion
-    /// metadata into one capsule for final revalidation and execution.
-    pub fn compile_off_checkout(self) -> Result<ReadyPreparedInstall, PreparedRuntimeError> {
-        let original = self.source.clone();
-        super::source_admission::run_source_compiler_transaction(
-            self.source,
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            crate::CompilerTransactionCancellation::new(),
-            None,
-            |_| {},
-            |owner, _| {
-                owner.admit(Some(self.metadata.target.clone()))?;
-                let source = self.snapshot.compile_off_checkout()?;
-                Ok(ReadyPreparedInstall {
-                    original,
-                    source,
-                    metadata: self.metadata,
-                })
-            },
-        )?
-        .into_outcome()
-        .action
-    }
 }
 
 /// The `Send` projection of one prepared run that crosses the eval thread:
@@ -5729,7 +5550,7 @@ where
             &binder,
             generation,
             owner.input.custody,
-            ValueInterfaceSource::Staged(staged),
+            Some(staged),
             settlement,
         )
         .map_err(|source| ResidentError::ActivationInputConsumed {
@@ -5798,7 +5619,7 @@ where
             binder,
             gen,
             custody,
-            ValueInterfaceSource::LegacyDisk,
+            None,
             settlement,
         )
     }
@@ -5998,7 +5819,7 @@ where
             binder,
             admission.generation,
             carrier.code(),
-            ValueInterfaceSource::Staged(staged),
+            Some(staged),
             move |engine, realm, _| representation.build(engine, realm, payload),
             settlement,
         )?;
@@ -6066,7 +5887,7 @@ where
             binder,
             generation,
             carrier.code(),
-            ValueInterfaceSource::Staged(staged),
+            Some(staged),
             move |engine, realm, _| representation.build(engine, realm, payload),
             settlement,
         )?;
@@ -6375,7 +6196,7 @@ where
             binder,
             gen,
             code,
-            ValueInterfaceSource::LegacyDisk,
+            None,
             build,
             settlement,
         )
@@ -6387,7 +6208,7 @@ where
         binder: &BoundBinder,
         gen: Generation,
         code: TurnCode<'_>,
-        interface_source: ValueInterfaceSource,
+        staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
         build: impl FnOnce(
             &mut super::prepared::PreparedEngine,
             RealmId,
@@ -6438,7 +6259,7 @@ where
                 binder,
                 gen,
                 handle,
-                interface_source,
+                staged_interface,
                 settlement,
             )
         })();
@@ -6460,7 +6281,7 @@ where
         binder: &BoundBinder,
         gen: Generation,
         handle: PreparedHandle,
-        interface_source: ValueInterfaceSource,
+        staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         let engine = self.state.require_prepared()?;
@@ -6476,7 +6297,7 @@ where
             gen,
             &[(binder, handle)],
             None,
-            interface_source,
+            staged_interface,
             settlement,
         )?;
         self.binding_provenance
@@ -6493,7 +6314,7 @@ where
         binder: &BoundBinder,
         gen: Generation,
         custody: RootCustody,
-        interface_source: ValueInterfaceSource,
+        staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         custody.checked_handle(&self.custody_cleanup)?;
@@ -6517,7 +6338,7 @@ where
             gen,
             &[(binder, handle)],
             None,
-            interface_source,
+            staged_interface,
             settlement,
         )?;
         self.binding_provenance.insert(binder.var_id, provenance);
@@ -7573,263 +7394,6 @@ where
         )
     }
 
-    /// Whether this session already has a resident machine to snapshot an
-    /// install against. `false` only for a session's first turn, whose
-    /// `install_prepared` bootstraps the machine from that first program --
-    /// nothing exists yet to take an off-checkout compile snapshot from, so
-    /// that turn has no split path and stays on
-    /// [`Self::run_prepared`]/[`Self::run_prepared_with_argument`].
-    #[must_use]
-    pub fn prepared_machine_ready(&self) -> bool {
-        self.state.is_bootstrapped()
-    }
-
-    /// Step (a) of the off-checkout split install for a prepared turn (see
-    /// `tidepool_codegen::prepared_program::PreparedCompileSnapshot` and
-    /// `PreparedEngine::snapshot_install` for what this snapshots and why
-    /// it needs no further machine access to compile): merge `code`'s
-    /// table, claim the turn's value-module generation, and resolve+plan
-    /// the install exactly as [`Self::run_prepared_with_argument`] does,
-    /// stopping short of the Cranelift compile. Run this under a machine
-    /// checkout; the caller compiles the returned [`PendingPreparedInstall`]
-    /// off any checkout ([`PendingPreparedInstall::compile_off_checkout`])
-    /// and finishes the turn through [`Self::revalidate_and_run_prepared`]
-    /// under a fresh checkout.
-    ///
-    /// The caller checks [`Self::prepared_machine_ready`] first. A legacy
-    /// turn cannot snapshot before machine bootstrap and gets a typed error;
-    /// certified bootstrap uses the single-checkout path.
-    pub fn snapshot_run_prepared(
-        &mut self,
-        code: TurnCode<'static>,
-        mode: PendingPreparedMode,
-        argument: Option<PreparedHandle>,
-    ) -> Result<PendingPreparedInstall, ResidentError> {
-        self.state
-            .validate_new_binding_ids(binding_ids_of(&mode.as_mode()))?;
-        refuse_generic_activation_preview_install(code.certification())?;
-        let checked =
-            tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.check")
-                .in_scope(|| {
-                    checked_turn_plan(
-                        code.certification.as_ref(),
-                        code.prepared(),
-                        code.table(),
-                        &mode.as_mode(),
-                    )
-                })?;
-        let lexical_scope = self.run_context.lexical_scope;
-        let admission =
-            tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.resolve")
-                .in_scope(|| {
-                    self.admit_turn_code_in(
-                        lexical_scope,
-                        code,
-                        TurnInstallationAdmission::Compilation,
-                    )
-                })?;
-        let provenance = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.provenance")
-            .in_scope(|| self.provenance_for(&admission))?;
-        let AdmittedTurnCode {
-            code,
-            scope: _,
-            resolved,
-        } = admission;
-        let (constructor_table, _sites, prepared, _certification) = code.into_parts();
-        if let Some(generation) = mode.generation() {
-            // Claim the value-module identity before the turn runs.
-            self.state.set_val_gen(generation);
-        }
-        // The caller is documented to check `prepared_machine_ready` first;
-        // this typed refusal (rather than a panic) is the fallback if that
-        // contract is not honored, since `PreparedRuntimeError` already has
-        // a variant for exactly this precondition.
-        let snapshot = if let Some(resolved) = resolved {
-            let admitted_public = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.snapshot.visibility")
-                .in_scope(|| self.state.public_visibility_snapshot_in(lexical_scope))
-                .ok_or(PreparedRuntimeError::SourceScopeAdmission)?;
-            PendingPreparedSource::Certified {
-                prepared,
-                resolved,
-                registry: self.state.certified_image_registry(),
-                admitted_public,
-            }
-        } else {
-            PendingPreparedSource::Legacy(
-                self.state
-                    .snapshot_install_prepared(prepared)?
-                    .ok_or(PreparedRuntimeError::MachineNotInstalled)?,
-            )
-        };
-        let realm = self.run_context.resource_scope;
-        let park = ParkPolicy {
-            principal: self.run_context.principal,
-            effect_policy: self.state.effect_policy(),
-            live_payload: self.state.live_payload_policy(),
-        };
-        let source = match &self.state.source_transaction {
-            Some(owner) => owner.source.clone(),
-            None => {
-                return Err(SessionError::SourceAdmission(
-                    super::SourceAdmissionError::MissingTransaction,
-                )
-                .into())
-            }
-        };
-        Ok(PendingPreparedInstall {
-            source,
-            snapshot,
-            metadata: PreparedInstallMetadata {
-                target: self
-                    .state
-                    .source_lease_in(lexical_scope)
-                    .map_err(PreparedRuntimeError::from)?,
-                constructor_table: constructor_table.into_owned(),
-                mode,
-                argument,
-                provenance,
-                realm,
-                lexical_scope,
-                park,
-                checked,
-            },
-        })
-    }
-
-    /// Revalidate the capsule's original imports against this checkout's
-    /// live bindings and, if nothing changed, install its image and run exactly
-    /// as [`Self::run_prepared_with_argument`]'s tail does. `Ok(None)`
-    /// means revalidation found a stale import (see
-    /// `PreparedEngine::revalidate_and_install`): the caller must recompile
-    /// from a fresh [`Self::snapshot_run_prepared`], or fall back to the
-    /// single-checkout [`Self::run_prepared_with_argument`].
-    pub fn revalidate_and_run_prepared(
-        &mut self,
-        ready: ReadyPreparedInstall,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<Option<ResidentOutcome>, ResidentError> {
-        let ReadyPreparedInstall {
-            original,
-            source,
-            metadata,
-        } = ready;
-        let PreparedInstallMetadata {
-            target,
-            constructor_table,
-            mode,
-            argument,
-            provenance,
-            realm,
-            lexical_scope,
-            park,
-            checked,
-        } = metadata;
-        self.state
-            .validate_new_binding_ids(binding_ids_of(&mode.as_mode()))?;
-        self.state
-            .validate_lexical_scope_lease(lexical_scope, &target)?;
-        self.state
-            .admit_source_lease(original)
-            .map_err(PreparedRuntimeError::from)?;
-        self.state
-            .admit_source_lease(target)
-            .map_err(PreparedRuntimeError::from)?;
-        let install_started = std::time::Instant::now();
-        let mut checked_completion = None;
-        let install_span = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.install", inclusive = true).entered();
-        let (program, source_keys) = match source {
-            ReadyPreparedSource::Legacy { snapshot, image } => {
-                match self.state.revalidate_and_install_prepared(
-                    lexical_scope,
-                    snapshot,
-                    image,
-                    Some(&constructor_table),
-                )? {
-                    Some(program) => (program, Default::default()),
-                    None => return Ok(None),
-                }
-            }
-            ReadyPreparedSource::Certified {
-                resolved,
-                admitted_public,
-                target,
-                demanded,
-            } => {
-                if tracing::debug_span!(target: "exomonad_harness::timing", "prepared.install.visibility")
-                    .in_scope(|| self.state.public_visibility_snapshot_in(lexical_scope))
-                    .as_ref()
-                    != Some(&admitted_public)
-                {
-                    return Ok(None);
-                }
-                if checked
-                    .as_ref()
-                    .is_some_and(|checked| !checked.execution.matches_target(target.prepared()))
-                {
-                    return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
-                }
-                checked_completion = tracing::debug_span!(target: "exomonad_harness::timing", "prepared.install.check")
-                    .in_scope(|| checked.map(|checked| checked.start(&self.state, lexical_scope)).transpose())?;
-                tracing::debug_span!(target: "exomonad_harness::timing", "prepared.install.certified", inclusive = true)
-                    .in_scope(|| self.install_certified_turn_in(
-                    lexical_scope,
-                    &constructor_table,
-                    target,
-                    &resolved.source_evidence,
-                    demanded,
-                    &resolved.inherited_needed,
-                ))?
-            }
-        };
-        drop(install_span);
-        timing::record_stage(
-            timing::NO_NODE,
-            timing::NO_ROUND,
-            timing::STAGE_INSTALL_PREPARED,
-            install_started.elapsed(),
-            0,
-        );
-        let borrowed_mode = mode.as_mode();
-        let plan = settle_plan_of(&borrowed_mode);
-        let run_exec_started = std::time::Instant::now();
-        let ran = self.on_eval_thread(move |engine, table, handlers, captured| {
-            Ok(settle_prepared(
-                engine, program, realm, argument, plan, park, table, handlers, captured,
-            ))
-        });
-        timing::record_stage(
-            timing::NO_NODE,
-            timing::NO_ROUND,
-            timing::STAGE_RUN_EXEC,
-            run_exec_started.elapsed(),
-            0,
-        );
-        if let Some(engine) = self.state.prepared_mut() {
-            engine.unpin(program);
-        }
-        let run = match ran {
-            Ok(Ok(run)) => run,
-            Ok(Err(error)) => {
-                self.retire_failed_turn_source_instances(lexical_scope, &source_keys);
-                return Err(error.into());
-            }
-            Err(error) => {
-                self.retire_failed_turn_source_instances(lexical_scope, &source_keys);
-                return Err(error);
-            }
-        };
-        Ok(Some(self.complete_prepared(
-            run,
-            mode.as_mode(),
-            program,
-            lexical_scope,
-            provenance,
-            None,
-            checked_completion,
-            settlement,
-        )?))
-    }
-
     /// Finish one prepared run on the session thread, whichever entry
     /// produced it: bind or return a completed value per `mode`, or classify a
     /// parked suspension. `resumed` names the hole this run answered (a
@@ -7864,7 +7428,7 @@ where
                             generation,
                             &[(binder, handle)],
                             checked.as_deref(),
-                            ValueInterfaceSource::for_checked(checked.is_some()),
+                            None,
                             settlement,
                         )?;
                         self.binding_provenance
@@ -7910,7 +7474,7 @@ where
                     generation,
                     &bound,
                     checked.as_deref(),
-                    ValueInterfaceSource::for_checked(checked.is_some()),
+                    None,
                     settlement,
                 )?;
                 for binder in binders {
@@ -7978,10 +7542,10 @@ where
         generation: Generation,
         bound: &[(&BoundBinder, PreparedHandle)],
         checked: Option<&CheckedTurnCompletion>,
-        interface_source: ValueInterfaceSource,
+        staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
-        if let ValueInterfaceSource::Staged(staged) = &interface_source {
+        if let Some(staged) = &staged_interface {
             let validated = self
                 .state
                 .validate_staged_value_interface(staged)
@@ -8025,9 +7589,10 @@ where
             engine.release_all(bound.iter().map(|(_, handle)| *handle));
             return Err(SessionError::DeadScope(scope).into());
         }
-        let unit = match &interface_source {
-            ValueInterfaceSource::Checked | ValueInterfaceSource::Staged(_) => "main".to_owned(),
-            ValueInterfaceSource::LegacyDisk => engine.entry_unit(program).unwrap_or_default(),
+        let unit = if checked.is_some() || staged_interface.is_some() {
+            "main".to_owned()
+        } else {
+            engine.entry_unit(program).unwrap_or_default()
         };
         for (_, handle) in bound {
             if !engine.adopt(*handle) {
@@ -8070,16 +7635,10 @@ where
             self.state
                 .bind_replacing_decls_in(scope, entries, settlement)?;
         }
-        // Ordinary fragments retain their established filesystem interface
-        // contract. Checked settlements register their sealed artifact instead.
-        match interface_source {
-            ValueInterfaceSource::LegacyDisk => self
-                .state
-                .mark_legacy_value_interface(SessionModule::val(generation)),
-            ValueInterfaceSource::Staged(staged) => {
-                self.state.commit_staged_value_interface(staged)
-            }
-            ValueInterfaceSource::Checked => {}
+        // A checked native mount commits its sealed artifact with the binding;
+        // every other install retains no in-memory value interface.
+        if let Some(staged) = staged_interface {
+            self.state.commit_staged_value_interface(staged);
         }
         for _ in bound {
             self.advance_public_visibility(scope);
@@ -10096,21 +9655,6 @@ mod authored_publication_tests {
         .into_code()
     }
 
-    fn integer_capsule_session() -> (tempfile::TempDir, TestSession) {
-        let (root, mut session) = startup_session();
-        let entry = session
-            .prepare_startup_entry_installed(
-                startup_code_with_value(false, Some(0)),
-                StartupCompileIdentity::Fixture,
-            )
-            .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            session.run_startup_entry(entry, settlement)
-        })
-        .unwrap();
-        (root, session)
-    }
-
     #[test]
     fn runtime_source_owner_keeps_binding_claim_through_close_and_unwind() {
         for unwind in [false, true] {
@@ -10823,289 +10367,12 @@ mod authored_publication_tests {
     }
 
     #[test]
-    fn source_fence_keeps_precompiled_plain_execution_and_refuses_ready_install() {
-        let (_root, mut session) = startup_session();
-        let scope = session.mint_isolated_scope_with_lease().unwrap();
-        session
-            .set_run_context(SessionRunContext {
-                lexical_scope: scope.scope(),
-                ..SessionRunContext::ROOT
-            })
-            .unwrap();
-        let entry = source_action(&mut session, &scope, |session, _| {
-            session.prepare_startup_entry_installed(
-                startup_code_with_value(false, Some(11)),
-                StartupCompileIdentity::Fixture,
-            )
-        })
-        .unwrap();
-        let open_ready = source_action(&mut session, &scope, |session, _| {
-            session.snapshot_run_prepared(
-                startup_code_with_value(false, Some(22)),
-                PendingPreparedMode::Value,
-                None,
-            )
-        })
-        .unwrap()
-        .compile_off_checkout()
-        .unwrap();
-        let open_outcome = source_action(&mut session, &scope, |session, settlement| {
-            session.revalidate_and_run_prepared(open_ready, settlement)
-        })
-        .unwrap();
-        let Some(ResidentOutcome::Completed { result, .. }) = open_outcome else {
-            panic!("fresh legacy Ready capsule must install while open")
-        };
-        assert_eq!(result.to_json(), serde_json::json!(22));
-
-        // Snapshot after the successful install so stale imports cannot account
-        // for refusal. No machine work intervenes between this snapshot and use.
-        let ready = source_action(&mut session, &scope, |session, _| {
-            session.snapshot_run_prepared(
-                startup_code_with_value(false, Some(33)),
-                PendingPreparedMode::Value,
-                None,
-            )
-        })
-        .unwrap()
-        .compile_off_checkout()
-        .unwrap();
-        let before_exports = session.code_export_count();
-        let before_table = session.state.session_table().clone();
-        let before_bindings = session.binding_names();
-        let before_parked = session.parked_count();
-        session.set_run_context(SessionRunContext::ROOT).unwrap();
-        let fence = scope.source_admission().fence().unwrap();
-        // The transaction retains original source S independently of ROOT placement.
-        let refused = source_action(&mut session, &scope, |session, settlement| {
-            session.revalidate_and_run_prepared(ready, settlement)
-        });
-        assert!(
-            matches!(
-                &refused,
-                Err(ResidentError::Prepared(
-                    PreparedRuntimeError::SourceAdmission(
-                        super::super::SourceAdmissionError::Closed { .. }
-                    )
-                ))
-            ),
-            "actual legacy Ready result: {refused:?}"
-        );
-        assert_eq!(session.code_export_count(), before_exports);
-        assert_eq!(session.state.session_table(), &before_table);
-        assert_eq!(session.binding_names(), before_bindings);
-        assert_eq!(session.parked_count(), before_parked);
-        session
-            .set_run_context(SessionRunContext {
-                lexical_scope: scope.scope(),
-                ..SessionRunContext::ROOT
-            })
-            .unwrap();
-        let outcome = session
-            .with_source_compiler_transaction(
-                scope.clone(),
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                crate::CompilerTransactionCancellation::new(),
-                None,
-                |_| {},
-                |session, settlement| session.run_startup_entry(entry, settlement),
-            )
-            .unwrap()
-            .into_outcome()
-            .action
-            .unwrap();
-        let ResidentOutcome::Completed { result, .. } = outcome else {
-            panic!("precompiled plain result must settle")
-        };
-        assert_eq!(result.to_json(), serde_json::json!(11));
-        assert_eq!(
-            fence.pending_claims(),
-            0,
-            "plain execution needs no fresh source authority"
-        );
-        assert!(session.state.scope_tree().is_live(scope.scope()));
-    }
-
-    #[test]
-    fn ready_install_keeps_original_source_when_recipient_owner_changes() {
-        let (_source_root, mut original) = startup_session();
-        let source = original.mint_isolated_scope_with_lease().unwrap();
-        let target_root = tempfile::tempdir().unwrap();
-        let library = SessionLib::open(
-            SessionId(403),
-            target_root.path(),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap();
-        let mut recipient =
-            TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(library));
-        let target = recipient.mint_isolated_scope_with_lease().unwrap();
-        recipient
-            .set_run_context(SessionRunContext {
-                lexical_scope: target.scope(),
-                ..SessionRunContext::ROOT
-            })
-            .unwrap();
-        source_action(&mut recipient, &source, |session, report| {
-            session.run_with_sites(
-                "original_source_bootstrap",
-                startup_code_with_value(false, Some(11)),
-                report,
-            )
-        })
-        .unwrap();
-        let make_ready = |session: &mut TestSession, value| {
-            source_action(session, &source, |session, _| {
-                session.snapshot_run_prepared(
-                    startup_code_with_value(false, Some(value)),
-                    PendingPreparedMode::Value,
-                    None,
-                )
-            })
-            .unwrap()
-            .compile_off_checkout()
-            .unwrap()
-        };
-        let open = make_ready(&mut recipient, 22);
-        let outcome = source_action(&mut recipient, &target, |session, report| {
-            session.revalidate_and_run_prepared(open, report)
-        })
-        .unwrap();
-        let Some(ResidentOutcome::Completed { result, .. }) = outcome else {
-            panic!("an open original can install under recipient authority");
-        };
-        assert_eq!(result.to_json(), serde_json::json!(22));
-        let ready = make_ready(&mut recipient, 33);
-        let before_exports = recipient.code_export_count();
-        let before_table = recipient.state.session_table().clone();
-        let fence = source.source_admission().fence().unwrap();
-        let refused = source_action(&mut recipient, &target, |session, report| {
-            session.revalidate_and_run_prepared(ready, report)
-        });
-        assert!(
-            matches!(
-                &refused,
-                Err(ResidentError::Prepared(
-                    PreparedRuntimeError::SourceAdmission(
-                        super::super::SourceAdmissionError::Closed { .. }
-                    )
-                ))
-            ),
-            "actual A→B Ready result: {refused:?}"
-        );
-        assert_eq!(recipient.code_export_count(), before_exports);
-        assert_eq!(recipient.state.session_table(), &before_table);
-        assert!(recipient.state.scope_tree().is_live(target.scope()));
-        drop(
-            target
-                .source_admission()
-                .admit()
-                .expect("recipient B remains open"),
-        );
-        assert_eq!(fence.pending_claims(), 0);
-    }
-
-    #[test]
-    fn prepared_capsules_keep_same_shape_images_and_original_binding_metadata_together() {
-        let (_root, mut session) = integer_capsule_session();
-        let binder = BoundBinder {
-            name: "originalCapsuleBinding".into(),
-            var_id: 1401,
-            module: SessionModule::val(Generation(41)).module_name(),
-            tier: ValueTier::ForceData,
-            type_display: "Int".into(),
-            root_head: None,
-            host_authority: None,
-        };
-        let a = session
-            .snapshot_run_prepared(
-                startup_code_with_value(false, Some(11)),
-                PendingPreparedMode::Binding {
-                    binder: binder.clone(),
-                    generation: Generation(41),
-                    observation: None,
-                },
-                None,
-            )
-            .unwrap();
-        let b = session
-            .snapshot_run_prepared(
-                startup_code_with_value(false, Some(22)),
-                PendingPreparedMode::Value,
-                None,
-            )
-            .unwrap();
-        // Both programs are import-free and have the same constructor shape.
-        // Compile in the opposite order to installation.
-        let b = b.compile_off_checkout().unwrap();
-        let a = a.compile_off_checkout().unwrap();
-        let Some(ResidentOutcome::Completed { result, .. }) =
-            tidepool_testing::with_settlement(|settlement| {
-                session.revalidate_and_run_prepared(a, settlement)
-            })
-            .unwrap()
-        else {
-            panic!("original binding capsule must complete");
-        };
-        assert_eq!(result.to_json(), serde_json::json!(11));
-        let bindings = session.workbench_bindings_in(ScopeId::ROOT);
-        let original = bindings.iter().find(|row| row.name == binder.name).unwrap();
-        assert_eq!(
-            session
-                .state
-                .resolve_in(ScopeId::ROOT, &binder.name)
-                .unwrap()
-                .id,
-            SessionVarId::from_extract(binder.var_id),
-        );
-        assert_eq!(original.defining_generation(), Some(41));
-        assert_eq!(original.type_display.as_deref(), Some("Int"));
-        let Some(ResidentOutcome::Completed { result, .. }) =
-            tidepool_testing::with_settlement(|settlement| {
-                session.revalidate_and_run_prepared(b, settlement)
-            })
-            .unwrap()
-        else {
-            panic!("value capsule must complete");
-        };
-        assert_eq!(result.to_json(), serde_json::json!(22));
-    }
-
-    #[test]
-    fn dropping_uninstalled_prepared_capsules_does_not_execute_or_retain_metadata() {
-        let (_root, mut session) = integer_capsule_session();
-        for compile in [false, true] {
-            let pending = session
-                .snapshot_run_prepared(
-                    startup_code_with_value(true, Some(77)),
-                    PendingPreparedMode::Value,
-                    None,
-                )
-                .unwrap();
-            let provenance = Arc::downgrade(&pending.metadata.provenance);
-            let residency = session.residency();
-            let public = session.public_visibility_snapshot_in(ScopeId::ROOT);
-            if compile {
-                drop(pending.compile_off_checkout().unwrap());
-            } else {
-                drop(pending);
-            }
-            assert!(provenance.upgrade().is_none());
-            assert_eq!(session.residency(), residency);
-            assert_eq!(session.public_visibility_snapshot_in(ScopeId::ROOT), public);
-            assert!(session.workbench_bindings_in(ScopeId::ROOT).is_empty());
-            assert!(session.parked.is_empty());
-        }
-    }
-
-    #[test]
     fn startup_requires_compiler_seal_before_native_install() {
         let (_root, mut session) = startup_session();
         assert!(matches!(
             session.prepare_startup_entry(startup_code(false)),
             Err(ResidentError::UnsealedStartupEntry)
         ));
-        assert!(!session.prepared_machine_ready());
     }
 
     #[test]
@@ -11491,7 +10758,7 @@ mod authored_publication_tests {
             unwind.downcast_ref::<&str>().copied(),
             Some("startup output clone panic")
         );
-        assert!(session.prepared_machine_ready());
+        assert!(session.state.is_bootstrapped());
         {
             let abandoned = session.custody_cleanup.startup_entries.lock();
             assert_eq!(abandoned.len(), 1);
@@ -12148,12 +11415,6 @@ mod authored_publication_tests {
             tidepool_testing::with_settlement(|settlement| session.run_bind_with_sites("replacement", code.clone(), &occupied, Generation(408), settlement)),
             Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == id
         ));
-        assert!(matches!(
-            session.snapshot_run_prepared(code, PendingPreparedMode::Binding {
-                binder: occupied, generation: Generation(408), observation: None,
-            }, None),
-            Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == id
-        ));
         assert_eq!(session.residency(), residency);
         assert_eq!(session.state.persistent_roots_count(), roots);
         assert_eq!(session.state.session_table(), &table);
@@ -12338,7 +11599,7 @@ mod authored_publication_tests {
             Err(ResidentError::UnsupportedCheckedTurn)
         ));
         assert!(
-            !session.prepared_machine_ready(),
+            !session.state.is_bootstrapped(),
             "refusal must precede native installation"
         );
         assert_eq!(session.state.session_table(), &before_table);
@@ -12480,143 +11741,6 @@ mod authored_publication_tests {
             eprintln!("ordinary admission work startup={startup} groups={group_count} resolver_calls={} outline_visits={} resolved_groups=unmeasured",
                 after.0 - before.0, after.1 - before.1);
         }
-    }
-
-    #[test]
-    fn certified_install_fences_hidden_binding_replacement() {
-        use crate::session::{resident_workbench_templates, run_turn, TurnRequest, TurnResult};
-        use tidepool_testing::effect_surface::TestEffectSurface;
-
-        tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
-        let effects = TestEffectSurface::minimal(&[]).unwrap();
-        let lib =
-            SessionLib::open(SessionId(992), root.path(), ModuleEnv::standalone_default()).unwrap();
-        let mut session =
-            ResidentSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
-        let binding = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut session.state,
-            "requestCarrier",
-            201,
-        );
-        let old_id = binding.id;
-        session.state.bind(binding).unwrap();
-        session.hidden_host_bindings.insert(old_id, ());
-        let templates = resident_workbench_templates(effects.preamble(), effects.row(), "");
-        let mut includes = effects.include_paths().to_vec();
-        includes.push(root.path().to_path_buf());
-        let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let TurnResult::Bind { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
-            run_turn(
-                TurnRequest {
-                    exact_context: None,
-                    session_id: None,
-                    turn_text: "let retained = (42 :: Int)",
-                    templates: &templates,
-                    include: &includes,
-                    session_root: root.path(),
-                    inject_modules: &[],
-                    gen: 1,
-                    verdict: None,
-                    target: None,
-                    retained_imports: &[],
-                },
-                settlement,
-            )
-        })
-        .unwrap() else {
-            panic!("expected compiler-owned binding");
-        };
-        let certification = compiled.certification.as_ref().unwrap();
-        let candidate_groups = certification.groups.len();
-        // Recompute independently before the counted admission. Agreement with
-        // this oracle cannot hide a second resolver inside provenance.
-        let oracle = session
-            .state
-            .resolve_certification_in(ScopeId::ROOT, compiled.prepared(), certification)
-            .unwrap();
-        let code = compiled.into_code();
-        let before_resolution = session.state.certified_resolution_work();
-        let pending = session
-            .snapshot_run_prepared(code.clone(), PendingPreparedMode::Value, None)
-            .unwrap();
-        let after_resolution = session.state.certified_resolution_work();
-        assert_eq!(after_resolution.0 - before_resolution.0, 1);
-        assert_eq!(after_resolution.1 - before_resolution.1, candidate_groups);
-        let PendingPreparedSource::Certified { resolved, .. } = &pending.snapshot else {
-            panic!("compiler-owned turn must keep its certified admission");
-        };
-        assert_eq!(resolved.target_owners, oracle.target_owners);
-        assert_eq!(resolved.source_evidence, oracle.source_evidence);
-        let group_owners = |selection: &crate::session::persistent::ResolvedCertifiedTurn| {
-            selection
-                .groups
-                .iter()
-                .map(|group| {
-                    (
-                        group.original().owner().clone(),
-                        group.original().original_ordinal(),
-                        group.demand().domain(),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(group_owners(resolved), group_owners(&oracle));
-        eprintln!("snapshot admission work groups={candidate_groups} resolved_groups={} oracle_resolved_groups={} resolver_calls={} outline_visits={}",
-            resolved.groups.len(), oracle.groups.len(), after_resolution.0 - before_resolution.0,
-            after_resolution.1 - before_resolution.1);
-        let compiled = pending.compile_off_checkout().unwrap();
-        let admitted = session
-            .public_visibility_snapshot_in(ScopeId::ROOT)
-            .unwrap();
-        let internal = session
-            .state
-            .public_visibility_snapshot_in(ScopeId::ROOT)
-            .unwrap();
-        assert_eq!(admitted, internal);
-        assert!(session.workbench_bindings_in(ScopeId::ROOT).is_empty());
-        assert_eq!(internal.bindings, vec![("requestCarrier".into(), old_id)]);
-        assert!(internal.machine_incarnation.is_some());
-
-        let replacement = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut session.state,
-            "requestCarrier",
-            202,
-        );
-        let new_id = replacement.id;
-        session.state.bind(replacement).unwrap();
-        session.hidden_host_bindings.insert(new_id, ());
-        // Exact identities fence low-level native updates independently of
-        // the displayed names or the notification epoch.
-        assert!(session.workbench_bindings_in(ScopeId::ROOT).is_empty());
-        let current = session
-            .state
-            .public_visibility_snapshot_in(ScopeId::ROOT)
-            .unwrap();
-        assert_eq!(current.epoch, internal.epoch);
-        assert_eq!(current.machine_incarnation, internal.machine_incarnation);
-        assert_ne!(current.bindings, internal.bindings);
-        assert_eq!(
-            session
-                .public_visibility_snapshot_in(ScopeId::ROOT)
-                .unwrap(),
-            current
-        );
-        let residency = session.residency();
-        assert!(tidepool_testing::with_settlement(
-            |settlement| session.revalidate_and_run_prepared(compiled, settlement)
-        )
-        .unwrap()
-        .is_none());
-        assert_eq!(session.residency(), residency);
-        assert_eq!(
-            session
-                .state
-                .resolve_in(ScopeId::ROOT, "requestCarrier")
-                .unwrap()
-                .id,
-            new_id
-        );
     }
 
     #[test]

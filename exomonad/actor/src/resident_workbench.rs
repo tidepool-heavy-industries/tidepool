@@ -63,10 +63,10 @@ use tidepool_runtime::session::{
     hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
     resident_cell_check_template, resident_workbench_templates, run_admitted_inspections,
     BoundBinder, CellCheck, CompiledTurn, HostBindingAuthority, HostBindingType, HostPayload,
-    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, PendingPreparedInstall,
-    PendingPreparedMode, RequestReceiverEntry, ResidentContinuationEvent, ResidentError,
+    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, RequestReceiverEntry,
+    ResidentContinuationEvent, ResidentError,
     ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
-    SourceImports, TurnClassification, TurnCode, TurnKind, TurnResult,
+    SourceImports, TurnClassification, TurnKind, TurnResult,
 };
 #[cfg(test)]
 use tidepool_runtime::session::{run_turn, TurnRequest};
@@ -8978,7 +8978,26 @@ where
                 return Ok(ResidentWorkbenchStep::Rejected(diagnostic))
             }
         };
-        Box::pin(begin_ready_block_split(&self.access, context, block, ready)).await
+        let ReadyBlock {
+            bound,
+            compiled,
+            generation,
+            observation,
+        } = ready;
+        self.access
+            .with_compiler_machine(context, move |session, context, _, settlement| {
+                begin_ready_bind_in_checkout(
+                    session,
+                    context,
+                    &block,
+                    bound,
+                    compiled,
+                    generation,
+                    observation,
+                    settlement,
+                )
+            })
+            .await
     }
 
     pub(crate) async fn bind_command_job(
@@ -9390,150 +9409,6 @@ where
         warnings,
         outcome,
     )
-}
-
-/// Select the native installation mode from binders and observation metadata.
-fn pending_mode_for(
-    bound: &[BoundBinder],
-    generation: tidepool_repr::Generation,
-    observation: &Option<(String, Option<bool>)>,
-) -> PendingPreparedMode {
-    match bound {
-        [] => PendingPreparedMode::Value,
-        [binder] if observation.is_some() => PendingPreparedMode::Binding {
-            binder: binder.clone(),
-            generation,
-            observation: Some(Vec::new()),
-        },
-        [binder] => PendingPreparedMode::Binding {
-            binder: binder.clone(),
-            generation,
-            observation: None,
-        },
-        binders => PendingPreparedMode::Projected {
-            binders: binders.to_vec(),
-            generation,
-        },
-    }
-}
-
-/// An owned, `'static` [`TurnCode`] cloned from `turn` without consuming it,
-/// so the single-checkout fallback after a stale split install can still run
-/// the same compiled turn instead of needing a second GHC compile.
-fn cloned_turn_code(turn: &CompiledTurn) -> TurnCode<'static> {
-    turn.code().into_owned()
-}
-
-/// One split-install attempt's outcome: either the session had no machine
-/// yet to snapshot against (see [`ResidentSession::prepared_machine_ready`]),
-/// in which case the caller has nothing to compile off-checkout and must use
-/// the single-checkout bootstrap install, or a snapshot ready to compile.
-enum PreparedSnapshotAttempt {
-    Bootstrap,
-    Ready(Box<PendingPreparedInstall>),
-}
-
-/// Install a compiled item without holding the machine during native compilation.
-/// Stale native imports relink the same immutable compiled binding program.
-#[tracing::instrument(target = "exomonad_actor::workbench_phase", skip_all, fields(actor = %context.actor, item = block.ordinal))]
-async fn begin_ready_block_split<H, O>(
-    access: &ResidentMachineAccess<H, O>,
-    context: crate::ActorSessionContext,
-    block: ParsedBlock,
-    compiled: ReadyBlock,
-) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send + 'static,
-    O: OutputSink + Sync + 'static,
-{
-    let ReadyBlock {
-        bound,
-        compiled: compiled_turn,
-        generation,
-        observation,
-    } = compiled;
-    let warnings = compiled_turn.warnings.warnings.clone();
-
-    'split: for install_attempt in 1..=CHEAP_RETRY_ATTEMPTS {
-        tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_snapshot_started", "workbench phase");
-        let code = cloned_turn_code(&compiled_turn);
-        let mode = pending_mode_for(&bound, generation, &observation);
-        let attempt_future =
-            access.with_continuation_machine(context.clone(), move |session, _, _, _| {
-                if !session.prepared_machine_ready() {
-                    return Ok(PreparedSnapshotAttempt::Bootstrap);
-                }
-                session
-                    .snapshot_run_prepared(code, mode, None)
-                    .map(|pending| PreparedSnapshotAttempt::Ready(Box::new(pending)))
-                    .map_err(ResidentActorWorkbenchError::Resident)
-            });
-        let attempt = attempt_future.await?;
-        let pending = match attempt {
-            PreparedSnapshotAttempt::Bootstrap => break 'split,
-            PreparedSnapshotAttempt::Ready(pending) => pending,
-        };
-        tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_snapshot_completed", "workbench phase");
-
-        // No checkout held here: the Cranelift compile runs concurrently
-        // with every other actor's turn against this session.
-        let compiled_program =
-            crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                pending.compile_off_checkout()
-            }))
-            .await
-            .map_err(ResidentActorWorkbenchError::Join)?;
-        let compiled_program = compiled_program.map_err(|error| {
-            ResidentActorWorkbenchError::Resident(ResidentError::Prepared(error))
-        })?;
-        tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_jit_completed", "workbench phase");
-
-        let finish_bound = bound.clone();
-        let finish_warnings = warnings.clone();
-        let captured = observation.is_some();
-        let finish_block = block.clone();
-        let install_future = access.with_compiler_machine(context.clone(), move |session, context, _, settlement| {
-                tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_run_started", "workbench phase");
-                match session.revalidate_and_run_prepared(compiled_program, settlement) {
-                    Ok(Some(outcome)) => finish_bind_step(
-                        session,
-                        context,
-                        &finish_block,
-                        finish_bound,
-                        finish_warnings,
-                        captured,
-                        Ok(outcome),
-                    )
-                    .map(Some),
-                    Ok(None) => Ok(None),
-                    Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
-                }
-            });
-        let step = install_future.await?;
-        tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_run_completed", "workbench phase");
-        if let Some(step) = step {
-            return Ok(step);
-        }
-        // Revalidation found a stale import: another actor's turn changed
-        // a shared binding between the snapshot and this checkout. The
-        // GHC-compiled turn is still current; relink and recompile it.
-        log_stale_native_imports(&context, install_attempt < CHEAP_RETRY_ATTEMPTS);
-    }
-
-    access
-        .with_compiler_machine(context, move |session, context, _, settlement| {
-            begin_ready_bind_in_checkout(
-                session,
-                context,
-                &block,
-                bound,
-                compiled_turn,
-                generation,
-                observation,
-                settlement,
-            )
-        })
-        .await
 }
 
 fn begin_ready_bind_in_checkout<H, O>(
@@ -14220,30 +14095,6 @@ fn consume_admitted_cell_item(
         generation: reservation.generation(),
         observation,
     })))
-}
-
-/// Native installation can relink the same immutable whole-cell item twice
-/// outside the checkout before using the shared bootstrap installer.
-const CHEAP_RETRY_ATTEMPTS: usize = 2;
-
-fn log_stale_native_imports(context: &crate::ActorSessionContext, retrying: bool) {
-    if retrying {
-        tracing::info!(
-            actor = context.actor.id.0,
-            path = "prepared install",
-            stage = "install",
-            changed = "PreparedImports",
-            "split compile went stale; recompiling off-checkout against a fresh snapshot"
-        );
-    } else {
-        tracing::info!(
-            actor = context.actor.id.0,
-            path = "prepared install",
-            stage = "install",
-            changed = "PreparedImports",
-            "split compile went stale; compiling under one checkout"
-        );
-    }
 }
 
 fn actor_compile_view<H, O>(
@@ -22812,10 +22663,7 @@ pub(crate) mod request_tests {
         )
     }
 
-    fn lazy_binding_install(
-        session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
-        source: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-    ) -> tidepool_runtime::session::ReadyPreparedInstall {
+    fn lazy_binding_install() -> (CompiledTurn, BoundBinder, tidepool_repr::Generation) {
         let generation = tidepool_repr::Generation(871);
         let binder = BoundBinder {
             name: "lazySourceBinding".into(),
@@ -22826,42 +22674,11 @@ pub(crate) mod request_tests {
             root_head: None,
             host_authority: None,
         };
-        let pending = session
-            .with_source_compiler_transaction(
-                source,
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                tidepool_runtime::CompilerTransactionCancellation::new(),
-                None,
-                |_| {},
-                |session, settlement| {
-                    if !session.prepared_machine_ready() {
-                        session
-                            .run_with_sites(
-                                "lazy_fixture_bootstrap",
-                                child_bootstrap_fixture().code(),
-                                settlement,
-                            )
-                            .unwrap();
-                    }
-                    session
-                        .snapshot_run_prepared(
-                            Arc::try_unwrap(child_bootstrap_fixture())
-                                .unwrap()
-                                .into_code(),
-                            PendingPreparedMode::Binding {
-                                binder,
-                                generation,
-                                observation: None,
-                            },
-                            None,
-                        )
-                        .unwrap()
-                },
-            )
-            .unwrap()
-            .into_outcome()
-            .action;
-        pending.compile_off_checkout().unwrap()
+        (
+            Arc::try_unwrap(child_bootstrap_fixture()).unwrap(),
+            binder,
+            generation,
+        )
     }
 
     fn suspended_source_binding(
@@ -23380,7 +23197,7 @@ pub(crate) mod request_tests {
         dependency
             .adopt_final_scope(&mut session, scope.scope())
             .unwrap();
-        let ready = lazy_binding_install(&mut session, dependency.source_lease().unwrap());
+        let (compiled, binder, generation) = lazy_binding_install();
         let before = (
             session.code_export_count(),
             session.scope_binding_count(scope.scope()),
@@ -23399,7 +23216,15 @@ pub(crate) mod request_tests {
                 &mut session,
                 owner.admit_continuation().unwrap(),
                 &dependency,
-                |session, settlement| session.revalidate_and_run_prepared(ready, settlement),
+                |session, settlement| {
+                    session.run_bind_with_sites(
+                        "lazy_fixture_binding",
+                        compiled.into_code(),
+                        &binder,
+                        generation,
+                        settlement,
+                    )
+                },
             )
         };
         assert!(result.unwrap().is_err());
@@ -29293,7 +29118,7 @@ pub(crate) mod request_tests {
                 workbench
                     .access
                     .with_machine(context.clone(), move |session, _, _| {
-                        assert_eq!(session.prepared_machine_ready(), index != 0);
+                        assert_eq!(session.is_bootstrapped(), index != 0);
                         Ok(())
                     })
                     .await
