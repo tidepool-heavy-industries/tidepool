@@ -25013,16 +25013,6 @@ pub(crate) mod request_tests {
             if generation_replacement.is_none() {
                 assert_published_source_scope_histories(Arc::clone(&public_selection));
             }
-            let warm_view = workbench
-                .access
-                .with_machine(context.clone(), |session, context, _| {
-                    Ok(session
-                        .compile_view_in(context.placement.lexical_scope)
-                        .unwrap())
-                })
-                .await
-                .unwrap();
-            assert!(warm_view.exact_declaration_context().is_none());
             let publication = workbench_runner_for_test(&workbench)
                 .initialize_durable_public_owner(context.clone(), owner.clone())
                 .await
@@ -25044,6 +25034,16 @@ pub(crate) mod request_tests {
                     panic!("public bootstrap requires recovery: {error:?}")
                 }
             }
+            let warm_view = workbench
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    Ok(session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .unwrap())
+                })
+                .await
+                .unwrap();
+            assert!(warm_view.exact_declaration_context().is_none());
             let first_bootstrap = workbench
                 .access
                 .with_machine(context.clone(), {
@@ -25144,7 +25144,7 @@ pub(crate) mod request_tests {
                 assert_eq!(
                     initial_originals[0].context().semantic_sha256(),
                     public_selection.context().semantic_sha256(),
-                    "ordinary installation carries the exact completed original before durability"
+                    "ordinary installation carries the exact completed original before bootstrap publication"
                 );
             }
             workbench
