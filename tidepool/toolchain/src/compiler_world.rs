@@ -999,6 +999,8 @@ impl CompilerWorld {
             || private.restoration.profile != original_public.restoration.profile
             || self.restoration.producer != private.restoration.producer
             || self.restoration.profile != private.restoration.profile
+            || original_public.restoration.inputs.sources.seal() != private.restoration.inputs.sources.seal()
+            || self.restoration.inputs.sources.seal() != private.restoration.inputs.sources.seal()
         {
             return Err(source_failure("private publication has an incomplete or foreign checked lineage"));
         }
