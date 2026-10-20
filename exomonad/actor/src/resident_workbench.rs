@@ -27974,30 +27974,19 @@ pub(crate) mod request_tests {
             .unwrap();
         let settled_world = compiler_work.run_source_compiler_phase(
             &dependency, tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            |owner, _| tidepool_runtime::session::run_admitted_world_inspection(
+            |owner, _| tidepool_runtime::session::run_admitted_compiler_world(
                 owner, admitted_world,
                 || fixture_sources.capture_compiler_sources().map_err(|error| match error {
                     crate::SourceInspectionError::Unavailable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnavailable(detail),
                     crate::SourceInspectionError::Unreadable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnreadable(detail),
                 }),
-                tidepool_runtime::session::NameQuery {
-                    scope: tidepool_runtime::session::NameScope::PublicModule("Prelude".into()),
-                    namespace: tidepool_runtime::session::NameNamespace::Value,
-                    name: "id".into(),
-                },
-                tidepool_toolchain::compiler_world::PublicModuleQuestionKind::StructuredType,
             ),
         ).unwrap();
+        assert!(settled_world.close().resources_retired());
         let completed_world =
-            tidepool_runtime::session::finish_admitted_world_inspection(settled_world).unwrap();
-        assert!(matches!(
-            completed_world.result(),
-            Ok(tidepool_runtime::session::InspectionResult::StructuredType(
-                Ok(_)
-            ))
-        ));
+            tidepool_runtime::session::finish_admitted_compiler_world(settled_world).unwrap();
         fixture_setup(&mut session, &fixture_source, |session| {
-            assert!(session.install_inspection_world_if_current(
+            assert!(session.install_compiler_world_if_current(
                 &completed_world,
                 &fixture_reference,
                 &fixture_source,
@@ -28016,6 +28005,11 @@ pub(crate) mod request_tests {
             .set_run_context(private_context.run_context())
             .unwrap();
         let world = execution.compiler_world().unwrap().clone();
+        assert!(Arc::ptr_eq(&world, completed_world.world()));
+        assert!(Arc::ptr_eq(
+            &execution.original_source().unwrap(),
+            &fixture_source,
+        ));
         let receiver_source = source.clone().for_workbench(&private_context, None);
         let preamble = cell_module_preamble(
             &hide_preamble_exports(
