@@ -33,7 +33,8 @@ import GHC.Types.Name (Name)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Parser qualified as Parser
 import GHC.Parser.Header (mkPrelImports)
-import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
+import GHC.Parser.Lexer (ParseResult(..), initParserState, unP, getPsErrorMessages)
+import GHC.Types.Error (isEmptyMessages)
 import GHC.Data.FastString (mkFastString)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Ppr (showPpr)
@@ -149,15 +150,18 @@ segmentDemandMatchesSource = moduleDemandMatchesSource . segmentModuleDemand
 prepareModuleDemand :: DynFlags -> CapturedGeneratedScaffoldSource
   -> Either TypedSegmentFailure ParsedModuleDemand
 prepareModuleDemand flags captured = case unP Parser.parseModule parser of
-  PFailed _ -> Left UnprovedRootAbstraction
-  POk _ parsed
-    | null (quasiQuoteOccurrences flags parsed) ->
-        Right (ParsedModuleDemand captured flags parsed)
-    | otherwise -> Left UnprovedRootAbstraction
+  PFailed state -> parseRejected state
+  POk state parsed
+    | not (isEmptyMessages (getPsErrorMessages state)) -> parseRejected state
+    | null quotes -> Right (ParsedModuleDemand captured flags parsed)
+    | otherwise -> Left (ModuleDemandQuasiQuoteRejected path (map (showPpr flags) quotes))
+    where quotes = quasiQuoteOccurrences flags parsed
   where
+    path = capturedGeneratedScaffoldPath captured
+    parseRejected state = Left (ModuleDemandParseRejected path (showPpr flags (getPsErrorMessages state)))
     source = Text.unpack (TextEncoding.decodeUtf8 (capturedGeneratedScaffoldBytes captured))
     parser = initParserState (initParserOpts flags) (stringToStringBuffer source)
-      (mkRealSrcLoc (mkFastString (capturedGeneratedScaffoldPath captured)) 1 1)
+      (mkRealSrcLoc (mkFastString path) 1 1)
 
 prepareSegmentDemand :: TypedSegmentPlan -> DynFlags -> CapturedGeneratedScaffoldSource
   -> Either TypedSegmentFailure ParsedSegmentDemand

@@ -53,6 +53,8 @@ demandScopeChecks = do
           "ShadowOperand" -> pure (unlines
             ["module ShadowOperand where", "import qualified Data.Version as Operand"
             ,"root = let versionBranch value = value in versionBranch ()"])
+          "MalformedModule" -> pure (unlines
+            ["module MalformedModule where", "root = ("])
           "DeclarationQuote" -> pure (unlines
             ["{-# LANGUAGE QuasiQuotes #-}", "module DeclarationQuote where"
             ,"[doesNotExist| refuse before rename |]"])
@@ -88,9 +90,14 @@ demandScopeChecks = do
               Left ConflictingDemandName -> pure ()
               _ -> fail "duplicate exact Name association was accepted"
           case prepareModuleDemand actual captured of
-            Left _ | expected == ParseRefusal -> pure ()
-            Left failure -> fail (name ++ ": parsing refused " ++ show failure)
-            Right _ | expected == ParseRefusal -> fail (name ++ ": quote passed the parser gate")
+            Left (ModuleDemandParseRejected actualPath diagnostic)
+              | expected == SyntaxRefusal && actualPath == path && not (null diagnostic) ->
+                  putStrLn (name ++ ": " ++ diagnostic)
+            Left (ModuleDemandQuasiQuoteRejected actualPath quotes)
+              | expected == QuoteRefusal && actualPath == path && quotes == ["doesNotExist"] -> pure ()
+            Left failure -> fail (name ++ ": wrong parsing refusal " ++ show failure)
+            Right _ | expected `elem` [SyntaxRefusal,QuoteRefusal] ->
+              fail (name ++ ": refused source passed the parser gate")
             Right parsed -> do
               let sealedPath = capturedGeneratedScaffoldPath captured
                   sealedBytes = capturedGeneratedScaffoldBytes captured
@@ -189,7 +196,7 @@ observationContributionChecks directory flags = liftIO $ do
       (fail ("wrong observation contribution result " ++ show ordinal ++ ": " ++ show actual))
   putStrLn ("observation contribution: " ++ show (length cases) ++ " physical-boundary controls passed")
 
-data ExpectedDemand = Bindings [String] | ParseRefusal | RenameRefusal
+data ExpectedDemand = Bindings [String] | SyntaxRefusal | QuoteRefusal | RenameRefusal
   deriving (Eq, Show)
 
 controls :: [(String,String,[String],ExpectedDemand)]
@@ -208,12 +215,13 @@ controls =
   , ("AliasSynonyms","root",["first","second"],Bindings ["first","second"])
   , ("RenameError","root",["old"],RenameRefusal)
   , ("MissingImport","root",["old"],RenameRefusal)
-  , ("ActualQuote","root",[],ParseRefusal)
+  , ("MalformedModule","root",[],SyntaxRefusal)
+  , ("ActualQuote","root",[],QuoteRefusal)
   , ("QualifiedOperand","root",[],Bindings ["input"])
   , ("SameLabelOperand","root",["input"],Bindings ["input","input"])
   , ("UnusedHelperOperand","root",[],Bindings ["input"])
   , ("UnusedOperand","root",[],Bindings [])
   , ("ShadowOperand","root",[],Bindings [])
   , ("DeclarationModule","",["old"],Bindings ["old"])
-  , ("DeclarationQuote","",[],ParseRefusal)
+  , ("DeclarationQuote","",[],QuoteRefusal)
   ]
