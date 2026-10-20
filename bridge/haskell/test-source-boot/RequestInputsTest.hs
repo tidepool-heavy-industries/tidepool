@@ -99,7 +99,7 @@ import Tidepool.ExtractRequest
   , RequestField(..), WorkerRequest, workerArgv, workerRequestFromArgv )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
-  , scopedEnsureWorld, scopedCompileWorldCell, scopedPrepareWorldCellStage
+  , scopedEnsureWorld, scopedCompileWorldCell, scopedPrepareWorldCellStage, scopedValidateWorldCell
   , heldWorldCellStagePath, heldWorldCellStageTypedSource
   , heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
   , WorldCellRefusal(..), emitWorldAcquisitionRejection
@@ -1995,24 +1995,26 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                           _ -> fail "Name refusal control lost its declaration completion"
                         mapM_ (commitPreparedWorldDependencies request) completions
                         when (label == "source-family") $ do
-                          firstAdmission <- boundWorldCellPreparation request >>= either (fail . show) pure
-                          siblingAdmission <- boundWorldCellPreparation request >>= either (fail . show) pure
-                          let compileOriginal admitted = do
-                                _ <- scopedPrepareWorldCellStage compiler admitted >>= maybe
-                                  (fail "predecessor control lost its actual Original stage") pure
-                                scopedCompileWorldCell compiler admitted (PreparedProducts Nothing) Set.empty
-                          first <- compileOriginal firstAdmission
-                          sibling <- compileOriginal siblingAdmission
-                          next <- compileOriginal firstAdmission
-                          expected <- maybe (fail "predecessor control lost its completion") pure
-                            (completedCompilerWorldCompletion first)
-                          siblingCompletion <- maybe (fail "sibling control lost its completion") pure
-                            (completedCompilerWorldCompletion sibling)
-                          requireWorldProductPredecessor (completedCompilerResult next) expected
-                          refused <- try (requireWorldProductPredecessor (completedCompilerResult next) siblingCompletion)
-                            :: IO (Either WorldCellRefusal ())
-                          unless (either (== WorldCellCorrupt) (const False) refused)
-                            (fail "same-World sibling supplied another cursor's completed products")
+                          grant <- either fail pure (compilerExecutionGrant 2)
+                          (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \executor -> do
+                            firstAdmission <- scopedValidateWorldCell compiler grant executor ownPrepare >>= either (fail . show) pure
+                            siblingAdmission <- scopedValidateWorldCell compiler grant executor ownPrepare >>= either (fail . show) pure
+                            let compileOriginal admitted = do
+                                  _ <- scopedPrepareWorldCellStage compiler admitted >>= maybe
+                                    (fail "predecessor control lost its actual Original stage") pure
+                                  scopedCompileWorldCell compiler admitted (PreparedProducts Nothing) Set.empty
+                            first <- compileOriginal firstAdmission
+                            sibling <- compileOriginal siblingAdmission
+                            next <- compileOriginal firstAdmission
+                            expected <- maybe (fail "predecessor control lost its completion") pure
+                              (completedCompilerWorldCompletion first)
+                            siblingCompletion <- maybe (fail "sibling control lost its completion") pure
+                              (completedCompilerWorldCompletion sibling)
+                            requireWorldProductPredecessor (completedCompilerResult next) expected
+                            refused <- try (requireWorldProductPredecessor (completedCompilerResult next) siblingCompletion)
+                              :: IO (Either WorldCellRefusal ())
+                            unless (either (== WorldCellCorrupt) (const False) refused)
+                              (fail "same-World sibling supplied another cursor's completed products")
                     pure admitted
           runScope (pure ()) $ \compiler -> do
             let question = heldWorldCellQuestion admission
