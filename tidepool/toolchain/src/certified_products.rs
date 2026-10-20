@@ -414,6 +414,7 @@ pub(crate) struct CertifiedSegmentOriginals {
         Arc<crate::artifact_inventory::ArtifactEntry>,
     >,
     original_sources: Arc<AvailableOriginalSources>,
+    authored_artifacts: Option<crate::artifact_inventory::ArtifactView>,
 }
 
 impl CertifiedSegmentOriginals {
@@ -547,9 +548,9 @@ impl CertifiedSegmentOriginals {
             ));
         }
         timing.advance("native_availability");
-        // Completed selection rows already retain this physical custody. The
-        // segment owner needs their issuances, not another view handle here.
-        let _ =
+        // Original stages have no target view. Keep this same physical issuer
+        // for their authored closure; executable items use their bound cursor.
+        let physical =
             crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
                 &mut products.source_selection,
                 compiler_inputs.artifacts(),
@@ -575,6 +576,7 @@ impl CertifiedSegmentOriginals {
             value_entry_index,
             value_entries: value_entries.into(),
             original_sources,
+            authored_artifacts: authored.map(|_| physical),
             package_availability,
             raw,
             receipt,
@@ -607,6 +609,16 @@ impl CertifiedSegmentOriginals {
 
     pub(crate) fn artifact_entries(&self) -> &[Arc<crate::artifact_inventory::ArtifactEntry>] {
         &self.artifact_entries
+    }
+
+    pub(crate) fn authored_artifacts(
+        &self,
+    ) -> CertResult<&crate::artifact_inventory::ArtifactView> {
+        self.authored_artifacts
+            .as_ref()
+            .ok_or(CertificationError::Mismatch(
+                "executable segment has no authored original stage",
+            ))
     }
 
     pub(crate) fn original_sources(&self) -> &Arc<AvailableOriginalSources> {
@@ -17358,6 +17370,19 @@ pub(crate) mod tests {
             .collect::<BTreeMap<_, _>>();
         assert_eq!(issued_groups.len(), groups.len());
         assert_eq!(issued_groups, issued_offer.issued_group_carriers().unwrap());
+        let required_scopes = proof_graph
+            .bindings
+            .iter()
+            .map(|binding| binding.selection)
+            .chain(groups.iter().map(|group| group.binding.selection()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(issued_offer.required_scopes(), &required_scopes);
+        assert!(
+            issued_groups
+                .iter()
+                .any(|(group, carrier)| { group.binding.selection() != carrier.selection }),
+            "the control must exercise independent group and carrier scopes"
+        );
         let before = inventory.metrics();
         let mut item = physical.clone();
         Arc::make_mut(&mut item.modules)

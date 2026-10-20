@@ -192,3 +192,37 @@ already-captured paths. Trace those exact consumers before calling this redundan
 or deleting an intentional independent authentication observation. If they must
 consume the same captured output, lend the actual existing output owner through
 the product loader; do not add a second output cache or duplicate payload tree.
+
+
+## Authored closure custody and checked scope projection
+
+The authored stage now retains the same `ArtifactView` returned by
+`issue_segment_native_availability`. `WorldProgramSegment::planned_declaration`
+passes that actual view through `SelectedOriginalClosure`, `IssuedOriginalOutput`
+and the common declaration certifier. The World wrapper checks the same stage
+Arc, admitted captured source, reserved Lib generation, actual canonical
+interface SHA and inventory. It does not reread the captured source or issue a
+synthetic executable target. This helper is compiled; the ordered stage fold
+and a genuine mixed-output consumer are still pending.
+
+`NativeOfferCustody` derives `required_scopes` during its existing checked-node
+acquisition traversal. Artifact carrier scopes and group issuer scopes are
+recorded independently. The exact proof references and their direct ancestors
+remain with the original issuer; this set is only a borrowed projection.
+
+At parent `b1eef86c4b` plus this source delta, the focused command
+`swarm-build just test-lib tidepool-toolchain --exact declaration_context::tests::native_availability_delta_preserves_snapshot_and_untouched_row_owners --exact certified_products::tests::physical_native_issuance_survives_item_type_projection_without_future_demand --expected-count 2 --output-dir /srv/swarm/evidence/inanna/world-stage-native-scopes-final-20261020 --retain-artifacts`
+compiled the production and cfg consumers and passed 2/2, exit 0, build
+`e8730080-8439-4a2a-8f1d-cb5dcb8a65b8`. The executed Rust artifact SHA was
+`2cc6356cf13ef0d99d364e0baf9ae15bc2642d6d09757a704cd2d1d6e4e51429`.
+The controls include 1/32/128 persistent native row insertion, isolated prior
+snapshots, and an actual issued graph with different group/carrier scopes.
+The first compile attempt `7106bf09` caught an inventory JSON borrow type
+mismatch; the corrected wrapper borrows the existing string's bytes.
+
+Current source-support work is separate from runtime lexical publication. A
+stage Lib declaration certificate describes its actual authored exports and
+full compiled closure; it is not a cumulative `AcceptedJoin` facade. The
+runtime join owner must supply that authority. A separate open native boundary
+is how a new explicit Original role affects prior optional Full qualification;
+no full retained-native census or unchecked promotion is accepted as its repair.

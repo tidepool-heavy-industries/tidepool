@@ -8990,6 +8990,41 @@ pub(crate) struct WorldProgramSegment<'a> {
 }
 
 impl WorldProgramSegment<'_> {
+    pub(crate) fn planned_declaration(
+        &self,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        stage: &Arc<crate::compiler_world::CheckedWorldCellStage>,
+    ) -> Result<crate::checked_cell::PlannedCheckedDeclaration, CompileError> {
+        let owner = stage
+            .identity()
+            .original_owner()
+            .ok_or_else(|| failure("executable World stage has no planned declaration"))?;
+        let view = self
+            .originals
+            .authored_artifacts()
+            .map_err(compiler_evidence_failure)?;
+        let selection = self.originals.source_selection();
+        let originals = selection
+            .selected_authored_original_closure(view, &owner.unit, &owner.module)
+            .map_err(compiler_evidence_failure)?;
+        let output = IssuedOriginalOutput::issue(selection.clone(), view.clone())?;
+        let certificate = crate::declaration_join::certify_world_stage_planned_declaration(
+            program,
+            stage,
+            &self.source_text,
+            &originals,
+            &output,
+            &self.product_admission(),
+            &self.aliases,
+        )?;
+        Ok(crate::checked_cell::PlannedCheckedDeclaration {
+            source: self.source_text.clone(),
+            certificate: Arc::new(certificate),
+            receipt_digest: *program.certificate_sha256(),
+            compiler_input: output.compiler_inputs().clone(),
+        })
+    }
+
     pub(crate) fn source(&self) -> &ExactSourceAdmission {
         &self.source
     }
@@ -19598,6 +19633,25 @@ mod tests {
                 .expect("one genuinely issued new row")
                 .clone();
             let id = added.original_artifact_id();
+            for offer in added.offers() {
+                let graph = offer.proof().map(|proof| proof.selection.graph_selection());
+                let expected = graph
+                    .iter()
+                    .flat_map(|graph| {
+                        graph
+                            .bindings
+                            .iter()
+                            .map(|binding| binding.selection)
+                            .chain(
+                                graph
+                                    .native_groups
+                                    .iter()
+                                    .map(|group| group.binding.selection()),
+                            )
+                    })
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(offer.required_scopes(), &expected);
+            }
             let incoming = RequestNativeAvailability::from_issued_rows([added.clone()]).unwrap();
             let before = previous.snapshot_facts().unwrap();
             let mut expected = before
