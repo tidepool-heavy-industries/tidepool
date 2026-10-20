@@ -61,8 +61,8 @@ import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
 import GHC.Iface.Syntax (IfaceClsInst(..))
 import GHC.Unit.Module (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName, mkModule)
 import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_iface_hash, mi_final_exts, mi_exports, mi_insts, mi_usages)
-import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
-import GHC.Unit.Types (unitString, stringToUnit, toUnitId)
+import GHC.Unit.Module.Deps (Usage(..))
+import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId)
 import Numeric (readHex)
 import System.Directory (canonicalizePath, doesPathExist, makeAbsolute, createDirectoryIfMissing)
 import System.FilePath (normalise, (</>))
@@ -467,8 +467,14 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
                           ++ "selected-source=" ++ canonicalSourceSha256 proof ++ "\n"
                           ++ "finalization-ingress=unobserved; correlate TIDEPOOL_FINALIZED_OWNER_TRACE\n"
                           ++ "selected-requirements=" ++ take 65536 (show (canonicalRequirements proof)) ++ "\n"
-                          ++ "current-usages=" ++ take 65536 (renderWithContext defaultSDocContext
-                            (ppr (mi_usages (hm_iface (finalizedHomeModInfo original))))) ++ "\n"
+                          ++ "current-home-package-usages=" ++ take 65536 (show
+                            [case usage of
+                              UsageHomeModule {usg_mod_name=name,usg_unit_id=unit,usg_mod_hash=hash} ->
+                                ("home",unitIdString unit,moduleNameString name,show hash)
+                              UsagePackageModule {usg_mod=required,usg_mod_hash=hash} ->
+                                ("package",unitString (moduleUnit required),moduleNameString (moduleName required),show hash)
+                              _ -> ("other-unobserved","","","")
+                            | usage <- mi_usages (hm_iface (finalizedHomeModInfo original))]) ++ "\n"
                           ++ "current-interface-hash=" ++ show (mi_iface_hash (mi_final_exts
                             (hm_iface (finalizedHomeModInfo original)))) ++ "\n"
                           ++ "current-source-summaries=" ++ take 65536 (show
