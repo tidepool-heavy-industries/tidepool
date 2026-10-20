@@ -2187,6 +2187,10 @@ pub struct CheckedWorldCellItem {
 }
 
 impl CheckedWorldCellItem {
+    pub(crate) fn checked_item_observation(&self) -> &crate::checked_cell::CheckedItem {
+        &self.checked
+    }
+
     pub fn ordinal(&self) -> usize {
         self.ordinal
     }
@@ -2241,6 +2245,10 @@ pub struct CheckedWorldCellProgram {
 }
 
 impl CheckedWorldCellProgram {
+    pub(crate) fn observations(&self) -> &Arc<[u8]> {
+        &self.output.observations
+    }
+
     pub fn reservation(&self) -> &Arc<crate::cell_plan::CompilerWorldCellReservation> {
         &self.output.reservation
     }
