@@ -1034,14 +1034,6 @@ impl PersistentSession {
                     .or(self.machine.as_mut())
                     .expect("certified machine remains installed");
                 let target = engine.commit_certified_turn(staged);
-                // Certified targets are compiled before this install call, so
-                // they share the legacy split install's off-checkout fact.
-                tracing::info!(
-                    target: "tidepool_runtime::prepared_install",
-                    compiled_off_checkout = true,
-                    install_kind = "certified",
-                    "prepared install"
-                );
                 self.session_table = admitted_metadata;
                 if let Some(engine) = bootstrap {
                     self.machine = Some(engine);
