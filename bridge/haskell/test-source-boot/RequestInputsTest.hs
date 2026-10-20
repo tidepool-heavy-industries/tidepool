@@ -23,6 +23,7 @@ import Data.Maybe (isNothing)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Directory (canonicalizePath, copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, getTemporaryDirectory, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
 import System.Posix.Files (createSymbolicLink)
@@ -77,6 +78,7 @@ import Tidepool.ExactScope
   , exactInputRetentionLimits, commitWorldInputRetention
   , worldInputsLexicalSurface, worldLexicalImports, worldLexicalDeclaration
   , worldInputsSources, worldSourceDomainSha256
+  , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldCellPlan, boundWorldCellPreparation
@@ -529,6 +531,43 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
       && isNothing (worldLexicalDeclaration (worldInputsLexicalSurface imported))
       && worldInputsIdentityBytes imported /= worldInputsIdentityBytes original)
     (fail "world product lost ordered import qualification, explicit empty selection or lexical identity")
+  -- Use the same genuine cold facts as an independent full-read oracle. The
+  -- successor carries only its changed lexical block, then returns to the old
+  -- root without retaining either descriptor. Compatible alternate captures of
+  -- the same immutable predecessor remain valid reconstruction inputs.
+  let noInputs = TList [TString "continue-originals",TList [],TList []]
+      successor receipt changed = TList [TString "TPCWSUCC4",TBytes receipt,blocks changed,TList [],TList [],noInputs]
+      readSuccessor label before term = do
+        let path = work </> (label ++ ".successor.cbor")
+        BS.writeFile path (encode term)
+        owner <- newExactInputOwner
+        readWorldSuccessorWithOwner owner before path
+      importedProduct = restorationWithLexical 4 primary association emptyBinding importsRoot
+      requireSuccessorCorrupt label before term = do
+        outcome <- try (readSuccessor label before term)
+        case outcome of
+          Left (WorldInputsFailure WorldInputsCorrupt _) -> pure ()
+          Left failure -> throwIO failure
+          Right _ -> fail ("successor accepted malformed immutable facts: " ++ label)
+  next <- readSuccessor "lexical-delta" original (successor importedProduct [(importsRoot,importsBody)])
+  unless (worldInputsIdentityBytes (worldSuccessorFacts next) == worldInputsIdentityBytes imported
+      && worldInputsRetainedCharge (worldSuccessorFacts next) == worldInputsRetainedCharge imported
+      && worldLexicalImports (worldInputsLexicalSurface (worldSuccessorFacts next)) == orderedImports
+      && Set.null (worldSuccessorChangedAliases next))
+    (fail "successor lexical facts/charge differ from independent full cold admission")
+  reverted <- readSuccessor "lexical-revert" (worldSuccessorFacts next) (successor product [(lexical,maybe (error "genuine lexical block absent") id (lookup lexical blockPairs))])
+  unless (worldInputsRetainedCharge (worldSuccessorFacts reverted) == worldInputsRetainedCharge original
+      && worldInputsIdentityBytes (worldSuccessorFacts reverted) == worldInputsIdentityBytes original)
+    (fail "successor retained retired lexical blocks or predecessor envelopes")
+  compatible <- readPacket "compatible-predecessor" originalPacket
+  equivalent <- readSuccessor "compatible-frontier" compatible (successor importedProduct [(importsRoot,importsBody)])
+  unless (worldInputsIdentityBytes (worldSuccessorFacts equivalent) == worldInputsIdentityBytes imported)
+    (fail "compatible independently authenticated frontier changed the next immutable product")
+  requireSuccessorCorrupt "missing-changed-block" original (successor importedProduct [])
+  requireSuccessorCorrupt "corrupt-changed-block" original
+    (successor importedProduct [(importsRoot,importsBody <> BS.singleton 0)])
+  requireSuccessorCorrupt "extra-unreachable-block" original
+    (successor product [(importsRoot,importsBody)])
   requireCorrupt (Just "compiler world block child is absent") "world-missing-lexical-root"
     (packet 4 product primary (filter ((/= lexical) . fst) blockPairs) base [] acquisition emptyBinding)
   let unselectedBody = encode (TList [TString "TPCWLEX1",TList [],TList
@@ -578,9 +617,31 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
   lexicalBody <- maybe (fail "actual lexical surface block is absent") pure (lookup lexical blockPairs)
   let uniqueParts = Map.fromList parts
       (primaryBytes,primaryEntries) = expectedPrimary
-      rawBytes = sum (Map.elems uniqueParts) + toInteger (BS.length sources) + toInteger (BS.length (encode originalPacket))
-      expectedCharge = (rawBytes + toInteger (BS.length emptyNode) + primaryBytes + toInteger (BS.length lexicalBody)
-        ,Map.size uniqueParts + 4 + primaryEntries)
+      -- The receiver retains row parts, source bytes and the authenticated
+      -- graph, independently of the disposable transport envelope.
+      rawBytes = sum (Map.elems uniqueParts) + toInteger (BS.length sources)
+      rowMetadata (TList [TList [unit,name,path,sha,TList requirements,packages,packageSha,TList (role:proof)],image]) =
+        let extra = case proof of
+              [certificate,certificateSha,TNull,TNull] -> [certificate,certificateSha]
+              [certificate,certificateSha,core,coreSha] -> [certificate,certificateSha,core,coreSha]
+              [] -> []
+              _ -> error "row charge oracle needs one closed role"
+            paths = [path,sha,packages,packageSha] ++ extra
+            textBytes (TString value) = BS.length (TE.encodeUtf8 value)
+            textBytes _ = error "row charge oracle needs path/seal text"
+            order (TList [TString u,TString n]) = (u,n)
+            order _ = error "row charge oracle needs exact requirements"
+            semantic = TList [unit,name,TBytes producer,image,role,TList (sortOn order requirements)]
+        in toInteger (sum (map textBytes paths) + BS.length (encode semantic))
+      rowMetadata _ = error "row charge oracle needs genuine transport rows"
+      rowBytes = sum (map rowMetadata base)
+      frontierBytes = sum [toInteger (BS.length cid + BS.length body)
+        + 38 * toInteger (Set.size (Set.fromList (links term)))
+        | (cid,body) <- blockPairs,Right (remaining,term) <- [deserialiseFromBytes decodeTerm (BL.fromStrict body)]
+        ,BL.null remaining]
+      expectedCharge = (rawBytes + 2 * toInteger (BS.length emptyNode) + primaryBytes
+          + toInteger (BS.length lexicalBody) + rowBytes + frontierBytes
+        ,Map.size uniqueParts + 2 + primaryEntries + length base + length blockPairs)
   unless (worldInputsRetainedCharge original == expectedCharge)
     (fail ("four-root known backing/record charge differs from independent DATA census: "
       ++ show (worldInputsRetainedCharge original,expectedCharge)))
