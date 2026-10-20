@@ -480,6 +480,16 @@ pub(crate) struct TargetNativeInputs {
 }
 
 impl TargetNativeInputs {
+    pub(crate) fn with_certified_groups(
+        self,
+        groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
+    ) -> Result<CertifiedTargetNativeInputs, CompileError> {
+        if !groups.matches_view(self.artifacts()) {
+            return Err(failure("native group products belong to another target acquisition"));
+        }
+        Ok(CertifiedTargetNativeInputs { target: self, groups })
+    }
+
     pub(crate) fn artifacts(&self) -> &ArtifactView {
         self.admitted.artifacts()
     }
@@ -568,6 +578,50 @@ impl TargetNativeInputs {
             sources: source_traversal.selected,
             groups,
             entry_binding,
+        })
+    }
+}
+
+/// The actual group certifier closes the selected graph with its physical
+/// products. Graph-only compiler consumers cannot issue runtime source proofs.
+#[derive(Debug)]
+pub(crate) struct CertifiedTargetNativeInputs {
+    target: TargetNativeInputs,
+    groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
+}
+
+impl std::ops::Deref for CertifiedTargetNativeInputs {
+    type Target = TargetNativeInputs;
+    fn deref(&self) -> &TargetNativeInputs { &self.target }
+}
+
+impl CertifiedTargetNativeInputs {
+    pub(crate) fn resolve_sources(&self) -> Result<ResolvedNativeSourceTarget<'_>, CompileError> {
+        Ok(ResolvedNativeSourceTarget {
+            target: self.target.resolve()?,
+            groups: &self.groups,
+        })
+    }
+}
+
+/// One operation's exact selected groups and its already paired product owner.
+pub(crate) struct ResolvedNativeSourceTarget<'a> {
+    target: ResolvedNativeTarget<'a>,
+    groups: &'a crate::declaration_context::CertifiedArtifactGroupBindings,
+}
+
+impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
+    type Target = ResolvedNativeTarget<'a>;
+    fn deref(&self) -> &Self::Target { &self.target }
+}
+
+impl ResolvedNativeSourceTarget<'_> {
+    pub(crate) fn group(
+        &self,
+        binding: NativeGroupBinding,
+    ) -> Result<&crate::certified_products::PendingCertifiedGroup, CompileError> {
+        self.groups.get(binding).ok_or_else(|| {
+            failure("selected native binding lacks its exact certified product")
         })
     }
 }
@@ -6662,6 +6716,23 @@ pub struct ArtifactView {
     reads: Arc<ViewReadCache>,
 }
 
+/// Identity of an actual acquisition, without retaining its resource closure.
+/// Equal graph snapshots are insufficient to pair physical group products.
+#[derive(Clone)]
+pub(crate) struct NativeGroupViewStamp(Weak<ViewLease>);
+
+impl std::fmt::Debug for NativeGroupViewStamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeGroupViewStamp")
+    }
+}
+
+impl NativeGroupViewStamp {
+    pub(crate) fn matches_view(&self, view: &ArtifactView) -> bool {
+        Weak::ptr_eq(&self.0, &Arc::downgrade(&view.lease))
+    }
+}
+
 /// One retained closure observed under the inventory lock. Entries are ordered
 /// by exact owner; dependency tuples keep their canonical wire order.
 #[derive(Clone, Debug)]
@@ -7399,6 +7470,19 @@ impl ArtifactView {
         pending: Vec<NativeGroupBinding>,
     ) -> Result<(NativeRequirements, BTreeSet<NativeGroupBinding>), CompileError> {
         native_requirements_for_exact_groups_in_custody(state, &self.lease.payloads, owned, pending)
+    }
+
+    /// Borrow this view's selected native rows, excluding custody-only support.
+    /// The stamp identifies the same acquisition independently of graph equality.
+    pub(crate) fn selected_native_binding_rows(
+        &self,
+    ) -> (NativeGroupViewStamp, Vec<NativeGroupBinding>) {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let bindings = self.selected_nodes(&state).iter().filter_map(|node| match node {
+            InventoryNodeKey::Group(group) => Some(*group),
+            _ => None,
+        }).collect();
+        (NativeGroupViewStamp(Arc::downgrade(&self.lease)), bindings)
     }
 
     pub(crate) fn contains_issued_native_group(&self, group: NativeGroupBinding) -> bool {
