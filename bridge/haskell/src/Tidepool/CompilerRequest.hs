@@ -954,7 +954,7 @@ prepareWorldCellQuestion bound question = do
                 ++ occNameString (nameOccName (idName (typedCaptureIdentifier capture)))) (typedCaptureType capture)
           pure (plannedItemOrdinal (typedItemPlan item),signatures)
         originalInterfaces <- newPreparedOriginalInterfaceArtifactsWithPrior prepared
-          (maybe [] worldCellTypeInterfaces (preparedCompilationWorldInputs completion)) prior stageDirectory
+          (preparedCompilationWorldInputs completion) prior stageDirectory
         let producedGenerations = Map.fromList [(preparedRootIdentity global,generation)
               | (global,generation) <- typedSegmentSessionRetainedGlobals batch]
             retainedGenerations = maybe Map.empty worldCellRetainedGenerations (preparedCompilationWorldInputs completion)
@@ -1056,7 +1056,7 @@ prepareWorldCellQuestion bound question = do
         unless (plannedModule original == reserved && plannedSource original == plannedSource submitted)
           (throwIO WorldCellCorrupt)
         interfaces <- newPreparedOriginalInterfaceArtifactsWithPrior prepared
-          (maybe [] worldCellTypeInterfaces (preparedCompilationWorldInputs completion)) prior stageDirectory
+          (preparedCompilationWorldInputs completion) prior stageDirectory
         let generations = maybe Map.empty worldCellRetainedGenerations (preparedCompilationWorldInputs completion)
         -- The existing original writer uses its real checking root to obtain
         -- the native inventory. No executable item or target packet is emitted.

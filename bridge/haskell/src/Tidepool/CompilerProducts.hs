@@ -109,6 +109,7 @@ import Tidepool.GhcPipeline
   , preparedFreshDependencies, preparedExactCompilation
   , preparedHomeRequirements, preparedCandidateOriginal, preparedCandidateProof
   , revalidatePreparedCandidateInputs )
+import Tidepool.GhcPipeline (WorldCellInputs, worldCellTypeInterfaces)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..))
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -670,13 +671,14 @@ retainedOriginalInterfaces prepared =
 
 -- | Share the selected interfaces with finalization and type-witness sealing.
 newPreparedOriginalInterfaceArtifacts :: PreparedPipelineResult -> FilePath -> IO OriginalInterfaceArtifacts
-newPreparedOriginalInterfaceArtifacts prepared = newPreparedOriginalInterfaceArtifactsWithPrior prepared [] Nothing
+newPreparedOriginalInterfaceArtifacts prepared = newPreparedOriginalInterfaceArtifactsWithPrior prepared Nothing Nothing
 
 newPreparedOriginalInterfaceArtifactsWithPrior
-  :: PreparedPipelineResult -> [(ExactIfaceArtifact,ArtifactBytes)] -> Maybe StagedOriginalProducts
+  :: PreparedPipelineResult -> Maybe WorldCellInputs -> Maybe StagedOriginalProducts
   -> FilePath -> IO OriginalInterfaceArtifacts
-newPreparedOriginalInterfaceArtifactsWithPrior prepared worldInterfaces prior directory = do
-  let previous = maybe Map.empty stagedOriginalInterfaces prior
+newPreparedOriginalInterfaceArtifactsWithPrior prepared worldInputs prior directory = do
+  let worldInterfaces = maybe [] worldCellTypeInterfaces worldInputs
+      previous = maybe Map.empty stagedOriginalInterfaces prior
       current = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,body)) | (artifact,body) <- worldInterfaces]
       retained = Map.union current previous
   unless (all (\(artifact,body) -> Map.lookup (exactUnit artifact,exactModule artifact) retained == Just (artifact,body)
