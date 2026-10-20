@@ -5516,7 +5516,7 @@ impl RetainedArtifactMaterialization {
                 owner
                     .groups
                     .iter()
-                    .filter(|(binding, _)| selected_native_groups.contains(binding))
+                    .filter(|(binding, _)| selected_native_groups.contains(*binding))
                     .map(|(binding, group)| (*binding, group)),
             );
         }
@@ -5612,7 +5612,7 @@ impl RetainedArtifactMaterialization {
                     owner
                         .groups
                         .iter()
-                        .filter(|(binding, _)| selected.contains(binding))
+                        .filter(|(binding, _)| selected.contains(*binding))
                         .map(|(binding, group)| (*binding, group)),
                 );
             });
@@ -21970,7 +21970,20 @@ mod tests {
             .remove(0)
             .product
         });
-        let inputs = match support_offer(&products) {
+        let baseline = crate::certified_products::tests::recovered_witness_fixtures(&[
+            crate::certified_products::fixture_finalized_product(
+                crate::certified_products::tests::original_groups_fixture(
+                    "ScopedRequestBaseline",
+                    vec![],
+                    7,
+                    &BTreeMap::new(),
+                ),
+                producer_sha,
+            ),
+        ])
+        .remove(0)
+        .product;
+        let inputs = match support_offer(&[baseline]) {
             CompilerSupportFixture::Complete(inputs) => inputs,
             _ => unreachable!(),
         };
