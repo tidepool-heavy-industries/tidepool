@@ -11164,8 +11164,8 @@ mod tests {
             // Current output is not an input continuation, even with Full bodies.
             assert!(
                 matches!(native_availability::verified_root_choice(&current, key, product.owner(), &native),
-                Err(CompileError::ArtifactInventory(error)) if matches!(error.native_refusal,
-                    Some(NativeAdmissionRefusal::RootChoiceMissing { owner }) if owner == native.descriptor.owner))
+                Err(CompileError::ArtifactInventory(error)) if matches!(&error.native_refusal,
+                    Some(NativeAdmissionRefusal::RootChoiceMissing { owner }) if owner == &native.descriptor.owner))
             );
 
             let context = ExactDeclarationContext::new(&[], &[], vec![])
