@@ -1934,6 +1934,7 @@ pub(crate) struct PreparedActorGeneration {
     checkout_context: crate::ActorSessionContext,
     expected: ActorRequestSnapshot,
     reload_report: Option<PreparedReloadReport>,
+    unpublished: Option<tidepool_runtime::session::UnpublishedNotebookScope>,
     candidate: Arc<ActorGenerationCandidate>,
     commit: PreparedGenerationCommit,
     public_owner: crate::resident_actor::PreparedWorkbenchGenerationOwner,
@@ -1989,6 +1990,7 @@ impl ActorGenerationCandidateObserver {
 }
 
 struct PreparingActorGeneration {
+    unpublished: Option<tidepool_runtime::session::UnpublishedNotebookScope>,
     machine_owner: std::sync::Weak<dyn std::any::Any + Send + Sync>,
     checkout_context: crate::ActorSessionContext,
     expected: ActorRequestSnapshot,
@@ -2104,7 +2106,9 @@ impl ReservedActorGeneration {
             .map_err(
                 |settlement| ResidentActorWorkbenchError::PublicationSettlement {
                     failure: Box::new(ActorPublicationSettlementFailure {
-                        outcome: Arc::new(Ok(ActorGenerationCommit::Refused(detail.to_owned().into()))),
+                        outcome: Arc::new(Ok(ActorGenerationCommit::Refused(
+                            detail.to_owned().into(),
+                        ))),
                         settlement,
                     }),
                 },
@@ -3362,8 +3366,11 @@ where
             Arc::downgrade(&owner)
         };
         let obligations = match &prepared.commit {
-            PreparedGenerationCommit::Ephemeral { .. } => PublicationBodyObligations::DiagnosticOnly,
-            PreparedGenerationCommit::Restored { .. } | PreparedGenerationCommit::Durable { .. } => PublicationBodyObligations::Retained,
+            PreparedGenerationCommit::Ephemeral { .. } => {
+                PublicationBodyObligations::DiagnosticOnly
+            }
+            PreparedGenerationCommit::Restored { .. }
+            | PreparedGenerationCommit::Durable { .. } => PublicationBodyObligations::Retained,
         };
         if !Arc::ptr_eq(&self.state, &owner.state) || !prepared.machine_owner.ptr_eq(&machine_owner)
         {
@@ -3583,9 +3590,7 @@ impl ActorGenerationCommit {
         self.into_initial_generation()
     }
 
-    fn into_initial_generation(
-        self,
-    ) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
+    fn into_initial_generation(self) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
         match self {
             Self::Published { generation, .. } => Ok(generation),
             Self::Refused(ActorGenerationPublicationIssue::Detail(detail)) => {
@@ -4068,6 +4073,26 @@ where
         installation: InstalledToolLease,
         prompts: tidepool_runtime::session::ComposedPromptSnapshot,
     ) -> Result<PreparedActorGeneration, ResidentActorWorkbenchError> {
+        self.prepare_actor_generation_in(
+            context,
+            descriptor,
+            expected_snapshot,
+            installation,
+            prompts,
+            None,
+        )
+        .await
+    }
+
+    async fn prepare_actor_generation_in(
+        &self,
+        context: crate::ActorSessionContext,
+        descriptor: crate::ActorDescriptor,
+        expected_snapshot: ActorRequestSnapshot,
+        installation: InstalledToolLease,
+        prompts: tidepool_runtime::session::ComposedPromptSnapshot,
+        unpublished: Option<tidepool_runtime::session::UnpublishedNotebookScope>,
+    ) -> Result<PreparedActorGeneration, ResidentActorWorkbenchError> {
         if context.actor != installation.actor()
             || expected_snapshot.installation().actor() != context.actor
         {
@@ -4107,7 +4132,9 @@ where
                     },
                     |generation| generation.dependency().prerequisite().clone(),
                 );
-                let scope = if expected.is_some() {
+                let scope = if let Some(owner) = &unpublished {
+                    owner.lease().clone()
+                } else if expected.is_some() {
                     let retained = session
                         .mint_notebook_scope_with_lease(
                             prerequisite
@@ -4230,15 +4257,32 @@ where
                     PreparedGenerationCommit::Restored { selected, .. }
                     | PreparedGenerationCommit::Durable { selected, .. } => selected.generation(),
                 };
-                let dependency = generation_admission::SourceDependency::Generation(
-                    generation_admission::GenerationDependency::new(
-                        context.actor,
-                        generation,
-                        installation.source().clone(),
-                        &scope,
-                        prerequisite,
-                    ),
-                );
+                let dependency = if unpublished.is_some() {
+                    match context.source_dependency() {
+                        generation_admission::SourceDependency::Generation(dependency)
+                            if dependency.generation() == generation
+                                && Arc::ptr_eq(dependency.runtime_lease(), &scope) =>
+                        {
+                            generation_admission::SourceDependency::Generation(dependency.clone())
+                        }
+                        _ => {
+                            return Err(
+                                generation_admission::GenerationAdmissionError::StaleSourceLease
+                                    .into(),
+                            )
+                        }
+                    }
+                } else {
+                    generation_admission::SourceDependency::Generation(
+                        generation_admission::GenerationDependency::new(
+                            context.actor,
+                            generation,
+                            installation.source().clone(),
+                            &scope,
+                            prerequisite,
+                        ),
+                    )
+                };
                 installation.dependency = dependency.clone();
                 next_context.source_dependency = dependency;
                 let public_owner = crate::resident_actor::WorkbenchPublicOwner::prepare_generation(
@@ -4248,6 +4292,7 @@ where
                     native_owner,
                 )?;
                 Ok(PreparingActorGeneration {
+                    unpublished,
                     machine_owner,
                     checkout_context,
                     expected: expected_snapshot,
@@ -4366,6 +4411,7 @@ where
             checkout_context: preparing.checkout_context,
             expected: preparing.expected,
             reload_report: None,
+            unpublished: preparing.unpublished,
             candidate: Arc::new(ActorGenerationCandidate {
                 installation: preparing.installation,
                 prompts: preparing.prompts,
@@ -9384,17 +9430,27 @@ where
         let public_scope = context.placement.lexical_scope;
         let mut compile_context = context.clone();
         compile_context.haskell_effects_alias = dispatcher_effects.clone();
-        let installation_scope = self
-            .access
-            .with_machine(context.clone(), move |session, _, _| {
-                // Each installation has an independent CAF/source domain even
-                // when actors share the surrounding machine and native images.
-                let isolated = session.mint_isolated_scope();
-                let retained = session.retain_lexical_scope(isolated)?;
-                session.retire_scope(isolated);
-                Ok(retained)
-            })
-            .await?;
+        let (installation_scope, source_startup) = if let Some(prepared) = code.prepared().cloned()
+        {
+            self.access
+                .with_compiler_machine(context.clone(), move |session, _, _, _| {
+                    session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
+                    let entry = session.prepare_source_startup_entry(&prepared.entry)?;
+                    Ok((entry.installation_scope().clone(), Some(entry)))
+                })
+                .await?
+        } else {
+            let retained = self
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    let isolated = session.mint_isolated_scope();
+                    let retained = session.retain_lexical_scope(isolated)?;
+                    session.retire_scope(isolated);
+                    Ok(retained)
+                })
+                .await?;
+            (retained, None)
+        };
         compile_context.placement.lexical_scope = installation_scope.scope();
         let abort_guard = ParkedHoleAbortGuard::with_retained_latest(
             &self.access,
@@ -9428,13 +9484,6 @@ where
                     }
                 };
                 move |session, context, _, settlement| {
-                    let startup = prepared
-                        .as_ref()
-                        .map(|prepared| {
-                            session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
-                            session.prepare_startup_entry(prepared.entry.compiled().code())
-                        })
-                        .transpose()?;
                     let pending_originals = if matches!(
                         purpose,
                         ToolInstallationPurpose::InitialTools
@@ -9448,9 +9497,9 @@ where
                     } else {
                         None
                     };
-                    let (outcome, warnings) = match (prepared, startup, installer) {
+                    let (outcome, warnings) = match (prepared, source_startup, installer) {
                         (Some(prepared), Some(entry), None) => (
-                            session.run_startup_entry(entry, settlement),
+                            session.run_source_startup_entry(entry, settlement),
                             prepared.entry.compiled().warnings.warnings.clone(),
                         ),
                         (None, None, Some(installer)) => (
@@ -24937,11 +24986,18 @@ pub(crate) mod request_tests {
                     } else if matches!(control, PublicationFailureControl::UnstartedSourceSettlements) {
                         let mut preparations = vec![prepared];
                         for _ in 0..2 {
-                            preparations.push(workbench.prepare_actor_generation(
-                                context.clone(), descriptor.clone(),
-                                ActorRequestSnapshot::Generation(initial.clone()),
-                                next_installation.clone(), prompts.clone(),
-                            ).await.unwrap());
+                            preparations.push(
+                                workbench
+                                    .prepare_actor_generation(
+                                        context.clone(),
+                                        descriptor.clone(),
+                                        ActorRequestSnapshot::Generation(initial.clone()),
+                                        next_installation.clone(),
+                                        prompts.clone(),
+                                    )
+                                    .await
+                                    .unwrap(),
+                            );
                         }
                         assert_unstarted_source_settlements(&workbench, state, preparations).await;
                     } else {
@@ -25029,12 +25085,12 @@ pub(crate) mod request_tests {
                         )
                         .await
                         .unwrap();
-                    let foreign_owner = ResidentActorWorkbench::<
-                        frunk::HNil,
-                        tidepool_mcp::CapturedOutput,
-                    >::new(
-                        Arc::new(ActorMachineRegistry::new()), source.clone(), None
-                    );
+                    let foreign_owner =
+                        ResidentActorWorkbench::<frunk::HNil, tidepool_mcp::CapturedOutput>::new(
+                            Arc::new(ActorMachineRegistry::new()),
+                            source.clone(),
+                            None,
+                        );
                     assert!(matches!(
                         foreign_owner
                             .generation_publisher(
@@ -25135,7 +25191,9 @@ pub(crate) mod request_tests {
                             session
                                 .initialize_durable_public_scope(owner, scope)
                                 .map_err(|error| {
-                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                                        error,
+                                    ))
                                 })?;
                             Ok(())
                         })
@@ -25218,13 +25276,16 @@ pub(crate) mod request_tests {
                     );
                     let mut private_context = replacement.context.clone();
                     private_context.placement.lexical_scope = execution.private_scope;
-                    let (private_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
-                        private_context,
-                        replacement.installation.source().clone(),
-                        Some(replacement.installation.clone()),
-                        Some(&source_layers),
-                    )
-                    .expect("replacement cells retain their actual installation and source owner");
+                    let (private_context, authority) =
+                        crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                            private_context,
+                            replacement.installation.source().clone(),
+                            Some(replacement.installation.clone()),
+                            Some(&source_layers),
+                        )
+                        .expect(
+                            "replacement cells retain their actual installation and source owner",
+                        );
                     let private = workbench
                         .shared_view()
                         .with_compilation_authority(authority)
@@ -25744,13 +25805,16 @@ pub(crate) mod request_tests {
             );
             let mut failed_context = context.clone();
             failed_context.placement.lexical_scope = execution.private_scope;
-            let (failed_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
-                failed_context,
-                generation_source.clone(),
-                None,
-                Some(&source_layers),
-            )
-            .expect("failed source preparation still requires its actual retained source owner");
+            let (failed_context, authority) =
+                crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                    failed_context,
+                    generation_source.clone(),
+                    None,
+                    Some(&source_layers),
+                )
+                .expect(
+                    "failed source preparation still requires its actual retained source owner",
+                );
             let failed = workbench
                 .shared_view()
                 .with_compilation_authority(authority)
