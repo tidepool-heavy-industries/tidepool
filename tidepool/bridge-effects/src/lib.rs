@@ -854,10 +854,13 @@ mod context_constructor_tests {
             ),
             vec![],
         );
-        assert_ne!(
-            first_resource.to_value(&table).unwrap(),
-            other_resource.to_value(&table).unwrap()
-        );
+        let decoded_first =
+            RlOperationalSettlement::from_value(&first_resource.to_value(&table).unwrap(), &table)
+                .unwrap();
+        let decoded_other =
+            RlOperationalSettlement::from_value(&other_resource.to_value(&table).unwrap(), &table)
+                .unwrap();
+        assert_ne!(decoded_first, decoded_other);
         for state in [
             RlRetirementState::ReloadAReopened,
             RlRetirementState::ReloadRetirementFenced(RlRetirementStage::ReloadResourceCleanup),
