@@ -384,6 +384,40 @@ fn reload_publication_keeps_typed_outcomes_and_actor_authority() {
             .unwrap();
         assert_eq!(variant.fields.types(), fields.iter().collect::<Vec<_>>());
     }
+    let retirement_state = reload
+        .type_defs
+        .iter()
+        .find(|ty| ty.name == "ReloadRetirementState")
+        .unwrap();
+    let TypeShape::Sum { variants } = &retirement_state.shape else {
+        panic!("retirement settlement facts must remain distinct constructors")
+    };
+    assert_eq!(
+        variants
+            .iter()
+            .map(|variant| variant.ctor)
+            .collect::<Vec<_>>(),
+        [
+            "ReloadAReopened",
+            "ReloadRetirementFenced",
+            "ReloadBPublished",
+            "ReloadBPublishedAUnsettled",
+        ]
+    );
+    let published_fields = vec![HsType::list(HsType::Text), HsType::list(HsType::Text)];
+    assert_eq!(
+        variants[2].fields.types(),
+        published_fields.iter().collect::<Vec<_>>()
+    );
+    let unsettled_fields = vec![
+        HsType::list(HsType::Text),
+        HsType::list(HsType::Text),
+        HsType::Named("ReloadRetirementStage"),
+    ];
+    assert_eq!(
+        variants[3].fields.types(),
+        unsettled_fields.iter().collect::<Vec<_>>()
+    );
     let generated = tidepool_protocol::actor_generated_files();
     let decoder = generated
         .iter()

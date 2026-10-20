@@ -543,6 +543,7 @@ mod context_constructor_tests {
             ("ReloadActorCompilerResource", 2),
             ("ReloadPreparationCompilerResource", 2),
             ("ReloadSourceBindingResource", 2),
+            ("ReloadBPublishedAUnsettled", 3),
         ];
         table
             .extend_checked(
@@ -741,6 +742,14 @@ mod context_constructor_tests {
                 ),
                 vec![partial[0].clone()],
             ),
+            (
+                RlRetirementState::ReloadBPublishedAUnsettled(
+                    vec!["Changed".into()],
+                    vec!["projection repair".into()],
+                    RlRetirementStage::ReloadResourceCleanup,
+                ),
+                partial.clone(),
+            ),
         ];
         let mut encoded_cases = vec![];
         let mut decoded_cases = vec![];
@@ -758,6 +767,10 @@ mod context_constructor_tests {
                 RlRetirementState::ReloadBPublished(_, _) => RlCause {
                     kind: RlCauseKind::ReloadContinuationFailed,
                     detail: "receipt display failed after commit".into(),
+                },
+                RlRetirementState::ReloadBPublishedAUnsettled(_, _, _) => RlCause {
+                    kind: RlCauseKind::ReloadAcknowledgementUnconfirmed,
+                    detail: "A retirement owner retained after B publication".into(),
                 },
             });
             receipt.secondary = vec![RlCause {
@@ -786,6 +799,18 @@ mod context_constructor_tests {
             fields.push(HaskellValue::Con(DataConId(100), vec![]));
             assert!(SrReloadOutcome::from_value(&encoded, &table).is_err());
         }
+        let mut unsettled = RlRetirementState::ReloadBPublishedAUnsettled(
+            vec!["Changed".into()],
+            vec!["projection repair".into()],
+            RlRetirementStage::ReloadResourceCleanup,
+        )
+        .to_value(&table)
+        .unwrap();
+        let HaskellValue::Con(_, fields) = &mut unsettled else {
+            panic!("retirement state constructor missing")
+        };
+        fields.pop();
+        assert!(RlRetirementState::from_value(&unsettled, &table).is_err());
     }
 
     #[test]

@@ -67,13 +67,18 @@ main = do
         ReloadAReopened -> ReloadCause ReloadRetirementBlocked "known live blocker"
         ReloadRetirementFenced _ -> cause
         ReloadBPublished _ _ -> ReloadCause ReloadContinuationFailed "receipt display failed"
+        ReloadBPublishedAUnsettled _ _ _ -> cause
       secondaryFor state = case state of
         ReloadBPublished _ _ -> [ReloadCause ReloadContinuationFailed "response delivery failed"]
+        ReloadBPublishedAUnsettled _ _ _ -> [ReloadCause ReloadContinuationFailed "response delivery failed"]
         _ -> [ReloadCause ReloadPublicationFailed "publication uncommitted"]
       render state effects = reloadPresenter (Right (receipt state effects))
       reopened = render ReloadAReopened [stopped, refused]
       fenced = render (ReloadRetirementFenced ReloadResourceCleanup) [stopped, pending, unknown]
       published = render (ReloadBPublished ["Changed"] ["repair projection"]) [stopped]
+      publishedUnsettled = render
+        (ReloadBPublishedAUnsettled ["Changed"] ["repair projection"] ReloadResourceCleanup)
+        [stopped, pending]
   mapM_ (\fragment -> assert (fragment `T.isInfixOf` reopened)
     ("partial stop receipt lost " ++ T.unpack fragment))
     [ "frozen-A reopened", "frozen-B was not published", "actor 42/7: stop confirmed, cleanup confirmed"
@@ -91,6 +96,26 @@ main = do
   assert ("Published source frozen-B" `T.isInfixOf` published) "confirmed candidate lost"
   assert ("Notebook reset" `T.isInfixOf` published) "published reset contract lost"
   assert ("Warnings: repair projection" `T.isInfixOf` published) "published warnings lost"
+  mapM_ (\fragment -> assert (fragment `T.isInfixOf` publishedUnsettled)
+    "known publication with unsettled retirement lost its exact facts")
+    [ "Published source frozen-B"
+    , "previous source frozen-A retirement remains unsettled at physical cleanup"
+    , "reconcile before retry", "Notebook reset", "Warnings: repair projection"
+    , "Primary: acknowledgement unconfirmed", "Secondary causes: continuation failed"
+    ]
+  assert (not ("was not published" `T.isInfixOf` publishedUnsettled)
+    && not ("reopened" `T.isInfixOf` publishedUnsettled))
+    "known B publication was presented as uncommitted or A reopened"
+  let unsettledState = ReloadBPublishedAUnsettled ["Changed"] ["repair projection"] ReloadResourceCleanup
+  assert (fromJSON (toJSON unsettledState) == Success unsettledState)
+    "known publication with unsettled retirement did not roundtrip"
+  assert (toJSON unsettledState == object
+    [ "tag" .= ("ReloadBPublishedAUnsettled" :: String)
+    , "contents" .= (["Changed"] :: [T.Text], ["repair projection"] :: [T.Text], ReloadResourceCleanup)
+    ]) "unsettled publication lost changed modules, warnings or stage"
+  assert (toJSON unsettledState /= toJSON (ReloadBPublished ["Changed"] ["repair projection"])
+    && toJSON unsettledState /= toJSON (ReloadRetirementFenced ReloadResourceCleanup))
+    "known publication, confirmed settlement and unknown selection collapsed"
   assert ("Primary: retirement blocked" `T.isInfixOf` reopened) "reopened receipt lost primary cause"
   assert ("Secondary causes: continuation failed" `T.isInfixOf` published) "published receipt lost secondary cause"
   assert (toJSON (receipt ReloadAReopened []) /=

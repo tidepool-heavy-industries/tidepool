@@ -116,6 +116,12 @@ retirementSummary (ReloadRetirementReceipt previous candidate operation state bl
       ReloadBPublished _ warnings -> "Published source " <> revision candidate <> surfaceSummary diff
         <> " Notebook reset; re-import modules and recreate notebook bindings before use."
         <> sections "Warnings" warnings
+      ReloadBPublishedAUnsettled _ warnings stage ->
+        "Published source " <> revision candidate <> surfaceSummary diff
+          <> "; previous source " <> revision previous <> " retirement remains unsettled at "
+          <> stageSummary stage <> "; reconcile before retry."
+          <> " Notebook reset; re-import modules and recreate notebook bindings before use."
+          <> sections "Warnings" warnings
     surfaceSummary (ReloadSurfaceDiff added removed changed) =
       " (tools added " <> number (length added) <> ", removed " <> number (length removed)
         <> ", changed " <> number (length changed) <> ")."

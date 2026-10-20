@@ -227,7 +227,8 @@ fn retirement_types() -> Vec<TypeDef> {
             variant("ReloadAReopened", vec![]),
             variant("ReloadRetirementFenced", vec![Named("ReloadRetirementStage")]),
             variant("ReloadBPublished", vec![HsType::list(Text), HsType::list(Text)]),
-        ], &["AReopened proves A selected, B uncommitted and all initiated effects settled; actual partial stops remain in the receipt. Fenced retains unresolved obligations; it does not claim A or B selected. BPublished confirms B selected and records changed modules and projection warnings."]),
+            variant("ReloadBPublishedAUnsettled", vec![HsType::list(Text), HsType::list(Text), Named("ReloadRetirementStage")]),
+        ], &["AReopened proves A selected, B uncommitted and all initiated effects settled; actual partial stops remain in the receipt. Fenced retains unresolved obligations; it does not claim A or B selected. BPublished confirms B selected and records changed modules and projection warnings. BPublishedAUnsettled records known B publication while the same A retirement fence and error remain retained at the reported stage; its operational disposition is Unknown, not committed settlement."]),
         record("ReloadRetirementReceipt", "RlRetirementReceipt", vec![
             field("reloadPrevious", "previous", Named("SourceRevision")),
             field("reloadCandidate", "candidate", Named("SourceRevision")),
