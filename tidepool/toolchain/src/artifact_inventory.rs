@@ -14943,19 +14943,12 @@ mod tests {
             .admission_roots
             .iter()
             .all(|root| matches!(root, InventoryNodeKey::Artifact(_))));
-        let mut fixed = inventory
+        let denied = inventory
             .bind_segment(&interfaces, vec![Arc::new(root.clone())], &ambiguous)
-            .unwrap();
-        let imports = [issued_source(&root, 12)];
-        let denied = inventory.admit_bound_target(
-            &mut fixed,
-            &inventory.empty_view(),
-            NativeArtifactDemand::CertifiedTargetImports(&imports),
-            vec![],
-            &ambiguous,
-        );
+            .err()
+            .expect("product completion refuses competing root proofs");
         assert!(
-            matches!(&denied, Err(CompileError::ArtifactInventory(error))
+            matches!(&denied, CompileError::ArtifactInventory(error)
                 if matches!(&error.failure,
                     ArtifactInventoryFailure::NativeGroupUnavailable {
                         artifact,
@@ -14966,7 +14959,7 @@ mod tests {
                         original,
                         original_ordinal: 12,
                     }) if *original == root.descriptor.id)),
-            "competing root proofs at executable demand returned {denied:?}"
+            "competing root proofs at product completion returned {denied:?}"
         );
     }
 
