@@ -3364,13 +3364,19 @@ mod normalized_dependency_tests {
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-            &projection,
-            &artifacts.metadata_snapshot(),
-            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        let mut selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &artifacts.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        let inputs = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            &artifacts,
+            entries.clone(),
         )
         .unwrap();
-        let inputs = OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap();
         let complete = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
         let root_owner = ExactModuleIdentity {
             unit: products[1].owner().unit.clone(),
@@ -3596,28 +3602,40 @@ mod normalized_dependency_tests {
         };
         let root_pair = raw_pair(expected_root);
         let hidden_pair = raw_pair(expected_hidden);
-        let root_projection =
-            CompilerInputProjection::from_issued_entries(&[entries[&root_id].clone()]).unwrap();
-        let mut selection =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &root_projection,
-                &parent.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        let root_originals = selection
+            .selected_authored_original_closure(
+                inputs.issued_artifacts(),
+                &products[1].owner().unit,
+                &products[1].owner().module,
             )
             .unwrap();
-        selection
-            .with_new_product_dependencies(&parent.metadata_snapshot(), std::slice::from_ref(&proof))
+        let root_source = complete
+            .certify_original_closure(&root_originals)
+            .unwrap()
+            .source_support(&BTreeSet::from([root_owner.clone()]))
             .unwrap();
-        let completed_root = OriginalCompilerInputs::issue_segment_native_availability(
-            &mut selection,
-            parent,
-            vec![entries[&root_id].clone()],
+        assert_eq!(root_source.projection().snapshot_roles().len(), 1);
+        assert!(root_source
+            .projection()
+            .snapshot_roles()
+            .contains_key(&root_owner));
+        let root_context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&root_source)
+            .unwrap();
+        let root_request = root_context
+            .capture_world_primary_compiler_inputs(producer.sha256())
+            .unwrap();
+        assert!(root_request
+            .artifacts()
+            .capture_graph_selection()
+            .native_groups
+            .contains(&expected_root));
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            &root_request,
+            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
         )
         .unwrap();
-        assert!(completed_root
-            .native_availability()
-            .issued_row(root_id)
-            .is_some());
         let canonical = Arc::new(ArtifactEntry::canonical(
             products[0].module_interface().unwrap().clone(),
         ));
