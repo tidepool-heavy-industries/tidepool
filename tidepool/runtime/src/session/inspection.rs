@@ -528,8 +528,7 @@ fn acquire_compiler_world(
     match inputs {
         InspectionWorldInputs::Published(world) => match observation {
             None => Ok(world),
-            Some(observation) => Ok(world.with_type_interfaces(observation.type_contexts())?
-                .with_observation_scaffold(Some(observation))?),
+            Some(observation) => Ok(world.with_observation_scaffold(Some(observation))?),
         },
         InspectionWorldInputs::Cold {
             primary,

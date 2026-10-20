@@ -1177,95 +1177,14 @@ impl CompilerWorld {
         &self.restoration
     }
 
-    /// Change only the descriptive compiler scaffold, sharing the existing
-    /// source capture, primary associations and binding custody. A changed
-    /// lexical product does not inherit a checked cell's execution position.
+    /// Admit the original TYPE owners and protected lexical scaffold as one
+    /// derived product of this held predecessor.
     pub fn with_observation_scaffold(
         self: &Arc<Self>,
         observation: Option<Arc<WorldObservationScaffold>>,
     ) -> Result<Arc<Self>, CompileError> {
-        let prior = &self.restoration;
-        if prior.inputs.lexical.observation == observation {
-            return Ok(self.clone());
-        }
-        let mut inputs = prior.inputs.clone();
-        inputs.lexical = inputs.lexical.clone().with_observation(observation)?;
-        let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
-        inputs.directory = directory.clone();
-        let mut materializer = Materializer::new(&prior.primary_blocks);
-        let lexical_root = inputs
-            .lexical
-            .materialize(&inputs.primary_context, &mut materializer)?;
-        let staged = materializer
-            .finish()
-            .map_err(|error| source_failure(error.to_string()))?;
-        let changed_blocks = staged
-            .blocks()
-            .iter()
-            .map(|(cid, bytes)| world_array(vec![world_blob(cid.to_bytes()), world_blob(bytes)]))
-            .collect();
-        let (roots, primary_blocks) = prior
-            .primary_blocks
-            .replace_semantic_roots(
-                &staged,
-                SemanticRoots {
-                    primary: *prior.primary_root.root().cid(),
-                    associations: *prior.primary_associations.root().cid(),
-                    bindings: *prior.bindings.root().cid(),
-                    lexical: lexical_root,
-                },
-            )
-            .map_err(|error| source_failure(error.to_string()))?;
-        let product = world_restoration_product(
-            &roots,
-            inputs.sources.seal(),
-            &prior.producer,
-            &prior.profile,
-            inputs.bindings.query_scope,
-        )?;
-        let logical_id = world_digest(&product);
-        let acquisition =
-            crate::declaration_context::original_inputs::OriginalInputArenaTable::default()
-                .acquisition(Vec::new())?;
-        let descriptor = directory.path().join("observation.cbor");
-        std::fs::write(
-            &descriptor,
-            world_bytes(&world_array(vec![
-                world_text("TPCWSUCC4"),
-                world_blob(&product),
-                world_array(changed_blocks),
-                world_array(Vec::new()),
-                world_array(Vec::new()),
-                acquisition,
-            ]))?,
-        )?;
-        let restoration = Arc::new(CompilerWorldRestoration {
-            logical_id,
-            inputs,
-            product: product.into(),
-            primary_root: prior.primary_root.clone(),
-            primary_blocks,
-            primary_associations: prior.primary_associations.clone(),
-            primary_compiler_inputs: prior.primary_compiler_inputs.clone(),
-            bindings: prior.bindings.clone(),
-            binding_rows: prior.binding_rows.clone(),
-            lexical_root,
-            producer: prior.producer,
-            profile: prior.profile,
-            descriptor,
-            input_files: Default::default(),
-            successor: Some(WorldSuccessorAcquisition {
-                predecessor: *self.logical_id(),
-                realization: self.realization.clone(),
-                files: Vec::new(),
-                cold: Mutex::new(None),
-            }),
-        });
-        Ok(Arc::new(Self {
-            restoration,
-            realization: Arc::new(Mutex::new(None)),
-            position: None,
-        }))
+        let lexical = self.restoration.inputs.lexical.clone().with_observation(observation)?;
+        self.with_primary_and_lexical(lexical.observation_type_contexts(), Some(&lexical))
     }
 
 }
@@ -1402,13 +1321,24 @@ impl CompilerWorld {
         self: &Arc<Self>,
         contexts: &[Arc<ExactDeclarationContext>],
     ) -> Result<Arc<Self>, CompileError> {
+        self.with_primary_and_lexical(contexts, None)
+    }
+
+    fn with_primary_and_lexical(
+        self: &Arc<Self>,
+        contexts: &[Arc<ExactDeclarationContext>],
+        lexical: Option<&CompilerWorldLexicalSurface>,
+    ) -> Result<Arc<Self>, CompileError> {
         let prior = &self.restoration;
         let advance = prior.primary_compiler_inputs.with_type_interfaces(contexts)?;
-        if advance.changed_owners.is_empty() {
+        let lexical_changed = lexical.is_some_and(|lexical|
+            prior.inputs.lexical.observation != lexical.observation);
+        if advance.changed_owners.is_empty() && !lexical_changed {
             return Ok(self.clone());
         }
         let mut inputs = prior.inputs.clone();
         inputs.primary_context = advance.context;
+        if let Some(lexical) = lexical { inputs.lexical = lexical.clone(); }
         let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
         inputs.directory = directory.clone();
         let mut rows = WorldColdRows {
@@ -1446,6 +1376,9 @@ impl CompilerWorld {
         let primary_associations = materializer.materialize_map(
             Some(&prior.primary_associations), &association_facts,
         ).map_err(|error| source_failure(error.to_string()))?;
+        let lexical_root = if lexical_changed {
+            inputs.lexical.materialize(&inputs.primary_context, &mut materializer)?
+        } else { prior.lexical_root };
         let staged = materializer.finish().map_err(|error| source_failure(error.to_string()))?;
         let changed_blocks = staged.blocks().iter().map(|(cid, bytes)| {
             world_array(vec![world_blob(cid.to_bytes()), world_blob(bytes)])
@@ -1453,7 +1386,7 @@ impl CompilerWorld {
         let (roots, primary_blocks) = prior.primary_blocks.replace_semantic_roots(&staged,
             SemanticRoots { primary: *primary_root.root().cid(),
                 associations: *primary_associations.root().cid(),
-                bindings: *prior.bindings.root().cid(), lexical: prior.lexical_root })
+                bindings: *prior.bindings.root().cid(), lexical: lexical_root })
             .map_err(|error| source_failure(error.to_string()))?;
         let product = world_restoration_product(&roots, inputs.sources.seal(), &prior.producer,
             &prior.profile, inputs.bindings.query_scope)?;
@@ -1469,7 +1402,7 @@ impl CompilerWorld {
             logical_id, inputs, product: product.into(), primary_root,
             primary_blocks, primary_associations,
             primary_compiler_inputs: advance.inputs, bindings: prior.bindings.clone(),
-            binding_rows: prior.binding_rows.clone(), lexical_root: prior.lexical_root,
+            binding_rows: prior.binding_rows.clone(), lexical_root,
             producer: prior.producer, profile: prior.profile, descriptor,
             input_files: files.iter().cloned().collect(),
             successor: Some(WorldSuccessorAcquisition { predecessor: *self.logical_id(),
