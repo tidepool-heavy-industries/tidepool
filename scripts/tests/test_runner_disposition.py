@@ -2,6 +2,7 @@
 import contextlib
 import errno
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -35,7 +36,7 @@ class RunnerDispositionTests(unittest.TestCase):
         self.binary = self.root / 'local-libtest'
         self.binary.write_text('#!' + sys.executable + '\n' + '''import os,pathlib,sys,time
 if '--list' in sys.argv:
-    if '--ignored' not in sys.argv:
+    if '--ignored' not in sys.argv or os.environ.get('PROPTEST_CASES'):
         print('suite::first: test\\nsuite::second: test\\nsuite::third: test')
 else:
     root=pathlib.Path(os.environ.get('TIDEPOOL_TEST_ARTIFACT_ROOT',os.environ['TIDEPOOL_COMPILE_CACHE_DIR']))
@@ -70,6 +71,8 @@ else:
             assert time.monotonic()<deadline, 'case release missing'
             time.sleep(.005)
     print('body marker: '+sys.argv[2])
+    if 'PROPTEST_CASES' in os.environ:
+        print('configured_fresh_cases='+os.environ['PROPTEST_CASES'])
     print('test result: ok. 1 passed; 0 failed; 0 ignored;')
 '''.replace('EXTERNAL', repr(str(self.external))).replace('SENTINEL', repr(str(self.sentinel)))
             .replace('SHARED', repr(str(self.root))))
@@ -155,6 +158,81 @@ else:
         self.assertEqual(first.returncode, 0, stderr)
         self.assertIn('Isolated libtest: 1 passed; 0 failed;', stdout)
         self.assertTrue(self.record('suite::first')['passed'])
+        self.external_unchanged()
+
+    def test_persistence_wrapper_uses_receipt_streams_and_preserves_reused_root(self):
+        script = Path(runner.__file__).with_name('proptest-persistence.py')
+        spec = importlib.util.spec_from_file_location('persistence_wrapper', script)
+        wrapper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wrapper)
+        source = self.root / 'property.rs'
+        source.write_text('// local wrapper control; no Rust property execution\n')
+        output = self.root / 'persistence-results'
+        command = [str(script), '--binary', str(self.binary), '--runner', str(Path(runner.__file__)),
+                   '--output-dir', str(output)]
+        phase = wrapper.PersistenceTests()
+        suite = unittest.TestSuite([unittest.FunctionTestCase(
+            lambda: phase.phase('suite::first', 'fresh', 0, False))])
+        with patch.object(sys, 'argv', command), patch.object(wrapper, 'SOURCE', source), \
+             patch.object(unittest.defaultTestLoader, 'loadTestsFromTestCase', return_value=suite), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(wrapper.main(), 0)
+
+        phase_output = output / 'suite::first' / 'fresh'
+        key = hashlib.sha256(b'suite::first').hexdigest()
+        report = json.loads((phase_output / f'{key}.json').read_text())
+        self.assertTrue(report['passed'])
+        self.assertNotEqual(report['streams']['stdout']['path'], f'{key}.stdout.log')
+        self.assertTrue((phase_output / 'observations.json').is_file())
+        invocation = phase_output / 'invocation.json'
+        before = {str(p.relative_to(output)): (p.read_bytes(), p.stat().st_mtime_ns)
+                  for p in output.rglob('*') if p.is_file() and not p.is_symlink()}
+        with patch.object(sys, 'argv', command), patch.object(wrapper, 'SOURCE', source), \
+             patch.object(unittest.defaultTestLoader, 'loadTestsFromTestCase') as load, \
+             contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as refused:
+            wrapper.main()
+        self.assertEqual(refused.exception.code, 2)
+        self.assertEqual({str(p.relative_to(output)): (p.read_bytes(), p.stat().st_mtime_ns)
+                          for p in output.rglob('*') if p.is_file() and not p.is_symlink()}, before)
+        self.assertEqual(json.loads(invocation.read_text())['exit_status'], 0)
+        load.assert_not_called()
+        self.external_unchanged()
+
+    def test_concurrent_persistence_wrapper_refuses_before_first_phase_report(self):
+        script = Path(runner.__file__).with_name('proptest-persistence.py')
+        spec = importlib.util.spec_from_file_location('concurrent_persistence_wrapper', script)
+        wrapper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wrapper)
+        source = self.root / 'property.rs'
+        source.write_text('// local wrapper admission control\n')
+        output = self.root / 'persistence-results'
+        phase_output = output / 'suite::first' / 'fresh'
+        command = [str(script), '--binary', str(self.binary), '--runner', str(Path(runner.__file__)),
+                   '--output-dir', str(output)]
+        phase = wrapper.PersistenceTests()
+        suite = unittest.TestSuite([unittest.FunctionTestCase(
+            lambda: phase.phase('suite::first', 'fresh', 0, False))])
+        with patch.object(sys, 'argv', command), patch.object(wrapper, 'SOURCE', source), \
+             patch.object(unittest.defaultTestLoader, 'loadTestsFromTestCase', return_value=suite) as load, \
+             patch.dict(os.environ, TEST_WAIT_FOR_RELEASE='1'), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+             runner.concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            first = pool.submit(wrapper.main)
+            try:
+                deadline = time.monotonic() + 10
+                while not (self.root / 'case-started').exists():
+                    self.assertFalse(first.done(), 'first wrapper exited before its phase started')
+                    self.assertLess(time.monotonic(), deadline, 'first phase did not start')
+                    time.sleep(.005)
+                self.assertFalse(list(phase_output.glob('*.json')))
+                with self.assertRaises(SystemExit) as refused:
+                    wrapper.main()
+                self.assertEqual(refused.exception.code, 2)
+                self.assertFalse(list(phase_output.glob('*.json')))
+            finally:
+                (self.root / 'case-release').touch()
+            self.assertEqual(first.result(timeout=10), 0)
+            load.assert_called_once()
         self.external_unchanged()
 
     def record(self, name):
