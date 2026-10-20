@@ -179,6 +179,20 @@ impl CapturedSourceOrigin {
         source.admitted_original_source().map(Self)
     }
 
+    // Only the closed source-entry installer calls this for definitions that
+    // its fresh native batch is about to instantiate. Existing physical imports
+    // retain their own ProgramFacts in the batch installer.
+    pub(super) fn for_closed_entry_sites(&self, sites: &[YieldSite]) -> NativeSourceCustody {
+        NativeSourceCustody {
+            sites: Arc::new(
+                sites
+                    .iter()
+                    .map(|site| (site.site, RuntimeSourceOrigin::Known(self.0.clone())))
+                    .collect(),
+            ),
+        }
+    }
+
     pub(super) fn for_current_target(
         &self,
         target: tidepool_toolchain::artifacts::PhysicalCurrentNativeTarget<'_>,
@@ -2331,6 +2345,22 @@ impl PreparedStartupEntry {
         }
     }
 }
+
+/// A closed source entry installed in a runtime-minted fresh domain.
+/// Neither a scope description nor a raw TurnCode can construct this capsule.
+#[must_use]
+pub struct PreparedSourceStartupEntry {
+    entry: PreparedStartupEntry,
+    installation_scope: Arc<super::RuntimeLexicalScopeLease>,
+}
+
+impl PreparedSourceStartupEntry {
+    pub fn installation_scope(&self) -> &Arc<super::RuntimeLexicalScopeLease> {
+        &self.installation_scope
+    }
+}
+
+static_assertions::assert_not_impl_any!(PreparedSourceStartupEntry: Clone, Copy);
 
 static_assertions::assert_not_impl_any!(PreparedStartupEntry: Clone, Copy);
 
@@ -7359,6 +7389,16 @@ where
         self.settle_dropped_custody();
         self.state.mint_notebook_scope_with_lease(prerequisite)
     }
+    /// Mint the provisional notebook only outside compiler-source sequencing.
+    /// Permission to initiate replacement is held by the actor owner separately.
+    pub fn mint_unpublished_notebook_scope(
+        &mut self,
+        prerequisite: Option<Arc<super::RuntimeLexicalScopeLease>>,
+    ) -> Result<super::UnpublishedNotebookScope, SessionError> {
+        self.settle_dropped_custody();
+        self.state.mint_unpublished_notebook_scope(prerequisite)
+    }
+
     pub fn adopt_initial_notebook_scope(
         &mut self,
         scope: ScopeId,
@@ -8119,20 +8159,84 @@ where
         code: TurnCode<'_>,
         compile_identity: StartupCompileIdentity,
     ) -> Result<PreparedStartupEntry, ResidentError> {
+        self.prepare_startup_entry_in(code, compile_identity, self.run_context.lexical_scope, None)
+    }
+
+    /// Install closed compiler-owned code into a fresh runtime domain. The
+    /// current transaction supplies the actual source authority; immutable code
+    /// reuse never substitutes for that admission or reuses a live dispatcher.
+    pub fn prepare_source_startup_entry(
+        &mut self,
+        source_entry: &super::PreparedSourceEntry,
+    ) -> Result<PreparedSourceStartupEntry, ResidentError> {
         self.settle_dropped_custody();
-        let scope = self.run_context.lexical_scope;
+        let transaction = self
+            .state
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?;
+        let origin = CapturedSourceOrigin::capture(transaction)?;
+        let code = source_entry.compiled().code();
+        let proof = code
+            .certification
+            .as_ref()
+            .as_ref()
+            .and_then(|certification| certification.ordinary_original())
+            .ok_or(ResidentError::UnsealedStartupEntry)?;
+        let identity = StartupCompileIdentity::Issued(proof.clone());
+        let installation_scope = self.state.mint_isolated_scope_with_lease()?;
+        let entry = self.prepare_startup_entry_in(
+            code,
+            identity,
+            installation_scope.scope(),
+            Some(&origin),
+        )?;
+        Ok(PreparedSourceStartupEntry {
+            entry,
+            installation_scope,
+        })
+    }
+
+    fn prepare_startup_entry_in(
+        &mut self,
+        code: TurnCode<'_>,
+        compile_identity: StartupCompileIdentity,
+        scope: ScopeId,
+        closed_origin: Option<&CapturedSourceOrigin>,
+    ) -> Result<PreparedStartupEntry, ResidentError> {
+        self.settle_dropped_custody();
         if self.state.public_visibility_snapshot_in(scope).is_none() {
             return Err(PreparedRuntimeError::SourceScopeAdmission.into());
         }
-        let admission =
-            self.admit_turn_code_in(scope, code, TurnInstallationAdmission::Compilation)?;
+        let admission = if let Some(origin) = closed_origin {
+            // Resolve exactly once against the fresh domain. Retained live
+            // inputs refuse; only this closed-entry producer can supply the
+            // new physical definitions' execution source.
+            let certification = code
+                .certification()
+                .ok_or(ResidentError::UnsealedStartupEntry)?;
+            let resolved = self.state.resolve_closed_source_entry_in(
+                scope,
+                code.prepared(),
+                certification,
+                origin,
+            )?;
+            AdmittedTurnCode {
+                code,
+                scope,
+                resolved: Some(resolved),
+            }
+        } else {
+            self.admit_turn_code_in(scope, code, TurnInstallationAdmission::Compilation)?
+        };
         let provenance = self.provenance_for(&admission)?;
         let InstalledAdmittedTurn {
             program,
             source_keys,
             provenance,
             _inputs: _installed_inputs,
-        } = self.install_admitted_turn(admission, TurnImageAcquisition::Compile, provenance, None)?;
+        } =
+            self.install_admitted_turn(admission, TurnImageAcquisition::Compile, provenance, None)?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)
@@ -8147,6 +8251,21 @@ where
             _lease: self.lease_bindings(&[]),
             compile_identity,
         })
+    }
+
+    pub fn run_source_startup_entry(
+        &mut self,
+        entry: PreparedSourceStartupEntry,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<ResidentOutcome, ResidentError> {
+        if self.run_context.lexical_scope != entry.installation_scope.scope() {
+            return Err(ResidentError::StaleStartupEntry);
+        }
+        self.state.validate_lexical_scope_lease(
+            entry.installation_scope.scope(),
+            &entry.installation_scope,
+        )?;
+        self.run_startup_entry(entry.entry, settlement)
     }
 
     /// Consume the original startup capsule under the admitted actor's current

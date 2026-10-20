@@ -100,10 +100,11 @@ pub use persistent::{
 
 pub use admission::{
     NativeSetupAdmissionFailure, NativeSetupInputInventory, PendingHostValueWrite,
-    PrivateExecutionAdmission, RuntimeBindingInterfaceReservation, RuntimeCellAdmission,
-    RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
-    RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission, RuntimeLexicalScopeLease,
-    RuntimeOriginalSource, RuntimeWorldCellOperand,
+    PrivateExecutionAdmission, ReservedNotebookScope, RuntimeBindingInterfaceReservation,
+    RuntimeCellAdmission, RuntimeCheckedItemAdmission, RuntimeCheckedPrefix,
+    RuntimeCheckedPrefixSnapshot, RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission,
+    RuntimeLexicalScopeLease, RuntimeOriginalSource, RuntimeWorldCellOperand,
+    UnpublishedNotebookScope,
 };
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{
@@ -156,9 +157,9 @@ pub use facade::{
 pub use resident::{
     truncate_preview_at_line, ActivationDisplayOwners, CompiledActivationPreview,
     HostBindingPrototype, HostBindingType, HostCarrier, HostPayload, MountedActivationInput,
-    PreparedStartupEntry, ProgramProvenance, ProgramProvenanceError, RequestReceiverEntry,
-    ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome, ResidentParcel,
-    ResidentResumeError, ResidentSession, RootCustody, RuntimeActivationInput,
+    PreparedSourceStartupEntry, PreparedStartupEntry, ProgramProvenance, ProgramProvenanceError,
+    RequestReceiverEntry, ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentParcel, ResidentResumeError, ResidentSession, RootCustody, RuntimeActivationInput,
     RuntimeActivationInputAdmission, RuntimeActivationPreviewAdmission, RuntimeProgressPublication,
     RuntimeResultParcel, RuntimeResultPublication, SessionRunContext,
 };
