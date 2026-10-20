@@ -12774,29 +12774,17 @@ where
                 }
                 Ok(None) => {}
             }
-            self.workbench_executions
-                .lock()
-                .begin(execution, request.clone(), key.as_ref());
-            self.workbench_executions.lock().bind_provider_finalization(
-                execution,
-                key.as_ref(),
-                Some(&control),
-            );
         }
-        let work = InvocationWork::new_selecting(
+        let work = self.workbench_executions.lock().begin_selecting_invocation(
             actor,
-            control
-                .reservation_owner(actor)
-                .expect("admitted tool reservation"),
+            execution.as_ref().expect("tool control issues an execution"),
+            request.as_ref().expect("tool execution carries its request"),
+            key.as_ref(),
+            &control,
         );
         let _ = work.bind_model(
             self.environment.cell_model_factory.as_deref(),
             &self.descriptor,
-        );
-        self.workbench_executions.lock().retain_invocation_work(
-            work.clone(),
-            execution.as_ref(),
-            key.as_ref(),
         );
         crate::OwnedActorTask::serial(move |mut behavior: Box<Self>, kernel| {
             Box::pin(async move {

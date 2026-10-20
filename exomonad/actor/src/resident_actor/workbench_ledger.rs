@@ -93,6 +93,29 @@ pub(super) enum WorkbenchBoundaryRecord {
 }
 
 impl WorkbenchExecutions {
+    /// Publish the active record and its selection-pending cleanup owner under
+    /// the same journal lock. Retirement must never observe active work without
+    /// either its issued source or an explicit unclassified root.
+    pub(super) fn begin_selecting_invocation(
+        &mut self,
+        actor: ActorRef,
+        execution: &WorkbenchExecutionId,
+        request: &WorkbenchRequest,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+        control: &Arc<crate::WorkbenchExecutionControl>,
+    ) -> Arc<InvocationWork> {
+        let work = InvocationWork::new_selecting(
+            actor,
+            control
+                .reservation_owner(actor)
+                .expect("admitted tool reservation"),
+        );
+        self.begin(execution, request.clone(), invocation);
+        self.bind_provider_finalization(execution, invocation, Some(control));
+        self.retain_invocation_work(work.clone(), Some(execution), invocation);
+        work
+    }
+
     pub(super) fn generation_observations(
         &self,
         dependency: &crate::resident_workbench::generation_admission::GenerationDependency,
