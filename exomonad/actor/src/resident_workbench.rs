@@ -270,6 +270,15 @@ impl ActorWorkbenchSource {
     }
 
     fn request_preamble(&self, request: crate::RequestId, effects_alias: &str) -> String {
+        self.request_preamble_for(request, effects_alias, PreambleBindings::Runtime)
+    }
+
+    fn request_preamble_for(
+        &self,
+        request: crate::RequestId,
+        effects_alias: &str,
+        bindings: PreambleBindings,
+    ) -> String {
         let preamble = &self.preamble;
         let signatures = self
             .request_evidence
@@ -281,31 +290,59 @@ impl ActorWorkbenchSource {
         );
         preamble = insert_preamble_imports(&preamble, "qualified Data.Void as TidepoolVoid");
         preamble = insert_preamble_imports(&preamble, "qualified Prelude as TidepoolPrelude");
+        let reply = bindings.body(|| format!("TidepoolReplies.Reply (TidepoolReplies.RequestId {})", request.0));
+        let respond = bindings.body(|| "TidepoolReplies.reply sessionReply".to_owned());
         preamble.push_str(&format!(
-            "\nsessionReply :: TidepoolReplies.Reply TidepoolRequestReply\nsessionReply = TidepoolReplies.Reply (TidepoolReplies.RequestId {})\nrespond :: TidepoolRequestReply -> Eff {effects_alias} TidepoolVoid.Void\nrespond = TidepoolReplies.reply sessionReply\n",
-            request.0,
+            "\nsessionReply :: TidepoolReplies.Reply TidepoolRequestReply\nsessionReply = {reply}\nrespond :: TidepoolRequestReply -> Eff {effects_alias} TidepoolVoid.Void\nrespond = {respond}\n",
         ));
         if signatures
             .and_then(|signatures| signatures.progress())
             .is_some()
         {
             let progress_type = "TidepoolRequestProgress";
+            let report = bindings.body(|| format!(
+                "\\value -> do\n  outcome <- TidepoolReplies.reportRequestProgress (TidepoolReplies.ProgressSink (TidepoolReplies.RequestId {})) value\n  case outcome of\n    Left failure -> TidepoolPrelude.error (TidepoolPrelude.show failure)\n    Right () -> pure ()", request.0,
+            ));
             preamble.push_str(&format!(
-                "\nreportProgress :: ({progress_type}) -> Eff {effects_alias} ()\nreportProgress value = do\n  outcome <- TidepoolReplies.reportRequestProgress (TidepoolReplies.ProgressSink (TidepoolReplies.RequestId {})) value\n  case outcome of\n    Left failure -> TidepoolPrelude.error (TidepoolPrelude.show failure)\n    Right () -> pure ()\n", request.0,
+                "\nreportProgress :: ({progress_type}) -> Eff {effects_alias} ()\nreportProgress = {report}\n",
             ));
         }
         preamble
     }
 }
 
+#[derive(Clone, Copy)]
+enum PreambleBindings {
+    Runtime,
+    TypeObservation,
+}
+
+impl PreambleBindings {
+    fn body(self, runtime: impl FnOnce() -> String) -> String {
+        match self {
+            Self::Runtime => runtime(),
+            Self::TypeObservation => "(let observation = observation in observation)".to_owned(),
+        }
+    }
+}
+
 fn actor_preamble(preamble: &str, context: &crate::ActorSessionContext) -> String {
+    actor_preamble_for(preamble, context, PreambleBindings::Runtime)
+}
+
+fn actor_preamble_for(
+    preamble: &str,
+    context: &crate::ActorSessionContext,
+    bindings: PreambleBindings,
+) -> String {
     let preamble = insert_preamble_imports(
         preamble,
         "qualified Tidepool.Agent.Ref.Internal as TidepoolAgentRef",
     );
+    let me = bindings.body(|| format!("TidepoolAgentRef.internalAgentRef {} {}",
+        context.actor.id.0, context.actor.incarnation.0));
     let mut rendered = format!(
-        "{preamble}\nme :: TidepoolAgentRef.AgentRef\nme = TidepoolAgentRef.internalAgentRef {} {}\n",
-        context.actor.id.0, context.actor.incarnation.0
+        "{preamble}\nme :: TidepoolAgentRef.AgentRef\nme = {me}\n",
     );
     if let Some((identity, reasoning)) = &context.current_model {
         let (family, constructor, options, prefix) = match identity.model().backend() {
@@ -335,9 +372,12 @@ fn actor_preamble(preamble: &str, context: &crate::ActorSessionContext) -> Strin
             &rendered,
             "qualified Tidepool.Model.Selection as TidepoolModelSelection",
         );
-        rendered.push_str(&format!(
-            "\ncurrentModel :: TidepoolModelSelection.Model TidepoolModelSelection.{family}\ncurrentModel = TidepoolModelSelection.{constructor} {} {} (TidepoolModelSelection.{options} TidepoolModelSelection.{prefix}{effort})\n",
+        let current_model = bindings.body(|| format!(
+            "TidepoolModelSelection.{constructor} {} {} (TidepoolModelSelection.{options} TidepoolModelSelection.{prefix}{effort})",
             literal(identity.catalog_identity()), literal(identity.key()),
+        ));
+        rendered.push_str(&format!(
+            "\ncurrentModel :: TidepoolModelSelection.Model TidepoolModelSelection.{family}\ncurrentModel = {current_model}\n",
         ));
     }
     rendered
