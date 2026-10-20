@@ -141,12 +141,12 @@ fn prepared_targets_reject_foreign_settlement_and_retired_original() {
             .to_json(),
         serde_json::json!(42)
     );
-    source
+    assert!(source
         .source_admission()
         .fence()
         .unwrap()
         .retire(session::NotebookGenerationId::INITIAL)
-        .unwrap();
+        .is_ok());
     let mut entered = false;
     let refused = prepared.run(
         session::PREPARED_SCAFFOLD_TARGET,
