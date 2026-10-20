@@ -3,8 +3,8 @@
 The reviewed engine repair `cee0baed39059b085f747bad248468669b37adf7`
 (received here as `076e8868c5`) removes the append-only predecessor file and
 directory frontier. `native_publication_birth` independently reviewed the exact
-delta and consumers. This report separates transport lifetime observations from
-the still unqualified Haskell cold-restoration boundary.
+delta and consumers. The actual control now passes transport lifetime checks and
+production predecessor-free cold restoration for both measured histories.
 
 ## Owner trace
 
@@ -54,15 +54,15 @@ Exact observed paths are retained in
 These are observations of this fixed-size binding workload, not general memory
 or performance bounds.
 
-## Required unresolved boundary
+## Earlier reader refusal control
 
-The full control **failed 1/1, exit 1** at its final production `restore_world`:
+Before the successor reader landed, the full control **failed 1/1, exit 1** at
+its final production `restore_world`:
 `ExtractFailed("compiler refused world acquisition: UnsupportedOperation")`,
-with Clean END. The Haskell `SuccessorExactInputs` receiver is still explicitly
-unsupported. The test requires genuine missing-predecessor acquisition and
+with Clean END. That Haskell revision explicitly refused
+`SuccessorExactInputs`. The test requires genuine missing-predecessor acquisition and
 same-product cold restoration; it does not reinterpret Unsupported as a miss,
-substitute a complete descriptor, or skip the cold gate. No cold restoration
-success is claimed.
+substitute a complete descriptor, or skip the cold gate. This retained refusal calibrates the now-passing gate.
 
 ## Discriminating old-core control
 
@@ -91,9 +91,8 @@ the repaired executable SHA-256 was
 `d60f232f5961ec6bf45bdfb9418866d3942ee982c235340a5711220e7d6ded74`.
 
 The control's small cfg(test) directory getter lends an existing owner for weak
-observation and issues no compiler or runtime authority. Successful cold
-restoration remains an explicit pending requirement, not a passing or skipped
-test.
+observation and issues no compiler or runtime authority. The current successful cold-restoration evidence follows below; the older
+refusal runs remain distinct.
 
 ## Actual writer DATA for the independent reader
 
@@ -122,3 +121,39 @@ Every arena extent and descriptor/arena SHA-256 was independently checked agains
 the copied bytes (6492 arena bytes total). Both final cold envelopes carry exactly
 their final successor's product hash and logical identity. This verifies the
 actual writer's reconstruction, not acceptance by the Haskell reader.
+
+## Joined production receiver acceptance
+
+At `5c9827eb11`, engine `f88698a3c2` and Haskell reader/service
+`69031bd2f8`, `4748709ada`, `3c3b013dd4` are joined with this control. The
+control restores each two/eight-item history immediately after its predecessor
+owner/path release checks. Each restoration goes through the production
+`restore_world` acquisition, checks Clean END and the same logical World ID,
+and obtains the structured `GHC.Types.Int` type answer. No intermediate
+successor was acquired, so the receiver must handle genuine missing predecessor
+backing and request the existing same-product complete cold form.
+
+```sh
+swarm-build just test-native //tidepool/toolchain:toolchain_world_lifetime_test --output-dir /srv/swarm/evidence/inanna/native-world-lifetime-each-receiver-fixed-20261020 --compiler-diagnostics off --retain-artifacts
+```
+
+Build `4109fbd9-4f64-4bb0-b938-64794ce57b02` compiled and executed exactly
+one test: **1 passed, 0 failed, exit 0**, owned compiler cleanup confirmed.
+Both histories retain one arena FD and 541 arena bytes, with zero old row
+owners/FDs and zero predecessor descriptor directories; latest descriptor sizes
+remain 1805/1806 bytes. Log and full report root:
+`/srv/swarm/evidence/inanna/native-world-lifetime-each-receiver-fixed-20261020`
+(the log adds `.log`). The Rust executable SHA-256 is
+`208c62eac1efc61cb1349a867e794bfbc5f58bbab6af6c4e440f39c1331ff9fd`;
+the Haskell worker SHA-256 is
+`6cfe29644b87e9d4e2155076a4c50b360005c2843fc5171bf3ab3b817244fceb`.
+
+The first joined passing run at `d7667c5802`, build
+`34c4b23b-addb-4f7e-a921-f3ed9b1d71c8`, restored only the final eight-item
+history. Source inspection caught that narrower scope, so the maintained control
+now restores each history. Its first edit failed compilation on a stale
+`latest.take()` reference, retained in
+`native-world-lifetime-each-receiver-20261020.log`; the corrected exact candidate
+above compiles and passes. These are compiler evidence and physical custody
+controls, not runtime execution, arbitrary source-syntax or general performance
+acceptance.
