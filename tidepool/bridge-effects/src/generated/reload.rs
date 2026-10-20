@@ -206,12 +206,13 @@ pub enum RlRetirementStage {
     ReloadSourcePublication,
 }
 
-/// AReopened proves A selected, B uncommitted and all initiated effects settled; actual partial stops remain in the receipt. Fenced retains unresolved obligations; it does not claim A or B selected. BPublished confirms B selected and records changed modules and projection warnings.
+/// AReopened proves A selected, B uncommitted and all initiated effects settled; actual partial stops remain in the receipt. Fenced retains unresolved obligations; it does not claim A or B selected. BPublished confirms B selected and records changed modules and projection warnings. BPublishedAUnsettled records known B publication while the same A retirement fence and error remain retained at the reported stage; its operational disposition is Unknown, not committed settlement.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum RlRetirementState {
     ReloadAReopened,
     ReloadRetirementFenced(RlRetirementStage),
     ReloadBPublished(Vec<String>, Vec<String>),
+    ReloadBPublishedAUnsettled(Vec<String>, Vec<String>, RlRetirementStage),
 }
 
 /// Retirement of exact frozen A toward candidate B. A later editable draft is not this candidate. Primary and secondary causes survive independently of selection/fence state. Inspect the owning operation and resource records for detailed retained obligations.
