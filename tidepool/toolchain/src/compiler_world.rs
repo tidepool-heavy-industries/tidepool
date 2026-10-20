@@ -2911,23 +2911,14 @@ fn world_output_symbol(
     })
 }
 
-/// A world item's root identity is a compiler-issued session value binder.
-/// Every component is checked: the occurrence names the typed entry, the
-/// module is the exact generated session module for the slot generation, the
-/// namespace is the `value` namespace the writer passes, and a record parent
-/// is never valid for a top-level session binder.
-fn validate_world_output_symbol(
+/// Validate the native entry observation without confusing it with a captured
+/// value's owner. The original-product issuer authenticates the generated
+/// scaffold owner and native ordinal; the value-interface issuer independently
+/// authenticates captured binders in their reserved Val module.
+fn validate_world_native_entry_observation(
     symbol: &tidepool_repr::execution_schema::SymbolIdentity,
     typed_item: &crate::checked_cell::CheckedTypedSegmentItem,
-    slot: &crate::checked_cell::CheckedPlannedCellSlot,
 ) -> Result<(), CompileError> {
-    use crate::checked_cell::CheckedPlannedCellSlot as Slot;
-    use tidepool_repr::{Generation, SessionModule};
-    let generation = Generation(typed_item.generation());
-    let module = match slot {
-        Slot::Prologue { .. } | Slot::Declaration { .. } => SessionModule::lib(generation),
-        Slot::Bind { .. } | Slot::Expression { .. } => SessionModule::val(generation),
-    };
     let bounded = |value: &str| !value.is_empty() && value.len() <= 65536;
     if symbol.namespace != "value"
         || symbol.record_parent.is_some()
@@ -2936,7 +2927,6 @@ fn validate_world_output_symbol(
         || !bounded(&symbol.namespace)
         || !bounded(&symbol.occurrence)
         || symbol.occurrence != typed_item.entry()
-        || symbol.module != module.module_name()
     {
         return Err(world_response_error(true));
     }
@@ -3067,7 +3057,7 @@ fn admit_world_preparation_response(
             .charge_value_copies(&observed[9], 1)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         let symbol = world_output_symbol(&observed[9])?;
-        validate_world_output_symbol(&symbol, typed_item, slot)?;
+        validate_world_native_entry_observation(&symbol, typed_item)?;
         // Field 10 is the native original-group ordinal the compiler issued for
         // this item entry. Retain it, and refuse a preparation whose two items
         // claim different ordinals for one entry.
