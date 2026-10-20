@@ -2834,9 +2834,12 @@ mod normalized_dependency_tests {
             };
             assert!(Arc::ptr_eq(sources, retained));
 
+            let custody = ArtifactView::from_custody(Arc::clone(offer.custody_lease()));
+            let graph = custody
+                .select_issued(vec![offer.original()], &offer.proof().unwrap().selection)
+                .unwrap();
             let graph_only =
-                IssuedNativeOffer::issue(offer.original(), &completed, offer.proof().cloned())
-                    .unwrap();
+                IssuedNativeOffer::issue(offer.original(), &graph, offer.proof().cloned()).unwrap();
             assert!(
                 matches!(
                     graph_only.0.custody.source_receipt,
