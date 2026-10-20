@@ -31,6 +31,8 @@ mod forest_shutdown_tests;
 pub(crate) mod forms;
 mod generation_inventory;
 pub(crate) use generation_inventory::{GenerationWorkObservations, ResidentGenerationInventory};
+#[cfg(test)]
+pub(crate) use generation_inventory::assert_owner_observation_contract;
 pub(crate) mod green;
 mod green_notebook;
 #[cfg(test)]

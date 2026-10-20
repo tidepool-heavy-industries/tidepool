@@ -16,6 +16,13 @@ pub(crate) struct GenerationWorkObservations {
     pub(crate) actors: Vec<ActorRef>,
     pub(crate) invocations: Vec<invocation_work::GenerationInvocationObservation>,
     pub(crate) routes: Vec<GenerationRouteObservation>,
+    pub(crate) lifecycle_compilers: Vec<GenerationLifecycleCompilerObservation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GenerationLifecycleCompilerObservation {
+    pub(crate) actor: ActorRef,
+    pub(crate) compiler: crate::termination::GenerationCompilerObservation,
 }
 
 impl ResidentGenerationInventory {
@@ -26,17 +33,30 @@ impl ResidentGenerationInventory {
             .actors
             .lock()
             .iter()
-            .map(|(actor, record)| (*actor, record.workbench_executions.clone()))
+            .map(|(actor, record)| {
+                (
+                    *actor,
+                    record.workbench_executions.clone(),
+                    record.lifecycle.retained_terminal().clone(),
+                )
+            })
             .collect();
         // Retention publication locks work state before actor records. Release
         // the record guard before entering any ledger or invocation owner.
-        let actors = ledgers.iter().map(|(actor, _)| *actor).collect();
+        let actors = ledgers.iter().map(|(actor, _, _)| *actor).collect();
         let mut invocations = Vec::new();
-        for (_, ledger) in ledgers {
+        let mut lifecycle_compilers = Vec::new();
+        for (actor, ledger, lifecycle) in ledgers {
             invocations.extend(
                 ledger
                     .lock()
                     .generation_observations(dependency, self.coordinator.as_ref()),
+            );
+            lifecycle_compilers.extend(
+                lifecycle
+                    .generation_compiler_observations(dependency)
+                    .into_iter()
+                    .map(|compiler| GenerationLifecycleCompilerObservation { actor, compiler }),
             );
         }
         let routes = self.requests.generation_routes(dependency);
@@ -44,6 +64,7 @@ impl ResidentGenerationInventory {
             actors,
             invocations,
             routes,
+            lifecycle_compilers,
         }
     }
 }
@@ -59,4 +80,270 @@ impl<H, O> ResidentEnvironment<H, O> {
             coordinator,
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn assert_owner_observation_contract(dependency: GenerationDependency) {
+    use crate::resident_workbench::generation_admission::{BootstrapWorld, SourceDependency};
+    use invocation_work::GenerationInvocationState;
+    use tidepool_runtime::session::PersistentSession;
+
+    let fixture = invocation_work::tests::Fixture::start().await;
+    let actor = fixture.actor.identity();
+    let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+    fixture.environment.actors.lock().insert(
+        actor,
+        ResidentActorRecord {
+            installed_tools: Arc::default(),
+            lifecycle: fixture.kernel.lifecycle().clone(),
+            fresh_context_seed: None,
+            workbench_executions: journal.clone(),
+            interactive_policy_installed: false,
+            descriptor: crate::ActorDescriptor::new(
+                "inventory owner",
+                crate::ActorPlacement {
+                    session: tidepool_repr::SessionId(71),
+                    lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+                    resource_scope: RealmId::ROOT,
+                },
+            ),
+            bound_worktree: None,
+            terminal: None,
+            runtime_observation: Default::default(),
+            scheduler_root: true,
+            displays: Default::default(),
+        },
+    );
+    let source = SourceDependency::Generation(dependency.clone());
+    let coordinator_control = crate::WorkbenchExecutionControl::untracked();
+    let sibling_control = crate::WorkbenchExecutionControl::untracked();
+    let admit = |control: &Arc<crate::WorkbenchExecutionControl>| {
+        let execution = control.execution_id(actor);
+        WorkbenchExecutions::admit_source_invocation(
+            &journal,
+            actor,
+            control.reservation_owner(actor).unwrap(),
+            source.clone(),
+            &WorkbenchRequest::from_cell_input("inventory control").with_execution_id(execution),
+            None,
+            Some(control),
+        )
+        .unwrap()
+    };
+    let coordinator = admit(&coordinator_control);
+    let sibling = admit(&sibling_control);
+    let pure_custody = WorkbenchExecutions::admit_callback_root(
+        &journal,
+        actor,
+        RequestReservationOwner::Route(crate::WatchId(700)),
+        source.clone(),
+    )
+    .unwrap();
+    let neutral_custody = journal.lock().actor_scope_root(actor);
+    fixture
+        .environment
+        .runner
+        .compiler_scope(crate::resident_workbench::CompilerCloseOwner::Invocation {
+            work: pure_custody.clone(),
+            control: None,
+        })
+        .with_source_dependency(&source)
+        .admit_work()
+        .unwrap()
+        .run(|_| ());
+    let compiler_scope = fixture
+        .environment
+        .runner
+        .compiler_scope(crate::resident_workbench::CompilerCloseOwner::Invocation {
+            work: coordinator.clone(),
+            control: Some(coordinator_control.clone()),
+        })
+        .with_source_dependency(&source);
+    let pending = compiler_scope.admit_work().unwrap();
+    let neutral_scope = fixture.environment.runner.compiler_scope(
+        crate::resident_workbench::CompilerCloseOwner::Invocation {
+            work: neutral_custody.clone(),
+            control: None,
+        },
+    );
+    let neutral_pending = neutral_scope
+        .clone()
+        .with_source_dependency(&source)
+        .admit_work()
+        .unwrap();
+    let original_pending = neutral_scope.admit_continuation().unwrap();
+    original_pending
+        .bind_original_source(dependency.runtime_lease().clone())
+        .unwrap();
+    let unknown_pending = neutral_scope.admit_continuation().unwrap();
+
+    let mut independent_session = PersistentSession::new(None, 1024);
+    let independent_scope = independent_session
+        .mint_notebook_scope_with_lease(None)
+        .unwrap();
+    let independent_world = BootstrapWorld::new(None);
+    independent_world.adopt_scope(independent_scope).unwrap();
+    let independent_source = SourceDependency::World(independent_world);
+    let independent = WorkbenchExecutions::admit_callback_root(
+        &journal,
+        actor,
+        RequestReservationOwner::Route(crate::WatchId(701)),
+        independent_source.clone(),
+    )
+    .unwrap();
+    let independent_pending = fixture
+        .environment
+        .runner
+        .compiler_scope(crate::resident_workbench::CompilerCloseOwner::Invocation {
+            work: independent.clone(),
+            control: None,
+        })
+        .with_source_dependency(&independent_source)
+        .admit_work()
+        .unwrap();
+    let lifecycle_scope = fixture.environment.runner.compiler_scope(
+        crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+            fixture.kernel.lifecycle().retained_terminal().clone(),
+        ),
+    );
+    assert!(fixture
+        .kernel
+        .lifecycle()
+        .retained_terminal()
+        .compiler_close_observations()
+        .is_empty());
+    let lifecycle_pending = lifecycle_scope
+        .clone()
+        .with_source_dependency(&source)
+        .admit_work()
+        .unwrap();
+    let lifecycle_original = lifecycle_scope.admit_continuation().unwrap();
+    lifecycle_original
+        .bind_original_source(dependency.runtime_lease().clone())
+        .unwrap();
+    let lifecycle_independent = lifecycle_scope
+        .clone()
+        .with_source_dependency(&independent_source)
+        .admit_work()
+        .unwrap();
+    let lifecycle_unknown = lifecycle_scope.admit_continuation().unwrap();
+    lifecycle_scope
+        .clone()
+        .with_source_dependency(&source)
+        .admit_work()
+        .unwrap()
+        .run(|_| ());
+    let fence = dependency.fence().unwrap();
+    let observed = fixture
+        .environment
+        .generation_inventory(Some(coordinator.clone()))
+        .observe(&dependency);
+    assert_eq!(observed.actors, [actor]);
+    assert!(observed.routes.is_empty());
+    assert_eq!(observed.lifecycle_compilers.len(), 3);
+    for (registration, source) in [
+        (0, crate::termination::GenerationCompilerSource::Dependent),
+        (1, crate::termination::GenerationCompilerSource::Dependent),
+        (
+            3,
+            crate::termination::GenerationCompilerSource::Unclassified,
+        ),
+    ] {
+        assert!(
+            observed
+                .lifecycle_compilers
+                .contains(&GenerationLifecycleCompilerObservation {
+                    actor,
+                    compiler: crate::termination::GenerationCompilerObservation {
+                        registration,
+                        close: crate::CompilerWorkClose::Pending,
+                        source,
+                    },
+                }),
+            "lifecycle receipt membership retains its actual ordinal and source"
+        );
+    }
+    assert_eq!(
+        observed.invocations.len(),
+        5,
+        "inert custody and independent work do not block A"
+    );
+    assert!(
+        observed.invocations.iter().any(|observation| {
+            observation.actor == actor
+                && observation.reservation == sibling.reservation_owner()
+                && observation.state == GenerationInvocationState::Active
+        }),
+        "the coordinator exemption is exact, not actor-wide"
+    );
+    assert!(
+        observed.invocations.iter().any(|observation| {
+            observation.actor == actor
+                && observation.reservation == coordinator.reservation_owner()
+                && matches!(
+                    observation.state,
+                    GenerationInvocationState::Compiler {
+                        registration: 0,
+                        close: crate::CompilerWorkClose::Pending,
+                        source: invocation_work::GenerationCompilerSource::Dependent,
+                    }
+                )
+        }),
+        "the coordinator's physical compiler obligation remains visible"
+    );
+    for registration in 0..3 {
+        assert!(
+            observed.invocations.iter().any(|observation| {
+                observation.reservation == neutral_custody.reservation_owner()
+                    && observation.state
+                        == GenerationInvocationState::Compiler {
+                            registration,
+                            close: crate::CompilerWorkClose::Pending,
+                            source: if registration == 2 {
+                                invocation_work::GenerationCompilerSource::Unclassified
+                            } else {
+                                invocation_work::GenerationCompilerSource::Dependent
+                            },
+                        }
+            }),
+            "compiler provenance belongs to each receipt, including mixed neutral custody"
+        );
+    }
+    assert!(
+        unknown_pending
+            .bind_original_source(dependency.runtime_lease().clone())
+            .is_err(),
+        "a fenced issuer cannot bind a late source selection"
+    );
+    assert!(fixture.actor.terminal().requested_shutdown().is_none());
+    drop(independent_source.claim().unwrap());
+    pending.run(|_| ());
+    neutral_pending.run(|_| ());
+    original_pending.run(|_| ());
+    unknown_pending.run(|_| ());
+    independent_pending.run(|_| ());
+    lifecycle_pending.run(|_| ());
+    lifecycle_original.run(|_| ());
+    lifecycle_independent.run(|_| ());
+    lifecycle_unknown.run(|_| ());
+    assert!(
+        fixture
+            .environment
+            .generation_inventory(Some(coordinator.clone()))
+            .observe(&dependency)
+            .lifecycle_compilers
+            .is_empty(),
+        "settled lifecycle receipts retain inert historical custody"
+    );
+    fence.reopen().unwrap();
+    for work in [
+        coordinator,
+        sibling,
+        pure_custody,
+        neutral_custody,
+        independent,
+    ] {
+        fixture.cleanup(&work).await;
+    }
+    fixture.finish().await;
 }
