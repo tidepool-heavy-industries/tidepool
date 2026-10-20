@@ -2,12 +2,13 @@
 
 Status: implementation resumed after architectural review on 2026-10-20.
 Controlling branch: `integration/compiler-query-warm-final`.
-Reviewed root source: `3fe27b8d9f55d21077e6f2dc6ea4f7d455d5b274`.
-Current implementation contract: [demand-products.md](demand-products.md).
-It owns this wave's work split, identity/projection contracts and acceptance.
-This plan and [implementation reset](implementation-reset.md) supersede previous
-execution ordering and progress claims. [contracts.md](contracts.md) remains the
-shared semantic contract except where this reset explicitly narrows machinery.
+Reviewed root source: `e78e1152c1847f72b7442e02c2e05b5c48d90a73`.
+Current implementation contract: [g2-completion.md](g2-completion.md).
+It owns this wave's work split, constructor boundaries, sequencing and acceptance.
+[ownership-completion.md](ownership-completion.md) and
+[package-runtime-join.md](package-runtime-join.md) supply supporting contracts.
+[contracts.md](contracts.md) remains the shared semantic contract except where
+the current implementation contract explicitly refines it.
 Workers may replace unfinished scaffolding; preserving its shape is not a goal.
 
 ## Direction
@@ -50,11 +51,13 @@ because their old setup used a removed API.
 
 | Area | Current owner | Result |
 | --- | --- | --- |
-| Compiler projection | audit_native_selection | One issued compiler-primary product; full runtime identity remains exact |
-| Completed products | engine_completion | Actual source/HMI/native Name handoff and SOURCE recovery |
-| Residency | audit_compiler_dataflow_cost | Honest storage units, explicit optional retention, END custody |
-| Worker affinity | audit_command_retirement | Existing pool prefers an eligible idle realization; no accepted replay |
-| Lifecycle qualification | audit_reload_ownership | Real producer-issued inputs, truthful terminal outcomes, public startup diagnosis |
+| Native producer | engine_completion | Common native output/provenance and active demand callback |
+| Native selection | native_offer_scope_repair | Held initial/prefix composition and completion-bearing successors |
+| Artifact storage | audit_native_selection | Exact package bindings, kinds and recovery |
+| Codegen custody | review_world_lifetime_architecture | Exact HOME/package instance keys, leases and attachments |
+| Runtime join | audit_reload_ownership | Closed recipe, atomic adoption and deletion of global package exports |
+| Lifecycle qualification | audit_warm_lifecycle | Real production histories and joined G2 evidence |
+| Transport completion | compiler_demand_transport | Single-shot refusal and joined exchange controls |
 | Integration | root | Shared contracts, independent review, early joined tests, map and release evidence |
 
 Reuse existing isolated warm checkouts. Children report proposal, blocker,
@@ -69,11 +72,10 @@ integration checkpoints labelled with their actual qualification state.
 
 ## Sequence and gates
 
-1. Land the demand-products contract on the consolidated checkpoint.
-2. Run projection, completed-product, residency/routing and lifecycle work in
-   isolated checkouts. Review exact commits and integrate coherent parcels.
-3. Execute the joined production World history early, then measure cold/warm
-   demand costs and resolve the remaining ordinary-workflow failures.
+1. Freeze the G2 owner/recipe/lease/successor signatures on this checkpoint.
+2. Join compiler and runtime tranches incrementally from reviewed exact commits.
+3. Execute startup through two package-using public-B cells early, then complete
+   the production histories and remaining ordinary-workflow controls.
 4. Freeze one matched bundle and deliver the next Persona candidate after G2.
 5. Complete G3 and reconcile/push reviewed release/main checkpoints.
 

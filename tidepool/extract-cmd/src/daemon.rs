@@ -11,7 +11,7 @@
 //! identity  ::= "TPDPI004" producer[32] consumed_worker[32] boot_epoch[32] source-association
 //! request   ::= "TPDRQ002" expected_epoch[32]
 //!               frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
-//! transaction ::= "TPDTR005" expected_epoch[32] workload:u8 affinity
+//! transaction ::= "TPDTR006" expected_epoch[32] workload:u8 affinity
 //!                 (request-tag request)* end-tag
 //! affinity ::= 0u8 | 1u8 slot:u32-LE worker_instance[32]
 //! started ::= 3u8 epoch[32] slot:u32-LE worker_instance[32]
@@ -57,6 +57,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
 use crate::frontend::{DaemonConfig, FrontendError, PreparedWorker};
+use crate::native_demand::{self, Exchange, ExchangeBudget};
 use crate::request::ExecutionGrant;
 use crate::{CompileWorkload, ExtractRequest};
 
@@ -71,7 +72,7 @@ use crate::{CompileWorkload, ExtractRequest};
 const IO_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub(crate) const MAX_REQUEST_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 // Compiler artifacts are file-backed; only complete diagnostics cross this boundary.
-const MAX_RESPONSE_PAYLOAD_BYTES: u32 = 16 * 1024 * 1024;
+pub(crate) const MAX_RESPONSE_PAYLOAD_BYTES: u32 = 16 * 1024 * 1024;
 const UNCONFIRMED_RESPONSE: &[u8; 8] = b"TPCU0001";
 const MAX_END_CAUSE_BYTES: u32 = 64 * 1024;
 const MAX_REQUEST_ARGS: u32 = 4096;
@@ -84,10 +85,10 @@ const REQUEST: &[u8; 8] = b"TPDRQ002";
 /// explicit `REJECTED` and may safely rebind.
 const STOP: &[u8; 8] = b"TPDST001";
 const STOP_ACK: u8 = 1;
-pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR005";
-// Direct v2 exit0 confirms checked worker/scratch close, independently of
+pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR006";
+// Direct v3 exit0 confirms checked worker/scratch close, independently of
 // the daemon's admission/BEGIN version and cleanup acknowledgement protocol.
-pub(crate) const DIRECT_TRANSACTION: &[u8; 8] = b"TPDTR002";
+pub(crate) const DIRECT_TRANSACTION: &[u8; 8] = b"TPDTR003";
 pub(crate) const TRANSACTION_END: u8 = 0;
 pub(crate) const TRANSACTION_REQUEST: u8 = 1;
 pub(crate) const TRANSACTION_OUTPUT: u8 = 0;
@@ -259,7 +260,7 @@ fn available_memory_mb() -> Option<u64> {
 /// Generous: a cold compile of the full stdlib can legitimately take
 /// minutes, so this is sized well above any ordinary compile, not tuned to
 /// the warm case.
-const DEFAULT_REQUEST_DEADLINE: Duration = Duration::from_secs(15 * 60);
+pub(crate) const DEFAULT_REQUEST_DEADLINE: Duration = Duration::from_secs(15 * 60);
 const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 0;
 /// Capacity is transient and never permits rebinding to a direct worker.
@@ -613,6 +614,7 @@ pub(crate) struct DaemonTransaction {
     terminal: Option<DaemonTerminal>,
     framing_known: bool,
     end_sent: bool,
+    request_abandoned: bool,
     cancellation: Option<crate::CompilerTransactionCancellation>,
 }
 
@@ -630,6 +632,7 @@ struct DaemonTerminal {
 enum TransactionEvent {
     Started(crate::CompilerWorkerLocation),
     Output(Output),
+    NativeDemand(Exchange, u64, u64),
     Retired(DaemonTerminal),
     EndAcknowledged,
 }
@@ -671,6 +674,13 @@ impl Read for TransactionReader<'_> {
 }
 
 fn read_transaction_event(reader: &mut impl Read) -> Result<TransactionEvent, DaemonError> {
+    read_transaction_event_with_budget(reader, &mut MAX_RESPONSE_PAYLOAD_BYTES)
+}
+
+fn read_transaction_event_with_budget(
+    reader: &mut impl Read,
+    remaining: &mut u32,
+) -> Result<TransactionEvent, DaemonError> {
     use crate::endpoint::{read_retirement_cause, CompilerWorkerRetirement};
     match read_exact_or_crash(reader, 1)?[0] {
         TRANSACTION_STARTED => {
@@ -685,7 +695,15 @@ fn read_transaction_event(reader: &mut impl Read) -> Result<TransactionEvent, Da
                 crate::CompilerWorkerLocation::started(epoch, slot, instance),
             ))
         }
-        TRANSACTION_OUTPUT => decode_output(reader).map(TransactionEvent::Output),
+        TRANSACTION_OUTPUT => {
+            decode_output_with_budget(reader, remaining).map(TransactionEvent::Output)
+        }
+        native_demand::DEMAND => {
+            let exchange = Exchange::read(reader).map_err(DaemonError::Io)?;
+            let (stage, sequence) =
+                native_demand::read_coordinates(reader).map_err(DaemonError::Io)?;
+            Ok(TransactionEvent::NativeDemand(exchange, stage, sequence))
+        }
         TRANSACTION_RETIRED => {
             let epoch = read_exact_or_crash(reader, 32)?
                 .try_into()
@@ -806,13 +824,20 @@ impl DaemonTransaction {
         self.worker_location.as_ref()
     }
     fn read_event(&mut self, deadline: Instant) -> Result<TransactionEvent, DaemonError> {
+        self.read_event_with_budget(deadline, &mut MAX_RESPONSE_PAYLOAD_BYTES)
+    }
+    fn read_event_with_budget(
+        &mut self,
+        deadline: Instant,
+        remaining: &mut u32,
+    ) -> Result<TransactionEvent, DaemonError> {
         loop {
             let mut reader = TransactionReader {
                 stream: &mut self.stream,
                 deadline,
                 cancellation: self.cancellation.clone(),
             };
-            let event = read_transaction_event(&mut reader);
+            let event = read_transaction_event_with_budget(&mut reader, remaining);
             if event.is_err() {
                 self.framing_known = false;
             }
@@ -833,7 +858,9 @@ impl DaemonTransaction {
             }
             if matches!(
                 event,
-                TransactionEvent::Output(_) | TransactionEvent::EndAcknowledged
+                TransactionEvent::Output(_)
+                    | TransactionEvent::NativeDemand(..)
+                    | TransactionEvent::EndAcknowledged
             ) && self.worker_location.is_none()
             {
                 self.framing_known = false;
@@ -881,6 +908,7 @@ impl DaemonTransaction {
             terminal: None,
             framing_known: true,
             end_sent: false,
+            request_abandoned: false,
             cancellation,
         }
     }
@@ -1306,6 +1334,7 @@ fn begin_transaction_once(
                 terminal: None,
                 framing_known: true,
                 end_sent: false,
+                request_abandoned: false,
                 cancellation: cancellation.cloned(),
             })
         }
@@ -1328,7 +1357,41 @@ pub(crate) fn execute_transaction_request(
     cwd: &Path,
     request: &ExtractRequest,
 ) -> Result<Output, DaemonError> {
-    if !transaction.framing_known || transaction.terminal.is_some() || transaction.end_sent {
+    execute_transaction_request_inner(transaction, cwd, request, None)
+}
+
+pub(crate) fn execute_native_transaction_request(
+    transaction: &mut DaemonTransaction,
+    cwd: &Path,
+    request: &ExtractRequest,
+    exchange: &mut Exchange,
+    resolver: &mut dyn crate::NativeDemandResolver,
+) -> Result<Output, DaemonError> {
+    let result =
+        execute_transaction_request_inner(transaction, cwd, request, Some((exchange, resolver)));
+    if result.is_err() {
+        // A complete consumed demand retains response framing while its resolver
+        // fails. Retire the waiting worker, then drain its actual close evidence.
+        transaction.request_abandoned = true;
+        transaction.stream.shutdown(Shutdown::Write).ok();
+    }
+    result.map_err(|error| match error {
+        accepted @ DaemonError::AfterAcceptance(_) => accepted,
+        error => DaemonError::AfterAcceptance(Box::new(error)),
+    })
+}
+
+fn execute_transaction_request_inner(
+    transaction: &mut DaemonTransaction,
+    cwd: &Path,
+    request: &ExtractRequest,
+    mut native: Option<(&mut Exchange, &mut dyn crate::NativeDemandResolver)>,
+) -> Result<Output, DaemonError> {
+    if !transaction.framing_known
+        || transaction.terminal.is_some()
+        || transaction.end_sent
+        || transaction.request_abandoned
+    {
         return Err(DaemonError::AfterAcceptance(Box::new(
             DaemonError::Protocol("compiler transaction no longer accepts requests".into()),
         )));
@@ -1348,11 +1411,27 @@ pub(crate) fn execute_transaction_request(
     );
     let started = Instant::now();
     let argv = request.worker_argv();
-    let write = transaction
-        .stream
-        .write_all(&[TRANSACTION_REQUEST])
-        .and_then(|()| transaction.stream.write_all(&encode_request(cwd, &argv)))
-        .and_then(|()| transaction.stream.flush());
+    let send = |writer: &mut dyn Write| -> io::Result<()> {
+        writer.write_all(&[if native.is_some() {
+            native_demand::REQUEST
+        } else {
+            TRANSACTION_REQUEST
+        }])?;
+        if let Some((exchange, _)) = native.as_ref() {
+            exchange.write(writer)?;
+        }
+        writer.write_all(&encode_request(cwd, &argv))?;
+        writer.flush()
+    };
+    let write = match native.as_ref() {
+        Some((exchange, _)) => {
+            let control = exchange.control(transaction.cancellation.clone());
+            control
+                .writer(&mut transaction.stream)
+                .and_then(|mut writer| send(&mut writer))
+        }
+        None => send(&mut transaction.stream),
+    };
     if let Err(error) = write {
         if !transaction
             .cancellation
@@ -1367,7 +1446,64 @@ pub(crate) fn execute_transaction_request(
         // Only our explicit write-half cancellation preserves known response
         // framing after a partial outgoing request. Never resume a bad decoder.
     }
-    let response = transaction.read_event(Instant::now() + IO_TIMEOUT);
+    let mut budget = ExchangeBudget::new();
+    let mut first = true;
+    let mut refused = false;
+    let response = loop {
+        let deadline = match native.as_ref() {
+            Some((exchange, _)) => exchange
+                .control(transaction.cancellation.clone())
+                .instant()
+                .map_err(DaemonError::Io)?,
+            None => Instant::now() + IO_TIMEOUT,
+        };
+        let event = transaction.read_event_with_budget(deadline, &mut budget.remaining);
+        let Ok(TransactionEvent::NativeDemand(observed, stage, sequence)) = event else {
+            break event;
+        };
+        transaction.framing_known = false;
+        if refused {
+            return Err(DaemonError::Protocol(
+                "native demand after semantic refusal".into(),
+            ));
+        }
+        let Some((exchange, resolver)) = native.as_mut() else {
+            transaction.framing_known = false;
+            break Err(DaemonError::Protocol("unsolicited native demand".into()));
+        };
+        exchange.accept(&observed, first).map_err(DaemonError::Io)?;
+        first = false;
+        budget.demand(stage, sequence).map_err(DaemonError::Io)?;
+        budget
+            .charge(native_demand::ROUND_FRAME_BYTES)
+            .map_err(DaemonError::Io)?;
+        let control = exchange.control(transaction.cancellation.clone());
+        let mut reader = control
+            .read(&mut transaction.stream)
+            .map_err(DaemonError::Io)?;
+        let payload = budget.frame(&mut reader).map_err(DaemonError::Io)?;
+        transaction.framing_known = true;
+        let reply = native_demand::resolve(
+            *resolver,
+            exchange,
+            stage,
+            sequence,
+            payload,
+            &mut budget,
+            transaction.cancellation.clone(),
+        )
+        .map_err(DaemonError::Io)?;
+        transaction
+            .stream
+            .set_write_timeout(Some(control.remaining().map_err(DaemonError::Io)?))
+            .map_err(DaemonError::Io)?;
+        refused = matches!(reply, crate::NativeReply::Refused(_));
+        let mut writer = control
+            .writer(&mut transaction.stream)
+            .map_err(DaemonError::Io)?;
+        native_demand::write_reply(&mut writer, exchange, stage, sequence, &reply)
+            .map_err(DaemonError::Io)?;
+    };
     tracing::info!(
         phase = "compiler_transaction_response",
         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -1377,6 +1513,12 @@ pub(crate) fn execute_transaction_request(
     match response.map_err(|error| DaemonError::AfterAcceptance(Box::new(error)))? {
         TransactionEvent::Started(_) => unreachable!("read_event consumes worker start metadata"),
         TransactionEvent::Output(output) => {
+            if refused && output.status.success() {
+                transaction.framing_known = false;
+                return Err(DaemonError::Protocol(
+                    "native refusal followed by successful output".into(),
+                ));
+            }
             if ordinal.0 != transaction.received_outputs + 1 {
                 transaction.framing_known = false;
                 return Err(DaemonError::AfterAcceptance(Box::new(
@@ -1399,11 +1541,73 @@ pub(crate) fn execute_transaction_request(
             transaction.terminal = Some(terminal);
             Err(DaemonError::AfterAcceptance(Box::new(error)))
         }
-        TransactionEvent::EndAcknowledged => {
+        TransactionEvent::NativeDemand(..) | TransactionEvent::EndAcknowledged => {
             transaction.framing_known = false;
             Err(DaemonError::AfterAcceptance(Box::new(
-                DaemonError::Protocol("END acknowledged before END was sent".into()),
+                DaemonError::Protocol("unsolicited native demand or premature END".into()),
             )))
+        }
+    }
+}
+
+pub(crate) fn read_direct_native_output<R: Read + AsRawFd>(
+    reader: &mut R,
+    writer: &mut (impl Write + AsRawFd),
+    exchange: &mut Exchange,
+    resolver: &mut dyn crate::NativeDemandResolver,
+    cancellation: Option<crate::CompilerTransactionCancellation>,
+) -> Result<Output, DaemonError> {
+    let mut budget = ExchangeBudget::new();
+    let mut first = true;
+    let mut refused = false;
+    loop {
+        let control = exchange.control(cancellation.clone());
+        let mut input = control.read(reader).map_err(DaemonError::Io)?;
+        match read_transaction_event_with_budget(&mut input, &mut budget.remaining)? {
+            TransactionEvent::Output(output) => {
+                if refused && output.status.success() {
+                    return Err(DaemonError::Protocol(
+                        "native refusal followed by successful output".into(),
+                    ));
+                }
+                control.checkpoint().map_err(DaemonError::Io)?;
+                return Ok(output);
+            }
+            TransactionEvent::NativeDemand(observed, stage, sequence) => {
+                if refused {
+                    return Err(DaemonError::Protocol(
+                        "native demand after semantic refusal".into(),
+                    ));
+                }
+                exchange.accept(&observed, first).map_err(DaemonError::Io)?;
+                first = false;
+                budget.demand(stage, sequence).map_err(DaemonError::Io)?;
+                budget
+                    .charge(native_demand::ROUND_FRAME_BYTES)
+                    .map_err(DaemonError::Io)?;
+                let control = exchange.control(cancellation.clone());
+                let mut input = control.read(reader).map_err(DaemonError::Io)?;
+                let payload = budget.frame(&mut input).map_err(DaemonError::Io)?;
+                let reply = native_demand::resolve(
+                    resolver,
+                    exchange,
+                    stage,
+                    sequence,
+                    payload,
+                    &mut budget,
+                    cancellation.clone(),
+                )
+                .map_err(DaemonError::Io)?;
+                refused = matches!(reply, crate::NativeReply::Refused(_));
+                let mut output = control.writer(writer).map_err(DaemonError::Io)?;
+                native_demand::write_reply(&mut output, exchange, stage, sequence, &reply)
+                    .map_err(DaemonError::Io)?;
+            }
+            _ => {
+                return Err(DaemonError::Protocol(
+                    "unexpected direct native exchange event".into(),
+                ))
+            }
         }
     }
 }
@@ -1416,7 +1620,7 @@ pub(crate) fn end_transaction(
             DaemonError::Protocol("failed response framing cannot establish retirement".into()),
         )));
     }
-    if transaction.terminal.is_none() && !transaction.end_sent {
+    if transaction.terminal.is_none() && !transaction.end_sent && !transaction.request_abandoned {
         if transaction
             .cancellation
             .as_ref()
@@ -1637,6 +1841,13 @@ fn read_response_frame<R: Read>(r: &mut R, remaining: &mut u32) -> Result<Vec<u8
 /// (pinning the codec's round-trip and truncated-input behavior without a
 /// real socket).
 pub(crate) fn decode_response<R: Read>(r: &mut R) -> Result<(i32, Vec<u8>, Vec<u8>), DaemonError> {
+    decode_response_with_budget(r, &mut MAX_RESPONSE_PAYLOAD_BYTES)
+}
+
+fn decode_response_with_budget<R: Read>(
+    r: &mut R,
+    remaining: &mut u32,
+) -> Result<(i32, Vec<u8>, Vec<u8>), DaemonError> {
     let code_bytes = read_exact_or_crash(r, 4)?;
     if code_bytes.as_slice() == &UNCONFIRMED_RESPONSE[..4] {
         let version = read_exact_or_crash(r, 4)?;
@@ -1646,11 +1857,10 @@ pub(crate) fn decode_response<R: Read>(r: &mut R) -> Result<(i32, Vec<u8>, Vec<u
             ));
         }
         let code = read_u32(r)? as i32;
-        let mut remaining = MAX_RESPONSE_PAYLOAD_BYTES;
-        let stdout = read_response_frame(r, &mut remaining)?;
-        let stderr = read_response_frame(r, &mut remaining)?;
+        let stdout = read_response_frame(r, remaining)?;
+        let stderr = read_response_frame(r, remaining)?;
         let cause_length = read_u32(r)?;
-        let cause_remaining = remaining.min(MAX_END_CAUSE_BYTES);
+        let cause_remaining = (*remaining).min(MAX_END_CAUSE_BYTES);
         if cause_length > cause_remaining {
             return Err(DaemonError::ResponseTooLarge {
                 declared: u64::from(cause_length),
@@ -1672,9 +1882,8 @@ pub(crate) fn decode_response<R: Read>(r: &mut R) -> Result<(i32, Vec<u8>, Vec<u
         ));
     }
     let code = i32::from_le_bytes([code_bytes[0], code_bytes[1], code_bytes[2], code_bytes[3]]);
-    let mut remaining = MAX_RESPONSE_PAYLOAD_BYTES;
-    let stdout = read_response_frame(r, &mut remaining)?;
-    let stderr = read_response_frame(r, &mut remaining)?;
+    let stdout = read_response_frame(r, remaining)?;
+    let stderr = read_response_frame(r, remaining)?;
     Ok((code, stdout, stderr))
 }
 
@@ -1702,12 +1911,21 @@ pub(crate) fn decode_output<R: Read>(r: &mut R) -> Result<Output, DaemonError> {
     Ok(synthesize_output(code, stdout, stderr))
 }
 
+fn decode_output_with_budget(
+    r: &mut impl Read,
+    remaining: &mut u32,
+) -> Result<Output, DaemonError> {
+    let (code, stdout, stderr) = decode_response_with_budget(r, remaining)?;
+    Ok(synthesize_output(code, stdout, stderr))
+}
+
 /// One step of a connection's request stream, as `service_transaction`'s
 /// caller supplies it: a real transaction reads a command byte off the wire
 /// each time; a plain request is a one-request transaction whose supplier
 /// yields its single already-parsed request and then an orderly end.
 enum RequestStep {
     Request(std::path::PathBuf, PreparedRequest),
+    NativeRequest(std::path::PathBuf, PreparedRequest, Exchange),
     End,
     Disconnected,
     Malformed,
@@ -1798,7 +2016,14 @@ fn service_transaction(
                 ));
                 break;
             }
-            RequestStep::Request(cwd, mut prepared_request) => {
+            step @ (RequestStep::Request(..) | RequestStep::NativeRequest(..)) => {
+                let (cwd, mut prepared_request, mut exchange) = match step {
+                    RequestStep::Request(cwd, request) => (cwd, request, None),
+                    RequestStep::NativeRequest(cwd, request, exchange) => {
+                        (cwd, request, Some(exchange))
+                    }
+                    _ => unreachable!(),
+                };
                 request_ordinal =
                     RequestOrdinal(request_ordinal.0.checked_add(1).ok_or_else(|| {
                         FrontendError::Daemon("compiler request ordinal exhausted".into())
@@ -1852,12 +2077,22 @@ fn service_transaction(
                 let started = Instant::now();
                 tracing::info!(run_id, %compile_request, "compiler request started");
                 tracing::debug!(run_id, %compile_request, source_root = %cwd.display(), "compiler request source");
-                match worker.request_while_connected(
-                    &connection,
-                    &cwd,
-                    &mut prepared_request.request,
-                    request_deadline,
-                ) {
+                let response = match exchange.as_mut() {
+                    Some(exchange) => worker.native_request_while_connected(
+                        &connection,
+                        &cwd,
+                        &mut prepared_request.request,
+                        request_deadline,
+                        exchange,
+                    ),
+                    None => worker.request_while_connected(
+                        &connection,
+                        &cwd,
+                        &mut prepared_request.request,
+                        request_deadline,
+                    ),
+                };
+                match response {
                     Ok((code, stdout, stderr)) => {
                         *served += 1;
                         // Keep worker service separate from host-side parsing
@@ -1896,19 +2131,41 @@ fn service_transaction(
                             "compiler diagnostics processed"
                         );
                         if transaction {
-                            if connection.write_all(&[TRANSACTION_OUTPUT]).is_err() {
-                                break;
-                            }
-                            if write_response_with_timing(
-                                &mut connection,
-                                code,
-                                &stdout,
-                                &stderr,
-                                run_id,
-                                &compile_request,
-                            )
-                            .is_err()
-                            {
+                            let delivery = if let Some(exchange) = exchange.as_ref() {
+                                let control = exchange.control(None);
+                                (|| {
+                                    let mut writer = control
+                                        .writer(&mut connection)
+                                        .map_err(FrontendError::Io)?;
+                                    writer
+                                        .write_all(&[TRANSACTION_OUTPUT])
+                                        .map_err(FrontendError::Io)?;
+                                    write_response_with_timing(
+                                        &mut writer,
+                                        code,
+                                        &stdout,
+                                        &stderr,
+                                        run_id,
+                                        &compile_request,
+                                    )
+                                })()
+                            } else {
+                                connection
+                                    .write_all(&[TRANSACTION_OUTPUT])
+                                    .map_err(FrontendError::Io)
+                                    .and_then(|()| {
+                                        write_response_with_timing(
+                                            &mut connection,
+                                            code,
+                                            &stdout,
+                                            &stderr,
+                                            run_id,
+                                            &compile_request,
+                                        )
+                                    })
+                            };
+                            if let Err(error) = delivery {
+                                transaction_failed = Some(error);
                                 break;
                             }
                             emitted_outputs += 1;
@@ -2813,7 +3070,13 @@ fn serve_workers(
                                 }
                                 match command[0] {
                                     TRANSACTION_END => RequestStep::End,
-                                    TRANSACTION_REQUEST => {
+                                    command @ (TRANSACTION_REQUEST | native_demand::REQUEST) => {
+                                        let exchange = if command == native_demand::REQUEST {
+                                            match Exchange::read(connection) {
+                                                Ok(exchange) => Some(exchange),
+                                                Err(_) => return RequestStep::Malformed,
+                                            }
+                                        } else { None };
                                         let (cwd, argv) = match read_request(connection) {
                                             Ok(request) => request,
                                             Err(error) => {
@@ -2823,7 +3086,10 @@ fn serve_workers(
                                         };
                                         match prepare_worker_request(argv) {
                                             Ok(mut prepared) => match grant_worker_request(&mut prepared, workload, grant) {
-                                                Ok(()) => RequestStep::Request(cwd, prepared),
+                                                Ok(()) => match exchange {
+                                                    Some(exchange) => RequestStep::NativeRequest(cwd, prepared, exchange),
+                                                    None => RequestStep::Request(cwd, prepared),
+                                                },
                                                 Err(_) => RequestStep::Malformed,
                                             },
                                             Err(error) => {
@@ -4106,13 +4372,14 @@ impl Worker {
         Ok(())
     }
 
-    pub(crate) fn request(
+    fn start_request(
         &mut self,
         cwd: &Path,
         request: &mut ExtractRequest,
-    ) -> Result<(i32, Vec<u8>, Vec<u8>), FrontendError> {
+        exchange: Option<&Exchange>,
+    ) -> Result<Vec<u8>, FrontendError> {
         let placement_started = Instant::now();
-        let placement_diagnostics = self.build_products_namespace.place(cwd, request);
+        let diagnostics = self.build_products_namespace.place(cwd, request);
         let placement_ns = elapsed_ns(placement_started);
         let encoding_started = Instant::now();
         let bytes = encode_request(cwd, &request.worker_argv());
@@ -4128,23 +4395,184 @@ impl Worker {
         let stdin = self
             .stdin
             .as_mut()
-            .ok_or_else(|| FrontendError::Daemon("worker stdin is closed".to_owned()))?;
-        stdin
-            .write_all(&[TRANSACTION_REQUEST])
-            .map_err(FrontendError::Io)?;
-        stdin.write_all(&bytes).map_err(FrontendError::Io)?;
-        stdin.flush().map_err(FrontendError::Io)?;
-        let (code, stdout, stderr) =
-            decode_response(&mut self.stdout).map_err(daemon_frontend_error)?;
-        if placement_diagnostics.is_empty() {
+            .ok_or_else(|| FrontendError::Daemon("worker stdin is closed".into()))?;
+        let send = |writer: &mut dyn Write| -> io::Result<()> {
+            writer.write_all(&[if exchange.is_some() {
+                native_demand::REQUEST
+            } else {
+                TRANSACTION_REQUEST
+            }])?;
+            if let Some(exchange) = exchange {
+                exchange.write(writer)?;
+            }
+            writer.write_all(&bytes)?;
+            writer.flush()
+        };
+        match exchange {
+            Some(exchange) => {
+                let control = exchange.control(None);
+                let mut writer = control.writer(stdin).map_err(FrontendError::Io)?;
+                send(&mut writer).map_err(FrontendError::Io)?;
+            }
+            None => send(stdin).map_err(FrontendError::Io)?,
+        }
+        Ok(diagnostics)
+    }
+
+    pub(crate) fn request(
+        &mut self,
+        cwd: &Path,
+        request: &mut ExtractRequest,
+    ) -> Result<WorkerResponse, FrontendError> {
+        if request.requires_native_demand() {
+            return Err(FrontendError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "World preparation requires native demand exchange capability",
+            )));
+        }
+        let diagnostics = self.start_request(cwd, request, None)?;
+        let response = decode_response(&mut self.stdout).map_err(daemon_frontend_error)?;
+        Self::finish_response(response, diagnostics)
+    }
+
+    fn finish_response(
+        (code, stdout, stderr): WorkerResponse,
+        diagnostics: Vec<u8>,
+    ) -> Result<WorkerResponse, FrontendError> {
+        if diagnostics.is_empty() {
             return Ok((code, stdout, stderr));
         }
-        check_response_size(
-            stdout.len() as u64 + stderr.len() as u64 + placement_diagnostics.len() as u64,
-        )?;
-        let mut combined_stderr = placement_diagnostics;
-        combined_stderr.extend_from_slice(&stderr);
-        Ok((code, stdout, combined_stderr))
+        check_response_size(stdout.len() as u64 + stderr.len() as u64 + diagnostics.len() as u64)?;
+        let mut combined = diagnostics;
+        combined.extend_from_slice(&stderr);
+        Ok((code, stdout, combined))
+    }
+
+    /// Relay only this active request's typed frames. The semantic resolver and
+    /// input owner remain in the client; this worker owner only supervises IO.
+    pub(crate) fn native_request<R: Read + AsRawFd>(
+        &mut self,
+        cwd: &Path,
+        request: &mut ExtractRequest,
+        exchange: &Exchange,
+        client: &mut R,
+        output: &mut (impl Write + AsRawFd),
+    ) -> Result<WorkerResponse, FrontendError> {
+        let control = exchange.control(None);
+        control.checkpoint().map_err(FrontendError::Io)?;
+        let diagnostics = self.start_request(cwd, request, Some(exchange))?;
+        let mut budget = ExchangeBudget::new();
+        budget
+            .charge(diagnostics.len())
+            .map_err(FrontendError::Io)?;
+        let mut refused = false;
+        loop {
+            let mut reader = control.read(&mut self.stdout).map_err(FrontendError::Io)?;
+            let mut tag = [0];
+            reader.read_exact(&mut tag).map_err(FrontendError::Io)?;
+            match tag[0] {
+                TRANSACTION_OUTPUT => {
+                    let response = decode_response_with_budget(&mut reader, &mut budget.remaining)
+                        .map_err(daemon_frontend_error)?;
+                    control.checkpoint().map_err(FrontendError::Io)?;
+                    if refused && response.0 == 0 {
+                        return Err(FrontendError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "native refusal followed by successful terminal output",
+                        )));
+                    }
+                    return Self::finish_response(response, diagnostics);
+                }
+                native_demand::DEMAND => {
+                    if refused {
+                        return Err(FrontendError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "native demand after semantic refusal",
+                        )));
+                    }
+                    let observed = Exchange::read(&mut reader).map_err(FrontendError::Io)?;
+                    if &observed != exchange {
+                        return Err(FrontendError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "worker demand belongs to another request",
+                        )));
+                    }
+                    let (stage, sequence) =
+                        native_demand::read_coordinates(&mut reader).map_err(FrontendError::Io)?;
+                    budget.demand(stage, sequence).map_err(FrontendError::Io)?;
+                    budget
+                        .charge(native_demand::ROUND_FRAME_BYTES)
+                        .map_err(FrontendError::Io)?;
+                    let payload = budget.frame(&mut reader).map_err(FrontendError::Io)?;
+                    {
+                        let mut output = control.writer(output).map_err(FrontendError::Io)?;
+                        native_demand::write_demand(
+                            &mut output,
+                            exchange,
+                            stage,
+                            sequence,
+                            &payload,
+                        )
+                        .map_err(FrontendError::Io)?;
+                    }
+                    let mut client = control.read_reply(client, self.stdout.as_raw_fd());
+                    let reply = native_demand::read_reply(
+                        &mut client,
+                        exchange,
+                        stage,
+                        sequence,
+                        &mut budget,
+                    )
+                    .map_err(FrontendError::Io)?;
+                    refused = matches!(reply, crate::NativeReply::Refused(_));
+                    native_demand::ensure_worker_quiet(self.stdout.as_raw_fd())
+                        .map_err(FrontendError::Io)?;
+                    let stdin = self
+                        .stdin
+                        .as_mut()
+                        .ok_or_else(|| FrontendError::Daemon("worker stdin is closed".into()))?;
+                    let mut writer = control.writer(stdin).map_err(FrontendError::Io)?;
+                    native_demand::write_reply(&mut writer, exchange, stage, sequence, &reply)
+                        .map_err(FrontendError::Io)?;
+                }
+                _ => {
+                    return Err(FrontendError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unexpected event during native demand request",
+                    )))
+                }
+            }
+        }
+    }
+
+    fn native_request_while_connected(
+        &mut self,
+        connection: &UnixStream,
+        cwd: &Path,
+        request: &mut ExtractRequest,
+        deadline: Duration,
+        exchange: &mut Exchange,
+    ) -> Result<WorkerResponse, FrontendError> {
+        exchange
+            .limit_deadline(deadline)
+            .map_err(FrontendError::Io)?;
+        let remaining = exchange
+            .control(None)
+            .remaining()
+            .map_err(FrontendError::Io)?;
+        let mut client = connection.try_clone().map_err(FrontendError::Io)?;
+        let mut output = connection.try_clone().map_err(FrontendError::Io)?;
+        output
+            .set_write_timeout(Some(remaining))
+            .map_err(FrontendError::Io)?;
+        let request_span = tracing::Span::current();
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+        self.operation_while_connected(connection, remaining, WorkerOperation::Request, |worker| {
+            tracing::dispatcher::with_default(&dispatcher, || {
+                let _entered = request_span.enter();
+                worker.native_request(cwd, request, exchange, &mut client, &mut output)
+            })
+        })
     }
 
     fn begin_transaction_while_connected(
@@ -4250,6 +4678,9 @@ impl Worker {
                     // own result is discarded in favor of a deadline error
                     // that names the bound, matching the disconnect branch's
                     // own definite report below.
+                    // The relay may be waiting on this client, not the worker.
+                    // Preserve the write half for exact retirement evidence.
+                    connection.shutdown(Shutdown::Read).ok();
                     completed_rx.recv().ok();
                     return Err(FrontendError::Daemon(format!(
                         "compiler worker exceeded its {}s operation deadline ({operation:?}) and was killed",
@@ -4263,6 +4694,7 @@ impl Worker {
                     // EOF caused by this retirement must not be classified as
                     // an independent worker failure. Drain the monitor before
                     // the slot replaces the pinned worker.
+                    connection.shutdown(Shutdown::Read).ok();
                     completed_rx.recv().ok();
                     return Err(FrontendError::WorkerClientDisconnected);
                 }

@@ -1,6 +1,6 @@
 # Compiler work and authority map
 
-The current integrated source baseline is `f6d9976b70` (2026-10-20).
+The earlier integrated measurement baseline below is `f6d9976b70` (2026-10-20).
 It contains the compiler-primary projection, bounded World residency, idle-worker
 affinity, completed compiler-product handoff and the earlier affine retirement
 tranche. Integration is not release qualification: the actual joined runtime
@@ -10,6 +10,31 @@ The later P1–P10 material describes the earlier finite path at
 service dataflow. Stage timings are inclusive and are not additive. Use
 [compiler profiling](compiler-profiling.md) for measurement and
 [property testing](property-testing.md) for independent checks.
+
+## Current package/runtime boundary review
+
+Root integration `33b1ca3a52` contains the publication-owner and bootstrap repairs;
+the compiler demand/package/runtime cutover is still receiving worker changes.
+The [exact join contract](../plans/shared-warm-compiler/completion/package-runtime-join.md)
+records the root review and required replacement dataflow. This is not a claim
+that those changes have already passed joined execution.
+
+Direct review of L's `f6c16ca648` intermediate found:
+
+| Boundary | Actual remaining work | Replacement contract |
+|---|---|---|
+| `PreparedSourceEntry::prepare` → startup | Retains native images but drops the resolved import plan; startup runs `resolve_closed_source_entry_in` again. | Retain one closed occurrence-linked recipe; bind its exact links to a fresh installation without repeating selection. |
+| `install_certified_turn` → package imports | Prefers machine-global `code_exports` over local definitions. | New isolated B gets fresh state; later cells reuse exact B-domain instances through scoped custody. |
+| Native closure → runtime graph | Logical artifact/group and source-binder keys can collapse different exact historical dependency occurrences. | Preserve full issued binding/occurrence links independently of reusable code identity. |
+| Package interface → product identity | Independently reading a path and hashing bytes can mismatch the decoded interface/body. | Decode and hash the same captured bytes; carry their provenance to the sole product issuer. |
+| Actor test → source installation | Two probe helpers unwrap `entry.compiled().code()` and use ordinary startup. | Exercise the closed production installer; remove the public proof-erasing accessor after metadata consumers migrate. |
+
+The old package CAF control uses two separate machines and does not establish
+same-machine A/B isolation. Joined acceptance must also retire A and execute a
+NEW B cell, preserve same-B instance reuse, and retain real captured-A refusal.
+Immutable image sharing, fresh dispatch pointers and separate scope IDs are
+useful component observations, not substitutes for that history. No post-cutover
+performance result is available yet.
 
 ## Integrated service dataflow and remaining costs
 
