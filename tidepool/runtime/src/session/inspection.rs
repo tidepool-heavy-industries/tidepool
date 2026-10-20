@@ -47,6 +47,15 @@ impl InspectionActorObservation {
         }
     }
 
+    /// Compare actor/incarnation, effect source/imports and model TYPE only.
+    /// This is not request-identity proof: the actual Workbench-issued pair
+    /// separately binds the original request and its exact TYPE evidence.
+    pub fn same_actor_context(&self, other: &Self) -> bool {
+        self.principal == other.principal
+            && self.effects == other.effects
+            && self.model_type == other.model_type
+    }
+
     fn frame(&self, frame: &mut impl FnMut(&[u8])) {
         fn ty(source: &super::HaskellTypeSource, frame: &mut impl FnMut(&[u8])) {
             frame(source.expression().as_bytes());
