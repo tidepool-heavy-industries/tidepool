@@ -10,7 +10,7 @@ module Tidepool.CompilerProducts
   , requireOriginalExecutableGlobals
   , writeCertifiedProductsKeepingWithOriginals
   , StagedOriginalProducts, stagedOriginalEntryOrdinal, stagedFinalizedArtifacts, stagedOriginalOutputFiles
-  , StagedProductFailure(..), stagedOriginalBinders, validateStagedOriginalProducts, withStagedOriginalBindings, stagedOriginalPackageDemand, withPriorStagedOriginalProducts, newPreparedOriginalInterfaceArtifactsWithPrior
+  , StagedProductFailure(..), stagedOriginalBinders, withStagedOriginalBindings, stagedOriginalPackageDemand, withPriorStagedOriginalProducts, newPreparedOriginalInterfaceArtifactsWithPrior
   , retainTypeInterfaceCaptures, retainedTypeInterfaceBody
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, writeCertifiedSegmentItemProductsWithInputs
   , stagedDeclarationInputReferences
@@ -1111,6 +1111,12 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
     knownNames <- mergeOriginalBindings previousNames externalNames >>= (`mergeOriginalBindings` currentNames)
     let nativeNames = Map.filter (\identity -> identity `Set.member` maybe Set.empty certifiedContextBinders targetContext) knownNames
         nameBindings = CertifiedNameBindings (nameCacheIdentity hscEnv) nativeNames
+    -- Retain only Name and small identity facts, never lazy projections from
+    -- the preparation's Id/details owner. The GHC details knots stay untouched.
+    _ <- evaluate (Map.foldl' (\() identity ->
+      symbolUnit identity `seq` symbolModule identity `seq` symbolNamespace identity `seq`
+        symbolOccurrence identity `seq` maybe () (\parent -> parent `seq` ()) (symbolRecordParent identity))
+      () nativeNames)
     sourceOriginals <- case preparedExactCompilation prepared of
       Nothing -> do
         let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))

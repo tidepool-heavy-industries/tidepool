@@ -603,9 +603,11 @@ preparedDependencies _ variant fresh exact
         imports <- case selected of
           Just (WorldSourceSelection _ imports _ _) -> pure imports
           Nothing -> throwIO WorldCellCorrupt
+        let producer = hexBytes (worldInputsProducer facts)
+        _ <- evaluate (length producer)
         pure (WorldScoped fresh (worldInputsIdentityBytes facts)
           (worldSourceDomainSha256 (worldInputsSources facts)) (pvWorldCompletedDependencies variant)
-          (WorldSourceCaptureBasis (hexBytes (worldInputsProducer facts)) imports))
+          (WorldSourceCaptureBasis producer imports))
       Just _ -> throwIO CheckedPurposeMismatch
 preparedDependencies _ _ fresh Nothing = pure (SourceOnly fresh)
 preparedDependencies env variant fresh (Just exact) = do
