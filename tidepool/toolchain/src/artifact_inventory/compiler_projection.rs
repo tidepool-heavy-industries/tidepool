@@ -1542,12 +1542,16 @@ impl CompilerSourceSupport {
         }
         // Executable bindings are derived from certified rows during
         // certification, so this loop and `groups()` describe one authority.
-        if groups.groups().len() != groups.bindings().len() {
+        if groups.groups().len() != groups.bound_rows().len() {
             return Err(failure(
                 "demanded certified groups lost their executable bindings",
             ));
         }
-        for (key, binding) in groups.bindings() {
+        for (binding, _) in groups.bound_rows() {
+            let key = NativeGroupKey {
+                artifact: binding.binding.artifact(),
+                original_ordinal: binding.original_ordinal,
+            };
             crate::host_work::checkpoint()?;
             crate::host_work::record_host_work(
                 crate::host_work::HostWorkCounter::DemandNativeGroupVisit,
@@ -1558,8 +1562,8 @@ impl CompilerSourceSupport {
                 .issued_row(key.artifact)
                 .ok_or_else(|| failure("demanded semantic group lost its issued row"))?;
             if row
-                .dependency_support(*key, row.original_owner())
-                .is_none_or(|support| !support.groups().any(|candidate| candidate == *binding))
+                .dependency_support(key, row.original_owner())
+                .is_none_or(|support| !support.groups().any(|candidate| candidate == binding))
             {
                 return Err(failure(
                     "demanded semantic group differs from its exact issued choice",
@@ -1572,7 +1576,7 @@ impl CompilerSourceSupport {
             .map_err(|error| failure(&format!("demanded native fact projection: {error}")))?;
         let artifacts = self.artifacts.select_acquired_compiler_bindings(
             &namespace,
-            groups.bindings(),
+            groups.bound_rows().map(|(binding, _)| binding),
             operation,
         )?;
         charge(operation.reserve::<IssuedNativeOffer>(offers.len()))?;
