@@ -2,6 +2,48 @@ use super::*;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
+#[test]
+fn lexical_append_shares_unchanged_facts_and_refuses_changed_adjacency() {
+    for width in [1, 32, 128] {
+        let owner = |index| ExactModuleIdentity {
+            unit: "main".into(),
+            module: format!("Home{index}"),
+        };
+        let baseline = ExactLexicalSnapshot::default()
+            .replace(
+                (0..width)
+                    .map(|index| ExactLexicalNode {
+                        owner: owner(index),
+                        imports: vec![],
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let added = ExactLexicalNode {
+            owner: owner(width),
+            imports: vec![owner(0)],
+        };
+        let next = baseline.append_issued([added.clone()]).unwrap();
+        assert_eq!(next.facts.len(), width + 1);
+        assert_eq!(baseline.facts.len(), width);
+        for (key, fact) in &baseline.facts {
+            assert!(Arc::ptr_eq(&fact.node, &next.facts[key].node));
+        }
+        let equal = next.append_issued([added.clone()]).unwrap();
+        assert!(Arc::ptr_eq(&next.rows, &equal.rows));
+        assert!(next
+            .append_issued([ExactLexicalNode {
+                owner: owner(width),
+                imports: vec![]
+            }])
+            .is_err());
+        let recomputed = ExactLexicalSnapshot::default()
+            .replace(baseline.iter().cloned().chain([added]).collect())
+            .unwrap();
+        assert_eq!(next, recomputed);
+    }
+}
+
 fn install(store: &MemoryBlockstore, packet: StagedBlocks) {
     for (cid, bytes) in packet.into_blocks() {
         verify_block(&cid, &bytes).unwrap();

@@ -1972,6 +1972,98 @@ pub(crate) struct CheckedTurnCompletion {
 }
 
 impl CheckedTurnCompletion {
+    /// Native installation changes runtime selection and custody, not the
+    /// compiler prefix from which this exact item was prepared. Keep its
+    /// association current before evaluation can suspend on a compiler query.
+    pub(crate) fn install_certified_turn_in(
+        &self,
+        session: &mut PersistentSession,
+        scope: ScopeId,
+        metadata: &tidepool_repr::DataConTable,
+        target: super::prepared::ScopedTargetImage,
+        source_evidence: &BTreeMap<
+            tidepool_codegen::prepared_program::SourceBinder,
+            (tidepool_repr::execution_schema::CachedHomeOwner, u32),
+        >,
+        demanded: Vec<tidepool_codegen::prepared_program::DemandedImage>,
+        inherited_needed: &[tidepool_codegen::prepared_program::InheritedSourceDemand],
+    ) -> Result<
+        (
+            tidepool_codegen::prepared_program::ProgramId,
+            tidepool_codegen::binding_table::SourceScopeAdmission,
+        ),
+        super::resident::ResidentError,
+    > {
+        let association = {
+            let state = self.prefix.state.lock();
+            if !self.prefix.admission.belongs_to(session)
+                || self.scope != scope
+                || state
+                    .in_flight
+                    .as_ref()
+                    .is_none_or(|execution| !Arc::ptr_eq(execution, &self.execution))
+                || !state.snapshot.is_current(session, scope)
+            {
+                return Err(SessionError::StaleStagedDeclaration.into());
+            }
+            match state.snapshot.world() {
+                None => None,
+                Some(predecessor) => {
+                    let association = session
+                        .lib()
+                        .tips
+                        .get(&scope)
+                        .and_then(|tip| tip.inspection_world.as_ref())
+                        .ok_or(SessionError::MissingPublishedCompilerWorld(scope))?;
+                    let source = self.prefix.admission.world_source_reference()?;
+                    let original = self.prefix.admission.original_source()?;
+                    if !Arc::ptr_eq(&association.world, predecessor)
+                        || !session.inspection_world_base_is_current(
+                            &association.base,
+                            source,
+                            &original,
+                        )
+                    {
+                        return Err(SessionError::StaleStagedDeclaration.into());
+                    }
+                    Some(association.clone())
+                }
+            }
+        };
+        // This owner earns and retains the actual source transaction claims.
+        // They permit finishing an admitted installation across a later fence;
+        // an outer gate lock here would recursively lock the same admissions.
+        let installed = session.install_certified_turn_in(
+            scope,
+            metadata,
+            target,
+            source_evidence,
+            demanded,
+            inherited_needed,
+        )?;
+        if let Some(association) = association {
+            let refreshed = session.compile_view_key_in(scope).map(|key| {
+                let mut base = association.base.clone();
+                base.key = key;
+                Arc::new(super::inspection::InspectionWorldAssociation {
+                    base,
+                    world: association.world.clone(),
+                })
+            });
+            // Only native registration ran under this exclusive checkout.
+            // Keep all original issuer observations; never refresh their epochs.
+            // Witness exhaustion disables reuse without losing installed-product
+            // ownership through a new fallible postcommit check.
+            session
+                .lib_mut()
+                .tips
+                .get_mut(&scope)
+                .expect("checked installation preserves its admitted scope")
+                .inspection_world = refreshed;
+        }
+        Ok(installed)
+    }
+
     pub(crate) fn validates_private_overlay(
         &self,
         session: &PersistentSession,

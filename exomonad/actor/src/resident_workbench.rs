@@ -18871,39 +18871,40 @@ pub(crate) mod request_tests {
             ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
             crate::ActorSessionContext,
         ) {
+            let layers: crate::ActorSourceLayerResolver = self.source_owner.clone();
+            let (mut context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                self.public.clone(),
+                self.captured.clone(),
+                None,
+                Some(&layers),
+            )
+            .expect("the actual captured source owner admits the original public context");
+            let frontend = self
+                .workbench
+                .shared_view()
+                .with_json_input(Some(serde_json::json!({"greeting": "hi"})))
+                .with_compilation_authority(authority);
+            let observation = frontend.capture_observation_scaffold(&context).await
+                .expect("the production public preflight settles the input TYPE prototype");
             let descriptor =
-                crate::ActorDescriptor::new("actual-world-json-input", self.public.placement);
+                crate::ActorDescriptor::new("actual-world-json-input", context.placement);
             let public_owner =
-                crate::resident_actor::WorkbenchPublicOwner::issue(&self.public, &descriptor, None)
+                crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
                     .unwrap();
             let private = Arc::new(
                 workbench_runner_for_test(&self.workbench)
                     .begin_private_execution(
-                        self.public.clone(),
+                        context.clone(),
                         public_owner,
                         tidepool_runtime::session::PublicationDecision::new(),
-                        None,
+                        Some(observation),
                     )
                     .await
                     .unwrap(),
             );
             assert_ne!(private.private_scope, self.public.placement.lexical_scope);
-            let mut private_context = self.public.clone();
-            private_context.placement.lexical_scope = private.private_scope;
-            let layers: crate::ActorSourceLayerResolver = self.source_owner.clone();
-            let (context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
-                private_context,
-                self.captured.clone(),
-                None,
-                Some(&layers),
-            )
-            .expect("the actual captured source owner admits private B over public A");
-            let frontend = self
-                .workbench
-                .shared_view()
-                .with_json_input(Some(serde_json::json!({"greeting": "hi"})))
-                .with_compilation_authority(authority)
-                .with_private_execution(private);
+            context.placement.lexical_scope = private.private_scope;
+            let frontend = frontend.with_private_execution(private);
             (frontend, context)
         }
 
@@ -18944,12 +18945,18 @@ pub(crate) mod request_tests {
         }
     }
 
+    enum WorldInputPlanBoundary {
+        Actual,
+        ForeignWorld(Arc<tidepool_toolchain::compiler_world::CompilerWorld>),
+        ForeignOriginal(generation_admission::SourceDependency),
+    }
+
     async fn plan_actual_world_input(
         frontend: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
         context: &crate::ActorSessionContext,
         input: HostInputRetirement,
         source: &str,
-        world_override: Option<Arc<tidepool_toolchain::compiler_world::CompilerWorld>>,
+        boundary: WorldInputPlanBoundary,
     ) -> (
         Result<
             tidepool_runtime::session::turn::RuntimeWorldCellPlan,
@@ -18966,8 +18973,19 @@ pub(crate) mod request_tests {
                 Some(input.mounted_input()),
             )
             .unwrap();
-        let world =
-            world_override.unwrap_or_else(|| execution.admission.compiler_world().unwrap().clone());
+        let expected_close = match &boundary {
+            WorldInputPlanBoundary::Actual => tidepool_runtime::CompilerTransactionClose::Clean,
+            WorldInputPlanBoundary::ForeignWorld(_) | WorldInputPlanBoundary::ForeignOriginal(_) => {
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            }
+        };
+        let mut world = execution.admission.compiler_world().unwrap().clone();
+        let mut dependency = context.source_dependency().clone();
+        match boundary {
+            WorldInputPlanBoundary::Actual => {}
+            WorldInputPlanBoundary::ForeignWorld(foreign) => world = foreign,
+            WorldInputPlanBoundary::ForeignOriginal(foreign) => dependency = foreign,
+        }
         let (operand, input) = frontend
             .access
             .with_compiler_machine(context.clone(), move |session, _, _, _| {
@@ -18987,7 +19005,6 @@ pub(crate) mod request_tests {
         let scope = crate::capabilities::WorkbenchServices::new()
             .with_compiler_owner(CompilerCloseOwner::ActorLifecycle(closes.clone()))
             .for_preparation();
-        let dependency = context.source_dependency().clone();
         let result = scope
             .scope(async move {
                 let work = crate::capabilities::CompilerOwnerScope::current()
@@ -19018,10 +19035,8 @@ pub(crate) mod request_tests {
             .await;
         assert_eq!(
             closes.compiler_close_observations().as_slice(),
-            &[crate::termination::CompilerWorkClose::Settled(
-                tidepool_runtime::CompilerTransactionClose::Clean
-            )],
-            "a retained plan is returned only after its actual parser transaction END"
+            &[crate::termination::CompilerWorkClose::Settled(expected_close)],
+            "successful parser work confirms END; owner preflight refusal submits no request"
         );
         (result, input)
     }
@@ -19089,7 +19104,7 @@ pub(crate) mod request_tests {
             let (other, other_context) = fixture.private().await;
             let input = frontend.lease_cell_input(&context).await.unwrap().unwrap();
             let other_input = other.lease_cell_input(&other_context).await.unwrap().unwrap();
-            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", None).await;
+            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let plan = plan.ok().expect("a real input parser result after confirmed END");
             let execution = other.private_execution.as_ref().unwrap().admission.clone();
             let input = frontend.access.with_machine(context.clone(), move |session, context, _| {
@@ -19103,7 +19118,7 @@ pub(crate) mod request_tests {
                     session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope)));
                 Ok(input)
             }).await.unwrap();
-            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", None).await;
+            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let plan = plan.ok().unwrap();
             let execution = frontend.private_execution.as_ref().unwrap().admission.clone();
             let other_input = frontend.access.with_machine(context.clone(), move |session, context, _| {
@@ -19121,27 +19136,43 @@ pub(crate) mod request_tests {
             drop(other_input);
             other.wait_for_host_input_retirement_for_test(other_context, other_name).await;
 
-            // Two genuine affine parser results let one refusal consume a plan
-            // while another still owns physical custody after logical retirement.
-            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", None).await;
+            // Each refusal consumes a genuine affine parser result; the last
+            // plan independently keeps physical custody through real retirement.
+            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let plan = plan.ok().unwrap();
-            let (retained_plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", None).await;
+            let (missing_input_plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
+            let missing_input_plan = missing_input_plan.ok().unwrap();
+            let (retained_plan, mut input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let retained_plan = retained_plan.ok().unwrap();
             let input_name = input.mounted_input().binder.name.clone();
             let roots_with_input = frontend.access.with_machine(context.clone(), |session, _, _| Ok(session.persistent_roots_count())).await.unwrap();
-            drop(input);
+            input.retire_for_publication().await.unwrap();
             frontend.wait_for_host_input_retirement_for_test(context.clone(), input_name.clone()).await;
             let execution = frontend.private_execution.as_ref().unwrap().admission.clone();
-            frontend.access.with_machine(context.clone(), move |session, context, _| {
+            let input = frontend.access.with_machine(context.clone(), move |session, context, _| {
                 let scope = context.placement.lexical_scope;
                 assert!(session.current_binding_in(scope, &input_name).is_none());
                 assert_eq!(session.persistent_roots_count(), roots_with_input,
                     "retained parser plans keep physical custody without reviving the logical mount");
                 let before = (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
                     session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope));
-                assert!(matches!(session.admit_world_planned_cell_for_execution(execution, plan),
+                assert!(matches!(session.admit_world_planned_cell_with_input(execution, plan, input.write.as_ref()),
                     Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)),
-                    "a retained Some-input plan cannot execute after its actual guard is gone");
+                    "the same authentic input write must refuse after its actual mount retires");
+                assert_eq!(before, (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
+                    session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope)));
+                assert_eq!(session.persistent_roots_count(), roots_with_input);
+                Ok(input)
+            }).await.unwrap();
+            drop(input);
+            let execution = frontend.private_execution.as_ref().unwrap().admission.clone();
+            frontend.access.with_machine(context.clone(), move |session, context, _| {
+                let scope = context.placement.lexical_scope;
+                let before = (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
+                    session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope));
+                assert!(matches!(session.admit_world_planned_cell_for_execution(execution, missing_input_plan),
+                    Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)),
+                    "a Some-input plan also refuses when its caller supplies no input");
                 assert_eq!(before, (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
                     session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope)));
                 assert_eq!(session.persistent_roots_count(), roots_with_input);
@@ -19159,15 +19190,29 @@ pub(crate) mod request_tests {
             // This uses the existing runtime operand/source admission boundary;
             // no caller-built source proof or replacement PendingWrite is involved.
             let foreign = RootedWorldInputTest::new(client, 8).await;
-            let (foreign_frontend, _) = foreign.private().await;
+            let (foreign_frontend, foreign_context) = foreign.private().await;
             let foreign_world = foreign_frontend.private_execution.as_ref().unwrap().admission.compiler_world().unwrap().clone();
             let (frontend, context) = fixture.private().await;
             let input = frontend.lease_cell_input(&context).await.unwrap().unwrap();
             let name = input.mounted_input().binder.name.clone();
-            let (refused, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", Some(foreign_world)).await;
+            let (refused, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::ForeignWorld(foreign_world)).await;
             assert!(matches!(refused, Err(tidepool_runtime::session::WorldInspectionError::Runtime(
                 tidepool_runtime::RuntimeError::Session(tidepool_runtime::session::SessionError::SourceAdmission(
                     tidepool_runtime::session::SourceAdmissionError::ForeignTransaction))))));
+            drop(input);
+            frontend.wait_for_host_input_retirement_for_test(context, name).await;
+
+            let (frontend, context) = fixture.private().await;
+            let input = frontend.lease_cell_input(&context).await.unwrap().unwrap();
+            let name = input.mounted_input().binder.name.clone();
+            let (refused, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input",
+                WorldInputPlanBoundary::ForeignOriginal(foreign_context.source_dependency().clone())).await;
+            assert!(matches!(refused, Err(tidepool_runtime::session::WorldInspectionError::Runtime(
+                tidepool_runtime::RuntimeError::Session(tidepool_runtime::session::SessionError::SourceAdmission(
+                    tidepool_runtime::session::SourceAdmissionError::DifferentOriginalSource))))),
+                "a real second rooted source cannot admit this operand's original source");
+            // The source-admission owner's counter control independently proves
+            // this typed refusal precedes claims; this actor observes cleanup.
             drop(input);
             frontend.wait_for_host_input_retirement_for_test(context, name).await;
             fixture.assert_public_unchanged().await;
@@ -29949,6 +29994,7 @@ pub(crate) mod request_tests {
                         owner,
                         &world,
                         specification.clone(),
+                        None,
                     )
                 },
             )

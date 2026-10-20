@@ -33,7 +33,7 @@ a reason to preserve the finite engine while building another abstraction layer.
 
 ## Current implementation and evidence
 
-The published root checkpoint is `3c53bc547e` on
+The compiled root checkpoint is `6c289d64dd` on
 `integration/compiler-query-warm-final`. It is an intermediate integration,
 not the release candidate. The compiler service, runtime, native issuer and
 query owners are receiving further reviewed changes on their area branches.
@@ -42,6 +42,7 @@ repeated reconstruction and competing cell paths, not a process-per-cell design.
 
 | Evidence | Exact boundary | Remaining gate |
 | --- | --- | --- |
+| Joined `6c289d64dd`: toolchain, runtime, actor and host production/test consumers compile; build `32456ee8-31e8-4fc8-be03-eaf2bcb224a9` passed | Canonical source tokens, exact World owner, private operand, owner-rendered stages, Name-based demand and bounded diagnostics compile together | Counted actual query/private-input histories; compile success is not execution |
 | Root `3c53bc547e`: affected native production/test consumers compile; real v26 first-stage native case 1/1 passes | Actual parser, captured source and native issuer, confirmed END and post-END refusal | Full actor history, declarations, multiple stages and real private operand |
 | Weak association: real lost successful delivery and separately held completed-output controls pass | Installed observations do not own their runtime source/target; admitted outputs retain actual custody | Joined candidate abandonment and reload/force/recovery histories |
 | Canonical source `bba012bfd3`: four runtime/actor consumers compile, 29/29 controls pass | Source authority independent of lexical/native resource roots; source gates, per-site histories and core lifetime cases | Joined actual native contribution, parked values and force recovery |
@@ -71,6 +72,28 @@ qualification and a new Persona launch have not passed.
 | Lifecycle retirement/recovery | Unreserved publisher result crosses the real RunControl owner, then reservation/cutoff | Lost delivery before/after reserve, actual A/B registration and acknowledgements, durable B import, no unauthorized replay |
 | Query + verification | Execute semantic all-five hosted program and real private-input controls | Correct returned evidence, no effect authority inferred from row fit, unchanged public state after read-only query |
 | Engine qualification | Full syntax/history gate, legacy-path deletion audit, then frozen bundle | One production cell path, real actor execution and exact bundle metrics |
+
+Receiving work not yet included in this compiled checkpoint:
+
+- Declaration publication roots use actual exported values, instance dictionaries,
+  class defaults and pattern implementations. Runtime adoption must retain their
+  exact captured inputs, including hidden private operands, through the existing
+  declaration dependency owner.
+- A declaration delta may reveal an ancestor binding after a local shadow is
+  removed. Carry that actual winner and its retained checked row; the preceding
+  visible-name map cannot reconstruct a previously hidden winner.
+- Native installation must issue source contributions per installed program from
+  its actual imports. Distinct members of a compilation batch must not inherit
+  one another's unrelated source obligations.
+- Cold recovery must preserve the requested proof-scope snapshot and namespace
+  exactly, including an explicitly empty namespace. Narrowing materializations
+  must neither discard proof-only scopes nor widen to parent custody.
+- Scoped queries must share the held compiler source/checking owner, including
+  the same resolved native annotations before demand renaming and final checking.
+- Force retirement must block new affected admission while allowing already
+  issued transfers to settle. The final physical recapture and first stop belong
+  to one owner transition. Lost transfer ownership remains uncertain in the
+  surviving terminal owner, even after the RunControl state is destroyed.
 
 The native support owner keeps an explicit residual qualification step only when
 an existing interface-only role becomes a selected Original. A fresh-owner or

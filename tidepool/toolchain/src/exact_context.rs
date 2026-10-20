@@ -1532,6 +1532,39 @@ impl PartialEq for ExactLexicalSnapshot {
 }
 impl Eq for ExactLexicalSnapshot {}
 impl ExactLexicalSnapshot {
+    pub(crate) fn append_issued(
+        &self,
+        nodes: impl IntoIterator<Item = ExactLexicalNode>,
+    ) -> Result<Self, crate::CompileError> {
+        let mut facts = self.facts.clone();
+        let mut changed = false;
+        for mut node in nodes {
+            node.imports.sort();
+            node.imports.dedup();
+            if let Some(previous) = facts.get(&node.owner) {
+                if previous.node.as_ref() != &node {
+                    return Err(crate::CompileError::ExtractFailed(
+                        "program support changed its selected source graph".into(),
+                    ));
+                }
+                continue;
+            }
+            let owner = node.owner.clone();
+            let fact = ImmutableLexicalFactRef::new(node)
+                .map_err(|error| crate::CompileError::ExtractFailed(error.to_string()))?;
+            facts.insert(owner, fact);
+            changed = true;
+        }
+        Ok(if changed {
+            Self {
+                facts,
+                rows: Arc::new(OnceLock::new()),
+            }
+        } else {
+            self.clone()
+        })
+    }
+
     pub(crate) fn get(&self, owner: &ExactModuleIdentity) -> Option<&ExactLexicalNode> {
         self.facts.get(owner).map(|fact| fact.node.as_ref())
     }

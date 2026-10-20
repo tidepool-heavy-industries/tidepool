@@ -13,7 +13,7 @@ import Control.Monad (forM, foldM)
 import qualified Data.ByteString as BS
 import Data.Data (Data)
 import Data.Generics (everything, mkQ)
-import Data.List (intersect, nub)
+import Data.List (intersect, nub, sortOn)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -184,10 +184,12 @@ moduleInputOccurrences environment (SegmentDemandScope aliases bindings)
     Nothing -> Left (InputDemandRenameRejected (showPpr probeFlags diagnostics))
     Just result ->
       let selected = everything (++) (mkQ [] occurrence) result
+          -- Distinct resolved Names can share a presentation label. Only
+          -- repeated occurrences of the same Name select the same input fact.
           demanded = Map.fromList
-            [ (alias,(alias,binding))
+            [ (name,(alias,binding))
             | name <- selected, Just (alias,binding) <- [Map.lookup name bindings] ]
-      in Right (Map.elems demanded)
+      in Right (sortOn fst (Map.elems demanded))
   where
     occurrence :: HsExpr GhcRn -> [Name]
     occurrence (HsVar _ (L _ name)) = [name]

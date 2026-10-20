@@ -7215,6 +7215,16 @@ impl ArtifactView {
         ))
     }
 
+    /// Physical observations for an issuer that already owns exact role IDs.
+    /// These lookups do not select namespace bindings or native groups.
+    pub(crate) fn observed_payload(&self, id: &ArtifactId) -> Option<&Arc<ArtifactEntry>> {
+        self.lease.payloads.get(id)
+    }
+
+    pub(crate) fn has_observed_owner(&self, owner: &ExactModuleIdentity) -> bool {
+        self.lease.has_acquired_owner(owner)
+    }
+
     pub(crate) fn contains_namespace_artifact(&self, id: ArtifactId) -> bool {
         self.lease.selection.namespace.contains_key(&id)
     }
@@ -7941,17 +7951,36 @@ impl ArtifactView {
         if roots.iter().any(|id| !namespace.contains_key(id)) {
             return Err(failure("issued root lacks exact namespace binding"));
         }
-        let selected = graph.roots.clone();
-        let custody = graph.custody_roots.clone();
+        for (scope, requested) in &selection.snapshot().scopes {
+            let acquired =
+                self.lease.selection.scopes.get(scope).ok_or_else(|| {
+                    failure("issued selection scope is outside acquisition custody")
+                })?;
+            if acquired != requested {
+                return Err(failure(
+                    "issued selection scope proof differs from acquisition custody",
+                ));
+            }
+        }
         validate_issued_selection(&state, owned, graph)?;
         drop(state);
-        let mut retained = self
-            .lease
-            .inventory
-            .retain(selected, custody, Vec::new(), Vec::new());
-        retained.replace_namespace(&namespace);
+        // The issuer can retain proof-only scopes for recorded native offers.
+        // Graph reachability grants payload custody but cannot recreate those facts.
+        let retained = Self::new(ViewDraft {
+            roots: graph.roots.clone(),
+            selection: Arc::clone(selection.snapshot()),
+            inventory: self.lease.inventory.clone(),
+            parents: Vec::new(),
+            issuing_payloads: BTreeMap::new(),
+            materialization_parents: Vec::new(),
+            materialization: Mutex::new(BTreeMap::new()),
+        });
         let mut retained = self.retain_projected_materializations(retained)?;
-        retained.replace_namespace(&namespace);
+        // Materialization projection can infer a namespace for an empty view.
+        // Reopening preserves the issuer's exact choice, including an empty one.
+        Arc::get_mut(&mut retained.lease)
+            .expect("new issued selection lease")
+            .selection = Arc::clone(selection.snapshot());
         Ok(retained)
     }
 
@@ -8417,7 +8446,7 @@ impl ArtifactView {
                 _ => Vec::new(),
             };
             let selected_choices = selected_sources
-                .into_iter()
+                .iter()
                 .filter_map(|decisions| {
                     decisions
                         .facts
@@ -8488,6 +8517,9 @@ impl ArtifactView {
                     groups: chosen,
                 },
             );
+            for source in selected_sources {
+                input_decisions.carry_selected_from(source, owner);
+            }
         }
         timing.advance("validate_issued_merge");
         self.validate_issued_merge(other)?;
