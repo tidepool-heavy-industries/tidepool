@@ -480,7 +480,7 @@ impl PersistentSession {
         };
     }
 
-    fn is_stub_module(&self, module: SessionModule) -> bool {
+    pub(super) fn is_stub_module(&self, module: SessionModule) -> bool {
         self.stub_generations.contains(&module.gen().0)
     }
 
