@@ -8496,7 +8496,6 @@ mod module_product_tests {
                 })
                 .count()
         };
-        let mut latest = None;
         let mut constant_frontier = None;
         let observations = PathBuf::from(
             std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
@@ -8505,7 +8504,6 @@ mod module_product_tests {
         .join("world-writer-observations");
         std::fs::create_dir_all(&observations).unwrap();
         for item_count in [2, 8] {
-            drop(latest.take());
             let settled = settle_compiler_transaction_cancellable(
                 CompilerTransactionCancellation::new(),
                 |_| {},
@@ -8774,7 +8772,37 @@ mod module_product_tests {
                 .restoration()
                 .export_cold_observation_for_test(&history_observations.join("cold-final"))
                 .expect("observe same-product cold writer after predecessor owners drop");
-            latest = Some((endpoint, current));
+            let restoration = current.restoration().clone();
+            let logical = *current.logical_id();
+            drop(current);
+            let settled = settle_compiler_transaction_cancellable(
+                CompilerTransactionCancellation::new(),
+                |_| {},
+                || {
+                    crate::compiler_world::restore_world(
+                        &restoration,
+                        &endpoint,
+                        PublicModuleQuestion::structured_type(
+                            "GHC.Types".into(),
+                            InspectionNamespace::Type,
+                            "Int".into(),
+                        ),
+                    )
+                },
+            );
+            if let Err(error) = settled.action() {
+                panic!(
+                    "predecessor-free same-product cold restoration failed: {error:?}; close {:?}",
+                    settled.close()
+                );
+            }
+            assert!(matches!(settled.close(), CompilerTransactionClose::Clean));
+            let restored = settled.into_outcome().action.unwrap();
+            assert_eq!(restored.world().logical_id(), &logical);
+            assert!(matches!(
+                restored.answer(),
+                crate::compiler_world::WorldAnswer::Type { .. }
+            ));
         }
         std::fs::write(observations.join("bundle.json"), serde_json::to_vec_pretty(&serde_json::json!({
             "schema":1,"authority":false,"histories":[
@@ -8782,38 +8810,6 @@ mod module_product_tests {
                 {"directory":"history-8","initial":"initial","successors":(1..=8).map(|n|format!("delta-{n:02}")).collect::<Vec<_>>(),"same_product_cold":"cold-final"},
             ]
         })).unwrap()).unwrap();
-        let (endpoint, world) = latest.unwrap();
-        let restoration = world.restoration().clone();
-        let logical = *world.logical_id();
-        drop(world);
-        let settled = settle_compiler_transaction_cancellable(
-            CompilerTransactionCancellation::new(),
-            |_| {},
-            || {
-                crate::compiler_world::restore_world(
-                    &restoration,
-                    &endpoint,
-                    PublicModuleQuestion::structured_type(
-                        "GHC.Types".into(),
-                        InspectionNamespace::Type,
-                        "Int".into(),
-                    ),
-                )
-            },
-        );
-        if let Err(error) = settled.action() {
-            panic!(
-                "predecessor-free same-product cold restoration failed: {error:?}; close {:?}",
-                settled.close()
-            );
-        }
-        assert!(matches!(settled.close(), CompilerTransactionClose::Clean));
-        let restored = settled.into_outcome().action.unwrap();
-        assert_eq!(restored.world().logical_id(), &logical);
-        assert!(matches!(
-            restored.answer(),
-            crate::compiler_world::WorldAnswer::Type { .. }
-        ));
     }
 
     #[test]
