@@ -1290,17 +1290,6 @@ runtime_executable(
 )
 
 rust_compile_fail(
-    name = "compile_fail_native_group_issuer_fields_are_private",
-    source = "tests/compile_fail/native_group_issuer_fields_are_private.rs",
-    control = "tests/compile_pass/native_group_issuer_fields_are_private.rs",
-    expected = "tests/compile_fail/native_group_issuer_fields_are_private.stderr",
-    dependencies = {
-        "tidepool_toolchain": ":tidepool_toolchain",
-    },
-    visibility = ["PUBLIC"],
-)
-
-rust_compile_fail(
     name = "compile_fail_checked_cell_request_digest_is_issued",
     source = "tests/compile_fail/checked_cell_request_digest_is_issued.rs",
     control = "tests/compile_pass/checked_cell_request_digest_is_issued.rs",
@@ -1316,6 +1305,17 @@ rust_compile_fail(
     source = "tests/compile_fail/checked_cell_request_inventory_is_issued.rs",
     control = "tests/compile_pass/checked_cell_request_inventory_is_issued.rs",
     expected = "tests/compile_fail/checked_cell_request_inventory_is_issued.stderr",
+    dependencies = {
+        "tidepool_toolchain": ":tidepool_toolchain",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_native_group_issuer_fields_are_private",
+    source = "tests/compile_fail/native_group_issuer_fields_are_private.rs",
+    control = "tests/compile_pass/native_group_issuer_fields_are_private.rs",
+    expected = "tests/compile_fail/native_group_issuer_fields_are_private.stderr",
     dependencies = {
         "tidepool_toolchain": ":tidepool_toolchain",
     },
