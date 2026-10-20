@@ -78,6 +78,7 @@ pub(crate) enum CompilerQuery {
     RowFit {
         expected_scope: Option<ScopeProvenance>,
         identifier: IdentifierRef,
+        module: RowFitModule,
     },
     TypeOfExpression {
         expected_scope: Option<ScopeProvenance>,
@@ -90,6 +91,20 @@ pub(crate) enum CompilerQuery {
 }
 
 impl CompilerQuery {
+    /// Admit one `rowFit` reference: parse the wire's defining-module string
+    /// exactly once. Every later decision consumes the resolved value.
+    pub(super) fn row_fit(
+        expected_scope: Option<ScopeProvenance>,
+        identifier: IdentifierRef,
+    ) -> Self {
+        let module = RowFitModule::from_wire(&identifier.module);
+        Self::RowFit {
+            expected_scope,
+            identifier,
+            module,
+        }
+    }
+
     pub(super) fn operation(&self) -> &'static str {
         match self {
             Self::CurrentScopeView => "currentScopeView",
@@ -121,8 +136,8 @@ impl CompilerQuery {
     pub(super) fn plans_compiler_work(&self, live: &LiveSessionModules) -> bool {
         match self {
             Self::CurrentScopeView => false,
-            Self::RowFit { identifier, .. } => {
-                !matches!(row_fit_target(identifier, live), RowFitTarget::StaleSessionModule)
+            Self::RowFit { module, .. } => {
+                !matches!(row_fit_target(module, live), RowFitTarget::StaleSessionModule)
             }
             _ => true,
         }
@@ -181,13 +196,13 @@ impl CompilerQuery {
                     budget: QUERY_RESULT_LIMIT,
                 },
             ]),
-            Self::RowFit { identifier, .. } => match row_fit_target(identifier, live) {
+            Self::RowFit { identifier, module, .. } => match row_fit_target(module, live) {
                 RowFitTarget::CurrentScope => {
                     CompilerPlan::Queries(vec![InspectionQuery::ScopeBrowse])
                 }
                 RowFitTarget::Module(module) => CompilerPlan::Queries(vec![
                     InspectionQuery::Browse {
-                        module,
+                        module: module.as_str().to_owned(),
                         expanded: true,
                     },
                 ]),
@@ -262,13 +277,86 @@ pub(super) enum CompilerPlan {
     Queries(Vec<InspectionQuery>),
 }
 
+/// A `rowFit` reference's defining module, resolved once from the wire's
+/// `module: String`. The wire shape stays a string; only this boundary decides
+/// what the spelling means.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DefiningModule {
+    /// The executing scope: an empty wire module names a local binder.
+    Local,
+    /// A parseable `Tidepool.Session.*` module. Whether this view still carries
+    /// that exact generation is decided against the held view.
+    Session(tidepool_repr::SessionModule),
+    /// A public module name. Reserved session spellings cannot be constructed.
+    Public(PublicModuleName),
+}
+
+/// A public module name that is not a reserved session spelling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PublicModuleName(String);
+
+impl PublicModuleName {
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A reserved `Tidepool.Session.*` spelling that is not a parseable session
+/// module. It names no module that can exist, so it is a stale session
+/// reference rather than a public module to browse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UnparseableSessionModule;
+
+/// The admitted form of a `rowFit` reference's defining module.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RowFitModule {
+    Defining(DefiningModule),
+    UnparseableSession(UnparseableSessionModule),
+}
+
+impl RowFitModule {
+    fn from_wire(module: &str) -> Self {
+        match DefiningModule::from_wire(module) {
+            Ok(defining) => Self::Defining(defining),
+            Err(unparseable) => Self::UnparseableSession(unparseable),
+        }
+    }
+
+    /// The public module named by this reference, if any.
+    fn public_module(&self) -> Option<&PublicModuleName> {
+        match self {
+            Self::Defining(DefiningModule::Public(module)) => Some(module),
+            Self::Defining(DefiningModule::Local | DefiningModule::Session(_))
+            | Self::UnparseableSession(_) => None,
+        }
+    }
+}
+
+impl DefiningModule {
+    fn from_wire(module: &str) -> Result<Self, UnparseableSessionModule> {
+        if module.is_empty() {
+            return Ok(Self::Local);
+        }
+        match tidepool_repr::SessionModule::from_module_name(module) {
+            Some(session) => Ok(Self::Session(session)),
+            // A reserved spelling that does not parse names no module that
+            // can exist; it must never fall through to a public browse.
+            None if tidepool_repr::SessionModule::is_reserved_name(module) => {
+                Err(UnparseableSessionModule)
+            }
+            None => Ok(Self::Public(PublicModuleName(module.to_owned()))),
+        }
+    }
+}
+
 /// Where a `rowFit` reference resolves.
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum RowFitTarget {
     /// A binding in the executing scope: no defining module, or a module this
     /// view still carries.
     CurrentScope,
     /// A public module's exports.
-    Module(String),
+    Module(PublicModuleName),
     /// A session module this view no longer carries. Its spelling may be
     /// reused by a newer generation, so the reference must not read the
     /// current binding of the same name.
@@ -296,19 +384,17 @@ enum RowFitTarget {
 /// enumeration spike ruled a non-compiling `rowFit` out; replacing this with a
 /// keyed availability query is the follow-up that removes the last unbounded
 /// compiler read.
-fn row_fit_target(identifier: &IdentifierRef, live: &LiveSessionModules) -> RowFitTarget {
-    if identifier.module.is_empty() {
-        return RowFitTarget::CurrentScope;
-    }
-    match tidepool_repr::SessionModule::from_module_name(&identifier.module) {
-        Some(module) if live.serves(module) => RowFitTarget::CurrentScope,
-        Some(_) => RowFitTarget::StaleSessionModule,
-        // A reserved spelling that does not parse names no module that can
-        // exist, so it is stale rather than a public module to browse.
-        None if tidepool_repr::SessionModule::is_reserved_name(&identifier.module) => {
-            RowFitTarget::StaleSessionModule
+fn row_fit_target(module: &RowFitModule, live: &LiveSessionModules) -> RowFitTarget {
+    match module {
+        RowFitModule::Defining(DefiningModule::Local) => RowFitTarget::CurrentScope,
+        RowFitModule::Defining(DefiningModule::Session(session)) if live.serves(*session) => {
+            RowFitTarget::CurrentScope
         }
-        None => RowFitTarget::Module(identifier.module.clone()),
+        RowFitModule::Defining(DefiningModule::Session(_))
+        | RowFitModule::UnparseableSession(_) => RowFitTarget::StaleSessionModule,
+        RowFitModule::Defining(DefiningModule::Public(module)) => {
+            RowFitTarget::Module(module.clone())
+        }
     }
 }
 
@@ -683,12 +769,10 @@ fn refusal_query(query: &CompilerQuery, before: &ScopeProvenance, name: &str) ->
         CompilerQuery::ModuleExports { module, .. } => NameScope::PublicModule(module.clone()),
         // An empty module is a local binder, and a reserved session module is
         // private: neither is a public module scope to name in the refusal.
-        CompilerQuery::RowFit { identifier, .. }
-            if !identifier.module.is_empty()
-                && !tidepool_repr::SessionModule::is_reserved_name(&identifier.module) =>
-        {
-            NameScope::PublicModule(identifier.module.clone())
-        }
+        CompilerQuery::RowFit { module, .. } => match module.public_module() {
+            Some(module) => NameScope::PublicModule(module.as_str().to_owned()),
+            None => before.scope.clone(),
+        },
         _ => before.scope.clone(),
     };
     let namespace = match query {
@@ -1310,6 +1394,10 @@ mod tests {
         }
     }
 
+    fn row_fit_module(module: &str) -> RowFitModule {
+        RowFitModule::from_wire(module)
+    }
+
     fn typed_identifier(namespace: IdentifierNamespace) -> IdentifierRef {
         IdentifierRef {
             module: "Data.Thing".into(),
@@ -1409,10 +1497,7 @@ mod tests {
                 expected_scope: expected.clone(),
                 module: "Data.Thing".into(),
             },
-            CompilerQuery::RowFit {
-                expected_scope: expected.clone(),
-                identifier: identifier("Data.Thing", "thing"),
-            },
+            CompilerQuery::row_fit(expected.clone(), identifier("Data.Thing", "thing")),
             CompilerQuery::TypeOfExpression {
                 expected_scope: expected.clone(),
                 expression: "1 + 1".into(),
@@ -1483,10 +1568,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier: identifier("Data.Thing", "thing")
-            }
+            CompilerQuery::row_fit(None, identifier("Data.Thing", "thing"))
             .inspection_queries(),
             vec![InspectionQuery::Browse {
                 module: "Data.Thing".into(),
@@ -1494,10 +1576,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier: identifier("Tidepool.Session.Val.G3", "x")
-            }
+            CompilerQuery::row_fit(None, identifier("Tidepool.Session.Val.G3", "x"))
             .inspection_queries(),
             vec![InspectionQuery::ScopeBrowse]
         );
@@ -1565,10 +1644,7 @@ mod tests {
         // documented exception: its wire answer is one `Fit`, so it keeps the
         // unbounded enumeration until a keyed availability query lands.
         assert_eq!(
-            CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier: identifier("Data.Thing", "thing")
-            }
+            CompilerQuery::row_fit(None, identifier("Data.Thing", "thing"))
             .inspection_queries(),
             vec![InspectionQuery::Browse {
                 module: "Data.Thing".into(),
@@ -1576,10 +1652,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier: identifier("Tidepool.Session.Val.G3", "x")
-            }
+            CompilerQuery::row_fit(None, identifier("Tidepool.Session.Val.G3", "x"))
             .inspection_queries(),
             vec![InspectionQuery::ScopeBrowse]
         );
@@ -1588,10 +1661,7 @@ mod tests {
     #[test]
     fn row_fit_resolves_local_and_live_session_references() {
         let current_scope = |identifier| {
-            CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier,
-            }
+            CompilerQuery::row_fit(None, identifier)
             .inspection_queries()
         };
         // A binder with no defining module is published as the empty module.
@@ -1630,10 +1700,7 @@ mod tests {
             // A reserved spelling that names no module at all.
             "Tidepool.Session.Lib.G",
         ] {
-            let query = CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier: identifier(stale, "local"),
-            };
+            let query = CompilerQuery::row_fit(None, identifier(stale, "local"));
             assert!(
                 !query.plans_compiler_work(&live()),
                 "{stale}: a stale reference must not enumerate the current scope"
@@ -1655,13 +1722,10 @@ mod tests {
         // The namespace is never widened to the current scope's same spelling:
         // a type query cannot read a value's availability.
         let asked = typed_identifier(IdentifierNamespace::Type);
-        let query = CompilerQuery::RowFit {
-            expected_scope: None,
-            identifier: IdentifierRef {
+        let query = CompilerQuery::row_fit(None, IdentifierRef {
                 module: "Tidepool.Session.Lib.G3".into(),
                 ..asked
-            },
-        };
+            });
         assert!(!query.plans_compiler_work(&live()));
     }
 
@@ -1670,53 +1734,75 @@ mod tests {
         let view = live();
         // Empty defining module: a local binder in the executing scope.
         assert!(matches!(
-            row_fit_target(&identifier("", "local"), &view),
+            row_fit_target(&row_fit_module(""), &view),
             RowFitTarget::CurrentScope
         ));
         // The live declaration generation and a retained value generation.
         assert!(matches!(
-            row_fit_target(&identifier("Tidepool.Session.Lib.G4", "local"), &view),
+            row_fit_target(&row_fit_module("Tidepool.Session.Lib.G4"), &view),
             RowFitTarget::CurrentScope
         ));
         assert!(matches!(
-            row_fit_target(&identifier("Tidepool.Session.Val.G3", "local"), &view),
+            row_fit_target(&row_fit_module("Tidepool.Session.Val.G3"), &view),
             RowFitTarget::CurrentScope
         ));
         // A replaced declaration generation and a reserved spelling that names
         // no module: held-state unknown, never a current-scope read.
         assert!(matches!(
-            row_fit_target(&identifier("Tidepool.Session.Lib.G3", "local"), &view),
+            row_fit_target(&row_fit_module("Tidepool.Session.Lib.G3"), &view),
             RowFitTarget::StaleSessionModule
         ));
         assert!(matches!(
-            row_fit_target(&identifier("Tidepool.Session.Lib.G", "local"), &view),
+            row_fit_target(&row_fit_module("Tidepool.Session.Lib.G"), &view),
             RowFitTarget::StaleSessionModule
         ));
         // A public module keeps its keyed owner read.
         assert!(
-            matches!(row_fit_target(&identifier("Data.Thing", "thing"), &view),
-                RowFitTarget::Module(module) if module == "Data.Thing")
+            matches!(row_fit_target(&row_fit_module("Data.Thing"), &view),
+                RowFitTarget::Module(module) if module.as_str() == "Data.Thing")
         );
+    }
+
+    #[test]
+    fn row_fit_reference_admits_exactly_one_module_shape() {
+        assert_eq!(DefiningModule::from_wire(""), Ok(DefiningModule::Local));
+        assert_eq!(
+            DefiningModule::from_wire("Tidepool.Session.Lib.G4"),
+            Ok(DefiningModule::Session(
+                SessionModule::from_module_name("Tidepool.Session.Lib.G4").unwrap()
+            ))
+        );
+        assert!(matches!(
+            DefiningModule::from_wire("Data.Thing"),
+            Ok(DefiningModule::Public(module)) if module.as_str() == "Data.Thing"
+        ));
+        // Reserved spellings that name no module never become public modules.
+        for spelling in ["Tidepool.Session.", "Tidepool.Session.Lib.G"] {
+            assert_eq!(
+                DefiningModule::from_wire(spelling),
+                Err(UnparseableSessionModule),
+                "{spelling}"
+            );
+            assert_eq!(
+                row_fit_target(&row_fit_module(spelling), &live()),
+                RowFitTarget::StaleSessionModule,
+                "{spelling}"
+            );
+        }
     }
 
     #[test]
     fn row_fit_refusals_name_the_executing_scope_for_local_references() {
         let view = provenance(4, "world");
         for module in ["", "Tidepool.Session.Lib.G3"] {
-            let query = CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier: identifier(module, "local"),
-            };
+            let query = CompilerQuery::row_fit(None, identifier(module, "local"));
             let refusal = refusal_query(&query, &view, "local");
             assert_eq!(refusal.scope, NameScope::Current, "{module:?}");
             assert_eq!(refusal.namespace, NameNamespace::Value, "{module:?}");
             assert_eq!(refusal.name, "local");
         }
         // Public modules keep their named scope in the refusal payload.
-        let query = CompilerQuery::RowFit {
-            expected_scope: None,
-            identifier: identifier("Data.Thing", "thing"),
-        };
+        let query = CompilerQuery::row_fit(None, identifier("Data.Thing", "thing"));
         assert_eq!(
             refusal_query(&query, &view, "thing").scope,
             NameScope::PublicModule("Data.Thing".into())
@@ -2019,10 +2105,7 @@ mod tests {
         let entry_view = provenance(7, "world-a");
         let requested = identifier("Data.Thing", "thing");
         let answer = compiler_query_answer(
-            &CompilerQuery::RowFit {
-                expected_scope: Some(entry_view.clone()),
-                identifier: requested.clone(),
-            },
+            &CompilerQuery::row_fit(Some(entry_view.clone()), requested.clone()),
             entry_view.clone(),
             entry_view.clone(),
             BatchOutcome::Answer(Ok(browse(vec![entry(
@@ -2057,10 +2140,7 @@ mod tests {
             (InspectionAvailability::Unknown, FitAvailability::Unknown),
         ] {
             let answer = compiler_query_answer(
-                &CompilerQuery::RowFit {
-                    expected_scope: None,
-                    identifier: requested.clone(),
-                },
+                &CompilerQuery::row_fit(None, requested.clone()),
                 provenance(1, "world"),
                 provenance(1, "world"),
                 BatchOutcome::Answer(Ok(browse(vec![entry(
@@ -2079,10 +2159,7 @@ mod tests {
     #[test]
     fn row_fit_refuses_a_same_spelled_name_from_another_namespace() {
         let answer = compiler_query_answer(
-            &CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier: typed_identifier(IdentifierNamespace::Type),
-            },
+            &CompilerQuery::row_fit(None, typed_identifier(IdentifierNamespace::Type)),
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(browse(vec![entry(
@@ -2102,10 +2179,7 @@ mod tests {
     fn row_fit_matches_identity_namespace_not_the_rendered_kind() {
         let fit = |kind: &str, identity_namespace: IdentifierNamespace| {
             compiler_query_answer(
-                &CompilerQuery::RowFit {
-                    expected_scope: None,
-                    identifier: typed_identifier(IdentifierNamespace::Type),
-                },
+                &CompilerQuery::row_fit(None, typed_identifier(IdentifierNamespace::Type)),
                 provenance(1, "world"),
                 provenance(1, "world"),
                 BatchOutcome::Answer(Ok(browse(vec![entry_with(
@@ -2146,10 +2220,7 @@ mod tests {
         };
         let answer = |result| {
             compiler_query_answer(
-                &CompilerQuery::RowFit {
-                    expected_scope: None,
-                    identifier: requested.clone(),
-                },
+                &CompilerQuery::row_fit(None, requested.clone()),
                 provenance(1, "world"),
                 provenance(1, "world"),
                 BatchOutcome::Answer(Ok(result)),
@@ -2175,10 +2246,7 @@ mod tests {
     #[test]
     fn missing_row_fit_entry_is_unknown_not_unavailable() {
         let answer = compiler_query_answer(
-            &CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier: identifier("Data.Thing", "absent"),
-            },
+            &CompilerQuery::row_fit(None, identifier("Data.Thing", "absent")),
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(browse(vec![entry(
@@ -2211,10 +2279,7 @@ mod tests {
             InspectionAvailability::Unavailable,
         );
         let answer = compiler_query_answer(
-            &CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier: typed_identifier(IdentifierNamespace::Type),
-            },
+            &CompilerQuery::row_fit(None, typed_identifier(IdentifierNamespace::Type)),
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(browse(vec![constructor, ty]))),
@@ -2229,10 +2294,7 @@ mod tests {
     #[test]
     fn row_fit_distinguishes_missing_from_unknown_module() {
         let missing = compiler_query_answer(
-            &CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier: identifier("Data.Thing", "absent"),
-            },
+            &CompilerQuery::row_fit(None, identifier("Data.Thing", "absent")),
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(browse(Vec::new()))),
@@ -2244,10 +2306,7 @@ mod tests {
         ));
 
         let unknown_module = compiler_query_answer(
-            &CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier: identifier("Data.Missing", "thing"),
-            },
+            &CompilerQuery::row_fit(None, identifier("Data.Missing", "thing")),
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(InspectionResult::ModuleNotFound {
@@ -2272,10 +2331,7 @@ mod tests {
             InspectionAvailability::Unavailable,
         );
         let answer = compiler_query_answer(
-            &CompilerQuery::RowFit {
-                expected_scope: None,
-                identifier: identifier("Data.Thing", "thing"),
-            },
+            &CompilerQuery::row_fit(None, identifier("Data.Thing", "thing")),
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(browse(vec![reexport]))),

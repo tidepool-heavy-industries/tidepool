@@ -10900,17 +10900,17 @@ where
                         ),
                     ) => Ok(ResidentActorBoundary::CompilerQuery {
                         continuation: hole,
-                        query: compiler_query::CompilerQuery::RowFit {
-                            expected_scope: compiler_query::expected_scope_from_value(
+                        query: compiler_query::CompilerQuery::row_fit(
+                            compiler_query::expected_scope_from_value(
                                 &expected_scope,
                                 session.data_con_table(),
                             )?,
-                            identifier: compiler_query::IntrospectionIdentifier::from_value(
+                            compiler_query::IntrospectionIdentifier::from_value(
                                 &identifier,
                                 session.data_con_table(),
                             )?
                             .into(),
-                        },
+                        ),
                     }),
                     ResidentRequest::Introspection(
                         crate::generated::introspection::IntrospectionReq::TypeOfExpression(
