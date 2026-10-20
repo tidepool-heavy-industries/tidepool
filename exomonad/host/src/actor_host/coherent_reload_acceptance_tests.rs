@@ -68,6 +68,7 @@ struct GatedSourceLayers {
     owner: exomonad_actor::ActorSourceLayerResolver,
     gate: Arc<ReloadGate>,
     observe_gate: Option<Arc<ReloadGate>>,
+    captured_gate: Option<Arc<ReloadGate>>,
 }
 impl exomonad_actor::SourceInspection for GatedSourceLayers {
     fn read_from(
@@ -194,7 +195,11 @@ impl exomonad_actor::ActorSourceLayers for GatedSourceLayers {
     {
         self.gate.staged.fetch_add(1, Ordering::SeqCst);
         self.gate.wait_if_armed();
-        self.owner.clone().stage_reload(actor, source, checks)
+        let staged = self.owner.clone().stage_reload(actor, source, checks)?;
+        if let Some(gate) = &self.captured_gate {
+            gate.wait_if_armed();
+        }
+        Ok(staged)
     }
 }
 
@@ -341,6 +346,10 @@ fn configure_workshop_inventory(
                     include_str!("fixtures/coherent_reload_work_b.hs"),
                 ),
                 (
+                    "work-c.txt",
+                    include_str!("fixtures/coherent_reload_work_c.hs"),
+                ),
+                (
                     "work-invalid.txt",
                     include_str!("fixtures/coherent_reload_work_invalid.hs"),
                 ),
@@ -385,6 +394,7 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                 owner,
                 gate: Default::default(),
                 observe_gate: Some(observe_gate.clone()),
+                captured_gate: None,
             }) as exomonad_actor::ActorSourceLayerResolver
         })
     };
@@ -651,7 +661,7 @@ async fn authored_cell(
         )
         .await
         .unwrap();
-    if id == "use-b" {
+    if matches!(id, "use-b" | "execute-frozen-b") {
         assert_use_b_with_constituents(host, &next.settled_output(id));
     } else {
         assert_true_page(host, &next.settled_output(id));
@@ -766,6 +776,146 @@ async fn standard_reload_retains_complete_large_source_receipts_after_publicatio
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn staged_reload_publishes_frozen_b_and_executes_it_after_disk_moves_to_c() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let judgments = Arc::new(UnexpectedJudgment(AtomicUsize::new(0)));
+    let captured_gate = Arc::new(ReloadGate::default());
+    let transform = {
+        let captured_gate = captured_gate.clone();
+        Arc::new(move |owner| {
+            Arc::new(GatedSourceLayers {
+                owner,
+                gate: Default::default(),
+                observe_gate: None,
+                captured_gate: Some(captured_gate.clone()),
+            }) as exomonad_actor::ActorSourceLayerResolver
+        })
+    };
+    let host = HostedTestRuntime::start_configured_with_source_layers(
+        &settings,
+        &provider,
+        |config| {
+            configure_workshop(
+                config,
+                judgments.clone(),
+                Some(include_str!("fixtures/sync_reload_spec_a.hs")),
+            );
+        },
+        transform,
+    )
+    .await
+    .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            let _release_on_failure = ReleaseReloadGate(captured_gate.clone());
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = VecDeque::new();
+            host.input("Publish the captured draft, even if another edit arrives.")
+                .await
+                .unwrap();
+            let round = host
+                .while_host_running(next_hosted_script_round(&mut requests, &mut pending, &root))
+                .await
+                .unwrap();
+            let round = authored_cell(
+                host,
+                &mut requests,
+                &mut pending,
+                &root,
+                round,
+                "bind-a",
+                include_str!("fixtures/coherent_reload_bind_a.hs"),
+            )
+            .await;
+            let durable_a = selected_root_generation(host).await;
+            let authored = host.context.config.workspace.join(".exomonad");
+            std::fs::write(
+                authored.join("Project/Work.hs"),
+                include_str!("fixtures/coherent_reload_work_b.hs"),
+            )
+            .unwrap();
+            std::fs::write(
+                authored.join("prompts/agent.md"),
+                include_str!("fixtures/coherent_reload_prompt_b.md"),
+            )
+            .unwrap();
+            captured_gate.arm();
+            let operation = round.operation("frozen-b");
+            round.function("frozen-b", "apply_draft", serde_json::json!({}));
+            host.while_operation_succeeds(&operation, captured_gate.entered.notified())
+                .await
+                .unwrap();
+            // stage_reload has returned the actual immutable B product to the
+            // delegating owner. Changing the draft cannot replace that product.
+            std::fs::write(
+                authored.join("Project/Work.hs"),
+                include_str!("fixtures/coherent_reload_work_c.hs"),
+            )
+            .unwrap();
+            std::fs::write(authored.join("prompts/agent.md"), "Unpublished draft C.\n").unwrap();
+            captured_gate.release();
+            let round = host
+                .while_operation_succeeds(
+                    &operation,
+                    next_hosted_script_round(&mut requests, &mut pending, &root),
+                )
+                .await
+                .unwrap();
+            let receipt = round.settled_output("frozen-b");
+            assert_reload_tool(&receipt, "ReloadRetirement");
+            assert_reload_disposition(
+                &receipt,
+                tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
+            );
+            let contents = &receipt["items"][0]["value"]["Right"]["contents"];
+            assert_eq!(
+                contents["reloadRetirementState"]["tag"], "ReloadBPublished",
+                "{receipt}"
+            );
+            assert_eq!(
+                contents["reloadOperationalSettlement"]["tag"], "ReloadOperationalSettled",
+                "{receipt}"
+            );
+            let durable_b = selected_root_generation(host).await;
+            assert_ne!(durable_b, durable_a);
+            assert!(round
+                .request
+                .instructions
+                .contains(include_str!("fixtures/coherent_reload_prompt_b.md")));
+            assert!(!round.request.instructions.contains("Unpublished draft C."));
+            let current = host
+                .context
+                .observer
+                .installation(host.context.actor.identity())
+                .await;
+            let missing_a =
+                super::tests::dispatch_haskell_script(current.policy.as_ref(), "display aOnly")
+                    .await;
+            assert_eq!(
+                missing_a["status"], "rejected",
+                "B does not inherit A notebook bindings: {missing_a}"
+            );
+            let round = authored_cell(
+                host,
+                &mut requests,
+                &mut pending,
+                &root,
+                round,
+                "execute-frozen-b",
+                include_str!("fixtures/coherent_reload_frozen_b.hs"),
+            )
+            .await;
+            assert_eq!(selected_root_generation(host).await, durable_b);
+            assert_eq!(judgments.0.load(Ordering::SeqCst), 0);
+            round.finish();
+        })
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn unsupported_force_preserves_the_original_generation_for_a_later_default_reload() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);
@@ -779,6 +929,7 @@ async fn unsupported_force_preserves_the_original_generation_for_a_later_default
                 owner,
                 gate: gate.clone(),
                 observe_gate: None,
+                captured_gate: None,
             })
         })
     };
@@ -903,6 +1054,7 @@ async fn authored_sync_reload_publishes_an_opted_in_surface_and_waits_for_settle
                 owner,
                 gate: gate.clone(),
                 observe_gate: None,
+                captured_gate: None,
             })
         })
     };

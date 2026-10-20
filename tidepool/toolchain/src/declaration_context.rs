@@ -616,6 +616,14 @@ impl CompletedNativeProductAvailability {
     }
 }
 
+/// Completed proofs retain their exact custody without issuing compiler roles.
+/// The caller keeps the source selection's namespace and demand decisions.
+struct CompletedRequestNativeAvailability {
+    artifacts: ArtifactView,
+    native_availability: RequestNativeAvailability,
+    native_offers: Vec<crate::artifact_inventory::IssuedNativeOffer>,
+}
+
 /// Consumed at the producer's completion boundary. Only `inputs` survives it;
 /// current products retain their individual coissued root receipt.
 struct NormalizedOriginalCompilerInputs {
@@ -882,7 +890,7 @@ impl OriginalCompilerInputs {
             "products.native_selection",
             "projection",
         );
-        let mut projection = selection
+        let projection = selection
             .compiler_projection(artifacts)
             .map_err(compiler_evidence_failure)?;
         timing.advance("continuation_rows");
@@ -938,7 +946,6 @@ impl OriginalCompilerInputs {
                 .merge(&issued.native_availability)?
                 .into_rows();
             native_offers.extend(issued.native_offers);
-            projection = issued.projection;
             issued.artifacts
         } else {
             artifacts.clone()
@@ -982,7 +989,7 @@ impl OriginalCompilerInputs {
         baseline: &CompilerInputProjection,
         producer_sha256: [u8; 32],
         completed: CompletedRequestNativeProducts<'_>,
-    ) -> Result<Self, CompileError> {
+    ) -> Result<CompletedRequestNativeAvailability, CompileError> {
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "products.complete_native_availability",
             "projection",
@@ -1060,16 +1067,14 @@ impl OriginalCompilerInputs {
         timing.advance("normalize_rows");
         let (native_availability, native_offers) =
             RequestNativeAvailability::issue_checked_fragment(&effective, &artifacts, validated)?;
+        // The effective Original roles exist only to validate fresh body proofs.
+        // Transfer those proofs back to the receiving selection without importing
+        // the temporary namespace or changing its executable roots.
+        let artifacts = inventory.retain_issued_offer_custody(native_offers.iter().cloned())?;
+        let native_availability = native_availability.for_compiler_roles(baseline, &artifacts)?;
         timing.finish(true);
-        Ok(Self {
-            native_fact_base: completed.continuation.selection.native_fact_base().cloned(),
+        Ok(CompletedRequestNativeAvailability {
             native_availability,
-            demand: OriginalInputDemand::Issued(
-                crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
-                    completed.continuation.selection, &effective,
-                )?,
-            ),
-            projection: effective,
             artifacts,
             native_offers,
         })

@@ -3,8 +3,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v27";
-const MAGIC: &[u8; 8] = b"TPREQ027";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v28";
+const MAGIC: &[u8; 8] = b"TPREQ028";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -12,6 +12,70 @@ const MAGIC: &[u8; 8] = b"TPREQ027";
 /// a resolved worker's before ever sending it a real request. Mirrored in
 /// `bridge/haskell/app/Main.hs`'s argument handling.
 pub(crate) const PRINT_WORKER_REQUEST_FLAG: &str = "--print-worker-request-flag";
+
+/// A worker-issued accelerator identity. Parsing authenticates its grammar,
+/// never residency, World custody, or execution authority. Placement metadata
+/// stays outside this value and outside semantic request correlation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldRealizationRef {
+    encoded: Arc<str>,
+    instance: [u8; 32],
+    unique: u64,
+}
+
+impl WorldRealizationRef {
+    pub const MAX_ENCODED_LEN: usize = 64 + 1 + 20;
+
+    pub fn parse(value: &str) -> Result<Self, ProtocolError> {
+        if !(66..=Self::MAX_ENCODED_LEN).contains(&value.len()) || value.as_bytes()[64] != b'.' {
+            return Err(ProtocolError::InvalidExactInputs);
+        }
+        let (nonce, serial) = value.split_at(64);
+        let serial = &serial[1..];
+        let mut instance = [0; 32];
+        let hex = |byte| match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            _ => Err(ProtocolError::InvalidExactInputs),
+        };
+        for (result, pair) in instance.iter_mut().zip(nonce.as_bytes().chunks_exact(2)) {
+            *result = hex(pair[0])? * 16 + hex(pair[1])?;
+        }
+        let unique = serial
+            .parse::<u64>()
+            .map_err(|_| ProtocolError::InvalidExactInputs)?;
+        if unique.to_string() != serial {
+            return Err(ProtocolError::InvalidExactInputs);
+        }
+        Ok(Self {
+            encoded: Arc::from(value),
+            instance,
+            unique,
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.encoded
+    }
+    pub fn instance(&self) -> &[u8; 32] {
+        &self.instance
+    }
+    pub fn unique(&self) -> u64 {
+        self.unique
+    }
+
+    /// A location can guide placement only when the actual BEGIN worker
+    /// matches the instance which issued this response reference.
+    pub fn matches_location(&self, location: &crate::CompilerWorkerLocation) -> bool {
+        &self.instance == location.instance()
+    }
+}
+
+impl AsRef<OsStr> for WorldRealizationRef {
+    fn as_ref(&self) -> &OsStr {
+        OsStr::new(self.as_str())
+    }
+}
 
 /// Transport data only: the host and compiler owners authenticate these references.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,12 +86,12 @@ pub struct ExactInputsRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExactInputsAcquisition {
-    Resident(String),
+    Resident(WorldRealizationRef),
     /// Strict cold-world descriptor; input descriptors retain their existing owner.
     Complete(PathBuf),
     Successor {
         predecessor: String,
-        realization: String,
+        realization: WorldRealizationRef,
         descriptor: PathBuf,
     },
 }
@@ -37,17 +101,13 @@ impl ExactInputsRequest {
         let valid = |value: &str| !value.is_empty() && !value.contains('\0');
         valid_world_identity(&self.root)
             && match &self.acquisition {
-                ExactInputsAcquisition::Resident(reference) => valid(reference),
+                ExactInputsAcquisition::Resident(_) => true,
                 ExactInputsAcquisition::Complete(path) => path.to_str().is_some_and(valid),
                 ExactInputsAcquisition::Successor {
                     predecessor,
-                    realization,
+                    realization: _,
                     descriptor,
-                } => {
-                    valid_world_identity(predecessor)
-                        && valid(realization)
-                        && descriptor.to_str().is_some_and(valid)
-                }
+                } => valid_world_identity(predecessor) && descriptor.to_str().is_some_and(valid),
             }
     }
 }
@@ -64,11 +124,21 @@ pub enum ExactInputsRejection {
 pub enum EnsureExactInputsOutcome {
     Ready {
         world: String,
-        realization: String,
+        realization: WorldRealizationRef,
         residency: WorldResidency,
     },
-    NeedsAcquisition(String),
+    NeedsAcquisition {
+        world: String,
+        reason: WorldAcquisitionMiss,
+    },
     Rejected(ExactInputsRejection),
+}
+
+/// A failed lookup of an issued reference. It does not assert an eviction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldAcquisitionMiss {
+    NotResidentOnThisWorker,
+    DifferentWorker,
 }
 
 /// Optional storage observed at admission, never a residency lease.
@@ -88,7 +158,7 @@ pub enum WorldNonRetentionReason {
 
 impl EnsureExactInputsOutcome {
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        if bytes.get(..8) != Some(b"TPEXO003") {
+        if bytes.get(..8) != Some(b"TPEXO004") {
             return Err(ProtocolError::InvalidHeader);
         }
         let mut decoder = Decoder { bytes, cursor: 8 };
@@ -107,16 +177,19 @@ impl EnsureExactInputsOutcome {
                         if required_bytes <= limit_bytes {
                             return Err(ProtocolError::InvalidExactInputs);
                         }
-                        WorldResidency::ActiveOnly(WorldNonRetentionReason::StorageAllowanceExceeded {
-                            required_bytes, limit_bytes,
-                        })
-                    },
+                        WorldResidency::ActiveOnly(
+                            WorldNonRetentionReason::StorageAllowanceExceeded {
+                                required_bytes,
+                                limit_bytes,
+                            },
+                        )
+                    }
                     _ => return Err(ProtocolError::InvalidExactInputs),
                 };
                 decoder.finish()?;
                 Ok(Self::Ready {
                     world: world.to_owned(),
-                    realization: realization.to_owned(),
+                    realization: WorldRealizationRef::parse(realization)?,
                     residency,
                 })
             }
@@ -125,8 +198,16 @@ impl EnsureExactInputsOutcome {
                 if !valid_world_identity(world) {
                     return Err(ProtocolError::InvalidExactInputs);
                 }
+                let reason = match decoder.byte()? {
+                    0 => WorldAcquisitionMiss::NotResidentOnThisWorker,
+                    1 => WorldAcquisitionMiss::DifferentWorker,
+                    _ => return Err(ProtocolError::InvalidExactInputs),
+                };
                 decoder.finish()?;
-                Ok(Self::NeedsAcquisition(world.to_owned()))
+                Ok(Self::NeedsAcquisition {
+                    world: world.to_owned(),
+                    reason,
+                })
             }
             2 => {
                 let cause = match decoder.byte()? {
@@ -183,7 +264,7 @@ pub enum WorldQueryQuestion {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorldQueryRequest {
     pub world: String,
-    pub realization: String,
+    pub realization: WorldRealizationRef,
     pub question: WorldQueryQuestion,
     pub output: PathBuf,
 }
@@ -191,7 +272,6 @@ pub struct WorldQueryRequest {
 impl WorldQueryRequest {
     fn valid(&self) -> bool {
         valid_world_identity(&self.world)
-            && valid_reference(&self.realization)
             && self.output.to_str().is_some_and(valid_reference)
             && match &self.question {
                 WorldQueryQuestion::PublicInfo(query) | WorldQueryQuestion::PublicType(query) => {
@@ -268,7 +348,7 @@ impl WorldCellOperandRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorldCellPlanRequest {
     pub world: String,
-    pub realization: String,
+    pub realization: WorldRealizationRef,
     pub recipe: Arc<WorldCellRecipe>,
     pub operand: Option<WorldCellOperandRequest>,
     pub output: PathBuf,
@@ -284,33 +364,46 @@ impl WorldCellPlanRequest {
         self.validate_transport().is_ok()
     }
 
-    /// Check the existing encoded frame budget without copying source bodies.
+    /// Check the existing frame budget without copying source bodies.
     pub fn validate_transport(&self) -> Result<(), ProtocolError> {
-        if !valid_world_identity(&self.world)
-            || !valid_reference(&self.realization)
-            || !self.recipe.valid()
-            || self
-                .operand
-                .as_ref()
-                .is_some_and(|operand| !operand.valid())
-            || !valid_cell_path(&self.output)
+        Self::validate_borrowed(
+            &self.world,
+            &self.recipe,
+            self.operand.as_ref(),
+            &self.output,
+            Some(&self.realization),
+        )
+    }
+
+    /// Before acquisition, reserve the protocol's maximum reference size.
+    /// The complete request still requires an actual issued reference.
+    pub fn validate_borrowed(
+        world: &str,
+        recipe: &WorldCellRecipe,
+        operand: Option<&WorldCellOperandRequest>,
+        output: &Path,
+        realization: Option<&WorldRealizationRef>,
+    ) -> Result<(), ProtocolError> {
+        if !valid_world_identity(world)
+            || !recipe.valid()
+            || operand.is_some_and(|operand| !operand.valid())
+            || !valid_cell_path(output)
         {
             return Err(ProtocolError::InvalidWorldCell);
         }
         check_world_cell_bytes(
             21 + 1
                 + 4
-                + self.world.len()
+                + world.len()
                 + 4
-                + self.realization.len()
-                + self.recipe.encoded_len()
+                + realization.map_or(WorldRealizationRef::MAX_ENCODED_LEN, |reference| {
+                    reference.as_str().len()
+                })
+                + recipe.encoded_len()
                 + 1
-                + self
-                    .operand
-                    .as_ref()
-                    .map_or(0, WorldCellOperandRequest::encoded_len)
+                + operand.map_or(0, WorldCellOperandRequest::encoded_len)
                 + 4
-                + self.output.as_os_str().len(),
+                + output.as_os_str().len(),
         )
     }
 }
@@ -340,7 +433,7 @@ impl PlannedCellSlot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorldCellPrepareRequest {
     pub world: String,
-    pub realization: String,
+    pub realization: WorldRealizationRef,
     pub recipe: Arc<WorldCellRecipe>,
     pub operand: Option<WorldCellOperandRequest>,
     pub plan: Arc<[u8]>,
@@ -388,7 +481,7 @@ impl WorldCellPrepareRequest {
     pub fn validate_transport(&self) -> Result<(), ProtocolError> {
         Self::validate_borrowed(
             &self.world,
-            &self.realization,
+            Some(&self.realization),
             &self.recipe,
             self.operand.as_ref(),
             &self.plan,
@@ -404,7 +497,7 @@ impl WorldCellPrepareRequest {
     /// Only the bounded generation sets allocate; source and receipt are borrowed.
     pub fn validate_borrowed<'a>(
         world: &str,
-        realization: &str,
+        realization: Option<&WorldRealizationRef>,
         recipe: &WorldCellRecipe,
         operand: Option<&WorldCellOperandRequest>,
         plan: &[u8],
@@ -413,7 +506,6 @@ impl WorldCellPrepareRequest {
         output: &Path,
     ) -> Result<(), ProtocolError> {
         if !valid_world_identity(world)
-            || !valid_reference(realization)
             || !recipe.valid()
             || operand.is_some_and(|operand| !operand.valid())
             || plan.is_empty()
@@ -456,7 +548,9 @@ impl WorldCellPrepareRequest {
                 + 4
                 + world.len()
                 + 4
-                + realization.len()
+                + realization.map_or(WorldRealizationRef::MAX_ENCODED_LEN, |reference| {
+                    reference.as_str().len()
+                })
                 + recipe.encoded_len()
                 + 1
                 + operand.map_or(0, WorldCellOperandRequest::encoded_len)
@@ -722,7 +816,7 @@ impl ExtractRequest {
             return Err(ProtocolError::InvalidExactInputs);
         };
         match EnsureExactInputsOutcome::decode(&output.stdout)? {
-            EnsureExactInputsOutcome::NeedsAcquisition(root) if root != request.root => {
+            EnsureExactInputsOutcome::NeedsAcquisition { world, .. } if world != request.root => {
                 Err(ProtocolError::InvalidExactInputs)
             }
             EnsureExactInputsOutcome::Ready { world, .. } if world != request.root => {
@@ -1118,11 +1212,11 @@ impl ExtractRequest {
                 57 => {
                     let root = decoder.string()?;
                     let acquisition = match decoder.byte()? {
-                        0 => ExactInputsAcquisition::Resident(decoder.string()?),
+                        0 => ExactInputsAcquisition::Resident(decoder.world_realization()?),
                         1 => ExactInputsAcquisition::Complete(PathBuf::from(decoder.os_string()?)),
                         2 => ExactInputsAcquisition::Successor {
                             predecessor: decoder.string()?,
-                            realization: decoder.string()?,
+                            realization: decoder.world_realization()?,
                             descriptor: PathBuf::from(decoder.os_string()?),
                         },
                         _ => return Err(ProtocolError::InvalidExactInputs),
@@ -1131,7 +1225,7 @@ impl ExtractRequest {
                 }
                 58 => {
                     let world = decoder.string()?;
-                    let realization = decoder.string()?;
+                    let realization = decoder.world_realization()?;
                     let question = match decoder.byte()? {
                         0 => WorldQueryQuestion::PublicInfo(decoder.structured_inspection()?),
                         1 => WorldQueryQuestion::PublicType(decoder.structured_inspection()?),
@@ -1165,7 +1259,7 @@ impl ExtractRequest {
                 59 => {
                     check_world_cell_bytes(bytes.len())?;
                     let world = decoder.cell_string(64)?;
-                    let realization = decoder.string()?;
+                    let realization = decoder.world_realization()?;
                     let recipe = Arc::new(decoder.world_cell_recipe()?);
                     let operand = match decoder.byte()? {
                         0 => None,
@@ -1187,7 +1281,7 @@ impl ExtractRequest {
                 60 => {
                     check_world_cell_bytes(bytes.len())?;
                     let world = decoder.cell_string(64)?;
-                    let realization = decoder.string()?;
+                    let realization = decoder.world_realization()?;
                     let recipe = Arc::new(decoder.world_cell_recipe()?);
                     let operand = match decoder.byte()? {
                         0 => None,
@@ -1856,6 +1950,10 @@ impl<'a> Decoder<'a> {
         std::str::from_utf8(self.frame()?).map_err(|_| ProtocolError::NonUtf8Text)
     }
 
+    fn world_realization(&mut self) -> Result<WorldRealizationRef, ProtocolError> {
+        WorldRealizationRef::parse(self.text()?)
+    }
+
     fn string(&mut self) -> Result<String, ProtocolError> {
         self.text().map(str::to_owned)
     }
@@ -2435,6 +2533,55 @@ mod tests {
 
     use super::*;
 
+    const WORLD_REALIZATION: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111.7";
+
+    #[test]
+    fn world_realization_reference_has_canonical_grammar_and_exact_worker_instance() {
+        let reference = WorldRealizationRef::parse(WORLD_REALIZATION).unwrap();
+        assert_eq!(reference.as_str(), WORLD_REALIZATION);
+        assert_eq!(reference.instance(), &[0x11; 32]);
+        assert_eq!(reference.unique(), 7);
+        for serial in [0, u64::MAX] {
+            let encoded = format!("{}.{}", "ab".repeat(32), serial);
+            let reference = WorldRealizationRef::parse(&encoded).unwrap();
+            assert_eq!(reference.as_str(), encoded);
+            assert_eq!(reference.instance(), &[0xab; 32]);
+            assert_eq!(reference.unique(), serial);
+        }
+        for invalid in [
+            String::new(),
+            "realized".into(),
+            format!("{}.7", "1".repeat(63)),
+            format!("{}.7", "1".repeat(65)),
+            format!("{}.7", "AB".repeat(32)),
+            format!("{}.7", "gg".repeat(32)),
+            format!("{}.7", "é".repeat(32)),
+            format!("{}:7", "1".repeat(64)),
+            format!("{}.", "1".repeat(64)),
+            format!("{}.00", "1".repeat(64)),
+            format!("{}.07", "1".repeat(64)),
+            format!("{}.+7", "1".repeat(64)),
+            format!("{}.-7", "1".repeat(64)),
+            format!("{}.18446744073709551616", "1".repeat(64)),
+            format!("{WORLD_REALIZATION}\0"),
+            format!("{WORLD_REALIZATION} "),
+            format!("{WORLD_REALIZATION}.1"),
+        ] {
+            assert_eq!(
+                WorldRealizationRef::parse(&invalid),
+                Err(ProtocolError::InvalidExactInputs)
+            );
+        }
+        // Location coordinates are transport data; only the issuing instance matches.
+        for (epoch, slot) in [([2; 32], 0), ([3; 32], 17)] {
+            let same_worker = crate::CompilerWorkerLocation::started(epoch, slot, [0x11; 32]);
+            assert!(reference.matches_location(&same_worker));
+        }
+        let other_worker = crate::CompilerWorkerLocation::started([2; 32], 0, [0x12; 32]);
+        assert!(!reference.matches_location(&other_worker));
+    }
+
     #[test]
     fn execution_header_round_trips_and_refuses_nonpositive_grants() {
         let mut request = ExtractRequest::default();
@@ -2864,6 +3011,7 @@ mod tests {
             "--worker-request-v18",
             "--worker-request-v21",
             "--worker-request-v26",
+            "--worker-request-v27",
         ] {
             assert_eq!(
                 ExtractRequest::decode_worker_argv(&[flag.into(), payload.clone()]).unwrap_err(),
@@ -2896,6 +3044,7 @@ mod tests {
             b"TPREQ020",
             b"TPREQ021",
             b"TPREQ026",
+            b"TPREQ027",
             b"TPREQ022",
             b"TPREQ023",
         ] {
@@ -3161,7 +3310,7 @@ mod tests {
     fn world_query_wire_is_exclusive_and_matches_haskell() {
         let query = WorldQueryRequest {
             world: "a".repeat(64),
-            realization: "realized".into(),
+            realization: WorldRealizationRef::parse(WORLD_REALIZATION).unwrap(),
             question: WorldQueryQuestion::PublicInfo(StructuredInspection {
                 scope: InspectionScope::PublicModule("Data.List".into()),
                 namespace: InspectionNamespace::Value,
@@ -3173,7 +3322,7 @@ mod tests {
         };
         let mut request = ExtractRequest::default();
         request.world_query(query.clone());
-        let bytes = unhex("5450524551303237000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e").unwrap();
+        let bytes = unhex("5450524551303238000100000001000000010000003a400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616142000000313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e37000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e").unwrap();
         assert_eq!(request.encode(), bytes);
         let WorldQueryQuestion::PublicInfo(public) = &query.question else {
             panic!("public fixture")
@@ -3202,7 +3351,9 @@ mod tests {
             Field::WorldQuery(query.clone()),
             Field::EnsureExactInputs(ExactInputsRequest {
                 root: query.world.clone(),
-                acquisition: ExactInputsAcquisition::Resident("realized".into()),
+                acquisition: ExactInputsAcquisition::Resident(
+                    WorldRealizationRef::parse(WORLD_REALIZATION).unwrap(),
+                ),
             }),
         ] {
             for reverse in [false, true] {
@@ -3219,10 +3370,6 @@ mod tests {
         for invalid in [
             WorldQueryRequest {
                 world: "caller-label".into(),
-                ..query.clone()
-            },
-            WorldQueryRequest {
-                realization: String::new(),
                 ..query.clone()
             },
             WorldQueryRequest {
@@ -3247,8 +3394,14 @@ mod tests {
         for end in 0..bytes.len() {
             assert!(ExtractRequest::decode(&bytes[..end]).is_err());
         }
+        let mut empty_reference = bytes.clone();
+        empty_reference.splice(90..94 + WORLD_REALIZATION.len(), 0u32.to_le_bytes());
+        assert_eq!(
+            ExtractRequest::decode(&empty_reference).unwrap_err(),
+            ProtocolError::InvalidExactInputs
+        );
         let mut bad_mode = bytes;
-        bad_mode[102] = 2;
+        bad_mode[94 + WORLD_REALIZATION.len()] = 2;
         assert_eq!(
             ExtractRequest::decode(&bad_mode).unwrap_err(),
             ProtocolError::InvalidWorldQuery
@@ -3264,7 +3417,7 @@ mod tests {
         });
         let plan = WorldCellPlanRequest {
             world: "a".repeat(64),
-            realization: "held".into(),
+            realization: WorldRealizationRef::parse(WORLD_REALIZATION).unwrap(),
             recipe: recipe.clone(),
             operand: None,
             output: "plan.cbor".into(),
@@ -3292,8 +3445,8 @@ mod tests {
         };
         assert!(Arc::ptr_eq(&plan.recipe, &prepare.recipe));
         assert!(Arc::ptr_eq(&plan.recipe, &plan.clone().recipe));
-        let plan_bytes = unhex("5450524551303237000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650009000000706c616e2e63626f72").unwrap();
-        let prepare_bytes = unhex("5450524551303237000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e64207768657265000c000000706c616e2d72656365697074626262626262626262626262626262626262626262626262626262626262626213000000000000000200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72").unwrap();
+        let plan_bytes = unhex("5450524551303238000100000001000000010000003b400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616142000000313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e370b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650009000000706c616e2e63626f72").unwrap();
+        let prepare_bytes = unhex("5450524551303238000100000001000000010000003c400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616142000000313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e370b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e64207768657265000c000000706c616e2d72656365697074626262626262626262626262626262626262626262626262626262626262626213000000000000000200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72").unwrap();
         let mut plan_request = ExtractRequest::default();
         plan_request.world_cell_plan(plan.clone()).unwrap();
         let mut prepare_request = ExtractRequest::default();
@@ -3456,11 +3609,37 @@ mod tests {
             turn_templates: vec![],
         };
         let world = "a".repeat(64);
+        let realization = WorldRealizationRef::parse(WORLD_REALIZATION).unwrap();
+        for borrowed_reference in [Some(&realization), None] {
+            assert_eq!(
+                WorldCellPlanRequest::validate_borrowed(
+                    &world,
+                    &recipe,
+                    None,
+                    Path::new("plan.cbor"),
+                    borrowed_reference,
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                WorldCellPrepareRequest::validate_borrowed(
+                    &world,
+                    borrowed_reference,
+                    &recipe,
+                    None,
+                    b"plan",
+                    std::iter::empty::<(u64, PlannedCellSlotRef<'_>)>(),
+                    Path::new("operation"),
+                    Path::new("prepared.cbor"),
+                ),
+                Ok(())
+            );
+        }
         let oversized = "x".repeat(65537);
         assert_eq!(
             WorldCellPrepareRequest::validate_borrowed(
                 &world,
-                "held",
+                Some(&realization),
                 &recipe,
                 None,
                 b"plan",
@@ -3489,7 +3668,7 @@ mod tests {
         assert!(matches!(
             WorldCellPrepareRequest::validate_borrowed(
                 &world,
-                "held",
+                Some(&realization),
                 &recipe,
                 None,
                 b"plan",
@@ -3514,7 +3693,7 @@ mod tests {
         let mut request = ExtractRequest::default();
         let refused = match request.world_cell_plan(WorldCellPlanRequest {
             world: "a".repeat(64),
-            realization: "held".into(),
+            realization: WorldRealizationRef::parse(WORLD_REALIZATION).unwrap(),
             recipe,
             operand: None,
             output: "plan.cbor".into(),
@@ -3531,7 +3710,7 @@ mod tests {
         // prepare envelope must still be charged before it is appended.
         let refused = match request.world_cell_prepare(WorldCellPrepareRequest {
             world: "a".repeat(64),
-            realization: "held".into(),
+            realization: WorldRealizationRef::parse(WORLD_REALIZATION).unwrap(),
             recipe: Arc::new(WorldCellRecipe {
                 source: String::new(),
                 template: String::new(),
@@ -3559,7 +3738,9 @@ mod tests {
     fn exact_inputs_requests_are_source_free_and_exclusive() {
         let resident = ExactInputsRequest {
             root: "a".repeat(64),
-            acquisition: ExactInputsAcquisition::Resident("realized".into()),
+            acquisition: ExactInputsAcquisition::Resident(
+                WorldRealizationRef::parse(WORLD_REALIZATION).unwrap(),
+            ),
         };
         let make = |inputs| ExtractRequest {
             fields: vec![Field::EnsureExactInputs(inputs)],
@@ -3567,7 +3748,7 @@ mod tests {
         };
         let request = make(resident.clone());
         // Independent fixed bytes also checked by the maintained Haskell codec case.
-        let bytes = unhex("54505245513032370001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564").unwrap();
+        let bytes = unhex("5450524551303238000100000001000000010000003940000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610042000000313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e37").unwrap();
         assert_eq!(request.encode(), bytes);
         assert_eq!(
             ExtractRequest::decode(&bytes).unwrap().mode(),
@@ -3584,6 +3765,20 @@ mod tests {
         assert_eq!(
             ExtractRequest::decode(&complete.encode()).unwrap().encode(),
             complete.encode()
+        );
+        let successor = make(ExactInputsRequest {
+            root: "b".repeat(64),
+            acquisition: ExactInputsAcquisition::Successor {
+                predecessor: resident.root.clone(),
+                realization: WorldRealizationRef::parse(WORLD_REALIZATION).unwrap(),
+                descriptor: "/successor.cbor".into(),
+            },
+        });
+        assert_eq!(
+            ExtractRequest::decode(&successor.encode())
+                .unwrap()
+                .encode(),
+            successor.encode()
         );
         // Envelope admission metadata does not become source or selection authority.
         let mut admitted = request.clone();
@@ -3632,10 +3827,6 @@ mod tests {
             },
             ExactInputsRequest {
                 root: "a".repeat(64),
-                acquisition: ExactInputsAcquisition::Resident("".into()),
-            },
-            ExactInputsRequest {
-                root: "a".repeat(64),
                 acquisition: ExactInputsAcquisition::Complete("".into()),
             },
         ] {
@@ -3647,6 +3838,12 @@ mod tests {
         for end in 0..bytes.len() {
             assert!(ExtractRequest::decode(&bytes[..end]).is_err());
         }
+        let mut empty_reference = bytes.clone();
+        empty_reference.splice(91..95 + WORLD_REALIZATION.len(), 0u32.to_le_bytes());
+        assert_eq!(
+            ExtractRequest::decode(&empty_reference).unwrap_err(),
+            ProtocolError::InvalidExactInputs
+        );
         let mut unknown = bytes.clone();
         unknown[90] = 3;
         assert_eq!(
@@ -3668,18 +3865,20 @@ mod tests {
         let request = ExtractRequest {
             fields: vec![Field::EnsureExactInputs(ExactInputsRequest {
                 root: "a".repeat(64),
-                acquisition: ExactInputsAcquisition::Resident("realized".into()),
+                acquisition: ExactInputsAcquisition::Resident(
+                    WorldRealizationRef::parse(WORLD_REALIZATION).unwrap(),
+                ),
             })],
             ..ExtractRequest::default()
         };
         let frame = |tag: u8, root: &str, reference: Option<&str>| {
-            let mut bytes = b"TPEXO003".to_vec();
+            let mut bytes = b"TPEXO004".to_vec();
             bytes.push(tag);
             push_frame(&mut bytes, OsStr::new(root));
             if let Some(reference) = reference {
                 push_frame(&mut bytes, OsStr::new(reference));
-                bytes.push(0);
             }
+            bytes.push(0);
             bytes
         };
         let mut output = std::process::Output {
@@ -3690,7 +3889,7 @@ mod tests {
         assert!(request.validate_exact_inputs_response(&output).is_ok());
         for bytes in [
             frame(1, &"b".repeat(64), None),
-            frame(0, &"b".repeat(64), Some("realized")),
+            frame(0, &"b".repeat(64), Some(WORLD_REALIZATION)),
         ] {
             output.stdout = bytes;
             assert_eq!(
@@ -3698,7 +3897,7 @@ mod tests {
                 Err(ProtocolError::InvalidExactInputs)
             );
         }
-        output.stdout = frame(0, &"a".repeat(64), Some("realized"));
+        output.stdout = frame(0, &"a".repeat(64), Some(WORLD_REALIZATION));
         assert!(request.validate_exact_inputs_response(&output).is_ok());
         output.stdout = b"human captured output".to_vec();
         assert!(request.validate_exact_inputs_response(&output).is_err());
@@ -3715,39 +3914,49 @@ mod tests {
     fn exact_inputs_outcomes_match_closed_wire_and_reject_uncertain_frames() {
         let cases = [
             (
-                "545045584f303033004000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a656400",
+                "545045584f30303400400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616142000000313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e3700",
                 EnsureExactInputsOutcome::Ready {
                     world: "a".repeat(64),
-                    realization: "realized".into(),
+                    realization: WorldRealizationRef::parse(WORLD_REALIZATION).unwrap(),
                     residency: WorldResidency::RetainedAtAdmission,
                 },
             ),
             (
-                "545045584f303033004000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a65640181000000000000008000000000000000",
+                "545045584f30303400400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616142000000313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e370181000000000000008000000000000000",
                 EnsureExactInputsOutcome::Ready {
                     world: "a".repeat(64),
-                    realization: "realized".into(),
+                    realization: WorldRealizationRef::parse(WORLD_REALIZATION).unwrap(),
                     residency: WorldResidency::ActiveOnly(WorldNonRetentionReason::StorageAllowanceExceeded { required_bytes: 129, limit_bytes: 128 }),
                 },
             ),
             (
-                "545045584f303033014000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
-                EnsureExactInputsOutcome::NeedsAcquisition("a".repeat(64)),
+                "545045584f30303401400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100",
+                EnsureExactInputsOutcome::NeedsAcquisition {
+                    world: "a".repeat(64),
+                    reason: WorldAcquisitionMiss::NotResidentOnThisWorker,
+                },
             ),
             (
-                "545045584f3030330200",
+                "545045584f30303401400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616101",
+                EnsureExactInputsOutcome::NeedsAcquisition {
+                    world: "a".repeat(64),
+                    reason: WorldAcquisitionMiss::DifferentWorker,
+                },
+            ),
+            (
+                "545045584f3030340200",
                 EnsureExactInputsOutcome::Rejected(ExactInputsRejection::UnsupportedOperation),
             ),
             (
-                "545045584f3030330201",
+                "545045584f3030340201",
                 EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRealization),
             ),
             (
-                "545045584f3030330202",
+                "545045584f3030340202",
                 EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRoot),
             ),
             (
-                "545045584f3030330203",
+                "545045584f3030340203",
                 EnsureExactInputsOutcome::Rejected(ExactInputsRejection::AcquisitionRejected),
             ),
         ];
@@ -3765,27 +3974,41 @@ mod tests {
             );
         }
         for hex in [
-            "545045584f30303303",
-            "545045584f3030330204",
-            "545045584f3030330000000000",
-            "545045584f303033010100000000",
+            "545045584f30303403",
+            "545045584f3030340204",
+            "545045584f3030340000000000",
+            "545045584f303034010100000000",
             "545045584f3030310200",
+            "545045584f3030320200",
+            "545045584f3030330200",
         ] {
             assert!(EnsureExactInputsOutcome::decode(&unhex(hex).unwrap()).is_err());
         }
+        let mut unknown_miss = b"TPEXO004\x01".to_vec();
+        push_frame(&mut unknown_miss, OsStr::new(&"a".repeat(64)));
+        assert!(EnsureExactInputsOutcome::decode(&unknown_miss).is_err());
+        unknown_miss.push(2);
+        assert_eq!(
+            EnsureExactInputsOutcome::decode(&unknown_miss),
+            Err(ProtocolError::InvalidExactInputs)
+        );
         for (required, limit) in [(0u64, 0u64), (128, 128), (127, 128)] {
-            let mut frame = b"TPEXO003\0".to_vec();
+            let mut frame = b"TPEXO004\0".to_vec();
             push_frame(&mut frame, OsStr::new(&"a".repeat(64)));
-            push_frame(&mut frame, OsStr::new("realized"));
+            push_frame(&mut frame, OsStr::new(WORLD_REALIZATION));
             frame.push(1);
             frame.extend_from_slice(&required.to_le_bytes());
             frame.extend_from_slice(&limit.to_le_bytes());
-            assert_eq!(EnsureExactInputsOutcome::decode(&frame), Err(ProtocolError::InvalidExactInputs));
+            assert_eq!(
+                EnsureExactInputsOutcome::decode(&frame),
+                Err(ProtocolError::InvalidExactInputs)
+            );
         }
         for reference in ["", "realized\0other"] {
-            let mut bytes = b"TPEXO003\0".to_vec();
+            let mut bytes = b"TPEXO004\0".to_vec();
             push_frame(&mut bytes, OsStr::new(&"a".repeat(64)));
             push_frame(&mut bytes, OsStr::new(reference));
+            bytes.push(0);
             assert_eq!(
                 EnsureExactInputsOutcome::decode(&bytes).unwrap_err(),
                 ProtocolError::InvalidExactInputs

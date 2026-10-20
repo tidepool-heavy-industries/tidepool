@@ -56,9 +56,10 @@ use exec_check::is_readable_executable_file;
 pub use request::{
     CompileWorkload, EnsureExactInputsOutcome, ExactInputsAcquisition, ExactInputsRejection,
     ExactInputsRequest, ExtractRequest, InspectionNamespace, InspectionScope, PlannedCellSlot,
-    PlannedCellSlotRef, ProtocolError, StructuredInspection, SymbolIdentity,
+    PlannedCellSlotRef, ProtocolError, StructuredInspection, SymbolIdentity, WorldAcquisitionMiss,
     WorldCellOperandRequest, WorldCellPlanRequest, WorldCellPrepareRequest, WorldCellRecipe,
-    WorldNonRetentionReason, WorldQueryQuestion, WorldQueryRequest, WorldResidency,
+    WorldNonRetentionReason, WorldQueryQuestion, WorldQueryRequest, WorldRealizationRef,
+    WorldResidency,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.
@@ -979,7 +980,7 @@ mod tests {
         let before = command.request_bytes();
         let refused = command.world_cell_plan(WorldCellPlanRequest {
             world: "a".repeat(64),
-            realization: "held".into(),
+            realization: crate::WorldRealizationRef::parse(&("11".repeat(32) + ".7")).unwrap(),
             recipe: std::sync::Arc::new(WorldCellRecipe {
                 source: "pure ()".into(),
                 template: "template".into(),
@@ -997,7 +998,9 @@ mod tests {
         let mut ensure = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
         ensure.ensure_exact_inputs(ExactInputsRequest {
             root: "a".repeat(64),
-            acquisition: ExactInputsAcquisition::Resident("realized".into()),
+            acquisition: ExactInputsAcquisition::Resident(
+                crate::WorldRealizationRef::parse(&("11".repeat(32) + ".7")).unwrap(),
+            ),
         });
         assert!(ExtractRequest::decode(&ensure.request_bytes()).is_ok());
         ensure.input("source.hs");
@@ -1009,7 +1012,7 @@ mod tests {
         let mut query = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
         query.world_query(WorldQueryRequest {
             world: "a".repeat(64),
-            realization: "realized".into(),
+            realization: crate::WorldRealizationRef::parse(&("11".repeat(32) + ".7")).unwrap(),
             question: WorldQueryQuestion::PublicType(StructuredInspection {
                 scope: InspectionScope::PublicModule("Data.List".into()),
                 namespace: InspectionNamespace::Value,

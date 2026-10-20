@@ -436,7 +436,7 @@ nativeGraphSchedulingEquality = withTiming $ withScratch $ \work -> do
           workers <- newMVar Set.empty
           releaseFirst <- newEmptyMVar
           let inputs = PreparedModuleCompletionInputs Nothing
-                (Set.fromList (map pmModule queue)) siblings Set.empty Map.empty (ReuseContext 0 "scheduling-fixture") Map.empty
+                (Set.fromList (map pmModule queue)) siblings Set.empty Map.empty (ReuseContext 0 "scheduling-fixture") Map.empty Nothing Map.empty
               firstOwner = pmModule (head queue)
               secondOwner = pmModule (queue !! 1)
           (observer,worklist) <- observeOriginalProjectionWithRecovery rawCache bodyCache executor
@@ -3875,7 +3875,7 @@ originalProjectionProducts = withScratch $ \work -> do
   (withCompilerExecutor (const (pure ())) serialCompilerExecutionGrant >=> finishCompletion) $ \executor -> do
     let inputs = PreparedModuleCompletionInputs Nothing
           (Set.fromList (map pmModule (pprModules paired)))
-          (Map.unions (map pmSitedSiblings (pprModules paired))) Set.empty Map.empty (ReuseContext 0 "fixture") (prCanonicalInterfaceAdmissions (pprPipelineResult paired))
+          (Map.unions (map pmSitedSiblings (pprModules paired))) Set.empty Map.empty (ReuseContext 0 "fixture") (prCanonicalInterfaceAdmissions (pprPipelineResult paired)) Nothing Map.empty
         completionOrder = [consumer,ownerModule,provider,independent]
     (observer,pendingWorklist) <- observeOriginalProjectionWithRecovery pendingRawCache
       pendingBodyCache executor Map.empty [] Nothing pairedEnv pairedInterfaces
@@ -3942,7 +3942,7 @@ originalProjectionProducts = withScratch $ \work -> do
       fail "raw original cache missed unrelated inventory growth or reused a changed demanded generation"
     let inputs = PreparedModuleCompletionInputs Nothing
           (Set.fromList (map pmModule (pprModules captured)))
-          (Map.unions (map pmSitedSiblings (pprModules captured))) Set.empty Map.empty (ReuseContext 0 "fixture") (scopeCanonicalInterfaces capturedScope)
+          (Map.unions (map pmSitedSiblings (pprModules captured))) Set.empty Map.empty (ReuseContext 0 "fixture") (scopeCanonicalInterfaces capturedScope) Nothing Map.empty
     (observer,earlyWorklist) <- observeOriginalProjectionWithRecovery rawCache bodyCache executor
       Map.empty [] Nothing capturedEnv (pprProductInterfaces captured) (pmModule consumer)
       (Just capturedScope) inputs

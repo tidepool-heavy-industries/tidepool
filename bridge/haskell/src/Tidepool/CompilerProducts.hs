@@ -121,7 +121,7 @@ import Tidepool.FinalizedModuleArtifacts
   )
 import Tidepool.GhcPipeline
   ( PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules
-  , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprAcceptedCandidates, prHscEnv, prCanonicalInterfaceAdmissions
+  , pprCanonicalOriginalInputs, pprAcquiredCanonicalOriginals, pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprAcceptedCandidates, prHscEnv, prCanonicalInterfaceAdmissions
   , prInjectedSessionInterfaces, prProducedSessionInterfaces, prTargetTcGblEnv, PreparedModuleObserver(..)
   , PreparedModuleCompletionInputs(..), PreparedSourceRoute(..), preparedSourceRoute
   , acquireWorldSourceOriginal, worldSourceOriginalFinalization, worldSourceOriginalPackages, captureWorldSourceOriginals
@@ -136,10 +136,11 @@ import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthorityWithCanonicalIn
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedStg
   ( PreparedModule, pmModule, pmSitedSiblings, runPreparedModuleTask
-  , PreparedBodyCache, PreparedBodyReuse(..), newPreparedBodyCache, newPreparedOriginalModuleTaskPreparer, acquirePreparedModule )
+  , PreparedBodyCache, PreparedBodyReuse(..), newPreparedBodyCache, newPreparedOriginalModuleTaskPreparer, newPreparedCanonicalModuleTaskPreparer, acquirePreparedModule )
 import Tidepool.CompilerExecution (CompilerExecutor, withCompilerExecutor, serialCompilerExecutionGrant, runCompilerTasks, runCompilerTasksWithAttempt)
 import Tidepool.HomeProducts
-  ( AdmittedFinalizedOriginal, admittedOriginalModule, admitCompiledCanonicalOriginal, CandidateCoreFailure(..)
+  ( CanonicalOriginalInputs, lookupCanonicalOriginalInput
+  , AdmittedFinalizedOriginal, admittedOriginalModule, admitCompiledCanonicalOriginal, CandidateCoreFailure(..)
   , admittedOriginalProof, admittedOriginalInterface, originalVersionLookup, originalVersionSeal )
 import Tidepool.FinalizedModule (finalizedHomeModInfo)
 import Tidepool.Timing
@@ -420,32 +421,8 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
     Nothing -> do
       timing <- readTimingEnabled
       let environment = prHscEnv (pprPipelineResult prepared)
-          selectedCanonical = prCanonicalInterfaceAdmissions (pprPipelineResult prepared)
           freshOwners = freshSourceOwners (preparedFreshDependencies prepared)
-      canonical <- fmap Map.fromList $ fmap concat $ forM (preparedProductModules productContext) $ \preparedModule -> do
-        let owner = pmModule preparedModule
-            name = moduleName owner
-            key = (unitString (moduleUnit owner),moduleNameString name)
-        case Map.lookup key selectedCanonical of
-          Just (ModuleInterfaceAdmission proof)
-            | isSourceOriginal (canonicalOrigin proof)
-            , key `Set.notMember` freshOwners ->
-            case Map.lookup owner (preparedRetainedOriginals productContext) of
-              Just retained -> do
-                unless (admittedOriginalProof retained == proof)
-                  (throwIO CandidateOriginalOwnerMismatch)
-                pure []
-              Nothing -> do
-                original <- maybe (throwIO (CandidateOriginalAuthorityMissing (fst key) (snd key))) pure
-                  (Map.lookup name (pprFinalizedModules prepared))
-                roots <- maybe (throwIO CandidateOriginalPackagesMismatch) pure
-                  (Map.lookup name (pprPackageImports prepared))
-                metadata <- captureCanonicalMetadata (compilationScope <$> preparedExactCompilation prepared) proof
-                admitted <- admitCompiledCanonicalOriginal environment metadata original roots
-                pure [(owner,admitted)]
-          _ -> pure []
-      let selectedContext = productContext {preparedRetainedOriginals =
-            Map.union (preparedRetainedOriginals productContext) canonical}
+          selectedContext = productContext
       finalized <- timeDetailPhase timing "module_products" "capture_finalization" $
         capturePreparedFinalization originalInterfaces outDir prepared freshOwners
       let withheld = Set.fromList
@@ -562,10 +539,12 @@ prepareOriginalProductsWithCache cache collector executor = prepareOriginalProdu
 -- the body/recovery/projection terminals, just as an acquired observer does.
 prepareOriginalProductsWithCacheAndReuse
   :: Maybe ReuseContext -> PreparedBodyCache -> Maybe OriginalProjectionCollector -> CompilerExecutor
-  -> Maybe (PreparedPipelineResult,StagedOriginalProducts) -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
+  -> Maybe (PreparedPipelineResult,Maybe StagedOriginalProducts) -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
   -> Set.Set SymbolIdentity -> [PreparedModule] -> IO ([PreparedModule],PreparedProductContext)
 prepareOriginalProductsWithCacheAndReuse reuse cache collector executor sourceInputs =
   prepareOriginalProductsUsingCollectorWithReuse collector (Just cache) executor reuse sourceInputs
+    (sourceInputs >>= pprCanonicalOriginalInputs . fst)
+    (maybe Map.empty (pprAcquiredCanonicalOriginals . fst) sourceInputs)
 
 -- The coordinator owns incorporation and demand discovery. Workers publish
 -- only immutable raw leaves through the existing projection cache. This driver
@@ -592,6 +571,7 @@ observeOriginalProjectionWithRecovery collector cache executor retained auxiliar
   let context = baseContext {projectionCurrentOriginals = completionExternalOriginalBindings inputs}
   worklist <- newOriginalProductWorklist collector cache executor (Just (completionReuseContext inputs)) env exact interfaces context
     (completionExternalOriginals inputs) (completionSourceOwners inputs) (completionSiblings inputs) Nothing
+    (completionCanonicalOriginalInputs inputs) (completionAcquiredCanonicalOriginals inputs)
   pure (PreparedModuleObserver (worklistObserve worklist) (worklistComplete worklist),worklist)
 
 -- A later target may add relevant generations or host authority. Adoption
@@ -610,20 +590,21 @@ prepareOriginalProductsUsingCollector
   -> Map.Map ModuleName ModIface -> ProjectionContext -> Set.Set SymbolIdentity -> [PreparedModule]
   -> IO ([PreparedModule], PreparedProductContext)
 prepareOriginalProductsUsingCollector collector stable executor =
-  prepareOriginalProductsUsingCollectorWithReuse collector stable executor Nothing Nothing
+  prepareOriginalProductsUsingCollectorWithReuse collector stable executor Nothing Nothing Nothing Map.empty
 
 prepareOriginalProductsUsingCollectorWithReuse
   :: Maybe OriginalProjectionCollector -> Maybe PreparedBodyCache -> CompilerExecutor
-  -> Maybe ReuseContext -> Maybe (PreparedPipelineResult,StagedOriginalProducts)
+  -> Maybe ReuseContext -> Maybe (PreparedPipelineResult,Maybe StagedOriginalProducts)
+  -> Maybe CanonicalOriginalInputs -> Map.Map Module AdmittedFinalizedOriginal
   -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface
   -> ProjectionContext -> Set.Set SymbolIdentity -> [PreparedModule]
   -> IO ([PreparedModule],PreparedProductContext)
-prepareOriginalProductsUsingCollectorWithReuse collector stable executor reuse sourceInputs env exact interfaces context external initial = do
-  forM_ sourceInputs $ \(prepared,prior) -> validateStagedOriginalProducts prepared prior
+prepareOriginalProductsUsingCollectorWithReuse collector stable executor reuse sourceInputs canonicalInputs acquired env exact interfaces context external initial = do
+  forM_ sourceInputs $ \(prepared,prior) -> forM_ prior (validateStagedOriginalProducts prepared)
   cache <- maybe newPreparedBodyCache pure stable
   completedRaw <- maybe newOriginalProjectionCache pure collector
   worklist <- newOriginalProductWorklist completedRaw cache executor reuse env exact interfaces context external
-    (Set.fromList (map pmModule initial)) (Map.unions (map pmSitedSiblings initial)) sourceInputs
+    (Set.fromList (map pmModule initial)) (Map.unions (map pmSitedSiblings initial)) sourceInputs canonicalInputs acquired
   _ <- runCompilerTasks executor
     (\prepared -> worklistObserve worklist prepared >> pure prepared)
     (\_ prepared -> worklistComplete worklist prepared) initial
@@ -632,18 +613,20 @@ prepareOriginalProductsUsingCollectorWithReuse collector stable executor reuse s
 newOriginalProductWorklist :: OriginalProjectionCollector -> PreparedBodyCache -> CompilerExecutor
   -> Maybe ReuseContext -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
   -> Set.Set SymbolIdentity -> Set.Set Module -> Map.Map String Id
-  -> Maybe (PreparedPipelineResult,StagedOriginalProducts) -> IO OriginalProductWorklist
-newOriginalProductWorklist completedRaw cache executor reuse env exact interfaces context external sourceOwners frozenSiblings sourceInputs = do
+  -> Maybe (PreparedPipelineResult,Maybe StagedOriginalProducts)
+  -> Maybe CanonicalOriginalInputs -> Map.Map Module AdmittedFinalizedOriginal -> IO OriginalProductWorklist
+newOriginalProductWorklist completedRaw cache executor reuse env exact interfaces context external sourceOwners frozenSiblings sourceInputs canonicalInputs acquired = do
   timing <- readTimingEnabled
   workRef <- newIORef (0 :: Integer,0 :: Integer)
   reuseRef <- newIORef (0 :: Integer,0 :: Integer)
   reportedRef <- newIORef False
   originalPreparerRef <- newIORef Nothing
   modulesRef <- newIORef Map.empty
-  admittedRef <- newIORef Map.empty
+  admittedRef <- newIORef acquired
   attemptedRef <- newIORef Set.empty
   rawRef <- newIORef Map.empty
   knownRef <- newIORef external
+  canonicalPreparer <- traverse (newPreparedCanonicalModuleTaskPreparer env cache) canonicalInputs
   let canonicalVersion = maybe (const Nothing) originalVersionLookup exact
       ownerVersion selected owner =
         let unit = unitString (moduleUnit owner)
@@ -656,10 +639,17 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
             _ -> Nothing
       report stage decision reason owner bytes = forM_ reuse $ \identity ->
         emitReuse timing identity stage decision reason owner 1 bytes
-      acquireOriginal siblings owner producer missing = do
+      acquireOriginal siblings owner producer missing = case
+          canonicalInputs >>= (\inputs -> lookupCanonicalOriginalInput inputs owner) of
+        Just _ -> case canonicalPreparer of
+          Just prepare -> prepare siblings owner
+          Nothing -> pure Nothing
+        Nothing -> acquirePrior siblings owner producer missing
+      acquirePrior siblings owner producer missing = do
         local <- case sourceInputs of
           Nothing -> pure Nothing
-          Just (prepared,StagedOriginalProducts certified _ _ _ _) -> case Map.lookup
+          Just (_,Nothing) -> pure Nothing
+          Just (prepared,Just (StagedOriginalProducts certified _ _ _ _)) -> case Map.lookup
               (unitString (moduleUnit owner),moduleNameString (moduleName owner))
               (certifiedSourceCaptures certified) of
             Nothing -> pure Nothing
@@ -839,7 +829,7 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
                 maybe (pure False) (`samePhysical` oldRaw) selectedRaw
           pure (sameSource && sameRaw)
       fallback = prepareOriginalProductsUsingCollectorWithReuse
-        (Just completedRaw) (Just cache) executor reuse sourceInputs
+        (Just completedRaw) (Just cache) executor reuse sourceInputs canonicalInputs acquired
   pure (OriginalProductWorklist observe complete finish matches fallback)
 
 -- Captures come from the exact scope, including its admitted checked values,

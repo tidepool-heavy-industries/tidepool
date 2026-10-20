@@ -1411,6 +1411,9 @@ def facade_test_cases(binary):
         ("facade_reload_default_publication_test", [
             "actor_host::coherent_reload_acceptance_tests::standard_reload_retains_complete_large_source_receipts_after_publication",
         ], host_env, service_host_paths, service_host_resources, True, False, 900),
+        ("facade_reload_frozen_source_test", [
+            "actor_host::coherent_reload_acceptance_tests::staged_reload_publishes_frozen_b_and_executes_it_after_disk_moves_to_c",
+        ], host_env, service_host_paths, service_host_resources, True, False, 900),
         ("facade_reload_force_refusal_test", [
             "actor_host::coherent_reload_acceptance_tests::unsupported_force_preserves_the_original_generation_for_a_later_default_reload",
         ], host_env, service_host_paths, service_host_resources, True, False, 900),
@@ -2043,10 +2046,13 @@ tidepool_buildscript_run(
                 ("toolchain_world_mixed_seal_test", "artifacts::module_product_tests::real_world_mixed_output_retains_prior_native_stages"),
                 ("toolchain_world_lifetime_test", "artifacts::module_product_tests::real_world_shadow_successors_release_transport_ancestors_before_cold_restore"),
                 ("toolchain_world_value_selection_test", "artifacts::world_value_selection_tests::real_world_value_selection_preserves_physical_owner_and_item_prefix"),
+                ("toolchain_world_reference_history_test", "artifacts::world_value_selection_tests::real_world_reference_history_restores_same_owner_and_rejects_crossed_ready"),
             ]:
                 world_env, world_resources, world_worker = compiler_service_test_inputs(
                     package_name, world_target
                 )
+                if world_target == "toolchain_world_reference_history_test":
+                    world_env["TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES"] = "0"
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",
                     f'    name = {json.dumps(world_target)},',

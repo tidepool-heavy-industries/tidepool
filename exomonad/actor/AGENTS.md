@@ -1,6 +1,8 @@
 # Contributor workflow
 
 For this crate's ownership boundaries and invariants, see [CLAUDE.md](CLAUDE.md).
+See [lifecycle-tests.md](lifecycle-tests.md) for the distinction between
+publication component controls and hosted Reload qualification.
 
 Inspect focused tests beside the request, workbench, or lifecycle module. Use
 `just test-lib exomonad-actor --exact FULL_TEST_NAME --expected-count 1`; compile changed consumers and

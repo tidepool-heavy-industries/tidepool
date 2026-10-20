@@ -4742,7 +4742,9 @@ mod tests {
         let mut command = fixture.command();
         command.ensure_exact_inputs(crate::ExactInputsRequest {
             root: "a".repeat(64),
-            acquisition: crate::ExactInputsAcquisition::Resident("realized".into()),
+            acquisition: crate::ExactInputsAcquisition::Resident(
+                crate::WorldRealizationRef::parse(&("11".repeat(32) + ".7")).unwrap(),
+            ),
         });
         let settled = with_compiler_transaction(
             |_| {},

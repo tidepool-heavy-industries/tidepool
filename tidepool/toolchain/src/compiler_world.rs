@@ -1113,9 +1113,36 @@ pub struct CompilerWorldRestoration {
     successor: Option<WorldSuccessorAcquisition>,
 }
 
+#[derive(Clone, Debug)]
+struct WorldRealizationObservation {
+    reference: tidepool_extract_cmd::WorldRealizationRef,
+    location: Option<tidepool_extract_cmd::CompilerWorkerLocation>,
+    residency: tidepool_extract_cmd::WorldResidency,
+}
+
+impl WorldRealizationObservation {
+    fn received(
+        reference: tidepool_extract_cmd::WorldRealizationRef,
+        location: Option<tidepool_extract_cmd::CompilerWorkerLocation>,
+        residency: tidepool_extract_cmd::WorldResidency,
+    ) -> Result<Self, CompileError> {
+        if location
+            .as_ref()
+            .is_some_and(|actual| !reference.matches_location(actual))
+        {
+            return Err(world_response_error(true));
+        }
+        Ok(Self {
+            reference,
+            location,
+            residency,
+        })
+    }
+}
+
 struct WorldSuccessorAcquisition {
     predecessor: [u8; 32],
-    realization: Arc<Mutex<Option<String>>>,
+    realization: Arc<Mutex<Option<WorldRealizationObservation>>>,
     files: Vec<Arc<std::fs::File>>,
     cold: Mutex<Option<Arc<CompilerWorldRestoration>>>,
 }
@@ -1394,7 +1421,7 @@ fn absolute_source_alias(path: &Path) -> bool {
 #[derive(Debug)]
 pub struct CompilerWorld {
     restoration: Arc<CompilerWorldRestoration>,
-    realization: Arc<Mutex<Option<String>>>,
+    realization: Arc<Mutex<Option<WorldRealizationObservation>>>,
     position: Option<WorldCellPosition>,
 }
 
@@ -1410,6 +1437,19 @@ impl CompilerWorld {
     pub fn logical_id(&self) -> &[u8; 32] {
         &self.restoration.logical_id
     }
+    /// The last actual Ready admission's optional storage observation. This
+    /// is neither current residency nor a lease and may be stale after END.
+    pub fn last_admission_residency(
+        &self,
+    ) -> Result<Option<tidepool_extract_cmd::WorldResidency>, CompileError> {
+        Ok(self
+            .realization
+            .lock()
+            .map_err(|_| source_failure("world realization lock poisoned"))?
+            .as_ref()
+            .map(|observed| observed.residency))
+    }
+
     pub fn restoration(&self) -> &Arc<CompilerWorldRestoration> {
         &self.restoration
     }
@@ -3405,6 +3445,7 @@ fn scoped_world_action<T>(
 
 fn world_command(
     identity: &tidepool_extract_cmd::CompilerIdentity,
+    affinity: Option<&tidepool_extract_cmd::CompilerWorkerLocation>,
 ) -> Result<
     (
         tidepool_extract_cmd::ExtractCmd,
@@ -3413,7 +3454,9 @@ fn world_command(
     CompileError,
 > {
     crate::host_work::checkpoint()?;
-    let cmd = tidepool_extract_cmd::ExtractCmd::new().map_err(|e| source_failure(e.to_string()))?;
+    let mut cmd =
+        tidepool_extract_cmd::ExtractCmd::new().map_err(|e| source_failure(e.to_string()))?;
+    cmd.set_worker_affinity_hint(affinity.cloned());
     let endpoint = cmd.bind().map_err(CompileError::CompilerEndpoint)?;
     if endpoint.identity() != identity {
         return Err(source_failure(
@@ -3431,13 +3474,72 @@ fn world_execute(
     CompileError::compiler_invocation_result(endpoint.execute_with_input_files(cmd, files, |_| {}))
 }
 
+enum WorldAcquisitionOutcome {
+    Ready(WorldRealizationObservation),
+    Missing(tidepool_extract_cmd::WorldAcquisitionMiss),
+}
+
+fn world_acquisition_outcome(
+    run: tidepool_extract_cmd::ExtractRun,
+    root: &str,
+) -> Result<WorldAcquisitionOutcome, CompileError> {
+    use tidepool_extract_cmd::EnsureExactInputsOutcome as O;
+    match O::decode(&run.output.stdout).map_err(|_| world_response_error(false))? {
+        O::Ready {
+            world,
+            realization,
+            residency,
+        } if world == root => {
+            WorldRealizationObservation::received(realization, run.worker_location, residency)
+                .map(WorldAcquisitionOutcome::Ready)
+        }
+        O::NeedsAcquisition { world, reason } if world == root => {
+            Ok(WorldAcquisitionOutcome::Missing(reason))
+        }
+        O::Rejected(reason) => Err(source_failure(format!(
+            "compiler refused world acquisition: {reason:?}"
+        ))),
+        _ => Err(world_response_error(true)),
+    }
+}
+
+fn cold_world_acquisition(
+    restoration: &CompilerWorldRestoration,
+) -> Result<
+    (
+        tidepool_extract_cmd::ExactInputsAcquisition,
+        Vec<Arc<std::fs::File>>,
+    ),
+    CompileError,
+> {
+    use tidepool_extract_cmd::ExactInputsAcquisition as A;
+    match &restoration.successor {
+        Some(successor) => {
+            let mut cached = successor
+                .cold
+                .lock()
+                .map_err(|_| source_failure("successor recovery lock poisoned"))?;
+            if cached.is_none() {
+                *cached = Some(restoration.prepare_cold()?);
+            }
+            let cold = cached.as_ref().expect("checked successor cold restoration");
+            Ok((
+                A::Complete(cold.descriptor.clone()),
+                cold.input_files.iter().cloned().collect(),
+            ))
+        }
+        None => Ok((
+            A::Complete(restoration.descriptor.clone()),
+            restoration.input_files.iter().cloned().collect(),
+        )),
+    }
+}
+
 fn ensure_world(
     world: &CompilerWorld,
     identity: &tidepool_extract_cmd::CompilerIdentity,
-) -> Result<String, CompileError> {
-    use tidepool_extract_cmd::{
-        EnsureExactInputsOutcome as O, ExactInputsAcquisition as A, ExactInputsRequest,
-    };
+) -> Result<tidepool_extract_cmd::WorldRealizationRef, CompileError> {
+    use tidepool_extract_cmd::{ExactInputsAcquisition as A, ExactInputsRequest};
     let restoration = &world.restoration;
     if CanonicalProducerIdentity::from_compiler(identity).sha256() != restoration.producer
         || identity
@@ -3450,149 +3552,191 @@ fn ensure_world(
         ));
     }
     let root = world_hex(world.logical_id());
-    let hint = world
+    let observed = world
         .realization
         .lock()
         .map_err(|_| source_failure("world realization lock poisoned"))?
-        .clone()
-        .unwrap_or_else(|| "not-resident".into());
-    // This source-free probe precedes baseline descriptor exports or FD visits.
-    let (mut cmd, endpoint) = world_command(identity)?;
-    cmd.ensure_exact_inputs(ExactInputsRequest {
-        root: root.clone(),
-        acquisition: A::Resident(hint),
-    });
+        .clone();
+    if let Some(previous) = &observed {
+        // Only an actual issued reference can make a resident lookup meaningful.
+        let (mut cmd, endpoint) = world_command(identity, previous.location.as_ref())?;
+        cmd.ensure_exact_inputs(ExactInputsRequest {
+            root: root.clone(),
+            acquisition: A::Resident(previous.reference.clone()),
+        });
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::WorldEnsureResidentProbe,
+            1,
+        );
+        match world_acquisition_outcome(world_execute(&cmd, endpoint, Vec::new())?, &root)? {
+            WorldAcquisitionOutcome::Ready(ready) => {
+                crate::host_work::record_host_work(
+                    crate::host_work::HostWorkCounter::WorldEnsureResidentHit,
+                    1,
+                );
+                let reference = ready.reference.clone();
+                *world
+                    .realization
+                    .lock()
+                    .map_err(|_| source_failure("world realization lock poisoned"))? = Some(ready);
+                return Ok(reference);
+            }
+            WorldAcquisitionOutcome::Missing(_reason) => {
+                crate::host_work::record_host_work(
+                    crate::host_work::HostWorkCounter::WorldEnsureNeedsAcquisition,
+                    1,
+                );
+            }
+        }
+    }
+    if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(
+        &restoration.inputs.directory,
+    )) {
+        return Err(source_failure(
+            "world acquisition requires its compiler scope",
+        ));
+    }
+    let predecessor = restoration
+        .successor
+        .as_ref()
+        .map(|successor| {
+            successor
+                .realization
+                .lock()
+                .map(|held| held.clone())
+                .map_err(|_| source_failure("predecessor realization lock poisoned"))
+        })
+        .transpose()?
+        .flatten();
+    let (acquisition, files, is_successor) = match (&restoration.successor, &predecessor) {
+        (Some(successor), Some(previous)) => (
+            A::Successor {
+                predecessor: world_hex(&successor.predecessor),
+                realization: previous.reference.clone(),
+                descriptor: restoration.descriptor.clone(),
+            },
+            successor.files.clone(),
+            true,
+        ),
+        _ => {
+            let (acquisition, files) = cold_world_acquisition(restoration)?;
+            (acquisition, files, false)
+        }
+    };
+    let affinity = observed
+        .as_ref()
+        .or(predecessor.as_ref())
+        .and_then(|previous| previous.location.as_ref());
+    let submit = |acquisition,
+                  files: Vec<Arc<std::fs::File>>|
+     -> Result<WorldAcquisitionOutcome, CompileError> {
+        let (mut cmd, endpoint) = world_command(identity, affinity)?;
+        cmd.ensure_exact_inputs(ExactInputsRequest {
+            root: root.clone(),
+            acquisition,
+        });
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::InputFdExport,
+            files.len() as u64,
+        );
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::WorldEnsureComplete,
+            1,
+        );
+        let diagnostics = crate::artifacts::CompilerDiagnosticCapture::start(
+            restoration.inputs.directory.path(),
+            &cmd,
+        );
+        let run = world_execute(&cmd, endpoint, files)?;
+        diagnostics.completed(
+            restoration.inputs.directory.path(),
+            &cmd,
+            run.success(),
+            &run.output.stderr,
+        );
+        world_acquisition_outcome(run, &root)
+    };
+    let ready = match submit(acquisition, files)? {
+        WorldAcquisitionOutcome::Ready(ready) => ready,
+        WorldAcquisitionOutcome::Missing(_reason) if is_successor => {
+            // A known missing predecessor is reconstructed from this exact
+            // retained World owner. No query, accepted compile, or effect is retried.
+            let (acquisition, files) = cold_world_acquisition(restoration)?;
+            match submit(acquisition, files)? {
+                WorldAcquisitionOutcome::Ready(ready) => ready,
+                WorldAcquisitionOutcome::Missing(_) => return Err(world_response_error(true)),
+            }
+        }
+        WorldAcquisitionOutcome::Missing(_) => return Err(world_response_error(true)),
+    };
     crate::host_work::record_host_work(
-        crate::host_work::HostWorkCounter::WorldEnsureResidentProbe,
+        crate::host_work::HostWorkCounter::WorldEnsureCompleteReady,
         1,
     );
-    let run = world_execute(&cmd, endpoint, Vec::new())?;
-    let response = O::decode(&run.output.stdout).map_err(|_| world_response_error(false))?;
-    let realized = match response {
-        O::Ready {
-            world, realization, ..
-        } if world == root => {
-            crate::host_work::record_host_work(
-                crate::host_work::HostWorkCounter::WorldEnsureResidentHit,
-                1,
-            );
-            realization
-        }
-        O::NeedsAcquisition(world) if world == root => {
-            crate::host_work::record_host_work(
-                crate::host_work::HostWorkCounter::WorldEnsureNeedsAcquisition,
-                1,
-            );
-            if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(
-                &restoration.inputs.directory,
-            )) {
-                return Err(source_failure(
-                    "world acquisition requires its compiler scope",
-                ));
-            }
-            let (acquisition, files) = match &restoration.successor {
-                Some(successor) => (
-                    A::Successor {
-                        predecessor: world_hex(&successor.predecessor),
-                        realization: successor
-                            .realization
-                            .lock()
-                            .map_err(|_| source_failure("predecessor realization lock poisoned"))?
-                            .clone()
-                            .unwrap_or_else(|| "not-resident".into()),
-                        descriptor: restoration.descriptor.clone(),
-                    },
-                    successor.files.clone(),
-                ),
-                None => (
-                    A::Complete(restoration.descriptor.clone()),
-                    restoration.input_files.iter().cloned().collect(),
-                ),
-            };
-            let (mut cmd, endpoint) = world_command(identity)?;
-            cmd.ensure_exact_inputs(ExactInputsRequest {
-                root: root.clone(),
-                acquisition,
-            });
-            crate::host_work::record_host_work(
-                crate::host_work::HostWorkCounter::InputFdExport,
-                files.len() as u64,
-            );
-            crate::host_work::record_host_work(
-                crate::host_work::HostWorkCounter::WorldEnsureComplete,
-                1,
-            );
-            let diagnostics = crate::artifacts::CompilerDiagnosticCapture::start(
-                restoration.inputs.directory.path(),
-                &cmd,
-            );
-            let run = world_execute(&cmd, endpoint, files)?;
-            diagnostics.completed(
-                restoration.inputs.directory.path(),
-                &cmd,
-                run.success(),
-                &run.output.stderr,
-            );
-
-            let response =
-                O::decode(&run.output.stdout).map_err(|_| world_response_error(false))?;
-            let response = match (response, &restoration.successor) {
-                (O::NeedsAcquisition(world), Some(successor)) if world == root => {
-                    // Missing exact predecessor backing is ordinary eviction.
-                    // Rehydrate the SAME retained immutable product; no cell
-                    // compilation or effect execution is retried here.
-                    let mut cached = successor
-                        .cold
-                        .lock()
-                        .map_err(|_| source_failure("successor recovery lock poisoned"))?;
-                    if cached.is_none() {
-                        *cached = Some(restoration.prepare_cold()?);
-                    }
-                    let cold = cached.as_ref().expect("checked successor cold restoration");
-                    let (mut cmd, endpoint) = world_command(identity)?;
-                    cmd.ensure_exact_inputs(ExactInputsRequest {
-                        root: root.clone(),
-                        acquisition: A::Complete(cold.descriptor.clone()),
-                    });
-                    O::decode(
-                        &world_execute(&cmd, endpoint, cold.input_files.iter().cloned().collect())?
-                            .output
-                            .stdout,
-                    )
-                    .map_err(|_| world_response_error(false))?
-                }
-                (response, _) => response,
-            };
-            match response {
-                O::Ready {
-                    world, realization, ..
-                } if world == root => {
-                    crate::host_work::record_host_work(
-                        crate::host_work::HostWorkCounter::WorldEnsureCompleteReady,
-                        1,
-                    );
-                    realization
-                }
-                O::Rejected(reason) => {
-                    return Err(source_failure(format!(
-                        "compiler refused world acquisition: {reason:?}"
-                    )))
-                }
-                _ => return Err(world_response_error(true)),
-            }
-        }
-        O::Rejected(reason) => {
-            return Err(source_failure(format!(
-                "compiler refused world realization: {reason:?}"
-            )))
-        }
-        _ => return Err(world_response_error(true)),
-    };
+    let reference = ready.reference.clone();
     *world
         .realization
         .lock()
-        .map_err(|_| source_failure("world realization lock poisoned"))? = Some(realized.clone());
-    Ok(realized)
+        .map_err(|_| source_failure("world realization lock poisoned"))? = Some(ready);
+    Ok(reference)
+}
+
+#[cfg(test)]
+pub(crate) fn assert_actual_world_reference_pairing(
+    world: &CompilerWorld,
+    identity: &tidepool_extract_cmd::CompilerIdentity,
+) -> Result<(), CompileError> {
+    use tidepool_extract_cmd::{ExactInputsAcquisition, ExactInputsRequest};
+    ensure_world(world, identity)?;
+    let before = world
+        .realization
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("actual acquired World");
+    assert!(before.location.is_some(), "real daemon BEGIN location");
+    let root = world_hex(world.logical_id());
+    let (mut cmd, endpoint) = world_command(identity, before.location.as_ref())?;
+    cmd.ensure_exact_inputs(ExactInputsRequest {
+        root: root.clone(),
+        acquisition: ExactInputsAcquisition::Resident(before.reference.clone()),
+    });
+    let mut run = world_execute(&cmd, endpoint, Vec::new())?;
+    assert!(before
+        .reference
+        .matches_location(run.worker_location.as_ref().expect("actual BEGIN")));
+    let decoded = tidepool_extract_cmd::EnsureExactInputsOutcome::decode(&run.output.stdout)
+        .expect("actual Ready response");
+    assert!(
+        matches!(decoded, tidepool_extract_cmd::EnsureExactInputsOutcome::Ready { ref realization, .. }
+        if realization == &before.reference)
+    );
+    // Alter only transport DATA, retaining the actual BEGIN observation and
+    // the same production response decoder used before cache publication.
+    let reference = before.reference.as_str().as_bytes();
+    let offset = run
+        .output
+        .stdout
+        .windows(reference.len())
+        .position(|bytes| bytes == reference)
+        .expect("actual encoded reference");
+    run.output.stdout[offset] = if reference[0] == b'0' { b'1' } else { b'0' };
+    let error = world_acquisition_outcome(run, &root)
+        .err()
+        .expect("crossed worker must refuse");
+    let CompileError::CompilerEndpoint(error) = error else {
+        panic!("typed protocol refusal")
+    };
+    assert_eq!(
+        error.source.get_ref().and_then(|cause| cause
+            .downcast_ref::<tidepool_extract_cmd::CompilerResponseRejection>(
+        )),
+        Some(&tidepool_extract_cmd::CompilerResponseRejection::ProvenanceMismatch)
+    );
+    let after = world.realization.lock().unwrap();
+    assert_eq!(after.as_ref().unwrap().reference, before.reference);
+    assert_eq!(after.as_ref().unwrap().location, before.location);
+    Ok(())
 }
 
 /// Acquire the exact published logical world independently of its next demand.
@@ -3745,18 +3889,23 @@ pub fn plan_cell(
                 "world cell planning requires its compiler scope",
             ));
         }
-        let mut request = tidepool_extract_cmd::WorldCellPlanRequest {
-            world: world_hex(world.logical_id()),
-            realization: "not-resident".into(),
+        let world_id = world_hex(world.logical_id());
+        tidepool_extract_cmd::WorldCellPlanRequest::validate_borrowed(
+            &world_id,
+            &recipe,
+            operand.as_ref().map(|operand| operand.request()),
+            &output,
+            None,
+        )
+        .map_err(|error| source_failure(error.to_string()))?;
+        let request = tidepool_extract_cmd::WorldCellPlanRequest {
+            world: world_id,
+            realization: ensure_world(world, endpoint.identity())?,
             recipe: Arc::clone(&recipe),
             operand: operand.as_ref().map(|operand| operand.request().clone()),
             output: output.clone(),
         };
-        request
-            .validate_transport()
-            .map_err(|error| source_failure(error.to_string()))?;
-        request.realization = ensure_world(world, endpoint.identity())?;
-        let (mut command, bound) = world_command(endpoint.identity())?;
+        let (mut command, bound) = world_command(endpoint.identity(), None)?;
         command
             .world_cell_plan(request)
             .map_err(|error| source_failure(error.to_string()))?;
@@ -4793,7 +4942,7 @@ fn prepare_world_cell_outputs(
         let world_id = world_hex(plan.world().logical_id());
         tidepool_extract_cmd::WorldCellPrepareRequest::validate_borrowed(
             &world_id,
-            "not-resident",
+            None,
             plan.recipe(),
             plan.operand().map(|operand| operand.request()),
             plan.receipt(),
@@ -4824,9 +4973,14 @@ fn prepare_world_cell_outputs(
             &output,
         )
         .map_err(|error| source_failure(error.to_string()))?;
-        let mut request = tidepool_extract_cmd::WorldCellPrepareRequest {
+        if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(&directory)) {
+            return Err(source_failure(
+                "world cell preparation requires its compiler scope",
+            ));
+        }
+        let request = tidepool_extract_cmd::WorldCellPrepareRequest {
             world: world_id,
-            realization: "not-resident".into(),
+            realization: ensure_world(plan.world(), endpoint.identity())?,
             recipe: plan.recipe_owned(),
             operand: plan.operand().map(|operand| operand.request().clone()),
             plan: plan.receipt_owned(),
@@ -4836,18 +4990,12 @@ fn prepare_world_cell_outputs(
             directory: directory.path().to_path_buf(),
             output: output.clone(),
         };
-        // Source and parser receipt remain shared. Bound the actual frame
-        // before Ensure or transport encoding performs bulk allocation.
+        // Borrowed payload preflight preceded acquisition. Validate the complete
+        // request against those same limits before transport encoding.
         request
             .validate_transport()
             .map_err(|error| source_failure(error.to_string()))?;
-        if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(&directory)) {
-            return Err(source_failure(
-                "world cell preparation requires its compiler scope",
-            ));
-        }
-        request.realization = ensure_world(plan.world(), endpoint.identity())?;
-        let (mut command, bound) = world_command(endpoint.identity())?;
+        let (mut command, bound) = world_command(endpoint.identity(), None)?;
         command
             .world_cell_prepare(request)
             .map_err(|error| source_failure(error.to_string()))?;
@@ -5807,7 +5955,7 @@ fn query_world_transport(
     if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(&output_owner)) {
         return Err(source_failure("world question requires its compiler scope"));
     }
-    let (mut cmd, endpoint) = world_command(identity)?;
+    let (mut cmd, endpoint) = world_command(identity, None)?;
     cmd.world_query(tidepool_extract_cmd::WorldQueryRequest {
         world: world_hex(world.logical_id()),
         realization,

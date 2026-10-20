@@ -6,6 +6,11 @@ module Tidepool.HomeProducts
   , CandidateCoreFailure(..), validateCandidateInterfaceRequirements
   , validateCandidateCompilerViewProfile, materializeCandidateCompilerView, materializeAdmittedCompilerView
   , admittedCompilerInterface, validateAdmittedInterfaceRequirements
+  , CanonicalOriginalInputs, captureCanonicalOriginalInputs, lookupCanonicalOriginalInput
+  , CanonicalOriginalInput, canonicalOriginalOwner
+  , canonicalOriginalVersion, canonicalOriginalHome, canonicalOriginalProof, canonicalOriginalPackages
+  , materializeCanonicalOriginalView
+  , recoverCanonicalOriginalWithPrevious
   , AdmittedFinalizedOriginal, recoverAdmittedFinalizedOriginal, admitCompiledCanonicalOriginal
   , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
   , admittedOriginalLocation, OriginalVersion, originalVersionOwner, originalVersionInScope, originalVersionLookup, originalVersionSeal
@@ -61,7 +66,7 @@ import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Unit.Module.ModDetails (md_exports, md_insts, md_types)
 import GHC.Unit.Module.ModIface
-  ( ModIface, mi_module, mi_usages, mi_iface_hash, mi_final_exts, set_mi_extra_decls )
+  ( ModIface, mi_module, mi_usages, mi_hsc_src, mi_iface_hash, mi_final_exts, set_mi_extra_decls )
 import GHC.Unit.Module.Location (ModLocation(..))
 import GHC.Iface.Binary (writeBinIface, CompressionIFace(..), TraceBinIFace(..))
 import GHC.Unit.Module.Deps (Usage(..))
@@ -70,7 +75,7 @@ import GHC.Unit.Types (unitString, unitIdString)
 import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), forkExactContext, hydrateExactScope, withExactHomeInstances
-  , exactInterfaceSummary )
+  , exactInterfaceSummary, HydratedExactInterfaces, hydratedExactInterfaces )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv, scopeRetainedModuleGraph)
@@ -80,7 +85,9 @@ import Tidepool.ExactScope
   , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements
   , scopeModuleInterfaceProofs, canonicalOrigin, isSourceOriginal, canonicalCoreArtifact
   , canonicalCoreSha256, canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements, validateExactScopeEnvironment, admittedInterfaceCoreBytes, admittedInterfaceCoreBody
-  , canonicalInterfaceInput, canonicalProofInterfaceBody, canonicalProofOriginalBody )
+  , canonicalInterfaceInput, canonicalProofInterfaceBody, canonicalProofOriginalBody
+  , captureCanonicalMetadata, captureCanonicalProofs, CanonicalInterfaceUse(..)
+  , canonicalProofMatchesOwner )
 import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore, decodeFinalizedCore, captureFinalizedCore)
 import Tidepool.FinalizedModule (FinalizedModule, finalizedHomeModInfo, captureFinalizedInterface)
 import Tidepool.PackageWitness (PackageImportEvidence, encodePackageImports)
@@ -124,6 +131,117 @@ admittedOriginalInterface (AdmittedFinalizedOriginal _ _ row _) = row
 
 admittedOriginalLocation :: AdmittedFinalizedOriginal -> ModLocation
 admittedOriginalLocation (AdmittedFinalizedOriginal _ _ _ location) = location
+
+-- The source reader supplies one exact canonical input. Metadata checking
+-- owns no executable Core; recovery acquires that sealed body only on demand.
+-- Details may participate in GHC's SOURCE knot independently of Core identity.
+data CanonicalOriginalInput = CanonicalOriginalInput
+  !CapturedCanonicalMetadata HomeModInfo !PackageImportEvidence !(Maybe OriginalVersion)
+
+canonicalOriginalOwner :: CanonicalOriginalInput -> Module
+canonicalOriginalOwner = mi_module . hm_iface . canonicalOriginalHome
+
+canonicalOriginalHome :: CanonicalOriginalInput -> HomeModInfo
+canonicalOriginalHome (CanonicalOriginalInput _ home _ _) = home
+
+canonicalOriginalProof :: CanonicalOriginalInput -> CanonicalInterfaceProof
+canonicalOriginalProof (CanonicalOriginalInput metadata _ _ _) = capturedCanonicalMetadataProof metadata
+
+canonicalOriginalPackages :: CanonicalOriginalInput -> PackageImportEvidence
+canonicalOriginalPackages (CanonicalOriginalInput _ _ packages _) = packages
+
+canonicalOriginalVersion :: CanonicalOriginalInput -> Maybe OriginalVersion
+canonicalOriginalVersion (CanonicalOriginalInput _ _ _ version) = version
+
+-- Only the existing canonical source qualification passes its actual
+-- closure homes here. Consumers receive one opaque selected basis, not a
+-- loose interface census from which to infer original availability.
+newtype CanonicalOriginalInputs = CanonicalOriginalInputs (Map.Map Module CanonicalOriginalInput)
+
+lookupCanonicalOriginalInput :: CanonicalOriginalInputs -> Module -> Maybe CanonicalOriginalInput
+lookupCanonicalOriginalInput (CanonicalOriginalInputs inputs) owner = Map.lookup owner inputs
+
+captureCanonicalOriginalInputs :: String
+  -> HydratedExactInterfaces
+  -> [(CanonicalInterfaceProof,PackageImportEvidence)] -> IO CanonicalOriginalInputs
+captureCanonicalOriginalInputs producer closure sources = do
+  let homes = hydratedExactInterfaces closure
+      selected = Map.fromList
+        [((exactUnit artifact,exactModule artifact),(artifact,home)) | (artifact,home) <- homes]
+      seals = Map.map (exactSha256 . fst) selected
+  unless (Map.size selected == length homes) (throwIO CandidateOriginalOwnerMismatch)
+  inputs <- forM sources $ \(proof,packages) -> do
+    metadata <- captureCanonicalMetadata Nothing proof
+    let captured = capturedCanonicalMetadataProof metadata
+        (artifact,path,packageSha) = canonicalInterfaceInput captured
+        ownerKey = (exactUnit artifact,exactModule artifact)
+    (selectedArtifact,home) <- maybe (throwIO CandidateCoreHomeMissing) pure
+      (Map.lookup ownerKey selected)
+    let iface = hm_iface home
+        owner = mi_module iface
+    unless (isSourceOriginal (canonicalOrigin captured)
+        && canonicalProofMatchesOwner producer (originalOwnerKey owner) captured
+        && artifact == selectedArtifact && mi_hsc_src iface == HsSrcFile)
+      (throwIO CandidateOriginalOwnerMismatch)
+    unless (all (\(required,seal) -> Map.lookup required seals == Just seal)
+        (Map.toAscList (canonicalRequirements captured)))
+      (throwIO CandidateInterfaceRequirementsMismatch)
+    either throwIO pure (validateCandidateInterfaceRequirements captured iface)
+    expectedPackages <- canonicalProofOriginalBody captured path packageSha
+    unless (encodePackageImports artifact packages == artifactBytes expectedPackages)
+      (throwIO CandidateOriginalPackagesMismatch)
+    let version = (\core -> OriginalVersion owner producer (canonicalCertificateSha256 captured)
+          (canonicalCoreSha256 core) (exactSha256 artifact) packageSha) <$> canonicalCoreArtifact captured
+    pure (owner,CanonicalOriginalInput metadata home packages version)
+  let issued = Map.fromList inputs
+  unless (Map.size issued == length inputs) (throwIO CandidateOriginalOwnerMismatch)
+  pure (CanonicalOriginalInputs issued)
+
+recoverCanonicalOriginalWithPrevious :: HscEnv -> CanonicalOriginalInput
+  -> Maybe (OriginalVersion,FinalizedModule) -> IO (Maybe (OriginalVersion,AdmittedFinalizedOriginal))
+recoverCanonicalOriginalWithPrevious env input@(CanonicalOriginalInput _ home _ selected) previous =
+  case selected of
+    Nothing -> pure Nothing
+    Just version -> do
+      let proof = canonicalOriginalProof input
+          row@(artifact,_,_) = canonicalInterfaceInput proof
+          location = ms_location (exactInterfaceSummary env artifact)
+      case previous of
+        Just (oldVersion,old) | oldVersion == version ->
+          pure (Just (version,AdmittedFinalizedOriginal old proof row location))
+        _ -> do
+          capturedProofs <- captureCanonicalProofs Nothing [(proof,ExecutableInterfaceUse)]
+          captured <- case capturedProofs of
+            [issued] -> pure issued
+            _ -> throwIO CandidateCoreMissing
+          bytes <- readAdmittedCoreBody (ModuleInterfaceAdmission captured)
+          original <- decodeFinalizedCore env home location bytes
+            >>= either (throwIO . CandidateCoreDecodeFailure) pure
+          pure (Just (version,AdmittedFinalizedOriginal original captured row location))
+
+-- GHC may require executable bytecode for a real compile-time dependency.
+-- Its supported interface/Core handoff consumes this same admitted input;
+-- source frontend replay cannot substitute a different finalized Original.
+materializeCanonicalOriginalView :: FilePath -> Int -> HscEnv -> CanonicalOriginalInput
+  -> ModSummary -> IO ModSummary
+materializeCanonicalOriginalView directory index env input summary = do
+  unless (ms_mod summary == canonicalOriginalOwner input && ms_hsc_src summary == HsSrcFile)
+    (throwIO CandidateOriginalOwnerMismatch)
+  validateCandidateCompilerViewProfile summary
+  iface <- if backendGeneratesCode (backend (ms_hspp_opts summary))
+    then do
+      timing <- readTimingEnabled
+      emitCount timing "world.cell.canonical_make_view_core_reads" 1
+      captured <- captureCanonicalProofs Nothing [(canonicalOriginalProof input,ExecutableInterfaceUse)]
+      proof <- case captured of
+        [issued] -> pure issued
+        _ -> throwIO CandidateCoreMissing
+      bytes <- readAdmittedCore (ModuleInterfaceAdmission proof)
+      emitCount timing "world.cell.canonical_make_view_core_bytes" (fromIntegral (BS.length bytes))
+      attachFinalizedCore env (canonicalOriginalHome input) bytes
+        >>= either (throwIO . CandidateCoreDecodeFailure) pure
+    else pure (set_mi_extra_decls Nothing (hm_iface (canonicalOriginalHome input)))
+  materializeInterfaceView directory index iface summary
 
 -- A current compiler finalization can reuse a selected canonical original
 -- only when it is the exact interface/Core/package pair already admitted.

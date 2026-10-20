@@ -15,7 +15,7 @@ module Tidepool.PreparedStg
   , prepareRecoveredModule
   , prepareRecoveredBodies
   , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching
-  , PreparedBodyReuse(..), newPreparedOriginalModuleTaskPreparer
+  , PreparedBodyReuse(..), newPreparedOriginalModuleTaskPreparer, newPreparedCanonicalModuleTaskPreparer
   , newPreparedBodyPreparer, newPreparedBodyTaskPreparer, PreparedBodyTask, runPreparedBodyTask
   , PreparedComponents, PreparedComponentTask, newPreparedComponentUnitsPreparer
   , runPreparedComponentTask, PreparedUnitKey, PreparedUnitTask
@@ -99,7 +99,8 @@ import Tidepool.ConstructorIdentity (IdentityResolver, captureIdentityResolver)
 import GHC.Unit.Home.ModInfo (hm_iface)
 import Tidepool.ExactScope (ExactScope)
 import Tidepool.HomeProducts
-  ( OriginalVersion, originalVersionOwner, originalVersionInRecoveryScope, AdmittedFinalizedOriginal
+  ( CanonicalOriginalInputs, lookupCanonicalOriginalInput, canonicalOriginalVersion, recoverCanonicalOriginalWithPrevious
+  , OriginalVersion, originalVersionOwner, originalVersionInRecoveryScope, AdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalLocation, admitOriginalRecoveryScope
   , recoverAdmittedFinalizedOriginalWithPrevious )
 import Tidepool.Timing (readTimingEnabled, timePhase, timeModuleDetailPhase, emitCount
@@ -501,18 +502,44 @@ newPreparedOriginalModuleTaskPreparer :: HscEnv -> PreparedBodyCache -> ExactSco
   -> IO (Map String Id -> Module
     -> IO (Maybe (AdmittedFinalizedOriginal,PreparedBodyReuse,PreparedModuleTask)))
 newPreparedOriginalModuleTaskPreparer env cache scope = do
-  disabled <- bodyReuseDisabled
   admittedScope <- admitOriginalRecoveryScope env scope
+  newPreparedOriginalTaskPreparer env cache
+    (originalVersionInRecoveryScope admittedScope)
+    (recoverAdmittedFinalizedOriginalWithPrevious admittedScope)
+
+-- World acquisition supplies the same opaque input used by its compiler
+-- loader. Only reached executable demand enters the existing recovery cache.
+newPreparedCanonicalModuleTaskPreparer :: HscEnv -> PreparedBodyCache
+  -> CanonicalOriginalInputs
+  -> IO (Map String Id -> Module
+    -> IO (Maybe (AdmittedFinalizedOriginal,PreparedBodyReuse,PreparedModuleTask)))
+newPreparedCanonicalModuleTaskPreparer env cache inputs =
+  newPreparedOriginalTaskPreparer env cache
+    (\owner -> lookupCanonicalOriginalInput inputs owner >>= canonicalOriginalVersion)
+    (\owner previous -> case lookupCanonicalOriginalInput inputs owner of
+      Nothing -> pure Nothing
+      Just input -> recoverCanonicalOriginalWithPrevious env input previous)
+
+-- Both acquisition routes share version selection, site validation, decoded
+-- Core alternatives and body preparation. Neither cache hit changes custody.
+newPreparedOriginalTaskPreparer :: HscEnv -> PreparedBodyCache
+  -> (Module -> Maybe OriginalVersion)
+  -> (Module -> Maybe (OriginalVersion,FinalizedModule)
+      -> IO (Maybe (OriginalVersion,AdmittedFinalizedOriginal)))
+  -> IO (Map String Id -> Module
+    -> IO (Maybe (AdmittedFinalizedOriginal,PreparedBodyReuse,PreparedModuleTask)))
+newPreparedOriginalTaskPreparer env cache versionFor recover = do
+  disabled <- bodyReuseDisabled
   siteEnvironment <- resolvePreparedSiteEnvironment env
   pure $ \siblings owner -> do
-    let key = originalVersionInRecoveryScope admittedScope owner
+    let key = versionFor owner
     alternatives <- maybe (pure []) (\version -> fromMaybe [] . lookupOwnerEntry owner version
       <$> readMVar (cachedOriginalModules cache)) key
     let previous = (,) <$> key <*> ((\(PreparedOriginalAlternative original _) -> original)
           <$> listToMaybe alternatives)
         hit = listToMaybe [prepared | PreparedOriginalAlternative _ prepared <- alternatives
           , preparedSiteDependenciesMatch siteEnvironment siblings prepared]
-    original <- recoverAdmittedFinalizedOriginalWithPrevious admittedScope owner previous
+    original <- recover owner previous
     case original of
       Nothing -> pure Nothing
       Just (version,admitted) -> case hit of

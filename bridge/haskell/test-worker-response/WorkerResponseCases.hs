@@ -24,7 +24,8 @@ import Tidepool.CompilerRequest (withBoundCompilerRequest, compileBoundRequest)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..))
 import Tidepool.ExtractRequest
   ( workerRequestFromArgv, workerArgv, RequestField(..)
-  , EnsureExactInputsOutcome(..), ExactInputsRejection(..), WorldResidency(..), encodeEnsureExactInputsOutcomeWithin )
+  , EnsureExactInputsOutcome(..), ExactInputsRejection(..), WorldResidency(..)
+  , WorldAcquisitionMiss(..), encodeEnsureExactInputsOutcomeWithin )
 import Tidepool.GhcPipeline
   ( withResidentCompilerScopes, PipelineSelection(CheckedEnvironment), CompilePurpose(GeneralCompile) )
 import System.Posix.Resource
@@ -58,7 +59,7 @@ workerChild oneFreeFd scratch = do
         ["source-free"] -> BSC.hPutStr stdout "captured-control-debug"
         ["source-free-rejected"] -> pure ()
         ["source-free-capture-overflow"] -> BS.hPut stdout (BS.replicate (limit + 1) 111)
-        ["source-free-response-overflow"] -> pure ()
+        ["source-free-unbounded-reference"] -> pure ()
         ["source-free-capture-failure"] -> removeCaptureFiles scratch
         ["source-free-rejected-capture-failure"] -> removeCaptureFiles scratch
         ["stdout-overflow"] -> BS.hPut stdout (BS.replicate (limit + 1) 111)
@@ -75,11 +76,11 @@ workerChild oneFreeFd scratch = do
         ["next-request"] -> BSC.hPutStr stdout "complete-next-request"
         _ -> fail "unexpected capture fixture request"
       pure $ case args of
-        ["source-free"] -> ExactInputsResponse (ExactInputsNeedsAcquisition (replicate 64 'a'))
+        ["source-free"] -> ExactInputsResponse (ExactInputsNeedsAcquisition (replicate 64 'a') WorldNotResidentOnThisWorker)
         ["source-free-rejected"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
-        ["source-free-capture-overflow"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') "realization" WorldRetainedAtAdmission)
-        ["source-free-response-overflow"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (repeat 'x') WorldRetainedAtAdmission)
-        ["source-free-capture-failure"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') "realization" WorldRetainedAtAdmission)
+        ["source-free-capture-overflow"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (replicate 64 '1' ++ ".7") WorldRetainedAtAdmission)
+        ["source-free-unbounded-reference"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (repeat 'x') WorldRetainedAtAdmission)
+        ["source-free-capture-failure"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (replicate 64 '1' ++ ".7") WorldRetainedAtAdmission)
         ["source-free-rejected-capture-failure"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
         _ -> DiagnosticResponse []
 
@@ -99,17 +100,17 @@ check scratch = do
       unless (ack == BS.singleton 1) (fail "missing transaction acknowledgement")
       forRequest input output "source-free" $ \code out err ->
         unless (code == 0
-            && Just out == encodeEnsureExactInputsOutcomeWithin (toInteger limit) (ExactInputsNeedsAcquisition (replicate 64 'a'))
+            && Just out == encodeEnsureExactInputsOutcomeWithin (toInteger limit) (ExactInputsNeedsAcquisition (replicate 64 'a') WorldNotResidentOnThisWorker)
             && err == "captured-control-debug")
           (fail "typed source-free result did not use the machine channel")
       forRequest input output "source-free-capture-overflow" $ \code out _ ->
         unless (code == 1 && BSC.isInfixOf "worker-failure" out
             && not (BSC.isInfixOf "TPEXO" out))
           (fail "capture overflow exposed an unconfirmed Ready result")
-      forRequest input output "source-free-response-overflow" $ \code out err ->
+      forRequest input output "source-free-unbounded-reference" $ \code out err ->
         unless (code == 1 && BSC.isInfixOf "worker-failure" out
             && BS.length out < 1024 && BS.null err)
-          (fail "typed response encoding did not stop at the aggregate payload budget")
+          (fail "typed response encoding forced or admitted an unbounded invalid reference")
       forRequest input output "source-free-rejected" $ \code out err ->
         unless (code == 0
             && Just out == encodeEnsureExactInputsOutcomeWithin (toInteger limit) (ExactInputsRejected AcquisitionRejected)

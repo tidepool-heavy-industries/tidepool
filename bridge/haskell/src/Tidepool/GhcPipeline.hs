@@ -4,7 +4,7 @@
 
 module Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedModuleCompletion, PreparedModuleCompletionInputs(..), PreparedModuleObserver(..)
-  , PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules
+  , PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules, pprCanonicalOriginalInputs, pprAcquiredCanonicalOriginals
   , CheckedPublicModuleResult, checkedPublicModuleIdentity, checkedPublicModuleEvidence
   , WorldModulePolicyFailure(..), WorldModulePolicy(..)
   , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprReuseContext
@@ -230,6 +230,12 @@ import Tidepool.FinalizedModuleArtifacts
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedHomeUnits, localFinalizedCore
   , matchesCapturedFinalization, localFinalizedPackageEvidence, finalizedInterfaceSeals )
 import Tidepool.HomeProducts
+  ( CandidateCoreFailure(..), CanonicalOriginalInputs, CanonicalOriginalInput, captureCanonicalOriginalInputs
+  , lookupCanonicalOriginalInput, canonicalOriginalHome, canonicalOriginalProof
+  , canonicalOriginalPackages, canonicalOriginalVersion, AdmittedFinalizedOriginal
+  , admittedOriginalModule, admittedOriginalProof
+  , materializeCanonicalOriginalView )
+import Tidepool.HomeProducts
   ( hydrateCandidateHomeProductsWithOriginalsUsing, validateCandidateCompilerViewProfile, materializeCandidateCompilerView, admittedCompilerInterface
   , validateCandidateInterfaceRequirements, validateCapturedAdmittedCore )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
@@ -246,8 +252,8 @@ import Tidepool.ExtractUtil (getLibdir, boundedUtf8, trySynchronous)
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeInspectionWildcards, withInspectionWork, runWorldInspectionGhc, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..))
 import Tidepool.ExtractRequest
-  ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
-  , WorldResidency(..), WorldNonRetentionReason(..)
+  ( ExactInputsRequest(..), ExactInputsAcquisition(..), validExactInputsRequest, EnsureExactInputsOutcome(..), ExactInputsRejection(..)
+  , WorldResidency(..), WorldNonRetentionReason(..), WorldAcquisitionMiss(..)
   , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), publicQuestionInspection, publicQuestionIsType, WorldObservationQuery(..), InspectionRequest(..), StructuredInspection(..), StructuredNameScope(..)
   , WorldCellPlanRequest(..), WorldCellPrepareRequest(..), WorldCellOperandRequest(..), WorldCellRecipe(..), PlannedCellSlot(..)
   , StructuredNameNamespace(..), InspectionProvenance(..) )
@@ -270,7 +276,7 @@ import Tidepool.Timing
   , readMemoTraceEnabled, MemoSelectionState(..), MemoSelectionTrace(..), MemoExecutableTrace(..)
   , emitMemoCycleGraph, emitMemoMissTrace )
 import Tidepool.PreparedStg (PreparedModule, pmModule, preparedUsesSiteAuthority, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent, acquirePreparedModuleWithSiteEnvironment, runPreparedModuleTask
-  , PreparedBodyCache, newPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching)
+  , newPreparedCanonicalModuleTaskPreparer, PreparedBodyReuse(..), PreparedBodyCache, newPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching)
 import Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, mergeFatIfaceCaches, selectFatIfaceCaches, evictFatIfaceMatching
   , OwnerInterfaceCache, newOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching)
@@ -296,7 +302,7 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , sourceEvidenceWithFingerprint, selectedFreshHomeRequirements )
 import Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, hydrateExactScope, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  ( OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, hydrateExactScope, hydrateExactScopeWithProducts, HydratedExactInterfaces, VerifiedExactInterface, verifiedExactInterface, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
@@ -319,7 +325,7 @@ import Tidepool.ExactScope
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , WorldCellOperandInputs, readWorldCellOperandWithOwner, worldCellOperandExposure, WorldCellOperandExposure(..)
   , worldCellOperandBinding, worldCellOperandInterface, worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes
-  , WorldTypeClosureEntry, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryInterfaceBody, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
+  , WorldTypeClosureEntry, worldTypeEntryArtifact, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryInterfaceBody, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
   , WorldInputsFailure(..), WorldInputsFailureCause(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
@@ -396,6 +402,8 @@ data PreparedModuleCompletionInputs = PreparedModuleCompletionInputs
   , completionExternalOriginalBindings :: Map.Map Name SymbolIdentity
   , completionReuseContext :: ReuseContext
   , completionCanonicalInterfaces :: Map.Map (String,String) CanonicalInterfaceAdmission
+  , completionCanonicalOriginalInputs :: Maybe CanonicalOriginalInputs
+  , completionAcquiredCanonicalOriginals :: Map.Map Module AdmittedFinalizedOriginal
   }
 
 data PreparedModuleObserver = PreparedModuleObserver
@@ -450,6 +458,8 @@ data PreparedPipelineResult = PreparedPipelineResult
   , ownedPprCandidateAdmissions :: [AdmittedSourceCandidate]
   , ownedPprOriginalBindings :: Map.Map Name SymbolIdentity
   , ownedPprReuseContext :: ReuseContext
+  , ownedPprCanonicalOriginalInputs :: Maybe CanonicalOriginalInputs
+  , ownedPprAcquiredCanonicalOriginals :: Map.Map Module AdmittedFinalizedOriginal
   }
 
 -- Read accessors expose issued facts without record-update labels.
@@ -464,6 +474,12 @@ pprProductInterfaces = ownedPprProductInterfaces
 
 pprFinalizedModules :: PreparedPipelineResult -> Map.Map ModuleName FinalizedModule
 pprFinalizedModules = ownedPprFinalizedModules
+
+pprCanonicalOriginalInputs :: PreparedPipelineResult -> Maybe CanonicalOriginalInputs
+pprCanonicalOriginalInputs = ownedPprCanonicalOriginalInputs
+
+pprAcquiredCanonicalOriginals :: PreparedPipelineResult -> Map.Map Module AdmittedFinalizedOriginal
+pprAcquiredCanonicalOriginals = ownedPprAcquiredCanonicalOriginals
 
 pprPackageImports :: PreparedPipelineResult -> Map.Map ModuleName PackageImportEvidence
 pprPackageImports = ownedPprPackageImports
@@ -599,7 +615,7 @@ preparedDependencies _ variant fresh exact
       Nothing -> do
         selected <- readIORef receipt
         imports <- case selected of
-          Just (WorldSourceSelection _ imports _ _) -> pure imports
+          Just (WorldSourceSelection _ imports _ _ _) -> pure imports
           Nothing -> throwIO WorldCellCorrupt
         let producer = hexBytes (worldInputsProducer facts)
         _ <- evaluate (length producer)
@@ -1330,7 +1346,7 @@ data WorldSourceInputBasis = WorldSourceInputBasis ExactInputOwner WorldInputFac
 
 data WorldSourceSelection = WorldSourceSelection (Maybe SourceSelectedOriginals)
   [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])] [WorldTypeClosureEntry]
-  (Map.Map (String,String) CanonicalInterfaceAdmission)
+  (Map.Map (String,String) CanonicalInterfaceAdmission) (Maybe CanonicalOriginalInputs)
 
 candidateManifestFor :: PipelineSelection result -> Maybe FilePath
 candidateManifestFor (PreparedProducts path) = path
@@ -1466,12 +1482,24 @@ data CompilerUniverse = CompilerUniverse
 -- Immutable logical inputs and the NameCache-bound HPT have separate owners.
 -- This realization is indexed by its universe and strongly borrowed by one
 -- active compiler scope through confirmed END.
-data HeldCompilerWorld = HeldCompilerWorld WorldInputFacts String WorldMaterialization (IORef WorldPreparedModules)
+-- Only actual World acquisition issues this accelerator. Transport strings
+-- are compared at the scope boundary; they do not construct held bindings.
+newtype IssuedWorldRealization = IssuedWorldRealization String deriving (Eq)
+
+worldRealizationText :: IssuedWorldRealization -> String
+worldRealizationText (IssuedWorldRealization value) = value
+
+newWorldRealization :: BS.ByteString -> IO IssuedWorldRealization
+newWorldRealization instanceNonce = do
+  unique <- RequestUnique.hashUnique <$> RequestUnique.newUnique
+  pure (IssuedWorldRealization (hexBytes instanceNonce ++ "." ++ show unique))
+
+data HeldCompilerWorld = HeldCompilerWorld WorldInputFacts IssuedWorldRealization WorldMaterialization (IORef WorldPreparedModules)
 
 -- A retained closed request carries correlation, never a second payload hold.
 -- The scope revalidates this binding and borrows its actual held payload only
 -- after the fresh executor and phase checks have succeeded.
-data HeldWorldQueryBinding = HeldWorldQueryBinding !String !String
+data HeldWorldQueryBinding = HeldWorldQueryBinding !String !IssuedWorldRealization
 
 data WorldHomeSource = WorldHomeSource Int FilePath FilePath BS.ByteString
 data WorldMaterialization = WorldMaterialization FilePath FilePath [FilePath]
@@ -1489,13 +1517,13 @@ data WorldDependencyPolicy = WorldDependencyPolicy BS.ByteString BS.ByteString B
 data WorldCompletedDependencies = WorldCompletedDependencies WorldDependencyPolicy WorldModuleVersions
 
 data WorldDependencyAttempt = WorldDependencyAttempt
-  String String WorldDependencyPolicy (Map.Map FilePath WorldHomeSource)
+  String IssuedWorldRealization WorldDependencyPolicy (Map.Map FilePath WorldHomeSource)
   WorldModuleVersions ModIfaceCache (IORef GutsMemo) (IORef CompilerRecoveryCaches)
   (IORef CompilerInterpreterState)
 
 -- No held world, mutable attempt, source tree or backing lease escapes in this
 -- pending result. The scope resolves the actual held owner again at commit.
-data PendingWorldDependencies = PendingWorldDependencies CompilerExecutor String String WorldDependencyPolicy
+data PendingWorldDependencies = PendingWorldDependencies CompilerExecutor String IssuedWorldRealization WorldDependencyPolicy
   (IORef (Maybe WorldModuleVersions))
 
 -- Immutable private versions remain paired with the actual pending completion
@@ -1604,7 +1632,7 @@ borrowHeldWorldDependencies :: CompilerExecutor -> WorldInputFacts -> String
 borrowHeldWorldDependencies executor facts reference previous
     completion@(PendingWorldDependencies issued identity realization policy pending) = do
   unless (sameCompilerExecutor executor issued && identity == worldInputsIdentity facts
-      && realization == reference) (throwIO WorldCellCorrupt)
+      && worldRealizationText realization == reference) (throwIO WorldCellCorrupt)
   requireCompilerExecutorOpen executor
   additions <- readIORef pending >>= maybe (throwIO CheckedPurposeMismatch) pure
   retained <- case previous of
@@ -1805,7 +1833,7 @@ releaseWorldMaterialization (WorldMaterialization directory _ _ _ _ _ _ _ (World
 
 -- The caller is the service's authenticated successor issuer. Equal source
 -- seals can validate that exact base's inherited backing, never select a base.
-retainHeldWorldSuccessor :: IORef CompilerUniverse -> HeldCompilerWorld -> WorldSuccessorInputs -> String
+retainHeldWorldSuccessor :: IORef CompilerUniverse -> HeldCompilerWorld -> WorldSuccessorInputs -> IssuedWorldRealization
   -> (HeldCompilerWorld -> IO result) -> IO result
 retainHeldWorldSuccessor universeRef (HeldCompilerWorld base _ materialized preparedRef) successorInputs reference publish = mask $ \_ -> do
   let facts = worldSuccessorFacts successorInputs
@@ -1864,7 +1892,7 @@ retireCompilerWorldBacking timing universeRef world@(HeldCompilerWorld facts ref
     result -> [(CompilerScopeRestore,
       observeCompilerWorld timing universe
         (case result of BodySucceeded True -> WorldBackingRemoved; _ -> WorldBackingRemoveFailed)
-        (worldInputsIdentity facts) reference (Just world))]
+        (worldInputsIdentity facts) (worldRealizationText reference) (Just world))]
   void (finishCompletion (appendCleanupFailures completed observed))
 
 observeCompilerWorld :: Bool -> CompilerUniverse -> WorldRetentionEvent -> String -> String
@@ -2570,7 +2598,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
         pending <- liftIO (stageHeldWorldDependencies executor dependencies withAliases final path)
         recovery <- liftIO (worldDependencyRecovery dependencies)
         selected <- liftIO (readIORef importsRef >>= maybe (throwIO WorldCellCorrupt) pure)
-        let WorldSourceSelection sourceSelection _ _ _ = selected
+        let WorldSourceSelection sourceSelection _ _ _ _ = selected
         forM_ sourceSelection $ \value -> do
           unchanged <- liftIO (revalidateSourceSelectedOriginals value)
           unless unchanged (liftIO (throwIO WorldCellUnavailable))
@@ -2580,7 +2608,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
       result <- runStage selection
       final <- getSession
       resolved <- liftIO requireResolved
-      (pending,recovery,WorldSourceSelection sourceSelection imports sourceTypes _) <- completeDependencies
+      (pending,recovery,WorldSourceSelection sourceSelection imports sourceTypes _ _) <- completeDependencies
       selectedTypeBodies <- liftIO $ do
         let entries = worldResolvedTypes resolved ++ sourceTypes ++ maybe [] verifiedWorldDeclarationTypeInputs verifiedDeclaration
               ++ maybe [] (Map.elems . worldCellOperandTypes) operand
@@ -3427,8 +3455,16 @@ data LoadedModule = LoadedModule
   { loadedSummary :: ModSummary
   , loadedFacts :: ModuleFacts
   , loadedOutput :: ModuleOutput
-  , loadedFinalized :: FinalizedModule
+  , loadedAcquisition :: AcquiredOriginalProduct
   }
+
+loadedFinalized :: LoadedModule -> FinalizedModule
+loadedFinalized = acquiredOriginalFinalization . loadedAcquisition
+
+freshLoadedModule :: ModSummary -> ModuleFacts -> ModuleOutput -> FinalizedModule -> LoadedModule
+freshLoadedModule summary facts output original = LoadedModule summary facts output
+  (FreshCompletion (FreshSourceAdmission (ms_mod summary) (ms_hsc_src summary)
+    (ms_hs_hash summary) (ml_hs_file (ms_location summary))) original)
 
 data CanonicalFrontendFailure
   = CustomLoadPhaseHook
@@ -3955,11 +3991,29 @@ data ModuleProduct = ModuleProduct
   { productFacts :: ModuleFacts
   , productOutput :: ModuleOutput
   , productPrepared :: PreparedModule
-  , productFinalized :: FinalizedModule
+  , productAcquisition :: AcquiredOriginalProduct
   }
 
+-- The completion issuer chooses provenance once. A reused proof never gets
+-- attached later to a different source frontend's finalization.
+data AcquiredOriginalProduct
+  = FreshCompletion !FreshSourceAdmission FinalizedModule
+  | ReusedCanonical AdmittedFinalizedOriginal
+
+-- Only the source completion issuer constructs this small ingress fact. Keep
+-- parsed trees and phase environments out of dormant product provenance.
+data FreshSourceAdmission = FreshSourceAdmission !Module !HscSource !Fingerprint !(Maybe FilePath)
+
+productFinalized :: ModuleProduct -> FinalizedModule
+productFinalized = acquiredOriginalFinalization . productAcquisition
+
+acquiredOriginalFinalization :: AcquiredOriginalProduct -> FinalizedModule
+acquiredOriginalFinalization acquisition = case acquisition of
+  FreshCompletion _ original -> original
+  ReusedCanonical original -> admittedOriginalModule original
+
 data MemoPayload
-  = ValidationOnly ModuleFacts ModuleOutput FinalizedModule
+  = ValidationOnly ModuleFacts ModuleOutput AcquiredOriginalProduct
   | ExecutableProduct ModuleProduct
 
 data GutsMemoEntry = GutsMemoEntry
@@ -3984,16 +4038,19 @@ data GutsMemoEntry = GutsMemoEntry
 data ModuleObservation
   = CachedObservation ModSummary GutsMemoEntry
   | LoadedObservation LoadedModule
+  | CanonicalObservation ModSummary CanonicalOriginalInput
   | HydratedObservation ModSummary HomeModInfo AdmittedSourceCandidate
 
 observationSummary :: ModuleObservation -> ModSummary
 observationSummary (CachedObservation summary _) = summary
 observationSummary (LoadedObservation loaded) = loadedSummary loaded
+observationSummary (CanonicalObservation summary _) = summary
 observationSummary (HydratedObservation summary _ _) = summary
 
 observationFacts :: ModuleObservation -> IO ModuleFacts
 observationFacts (CachedObservation _ entry) = pure (payloadFacts (gmePayload entry))
 observationFacts (LoadedObservation loaded) = pure (loadedFacts loaded)
+observationFacts (CanonicalObservation _ input) = pure (hydratedModuleFacts (canonicalOriginalPackages input))
 observationFacts (HydratedObservation _ _ admitted) = pure
   (hydratedModuleFacts (admittedCandidateRoots admitted))
     { moduleFactReferences = Set.fromList
@@ -4023,28 +4080,27 @@ payloadProduct (ValidationOnly _ _ _) = Nothing
 payloadProduct (ExecutableProduct moduleProduct) = Just moduleProduct
 
 payloadLoaded :: ModSummary -> MemoPayload -> LoadedModule
-payloadLoaded summary (ValidationOnly facts output finalized) =
-  LoadedModule summary facts output finalized
+payloadLoaded summary (ValidationOnly facts output acquisition) =
+  LoadedModule summary facts output acquisition
 payloadLoaded summary (ExecutableProduct product') =
-  LoadedModule summary (productFacts product') (productOutput product') (productFinalized product')
+  LoadedModule summary (productFacts product') (productOutput product') (productAcquisition product')
 
 payloadFinalized :: MemoPayload -> FinalizedModule
-payloadFinalized (ValidationOnly _ _ finalized) = finalized
+payloadFinalized (ValidationOnly _ _ acquisition) = acquiredOriginalFinalization acquisition
 payloadFinalized (ExecutableProduct product') = productFinalized product'
 
 payloadOwner :: MemoPayload -> Module
 payloadOwner (ValidationOnly _ output _) = moduleOutputModule output
 payloadOwner (ExecutableProduct product') = moduleOutputModule (productOutput product')
 
-requireProduct :: ModuleFacts -> ModuleOutput -> Maybe PreparedModule
-  -> FinalizedModule -> Ghc ModuleProduct
-requireProduct facts output (Just prepared) finalized = pure ModuleProduct
-  { productFacts = facts
-  , productOutput = output
+requireProduct :: LoadedModule -> Maybe PreparedModule -> Ghc ModuleProduct
+requireProduct loaded (Just prepared) = pure ModuleProduct
+  { productFacts = loadedFacts loaded
+  , productOutput = loadedOutput loaded
   , productPrepared = prepared
-  , productFinalized = finalized
+  , productAcquisition = loadedAcquisition loaded
   }
-requireProduct _ _ Nothing _ = liftIO $ ioError $ userError
+requireProduct _ Nothing = liftIO $ ioError $ userError
     "executable compilation produced no prepared module"
 
 -- Resolved direct imports include unused, instance-only and compiler-inserted
@@ -4180,6 +4236,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     preparedSiblingsRef <- liftIO (newIORef Map.empty)
     productInterfacesRef <- liftIO (newIORef Map.empty)
     finalizedModulesRef <- liftIO (newIORef Map.empty)
+    acquiredCanonicalOriginalsRef <- liftIO (newIORef Map.empty)
     loadedModulesRef <- liftIO (newIORef Map.empty)
     targetEnvironmentRef <- liftIO (newIORef Nothing)
     targetTypedSegmentRef <- liftIO (newIORef Nothing)
@@ -4581,9 +4638,16 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           (pvSourceImportIntents variant) (pvGeneratedScaffold variant) modGraphRaw)
     selectedExact <- traverse (either (liftIO . fail) pure . extendSourceSelectedOriginals sourceSelection)
       (pvExactScope variant)
+    let canonicalOriginalInputs = case worldSources of
+          Just (WorldSourceSelection _ _ _ _ inputs) -> inputs
+          Nothing -> Nothing
+        canonicalOriginalFor summary
+          | ms_hsc_src summary == HsSrcFile = canonicalOriginalInputs >>=
+              (\inputs -> lookupCanonicalOriginalInput inputs (ms_mod summary))
+          | otherwise = Nothing
     let (freshGraph, exactImports) = case worldSources of
           Nothing -> sourceEvidenceGraph selectedExact modGraphRaw
-          Just (WorldSourceSelection selected imports _ _) ->
+          Just (WorldSourceSelection selected imports _ _ _) ->
             let owners = Set.fromList [key | value <- maybe [] pure selected,(key,_,_,_) <- selectedOriginalRows value]
                 (ordinary,_) = sourceEvidenceGraphFor
                   (Map.fromList [(mkModuleName name,unit) | (unit,name) <- Set.toAscList owners]) modGraphRaw
@@ -4616,7 +4680,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             , let original = admittedCandidateOriginal admitted]
         worldCanonicalInterfaces = case worldSources of
           Nothing -> Map.empty
-          Just (WorldSourceSelection _ _ _ selected) -> selected
+          Just (WorldSourceSelection _ _ _ selected _) -> selected
         -- Every admission remains paired with its actual issuer. Map precedence
         -- cannot select between independently admitted proofs of the same owner.
         duplicateCanonicalOwners = Set.toAscList (Set.unions
@@ -4709,6 +4773,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           , ms_mod_name summary `Map.notMember` acceptedCandidates]
         freshSource summary = ms_hsc_src summary == HsSrcFile
           && ms_mod summary `Set.member` recompiledOwners
+          && isNothing (canonicalOriginalFor summary)
         sourceFlags = Map.fromList [(ms_mod summary, ms_hspp_opts summary) | summary <- sourceOrder]
         forceFreshSource summary
           | freshSource summary = summary
@@ -4932,6 +4997,14 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           when (admittedCandidateLoading candidate == CandidateLoadForExecution) $ liftIO $
             emitCount timing "candidate_finalized_core_make_view" 1
           pure (ms_mod summary,view)
+    canonicalViews <- fmap Map.fromList $ forM
+      [(index,summary,input) | (index,ModuleNode _ summary) <- zip [0..] (mgModSummaries' loadGraph)
+        , ms_hsc_src summary == HsSrcFile
+        , Just input <- [canonicalOriginalFor summary]] $ \(index,summary,input) -> do
+          installPreparedInterface (ms_mod_name summary) (canonicalOriginalHome input)
+          view <- liftIO $ materializeCanonicalOriginalView compilerViewDirectory
+            (index + Map.size candidateViews) certifiedEnv input summary
+          pure (ms_mod summary,view)
     let canonicalizeLoadSummary summary =
           let original = ms_hspp_opts summary
               selected
@@ -4939,6 +5012,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 , Just candidate <- Map.lookup (ms_mod_name summary) acceptedCandidates
                 , ms_mod summary == ms_mod (admittedCandidateSummary candidate) =
                     candidateViews Map.! ms_mod summary
+                | ms_hsc_src summary == HsSrcFile
+                , Just canonical <- Map.lookup (ms_mod summary) canonicalViews = canonical
                 | otherwise = summary
               flags = (canonicalizeDFlags original)
                 { backend = backend original, ghcLink = ghcLink original }
@@ -5035,7 +5110,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           finalized <- newFinalizedModule (pendingEnvironment pending)
             (HomeModInfo skinny (pendingDetails pending) emptyHomeModInfoLinkable)
             (pendingTidyGuts pending)
-          let loaded = LoadedModule (pendingSummary pending) (pendingFacts pending)
+          let loaded = freshLoadedModule (pendingSummary pending) (pendingFacts pending)
                 (pendingOutput pending) finalized
               name = ms_mod_name (pendingSummary pending)
           -- A candidate's bytecode may be needed by a splice. Its recompilation
@@ -5057,7 +5132,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               unless (not (backendGeneratesCode originalBackend) || backendCanReuseLoadedCode originalBackend) $
                 throwIO UnsupportedLoadBackend
               when (isJust (hscFrontendHook (hsc_hooks phaseEnv))) (throwIO CustomLoadFrontendHook)
-              when (ms_mod_name summary `Map.member` acceptedCandidates) $
+              when (ms_mod_name summary `Map.member` acceptedCandidates
+                  || isJust (canonicalOriginalFor summary)) $
                 throwIO (CandidateFrontendReplayRefused (ms_mod_name summary))
               validateCandidateHomeInterfaces env
               -- GHC make supplies the dependency HPT for this exact phase.
@@ -5326,7 +5402,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       when (ms_mod summary /= targetOwner) $
         forM_ mMemoRef $ \ref -> liftIO $ modifyIORef' ref (Map.insert (ms_mod_name summary)
           (GutsMemoEntry (memoValidity summary (loadedFinalized loaded))
-            (ValidationOnly (loadedFacts loaded) (loadedOutput loaded) (loadedFinalized loaded))
+            (ValidationOnly (loadedFacts loaded) (loadedOutput loaded) (loadedAcquisition loaded))
             requestIdentity (memoDiagnosticWitnesses summary)))
     forM_ (Map.elems cachedOnly) $ \loaded -> do
       liftIO (publishLoadedFinalization loaded)
@@ -5505,7 +5581,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     front <- compileFront summary
                     (_, output, finalized) <- compileBack interfaceUse front
                     facts <- liftIO (frontFacts front)
-                    pure (LoadedModule (mfSummary front) facts output
+                    pure (freshLoadedModule (mfSummary front) facts output
                       finalized)
               rememberFinalized loaded = liftIO (publishLoadedFinalization loaded)
               observeCandidate modSum candidate = do
@@ -5525,7 +5601,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     LoadedObservation loaded -> [loadedFinalized loaded]
                     CachedObservation summary entry ->
                       [loadedFinalized (payloadLoaded summary (gmePayload entry))]
-                    HydratedObservation{} -> [] ])
+                    HydratedObservation{} -> []
+                    CanonicalObservation{} -> [] ])
               acquirePreparationEnvironment observations = do
                 freezeSiblings observations
                 env <- getSession
@@ -5567,6 +5644,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   siblings <- liftIO (readIORef preparedSiblingsRef)
                   externalBindings <- liftIO (availableOriginalBindings env)
                   recovery <- liftIO (readIORef completionRecoveryRef)
+                  acquiredCanonical <- liftIO (readIORef acquiredCanonicalOriginalsRef)
                   let taskNames = Set.fromList (map fst tasks)
                       sourceOwners = Set.fromList
                         [ ms_mod summary | observation <- observations
@@ -5577,6 +5655,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       -- Originals. Neither projection selects runtime roots.
                       externalOriginals = Set.fromList (Map.elems externalBindings)
                       inputs = PreparedModuleCompletionInputs recovery sourceOwners siblings externalOriginals externalBindings reuseContext selectedCanonicalInterfaces
+                        canonicalOriginalInputs acquiredCanonical
                   liftIO (factory (env {hsc_logger = loweringLogger}) interfaces
                     targetOwner (pvExactScope variant) inputs)
               lowerTasks preparedNormallyReusable observer tasks = liftIO $ timePhase timing "prepared_graph" $ do
@@ -5611,6 +5690,36 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 case executorFor selection of
                   Just executor -> lowerWith executor
                   Nothing -> withCompilerExecutor (const (pure ())) executionGrant lowerWith >>= finishCompletion
+          canonicalEnvironmentForTasks <- getSession
+          canonicalRecovery <- liftIO (readIORef completionRecoveryRef)
+          canonicalPrepare <- liftIO $ case canonicalOriginalInputs of
+            Nothing -> pure Nothing
+            Just inputs -> do
+              cache <- maybe newPreparedBodyCache (pure . compilerPreparedBodies) canonicalRecovery
+              Just <$> newPreparedCanonicalModuleTaskPreparer canonicalEnvironmentForTasks cache inputs
+          let prepareCanonical summary input = do
+                prepare <- maybe (liftIO (throwIO WorldCellCorrupt)) pure canonicalPrepare
+                siblings <- liftIO (readIORef preparedSiblingsRef)
+                result <- liftIO (prepare siblings (ms_mod summary))
+                (admitted,reuse,task) <- maybe (liftIO (throwIO CandidateCoreMissing)) pure result
+                unless (admittedOriginalProof admitted == canonicalOriginalProof input)
+                  (liftIO (throwIO CandidateOriginalOwnerMismatch))
+                liftIO (modifyIORef' acquiredCanonicalOriginalsRef (Map.insert (ms_mod summary) admitted))
+                liftIO (emitCount timing "world.cell.canonical_body_acquisitions" 1)
+                when (reuse == PreparedBodyReused) $ liftIO
+                  (emitCount timing "world.cell.canonical_body_cache_hits" 1)
+                -- The selected input fixes metadata; the completed task owns
+                -- executable preparation under the current site witness.
+                pure (ms_mod_name summary,Left task)
+              loadedCanonical summary input = do
+                admitted <- liftIO (Map.lookup (ms_mod summary) <$> readIORef acquiredCanonicalOriginalsRef)
+                  >>= maybe (liftIO (throwIO WorldCellCorrupt)) pure
+                let finalized = admittedOriginalModule admitted
+                    guts = finalizedTidyGuts finalized
+                    output = ModuleOutput (ms_mod summary) (cg_binds guts) Nothing [] Nothing
+                    facts = (hydratedModuleFacts (canonicalOriginalPackages input))
+                      {moduleFactReferences=bindingModuleRefs (cg_binds guts)}
+                pure (LoadedModule summary facts output (ReusedCanonical admitted))
           let interfaceUses = zipWith homeInterfaceUse summaries (homeInterfaceConsumers summaries)
           (observations, results, preparedModules, mReachable) <- case bodyTier of
             OptimizeEveryModule -> do
@@ -5622,6 +5731,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     observation <- observeCandidate modSum candidate
                     recordExecutableValidity modSum True
                     pure observation
+                  Nothing | Just canonical <- canonicalOriginalFor modSum ->
+                    pure (CanonicalObservation modSum canonical)
                   Nothing -> do
                     cached <- lookupValidMemo modSum
                     case cached of
@@ -5643,6 +5754,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   let name = ms_mod_name (observationSummary observation)
                   case observation of
                     HydratedObservation{} -> pure Nothing
+                    CanonicalObservation summary input -> Just <$> prepareCanonical summary input
                     CachedObservation summary entry -> case payloadProduct (gmePayload entry) of
                       Just product' | preparedReusable entry product' -> do
                         recordExecutableValidity summary True
@@ -5668,7 +5780,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         output = loadedOutput loaded
                         finalized = loadedFinalized loaded
                         prepared = Map.lookup (ms_mod_name summary) preparedByName
-                    moduleProduct <- requireProduct (loadedFacts loaded) output prepared finalized
+                    moduleProduct <- requireProduct loaded prepared
                     forM_ mMemoRef $ \ref -> liftIO (modifyIORef' ref
                       (Map.insert (ms_mod_name summary) (GutsMemoEntry
                         (memoValidity summary finalized)
@@ -5677,6 +5789,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     pure (Just output, prepared)
               pairs <- forM observations' $ \observation -> case observation of
                 HydratedObservation{} -> pure (Nothing, Nothing)
+                CanonicalObservation summary input -> loadedCanonical summary input >>= collectPrepared
                 CachedObservation summary entry -> collectPrepared (payloadLoaded summary (gmePayload entry))
                 LoadedObservation loaded -> collectPrepared loaded
               pure (observations', [output | (Just output, _) <- pairs],
@@ -5689,6 +5802,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 cpBeforeModule plan modSum
                 case Map.lookup (ms_mod_name modSum) acceptedCandidates of
                   Just candidate -> observeCandidate modSum candidate
+                  Nothing | Just canonical <- canonicalOriginalFor modSum ->
+                    pure (CanonicalObservation modSum canonical)
                   Nothing -> do
                     cached <- lookupValidMemo modSum
                     case cached of
@@ -5737,7 +5852,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             Just product' -> preparedNormallyReusable entry product'
                               && interfaceReady interfaceUse summary entry
                             Nothing -> False
-                        LoadedObservation{} -> False ]
+                        LoadedObservation{} -> False
+                        CanonicalObservation{} -> False ]
                   normalReusableOwners = dependencyClosedReuse referencesByMod locallyReusable
                   reusableOwners
                     | bodyReuseDisabled = Set.fromList
@@ -5764,6 +5880,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   if name `Set.notMember` reachableMods then pure Nothing
                     else case observation of
                       HydratedObservation{} -> pure Nothing
+                      CanonicalObservation canonicalSummary input -> Just <$> prepareCanonical canonicalSummary input
                       CachedObservation _ entry | name `Set.member` reusableOwners ->
                         case payloadProduct (gmePayload entry) of
                           Just product' -> pure (Just (name, Right (productPrepared product')))
@@ -5786,8 +5903,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     PrepareStg -> case Map.lookup (ms_mod_name (loadedSummary loaded)) preparedByName of
                       Just prepared -> pure (Just prepared)
                       Nothing -> liftIO (ioError (userError "selected prepared module task is absent"))
-                  rememberExecutable modSum output prepared finalized moduleFacts = do
-                    moduleProduct <- requireProduct moduleFacts output prepared finalized
+                  rememberExecutable loaded prepared = do
+                    let modSum = loadedSummary loaded
+                        finalized = loadedFinalized loaded
+                    moduleProduct <- requireProduct loaded prepared
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
                         (Map.insert (ms_mod_name modSum)
@@ -5797,13 +5916,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             requestIdentity
                             (memoDiagnosticWitnesses modSum))))
                       Nothing -> pure ()
-                  compileReachable loaded moduleFacts = do
-                    let modSum = loadedSummary loaded
+                  compileReachable loaded = do
                     rememberFinalized loaded
                     let r = loadedOutput loaded
-                        finalized = loadedFinalized loaded
                     prepared <- prepareReachable loaded
-                    rememberExecutable modSum r prepared finalized moduleFacts
+                    rememberExecutable loaded prepared
                     pure [(r, prepared)]
                   validationOnly loaded moduleFacts = do
                     let modSum = loadedSummary loaded
@@ -5812,7 +5929,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         (Map.insert (ms_mod_name modSum)
                           (GutsMemoEntry
                             (memoValidity modSum (loadedFinalized loaded))
-                            (ValidationOnly moduleFacts (loadedOutput loaded) (loadedFinalized loaded))
+                            (ValidationOnly moduleFacts (loadedOutput loaded) (loadedAcquisition loaded))
                             requestIdentity
                             (memoDiagnosticWitnesses modSum))))
                       Nothing -> pure ()
@@ -5849,8 +5966,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             | otherwise = "required-interface-not-retained"
                       memoMiss modSum reason
                       memoMissTrace modSum reason (Just entry)
-                      compileReachable (payloadLoaded modSum (gmePayload entry)) moduleFacts
-                    LoadedObservation loaded -> compileReachable loaded moduleFacts
+                      compileReachable (payloadLoaded modSum (gmePayload entry))
+                    LoadedObservation loaded -> compileReachable loaded
+                    CanonicalObservation summary input -> do
+                      loaded <- loadedCanonical summary input
+                      compileReachable loaded
                     HydratedObservation _ _ _ -> do
                       recordExecutableValidity modSum True
                       pure []
@@ -5871,6 +5991,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     CachedObservation _ entry ->
                       validationOnly (payloadLoaded modSum (gmePayload entry)) moduleFacts >> pure []
                     LoadedObservation loaded -> validationOnly loaded moduleFacts >> pure []
+                    CanonicalObservation{} -> pure []
                     HydratedObservation _ _ _ -> do
                       recordExecutableValidity modSum True
                       pure []
@@ -5974,11 +6095,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 matches owner = let (unit,name) = key owner in requested == unit ++ ":" ++ name
                 summaries graph owner = [summary | ModuleNode _ summary <- mgModSummaries' graph
                   , ms_mod summary == owner]
-                selectedSources = [owner | WorldSourceSelection selected _ _ _ <- maybe [] pure worldSources
+                selectedSources = [owner | WorldSourceSelection selected _ _ _ _ <- maybe [] pure worldSources
                   , selection <- maybe [] pure selected,(owner,_,_,_) <- selectedOriginalRows selection]
                 observed owner = [case observation of
                     CachedObservation _ entry -> "memo:" ++ show (gmeCycle entry)
                     LoadedObservation {} -> "loaded"
+                    CanonicalObservation {} -> "canonical-input"
                     HydratedObservation {} -> "admitted-candidate"
                   | observation <- observations,ms_mod (observationSummary observation) == owner]
                 sourcePaths graph owner = take 2
@@ -6151,6 +6273,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
             capturedDependencies <- liftIO (preparedDependencies (ownedPrHscEnv result)
               variant dependencies exactCompilation)
+            acquiredCanonicalOriginals <- liftIO (readIORef acquiredCanonicalOriginalsRef)
             pure PreparedPipelineResult
               { ownedPprPipelineResult = result
               , ownedPprModules = modules
@@ -6161,6 +6284,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , ownedPprCandidateAdmissions = []
               , ownedPprOriginalBindings = Map.empty
               , ownedPprReuseContext = reuseContext
+              , ownedPprCanonicalOriginalInputs = canonicalOriginalInputs
+              , ownedPprAcquiredCanonicalOriginals = acquiredCanonicalOriginals
               }
           PreparedProducts _ -> do
             (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
@@ -6170,6 +6295,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             originalBindings <- liftIO (availableOriginalBindings (ownedPrHscEnv result))
             capturedDependencies <- liftIO (preparedDependencies (ownedPrHscEnv result)
               variant dependencies exactCompilation)
+            acquiredCanonicalOriginals <- liftIO (readIORef acquiredCanonicalOriginalsRef)
             pure PreparedPipelineResult
               { ownedPprPipelineResult = result
               , ownedPprModules = modules
@@ -6180,6 +6306,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , ownedPprCandidateAdmissions = Map.elems acceptedCandidates
               , ownedPprOriginalBindings = originalBindings
               , ownedPprReuseContext = reuseContext
+              , ownedPprCanonicalOriginalInputs = canonicalOriginalInputs
+              , ownedPprAcquiredCanonicalOriginals = acquiredCanonicalOriginals
               }
           PreparedSegmentProducts _ candidatePath -> do
             products <- finish (PreparedProducts candidatePath)
@@ -7301,18 +7429,21 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   held <- readIORef heldWorld
                   case held of
                     Just (HeldCompilerWorld facts issued _ _)
-                      | root == worldInputsIdentity facts && reference == issued -> do
+                      | root == worldInputsIdentity facts && reference == worldRealizationText issued -> do
                           let identity = worldInputsIdentity facts
-                          _ <- evaluate (length identity + length issued)
+                          _ <- evaluate (length identity + length (worldRealizationText issued))
                           pure (Just (HeldWorldQueryBinding identity issued))
                     _ -> pure Nothing
-                ensureWorld (ExactInputsRequest root acquisition) = runGuarded $ do
+                ensureWorld request
+                  | not (validExactInputsRequest request) = runGuarded (pure (ExactInputsRejected InvalidRealization))
+                  | otherwise = ensureAdmittedWorld request
+                ensureAdmittedWorld (ExactInputsRequest root acquisition) = runGuarded $ do
                   selected <- readIORef universe
                   held <- readIORef heldWorld
                   let install event world@(HeldCompilerWorld facts reference _ _) = do
                         writeIORef heldWorld (Just world)
-                        observeCompilerWorld timing selected event root reference (Just world)
-                        pure (ExactInputsReady (worldInputsIdentity facts) reference
+                        observeCompilerWorld timing selected event root (worldRealizationText reference) (Just world)
+                        pure (ExactInputsReady (worldInputsIdentity facts) (worldRealizationText reference)
                           (worldAdmissionResidency (optionalInputByteLimit (exactInputRetentionLimits (universeOriginalInputs selected))) world))
                       publish world@(HeldCompilerWorld facts reference _ _) = do
                         selected <- readIORef universe
@@ -7322,7 +7453,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         _ <- evaluate (toInteger (length evicted) + fst (compilerWorldCacheCharge retiredWorlds))
                         retired <- evaluate (selected {universeWorlds=retiredWorlds})
                         held <- evaluate (Just world)
-                        ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) reference
+                        ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) (worldRealizationText reference)
                           (worldAdmissionResidency (optionalInputByteLimit (exactInputRetentionLimits (universeOriginalInputs selected))) world))
                         -- Retire old private owners before unlinking their backing.
                         -- The shared reservation remains conservative until cleanup
@@ -7331,7 +7462,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         failures <- attemptReleases
                           [(CompilerScopeRestore, do
                               observeCompilerWorld timing retired WorldEvicted
-                                (worldInputsIdentity oldFacts) oldReference (Just old)
+                                (worldInputsIdentity oldFacts) (worldRealizationText oldReference) (Just old)
                               retireCompilerWorldBacking timing universe old)
                           | old@(HeldCompilerWorld oldFacts oldReference _ _) <- evicted]
                         released <- captureCompletion (pure ())
@@ -7359,12 +7490,12 @@ withResidentCompilerScopes baseIncludes useRequests = do
                       SuccessorExactInputs predecessor reference manifest -> do
                         let previous = case held <|> lookupCompilerWorld predecessor (universeWorlds selected) of
                               Just world@(HeldCompilerWorld facts issued _ _)
-                                | worldInputsIdentity facts == predecessor && issued == reference -> Just world
+                                | worldInputsIdentity facts == predecessor && worldRealizationText issued == reference -> Just world
                               _ -> Nothing
                         case previous of
                           Nothing -> do
                             observeCompilerWorld timing selected WorldNeedsAcquisition root reference Nothing
-                            pure (ExactInputsNeedsAcquisition root)
+                            pure (ExactInputsNeedsAcquisition root (if take 64 reference /= hexBytes (servicePackageWorkerInstance association) then WorldDifferentWorker else WorldNotResidentOnThisWorker))
                           Just base@(HeldCompilerWorld baseFacts _ _ _) -> do
                             acquired <- try (readWorldSuccessorWithOwner (universeOriginalInputs selected) baseFacts manifest)
                             case acquired of
@@ -7379,24 +7510,23 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                 | otherwise -> case lookupCompilerWorld root (universeWorlds selected) of
                                     Just world -> install WorldCompleteReused world
                                     Nothing -> do
-                                      unique <- RequestUnique.hashUnique <$> RequestUnique.newUnique
+                                      issued <- newWorldRealization (servicePackageWorkerInstance association)
                                       let facts = worldSuccessorFacts successor
-                                          issued = hexBytes (servicePackageWorkerInstance association) ++ "." ++ show unique
                                       (ready,world,committed) <- retainHeldWorldSuccessor universe base successor issued publish
                                       emitCount timing "world.successor.inherited_realizations" 1
                                       let event = case lookupCompilerWorld root (universeWorlds committed) of
                                             Just _ -> WorldAdmittedRetained
                                             Nothing -> WorldAdmittedActiveOnly
-                                      observeCompilerWorld timing committed event root issued (Just world)
+                                      observeCompilerWorld timing committed event root (worldRealizationText issued) (Just world)
                                       pure ready
                       ResidentExactInputs reference ->
                         case held of
-                          Just world@(HeldCompilerWorld _ issued _ _) | issued == reference -> install WorldResidentHeldHit world
+                          Just world@(HeldCompilerWorld _ issued _ _) | worldRealizationText issued == reference -> install WorldResidentHeldHit world
                           _ -> case lookupCompilerWorld root (universeWorlds selected) of
-                            Just world@(HeldCompilerWorld _ issued _ _) | issued == reference -> install WorldResidentRetainedHit world
+                            Just world@(HeldCompilerWorld _ issued _ _) | worldRealizationText issued == reference -> install WorldResidentRetainedHit world
                             _ -> do
                               observeCompilerWorld timing selected WorldNeedsAcquisition root reference Nothing
-                              pure (ExactInputsNeedsAcquisition root)
+                              pure (ExactInputsNeedsAcquisition root (if take 64 reference /= hexBytes (servicePackageWorkerInstance association) then WorldDifferentWorker else WorldNotResidentOnThisWorker))
                       CompleteExactInputs manifest -> do
                         acquired <- try (readWorldInputsWithOwner (universeOriginalInputs selected) manifest)
                         case acquired of
@@ -7422,15 +7552,14 @@ withResidentCompilerScopes baseIncludes useRequests = do
                             | otherwise -> case held <|> lookupCompilerWorld root (universeWorlds selected) of
                                 Just world -> install WorldCompleteReused world
                                 Nothing -> do
-                                    unique <- RequestUnique.hashUnique <$> RequestUnique.newUnique
+                                    reference <- newWorldRealization (servicePackageWorkerInstance association)
                                     directory <- maybe (throwIO WorldQueryUnavailable) pure (universeWorldDirectory selected)
                                     (ready,world,committed) <- materializeWorldSourcesWithRelease
                                       (void . releaseRegisteredWorldMaterialization universe) directory (worldInputsSources facts)
                                       (worldInputsSourceModuleHints facts) $ \materialized -> do
                                         table <- newIORef emptyWorldPreparedModules
-                                        let reference = hexBytes (servicePackageWorkerInstance association) ++ "." ++ show unique
-                                            world = HeldCompilerWorld facts reference materialized table
-                                        _ <- evaluate (length reference)
+                                        let world = HeldCompilerWorld facts reference materialized table
+                                        _ <- evaluate (length (worldRealizationText reference))
                                         current <- readIORef universe
                                         writeIORef universe current
                                           {universeWorlds=registerWorldBacking materialized (universeWorlds current)}
@@ -7441,7 +7570,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                           Just _ -> WorldAdmittedRetained
                                           Nothing -> WorldAdmittedActiveOnly
                                         HeldCompilerWorld _ reference _ _ = world
-                                    observeCompilerWorld timing committed event root reference (Just world)
+                                    observeCompilerWorld timing committed event root (worldRealizationText reference) (Just world)
                                     pure ready
                 queryWorld expected grant executor question = runGuarded $ do
                   requireCompilerExecutorOpen executor
@@ -7450,7 +7579,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     (Just (HeldWorldQueryBinding identity reference),Just world@(HeldCompilerWorld current issued _ _))
                       | worldInputsIdentity current == identity && issued == reference
                         && worldQueryIdentity question == identity
-                        && worldQueryRealization question == reference -> do
+                        && worldQueryRealization question == worldRealizationText reference -> do
                           selected <- readIORef universe
                           let requireQueryActive = do
                                 caller <- myThreadId
@@ -7478,7 +7607,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     (Just (HeldWorldQueryBinding identity reference),Just (HeldCompilerWorld facts issued _ _))
                       | worldInputsIdentity facts == identity && issued == reference
                         && worldCellPlanIdentity question == identity
-                        && worldCellPlanRealization question == reference ->
+                        && worldCellPlanRealization question == worldRealizationText reference ->
                           planHeldWorldCell parserFlags facts (worldCellPlanRecipe question) (worldCellPlanOperand question)
                     _ -> throwIO WorldCellUnavailable
                 validateWorldCell grant executor question = runGuarded $ do
@@ -7487,7 +7616,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   case held of
                     Just (HeldCompilerWorld facts issued _ _)
                       | worldCellPrepareIdentity question == worldInputsIdentity facts
-                        && worldCellPrepareRealization question == issued -> do
+                        && worldCellPrepareRealization question == worldRealizationText issued -> do
                           admitted <- validateHeldWorldCell parserFlags facts question
                           case admitted of
                             Left refusal -> pure (Left refusal)
@@ -7553,7 +7682,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     (HeldWorldQueryBinding identity reference,Just world@(HeldCompilerWorld facts issued _ _))
                       | worldInputsIdentity facts == identity && issued == reference
                         && worldCellPrepareIdentity question == identity
-                        && worldCellPrepareRealization question == reference -> do
+                        && worldCellPrepareRealization question == worldRealizationText reference -> do
                           -- Request binding already parsed and admitted this
                           -- immutable recipe. Consumption rechecks held-world
                           -- liveness but does not reparse the same plan.
@@ -7589,7 +7718,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     (HeldWorldQueryBinding identity reference,Just world@(HeldCompilerWorld facts issued _ _))
                       | worldInputsIdentity facts == identity && issued == reference
                         && worldCellPrepareIdentity question == identity
-                        && worldCellPrepareRealization question == reference ->
+                        && worldCellPrepareRealization question == worldRealizationText reference ->
                           commitHeldWorldDependencies pending world
                     _ -> throwIO WorldCellUnavailable
                 runOperation :: forall result. Ghc result -> IO result
@@ -7648,7 +7777,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                               | not (null initialFailures) = WorldHeldEndQuarantined
                               | null uncached = WorldHeldEndRetained
                               | otherwise = WorldHeldEndRetiring
-                        observeCompilerWorld timing selected event (worldInputsIdentity facts) reference (Just world))
+                        observeCompilerWorld timing selected event (worldInputsIdentity facts) (worldRealizationText reference) (Just world))
                     | world@(HeldCompilerWorld facts reference _ _) <- maybe [] pure retained]
                   -- Oversize/nonresident worlds remain active through actual
                   -- scope release. A failed restore keeps backing with the
@@ -8561,7 +8690,7 @@ captureHeldWorldSourceSelection owner facts privateInputs graph = do
         , worldHasSelectedPrimary facts (ownerKey (ms_mod summary))
         , not (worldHasSelectedSource facts (ownerKey (ms_mod summary)))]
   unless (null unsupported) (liftIO (throwIO WorldCellUnsupported))
-  if Set.null demanded then pure (WorldSourceSelection Nothing (snd (sourceEvidenceGraphFor Map.empty graph)) [] Map.empty) else do
+  if Set.null demanded then pure (WorldSourceSelection Nothing (snd (sourceEvidenceGraphFor Map.empty graph)) [] Map.empty Nothing) else do
     initial <- getSession
     captured <- liftIO (readWorldSourceInputs owner initial facts (Set.toAscList demanded))
     (entries,typeEntries) <- case captured of
@@ -8579,7 +8708,7 @@ captureHeldWorldSourceSelection owner facts privateInputs graph = do
     -- closure. The shared validator derives source-less Finder locations and
     -- downsweep exclusions from every noncanonical artifact in that closure.
     -- Checked values are never promoted into a SOURCE module's TYPE closure.
-    (validation,selectedKeys) <- validateCanonicalSourceInputs True proofs interfaces artifacts
+    (validation,selectedKeys) <- validateCanonicalSourceInputs True (Just (map worldTypeEntryVerifiedInterface (Map.elems typeEntries))) proofs interfaces artifacts
       [] readPackages graph
       (Set.toAscList demanded)
     let selectedGraph = mkModuleGraph [node | node@(ModuleNode _ summary) <-
@@ -8612,13 +8741,18 @@ captureHeldWorldSourceSelection owner facts privateInputs graph = do
           | (key,entry) <- Map.toAscList entries,key `Set.member` selectedKeys]
         selectedProofs = Map.map (ModuleInterfaceAdmission . worldSourceEntryProof)
           (Map.restrictKeys entries selectedKeys)
+    closure <- maybe (liftIO (throwIO WorldCellCorrupt)) pure (validatedOriginalInputs validation)
+    canonical <- liftIO $ captureCanonicalOriginalInputs (hexBytes (worldInputsProducer facts)) closure
+      [(worldSourceEntryProof entry,worldSourceEntryPackages entry)
+      | (key,entry) <- Map.toAscList entries,key `Set.member` selectedKeys]
     pure (WorldSourceSelection (Just (SourceSelectedOriginals claims evidence)) imports
-      (Map.elems typeEntries) selectedProofs)
+      (Map.elems typeEntries) selectedProofs (Just canonical))
 
 data ValidatedOriginalSources = ValidatedOriginalSources
   { validatedOriginalGraph :: ModuleGraph
   , validatedOriginalEvidence :: DependencyEvidence
   , validatedOriginalExactImports :: Set.Set (DependencyQualifier,String,Bool)
+  , validatedOriginalInputs :: Maybe HydratedExactInterfaces
   }
 
 -- Current source lookup authenticates canonical interfaces, never native
@@ -8628,7 +8762,7 @@ validateCurrentCanonicalSources
   :: ExactScope -> [(ExactIfaceArtifact, ModIface)] -> ModuleGraph -> [(String,String)]
   -> Ghc (ValidatedOriginalSources,Set.Set (String,String))
 validateCurrentCanonicalSources admitted interfaces sourceGraph roots =
-  validateCanonicalSourceInputs False
+  validateCanonicalSourceInputs False Nothing
     (Map.filter (isSourceOriginal . canonicalOrigin) (scopeModuleInterfaceProofs admitted))
     interfaces ([artifact | (artifact,_,_) <- scopeInterfaces admitted] ++ scopeValueInterfaces admitted)
     (map (mkModuleName . exactModule) (scopeValueInterfaces admitted)) readPackages sourceGraph roots
@@ -8645,10 +8779,10 @@ validateCurrentCanonicalSources admitted interfaces sourceGraph roots =
 -- canonical facts/captured package bytes. The current-source compatibility
 -- checks below have one owner; this basis grants no native execution rights.
 validateCanonicalSourceInputs
-  :: Bool -> Map.Map (String,String) CanonicalInterfaceProof -> [(ExactIfaceArtifact,ModIface)]
+  :: Bool -> Maybe [VerifiedExactInterface] -> Map.Map (String,String) CanonicalInterfaceProof -> [(ExactIfaceArtifact,ModIface)]
   -> [ExactIfaceArtifact] -> [ModuleName] -> ((String,String) -> IO PackageImportEvidence)
   -> ModuleGraph -> [(String,String)] -> Ghc (ValidatedOriginalSources,Set.Set (String,String))
-validateCanonicalSourceInputs worldOnly proofs interfaces inputArtifacts sourceLess readPackages sourceGraph roots = do
+validateCanonicalSourceInputs worldOnly verifiedInputs proofs interfaces inputArtifacts sourceLess readPackages sourceGraph roots = do
   initial <- getSession
   let ownerKey owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
       originals = Map.fromList [((exactUnit artifact,exactModule artifact),iface) | (artifact,iface) <- interfaces]
@@ -8704,7 +8838,17 @@ validateCanonicalSourceInputs worldOnly proofs interfaces inputArtifacts sourceL
     nowPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location now)))
     unless (ms_mod old == ms_mod now && oldPath == nowPath && ms_hs_hash old == ms_hs_hash now) $
       liftIO (throwIO (ExecutionSourceIncomplete key))
-  native <- liftIO (hydrateExactScope env interfaces)
+  (native,hydratedInputs) <- liftIO $ case verifiedInputs of
+    Nothing -> do
+      ready <- hydrateExactScope env interfaces
+      pure (ready,Nothing)
+    Just verified -> do
+      let keys = Set.fromList [(exactUnit artifact,exactModule artifact)
+            | input <- verified,let (artifact,_) = verifiedExactInterface input]
+          additional = [(artifact,iface) | (artifact,iface) <- interfaces
+            , (exactUnit artifact,exactModule artifact) `Set.notMember` keys]
+      (ready,completed) <- hydrateExactScopeWithProducts env verified additional
+      pure (ready,Just completed)
   let nativeEnv = native {hsc_mod_graph=mapMG (\summary -> summary
         {ms_hspp_opts=canonicalizeDFlags (ms_hspp_opts summary)}) graph}
   exactImports <- fmap Set.unions $ forM (Set.toAscList selected) $ \key -> do
@@ -8758,7 +8902,7 @@ validateCanonicalSourceInputs worldOnly proofs interfaces inputArtifacts sourceL
       | (qualifier,name,boot,Just unit) <- currentImports
       , Map.member (unit,name) exactLocations])
   setSession env {hsc_targets=hsc_targets initial}
-  pure (ValidatedOriginalSources graph current exactImports,selected)
+  pure (ValidatedOriginalSources graph current exactImports hydratedInputs,selected)
 
 
 planExactExecutionLoad
@@ -9349,7 +9493,10 @@ reachableModuleClosure target referencesByMod = go (Set.singleton target) [targe
 -- This graph-independent fact stays valid when a later request changes the
 -- set of home modules; reachability intersects it with that request's graph.
 moduleRefs :: ModGuts -> Set.Set Module
-moduleRefs guts = Set.unions (map rhsModules (mg_binds guts))
+moduleRefs guts = bindingModuleRefs (mg_binds guts)
+
+bindingModuleRefs :: [CoreBind] -> Set.Set Module
+bindingModuleRefs bindings = Set.unions (map rhsModules bindings)
   where
     rhsModules (NonRec _ rhs) = externalVarModules rhs
     rhsModules (Rec ps)       = Set.unions [ externalVarModules rhs | (_, rhs) <- ps ]
