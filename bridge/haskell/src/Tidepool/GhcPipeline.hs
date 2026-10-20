@@ -2075,14 +2075,14 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   effective <- liftIO (sourceModuleFlags flags sourceText >>= either (throwIO . SourceRejection . renderCellSplitError) pure)
   liftIO (requireWorldHeaderPolicy path flags effective)
   plan <- maybe (liftIO (throwIO WorldCellCorrupt)) pure (typedPurposePlan purpose)
+  parsedDemand <- either (const (liftIO (throwIO WorldCellUnsupported))) pure
+    (prepareSegmentDemand plan effective capturedSource)
   initial <- getSession
   declarationInputs <- liftIO (hydrateWorldDeclarationInputs (universeOriginalInputs universe) initial facts)
   (current,_) <- either (\reason -> liftIO $ do
     emitWorldAcquisitionRejection "world declaration type input" path reason
     throwIO WorldCellCorrupt) pure declarationInputs
   setSession current
-  parsedDemand <- either (const (liftIO (throwIO WorldCellUnsupported))) pure
-    (prepareSegmentDemand plan effective capturedSource)
   demandScope <- liftIO $ do
     WorldPreparedModules table receipts dependencies retainedScope <- readIORef preparedRef
     case retainedScope of
