@@ -1130,6 +1130,27 @@ impl<'a> ContinuationNativeInputs<'a> {
         &self.projection
     }
 
+    pub(crate) fn original_namespace_pair(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Result<
+        Option<(
+            crate::artifact_inventory::ArtifactBinding,
+            crate::artifact_inventory::ArtifactBinding,
+        )>,
+        CompileError,
+    > {
+        Ok(self
+            .selection
+            .continuation_input(owner)
+            .map_err(compiler_evidence_failure)?
+            .and_then(|(source, _)| source.world_primary_type_row(owner))
+            .and_then(|row| {
+                row.original_binding
+                    .map(|original| (*original, *row.interface_binding))
+            }))
+    }
+
     pub(crate) fn availability_rows(&self) -> &[Arc<NativeTransportAvailability>] {
         &self.rows
     }
