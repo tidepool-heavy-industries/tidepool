@@ -3934,6 +3934,17 @@ impl CheckedWorldCellStage {
     }
 }
 
+/// Runtime roots selected before execution and those produced inside this cell.
+/// Both lists derive only from the same authenticated stage references.
+pub struct WorldCellBindingDemand {
+    existing: Vec<tidepool_repr::SessionVarId>,
+    prior_stage: Vec<tidepool_repr::SessionVarId>,
+}
+impl WorldCellBindingDemand {
+    pub fn existing(&self) -> &[tidepool_repr::SessionVarId] { &self.existing }
+    pub fn prior_stage(&self) -> &[tidepool_repr::SessionVarId] { &self.prior_stage }
+}
+
 /// A borrowed view of one authenticated stage's selected runtime inputs.
 /// These observations do not grant access to a live runtime value.
 pub struct WorldCellRuntimeInputs<'a> {
@@ -4277,6 +4288,29 @@ impl CheckedWorldCellProgram {
     pub fn demanded_session_bindings(&self) -> &[tidepool_repr::SessionVarId] {
         &self.output.demanded_session_bindings
     }
+    /// Select only already existing roots for the preexecution lease. A prior
+    /// stage's reserved value is installed by its ordered runtime item first.
+    pub fn runtime_binding_demand(&self) -> WorldCellBindingDemand {
+        let mut existing = std::collections::BTreeSet::new();
+        let mut prior_stage = std::collections::BTreeSet::new();
+        for stage in &self.output.stages {
+            for input in &stage.selected_inputs {
+                match input.origin() {
+                    WorldCellRuntimeInputOrigin::BaseWorld | WorldCellRuntimeInputOrigin::CellOperand => {
+                        existing.insert(input.session_var().raw());
+                    }
+                    WorldCellRuntimeInputOrigin::PriorStage { .. } => {
+                        prior_stage.insert(input.session_var().raw());
+                    }
+                }
+            }
+        }
+        WorldCellBindingDemand {
+            existing: existing.into_iter().map(tidepool_repr::SessionVarId::from_extract).collect(),
+            prior_stage: prior_stage.into_iter().map(tidepool_repr::SessionVarId::from_extract).collect(),
+        }
+    }
+
 
     pub fn item(&self, ordinal: usize) -> Option<&CheckedWorldCellItem> {
         self.items.get(ordinal)

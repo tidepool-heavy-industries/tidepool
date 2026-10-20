@@ -10405,32 +10405,11 @@ where
         };
         let compiler_binding_ids = world_output.demanded_session_bindings()
             .iter().map(|id| id.raw()).collect::<Vec<_>>();
-        let mut existing_ids = std::collections::BTreeSet::new();
-        let mut prior_stage_ids = std::collections::BTreeSet::new();
-        for issued in program.items() {
-            let item = issued.checked_item();
-            let stage = item.world_selected_runtime_inputs().ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "checked World item lacks its stage runtime-input proof".into(),
-                )
-            })?;
-            if stage.stage_first_ordinal() != item.index() {
-                continue;
-            }
-            for input in stage.inputs() {
-                match input.origin() {
-                    tidepool_toolchain::compiler_world::WorldCellRuntimeInputOrigin::BaseWorld
-                    | tidepool_toolchain::compiler_world::WorldCellRuntimeInputOrigin::CellOperand => {
-                        existing_ids.insert(input.session_var().raw());
-                    }
-                    tidepool_toolchain::compiler_world::WorldCellRuntimeInputOrigin::PriorStage { .. } => {
-                        prior_stage_ids.insert(input.session_var().raw());
-                    }
-                }
-            }
-        }
-        let demanded_bindings = existing_ids.into_iter().map(tidepool_repr::VarId).collect::<Vec<_>>();
-        let prior_stage_binding_ids = prior_stage_ids.into_iter().collect::<Vec<_>>();
+        let runtime_demand = world_output.runtime_binding_demand();
+        let demanded_bindings = runtime_demand.existing().iter()
+            .map(|id| tidepool_repr::VarId(id.raw())).collect::<Vec<_>>();
+        let prior_stage_binding_ids = runtime_demand.prior_stage().iter()
+            .map(|id| id.raw()).collect::<Vec<_>>();
         let logical_world = *world_output.logical().logical_id();
         let output_certificate = *world_output.certificate_sha256();
         let item_capabilities = program
@@ -10464,6 +10443,13 @@ where
             .access
             .with_machine(context, move |session, _, _| {
                 let bindings = session.lease_bindings(&demanded_bindings);
+                if demanded_bindings.iter().any(|expected| {
+                    !bindings.retained_bindings().iter().any(|actual| actual.raw() == expected.0)
+                }) {
+                    return Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                        tidepool_runtime::session::SessionError::StaleStagedDeclaration,
+                    )));
+                }
                 let mut retained = bindings.retained_bindings().iter().map(|id| id.raw()).collect::<Vec<_>>();
                 retained.sort_unstable();
                 tracing::debug!(target: "exomonad_harness::timing",
