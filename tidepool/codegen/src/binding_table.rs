@@ -96,6 +96,7 @@ pub enum BindingPromotionError {
     ConflictingSourceOrigin,
     MissingSourceDomain,
     UnverifiableSourceSelection,
+    StaleOrForeignDeclarationPreparation,
     LeaseCountExhausted,
     MutationWitnessExhausted { revision: u64, advances: usize },
 }
@@ -153,41 +154,14 @@ impl<'a> PreparedPromotionProjection<'a> {
     pub fn visible_changes(
         &self,
     ) -> impl Iterator<Item = (&'a BindingName, Option<&'a BindingEntry>)> + '_ {
-        let table = self.table;
-        let tree = self.tree;
-        let names = &self.prepared.names;
-        names
-            .writes
-            .iter()
-            .map(|(name, _)| name)
-            .chain(
-                names
-                    .removals
-                    .iter()
-                    .filter(|name| !names.writes.iter().any(|(written, _)| written == *name)),
-            )
-            .map(move |name| {
-                let selected = if names.removals.contains(name) {
-                    if table.tips.contains_key(&names.scope) {
-                        None
-                    } else {
-                        table.resolve_frame_name_in(tree, names.scope, name, false)
-                    }
-                } else {
-                    names
-                        .writes
-                        .iter()
-                        .find(|(written, _)| written == name)
-                        .and_then(|(_, id)| table.live.get(id))
-                };
-                (name, selected)
-            })
+        self.prepared.names.visible_changes(self.table, self.tree)
     }
 }
 
 pub struct PreparedSourceOwnerOrigin {
     scope: ScopeId,
     selection: SourceSelectionView,
+    baseline: DeclarationPreparationBaseline,
 }
 
 /// Exact observation preservation and declaration shadowing prepared before
@@ -195,6 +169,40 @@ pub struct PreparedSourceOwnerOrigin {
 pub struct PreparedDeclarationBindingChanges {
     names: PreparedNameChanges,
     observations: Vec<SessionVarId>,
+    baseline: DeclarationPreparationBaseline,
+}
+
+/// An observation of this table instance and its exact preparation revision.
+/// The marker has no binding, source, or resource ownership.
+struct DeclarationPreparationBaseline {
+    table: Arc<()>,
+    revision: u64,
+}
+
+/// The exact touched-name selections and witness after committing the borrowed
+/// origin followed by this declaration delta. No binding inventory is captured.
+pub struct PreparedDeclarationProjection<'a> {
+    table: &'a BindingTable,
+    tree: &'a ScopeTree,
+    changes: &'a PreparedDeclarationBindingChanges,
+    _origin: Option<&'a PreparedSourceOwnerOrigin>,
+    witness: BindingScopeWitness,
+}
+
+impl<'a> PreparedDeclarationProjection<'a> {
+    pub fn target_scope(&self) -> ScopeId {
+        self.changes.names.scope
+    }
+
+    pub fn scope_witness(&self) -> &BindingScopeWitness {
+        &self.witness
+    }
+
+    pub fn visible_changes(
+        &self,
+    ) -> impl Iterator<Item = (&'a BindingName, Option<&'a BindingEntry>)> + '_ {
+        self.changes.names.visible_changes(self.table, self.tree)
+    }
 }
 
 /// Frozen prospective declaration view for a newly minted private capture.
@@ -222,11 +230,33 @@ struct PreparedNameChanges {
     scope: ScopeId,
     writes: Vec<(BindingName, SessionVarId)>,
     removals: Vec<BindingName>,
+    removal_set: HashSet<BindingName>,
     hidden_additions: Vec<BindingName>,
     new_current: Option<HashMap<BindingName, SessionVarId>>,
     new_hidden: Option<HashSet<BindingName>>,
     projection: Option<HashTrieMapSync<BindingName, SessionVarId>>,
     changes: usize,
+}
+
+impl PreparedNameChanges {
+    fn visible_changes<'a>(
+        &'a self,
+        table: &'a BindingTable,
+        tree: &'a ScopeTree,
+    ) -> impl Iterator<Item = (&'a BindingName, Option<&'a BindingEntry>)> + 'a {
+        self.writes
+            .iter()
+            .filter(|(name, _)| !self.removal_set.contains(name))
+            .map(|(name, id)| (name, table.live.get(id)))
+            .chain(self.removals.iter().map(move |name| {
+                let selected = if table.tips.contains_key(&self.scope) {
+                    None
+                } else {
+                    table.resolve_frame_name_in(tree, self.scope, name, false)
+                };
+                (name, selected)
+            }))
+    }
 }
 
 struct PreparedMembership {
@@ -523,6 +553,7 @@ pub struct BindingEntry {
 /// by scope — a `SessionVarId` is globally unique, and an already-compiled
 /// fragment resolves by id regardless of which frame minted it.
 pub struct BindingTable {
+    declaration_preparation_owner: Arc<()>,
     /// Shadowing layer, one frame per scope: scope → (name → newest gen's id).
     /// A scope with no bindings has no frame (absent, not empty).
     current: HashMap<ScopeId, HashMap<BindingName, SessionVarId>>,
@@ -763,6 +794,7 @@ struct ObservationBinding {
 impl Default for BindingTable {
     fn default() -> Self {
         Self {
+            declaration_preparation_owner: Arc::new(()),
             current: HashMap::new(),
             capturable_names: HashMap::new(),
             capturable_membership: HashMap::new(),
@@ -803,6 +835,109 @@ impl Drop for BindingTable {
 }
 
 impl BindingTable {
+    fn declaration_preparation_baseline(&self) -> DeclarationPreparationBaseline {
+        DeclarationPreparationBaseline {
+            table: Arc::clone(&self.declaration_preparation_owner),
+            revision: self.revision,
+        }
+    }
+
+    fn matches_declaration_preparation(&self, baseline: &DeclarationPreparationBaseline) -> bool {
+        Arc::ptr_eq(&self.declaration_preparation_owner, &baseline.table)
+            && self.revision == baseline.revision
+    }
+
+    /// Predict the exact origin → observation removals → name changes commit.
+    /// Only the prepared observations, touched names, and lookup chain are read.
+    pub fn prepared_declaration_projection<'a>(
+        &'a self,
+        tree: &'a ScopeTree,
+        origin: Option<&'a PreparedSourceOwnerOrigin>,
+        changes: &'a PreparedDeclarationBindingChanges,
+    ) -> Result<PreparedDeclarationProjection<'a>, BindingPromotionError> {
+        let scope = changes.names.scope;
+        if !self.matches_declaration_preparation(&changes.baseline)
+            || origin.is_some_and(|origin| {
+                origin.scope != scope || !self.matches_declaration_preparation(&origin.baseline)
+            })
+        {
+            return Err(BindingPromotionError::StaleOrForeignDeclarationPreparation);
+        }
+        let advances = changes
+            .observations
+            .len()
+            .checked_add(usize::from(origin.is_some()))
+            .and_then(|n| n.checked_add(changes.names.changes))
+            .ok_or(BindingPromotionError::MutationWitnessExhausted {
+                revision: self.revision,
+                advances: usize::MAX,
+            })?;
+        let final_revision = self.revision_after(advances).ok_or(
+            BindingPromotionError::MutationWitnessExhausted {
+                revision: self.revision,
+                advances,
+            },
+        )?;
+        let mut witness = self
+            .scope_witness(tree, scope)
+            .ok_or(BindingPromotionError::UnverifiableSourceSelection)?;
+        let mut removed_by_owner: HashMap<ScopeId, (usize, u64)> = HashMap::new();
+        let mut revision = self.revision + u64::from(origin.is_some());
+        let origin_revision = revision;
+        for id in &changes.observations {
+            let observation = self
+                .observations
+                .get(id)
+                .ok_or(BindingPromotionError::StaleOrForeignDeclarationPreparation)?;
+            revision += 1; // Bounded by the checked complete commit above.
+            let removed = removed_by_owner.entry(observation.owner).or_default();
+            removed.0 += 1;
+            removed.1 = revision;
+        }
+        let mut has_observers = false;
+        for (owner, owner_revision) in &mut witness.frames {
+            let removed = removed_by_owner.get(owner).copied().unwrap_or_default();
+            let remaining = self
+                .observation_owners
+                .get(owner)
+                .copied()
+                .unwrap_or(0)
+                .checked_sub(removed.0)
+                .ok_or(BindingPromotionError::StaleOrForeignDeclarationPreparation)?;
+            has_observers |= remaining != 0;
+            if origin.is_some() && *owner == scope {
+                *owner_revision = origin_revision;
+            }
+            if removed.0 != 0 {
+                *owner_revision =
+                    if self.has_revision_scope(*owner) || (origin.is_some() && *owner == scope) {
+                        removed.1
+                    } else {
+                        0
+                    };
+            }
+            if *owner == scope && changes.names.changes != 0 {
+                *owner_revision = if self.has_revision_scope(scope) || origin.is_some() {
+                    final_revision
+                } else {
+                    0
+                };
+            }
+        }
+        witness.dependency_revision = has_observers.then_some(if changes.observations.is_empty() {
+            self.dependency_revision
+        } else {
+            revision
+        });
+        Ok(PreparedDeclarationProjection {
+            table: self,
+            tree,
+            changes,
+            _origin: origin,
+            witness,
+        })
+    }
+
     /// Table-wide cache invalidation only. Exhaustion permanently disables
     /// witnesses instead of allowing an old revision to become current again.
     #[must_use]
@@ -1049,14 +1184,7 @@ impl BindingTable {
             return;
         }
         self.revision = self.revision_after(advances).unwrap_or(0);
-        if self.current.contains_key(&scope)
-            || self.tips.contains_key(&scope)
-            || self.owned.contains_key(&scope)
-            || self.source_owned.contains_key(&scope)
-            || self.promoted.contains_key(&scope)
-            || self.promoted_source_instances.contains_key(&scope)
-            || self.source_selection.contains_key(&scope)
-        {
+        if self.has_revision_scope(scope) {
             if let Some(slot) = self.scope_revisions.get_mut(&scope) {
                 *slot = self.revision;
             } else {
@@ -1065,6 +1193,16 @@ impl BindingTable {
         } else {
             self.scope_revisions.remove(&scope);
         }
+    }
+
+    fn has_revision_scope(&self, scope: ScopeId) -> bool {
+        self.current.contains_key(&scope)
+            || self.tips.contains_key(&scope)
+            || self.owned.contains_key(&scope)
+            || self.source_owned.contains_key(&scope)
+            || self.promoted.contains_key(&scope)
+            || self.promoted_source_instances.contains_key(&scope)
+            || self.source_selection.contains_key(&scope)
     }
 
     fn membership_mut(&mut self, scope: ScopeId) -> &mut CapturableMembership {
@@ -2069,7 +2207,11 @@ impl BindingTable {
         selection.domains.insert_mut(selection.current, record);
         self.source_selection.reserve(1);
         self.scope_revisions.reserve(1);
-        Ok(PreparedSourceOwnerOrigin { scope, selection })
+        Ok(PreparedSourceOwnerOrigin {
+            scope,
+            selection,
+            baseline: self.declaration_preparation_baseline(),
+        })
     }
 
     pub fn commit_source_owner_origin(&mut self, prepared: PreparedSourceOwnerOrigin) {
@@ -2512,6 +2654,7 @@ impl BindingTable {
             scope,
             writes,
             removals,
+            removal_set: seen,
             hidden_additions,
             new_current,
             new_hidden,
@@ -2532,6 +2675,7 @@ impl BindingTable {
             scope,
             writes,
             removals,
+            removal_set: _,
             hidden_additions,
             new_current,
             new_hidden,
@@ -2600,6 +2744,7 @@ impl BindingTable {
         Ok(PreparedDeclarationBindingChanges {
             names,
             observations,
+            baseline: self.declaration_preparation_baseline(),
         })
     }
 

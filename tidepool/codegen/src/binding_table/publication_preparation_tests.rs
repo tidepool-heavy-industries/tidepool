@@ -19,6 +19,225 @@ fn visible(table: &BindingTable, tree: &ScopeTree, scope: ScopeId) -> Vec<(Strin
         .collect()
 }
 
+fn declaration_owner(version: u8) -> CachedHomeOwner {
+    CachedHomeOwner {
+        unit: "unit".into(),
+        module: "Declaration".into(),
+        module_version: ModuleVersion([version; 32]),
+        skinny_iface_sha256: [version; 32],
+        product_sha256: [version; 32],
+    }
+}
+
+#[test]
+fn prepared_declaration_projection_matches_committed_observation_and_name_histories() {
+    // Capture sets include target, ancestor and unrelated owners. A target's
+    // remaining observer must see the global dependency revision change even
+    // when the removed observation belongs to an unrelated scope.
+    for seeded in [false, true] {
+        for captured in 0u8..16 {
+            for with_origin in [false, true] {
+                let mut tree = ScopeTree::new();
+                let target = tree.mint_child(ScopeId::ROOT).unwrap();
+                let outside = tree.mint_isolated();
+                let mut table = BindingTable::new();
+                let ancestor = table.bind_in(ScopeId::ROOT, entry("answer", 1)).unwrap();
+                table.save_observation(ancestor, &[], 100);
+                if seeded {
+                    table.seed_scope(&tree, ScopeId::ROOT, target);
+                }
+                let local = table.bind_in(target, entry("answer", 2)).unwrap();
+                let alias = table
+                    .bind_alias_in(target, entry("alias", 3), local)
+                    .unwrap()
+                    .0;
+                let unrelated = table.bind_in(outside, entry("unrelated", 4)).unwrap();
+                table.save_observation(local, &[], 100);
+                table.save_observation(alias, &[local.var()], 100);
+                table.save_observation(unrelated, &[], 100);
+                let ids = [ancestor, local, alias, unrelated];
+                let captures = ids
+                    .iter()
+                    .enumerate()
+                    .filter(|(slot, _)| captured & (1 << slot) != 0)
+                    .map(|(_, id)| id.var())
+                    .collect::<Vec<_>>();
+                // Repeated no-op, local removal/ancestor fallback, alias
+                // withdrawal, already-hidden name, and a different origin.
+                for (step, removals) in [
+                    vec!["missing", "missing"],
+                    vec!["answer", "alias", "answer"],
+                    vec!["answer"],
+                    vec![],
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let removals = removals.into_iter().map(str::to_owned).collect::<Vec<_>>();
+                    let before = table.scope_snapshot(&tree, target).unwrap();
+                    let before_witness = table.scope_witness(&tree, target).unwrap();
+                    let before_revision = table.mutation_revision();
+                    let origin = with_origin.then(|| {
+                        table
+                            .prepare_source_owner_origin_in(
+                                &tree,
+                                target,
+                                declaration_owner(step as u8),
+                            )
+                            .unwrap()
+                    });
+                    let changes = table
+                        .prepare_declaration_binding_changes_in(target, &captures, &removals)
+                        .unwrap();
+                    let projection = table
+                        .prepared_declaration_projection(&tree, origin.as_ref(), &changes)
+                        .unwrap();
+                    assert_eq!(projection.target_scope(), target);
+                    let predicted = projection.scope_witness().clone();
+                    let selections = projection
+                        .visible_changes()
+                        .map(|(name, entry)| {
+                            (name.0.clone(), entry.map(|entry| (entry.id, entry.scope)))
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    assert_eq!(
+                        selections.keys().cloned().collect::<BTreeSet<_>>(),
+                        removals.iter().cloned().collect()
+                    );
+                    assert_eq!(table.scope_snapshot(&tree, target).unwrap(), before);
+                    assert_eq!(table.scope_witness(&tree, target).unwrap(), before_witness);
+                    assert_eq!(table.mutation_revision(), before_revision);
+                    without_allocations(|| {
+                        if let Some(origin) = origin {
+                            table.commit_source_owner_origin(origin);
+                        }
+                        table.commit_declaration_binding_changes(changes);
+                    });
+                    assert_eq!(table.scope_witness(&tree, target), Some(predicted));
+                    for (name, selected) in selections {
+                        assert_eq!(
+                            table
+                                .resolve_in(&tree, target, &name)
+                                .map(|entry| (entry.id, entry.scope)),
+                            selected
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn prepared_declaration_projection_refuses_foreign_stale_and_retired_before_mutation() {
+    let mut tree = ScopeTree::new();
+    let scope = tree.mint_isolated();
+    let other_scope = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let mut foreign = BindingTable::new();
+    let changes = table
+        .prepare_declaration_binding_changes_in(scope, &[], &[])
+        .unwrap();
+    let foreign_changes = foreign
+        .prepare_declaration_binding_changes_in(scope, &[], &[])
+        .unwrap();
+    let foreign_origin = foreign
+        .prepare_source_owner_origin_in(&tree, scope, declaration_owner(0))
+        .unwrap();
+    let wrong_scope_origin = table
+        .prepare_source_owner_origin_in(&tree, other_scope, declaration_owner(0))
+        .unwrap();
+    assert_eq!(table.revision, foreign.revision);
+    for (origin, delta) in [
+        (None, &foreign_changes),
+        (Some(&foreign_origin), &changes),
+        (Some(&wrong_scope_origin), &changes),
+    ] {
+        without_allocations(|| {
+            assert!(matches!(
+                table.prepared_declaration_projection(&tree, origin, delta),
+                Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+            ))
+        });
+    }
+    let before = table.scope_snapshot(&tree, scope).unwrap();
+    tree.retire(scope);
+    assert!(matches!(
+        table.prepared_declaration_projection(&tree, None, &changes),
+        Err(BindingPromotionError::UnverifiableSourceSelection)
+    ));
+    assert_eq!(table.revision, 1);
+    assert!(table.live.is_empty());
+    let origin = table
+        .prepare_source_owner_origin_in(&tree, other_scope, declaration_owner(0))
+        .unwrap();
+    let changes = table
+        .prepare_declaration_binding_changes_in(other_scope, &[], &[])
+        .unwrap();
+    table.bind_in(other_scope, entry("changed", 1)).unwrap();
+    let current = table.scope_snapshot(&tree, other_scope).unwrap();
+    without_allocations(|| {
+        assert!(matches!(
+            table.prepared_declaration_projection(&tree, Some(&origin), &changes),
+            Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+        ))
+    });
+    assert_eq!(table.scope_snapshot(&tree, other_scope).unwrap(), current);
+    // The refusal did not publish either prepared origin.
+    assert_eq!(table.source_selection.get(&scope), None);
+    assert!(before.observation_dependencies.is_empty());
+}
+
+#[test]
+fn prepared_declaration_projection_refuses_revision_exhaustion_before_commit() {
+    for revision in [0, u64::MAX - 2, u64::MAX - 1, u64::MAX] {
+        let tree = ScopeTree::new();
+        let scope = ScopeId::ROOT;
+        let mut table = BindingTable::new();
+        let id = table.bind_in(scope, entry("value", 1)).unwrap();
+        table.save_observation(id, &[], 10);
+        let mut origin = table
+            .prepare_source_owner_origin_in(&tree, scope, declaration_owner(0))
+            .unwrap();
+        table.revision = revision;
+        // Set the opaque baseline at the tested exhaustion boundary; genuine
+        // origin preparation already refuses a previously exhausted table.
+        origin.baseline.revision = revision;
+        let changes = table
+            .prepare_declaration_binding_changes_in(scope, &[id.var()], &["value".into()])
+            .unwrap();
+        let before = table.scope_witness(&tree, scope);
+        assert!(
+            matches!(table.prepared_declaration_projection(&tree, Some(&origin), &changes),
+            Err(BindingPromotionError::MutationWitnessExhausted { revision: observed, advances: 3 }) if observed == revision)
+        );
+        assert_eq!(table.scope_witness(&tree, scope), before);
+        assert_eq!(table.resolve_in(&tree, scope, "value").unwrap().id, id);
+        assert!(table.observations.contains_key(&id));
+        assert_eq!(table.revision, revision);
+    }
+    let tree = ScopeTree::new();
+    let mut table = BindingTable::new();
+    table.revision = u64::MAX - 1;
+    let origin = table
+        .prepare_source_owner_origin_in(&tree, ScopeId::ROOT, declaration_owner(0))
+        .unwrap();
+    let changes = table
+        .prepare_declaration_binding_changes_in(ScopeId::ROOT, &[], &[])
+        .unwrap();
+    let predicted = table
+        .prepared_declaration_projection(&tree, Some(&origin), &changes)
+        .unwrap()
+        .scope_witness()
+        .clone();
+    without_allocations(|| {
+        table.commit_source_owner_origin(origin);
+        table.commit_declaration_binding_changes(changes);
+    });
+    assert_eq!(table.scope_witness(&tree, ScopeId::ROOT), Some(predicted));
+    assert_eq!(table.revision, u64::MAX);
+}
+
 #[test]
 fn declaration_prepare_cancel_and_commit_preserve_exact_observation_history() {
     let mut tree = ScopeTree::new();
