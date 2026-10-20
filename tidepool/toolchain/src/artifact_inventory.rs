@@ -11092,10 +11092,7 @@ mod tests {
                 .map(|admitted| admitted.artifacts);
             let demanded =
                 result.expect("implicit and explicit demand consume the carried exact choice");
-            assert_eq!(
-                demanded.selected_native_groups(),
-                BTreeSet::from([expected])
-            );
+            assert_eq!(demanded.selected_native_groups(), expected_keys);
             assert!(demanded
                 .roots()
                 .contains(&InventoryNodeKey::Group(expected)));
