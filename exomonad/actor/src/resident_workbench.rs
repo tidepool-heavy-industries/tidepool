@@ -23901,6 +23901,7 @@ pub(crate) mod request_tests {
         ReplacementCheckoutRetired,
         ReplacementFrozenSource,
         UnstartedSourceSettlements,
+        PublicationTransportProtocol,
         RetirementNativeOwnerLoss(
             crate::local_actor::run_control::GenerationRetirementNativeControl,
         ),
@@ -23913,6 +23914,17 @@ pub(crate) mod request_tests {
             quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
                 client, Some(crate::ActorPersistencePolicy::Ephemeral),
                 Some(PublicationFailureControl::UnstartedSourceSettlements),
+            ).await;
+        }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted publication protocol execution group"]
+    async fn actual_publication_transport_return_controls_source_restoration() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::PublicationTransportProtocol),
             ).await;
         }).await;
     }
@@ -24437,7 +24449,8 @@ pub(crate) mod request_tests {
         control: PublicationFailureControl,
     ) {
         match control {
-            PublicationFailureControl::UnstartedSourceSettlements => {
+            PublicationFailureControl::UnstartedSourceSettlements
+            | PublicationFailureControl::PublicationTransportProtocol => {
                 unreachable!("source settlement controls retain their three actual preparations")
             }
             PublicationFailureControl::RetirementNativeOwnerLoss(_) => {
@@ -25519,6 +25532,7 @@ pub(crate) mod request_tests {
                     } else if matches!(
                         control,
                         PublicationFailureControl::UnstartedSourceSettlements
+                            | PublicationFailureControl::PublicationTransportProtocol
                     ) {
                         let mut preparations = vec![prepared];
                         for _ in 0..2 {
@@ -25535,7 +25549,20 @@ pub(crate) mod request_tests {
                                     .unwrap(),
                             );
                         }
-                        assert_unstarted_source_settlements(&workbench, state, preparations).await;
+                        if matches!(
+                            control,
+                            PublicationFailureControl::PublicationTransportProtocol
+                        ) {
+                            crate::resident_actor::assert_publication_transport_protocol(
+                                &workbench,
+                                state,
+                                preparations,
+                            )
+                            .await;
+                        } else {
+                            assert_unstarted_source_settlements(&workbench, state, preparations)
+                                .await;
+                        }
                     } else {
                         assert_real_publisher_failure(&workbench, state, prepared, control).await;
                     }

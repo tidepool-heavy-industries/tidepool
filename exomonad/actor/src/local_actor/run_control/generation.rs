@@ -1,4 +1,7 @@
 //! Generation provenance travels through the existing run-directory owners.
+#[cfg(test)]
+mod publication_protocol_tests;
+
 use super::*;
 use crate::resident_workbench::generation_admission::{GenerationAdmissionError, GenerationFence};
 use crate::ResidentActorWorkbenchError;

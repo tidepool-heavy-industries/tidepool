@@ -1181,6 +1181,20 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(delivery_loss['resource_env'], rooted['resource_env'])
         self.assertEqual(delivery_loss['resources'], rooted['resources'])
         self.assertTrue(delivery_loss['haskell_worker'])
+        protocol = self.rule('exomonad/actor', 'actor_generation_publication_protocol_tests',
+                             'tidepool_rust_test_cases')
+        self.assertEqual(protocol['binary'], rooted['binary'])
+        self.assertEqual(protocol['exact_tests'], [
+            'resident_workbench::request_tests::actual_publication_transport_return_controls_source_restoration',
+        ])
+        self.assertEqual(protocol['expected_count'], 1)
+        self.assertTrue(protocol['ignored'])
+        self.assertEqual(protocol['case_compiler_modes'], {
+            protocol['exact_tests'][0]: 'owned-resident',
+        })
+        self.assertEqual(protocol['resource_env'], rooted['resource_env'])
+        self.assertEqual(protocol['resources'], rooted['resources'])
+        self.assertTrue(protocol['haskell_worker'])
         publication = self.rule('exomonad/actor', 'actor_world_declaration_publication_test',
                                 'tidepool_rust_test_cases')
         self.assertEqual(publication['binary'], rooted['binary'])
