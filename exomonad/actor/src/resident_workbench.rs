@@ -2052,6 +2052,46 @@ pub(crate) struct ActorGenerationPublisher<H, O> {
     settlement_probe: Option<Arc<PublicationSettlementProbe>>,
 }
 
+/// Affine transfer payload for the linked publication worker. The concrete
+/// publisher supplies its consumer; callers cannot replace it with a closure
+/// that loses the reservation before recording whether publication started.
+#[must_use]
+pub(crate) struct ActorGenerationPublicationOperation {
+    reserved: ReservedActorGeneration,
+    publish: Box<
+        dyn FnOnce(
+                ReservedActorGeneration,
+            ) -> futures_util::future::BoxFuture<
+                'static,
+                Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+            > + Send,
+    >,
+}
+
+impl ActorGenerationPublicationOperation {
+    pub(crate) fn attempt_observer(&self) -> ActorPublicationAttemptObserver {
+        self.reserved.attempt_observer()
+    }
+
+    pub(crate) fn reserved_mut(&mut self) -> &mut ReservedActorGeneration {
+        &mut self.reserved
+    }
+
+    /// Possession of the unconsumed payload proves its publication body has not
+    /// run. A failed worker transfer must return this whole payload first.
+    pub(crate) fn into_reserved(self) -> ReservedActorGeneration {
+        self.reserved
+    }
+
+    pub(crate) async fn run(self) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        let Self { reserved, publish } = self;
+        publish(reserved).await
+    }
+}
+
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(ActorGenerationPublicationOperation: Clone, Copy);
+
 #[derive(Clone)]
 pub(crate) enum ActorPublicationOwner {
     Actor(crate::LifecycleHandle),
@@ -2667,6 +2707,19 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(crate) fn into_publication_operation(
+        self,
+        reserved: ReservedActorGeneration,
+        compiler: crate::capabilities::CompilerOwnerScope,
+    ) -> ActorGenerationPublicationOperation {
+        ActorGenerationPublicationOperation {
+            reserved,
+            publish: Box::new(move |reserved| {
+                Box::pin(async move { compiler.scope(self.publish_reserved(reserved)).await })
+            }),
+        }
+    }
+
     pub(crate) async fn publish(
         &self,
         prepared: PreparedActorGeneration,
@@ -21029,6 +21082,7 @@ pub(crate) mod request_tests {
         ReplacementOwnerLoss,
         BootstrapCheckoutRetired,
         ReplacementCheckoutRetired,
+        ReplacementFrozenSource,
     }
 
     impl PublicationFailureControl {
@@ -21038,6 +21092,100 @@ pub(crate) mod request_tests {
                 Self::BootstrapOwnerLoss | Self::BootstrapCheckoutRetired
             )
         }
+    }
+
+    #[test]
+    fn observe_actor_generation_future_layout_without_construction() {
+        fn output_size<A, F: std::future::Future>(_: impl FnOnce(A) -> F) -> usize {
+            std::mem::size_of::<F>()
+        }
+        type Workbench = ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>;
+        type Publisher = ActorGenerationPublisher<frunk::HNil, tidepool_mcp::CapturedOutput>;
+        type Prompts = tidepool_runtime::session::ComposedPromptSnapshot;
+        let mut observed = std::collections::BTreeMap::new();
+        observed.insert("quoted_fixture", output_size(|(client, persistence, control): (
+            crate::CompilerPreparationClient, Option<crate::ActorPersistencePolicy>,
+            Option<PublicationFailureControl>,
+        )| quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(client, persistence, control)));
+        observed.insert(
+            "prepare_initial_generation",
+            output_size(
+                |(workbench, state, context, descriptor, installation, prompts): (
+                    &'static Workbench,
+                    Arc<InstalledToolsState>,
+                    crate::ActorSessionContext,
+                    crate::ActorDescriptor,
+                    InstalledToolLease,
+                    Prompts,
+                )| {
+                    workbench.prepare_initial_generation(
+                        state,
+                        context,
+                        descriptor,
+                        installation,
+                        prompts,
+                    )
+                },
+            ),
+        );
+        observed.insert(
+            "prepare_actor_generation",
+            output_size(
+                |(workbench, context, descriptor, expected, installation, prompts): (
+                    &'static Workbench,
+                    crate::ActorSessionContext,
+                    crate::ActorDescriptor,
+                    ActorRequestSnapshot,
+                    InstalledToolLease,
+                    Prompts,
+                )| {
+                    workbench.prepare_actor_generation(
+                        context,
+                        descriptor,
+                        expected,
+                        installation,
+                        prompts,
+                    )
+                },
+            ),
+        );
+        observed.insert(
+            "complete_actor_generation_world",
+            output_size(
+                |(workbench, preparing): (&'static Workbench, PreparingActorGeneration)| {
+                    workbench.complete_actor_generation_world(preparing)
+                },
+            ),
+        );
+        observed.insert(
+            "publisher_failure_control",
+            output_size(
+                |(workbench, state, prepared, control): (
+                    &'static Workbench,
+                    Arc<InstalledToolsState>,
+                    PreparedActorGeneration,
+                    PublicationFailureControl,
+                )| {
+                    assert_real_publisher_failure(workbench, state, prepared, control)
+                },
+            ),
+        );
+        observed.insert(
+            "publish_reserved",
+            output_size(
+                |(publisher, reserved): (&'static Publisher, ReservedActorGeneration)| {
+                    publisher.publish_reserved(reserved)
+                },
+            ),
+        );
+        observed.insert(
+            "owned_publication",
+            output_size(|operation: ActorGenerationPublicationOperation| operation.run()),
+        );
+        eprintln!(
+            "ACTOR_GENERATION_FUTURE_LAYOUT {}",
+            serde_json::to_string(&observed).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -21132,7 +21280,126 @@ pub(crate) mod request_tests {
             | PublicationFailureControl::ReplacementCheckoutRetired => {
                 assert_real_publisher_checkout_loss(workbench, state, prepared).await;
             }
+            PublicationFailureControl::ReplacementFrozenSource => {
+                let source = prepared.candidate.installation.source().clone();
+                let reference = source.generation_evidence().unwrap().reference.clone();
+                let captured = source.capture_compiler_sources().unwrap().unwrap();
+                let candidate = ActorGenerationCandidateCustody(prepared.candidate.clone());
+                let world = prepared.candidate.compiler_world.clone();
+                let logical = *world.world().logical_id();
+                let draft = source
+                    .include_paths()
+                    .last()
+                    .unwrap()
+                    .join("QuotedAgentSpec.hs");
+                let frozen_body = std::fs::read(&draft).unwrap();
+                assert!(!frozen_body.is_empty());
+                let mut newer_body = frozen_body.clone();
+                newer_body.extend_from_slice(b"\n-- later editable draft C\n");
+                std::fs::write(&draft, &newer_body).unwrap();
+                assert_ne!(std::fs::read(&draft).unwrap(), frozen_body);
+                assert!(Arc::ptr_eq(
+                    &captured,
+                    &source.capture_compiler_sources().unwrap().unwrap()
+                ));
+                assert!(candidate
+                    .same_candidate(&ActorGenerationCandidateCustody(prepared.candidate.clone())));
+                assert!(Arc::ptr_eq(&world, &prepared.candidate.compiler_world));
+                assert_eq!(world.world().logical_id(), &logical);
+                let terminal = crate::CompilerPreparationOwner::new();
+                let publisher = workbench.generation_publisher(
+                    state.clone(),
+                    ActorPublicationOwner::Preparation(terminal.client()),
+                );
+                let ActorGenerationReservation::Reserved(reserved) = publisher
+                    .reserve(
+                        prepared,
+                        tidepool_runtime::session::PublicationDecision::new(),
+                        ActorGenerationPublication::Terminal,
+                    )
+                    .unwrap()
+                else {
+                    panic!("the actual frozen candidate must reserve after draft C changes");
+                };
+                assert!(candidate.same_candidate(&reserved.candidate_custody()));
+                let ActorGenerationCommit::Published { generation, .. } =
+                    publisher.publish_reserved(reserved).await.unwrap()
+                else {
+                    panic!("the actual frozen candidate must publish after draft C changes");
+                };
+                assert!(Arc::ptr_eq(
+                    &state.current_generation().unwrap(),
+                    &generation
+                ));
+                assert_eq!(
+                    generation
+                        .installation()
+                        .source()
+                        .generation_evidence()
+                        .unwrap()
+                        .reference,
+                    reference
+                );
+                let context = generation.context().clone();
+                let original = generation.scope().clone();
+                let installed_reference = reference.clone();
+                let admitted = workbench
+                    .access
+                    .with_compiler_machine(context.clone(), move |session, _, _, _| {
+                        session
+                            .capture_inspection_world_in(
+                                original.scope(),
+                                &installed_reference,
+                                &original,
+                            )
+                            .map_err(ResidentError::Session)
+                            .map_err(ResidentActorWorkbenchError::from)
+                    })
+                    .await
+                    .unwrap();
+                assert!(
+                    !admitted.needs_source_capture(),
+                    "installed B must expose its existing World"
+                );
+                let dependency = context.source_dependency().clone();
+                let work = crate::capabilities::CompilerOwnerScope::current()
+                    .unwrap()
+                    .with_source_dependency(&dependency)
+                    .admit_work()
+                    .unwrap();
+                let warmed = spawn_blocking_in_span(move || {
+                    let settled = work
+                        .run_source_compiler_phase(
+                            &dependency,
+                            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                            |owner, _| {
+                                tidepool_runtime::session::run_admitted_compiler_world(
+                                    owner,
+                                    admitted,
+                                    || panic!("installed B must not recapture draft C"),
+                                )
+                            },
+                        )
+                        .unwrap();
+                    tidepool_runtime::session::finish_admitted_compiler_world(settled).unwrap()
+                })
+                .await
+                .unwrap();
+                assert!(Arc::ptr_eq(warmed.world(), world.world()));
+                assert_eq!(warmed.world().logical_id(), &logical);
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn prepared_candidate_world_retains_captured_source_after_later_draft() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client,
+                Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::ReplacementFrozenSource),
+            ).await;
+        }).await;
     }
 
     #[tokio::test]
@@ -21284,6 +21551,7 @@ pub(crate) mod request_tests {
             identities: Vec<String>,
             evidence: crate::SourceGenerationEvidence,
             entries: crate::SourceEntryStorage,
+            compiler_sources: Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>,
         }
         impl crate::RetainedSourceLayer for GenerationSource {
             fn identities(&self) -> &[String] {
@@ -21301,12 +21569,40 @@ pub(crate) mod request_tests {
             fn generation_evidence(&self) -> Option<&crate::SourceGenerationEvidence> {
                 Some(&self.evidence)
             }
+            fn capture_compiler_sources(
+                &self,
+            ) -> Result<
+                Option<Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+                crate::SourceInspectionError,
+            > {
+                Ok(Some(self.compiler_sources.clone()))
+            }
         }
         let source_reference = tidepool_runtime::session::GenerationArtifactReference::capture(
             std::fs::read(authored.path().join("QuotedAgentSpec.hs")).unwrap(),
         );
         let entry_storage = Arc::new(tempfile::tempdir().unwrap());
         let source_issuer = crate::SourceLayerIssuer::default();
+        let (_, compiler_source_owner) = world_query_test_source_files_with_support(&[], &roots);
+        assert_eq!(compiler_source_owner.roots.len(), roots.len());
+        let quoted_root = compiler_source_owner.roots.last().unwrap();
+        assert_eq!(
+            quoted_root
+                .bodies
+                .get(std::path::Path::new("QuotedAgentSpec.hs"))
+                .unwrap()
+                .as_ref(),
+            std::fs::read(authored.path().join("QuotedAgentSpec.hs")).unwrap(),
+            "the actual quoted module body contributes to the captured source domain"
+        );
+        let compiler_sources = Arc::new(
+            tidepool_toolchain::compiler_world::CapturedCompilerSources::from_captured_roots(
+                compiler_source_owner.roots.clone(),
+                Arc::from(source_reference.bytes()),
+                compiler_source_owner,
+            )
+            .unwrap(),
+        );
         let generation_source = source_issuer.issue(Arc::new(GenerationSource {
             _owner: authored.clone(),
             _entries: entry_storage.clone(),
@@ -21320,6 +21616,7 @@ pub(crate) mod request_tests {
                 reference: source_reference.clone(),
                 configuration_digest: [0; 32],
             },
+            compiler_sources,
         }));
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));

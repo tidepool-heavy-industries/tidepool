@@ -1,6 +1,50 @@
 use super::*;
 
 #[tokio::test]
+async fn native_cleanup_retains_owner_loss_after_actor_kill() {
+    let (control, task) = RunControlClient::start().await.unwrap();
+    let retained = control.native_cleanup.clone();
+    assert!(retained.terminal.get().is_none());
+    control.owner.get_cell().kill();
+    task.await.unwrap();
+    assert_eq!(
+        retained.terminal.get(),
+        Some(&RunControlNativeExit::OwnerLost)
+    );
+    assert!(matches!(
+        control
+            .settle_run_preparations(Duration::from_millis(10))
+            .await,
+        crate::CleanupComponentOutcome::Unconfirmed(_)
+    ));
+    drop(control);
+    assert_eq!(
+        retained.terminal.get(),
+        Some(&RunControlNativeExit::OwnerLost)
+    );
+}
+
+#[tokio::test]
+async fn native_cleanup_retains_owner_loss_after_handler_panic() {
+    let (control, task) = RunControlClient::start().await.unwrap();
+    let retained = control.native_cleanup.clone();
+    control
+        .owner
+        .send_message(RunControlMessage::PanicForNativeRetention)
+        .unwrap();
+    task.await.unwrap();
+    assert_eq!(
+        retained.terminal.get(),
+        Some(&RunControlNativeExit::OwnerLost)
+    );
+    assert!(control.finish_run().await.is_err());
+    assert_eq!(
+        retained.terminal.get(),
+        Some(&RunControlNativeExit::OwnerLost)
+    );
+}
+
+#[tokio::test]
 async fn reservation_issued_before_seal_cannot_authorize_later_reservation() {
     let (control, _task) = RunControlClient::start().await.unwrap();
     let reservation = control.reserve(crate::Incarnation(1)).await.unwrap();
@@ -65,6 +109,10 @@ async fn seal_overtaking_prepared_input_coordinator_preserves_cleanup_reservatio
     ));
     control.finish_run().await.unwrap();
     task.await.unwrap();
+    assert_eq!(
+        control.native_cleanup.terminal.get(),
+        Some(&RunControlNativeExit::Finalized)
+    );
 }
 
 #[tokio::test]

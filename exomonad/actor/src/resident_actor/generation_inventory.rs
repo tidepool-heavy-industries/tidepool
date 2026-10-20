@@ -16,13 +16,6 @@ pub(crate) struct GenerationWorkObservations {
     pub(crate) actors: Vec<ActorRef>,
     pub(crate) invocations: Vec<invocation_work::GenerationInvocationObservation>,
     pub(crate) routes: Vec<GenerationRouteObservation>,
-    pub(crate) lifecycle_compilers: Vec<GenerationLifecycleCompilerObservation>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GenerationLifecycleCompilerObservation {
-    pub(crate) actor: ActorRef,
-    pub(crate) compiler: crate::termination::GenerationCompilerObservation,
 }
 
 impl ResidentGenerationInventory {
@@ -33,30 +26,17 @@ impl ResidentGenerationInventory {
             .actors
             .lock()
             .iter()
-            .map(|(actor, record)| {
-                (
-                    *actor,
-                    record.workbench_executions.clone(),
-                    record.lifecycle.retained_terminal().clone(),
-                )
-            })
+            .map(|(actor, record)| (*actor, record.workbench_executions.clone()))
             .collect();
         // Retention publication locks work state before actor records. Release
         // the record guard before entering any ledger or invocation owner.
-        let actors = ledgers.iter().map(|(actor, _, _)| *actor).collect();
+        let actors = ledgers.iter().map(|(actor, _)| *actor).collect();
         let mut invocations = Vec::new();
-        let mut lifecycle_compilers = Vec::new();
-        for (actor, ledger, lifecycle) in ledgers {
+        for (_, ledger) in ledgers {
             invocations.extend(
                 ledger
                     .lock()
                     .generation_observations(dependency, self.coordinator.as_ref()),
-            );
-            lifecycle_compilers.extend(
-                lifecycle
-                    .generation_compiler_observations(dependency)
-                    .into_iter()
-                    .map(|compiler| GenerationLifecycleCompilerObservation { actor, compiler }),
             );
         }
         let routes = self.requests.generation_routes(dependency);
@@ -64,7 +44,6 @@ impl ResidentGenerationInventory {
             actors,
             invocations,
             routes,
-            lifecycle_compilers,
         }
     }
 }
@@ -240,29 +219,19 @@ pub(crate) async fn assert_owner_observation_contract(dependency: GenerationDepe
         .observe(&dependency);
     assert_eq!(observed.actors, [actor]);
     assert!(observed.routes.is_empty());
-    assert_eq!(observed.lifecycle_compilers.len(), 3);
-    for (registration, source) in [
-        (0, crate::termination::GenerationCompilerSource::Dependent),
-        (1, crate::termination::GenerationCompilerSource::Dependent),
-        (
-            3,
-            crate::termination::GenerationCompilerSource::Unclassified,
-        ),
-    ] {
-        assert!(
-            observed
-                .lifecycle_compilers
-                .contains(&GenerationLifecycleCompilerObservation {
-                    actor,
-                    compiler: crate::termination::GenerationCompilerObservation {
-                        registration,
-                        close: crate::CompilerWorkClose::Pending,
-                        source,
-                    },
-                }),
-            "lifecycle receipt membership retains its actual ordinal and source"
-        );
-    }
+    fixture
+        .assert_generation_compilers(
+            &fence,
+            &[
+                (0, crate::termination::GenerationCompilerSource::Dependent),
+                (1, crate::termination::GenerationCompilerSource::Dependent),
+                (
+                    3,
+                    crate::termination::GenerationCompilerSource::Unclassified,
+                ),
+            ],
+        )
+        .await;
     assert_eq!(
         observed.invocations.len(),
         5,
@@ -326,15 +295,7 @@ pub(crate) async fn assert_owner_observation_contract(dependency: GenerationDepe
     lifecycle_original.run(|_| ());
     lifecycle_independent.run(|_| ());
     lifecycle_unknown.run(|_| ());
-    assert!(
-        fixture
-            .environment
-            .generation_inventory(Some(coordinator.clone()))
-            .observe(&dependency)
-            .lifecycle_compilers
-            .is_empty(),
-        "settled lifecycle receipts retain inert historical custody"
-    );
+    fixture.assert_generation_compilers(&fence, &[]).await;
     fence.reopen().unwrap();
     for work in [
         coordinator,
