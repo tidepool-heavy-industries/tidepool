@@ -5934,13 +5934,14 @@ mod answer_tests {
             &files
         )
         .is_ok());
-        for changed in [0, 1, 2] {
+        for changed in [0, 1, 2, 3] {
             let mut altered = selected_consumer.clone();
             let reference = &mut altered.selected_inputs[0].reference;
             match changed {
                 0 => reference.seal[0] ^= 1,
                 1 => reference.defining_scope += 1,
-                _ => reference.session_var += 1,
+                2 => reference.session_var += 1,
+                _ => reference.generation += 1,
             }
             assert!(
                 validate_world_prior_input(&input, &producer, &altered, &later, 900, &files)
