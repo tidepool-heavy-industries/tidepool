@@ -1161,7 +1161,7 @@ mod tests {
         let lease = session.mint_notebook_scope_with_lease(None).unwrap();
         let claim = lease.admit_source().unwrap();
         let fence = lease.source_admission().fence().unwrap();
-        let old_view = fence.publication_view(None);
+        let old_view = fence.publication_view();
         let successor = NotebookGenerationId::INITIAL.next().unwrap();
         let Err((fence, _)) = fence.retire(successor) else {
             panic!("active work must return its original fence");
