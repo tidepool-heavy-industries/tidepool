@@ -2039,21 +2039,7 @@ impl CompilerSourceSupport {
             }
         }
         let mut input_decisions = self.input_decisions.clone();
-        for (owner, fact) in &incoming.input_decisions.facts {
-            if projection.roles.get(owner) != Some(fact.role.as_role()) {
-                continue;
-            }
-            if input_decisions
-                .facts
-                .get(owner)
-                .is_some_and(|prior| prior != fact)
-            {
-                return Err(failure(
-                    "program support changed an issued native input decision",
-                ));
-            }
-            input_decisions.facts.insert(owner.clone(), fact.clone());
-        }
+        input_decisions.merge_selected(&incoming.input_decisions.for_exact_roles(&projection))?;
         let mut native_availability = match self
             .native_availability
             .merge(&incoming.native_availability)?
