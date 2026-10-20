@@ -72,7 +72,72 @@ pub struct ProgramProvenance {
     // Authentication follows the original compiler bundle through owned roots.
     // Public metadata construction alone cannot authorize a host input mount.
     authenticated_inputs: BTreeMap<u64, AuthenticatedInputContext>,
+    original_sources: BTreeMap<u64, RuntimeSourceOrigin>,
 }
+
+/// Actual runtime source custody is independent of semantic compiler equality.
+/// Unknown retains every known contributor and cannot be repaired by a later merge.
+#[derive(Clone, Debug)]
+enum RuntimeSourceOrigin {
+    Known(Arc<super::RuntimeLexicalScopeLease>),
+    Ambiguous(Vec<Arc<super::RuntimeLexicalScopeLease>>),
+    Unknown(Vec<Arc<super::RuntimeLexicalScopeLease>>),
+}
+
+impl RuntimeSourceOrigin {
+    fn known(&self) -> &[Arc<super::RuntimeLexicalScopeLease>] {
+        match self {
+            Self::Known(source) => std::slice::from_ref(source),
+            Self::Ambiguous(sources) | Self::Unknown(sources) => sources,
+        }
+    }
+
+    fn merge(&mut self, other: &Self) {
+        let unknown = matches!(self, Self::Unknown(_)) || matches!(other, Self::Unknown(_));
+        let mut sources = self.known().to_vec();
+        for source in other.known() {
+            if !sources.iter().any(|held| Arc::ptr_eq(held, source)) {
+                sources.push(source.clone());
+            }
+        }
+        *self = if unknown {
+            Self::Unknown(sources)
+        } else if sources.len() == 1 {
+            Self::Known(sources.pop().expect("one source"))
+        } else {
+            Self::Ambiguous(sources)
+        };
+    }
+
+    fn require_unique(
+        &self,
+        site: u64,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, ResidentError> {
+        match self {
+            Self::Known(source) => Ok(source.clone()),
+            Self::Ambiguous(sources) => Err(ResidentError::AmbiguousOriginalSource {
+                site,
+                origins: sources.len(),
+            }),
+            Self::Unknown(sources) => Err(ResidentError::MissingOriginalSource {
+                site,
+                known_origins: sources.len(),
+            }),
+        }
+    }
+}
+
+impl PartialEq for RuntimeSourceOrigin {
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+            && self.known().len() == other.known().len()
+            && self
+                .known()
+                .iter()
+                .all(|source| other.known().iter().any(|held| Arc::ptr_eq(source, held)))
+    }
+}
+impl Eq for RuntimeSourceOrigin {}
 
 /// Compiler-selected immutable facts. No runtime execution owner or renderer
 /// is retained here; each installation creates its own execution observation.
@@ -193,6 +258,11 @@ impl CompiledProvenancePlan {
             fresh_completion_sites: self.fresh_completion_sites.clone(),
             source_originals: self.source_originals.clone(),
             native_sites: self.native_sites.clone(),
+            original_sources: self
+                .sites
+                .keys()
+                .map(|site| (*site, RuntimeSourceOrigin::Unknown(Vec::new())))
+                .collect(),
             authenticated_inputs: self
                 .authenticated_inputs
                 .iter()
@@ -481,6 +551,8 @@ impl ProgramProvenance {
                 }
             } else {
                 self.sites.insert(site.site, site.clone());
+                self.original_sources
+                    .insert(site.site, RuntimeSourceOrigin::Unknown(Vec::new()));
             }
         }
         Ok(())
@@ -525,7 +597,17 @@ impl ProgramProvenance {
             }
         }
         for site in other.sites.values() {
+            let existing = self.sites.contains_key(&site.site);
             self.extend(std::slice::from_ref(site))?;
+            let incoming = &other.original_sources[&site.site];
+            if existing {
+                self.original_sources
+                    .get_mut(&site.site)
+                    .expect("site source")
+                    .merge(incoming);
+            } else {
+                self.original_sources.insert(site.site, incoming.clone());
+            }
         }
         for (site, interfaces) in &other.authenticated_inputs {
             self.authenticated_inputs
@@ -828,9 +910,7 @@ impl HostCarrier {
 
     pub fn session_root(&self) -> Result<&Path, ResidentError> {
         match &self.origin {
-            HostCarrierOrigin::Checked { admission, .. } => {
-                Ok(admission.snapshot().session_root())
-            }
+            HostCarrierOrigin::Checked { admission, .. } => Ok(admission.snapshot().session_root()),
             HostCarrierOrigin::Interface { admission, .. } => Ok(&admission.session_root),
             HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
         }
@@ -1573,17 +1653,21 @@ impl<E: std::fmt::Display> std::fmt::Display for RendererProductionFailure<E> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Compile(error) => write!(formatter, "{error}"),
-            Self::CloseUnconfirmed { close, action_error } => {
-                write!(
-                    formatter,
-                    "compiler close is unconfirmed: {close:?}"
-                )?;
+            Self::CloseUnconfirmed {
+                close,
+                action_error,
+            } => {
+                write!(formatter, "compiler close is unconfirmed: {close:?}")?;
                 if let Some(error) = action_error {
                     write!(formatter, "; primary action failed: {error}")?;
                 }
                 Ok(())
             }
-            Self::Publication { error, close, action_error } => {
+            Self::Publication {
+                error,
+                close,
+                action_error,
+            } => {
                 write!(
                     formatter,
                     "compiler publication failed: {error}; close: {close:?}"
@@ -2305,6 +2389,12 @@ pub enum ResidentError {
     },
     #[error("request receiver registration has no live entry: {hole}")]
     MissingRequestReceiverEntry { hole: String },
+    #[error("parked continuation does not match original-source site {site}")]
+    InvalidOriginalSourceSite { site: u64 },
+    #[error("site {site} lacks an original runtime source contribution ({known_origins} known)")]
+    MissingOriginalSource { site: u64, known_origins: usize },
+    #[error("site {site} has {origins} distinct original runtime source owners")]
+    AmbiguousOriginalSource { site: u64, origins: usize },
     #[error("activation site {site} lacks its original live input/type evidence")]
     InvalidActivationInput { site: u64 },
     #[error("activation site {site} lacks its original canonical input type witness")]
@@ -2574,10 +2664,7 @@ fn refuse_generic_activation_preview_install(
     if certification.is_some_and(|certification| {
         matches!(certification.purpose(), TurnPurpose::ActivationPreview(_))
     }) {
-        return Err(SessionError::SourceAdmission(
-            super::SourceAdmissionError::Unqualified,
-        )
-        .into());
+        return Err(SessionError::SourceAdmission(super::SourceAdmissionError::Unqualified).into());
     }
     Ok(())
 }
@@ -3686,9 +3773,10 @@ where
         prepared: &super::PreparedNotebookGeneration,
         source: &Arc<super::RuntimeLexicalScopeLease>,
     ) -> Result<super::AdmittedInspectionWorld, SessionError> {
-        self.state.capture_notebook_generation_world(prepared, source, |id| {
-            self.hidden_host_bindings.contains_key(&id)
-        })
+        self.state
+            .capture_notebook_generation_world(prepared, source, |id| {
+                self.hidden_host_bindings.contains_key(&id)
+            })
     }
 
     pub fn commit_notebook_generation_with_world(
@@ -3698,7 +3786,8 @@ where
         source: &super::RuntimeSourcePublicationView,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.state.commit_notebook_generation_with_world(prepared, publication, source, on_visible)
+        self.state
+            .commit_notebook_generation_with_world(prepared, publication, source, on_visible)
     }
 
     pub fn commit_notebook_generation_with_world_continuing(
@@ -3708,7 +3797,12 @@ where
         source: &super::RuntimeSourcePublicationView,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.state.commit_notebook_generation_with_world_continuing(prepared, publication, source, on_visible)
+        self.state.commit_notebook_generation_with_world_continuing(
+            prepared,
+            publication,
+            source,
+            on_visible,
+        )
     }
 
     pub fn commit_notebook_generation(
@@ -3885,7 +3979,8 @@ where
         expected: HostBindingType,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
-        self.state.admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
+        self.state
+            .admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
     }
 
     /// Admit one compiler-issued binder reserved for a native host payload.
@@ -4752,6 +4847,38 @@ where
             .iter()
             .find(|entry| entry.name == hole.cont_id())?;
         Some(Arc::clone(&entry.provenance))
+    }
+
+    /// Retain source custody for the actual suspended site, including raw tools
+    /// which have no activation input or compiler-authenticated input witness.
+    pub fn parked_site_original_source(
+        &mut self,
+        hole: &ResidentHole,
+        site: u64,
+    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, ResidentError> {
+        let invalid = || ResidentError::InvalidOriginalSourceSite { site };
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == hole.cont_id())
+            .ok_or_else(invalid)?;
+        let parked = self
+            .state
+            .prepared_mut()
+            .and_then(|engine| engine.parked_site(entry.id))
+            .ok_or_else(invalid)?;
+        if parked != site {
+            return Err(invalid());
+        }
+        entry
+            .provenance
+            .original_sources
+            .get(&site)
+            .ok_or(ResidentError::MissingOriginalSource {
+                site,
+                known_origins: 0,
+            })?
+            .require_unique(site)
     }
 
     /// Whether the session has no parked frames (ready and quiescent).
@@ -5690,14 +5817,7 @@ where
         self.state
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        self.mount_compiled_binding_prepared(
-            scope,
-            binder,
-            gen,
-            custody,
-            None,
-            settlement,
-        )
+        self.mount_compiled_binding_prepared(scope, binder, gen, custody, None, settlement)
     }
 
     /// Build and mount a compiler-typed JSON value without putting the
@@ -6267,15 +6387,7 @@ where
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
-        self.mount_host_value_with_interface_in(
-            scope,
-            binder,
-            gen,
-            code,
-            None,
-            build,
-            settlement,
-        )
+        self.mount_host_value_with_interface_in(scope, binder, gen, code, None, build, settlement)
     }
 
     fn mount_host_value_with_interface_in(
@@ -6307,9 +6419,8 @@ where
                 .state
                 .resolve_certification_in(scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let (target, demanded) = super::prepared::ScopedTargetImage::compile_scoped(
-                prepared, &resolved, &registry,
-            )?;
+            let (target, demanded) =
+                super::prepared::ScopedTargetImage::compile_scoped(prepared, &resolved, &registry)?;
             self.install_certified_turn_in(
                 scope,
                 &table,
@@ -6879,25 +6990,75 @@ where
             .get()
             .expect("plan was initialized")
             .instantiate(&self.display_owners);
+        // Pending origins live only in this local builder. Cached plans retain
+        // compiler facts alone; every site is finalized before provenance escapes.
+        let mut sources = BTreeMap::<u64, RuntimeSourceOrigin>::new();
+        let source = match code.certification().map(|proof| proof.purpose()) {
+            Some(TurnPurpose::Execution { prefix, .. }) => {
+                Some(prefix.admission().original_source_lease()?)
+            }
+            Some(TurnPurpose::Ordinary { original: Some(_) } | TurnPurpose::HostPrototype(_)) => {
+                self.state
+                    .source_transaction
+                    .as_ref()
+                    .map(|owner| owner.admitted_original_source())
+                    .transpose()
+                    .map_err(SessionError::from)?
+            }
+            _ => None,
+        };
+        if let Some(source) = source {
+            for site in code.prepared().sites() {
+                sources.insert(site.site, RuntimeSourceOrigin::Known(source.clone()));
+            }
+        }
+        let mut retained = Vec::new();
         if let Some(resolved) = &admission.resolved {
-            // Runtime binding lineage is projected from this admission's exact
-            // selected imports and never enters the immutable provenance plan.
             let imports = resolved.target_owners.iter().chain(
                 resolved
                     .groups
                     .iter()
                     .flat_map(|group| group.original().imports()),
             );
-            let retained = imports
+            let ids = imports
                 .filter_map(|owner| match owner {
                     ImportOwner::Retained { id, .. } => Some(id.raw()),
                     _ => None,
                 })
                 .collect::<std::collections::BTreeSet<_>>();
-            for id in retained {
+            for id in ids {
                 if let Some(original) = self.binding_provenance.get(&id) {
-                    Arc::make_mut(&mut provenance).merge(original)?;
+                    for (site, source) in &original.original_sources {
+                        sources
+                            .entry(*site)
+                            .and_modify(|held| held.merge(source))
+                            .or_insert_with(|| source.clone());
+                    }
+                    retained.push(original);
+                } else {
+                    // The retained value's site projection is unavailable. The
+                    // exact target-issued native closure bounds its possible
+                    // contribution; unrelated frame observations remain separate.
+                    for site in provenance.native_sites.ids() {
+                        sources
+                            .entry(site)
+                            .and_modify(|held| {
+                                held.merge(&RuntimeSourceOrigin::Unknown(Vec::new()));
+                            })
+                            .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+                    }
                 }
+            }
+        }
+        {
+            let provenance = Arc::make_mut(&mut provenance);
+            for (site, source) in &mut provenance.original_sources {
+                *source = sources
+                    .remove(site)
+                    .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+            }
+            for original in retained {
+                provenance.merge(original)?;
             }
         }
         Ok(provenance)
@@ -7297,9 +7458,7 @@ where
         let (program, source_keys) = if let Some(resolved) = resolved {
             let (target, demanded) = match images {
                 TurnImageAcquisition::Ready { bundle } => {
-                    super::prepared::ScopedTargetImage::lookup_scoped(
-                        prepared, &resolved, bundle,
-                    )?
+                    super::prepared::ScopedTargetImage::lookup_scoped(prepared, &resolved, bundle)?
                 }
                 TurnImageAcquisition::Compile => {
                     let registry = self.state.certified_image_registry();
@@ -9355,10 +9514,7 @@ mod authored_publication_tests {
         })
         .unwrap();
         let first = checked.checked_item(0).unwrap();
-        let prefix = state
-            .begin_cell_program(program)
-            .unwrap()
-            .unwrap();
+        let prefix = state.begin_cell_program(program).unwrap().unwrap();
         let mut resident = TestSession::from_persistent_for_test(frunk::HNil, EmptyOutput, state);
         resident
             .set_run_context(SessionRunContext {
@@ -9879,7 +10035,9 @@ mod authored_publication_tests {
                     "explicit A retirement is not evidence of B END"
                 );
                 assert!(matches!(
-                    target_weak.upgrade().map(|lease| target_fence.reopen(&lease)),
+                    target_weak
+                        .upgrade()
+                        .map(|lease| target_fence.reopen(&lease)),
                     Some(Err(super::super::SourceAdmissionError::Unconfirmed { .. }))
                 ));
                 recipient.state.retire_scope(target_scope);
@@ -11636,10 +11794,7 @@ mod authored_publication_tests {
         })
         .unwrap();
         let item = checked.checked_item(0).unwrap();
-        let prefix = session
-            .begin_cell_program(program)
-            .unwrap()
-            .unwrap();
+        let prefix = session.begin_cell_program(program).unwrap().unwrap();
         let item_admission = session.admit_checked_item(prefix.clone(), item).unwrap();
         let generation = item_admission.generation();
         let TurnResult::Bind {
