@@ -1918,6 +1918,50 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
 #[test]
 fn raw_graph_oracle_rejects_extra_bindings_edges_roots_and_demand() {
     let catalog = Catalog::new(&[0; MODULES], &[1; 2 * MODULES], 1);
+    // Choosing the diamond already supplies its dependency bytes; choosing
+    // only ordinal29 instead needs those bytes from peer custody. Both orders
+    // preserve exact issuers while the same raw oracle rejects extra bindings.
+    for (left, right) in [(0, 2), (2, 0)] {
+        let coverage = run_history(
+            &catalog,
+            &[
+                Op::Empty {
+                    inventory: 0,
+                    to: 0,
+                },
+                Op::Empty {
+                    inventory: 1,
+                    to: 1,
+                },
+                Op::Admit {
+                    parent: 0,
+                    root: left,
+                    future: false,
+                    reverse: false,
+                    to: 2,
+                },
+                Op::Admit {
+                    parent: 1,
+                    root: right,
+                    future: false,
+                    reverse: false,
+                    to: 3,
+                },
+                Op::RetainCustody {
+                    left: 2,
+                    right: 3,
+                    to: 4,
+                },
+                Op::Project {
+                    from: 4,
+                    nodes: vec![0],
+                    to: 5,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(coverage.projections, 1);
+    }
     let inventory = ArtifactInventory::default();
     let parent = View {
         inventory: 0,
