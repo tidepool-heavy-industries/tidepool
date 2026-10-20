@@ -1093,12 +1093,23 @@ checkingSourceRequestRoundTrip = do
       forM_ [[field,extra],[extra,field]] $ \mixed -> case workerRequestFromArgv (workerArgv mixed) of
         Left _ -> pure ()
         _ -> fail "mixed held cell request accepted"
+  let orderedVariants = [("decl","declaration"),("bind","binding"),("binddiscard","discard")
+        ,("expr","effectful-expression"),("expr","pure-expression")]
+      repeatedRecipe = cellRecipe {worldCellTurnTemplates=orderedVariants}
+      repeatedPlan = cellPlan {worldCellPlanRecipe=repeatedRecipe}
+      repeatedPrepare = cellPrepare {worldCellPrepareRecipe=repeatedRecipe}
+  forM_ [(WorldCellPlan repeatedPlan,WorldCellPlanOperation repeatedPlan)
+        ,(WorldCellPrepare repeatedPrepare,WorldCellPrepareOperation repeatedPrepare)] $ \(field,operation) ->
+    case workerRequestFromArgv (workerArgv [field]) of
+      Right (Just request) -> assertEqual "ordered expression variants survive held recipe admission"
+        (Right operation) (admitRequestOperation request)
+      other -> fail ("held cell rejected the ordinary ordered expression alternatives: " ++ show other)
   forM_ [cellPlan {worldCellPlanRecipe=cellRecipe {worldCellSource=replicate (1024*1024+1) 'λ'}}
-        ,cellPlan {worldCellPlanRecipe=cellRecipe {worldCellTurnTemplates=[("bind","one"),("bind","two")]}}
+        ,cellPlan {worldCellPlanRecipe=cellRecipe {worldCellTurnTemplates=[("","body")]}}
         ,cellPlan {worldCellPlanOutput=replicate 65537 'x'}] $ \invalid ->
     case workerRequestFromArgv (workerArgv [WorldCellPlan invalid]) of
       Left _ -> pure ()
-      _ -> fail "over-budget or duplicate held cell recipe accepted"
+      _ -> fail "over-budget or malformed held cell recipe accepted"
   forM_ [cellPrepare {worldCellPrepareSlots=[(0,PlannedBind 7),(0,PlannedExpression 8 "it")]}
         ,cellPrepare {worldCellPrepareSlots=reverse (worldCellPrepareSlots cellPrepare)}
         ,cellPrepare {worldCellPrepareAdmission=BS.replicate 31 98}] $ \invalid ->

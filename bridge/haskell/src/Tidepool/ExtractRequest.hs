@@ -109,7 +109,6 @@ validWorldCellRecipe recipe = all (utf8Within (2 * 1024 * 1024))
     (worldCellSource recipe : worldCellTemplate recipe : map snd templates)
   && length templates <= 256
   && all (\(kind,_) -> validReference kind && utf8Within 65536 kind) templates
-  && Set.size (Set.fromList (map fst templates)) == length templates
   where templates = worldCellTurnTemplates recipe
 
 validWorldCellPath :: FilePath -> Bool
