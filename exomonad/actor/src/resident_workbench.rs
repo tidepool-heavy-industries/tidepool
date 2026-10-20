@@ -1975,6 +1975,46 @@ pub(crate) struct ActorGenerationPublisher<H, O> {
     settlement_probe: Option<Arc<PublicationSettlementProbe>>,
 }
 
+/// Affine transfer payload for the linked publication worker. The concrete
+/// publisher supplies its consumer; callers cannot replace it with a closure
+/// that loses the reservation before recording whether publication started.
+#[must_use]
+pub(crate) struct ActorGenerationPublicationOperation {
+    reserved: ReservedActorGeneration,
+    publish: Box<
+        dyn FnOnce(
+                ReservedActorGeneration,
+            ) -> futures_util::future::BoxFuture<
+                'static,
+                Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+            > + Send,
+    >,
+}
+
+impl ActorGenerationPublicationOperation {
+    pub(crate) fn attempt_observer(&self) -> ActorPublicationAttemptObserver {
+        self.reserved.attempt_observer()
+    }
+
+    pub(crate) fn reserved_mut(&mut self) -> &mut ReservedActorGeneration {
+        &mut self.reserved
+    }
+
+    /// Possession of the unconsumed payload proves its publication body has not
+    /// run. A failed worker transfer must return this whole payload first.
+    pub(crate) fn into_reserved(self) -> ReservedActorGeneration {
+        self.reserved
+    }
+
+    pub(crate) async fn run(self) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        let Self { reserved, publish } = self;
+        publish(reserved).await
+    }
+}
+
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(ActorGenerationPublicationOperation: Clone, Copy);
+
 #[derive(Clone)]
 pub(crate) enum ActorPublicationOwner {
     Actor(crate::LifecycleHandle),
@@ -2570,6 +2610,19 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(crate) fn into_publication_operation(
+        self,
+        reserved: ReservedActorGeneration,
+        compiler: crate::capabilities::CompilerOwnerScope,
+    ) -> ActorGenerationPublicationOperation {
+        ActorGenerationPublicationOperation {
+            reserved,
+            publish: Box::new(move |reserved| {
+                Box::pin(async move { compiler.scope(self.publish_reserved(reserved)).await })
+            }),
+        }
+    }
+
     pub(crate) async fn publish(
         &self,
         prepared: PreparedActorGeneration,
