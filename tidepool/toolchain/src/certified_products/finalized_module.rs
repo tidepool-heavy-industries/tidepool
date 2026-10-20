@@ -69,6 +69,47 @@ impl CanonicalSourceImport {
     }
 }
 
+fn source_imports_from_evidence(
+    node: &crate::cache::ModuleEvidence,
+    evidence: &DependencyEvidence,
+    exact_imports: &[CanonicalSourceImport],
+) -> CertResult<Vec<CanonicalSourceImport>> {
+    let mut imports = BTreeMap::new();
+    for edge in &node.imports {
+        let home_unit = match &edge.selected {
+            None => None,
+            Some(path) => {
+                let mut owners = evidence.modules.iter().filter(|child| {
+                    child.module == edge.module && child.boot == edge.boot && &child.source == path
+                });
+                let child = owners.next().ok_or(CertificationError::Mismatch(
+                    "canonical original source import owner",
+                ))?;
+                if owners.next().is_some() {
+                    return Err(CertificationError::Mismatch(
+                        "canonical original source import owner",
+                    ));
+                }
+                Some(child.unit.clone())
+            }
+        };
+        let row = CanonicalSourceImport {
+            qualifier: edge.qualifier.clone(),
+            module: edge.module.clone(),
+            boot: edge.boot,
+            home_unit,
+        };
+        imports.insert(row.key(), row);
+    }
+    for row in exact_imports {
+        imports.insert(row.key(), row.clone());
+    }
+    if imports.len() > 4096 {
+        return Err(CertificationError::Receipt("canonical source import bound"));
+    }
+    Ok(imports.into_values().collect())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CanonicalOrigin {
     SourceOriginal {
@@ -616,6 +657,38 @@ impl CertifiedModuleInterface {
     pub(crate) fn source_sha256(&self) -> [u8; 32] {
         self.receipt.source_sha256
     }
+
+    /// Compare a new completed observation with this already issued source
+    /// original. This borrows its proof; native products still need their own
+    /// canonical and group certification.
+    pub(crate) fn validate_source_observation(
+        &self,
+        evidence: &DependencyEvidence,
+        module: &crate::cache::ModuleEvidence,
+        exact_imports: &[CanonicalSourceImport],
+    ) -> CertResult<()> {
+        let Some(imports) = self.source_imports() else {
+            return Err(CertificationError::Mismatch(
+                "same-program module is not a source original",
+            ));
+        };
+        let source_sha256 = hex(&self.source_sha256());
+        if module.boot
+            || !module.product.has_canonical_source_interface()
+            || module.unit != self.unit()
+            || module.module != self.module()
+            || !evidence
+                .sources
+                .iter()
+                .any(|source| source.path == module.source && source.sha256 == source_sha256)
+            || imports != source_imports_from_evidence(module, evidence, exact_imports)?
+        {
+            return Err(CertificationError::Mismatch(
+                "same-program source original changed",
+            ));
+        }
+        Ok(())
+    }
     pub(crate) fn producer_sha256(&self) -> [u8; 32] {
         self.producer_sha256
     }
@@ -1033,50 +1106,20 @@ pub(super) fn issue_interfaces(
                 }
             }
             _ => {
-                // This is ORIGINAL compiler evidence already admitted by the
-                // finalization owner, before any later source-selection receipt.
-                let mut imports = BTreeMap::new();
-                for edge in &node.imports {
-                    let home_unit = match &edge.selected {
-                        None => None,
-                        Some(path) => {
-                            let owners = evidence
-                                .modules
-                                .iter()
-                                .filter(|child| {
-                                    child.module == edge.module
-                                        && child.boot == edge.boot
-                                        && &child.source == path
-                                })
-                                .collect::<Vec<_>>();
-                            let [child] = owners.as_slice() else {
-                                return Err(CertificationError::Mismatch(
-                                    "canonical original source import owner",
-                                ));
-                            };
-                            Some(child.unit.clone())
-                        }
-                    };
-                    let row = CanonicalSourceImport {
-                        qualifier: edge.qualifier.clone(),
-                        module: edge.module.clone(),
-                        boot: edge.boot,
-                        home_unit,
-                    };
-                    imports.insert(row.key(), row);
-                }
                 let owner = crate::declaration_join::ExactModuleIdentity {
                     unit: module.unit.clone(),
                     module: module.module.clone(),
                 };
-                for row in exact_source_imports.get(&owner).into_iter().flatten() {
-                    imports.insert(row.key(), row.clone());
-                }
-                if imports.len() > 4096 {
-                    return Err(CertificationError::Receipt("canonical source import bound"));
-                }
                 let origin = CanonicalOrigin::SourceOriginal {
-                    imports: imports.into_values().collect::<Vec<_>>().into(),
+                    imports: source_imports_from_evidence(
+                        node,
+                        evidence,
+                        exact_source_imports
+                            .get(&owner)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]),
+                    )?
+                    .into(),
                 };
                 // Issuance enforces the same classification and uniqueness
                 // invariants as cold recovery, including exact parser rows.
