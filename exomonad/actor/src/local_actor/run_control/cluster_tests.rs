@@ -9,7 +9,8 @@ async fn native_cleanup_retains_owner_loss_after_actor_kill() {
     task.await.unwrap();
     assert!(matches!(
         retained.terminal.get(),
-        Some(RunControlNativeExit::OwnerLost { attempts }) if attempts.is_empty()
+        Some(RunControlNativeExit::OwnerLost { attempts, worker_transfers, resource_transfers })
+            if attempts.is_empty() && worker_transfers.is_empty() && resource_transfers.is_empty()
     ));
     assert!(matches!(
         control
@@ -20,7 +21,8 @@ async fn native_cleanup_retains_owner_loss_after_actor_kill() {
     drop(control);
     assert!(matches!(
         retained.terminal.get(),
-        Some(RunControlNativeExit::OwnerLost { attempts }) if attempts.is_empty()
+        Some(RunControlNativeExit::OwnerLost { attempts, worker_transfers, resource_transfers })
+            if attempts.is_empty() && worker_transfers.is_empty() && resource_transfers.is_empty()
     ));
 }
 
@@ -35,12 +37,14 @@ async fn native_cleanup_retains_owner_loss_after_handler_panic() {
     task.await.unwrap();
     assert!(matches!(
         retained.terminal.get(),
-        Some(RunControlNativeExit::OwnerLost { attempts }) if attempts.is_empty()
+        Some(RunControlNativeExit::OwnerLost { attempts, worker_transfers, resource_transfers })
+            if attempts.is_empty() && worker_transfers.is_empty() && resource_transfers.is_empty()
     ));
     assert!(control.finish_run().await.is_err());
     assert!(matches!(
         retained.terminal.get(),
-        Some(RunControlNativeExit::OwnerLost { attempts }) if attempts.is_empty()
+        Some(RunControlNativeExit::OwnerLost { attempts, worker_transfers, resource_transfers })
+            if attempts.is_empty() && worker_transfers.is_empty() && resource_transfers.is_empty()
     ));
 }
 

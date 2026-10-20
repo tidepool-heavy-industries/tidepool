@@ -69,7 +69,10 @@ struct GenerationRetirementCapture {
 }
 
 enum GenerationCapturePhysicalClosure {
-    UnknownPhysical,
+    Guarded {
+        actors: HashSet<ActorRef>,
+        cells: HashSet<ractor::ActorId>,
+    },
 }
 
 enum GenerationRetirementWork {
@@ -177,6 +180,29 @@ impl GenerationRetirementAttempt {
 }
 
 impl RunState {
+    fn retirement_blocks_link(
+        &self,
+        actors: &[ActorRef],
+        cells: &[ractor::ActorId],
+    ) -> Option<ActorRef> {
+        self.reservations.iter().find_map(|(actor, record)| {
+            let attempt = record.retirement.as_ref()?;
+            let GenerationRetirementPhase::Reserved {
+                cutoff: GenerationRetirementCutoffPhase::Captured { capture, .. },
+                ..
+            } = &attempt.phase
+            else {
+                return None;
+            };
+            let GenerationCapturePhysicalClosure::Guarded {
+                actors: protected_actors,
+                cells: protected_cells,
+            } = &capture.physical_closure;
+            (actors.iter().any(|actor| protected_actors.contains(actor))
+                || cells.iter().any(|cell| protected_cells.contains(cell)))
+            .then_some(*actor)
+        })
+    }
     pub(super) fn begin_generation_retirement(
         &mut self,
         myself: &RactorRef<RunControlMessage>,
@@ -319,7 +345,10 @@ impl RunState {
             return;
         }
         let pending_claims = match &attempt.phase {
-            GenerationRetirementPhase::Reserved { cutoff: GenerationRetirementCutoffPhase::AwaitCapture { fence, .. }, .. } => fence.pending_claims(),
+            GenerationRetirementPhase::Reserved {
+                cutoff: GenerationRetirementCutoffPhase::AwaitCapture { fence, .. },
+                ..
+            } => fence.pending_claims(),
             _ => return,
         };
         let population = self.generation_population(attempt.expected.dependency().clone());
@@ -367,6 +396,28 @@ impl RunState {
                 }
             }
         }
+        let mut protected_actors = HashSet::new();
+        let mut protected_cells = HashSet::new();
+        for resource in &population.resources {
+            match resource.identity {
+                GenerationResourceIdentity::Actor(actor) => {
+                    protected_actors.insert(actor);
+                    if let Some(entry) = self.entries.get(&actor) {
+                        protected_cells.insert(entry.actor.address().get_id());
+                    } else if let Some(executor) = self
+                        .reservations
+                        .get(&actor)
+                        .and_then(|record| record.executor.as_ref())
+                    {
+                        protected_cells.insert(executor.get_id());
+                    }
+                }
+                GenerationResourceIdentity::Native { id, .. } => {
+                    protected_cells.insert(id);
+                }
+                GenerationResourceIdentity::Preparation(_) => {}
+            }
+        }
         let capture = GenerationRetirementCapture {
             population,
             work,
@@ -375,7 +426,10 @@ impl RunState {
             reservations,
             preparations,
             pending_claims,
-            physical_closure: GenerationCapturePhysicalClosure::UnknownPhysical,
+            physical_closure: GenerationCapturePhysicalClosure::Guarded {
+                actors: protected_actors,
+                cells: protected_cells,
+            },
         };
         let Some(attempt) = self
             .reservations
@@ -399,7 +453,6 @@ impl RunState {
         // Physical closure revalidation and publication settlement are separate
         // owner transitions. Captured grants no authority to initiate a stop.
     }
-
     /// Both vectors remain empty while the owner is live. Each retained record
     /// has at most one outstanding attempt, including records without an entry.
     pub(super) fn reserve_retirement_loss_capacity(
@@ -426,10 +479,16 @@ impl RunState {
             }
         }
         let attempts = std::mem::take(&mut self.lost_retirements);
+        let worker_transfers = std::mem::take(&mut self.worker_transfers);
+        let resource_transfers = std::mem::take(&mut self.resource_transfers);
         let _ = self
             .native_cleanup
             .terminal
-            .set(RunControlNativeExit::OwnerLost { attempts });
+            .set(RunControlNativeExit::OwnerLost {
+                attempts,
+                worker_transfers,
+                resource_transfers,
+            });
         // Publisher closures can lead back to this client. Release them only
         // after the actual affine products are visible in the terminal owner.
         drop(std::mem::take(&mut self.retirement_discards));

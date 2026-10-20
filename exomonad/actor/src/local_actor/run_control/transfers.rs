@@ -6,8 +6,9 @@ pub(crate) struct WorkerTransferReservation {
     pub(super) owner: RactorRef<RunControlMessage>,
     pub(super) armed: bool,
     pub(super) parent_lease: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
+    pub(super) terminal: Arc<std::sync::OnceLock<Result<(), WorkerTransferError>>>,
 }
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub(crate) enum WorkerTransferError {
     #[error("worker transfer was not admitted")]
     NotAdmitted,
@@ -37,10 +38,15 @@ impl WorkerTransferReservation {
             })
             .map_err(|_| WorkerTransferError::NotAdmitted)?;
         self.armed = false;
+        let terminal = self.terminal.clone();
         Ok(Box::pin(async move {
-            receiver
-                .await
-                .map_err(|_| WorkerTransferError::SettlementUnconfirmed)?
+            match receiver.await {
+                Ok(result) => result,
+                Err(_) => terminal
+                    .get()
+                    .cloned()
+                    .unwrap_or(Err(WorkerTransferError::SettlementUnconfirmed)),
+            }
         }))
     }
 }
@@ -58,6 +64,7 @@ pub(crate) struct ResourceTransferReservation {
     pub(super) owner: RactorRef<RunControlMessage>,
     pub(super) armed: bool,
     pub(super) parent_lease: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
+    pub(super) terminal: Arc<std::sync::OnceLock<Result<(), DirectoryError>>>,
 }
 impl ResourceTransferReservation {
     pub(crate) fn try_commit(
@@ -66,13 +73,23 @@ impl ResourceTransferReservation {
     {
         let (reply, receiver) = oneshot::channel();
         self.owner
-            .send_message(RunControlMessage::CommitResourceTransfer { id: self.id, reply })
+            .send_message(RunControlMessage::CommitResourceTransfer {
+                id: self.id,
+                parent_lease: self.parent_lease.take(),
+                reply,
+            })
             .map_err(|_| DirectoryError::Unavailable)?;
         self.armed = false;
+        let terminal = self.terminal.clone();
+        let id = self.id;
         Ok(Box::pin(async move {
-            let result = receiver.await.map_err(|_| DirectoryError::Unavailable)?;
-            drop(self);
-            result
+            match receiver.await {
+                Ok(result) => result,
+                Err(_) => terminal
+                    .get()
+                    .cloned()
+                    .unwrap_or(Err(DirectoryError::LifetimeSettlementUnconfirmed { id })),
+            }
         }))
     }
     pub(crate) fn commit(
@@ -99,9 +116,20 @@ pub(super) struct WorkerTransfer {
     pub(super) child: ActorRef,
     pub(super) source: SpawnOwnership,
     pub(super) destination_run: bool,
+    pub(super) phase: TransferPhase,
+    pub(super) terminal: Arc<std::sync::OnceLock<Result<(), WorkerTransferError>>>,
 }
 pub(super) struct ResourceTransfer {
     pub(super) source: ResourceLifetime,
     pub(super) destination: ResourceLifetime,
     pub(super) resources: Vec<ractor::ActorId>,
+    pub(super) phase: TransferPhase,
+    pub(super) terminal: Arc<std::sync::OnceLock<Result<(), DirectoryError>>>,
+}
+
+pub(super) enum TransferPhase {
+    Armed,
+    Settling {
+        _parent_lease: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
+    },
 }
