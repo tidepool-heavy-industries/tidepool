@@ -18387,12 +18387,9 @@ pub(crate) mod tests {
             },
         );
         assert!(j_edges.contains(&j_to_r));
-        assert!(!finished
-            .roots()
-            .contains(&ArtifactBindingNode::Group(fresh_g)));
-        assert!(!finished
-            .roots()
-            .contains(&ArtifactBindingNode::Group(fresh_j)));
+        let physical_roots = finished.capture_graph_selection().roots;
+        assert!(!physical_roots.contains(&ArtifactBindingNode::Group(fresh_g)));
+        assert!(!physical_roots.contains(&ArtifactBindingNode::Group(fresh_j)));
         let owner = finished.inventory();
         let mut bound = owner.bind_segment(&finished, entries, &current).unwrap();
         let imports = [source(&g, 7), source(&j, 9)];
