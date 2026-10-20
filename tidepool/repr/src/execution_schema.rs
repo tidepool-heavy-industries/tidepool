@@ -1307,6 +1307,15 @@ impl PackageGroupCode {
     /// authentication and dependency selection belong to the package issuer.
     pub fn admit(owner: PackageCodeOwner, mut group: ProjectedGroup) -> Result<Self, ParseError> {
         group.validate_code_owner(&owner.unit, &owner.module)?;
+        if group
+            .globals()
+            .iter()
+            .any(|global| global.required_generation.is_some())
+        {
+            return Err(ParseError::InvalidReference(
+                "package group cannot capture machine-local import generations".into(),
+            ));
+        }
         // A package subset can renumber groups without changing their code.
         group.original_ordinal = 0;
         Ok(Self {
@@ -2093,6 +2102,30 @@ mod certified_exports_tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn package_code_refuses_machine_local_generation_contracts() {
+        let mut wire = testing::wire_program();
+        wire.globals.push(GlobalDecl {
+            identity: testing::identity("Dependency", "imported"),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let valid = PackageGroupCode::admit(
+            package_owner(),
+            testing::projected_group(wire.clone(), 0).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(valid.globals().len(), 1);
+        wire.globals[0].required_generation = Some(7);
+        let captured = testing::projected_group(wire, 0).unwrap();
+        assert!(matches!(
+            PackageGroupCode::admit(package_owner(), captured),
+            Err(ParseError::InvalidReference(_))
+        ));
     }
 
     #[test]

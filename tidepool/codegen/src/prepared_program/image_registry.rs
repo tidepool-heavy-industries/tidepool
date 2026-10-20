@@ -865,28 +865,28 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &prepare(&first_tokens)));
         assert!(!Arc::ptr_eq(&first, &prepare(&tokens(b"second"))));
         let before = registry.misses();
-        assert!(CompiledProgram::prepare_package_group_code(
-            &code,
-            &[],
-            &first_tokens,
-            &Default::default(),
-            &registry
-        )
-        .is_err());
+        assert!(matches!(
+            CompiledProgram::prepare_package_group_code(
+                &code,
+                &[],
+                &first_tokens,
+                &Default::default(),
+                &registry,
+            ),
+            Err(super::super::CompileError::LiteralImportCount {
+                globals: 1,
+                owners: 0
+            })
+        ));
         let wrong_owner = [Some(LiteralOwner::Package {
             unit: literal.unit.clone(),
             module: literal.module.clone(),
-            binder: literal,
+            binder: literal.clone(),
             interface_digest: [8; 32],
         })];
-        assert!(CompiledProgram::prepare_package_group_code(
-            &code,
-            &wrong_owner,
-            &first_tokens,
-            &Default::default(),
-            &registry
-        )
-        .is_err());
+        assert!(matches!(CompiledProgram::prepare_package_group_code(
+            &code, &wrong_owner, &first_tokens, &Default::default(), &registry,
+        ), Err(super::super::CompileError::PackageLiteralContract(binder)) if *binder == literal));
         assert_eq!(
             registry.misses(),
             before,
