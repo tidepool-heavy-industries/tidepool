@@ -4786,22 +4786,24 @@ fn resolve_receipt_owner(
     )
 }
 
-/// Symbol membership resolved by one actual request input owner. Later product
-/// certification consumes these issued coordinates instead of selecting again.
-pub(crate) struct ResolvedOriginalBindings {
+/// Authenticated immutable metadata membership retains its exact acquisition and
+/// pair/symbol requirements. It carries no executable permission or readiness.
+pub(crate) struct AuthenticatedOriginalBindings {
     basis: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     operation: Arc<InventoryOperation>,
     uses: BTreeMap<ReceiptImportOwner, (CachedHomeOwner, u32)>,
 }
 
-impl std::fmt::Debug for ResolvedOriginalBindings {
+impl std::fmt::Debug for AuthenticatedOriginalBindings {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("ResolvedOriginalBindings")
-            .field("uses", &self.uses).finish_non_exhaustive()
+        formatter
+            .debug_struct("AuthenticatedOriginalBindings")
+            .field("uses", &self.uses)
+            .finish_non_exhaustive()
     }
 }
 
-impl ResolvedOriginalBindings {
+impl AuthenticatedOriginalBindings {
     pub(crate) fn issue<'a>(
         basis: Arc<crate::artifact_inventory::CompilerSourceSupport>,
         operation: Arc<InventoryOperation>,
@@ -4823,7 +4825,7 @@ impl ResolvedOriginalBindings {
                 continue;
             }
             operation.reserve::<(ReceiptImportOwner, (CachedHomeOwner, u32))>(1)?;
-            let resolved = resolve_selected_original_binding(
+            let member = authenticate_original_binding_membership(
                 &basis,
                 &crate::declaration_join::ExactModuleIdentity {
                     unit: unit.clone(),
@@ -4834,7 +4836,7 @@ impl ResolvedOriginalBindings {
                 binder,
                 &operation,
             )?;
-            uses.insert(import.clone(), resolved);
+            uses.insert(import.clone(), member);
         }
         Ok(Arc::new(Self {
             basis,
@@ -4845,24 +4847,48 @@ impl ResolvedOriginalBindings {
 
     pub(crate) fn merge(&self, other: &Self) -> CertResult<Arc<Self>> {
         if !other.belongs_to(&self.basis, &self.operation) {
-            return Err(CertificationError::Mismatch("native demand batches have different input owners"));
+            return Err(CertificationError::Mismatch(
+                "Original metadata belongs to different input owners",
+            ));
         }
-        self.operation.reserve::<(ReceiptImportOwner, (CachedHomeOwner, u32))>(
-            self.uses.len().saturating_add(other.uses.len()),
-        )?;
+        self.operation
+            .reserve::<(ReceiptImportOwner, (CachedHomeOwner, u32))>(
+                self.uses.len().saturating_add(other.uses.len()),
+            )?;
         let mut uses = BTreeMap::new();
-        for (import, resolved) in self.uses.iter().chain(&other.uses) {
-            let ReceiptImportOwner::OriginalBinding { unit, module, binder, .. } = import else {
-                return Err(CertificationError::Mismatch("native demand contains a non-Original reference"));
+        for (import, member) in self.uses.iter().chain(&other.uses) {
+            let ReceiptImportOwner::OriginalBinding {
+                unit,
+                module,
+                binder,
+                ..
+            } = import
+            else {
+                return Err(CertificationError::Mismatch(
+                    "Original metadata contains another reference kind",
+                ));
             };
             charge_symbol(&self.operation, binder)?;
-            self.operation.charge(unit.len().saturating_add(module.len())
-                .saturating_add(resolved.0.unit.len()).saturating_add(resolved.0.module.len()))?;
-            if uses.insert(import.clone(), resolved.clone()).is_some_and(|prior| prior != *resolved) {
-                return Err(CertificationError::Mismatch("native demand changed a resolved Original reference"));
+            self.operation.charge(
+                unit.len()
+                    .saturating_add(module.len())
+                    .saturating_add(member.0.unit.len())
+                    .saturating_add(member.0.module.len()),
+            )?;
+            if uses
+                .insert(import.clone(), member.clone())
+                .is_some_and(|prior| prior != *member)
+            {
+                return Err(CertificationError::Mismatch(
+                    "Original metadata changed an authenticated member",
+                ));
             }
         }
-        Ok(Arc::new(Self { basis: Arc::clone(&self.basis), operation: Arc::clone(&self.operation), uses }))
+        Ok(Arc::new(Self {
+            basis: Arc::clone(&self.basis),
+            operation: Arc::clone(&self.operation),
+            uses,
+        }))
     }
 
     pub(crate) fn belongs_to(
@@ -4873,12 +4899,76 @@ impl ResolvedOriginalBindings {
         Arc::ptr_eq(&self.basis, source) && Arc::ptr_eq(&self.operation, operation)
     }
 
-    pub(crate) fn sources(&self) -> impl Iterator<Item = &(CachedHomeOwner, u32)> {
-        self.uses.values()
+    pub(crate) fn acquisition(&self) -> &Arc<crate::artifact_inventory::CompilerSourceSupport> {
+        &self.basis
+    }
+
+    pub(crate) fn references(&self) -> impl ExactSizeIterator<Item = &ReceiptImportOwner> {
+        self.uses.keys()
     }
 
     pub(crate) fn get(&self, import: &ReceiptImportOwner) -> Option<&(CachedHomeOwner, u32)> {
         self.uses.get(import)
+    }
+}
+
+/// Executable uses wrap the same authenticated pair/symbol requirements only
+/// after the input owner has permitted every referenced group.
+pub(crate) struct ResolvedOriginalBindings {
+    authenticated: Arc<AuthenticatedOriginalBindings>,
+}
+
+impl std::fmt::Debug for ResolvedOriginalBindings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedOriginalBindings")
+            .field("authenticated", &self.authenticated)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ResolvedOriginalBindings {
+    pub(crate) fn issue<'a>(
+        basis: Arc<crate::artifact_inventory::CompilerSourceSupport>,
+        operation: Arc<InventoryOperation>,
+        imports: impl IntoIterator<Item = &'a ReceiptImportOwner>,
+    ) -> CertResult<Arc<Self>> {
+        let authenticated = AuthenticatedOriginalBindings::issue(basis, operation, imports)?;
+        for (reference, (owner, ordinal)) in &authenticated.uses {
+            let ReceiptImportOwner::OriginalBinding { original, .. } = reference else {
+                return Err(CertificationError::Mismatch(
+                    "Original use lacks its exact binding pair",
+                ));
+            };
+            require_original_permission(&authenticated.basis, *original, owner, *ordinal)?;
+        }
+        Ok(Arc::new(Self { authenticated }))
+    }
+
+    pub(crate) fn merge(&self, other: &Self) -> CertResult<Arc<Self>> {
+        Ok(Arc::new(Self {
+            authenticated: self.authenticated.merge(&other.authenticated)?,
+        }))
+    }
+
+    pub(crate) fn belongs_to(
+        &self,
+        source: &Arc<crate::artifact_inventory::CompilerSourceSupport>,
+        operation: &Arc<InventoryOperation>,
+    ) -> bool {
+        self.authenticated.belongs_to(source, operation)
+    }
+
+    pub(crate) fn authenticated(&self) -> &Arc<AuthenticatedOriginalBindings> {
+        &self.authenticated
+    }
+
+    pub(crate) fn sources(&self) -> impl Iterator<Item = &(CachedHomeOwner, u32)> {
+        self.authenticated.uses.values()
+    }
+
+    pub(crate) fn get(&self, import: &ReceiptImportOwner) -> Option<&(CachedHomeOwner, u32)> {
+        self.authenticated.get(import)
     }
 }
 
@@ -4896,10 +4986,20 @@ pub(crate) fn resolve_selected_original_binding(
     let (native, ordinal) = authenticate_original_binding_membership(
         source, owner, interface, original, binder, operation,
     )?;
+    require_original_permission(source, original, &native, ordinal)?;
+    Ok((native, ordinal))
+}
+
+fn require_original_permission(
+    source: &crate::artifact_inventory::CompilerSourceSupport,
+    original: crate::artifact_inventory::ArtifactBinding,
+    native: &CachedHomeOwner,
+    ordinal: u32,
+) -> CertResult<()> {
     let permitted = source
         .native_availability()
         .issued_row(original.artifact)
-        .is_some_and(|row| row.original_owner() == &native && row.permits(ordinal));
+        .is_some_and(|row| row.original_owner() == native && row.permits(ordinal));
     if !permitted {
         return Err(CertificationError::OriginalAvailability(Box::new(
             OriginalAvailabilityRefusal {
@@ -4908,8 +5008,9 @@ pub(crate) fn resolve_selected_original_binding(
             },
         )));
     }
-    Ok((native, ordinal))
+    Ok(())
 }
+
 // Metadata authentication proves code membership only. It cannot issue an
 // executable choice, retained-value custody, or completed package readiness.
 fn authenticate_original_binding_membership(
@@ -13585,7 +13686,9 @@ pub(crate) mod tests {
             producer,
         );
         let other_entry = Arc::new(ArtifactEntry::original(producer, other_product).unwrap());
-        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone(), other_entry.clone()]).unwrap();
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[entry.clone(), other_entry.clone()])
+                .unwrap();
         let inventory = ArtifactInventory::default();
         let physical = inventory
             .admit_shared(
@@ -13667,13 +13770,25 @@ pub(crate) mod tests {
                 ..
             })
         ));
-        assert!(matches!(resolve_selected_original_binding(&completed, &other_entry.descriptor.owner, interface, original,
-            &binder, &operation), Err(CertificationError::InputDecision { reason: InputDecisionRefusal::ArtifactIdentityMismatch, .. })));
+        assert!(matches!(
+            resolve_selected_original_binding(
+                &completed,
+                &other_entry.descriptor.owner,
+                interface,
+                original,
+                &binder,
+                &operation
+            ),
+            Err(CertificationError::InputDecision {
+                reason: InputDecisionRefusal::ArtifactIdentityMismatch,
+                ..
+            })
+        ));
         let missing = testing::identity("BoundOriginal", "absent");
         assert!(
             matches!(resolve_selected_original_binding(&completed, &owner, interface, original,
-            &missing, &operation), Err(CertificationError::OriginalMembership(reason))
-                if *reason == OriginalMembershipFailure::MissingSymbol { owner: product.owner().clone(), symbol: missing })
+                &missing, &operation), Err(CertificationError::OriginalMembership(reason))
+                    if *reason == OriginalMembershipFailure::MissingSymbol { owner: product.owner().clone(), symbol: missing })
         );
         let custody = completed.for_source_owners(&BTreeSet::new()).unwrap();
         assert!(custody
@@ -13723,8 +13838,7 @@ pub(crate) mod tests {
         let primary = source.compiler_primary_input(&owner).unwrap().unwrap();
         let interface = primary.interface();
         let original = primary.original().unwrap();
-        let crate::artifact_inventory::ArtifactPayload::Original(product) =
-            &primary.entry().payload
+        let crate::artifact_inventory::ArtifactPayload::Original(product) = &primary.entry().payload
         else {
             unreachable!()
         };
@@ -13749,22 +13863,55 @@ pub(crate) mod tests {
             assert_eq!(
                 authenticate_original_binding_membership(
                     source, &owner, interface, original, &binder, &operation,
-                ).unwrap(),
+                )
+                .unwrap(),
                 (product.owner().clone(), ordinal),
             );
+            let acquisition = request.compiler_inputs().shared_compiler_source_support();
+            let authenticated = AuthenticatedOriginalBindings::issue(
+                Arc::clone(&acquisition),
+                Arc::clone(&operation),
+                [&receipt],
+            )
+            .unwrap();
+            assert!(Arc::ptr_eq(authenticated.acquisition(), &acquisition));
+            assert_eq!(
+                authenticated.references().collect::<Vec<_>>(),
+                vec![&receipt]
+            );
+            assert_eq!(
+                authenticated.get(&receipt),
+                Some(&(product.owner().clone(), ordinal))
+            );
+            let another_operation = Arc::new(InventoryOperation::new(Default::default()));
+            let foreign_metadata = AuthenticatedOriginalBindings::issue(
+                Arc::clone(&acquisition),
+                another_operation,
+                [&receipt],
+            )
+            .unwrap();
+            assert!(authenticated.merge(&foreign_metadata).is_err());
             let resolved = ResolvedOriginalBindings::issue(
-                request.compiler_inputs().shared_compiler_source_support(),
+                Arc::clone(&acquisition),
                 Arc::clone(&operation),
                 [&receipt],
             );
             if !permitted {
                 assert!(
                     matches!(resolved, Err(CertificationError::OriginalAvailability(reason))
-                    if reason.owner == *product.owner() && reason.original_ordinal == ordinal)
+                        if reason.owner == *product.owner() && reason.original_ordinal == ordinal)
                 );
                 continue;
             }
             let resolved = resolved.unwrap();
+            assert_eq!(
+                resolved.authenticated().references().collect::<Vec<_>>(),
+                vec![&receipt]
+            );
+            assert!(Arc::ptr_eq(
+                resolved.authenticated().acquisition(),
+                &acquisition
+            ));
             assert!(resolved.belongs_to(
                 &request.compiler_inputs().shared_compiler_source_support(),
                 &operation
@@ -13794,7 +13941,7 @@ pub(crate) mod tests {
             } else {
                 assert!(
                     matches!(result, Err(CertificationError::OriginalAvailability(reason))
-                    if reason.owner == *product.owner() && reason.original_ordinal == ordinal)
+                        if reason.owner == *product.owner() && reason.original_ordinal == ordinal)
                 );
             }
         }
