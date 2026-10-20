@@ -41,10 +41,15 @@ a reason to preserve the finite engine while building another abstraction layer.
   Native World outputs can be sealed through the existing issuing owners. The
   actual actor history still fails during compiler preparation; component
   assembly and consumer compilation do not establish a working hosted notebook.
-  This area candidate is being reviewed before root integration.
-- World preparation currently excludes declarations/multiple inference segments,
-  source-dependent retained value types and ordinary expression reservations.
-  These are required completion work, not unsupported Persona profiles to retain.
+  The compiled area checkpoint `5d5c15b737` is now consolidated on the root
+  integration branch. This is an intermediate source checkpoint, not acceptance
+  of its known lifetime and authored-cell failures.
+- World preparation still excludes declarations and multiple inference segments.
+  The real actor history does not yet execute its first authored cell. Actual
+  source-defined TYPE input, lexical exports and predecessor-free cold
+  restoration have separate passing producer controls. Full-language completion
+  reuses the existing admission and ordered stage fold; paired Haskell/Rust item
+  variants must distinguish executable, declaration and prologue outputs.
 - The 32-case sweep has a first-failure triage, not completed dispositions.
   The repaired residency fixture enters real source admission. Native completion
   previously stopped it before measurements; the owner-derived current-product
@@ -58,11 +63,17 @@ a reason to preserve the finite engine while building another abstraction layer.
   genuine ambiguity refusals. The test-only alternative historical issuer is
   deleted. The genuine hosted A1c target now declares the compiler-service
   deployment; its execution awaits the joined engine/Haskell producer.
-- The settled-cell review found that separately public admission and raw program
-  values allowed execution to bypass matched END. The engine area's opaque
-  `SettledCellProgram` repair closes that construction route. Remaining
-  declaration/host mutation checkpoints and same-bundle refusal controls must
-  pass review before accepting the joined repair.
+- The opaque `SettledCellProgram`, declaration/host cancellation checkpoints and
+  same-bundle refusal controls are integrated. A paired positive/negative
+  compilation contract rejects constructing an executable bundle outside its
+  settlement owner. This does not establish the whole hosted notebook history.
+- Installed World associations still strongly retain the runtime leases they
+  describe. A successful private birth whose receiver disappears, and an
+  unpublished ephemeral reload candidate, can therefore retain themselves.
+  The runtime owner is replacing both original-source and target association
+  references with exact weak observations. Actual admitted/completed operations,
+  generations and executions retain strong custody. Abandonment and held-output
+  controls must pass through the real producer before accepting this repair.
 - Query pins now share one observed compiler snapshot across verbs. Full
   lexical queries still need the active effect row and exact input/request type
   witnesses carried from their existing issuers; names or displayed types are
@@ -72,11 +83,19 @@ a reason to preserve the finite engine while building another abstraction layer.
   Reservation-owned A fencing and B-before-A refusal settlement have focused
   execution evidence. Linked publication, actual endpoint cutover, frozen B's
   World and durable force/recovery remain lifecycle work.
-- Successor transport retention has a discriminating execution control: shadowed
-  rows and predecessor transport handles are released by the engine repair.
-  Required cold restoration still returns `Unsupported`; it remains a failed
-  gate. The Haskell reader must reconstruct the exact next product from owned
-  immutable facts without restoring the old whole-inventory path.
+- Successor transport retention and cold restoration now have a discriminating
+  production-reader control at `29ce1590e9`: both two- and eight-successor
+  histories release predecessor transport and restore the same current product.
+  This result does not qualify subsequent combined changes. Durable process
+  recovery of a prospective reload World is separate work: live Arcs, FDs and
+  temporary directories are not a durable candidate.
+- A newer TYPE-only projection exposed an actual regression: applying it to
+  general `support_for_owners` discarded passive historical native custody.
+  Its correction preserves that existing contract and narrows only the already
+  authenticated type-interface consumer. The separate generated-history failure
+  `NativeGroupUnavailable(1374)` also occurs at the pre-change source; its cause
+  remains under investigation. Neither failure may be erased by weakening the
+  property oracle.
 
 The initial review ran no new builds or tests. The incoming handoff reports
 runtime/toolchain compilation, Q9 1/1, Q10 4/4 and residency 0/1 at `de12466597`;
@@ -88,13 +107,35 @@ evidence is in `root-native-scaffold/`, `verification-scaffold/`, `haskell-h/`,
 and the area owners' handoffs. Component passes are not joined World execution
 or release qualification.
 
-Root checkpoint `a94a140dc2` compiled `tidepool-extract-cmd`,
+Root checkpoint `65bd467d9d` compiled `tidepool-extract-cmd`,
 `tidepool-toolchain`, `tidepool-runtime`, `exomonad-actor` and `exomonad-host`
-successfully (build `abd924b6-5152-42d3-9bf7-b4b25cb76846`, launcher exit 0).
-The subsequent native custody, lifecycle cutoff and hosted-test registration
-folds require their own joined checks. Retain exact execution evidence per
-checkpoint; neither this compile nor an area's passing controls qualify the
-combined bundle.
+(build `cfa42aa5-e949-4d21-a2dd-c23030d4e752`, launcher exit 0). The exact
+World wire case and native-refusal preservation case each executed and passed
+1/1; logs are in `root-native-scaffold/joined-65bd467d9d-*`.
+
+Consolidated checkpoint `5d5c15b737` compiled all four affected extract-cmd,
+toolchain, runtime and actor production/test consumers (build
+`d638dba3-27d4-401e-97b8-2f7726513d99`, launcher exit 0;
+`completion/engine/paired-observation-joined-check.log`). Its subsequent real
+actor run with the target-HPT repair executed two cases: the source-domain case
+passed; the authored-cell case reached a `WorldCodeGeneration` refusal on a
+dependency. Haskell owns the phase/policy repair. No successful authored actor
+cell, early Persona acceptance or whole-bundle performance result is claimed.
+
+### Current receiving frontier
+
+| Owner | Next concrete result | Acceptance boundary |
+| --- | --- | --- |
+| Haskell + engine | Resolve target demand with its actual dependency HPT; distinguish compiler-induced code generation from authored options | Actual first and second actor cells, unchanged dangerous-option refusals |
+| Runtime + lifecycle | Weak installed associations and strong admitted/completed custody; original A/target B consumers | Lost successful birth delivery, abandoned B, held output, publication and transitive prerequisite retirement |
+| Haskell request + paired Rust receiver | Ordered full-language stages and genuine non-executable item proofs | Shipped mixed-cell template, precise prefixes, later error before any effect |
+| Native owners | Correct TYPE-only projection and carry actual source provenance through native installation | Historical custody property, actual World seal, source-dependent and package-alias provenance |
+| Queries | One typed actor/effect/request observation pin across all five verbs | Semantic query assertions and actual context mismatch refusals |
+| Lifecycle recovery | Native owner-loss retention, exact force attempt and durable B reference | Actual retained attempt after kill/panic; durable import and no replay after process loss |
+
+Receiver-only or source-only progress must remain labelled that way. Resume a
+completed worker explicitly when assigning its next wave; a message to an idle
+completed worker alone is not an implementation dispatch.
 
 ## Delivery tree and ownership
 

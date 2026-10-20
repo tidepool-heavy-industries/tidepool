@@ -55,6 +55,39 @@ the same public acquisition sequence to establish its initial World, but must
 not claim that this proves the actor's cold first-cell behavior. Do not expose
 private constructors to manufacture the association.
 
+### Association observations and operation custody
+
+An installed association is a cache of compiler facts about runtime owners. It
+must not strongly retain either its own target lease or the original-source
+lease. Otherwise the cache can keep an abandoned private scope or unpublished
+reload candidate alive after its actual owner disappears.
+
+Keep exact weak observations of both leases beside the existing immutable
+base/key/epoch facts. A new admission upgrades those observations through the
+canonical owner and checks the required gates. Pointer equality can compare two
+observations of the same owner; it cannot manufacture missing ownership or
+replace semantic compiler identity.
+
+The admitted preparation then owns the actual strong pair, transferring it
+through compiler completion, END and installation. Existing generation,
+candidate and execution owners retain their actual leases independently.
+Do not weaken the runtime lease's transitive prerequisite DAG or reconstruct a
+source from an ambient scope map. A completed output waiting for installation
+must remain usable even though installed associations themselves hold no lease.
+
+Fencing prevents new admission. It does not erase an already earned claim:
+accepted work may settle while its external prerequisite is fenced, provided
+that prerequisite is still the same live owner. Target publication remains tied
+to its exact attempt and gate. Retired, replaced or uncertain owners are distinct
+refusals. Retirement captures and waits for pre-fence accepted publications,
+including dependencies they establish before final stop selection.
+
+Acceptance must drop an actual successfully produced private birth before
+delivery, abandon a real unpublished B, and hold a real completed operation
+through the END/install gap. Observe subsequent scope/root retirement and
+independent generation usability; reference counts alone do not establish these
+contracts.
+
 ## 2. Source A, receiving target B and descriptive wire facts
 
 Original A comes from the live issuing source transaction and remains retained
@@ -105,6 +138,39 @@ and remain tied to that plan. Do not enumerate all historical names in Rust.
 Declarations, imports, expressions, mixed cells and retained source-defined
 types are required; blanket refusals are temporary WIP, not the language contract.
 Host-carrier shape restrictions apply only to their actual purpose.
+
+### Ordered full-language stages
+
+The existing `HeldWorldCellAdmission` owns the operation phase, executor and
+ordered stage cursor. Extend that owner with private immutable prefix facts
+and closed stage kinds. Do not introduce separate public start/advance
+capabilities, arbitrary compiler-environment callbacks or a second prefix
+registry.
+
+`CompilerRequest` folds the parser's actual inference segments in source order.
+Each completion is paired with its exact stage and global reserved ordinals.
+Only actual prior stage products can extend the next prefix; a final environment
+cannot stand in for every earlier prefix. Generated-instance retries reuse the
+same pre-stage facts and existing retry owner.
+
+The source owner captures and parses the module once, retaining byte identity,
+effective flags and quote-free evidence. A typed executable wrapper additionally
+proves its actual unique root. Declaration/prologue stages use their genuine
+planned-original proof; they do not fabricate a typed executable plan.
+
+The paired wire/receiver contract has closed executable, declaration and
+prologue variants. Shared reservation and captured-file facts remain shared;
+typed segment entry, native ordinal and executable program fields belong only
+to their actual executable variant. A source receipt identifies its exact stage
+and that stage's named dependency/package outputs, rather than assuming one
+global file pair or a typed digest for every kind.
+
+Reuse existing checked-item, original/native certificate and declaration
+adoption owners. The whole cell finishes compilation and certification before
+any authored effect executes. A later stage error discards the private prepared
+prefix; it cannot expose a partially admitted program. Tests must exercise the
+shipped template, genuine declarations/imports, later-stage failure and exact
+earlier-prefix isolation.
 
 ## 4. Same physical output through the existing executable issuer
 
