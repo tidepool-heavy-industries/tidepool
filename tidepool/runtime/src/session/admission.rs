@@ -4604,12 +4604,12 @@ mod tests {
 
     fn native_source_action<T>(
         session: &mut PersistentSession,
+        source: &Arc<RuntimeLexicalScopeLease>,
         action: impl FnOnce(&mut PersistentSession) -> T,
     ) -> T {
-        let source = session.mint_notebook_scope_with_lease(None).unwrap();
         let settled = session
             .with_source_compiler_transaction(
-                source,
+                source.clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -4832,8 +4832,9 @@ mod tests {
         let lib =
             SessionLib::open(SessionId(990), root.path(), ModuleEnv::standalone_default()).unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let source = session.mint_notebook_scope_with_lease(None).unwrap();
         let (public, retained, ledger, original_id, _sibling_source) =
-            native_source_action(&mut session, |session| {
+            native_source_action(&mut session, &source, |session| {
                 let public = session.mint_scope(ScopeId::ROOT).unwrap();
                 let _public_source = session.adopt_initial_notebook_scope(public).unwrap();
                 let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
@@ -5137,7 +5138,8 @@ mod tests {
     #[test]
     fn selected_native_imports_keep_exact_scoped_roots_and_refuse_sibling_only_values() {
         let mut session = PersistentSession::new(None, 1024 * 1024);
-        native_source_action(&mut session, |session| {
+        let source = session.mint_notebook_scope_with_lease(None).unwrap();
+        native_source_action(&mut session, &source, |session| {
             let public = session.mint_isolated_scope();
             let _public_source = session.adopt_initial_notebook_scope(public).unwrap();
             let first =
@@ -5182,7 +5184,8 @@ mod tests {
     fn settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots() {
         use tidepool_repr::execution_schema::{testing, Group};
         let mut session = PersistentSession::new(None, 1024 * 1024);
-        native_source_action(&mut session, |session| {
+        let source = session.mint_notebook_scope_with_lease(None).unwrap();
+        native_source_action(&mut session, &source, |session| {
             let baseline = Arc::new(
                 session
                     .capture_admitted_native_imports(ScopeId::ROOT)
@@ -5443,7 +5446,8 @@ mod tests {
         let lib =
             SessionLib::open(SessionId(991), root.path(), ModuleEnv::standalone_default()).unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        native_source_action(&mut session, |session| {
+        let source = session.mint_notebook_scope_with_lease(None).unwrap();
+        native_source_action(&mut session, &source, |session| {
             let unbound = crate::session::prepared::tests::rooted_publication_fixture(
                 session,
                 "nativeExport",
