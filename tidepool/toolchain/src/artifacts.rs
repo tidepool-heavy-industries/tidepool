@@ -3542,6 +3542,15 @@ impl<'a> ResolvedNativeSourceProduct<'a> {
 }
 
 impl<'a> ResolvedNativeSourceProducts<'a> {
+    /// Ordered links selected by this target issuer. Package entries remain
+    /// obligations until an executable completion supplies actual code bindings.
+    /// Closed preparation cannot substitute a live retained binding.
+    pub fn target_link_requirements(
+        &self,
+    ) -> Result<&'a [certified_products::SelectedNativeImport], CompileError> {
+        self._resolved.target_link_requirements()
+    }
+
     pub fn target(&self) -> PhysicalCurrentNativeTarget<'a> {
         PhysicalCurrentNativeTarget {
             prepared: self.prepared,

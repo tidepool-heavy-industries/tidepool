@@ -19722,7 +19722,7 @@ pub(crate) mod tests {
             .bind_segment(finished_artifacts, entries, &current)
             .unwrap();
         let imports = [source(&g, 7), source(&j, 9)];
-        let target = owner
+        let admitted_target = owner
             .admit_bound_target(
                 &mut bound,
                 &owner.empty_view(),
@@ -19730,9 +19730,8 @@ pub(crate) mod tests {
                 vec![],
                 &current,
             )
-            .unwrap()
-            .artifacts()
-            .clone();
+            .unwrap();
+        let target = admitted_target.artifacts().clone();
         assert_eq!(
             target
                 .capture_graph_selection()
@@ -19758,6 +19757,19 @@ pub(crate) mod tests {
         assert!(g_edges.iter().all(|edge| edges.contains(edge)));
         assert!(target.artifact_ids().contains(&old_value.artifact));
         assert!(target.artifact_ids().contains(&fresh_value.artifact));
+
+        let issued_groups = crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
+            &target, None, &mut validation,
+        ).unwrap();
+        let certified_target = admitted_target.bind_target(None, imports.to_vec())
+            .with_certified_groups(Arc::new(issued_groups)).unwrap();
+        let linked_target = certified_target.resolve_sources().unwrap();
+        assert!(matches!(linked_target.target_link_requirements().unwrap(), [
+            SelectedNativeImport::Source { binding: first, .. },
+            SelectedNativeImport::Source { binding: second, .. },
+        ] if *first == fresh_g && *second == fresh_j));
+        assert!(matches!(linked_target.group_imports(fresh_j).unwrap(),
+            [SelectedNativeImport::Source { binding, .. }] if *binding == old_r));
 
         // The World demand owner must retain both exact G occurrences too;
         // their equal logical key cannot erase either dependency history.
