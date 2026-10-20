@@ -571,7 +571,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) struct DirectoryFixture {
-        directory: crate::LocalActorDirectory,
+        pub(crate) directory: crate::LocalActorDirectory,
         task: ractor::concurrency::JoinHandle<()>,
     }
     impl DirectoryFixture {

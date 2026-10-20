@@ -151,6 +151,14 @@ impl CapturedSourceRegistration {
         resume_slot(&self.slot);
         self.observation()
     }
+    #[cfg(test)]
+    pub(super) fn resume_deferred_after_source_observation(
+        &self,
+        observe: impl FnOnce(),
+    ) -> SourceRegistrationObservation {
+        resume_slot_observed(&self.slot, observe);
+        self.observation()
+    }
 
     /// Drop only this registration and settle each retained logical input once.
     pub(crate) fn close(&self) -> SourceRegistrationObservation {
@@ -577,6 +585,10 @@ impl SourceSlots {
         drop(state);
         drop(old);
         drop(discarded);
+        let slots = self.0.lock().slots.clone();
+        for slot in slots {
+            resume_slot(&slot);
+        }
         Ok(())
     }
     pub(super) fn close_connections(&self) {
@@ -630,28 +642,39 @@ fn close_slot(slot: &Arc<SourceSlot>, expected: Option<&SourceDependency>) {
 }
 
 fn resume_slot(slot: &Arc<SourceSlot>) {
-    let execution = match &*slot.state.lock() {
+    resume_slot_observed(slot, || ());
+}
+
+fn resume_slot_observed(slot: &Arc<SourceSlot>, observe: impl FnOnce()) {
+    let binding = match &*slot.state.lock() {
         SourceSlotState::Open(open)
             if !open.deferred.is_empty()
                 && open.redispatched.is_none()
                 && !matches!(&open.resume_failure, Some(SourceRegistrationFailure::Admission(error)) if !temporarily_fenced(error)) =>
         {
-            Some(open.binding.execution.clone())
+            Some(open.binding.clone())
         }
         _ => None,
     };
-    let Some(execution) = execution else { return };
-    if let Err(error) = execution.admit_activation() {
-        if let SourceSlotState::Open(open) = &mut *slot.state.lock() {
-            open.resume_failure = Some(SourceRegistrationFailure::Admission(error));
-        }
-        return;
-    }
+    let Some(binding) = binding else { return };
+    let admission = binding.execution.admit_activation();
+    observe();
     let mut state = slot.state.lock();
     let SourceSlotState::Open(open) = &mut *state else {
         return;
     };
-    if open.redispatched.is_some() {
+    if !Arc::ptr_eq(&open.binding.entry, &binding.entry)
+        || open.binding.execution.source_dependency() != binding.execution.source_dependency()
+    {
+        return;
+    }
+    if open.redispatched.is_some()
+        || matches!(&open.resume_failure, Some(SourceRegistrationFailure::Admission(error)) if !temporarily_fenced(error))
+    {
+        return;
+    }
+    if let Err(error) = admission {
+        open.resume_failure = Some(SourceRegistrationFailure::Admission(error));
         return;
     }
     let Some((marker, delivery)) = open.deferred.front() else {

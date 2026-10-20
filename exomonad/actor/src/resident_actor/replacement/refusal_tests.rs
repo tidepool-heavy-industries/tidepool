@@ -1256,6 +1256,116 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
         dropped_capture[0].observation().state,
         SourceRegistrationState::Closed { rejected: 0 }
     ));
+    // A driver observation may straddle an already-admitted native replacement.
+    // It must not publish B's old fenced result into the independent A binding.
+    let (race_send, mut race_events) = tokio::sync::mpsc::unbounded_channel();
+    let (race_old, race_old_address, race_old_task) =
+        recipient_fixture.spawn(race_send, None).await;
+    let (race_new_send, mut race_new_events) = tokio::sync::mpsc::unbounded_channel();
+    let (race_new, race_new_address, race_new_task) = recipient_fixture
+        .spawn(race_new_send, Some(race_old.identity()))
+        .await;
+    let race_slots = SourceSlots::default();
+    race_slots.bind_owner(race_old.identity());
+    race_slots.install_connections(
+        behavior
+            .environment
+            .requests
+            .attach_sources(race_old.identity(), race_old.clone(), &[])
+            .unwrap(),
+    );
+    let attach_claim = context_b.source_dependency().claim().unwrap();
+    race_slots
+        .attach(slots.binding(1).unwrap(), |connections, slot| {
+            connections.attach_lifecycle(slot, &recipient);
+            Ok(())
+        })
+        .unwrap();
+    drop(attach_claim);
+    let race_initial = receive(&mut race_events).await;
+    let race_capture = race_slots.capture_source(source_b.source_admission());
+    let transfer_claims = race_slots.claim_sources().unwrap();
+    let new_claim = context_a.source_dependency().claim().unwrap();
+    let mut replacement_binding = slots.binding(0).unwrap();
+    let mut replacement_context = context_a.clone();
+    replacement_context.actor = race_new.identity();
+    replacement_binding.execution = replacement_binding
+        .execution
+        .transferred(replacement_context)
+        .unwrap();
+    let grant = recipient_fixture
+        .directory
+        .replacement_ingress_grant(race_old.identity(), race_new.identity())
+        .await
+        .unwrap();
+    race_old
+        .lifecycle()
+        .begin_replacement(grant.clone())
+        .await
+        .unwrap();
+    race_slots.handoff(grant).await.unwrap();
+    let replacement_slots = SourceSlots::default();
+    replacement_slots.bind_owner(race_new.identity());
+    let race_fence = source_b.source_admission().fence().unwrap();
+    assert!(matches!(
+        race_slots.admit_delivery(race_initial),
+        SourceDeliveryAdmission::Deferred(_)
+    ));
+    let observation = race_capture[0].resume_deferred_after_source_observation(|| {
+        replacement_slots
+            .adopt_replacement(&race_slots, vec![Some(replacement_binding)])
+            .unwrap();
+    });
+    assert_eq!(
+        observation.dependency,
+        crate::resident_actor::source_slots::SourceRegistrationDependency::Independent
+    );
+    assert!(
+        matches!(
+            observation.state,
+            SourceRegistrationState::Open {
+                deferred: 1,
+                resume_failure: None
+            }
+        ),
+        "old fenced admission cannot overwrite the new binding's successful dispatch"
+    );
+    assert!(
+        matches!(
+            race_capture[0].close().state,
+            SourceRegistrationState::Open { .. }
+        ),
+        "the old B capture cannot close independent replacement A"
+    );
+    let raced = receive(&mut race_new_events).await;
+    let admitted = match replacement_slots.admit_delivery(raced) {
+        SourceDeliveryAdmission::Admitted(delivery) => delivery,
+        _ => panic!("the original queued input follows the same slot to its admitted successor"),
+    };
+    behavior
+        .environment
+        .compiler_lifecycle_scope(&owner.kernel)
+        .scope(behavior.environment.runner.map_source(
+            admitted.binding.execution.activation_context(),
+            admitted.binding.entry.clone(),
+            admitted.delivery.event.clone(),
+        ))
+        .await
+        .unwrap();
+    drop(admitted);
+    assert!(race_new_events.try_recv().is_err());
+    assert!(race_events.try_recv().is_err());
+    drop(transfer_claims);
+    drop(new_claim);
+    assert_eq!(race_fence.pending_claims(), 0);
+    race_fence
+        .reopen_with(source_b.original_source(), |reopen| {
+            reopen.commit();
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
+    replacement_slots.clear();
     let first = match slots.admit_delivery(initial_a.clone()) {
         SourceDeliveryAdmission::Admitted(delivery) => delivery,
         _ => panic!("A admits before fence"),
@@ -1512,7 +1622,11 @@ async fn source_registration_slots_preserve_independent_callbacks_and_deferred_i
     drop(behavior);
     address.stop(None);
     drop_address.stop(None);
+    race_old_address.stop(None);
+    race_new_address.stop(None);
     task.await.unwrap();
     drop_task.await.unwrap();
+    race_old_task.await.unwrap();
+    race_new_task.await.unwrap();
     owner.finish().await;
 }
