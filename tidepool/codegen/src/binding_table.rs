@@ -884,6 +884,29 @@ impl BindingTable {
             && self.revision == baseline.revision
     }
 
+    fn validate_declaration_preparation(
+        &self,
+        scope: ScopeId,
+        origin: Option<&PreparedSourceOwnerOrigin>,
+        changes: Option<&PreparedDeclarationBindingChanges>,
+    ) -> Result<(), BindingPromotionError> {
+        if origin.is_some_and(|origin| {
+            origin.scope != scope || !self.matches_declaration_preparation(&origin.baseline)
+        }) || changes.is_some_and(|changes| {
+            changes.names.scope != scope || !self.matches_declaration_preparation(&changes.baseline)
+        }) {
+            return Err(BindingPromotionError::StaleOrForeignDeclarationPreparation);
+        }
+        match (
+            origin.and_then(PreparedSourceOwnerOrigin::binding_support),
+            changes.and_then(|changes| changes.support.as_ref()),
+        ) {
+            (None, None) => Ok(()),
+            (Some(original), Some(support)) if Arc::ptr_eq(original, support) => Ok(()),
+            _ => Err(BindingPromotionError::StaleOrForeignDeclarationPreparation),
+        }
+    }
+
     /// Predict the exact origin → observation removals → name changes commit.
     /// Only the prepared observations, touched names, and lookup chain are read.
     pub fn prepared_declaration_projection<'a>(
@@ -893,21 +916,7 @@ impl BindingTable {
         changes: &'a PreparedDeclarationBindingChanges,
     ) -> Result<PreparedDeclarationProjection<'a>, BindingPromotionError> {
         let scope = changes.names.scope;
-        if !self.matches_declaration_preparation(&changes.baseline)
-            || origin.is_some_and(|origin| {
-                origin.scope != scope || !self.matches_declaration_preparation(&origin.baseline)
-            })
-        {
-            return Err(BindingPromotionError::StaleOrForeignDeclarationPreparation);
-        }
-        match (
-            origin.and_then(PreparedSourceOwnerOrigin::binding_support),
-            &changes.support,
-        ) {
-            (None, None) => {}
-            (Some(original), Some(support)) if Arc::ptr_eq(original, support) => {}
-            _ => return Err(BindingPromotionError::StaleOrForeignDeclarationPreparation),
-        }
+        self.validate_declaration_preparation(scope, origin, Some(changes))?;
         let advances = changes
             .observations
             .len()
@@ -1093,11 +1102,7 @@ impl BindingTable {
         origin: Option<&PreparedSourceOwnerOrigin>,
         changes: Option<&PreparedDeclarationBindingChanges>,
     ) -> Result<BindingScopeSnapshot, BindingPromotionError> {
-        if origin.is_some_and(|p| p.scope != scope)
-            || changes.is_some_and(|p| p.names.scope != scope)
-        {
-            return Err(BindingPromotionError::UnverifiableSourceSelection);
-        }
+        self.validate_declaration_preparation(scope, origin, changes)?;
         // The existing selection owner validates every selected lease and
         // authored domain before its metadata can authorize publication.
         self.validate_source_domain_selection_in(tree, scope)?;
@@ -1176,9 +1181,11 @@ impl BindingTable {
         &'a self,
         tree: &ScopeTree,
         scope: ScopeId,
+        origin: Option<&PreparedSourceOwnerOrigin>,
         changes: &PreparedDeclarationBindingChanges,
     ) -> Result<Vec<(BindingName, &'a BindingEntry)>, BindingPromotionError> {
-        if !tree.is_live(scope) || changes.names.scope != scope {
+        self.validate_declaration_preparation(scope, origin, Some(changes))?;
+        if !tree.is_live(scope) {
             return Err(BindingPromotionError::UnverifiableSourceSelection);
         }
         let removed = &changes.names.removals;
@@ -3527,6 +3534,7 @@ impl BindingTable {
         origin: &PreparedSourceOwnerOrigin,
         changes: &PreparedDeclarationBindingChanges,
     ) -> Result<PreparedDetachedBindingScope, BindingPromotionError> {
+        self.validate_declaration_preparation(parent, Some(origin), Some(changes))?;
         // This older two-scope operation reserves child lease counts from the
         // current table. A pending same-scope custody install has different
         // prospective counts and must not share that independent reservation.
@@ -3557,7 +3565,7 @@ impl BindingTable {
         let projection = if self.tips.contains_key(&parent) || tree.parent_of(parent).is_none() {
             changes.names.projection.clone().unwrap_or_default()
         } else {
-            self.prepared_iter_current_in(tree, parent, changes)?
+            self.prepared_iter_current_in(tree, parent, Some(origin), changes)?
                 .into_iter()
                 .filter(|(_, entry)| !self.scope_local_aliases.contains(&entry.id))
                 .map(|(name, entry)| (name, entry.id))
@@ -3568,7 +3576,7 @@ impl BindingTable {
             current: remap[&origin.selection.current],
             domains: domains.into_iter().collect(),
         };
-        let membership = self.capture_membership_for_declaration(tree, parent, changes);
+        let membership = self.capture_membership_for_declaration(tree, parent, origin, changes);
         let capture = self.prepare_capture_leases(parent, &membership)?;
         let child_membership = CapturableMembership {
             retained: membership.retained.clone(),
@@ -3620,11 +3628,12 @@ impl BindingTable {
         &self,
         tree: &ScopeTree,
         parent: ScopeId,
+        origin: &PreparedSourceOwnerOrigin,
         changes: &PreparedDeclarationBindingChanges,
     ) -> CaptureMembership {
         if !self.tips.contains_key(&parent) && tree.parent_of(parent).is_some() {
             let snapshot = self
-                .prepared_scope_snapshot_in(tree, parent, None, Some(changes))
+                .prepared_scope_snapshot_in(tree, parent, Some(origin), Some(changes))
                 .expect("parent declaration snapshot was admitted");
             return CaptureMembership {
                 retained: snapshot.dependencies.into_iter().collect(),

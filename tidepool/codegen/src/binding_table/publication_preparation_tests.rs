@@ -421,6 +421,180 @@ fn declaration_frozen_support_pairs_and_cannot_be_overwritten() {
 }
 
 #[test]
+fn declaration_all_prospective_owners_require_same_issuance_even_for_equal_support() {
+    for with_root in [false, true] {
+        let mut tree = ScopeTree::new();
+        let scope = tree.mint_child(ScopeId::ROOT).unwrap();
+        let child = tree.mint_isolated();
+        let mut table = BindingTable::new();
+        let id = table.bind_in(scope, entry("root", 260)).unwrap();
+        let roots = if with_root {
+            table
+                .promote_exact_bindings_in(scope, scope, &[id])
+                .unwrap();
+            vec![id]
+        } else {
+            Vec::new()
+        };
+        let owner = declaration_owner(15);
+        let mut x = table
+            .prepare_source_owner_origin_in(&tree, scope, owner.clone())
+            .unwrap();
+        let mut y = table
+            .prepare_source_owner_origin_in(&tree, scope, owner)
+            .unwrap();
+        let dx = table
+            .prepare_declaration_binding_changes_with_custody_in(
+                &tree,
+                scope,
+                &mut x,
+                &[],
+                &[],
+                &roots,
+            )
+            .unwrap();
+        let dy = table
+            .prepare_declaration_binding_changes_with_custody_in(
+                &tree,
+                scope,
+                &mut y,
+                &[],
+                &[],
+                &roots,
+            )
+            .unwrap();
+        assert!(dx.custody.is_none() && dy.custody.is_none());
+        assert_eq!(x.binding_support(), y.binding_support());
+        assert!(!Arc::ptr_eq(
+            x.binding_support().unwrap(),
+            y.binding_support().unwrap()
+        ));
+        let before = table.scope_snapshot(&tree, scope).unwrap();
+        let revision = table.revision;
+        let leases = table.lease_count(id);
+        let next_tip = table.next_tip;
+        for (origin, changes) in [(&x, &dy), (&y, &dx)] {
+            without_allocations(|| {
+                assert!(matches!(
+                    table.prepared_declaration_projection(&tree, Some(origin), changes),
+                    Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+                ));
+                assert!(matches!(
+                    table.prepared_scope_snapshot_in(&tree, scope, Some(origin), Some(changes)),
+                    Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+                ));
+                assert!(matches!(
+                    table.prepared_iter_current_in(&tree, scope, Some(origin), changes),
+                    Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+                ));
+                assert!(matches!(
+                    table.prepare_seed_detached_scope_for_declaration(
+                        &tree, scope, child, origin, changes
+                    ),
+                    Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+                ));
+            });
+        }
+        without_allocations(|| {
+            assert!(matches!(
+                table.prepared_scope_snapshot_in(&tree, scope, None, Some(&dx)),
+                Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+            ));
+            assert!(matches!(
+                table.prepared_scope_snapshot_in(&tree, scope, Some(&x), None),
+                Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+            ));
+            assert!(matches!(
+                table.prepared_iter_current_in(&tree, scope, None, &dx),
+                Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+            ));
+        });
+        assert_eq!(table.scope_snapshot(&tree, scope).unwrap(), before);
+        assert_eq!(table.revision, revision);
+        assert_eq!(table.lease_count(id), leases);
+        assert_eq!(table.next_tip, next_tip);
+        assert!(table.tip_id(child).is_none());
+        // A correctly paired empty or already-promoted preparation remains
+        // supported at every entry, including unseeded ancestor lookup.
+        let expected = table
+            .prepared_scope_snapshot_in(&tree, scope, Some(&x), Some(&dx))
+            .unwrap();
+        let expected_visible = table
+            .prepared_iter_current_in(&tree, scope, Some(&x), &dx)
+            .unwrap()
+            .into_iter()
+            .map(|(name, entry)| (name.0, entry.id))
+            .collect::<Vec<_>>();
+        let detached = table
+            .prepare_seed_detached_scope_for_declaration(&tree, scope, child, &x, &dx)
+            .unwrap();
+        without_allocations(|| {
+            table.commit_source_owner_origin(x);
+            table.commit_declaration_binding_changes(dx);
+            table.commit_prepared_detached_scope(detached);
+        });
+        assert_eq!(table.scope_snapshot(&tree, scope).unwrap(), expected);
+        assert_eq!(visible(&table, &tree, child), expected_visible);
+    }
+}
+
+#[test]
+fn declaration_prospective_owners_refuse_foreign_or_stale_bare_preparations() {
+    let mut tree = ScopeTree::new();
+    let scope = tree.mint_isolated();
+    let child = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let mut foreign = BindingTable::new();
+    let origin = foreign
+        .prepare_source_owner_origin_in(&tree, scope, declaration_owner(16))
+        .unwrap();
+    let changes = foreign
+        .prepare_declaration_binding_changes_in(scope, &[], &[])
+        .unwrap();
+    without_allocations(|| {
+        assert!(matches!(
+            table.prepared_scope_snapshot_in(&tree, scope, Some(&origin), Some(&changes)),
+            Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+        ));
+        assert!(matches!(
+            table.prepared_iter_current_in(&tree, scope, Some(&origin), &changes),
+            Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+        ));
+        assert!(matches!(
+            table.prepare_seed_detached_scope_for_declaration(
+                &tree, scope, child, &origin, &changes
+            ),
+            Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+        ));
+    });
+    let origin = table
+        .prepare_source_owner_origin_in(&tree, scope, declaration_owner(16))
+        .unwrap();
+    let changes = table
+        .prepare_declaration_binding_changes_in(scope, &[], &[])
+        .unwrap();
+    table.bind_in(scope, entry("new", 261)).unwrap();
+    without_allocations(|| {
+        assert!(matches!(
+            table.prepared_scope_snapshot_in(&tree, scope, Some(&origin), Some(&changes)),
+            Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+        ));
+        assert!(matches!(
+            table.prepared_iter_current_in(&tree, scope, Some(&origin), &changes),
+            Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+        ));
+        assert!(matches!(
+            table.prepare_seed_detached_scope_for_declaration(
+                &tree, scope, child, &origin, &changes
+            ),
+            Err(BindingPromotionError::StaleOrForeignDeclarationPreparation)
+        ));
+    });
+    assert!(table.tip_id(child).is_none());
+    assert_eq!(table.lease_count(SessionVarId::from_extract(261)), 0);
+}
+
+#[test]
 fn declaration_frozen_support_forks_exact_ids_and_excludes_unaccepted_owners() {
     let mut tree = ScopeTree::new();
     let source = tree.mint_isolated();
@@ -810,7 +984,7 @@ fn declaration_prepare_cancel_and_commit_preserve_exact_observation_history() {
         .prepared_scope_snapshot_in(&tree, child, Some(&origin), Some(&changes))
         .unwrap();
     let prospective_visible: Vec<_> = table
-        .prepared_iter_current_in(&tree, child, &changes)
+        .prepared_iter_current_in(&tree, child, Some(&origin), &changes)
         .unwrap()
         .into_iter()
         .map(|(name, entry)| (name.0, entry.id))
@@ -1229,7 +1403,7 @@ proptest! {
             prop_assert_eq!(ids.iter().map(|id| table.lease_count(*id)).collect::<Vec<_>>(), counts);
             prop_assert_eq!(table.next_tip, next_tip);
             if commit {
-                let prospective: Vec<_> = table.prepared_iter_current_in(&tree, parent, &changes).unwrap().into_iter()
+                let prospective: Vec<_> = table.prepared_iter_current_in(&tree, parent, Some(&origin), &changes).unwrap().into_iter()
                     .map(|(name, entry)| (name.0, entry.id)).collect();
                 without_allocations(|| {
                     table.commit_source_owner_origin(origin);
