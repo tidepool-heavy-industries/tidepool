@@ -6,7 +6,7 @@ module Tidepool.DeclarationJoin
   , buildJoinedInterface, validateRetainedFamilyInstances, validateInstances
   , DeclarationInventoryIndex, declarationInventoryIndex, interfaceInventoryIndexed
   , declarationClassPairCount
-  , exportIdentity, interfaceExports, interfaceInventory
+  , exportIdentity, interfaceExports, normalizeDeclarationExports, interfaceInventory
   , ReservedJoin(..), DeclarationArtifact(..), DeclarationWrite(..)
   , DeclarationJoinInput(..), DeclarationJoinOutcome(..)
   , readDeclarationJoin, encodeDeclarationJoin, validateDeclarationJoin, renderDeclarationJoinOutcome
@@ -306,6 +306,9 @@ uniqueFamilyInstances = go emptyUniqSet
 
 normalizeExport :: DeclarationExport -> DeclarationExport
 normalizeExport e = e { exportChildren = sort (exportChildren e) }
+
+normalizeDeclarationExports :: [DeclarationExport] -> [DeclarationExport]
+normalizeDeclarationExports = sort . map normalizeExport
 
 -- | Local additions only. A persisted Join reports its selected inventory;
 -- authored interfaces report their original local dfuns and family axioms.
@@ -700,7 +703,7 @@ validateDeclarationJoin operations input = runExactInterfaceOperation operations
                   exported <- interfaceExports hydrated iface
                   let local = filter (\entry -> exportUnit (exportHead entry) == unitString (moduleUnit (mi_module iface))
                         && exportModule (exportHead entry) == snapshotModule (writeModule write)) exported
-                  pure (sort (map normalizeExport local) == sort (map normalizeExport (writeExports write)))
+                  pure (normalizeDeclarationExports local == normalizeDeclarationExports (writeExports write))
                 _ -> pure False
             packageRoots <- joinPackageRoots hydrated artifacts
             case (and writeChecks, packageRoots) of

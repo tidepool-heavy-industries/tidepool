@@ -1119,6 +1119,9 @@ where
                         .as_ref()
                         .expect("owned execution retains its original control")
                         .publication_decision();
+                    let observation = owned.workbench.as_ref()
+                        .expect("original source-authorized workbench precedes admission")
+                        .capture_observation_scaffold(&context).await?;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "private_begin_started", "workbench phase");
                     let private = Arc::new(
                         runner
@@ -1126,6 +1129,7 @@ where
                                 context,
                                 owned.resources.public.clone(),
                                 decision,
+                                Some(observation),
                             )
                             .await?,
                     );
@@ -2438,7 +2442,12 @@ where
                 Box::pin(async move {
                     let actor = context.actor;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_started", "workbench phase");
-                    let published = runner.publish_private_execution(context, private).await;
+                    let published = async {
+                        if let Some(dependencies) = owned.state.cursor.dependencies.as_mut() {
+                            dependencies.retire_input_for_publication().await?;
+                        }
+                        runner.publish_private_execution(context, private).await
+                    }.await;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_completed", "workbench phase");
                     published
                 })

@@ -914,6 +914,7 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
                 context.clone(),
                 owner.clone(),
                 tidepool_runtime::session::PublicationDecision::new(),
+                None,
             )
             .await
             .err()
@@ -957,6 +958,7 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
                 context.clone(),
                 owner.clone(),
                 tidepool_runtime::session::PublicationDecision::new(),
+                None,
             )
             .await
             .unwrap();

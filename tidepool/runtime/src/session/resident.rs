@@ -41,6 +41,42 @@ use crate::render::EvalResult;
 use crate::timing;
 use crate::{RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
 
+/// Issued only by successful retirement of an exact hidden private host owner.
+/// Compiler custody stays retained while its runtime name leaves visibility.
+pub(super) struct PrivateHostRetirement {
+    association: Arc<super::inspection::InspectionWorldAssociation>,
+    scope: Arc<super::RuntimeLexicalScopeLease>,
+    before: super::persistent::CompileViewKey,
+    after: super::persistent::CompileViewKey,
+    binder: SessionVarId,
+    name: BindingName,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HiddenHostBinding {
+    Generic,
+    /// Issued only while installing a globally fresh private host input ID.
+    PrivateInput,
+}
+
+impl PrivateHostRetirement {
+    pub(super) fn following_key<'a>(
+        &'a self,
+        session: &super::PersistentSession,
+        association: &Arc<super::inspection::InspectionWorldAssociation>,
+        scope: &Arc<super::RuntimeLexicalScopeLease>,
+        before: &super::persistent::CompileViewKey,
+    ) -> Option<&'a super::persistent::CompileViewKey> {
+        (Arc::ptr_eq(&self.association, association)
+            && Arc::ptr_eq(&self.scope, scope)
+            && &self.before == before
+            && session
+                .resolve_in(scope.scope(), &self.name.0)
+                .is_none_or(|entry| entry.id != self.binder))
+        .then_some(&self.after)
+    }
+}
+
 enum ResidentResumeInput {
     Response(Response),
     Handle(ValueHandle),
@@ -858,6 +894,7 @@ enum HostCarrierOrigin {
     Checked {
         admission: Arc<super::RuntimeCheckedItemAdmission>,
         binder: BoundBinder,
+        type_owner: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
     },
     Interface {
         admission: Arc<super::RuntimeHostBindingAdmission>,
@@ -962,10 +999,17 @@ impl HostCarrier {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
         let (_, representation) = host_representation(&binder, &code, expected)?;
+        let type_owner =
+            tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_checked(execution)
+                .map_err(SessionError::Compile)?;
         Ok(Self {
             code: Arc::new(code.into_owned()),
             representation,
-            origin: HostCarrierOrigin::Checked { admission, binder },
+            origin: HostCarrierOrigin::Checked {
+                admission,
+                binder,
+                type_owner,
+            },
         })
     }
 
@@ -974,7 +1018,9 @@ impl HostCarrier {
         &self,
     ) -> Result<(&Arc<super::RuntimeCheckedItemAdmission>, &BoundBinder), ResidentError> {
         match &self.origin {
-            HostCarrierOrigin::Checked { admission, binder } => Ok((admission, binder)),
+            HostCarrierOrigin::Checked {
+                admission, binder, ..
+            } => Ok((admission, binder)),
             HostCarrierOrigin::Reusable(_) | HostCarrierOrigin::Interface { .. } => {
                 Err(ResidentError::UnsupportedCheckedTurn)
             }
@@ -991,11 +1037,36 @@ impl HostCarrier {
         }
     }
 
+    fn type_owner(
+        &self,
+    ) -> Result<&Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>, ResidentError>
+    {
+        match &self.origin {
+            HostCarrierOrigin::Checked { type_owner, .. } => Ok(type_owner),
+            HostCarrierOrigin::Interface { proof, .. } => Ok(proof.prototype()),
+            HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
+        }
+    }
+
+    /// Borrow the native type already retained by this exact checked carrier.
+    /// Generic representation-only embeddings do not supply this witness.
+    pub fn type_signature(
+        &self,
+    ) -> Result<&tidepool_toolchain::checked_cell::ExactCheckedSignature, ResidentError> {
+        Ok(self.type_owner()?.signature())
+    }
+
+    /// Retain the exact selected original type context, without execution custody.
+    pub fn type_context(
+        &self,
+    ) -> Result<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, ResidentError>
+    {
+        Ok(self.type_owner()?.context())
+    }
+
     pub fn session_root(&self) -> Result<&Path, ResidentError> {
         match &self.origin {
-            HostCarrierOrigin::Checked { admission, .. } => {
-                Ok(admission.snapshot().session_root())
-            }
+            HostCarrierOrigin::Checked { admission, .. } => Ok(admission.snapshot().session_root()),
             HostCarrierOrigin::Interface { admission, .. } => Ok(&admission.session_root),
             HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
         }
@@ -1371,6 +1442,18 @@ static_assertions::assert_not_impl_any!(RuntimeActivationInput: Clone, Copy);
 impl RuntimeActivationInput {
     pub fn original_source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
         self.original_source.clone()
+    }
+
+    /// The binding issued by the original activation-input admission.
+    pub fn binding_name() -> &'static str {
+        "sessionInput"
+    }
+
+    /// Original checked TYPE metadata, without mounting or exposing the value.
+    pub fn type_prototype(
+        &self,
+    ) -> &Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype> {
+        &self.prototype
     }
 
     pub fn input_type(&self) -> &str {
@@ -2821,10 +2904,7 @@ fn refuse_generic_activation_preview_install(
     if certification.is_some_and(|certification| {
         matches!(certification.purpose(), TurnPurpose::ActivationPreview(_))
     }) {
-        return Err(SessionError::SourceAdmission(
-            super::SourceAdmissionError::Unqualified,
-        )
-        .into());
+        return Err(SessionError::SourceAdmission(super::SourceAdmissionError::Unqualified).into());
     }
     Ok(())
 }
@@ -3676,7 +3756,7 @@ pub struct ResidentSession<H, O> {
     host_text_bindings: HashMap<SessionVarId, String>,
     /// Private request carriers remain rooted for closures that captured them,
     /// but never become ordinary unqualified workbench vocabulary.
-    hidden_host_bindings: HashMap<SessionVarId, ()>,
+    hidden_host_bindings: HashMap<SessionVarId, HiddenHostBinding>,
     /// At most one exact source contract per fixed host kind. Outstanding
     /// instances retain their superseded prototype through their admission.
     host_binding_prototypes: Vec<Arc<HostBindingPrototype>>,
@@ -4127,7 +4207,7 @@ where
         digest.update(&self.run_context.principal.incarnation.to_le_bytes());
         let reservation = self.state.admit_binding_interface(
             scope,
-            "sessionInput".into(),
+            RuntimeActivationInput::binding_name().into(),
             input.prototype.clone(),
             *digest.finalize().as_bytes(),
         )?;
@@ -4147,7 +4227,8 @@ where
         expected: HostBindingType,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
-        self.state.admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
+        self.state
+            .admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
     }
 
     /// Admit one compiler-issued binder reserved for a native host payload.
@@ -4246,6 +4327,18 @@ where
         self.settle_dropped_custody();
         self.state
             .admit_world_planned_cell_for_execution(execution, plan)
+    }
+
+    /// Reserve against the exact atomic private input mount retained by its guard.
+    pub fn admit_world_planned_cell_with_input(
+        &mut self,
+        execution: Arc<super::PrivateExecutionAdmission>,
+        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        input: Option<&super::PendingHostValueWrite>,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state
+            .admit_world_planned_cell_with_input(execution, plan, input)
     }
 
     pub fn admit_checked_item(
@@ -4802,10 +4895,13 @@ where
         });
         self.host_text_bindings
             .retain(|id, _| self.state.bindings().get(*id).is_some());
-        let previous_hidden = self.hidden_host_bindings.len();
-        self.hidden_host_bindings
-            .retain(|id, _| self.state.bindings().get(*id).is_some());
-        if self.hidden_host_bindings.len() != previous_hidden {
+        let mut removed_generic = false;
+        self.hidden_host_bindings.retain(|id, kind| {
+            let live = self.state.bindings().get(*id).is_some();
+            removed_generic |= !live && *kind == HiddenHostBinding::Generic;
+            live
+        });
+        if removed_generic {
             self.state.advance_compiler_input_revision();
         }
     }
@@ -4908,6 +5004,7 @@ where
     ) -> bool {
         self.state.install_compiler_world_association_if_current(
             &completed.association,
+            &completed.custody,
             &completed.cancellation,
             source,
             original_source,
@@ -6003,14 +6100,7 @@ where
         self.state
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        self.mount_compiled_binding_prepared(
-            scope,
-            binder,
-            gen,
-            custody,
-            None,
-            settlement,
-        )
+        self.mount_compiled_binding_prepared(scope, binder, gen, custody, None, settlement)
     }
 
     /// Build and mount a compiler-typed JSON value without putting the
@@ -6110,16 +6200,7 @@ where
         if !admission.prefix().admission().belongs_to(&self.state) {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
-        let execution = carrier
-            .code
-            .certification
-            .as_ref()
-            .as_ref()
-            .and_then(|certification| certification.checked_execution())
-            .ok_or(ResidentError::UnsupportedCheckedTurn)?;
-        let compiler =
-            tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_checked(execution)
-                .map_err(SessionError::Compile)?;
+        let compiler = carrier.type_owner()?.clone();
         let code = carrier
             .code()
             .into_host_prototype()
@@ -6177,6 +6258,7 @@ where
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
     ) -> Result<super::PendingHostValueWrite, ResidentError> {
         let HostCarrierOrigin::Interface {
             admission,
@@ -6191,7 +6273,6 @@ where
         {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
-        self.settle_dropped_custody();
         self.validate_host_mount_geometry(admission.scope, binder, admission.generation)?;
         let staged = self
             .state
@@ -6209,6 +6290,7 @@ where
             admission.generation,
             carrier.code(),
             Some(staged),
+            private_input,
             move |engine, realm, _| representation.build(engine, realm, payload),
             settlement,
         )?;
@@ -6226,21 +6308,146 @@ where
         }
     }
 
-    /// Fill the sole compiler-issued host binder without entering a placeholder.
+    /// Mount a checked host value through its original native/interface owner.
     pub fn mount_checked_host_input(
         &mut self,
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<super::PendingHostValueWrite, ResidentError> {
+        self.settle_dropped_custody();
+        self.mount_checked_host_input_settled(carrier, payload, settlement, None)
+    }
+
+    /// Install an explicit input atomically as a never-visible private carrier.
+    /// The original pending write carries the actual World/key transition.
+    pub fn mount_private_hidden_host_input(
+        &mut self,
+        execution: &Arc<super::PrivateExecutionAdmission>,
+        carrier: &HostCarrier,
+        payload: HostPayload<'_>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<super::PendingHostValueWrite, ResidentError> {
+        self.settle_dropped_custody();
+        self.prune_binding_metadata();
+        if !self.state.has_lib() {
+            return Err(SessionError::MissingDeclarationLibrary.into());
+        }
+        let scope = execution.private_scope();
+        let binder = carrier.binding()?.clone();
+        let id = SessionVarId::from_extract(binder.var_id);
+        let facts = execution.world_execution_facts();
+        let target = execution.retained_lexical_scope();
+        let before = self
+            .state
+            .lib()
+            .tips
+            .get(&scope)
+            .and_then(|tip| tip.inspection_world.clone())
+            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+        // Fresh ID AND fresh name: this operation cannot retract a logical
+        // head, nor retroactively classify a previously visible host binding.
+        if !Arc::ptr_eq(&execution.owner, self.state.admission_owner())
+            || execution.owner_epoch != self.state.admission_owner().epoch()
+            || execution.session() != self.state.lib().session_id()
+            || execution.library != self.state.lib().compile_view_identity
+            || execution.final_intent.get().is_some()
+            || self.run_context.lexical_scope != scope
+            || self.state.bindings().get(id).is_some()
+            || self.state.resolve_in(scope, &binder.name).is_some()
+            || self.hidden_host_bindings.contains_key(&id)
+            || !execution.host_retirements.lock().is_empty()
+            || !Arc::ptr_eq(&before.world, execution.compiler_world()?)
+            || !Arc::ptr_eq(&before.base.source, &facts.source)
+            || !before.base.original_source.matches(&facts.original_source)
+            || !before.base.target.matches(&target)
+            || !self.state.inspection_world_base_is_current(
+                &before.base,
+                &facts.source,
+                &facts.original_source,
+            )
+        {
+            return Err(SessionError::WorldCellPublicationBaseStale.into());
+        }
+        let write =
+            self.mount_checked_host_input_settled(carrier, payload, settlement, Some(execution))?;
+        let result = super::RuntimeLexicalScopeLease::with_source_leases(
+            [facts.original_source.clone(), target.clone()],
+            |leases| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    leases.iter().map(|lease| lease.source_admission()),
+                    || {
+                        if self.hidden_host_bindings.get(&id)
+                            != Some(&HiddenHostBinding::PrivateInput)
+                            || !write.matches_private_mount(&self.state, execution)
+                            || !self
+                                .state
+                                .source_lease_in(scope)
+                                .is_ok_and(|live| Arc::ptr_eq(&live, &target))
+                            || self
+                                .state
+                                .lib()
+                                .tips
+                                .get(&scope)
+                                .and_then(|tip| tip.inspection_world.as_ref())
+                                .is_none_or(|live| !Arc::ptr_eq(live, &before))
+                        {
+                            return Err(SessionError::StaleStagedDeclaration);
+                        }
+                        let key = self
+                            .state
+                            .compile_view_key_in(scope)
+                            .ok_or(SessionError::StaleStagedDeclaration)?;
+                        let mut base = before.base.clone();
+                        base.key = key;
+                        let after = Arc::new(super::inspection::InspectionWorldAssociation {
+                            base,
+                            world: before.world.clone(),
+                        });
+                        // The bind owner already classified this fresh input;
+                        // publish its matching runtime association in this checkout.
+                        self.state
+                            .lib_mut()
+                            .tips
+                            .get_mut(&scope)
+                            .expect("validated private association")
+                            .inspection_world = Some(after.clone());
+                        write.retain_private_hidden_mount(
+                            &self.state,
+                            execution.clone(),
+                            before,
+                            after,
+                        )
+                    },
+                )
+            },
+        )
+        .map_err(SessionError::from)
+        .and_then(|result| result);
+        match result {
+            Ok(write) => Ok(write),
+            Err(error) => {
+                self.retire_binding_owner_settled(id);
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Fill the sole compiler-issued host binder without entering a placeholder.
+    fn mount_checked_host_input_settled(
+        &mut self,
+        carrier: &HostCarrier,
+        payload: HostPayload<'_>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
+    ) -> Result<super::PendingHostValueWrite, ResidentError> {
         if matches!(&carrier.origin, HostCarrierOrigin::Interface { .. }) {
-            return self.mount_host_interface_input(carrier, payload, settlement);
+            return self.mount_host_interface_input(carrier, payload, settlement, private_input);
         }
         let (admission, binder) = carrier.checked_binding()?;
         if !carrier.representation.matches_payload(&payload) {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
-        self.settle_dropped_custody();
         let scope = admission.prefix().admission().lexical_scope();
         let generation = admission.generation();
         if self.run_context.lexical_scope != scope {
@@ -6277,6 +6484,7 @@ where
             generation,
             carrier.code(),
             Some(staged),
+            private_input,
             move |engine, realm, _| representation.build(engine, realm, payload),
             settlement,
         )?;
@@ -6477,10 +6685,107 @@ where
                 "host binding identity changed before hiding".into(),
             ))));
         }
-        if self.hidden_host_bindings.insert(id, ()).is_none() {
+        self.hide_current_host_binding(scope, id);
+        Ok(())
+    }
+
+    fn hide_current_host_binding(&mut self, scope: ScopeId, id: SessionVarId) {
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.hidden_host_bindings.entry(id)
+        {
+            entry.insert(HiddenHostBinding::Generic);
             self.state.advance_compiler_input_revision();
             self.advance_public_visibility(scope);
         }
+    }
+
+    /// Retire the exact never-visible input issued to this execution. Its
+    /// original write stays borrowed until publication and the final lease drop.
+    pub fn retire_private_host_binding_owner(
+        &mut self,
+        execution: &super::PrivateExecutionAdmission,
+        binder: &BoundBinder,
+        write: &super::PendingHostValueWrite,
+    ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
+        self.prune_binding_metadata();
+        if !self.state.has_lib() {
+            return Err(SessionError::MissingDeclarationLibrary.into());
+        }
+        let target = execution.retained_lexical_scope();
+        let facts = execution.world_execution_facts();
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            [facts.original_source.clone(), target.clone()],
+            |leases| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    leases.iter().map(|lease| lease.source_admission()),
+                    || {
+                        let scope = execution.private_scope();
+                        let id = SessionVarId::from_extract(binder.var_id);
+                        if !write.matches_private_hidden_mount(&self.state, execution, id)
+                            || execution.final_intent.get().is_some()
+                            || self.hidden_host_bindings.get(&id)
+                                != Some(&HiddenHostBinding::PrivateInput)
+                            || self
+                                .state
+                                .resolve_in(scope, &binder.name)
+                                .is_none_or(|entry| entry.id != id || entry.scope != scope)
+                        {
+                            return Err(SessionError::StaleStagedDeclaration);
+                        }
+                        let association = self
+                            .state
+                            .lib()
+                            .tips
+                            .get(&scope)
+                            .and_then(|tip| tip.inspection_world.clone())
+                            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                        let before = self
+                            .state
+                            .compile_view_key_in(scope)
+                            .ok_or(SessionError::StaleStagedDeclaration)?;
+                        let mut records = execution.host_retirements.lock();
+                        let mut expected = &association.base.key;
+                        for record in records.iter() {
+                            expected = record
+                                .following_key(&self.state, &association, &target, expected)
+                                .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                        }
+                        if expected != &before
+                            || !association
+                                .base
+                                .original_source
+                                .matches(&facts.original_source)
+                            || !association.base.target.matches(&target)
+                            || !Arc::ptr_eq(&association.base.source, &facts.source)
+                        {
+                            return Err(SessionError::WorldCellPublicationBaseStale);
+                        }
+                        records
+                            .try_reserve(1)
+                            .map_err(|error| SessionError::RecoveryManifest {
+                                path: self.state.lib().root.clone(),
+                                detail: error.to_string(),
+                            })?;
+                        self.retire_binding_owner_settled(id);
+                        let after = self
+                            .state
+                            .compile_view_key_in(scope)
+                            .ok_or(SessionError::StaleStagedDeclaration)?;
+                        records.push(PrivateHostRetirement {
+                            association,
+                            scope: target.clone(),
+                            before,
+                            after,
+                            binder: id,
+                            name: BindingName(binder.name.clone()),
+                        });
+                        Ok(())
+                    },
+                )
+            },
+        )
+        .map_err(SessionError::from)??;
         Ok(())
     }
 
@@ -6501,12 +6806,17 @@ where
     /// Retire an exact binding owner while preserving existing dependency leases.
     pub fn retire_binding_owner(&mut self, id: SessionVarId) {
         self.settle_dropped_custody();
+        self.retire_binding_owner_settled(id);
+    }
+
+    fn retire_binding_owner_settled(&mut self, id: SessionVarId) {
         let scope = self.state.bindings().get(id).map(|entry| entry.scope);
         self.state.retire_binding_owner(id);
         if let Some(scope) = scope {
             self.advance_public_visibility(scope);
         }
-        if self.hidden_host_bindings.remove(&id).is_some() {
+        if self.hidden_host_bindings.get(&id) == Some(&HiddenHostBinding::Generic) {
+            self.hidden_host_bindings.remove(&id);
             self.state.advance_compiler_input_revision();
         }
         self.prune_binding_metadata();
@@ -6581,13 +6891,7 @@ where
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
         self.mount_host_value_with_interface_in(
-            scope,
-            binder,
-            gen,
-            code,
-            None,
-            build,
-            settlement,
+            scope, binder, gen, code, None, None, build, settlement,
         )
     }
 
@@ -6598,6 +6902,7 @@ where
         gen: Generation,
         code: TurnCode<'_>,
         staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
+        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
         build: impl FnOnce(
             &mut super::prepared::PreparedEngine,
             RealmId,
@@ -6620,9 +6925,8 @@ where
                 .state
                 .resolve_certification_in(scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let (target, demanded) = super::prepared::ScopedTargetImage::compile_scoped(
-                prepared, &resolved, &registry,
-            )?;
+            let (target, demanded) =
+                super::prepared::ScopedTargetImage::compile_scoped(prepared, &resolved, &registry)?;
             self.install_certified_turn_in(
                 scope,
                 &table,
@@ -6649,6 +6953,7 @@ where
                 gen,
                 handle,
                 staged_interface,
+                private_input,
                 settlement,
             )
         })();
@@ -6671,6 +6976,7 @@ where
         gen: Generation,
         handle: PreparedHandle,
         staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
+        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         let engine = self.state.require_prepared()?;
@@ -6687,6 +6993,7 @@ where
             &[(binder, handle)],
             None,
             staged_interface,
+            private_input,
             settlement,
         )?;
         self.binding_provenance
@@ -6728,6 +7035,7 @@ where
             &[(binder, handle)],
             None,
             staged_interface,
+            None,
             settlement,
         )?;
         self.binding_provenance.insert(binder.var_id, provenance);
@@ -7638,9 +7946,7 @@ where
         let (program, source_keys) = if let Some(resolved) = resolved {
             let (target, demanded) = match images {
                 TurnImageAcquisition::Ready { bundle } => {
-                    super::prepared::ScopedTargetImage::lookup_scoped(
-                        prepared, &resolved, bundle,
-                    )?
+                    super::prepared::ScopedTargetImage::lookup_scoped(prepared, &resolved, bundle)?
                 }
                 TurnImageAcquisition::Compile => {
                     let registry = self.state.certified_image_registry();
@@ -7846,6 +8152,7 @@ where
                             &[(binder, handle)],
                             checked.as_deref(),
                             None,
+                            None,
                             settlement,
                         )?;
                         self.binding_provenance
@@ -7891,6 +8198,7 @@ where
                     generation,
                     &bound,
                     checked.as_deref(),
+                    None,
                     None,
                     settlement,
                 )?;
@@ -7960,6 +8268,7 @@ where
         bound: &[(&BoundBinder, PreparedHandle)],
         checked: Option<&CheckedTurnCompletion>,
         staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
+        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         if let Some(staged) = &staged_interface {
@@ -8045,7 +8354,33 @@ where
             };
             entries.push(entry);
         }
-        if let Some(completion) = private_overlay {
+        if let Some(execution) = private_input {
+            if execution.private_scope() != scope
+                || !Arc::ptr_eq(&execution.owner, self.state.admission_owner())
+                || execution.owner_epoch != self.state.admission_owner().epoch()
+                || entries.len() != 1
+                || self.state.bindings().get(entries[0].id).is_some()
+                || self.state.resolve_in(scope, &entries[0].name.0).is_some()
+            {
+                if let Some(engine) = self.state.prepared_mut() {
+                    engine.release_all(entries.into_iter().map(|entry| entry.value.handle));
+                }
+                return Err(SessionError::StaleStagedDeclaration.into());
+            }
+            // Explicit input is never a logical declaration/value head. It
+            // must not retract a declaration with the same spelling.
+            let id = entries[0].id;
+            let entry = entries.pop().expect("one private host entry");
+            let handle = entry.value.handle;
+            if let Err(error) = self.state.bind_in(scope, entry) {
+                if let Some(engine) = self.state.prepared_mut() {
+                    engine.release(handle);
+                }
+                return Err(error.into());
+            }
+            self.hidden_host_bindings
+                .insert(id, HiddenHostBinding::PrivateInput);
+        } else if let Some(completion) = private_overlay {
             self.state
                 .bind_checked_private_values_in(completion, scope, entries, &binders)?;
         } else {
@@ -9696,10 +10031,7 @@ mod authored_publication_tests {
         })
         .unwrap();
         let first = checked.checked_item(0).unwrap();
-        let prefix = state
-            .begin_cell_program(program)
-            .unwrap()
-            .unwrap();
+        let prefix = state.begin_cell_program(program).unwrap().unwrap();
         let mut resident = TestSession::from_persistent_for_test(frunk::HNil, EmptyOutput, state);
         resident
             .set_run_context(SessionRunContext {
@@ -9812,8 +10144,12 @@ mod authored_publication_tests {
             id
         };
         let (_root, mut session) = startup_session();
+        let original = session.state.mint_notebook_scope_with_lease(None).unwrap();
         let parent = session.mint_isolated_scope();
-        let id = bind(&mut session, parent, 701);
+        let _parent = session.adopt_initial_notebook_scope(parent).unwrap();
+        let id = source_action(&mut session, &original, |session, _| {
+            bind(session, parent, 701)
+        });
         let child = session.mint_scope(parent).unwrap();
         let before = session.state.compile_view_key_in(child).unwrap();
         let visible = session.compile_view_in(child).unwrap();
@@ -9856,7 +10192,10 @@ mod authored_publication_tests {
             .is_current_for(&hidden));
 
         let orphan_owner = session.mint_isolated_scope();
-        let orphan = bind(&mut session, orphan_owner, 702);
+        let _orphan = session.adopt_initial_notebook_scope(orphan_owner).unwrap();
+        let orphan = source_action(&mut session, &original, |session, _| {
+            bind(session, orphan_owner, 702)
+        });
         let orphan_binder = BoundBinder {
             var_id: orphan.raw(),
             module: SessionModule::val(Generation(702)).module_name(),
@@ -9874,6 +10213,48 @@ mod authored_publication_tests {
         assert!(after_prune != before_prune);
         session.prune_binding_metadata();
         assert!(session.state.compile_view_key_in(child).as_ref() == Some(&after_prune));
+    }
+
+    #[test]
+    fn never_visible_input_retirement_keeps_hidden_classification_until_last_lease() {
+        let (_root, mut session) = startup_session();
+        let original = session.state.mint_notebook_scope_with_lease(None).unwrap();
+        let private = session.mint_isolated_scope();
+        let _private = session.adopt_initial_notebook_scope(private).unwrap();
+        let id = source_action(&mut session, &original, |session, _| {
+            let entry = crate::session::prepared::tests::evaluated_publication_fixture(
+                &mut session.state,
+                "input",
+                703,
+            );
+            let id = entry.id;
+            session.state.bind_in(private, entry).unwrap();
+            id
+        });
+        // Component state-machine fixture: production classification is issued
+        // solely by the atomic private mount, whose native receipt is separate.
+        session
+            .hidden_host_bindings
+            .insert(id, HiddenHostBinding::PrivateInput);
+        let leases = session.state.acquire_binding_leases([id]);
+        assert_eq!(leases.len(), 1);
+        let public_key = session.state.compile_view_key_in(ScopeId::ROOT).unwrap();
+        session.retire_binding_owner(id);
+        assert!(session.state.bindings().get(id).is_some());
+        assert_eq!(
+            session.hidden_host_bindings.get(&id),
+            Some(&HiddenHostBinding::PrivateInput)
+        );
+        session.prune_binding_metadata();
+        assert!(session.hidden_host_bindings.contains_key(&id));
+        assert!(session.state.compile_view_key_in(ScopeId::ROOT).as_ref() == Some(&public_key));
+        let expired = session.state.release_binding_leases(leases);
+        assert_eq!(expired.len(), 1);
+        session.state.release_binding_roots(expired);
+        assert!(session.state.bindings().get(id).is_none());
+        session.prune_binding_metadata();
+        assert!(!session.hidden_host_bindings.contains_key(&id));
+        assert!(session.state.compile_view_key_in(ScopeId::ROOT).as_ref() == Some(&public_key));
     }
 
     #[test]
@@ -9926,7 +10307,9 @@ mod authored_publication_tests {
             session.capture_inspection_inputs(&view),
             Err(SessionError::StaleStagedDeclaration)
         ));
-        session.hidden_host_bindings.insert(hidden_id, ());
+        session
+            .hidden_host_bindings
+            .insert(hidden_id, HiddenHostBinding::Generic);
         let normalized = session.compile_view_in(ScopeId::ROOT).unwrap();
         assert!(matches!(
             session.capture_inspection_inputs(&normalized),
@@ -10220,7 +10603,9 @@ mod authored_publication_tests {
                     "explicit A retirement is not evidence of B END"
                 );
                 assert!(matches!(
-                    target_weak.upgrade().map(|lease| target_fence.reopen(&lease)),
+                    target_weak
+                        .upgrade()
+                        .map(|lease| target_fence.reopen(&lease)),
                     Some(Err(super::super::SourceAdmissionError::Unconfirmed { .. }))
                 ));
                 recipient.state.retire_scope(target_scope);
@@ -11977,10 +12362,7 @@ mod authored_publication_tests {
         })
         .unwrap();
         let item = checked.checked_item(0).unwrap();
-        let prefix = session
-            .begin_cell_program(program)
-            .unwrap()
-            .unwrap();
+        let prefix = session.begin_cell_program(program).unwrap().unwrap();
         let item_admission = session.admit_checked_item(prefix.clone(), item).unwrap();
         let generation = item_admission.generation();
         let TurnResult::Bind {

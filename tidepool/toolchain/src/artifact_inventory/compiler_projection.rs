@@ -661,7 +661,7 @@ mod type_query_work {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdmittedCompilerRoles {
     rows: imbl::OrdMap<ExactModuleIdentity, ResolvedCompilerRole>,
-    home_units: Arc<BTreeSet<String>>,
+    home_units: Arc<imbl::OrdSet<String>>,
 }
 
 impl AdmittedCompilerRoles {
@@ -676,7 +676,7 @@ impl AdmittedCompilerRoles {
         }
         Self {
             rows: rows.into_iter().collect(),
-            home_units: Arc::new(home_units),
+            home_units: Arc::new(home_units.into_iter().collect()),
         }
     }
 
@@ -851,6 +851,122 @@ impl SelectedCompilerInterfaces<'_> {
     }
 }
 
+impl ArtifactView {
+    /// Reuse the exact issued canonical rows and proof owners. This operation
+    /// adds no native roots, decisions, materialization inventory or new scope.
+    fn append_type_interfaces<'a>(
+        &self,
+        additions: impl IntoIterator<Item = &'a (ArtifactView, ResolvedCompilerRole)>,
+    ) -> Result<Self, CompileError> {
+        let mut selection = self.lease.selection.as_ref().clone();
+        let mut payloads = self.lease.payloads.clone();
+        let mut acquired_owner_counts = self.lease.acquired_owner_counts.clone();
+        let mut pending_scopes = Vec::new();
+        let mut scope_sources = BTreeMap::new();
+        let mut introduced = Vec::new();
+        for (source, row) in additions {
+            let (binding, entry) = &row.interface;
+            if selection
+                .namespace
+                .get(&binding.artifact)
+                .is_some_and(|prior| prior != binding)
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::BindingAmbiguity {
+                        artifact: binding.artifact,
+                    },
+                ));
+            }
+            selection.namespace.insert(binding.artifact, *binding);
+            selection
+                .roots
+                .insert(InventoryNodeKey::Artifact(*binding), ());
+            if !payloads.contains_key(&binding.artifact) {
+                ViewLease::insert_payload(
+                    &mut payloads,
+                    &mut acquired_owner_counts,
+                    binding.artifact,
+                    Arc::clone(entry),
+                );
+                introduced.push((binding.artifact, Arc::clone(entry)));
+            } else if payloads[&binding.artifact].as_ref() != entry.as_ref() {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::MetadataConflict {
+                        artifact: binding.artifact,
+                    },
+                ));
+            }
+            if !Arc::ptr_eq(&payloads[&binding.artifact], entry) {
+                ViewLease::insert_payload(
+                    &mut payloads,
+                    &mut acquired_owner_counts,
+                    binding.artifact,
+                    Arc::clone(entry),
+                );
+                introduced.push((binding.artifact, Arc::clone(entry)));
+            }
+            pending_scopes.push((binding.selection, source));
+        }
+        while let Some((scope, source)) = pending_scopes.pop() {
+            let proof = source
+                .lease
+                .selection
+                .scopes
+                .get(&scope)
+                .ok_or_else(|| failure("type-interface binding lacks its issuing proof"))?;
+            if let Some(prior) = selection.scopes.get(&scope) {
+                if prior != proof {
+                    return Err(failure(
+                        "type-interface scope has differing immutable proofs",
+                    ));
+                }
+                continue;
+            }
+            pending_scopes.extend(
+                proof
+                    .proof()
+                    .scope_dependencies()
+                    .into_iter()
+                    .map(|ancestor| (ancestor, source)),
+            );
+            selection.scopes.insert(scope, proof.clone());
+            scope_sources.insert(scope, Arc::clone(proof.proof()));
+        }
+        {
+            let mut state = self.lease.inventory.0.lock().expect("inventory lock");
+            let proofs = scope_proof::prepare_install(&state, scope_sources.into_values())?;
+            scope_proof::install(&mut state, proofs);
+            for (id, entry) in introduced {
+                state.intern(id, &entry);
+            }
+        }
+        let mut materialization_sources = self.lease.materialization_sources.clone();
+        materialization_sources.insert(
+            self.lease.materialization.id(),
+            self.lease.materialization.clone(),
+        );
+        // New canonical rows carry their immutable bytes in the actual payload
+        // owners. An incoming view's unrelated cached physical files are not
+        // required to materialize those rows.
+        let lease = Arc::new(ViewLease {
+            admission_roots: self.lease.admission_roots.clone(),
+            selection: Arc::new(selection),
+            payloads,
+            acquired_owner_counts,
+            inventory: self.lease.inventory.clone(),
+            materialization_sources,
+            materialization: MaterializationSource {
+                cache: Arc::new(Mutex::new(BTreeMap::new())),
+                parents: Arc::from([self.lease.materialization.id()]),
+                fixed: Default::default(),
+            },
+        });
+        // This existing cleanup also releases strong snapshot owners belonging
+        // to dead views. Its registry scan is separate from keyed role work.
+        Ok(Self::from_custody(lease))
+    }
+}
+
 impl CompilerSourceSupport {
     /// Borrow only demanded roles and their canonical and Original interface
     /// requirements from this exact cold issuer. This does not select native
@@ -1008,7 +1124,7 @@ impl CompilerSourceSupport {
             source_support: Arc::clone(self),
             projection,
             metadata: CompilerArtifactMetadata {
-                entries,
+                entries: entries.into_iter().collect(),
                 retained: Arc::clone(retained),
             },
             owners,
@@ -1494,6 +1610,147 @@ impl CompilerSourceSupport {
                 transport_binding: &transport.0,
                 entry: &transport.1,
             }
+        })
+    }
+
+    pub(crate) fn world_primary_type_row(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Option<WorldPrimaryTypeRow<'_>> {
+        #[cfg(test)]
+        type_query_work::lookup();
+        let (owner, row) = self.selected.rows.get_key_value(owner)?;
+        let transport = row.original.as_ref().unwrap_or(&row.interface);
+        Some(WorldPrimaryTypeRow {
+            owner,
+            interface_binding: &row.interface.0,
+            original_binding: row.original.as_ref().map(|(binding, _)| binding),
+            transport_binding: &transport.0,
+            entry: &transport.1,
+        })
+    }
+
+    /// Add only already-admitted type roles. Existing roles retain their exact
+    /// canonical/native binding pairs and all executable choices remain shared.
+    pub(crate) fn with_type_interfaces(
+        &self,
+        incoming: &[&Self],
+        producer: [u8; 32],
+    ) -> Result<(Self, Vec<ExactModuleIdentity>), CompileError> {
+        let mut projection = self.projection.clone();
+        let mut selected = self.selected.as_ref().clone();
+        let mut home_units = self.selected.home_units.as_ref().clone();
+        let mut additions = BTreeMap::new();
+        for support in incoming {
+            for (owner, row) in support.selected.iter() {
+                crate::host_work::checkpoint()?;
+                if producer == [0; 32] || row.interface.1.descriptor.producer_sha256 != producer {
+                    return Err(failure(
+                        "type-interface row differs from the primary compiler producer",
+                    ));
+                }
+                let role = &support.projection.roles[owner];
+                if !matches!(role, CompilerInputRole::InterfaceOnly { .. })
+                    || row.original.is_some()
+                {
+                    return Err(failure("type-interface delta contains an original role"));
+                }
+                CompilerInputProjection::validate_role_payload(
+                    owner,
+                    role,
+                    &row.interface.1,
+                    |_| None,
+                )?;
+                if let Some(prior) = selected.get(owner) {
+                    if prior.interface.0.artifact != row.interface.0.artifact {
+                        return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
+                            owner: owner.clone(),
+                        }));
+                    }
+                    if prior.interface.0 != row.interface.0 {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::BindingAmbiguity {
+                                artifact: row.interface.0.artifact,
+                            },
+                        ));
+                    }
+                    continue;
+                }
+                projection.admit_role(owner.clone(), role.clone())?;
+                if let ArtifactPayload::Canonical(interface) = &row.interface.1.payload {
+                    home_units.extend(interface.home_units().iter().cloned());
+                }
+                selected.rows.insert(owner.clone(), row.clone());
+                additions.insert(owner.clone(), (support.artifacts.clone(), row.clone()));
+            }
+        }
+        if additions.is_empty() {
+            return Ok((self.clone(), Vec::new()));
+        }
+        // Incoming contexts already own closed canonical selections. Check only
+        // those obligations against the exact combined rows; never census the
+        // receiver's untouched roles or executable dependency graph.
+        for support in incoming {
+            projection.validate_requirements(
+                support
+                    .selected
+                    .iter()
+                    .map(|(_, row)| row.interface.1.as_ref()),
+                |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
+            )?;
+        }
+        selected.home_units = Arc::new(home_units);
+        let artifacts = self.artifacts.append_type_interfaces(additions.values())?;
+        let changed = additions.into_keys().collect();
+        let mut result = self.clone();
+        result.projection = projection;
+        result.selected = Arc::new(selected);
+        result.artifacts = artifacts;
+        Ok((result.refreshed_native_facts()?, changed))
+    }
+
+    pub(crate) fn type_interface_metadata(
+        &self,
+        prior: &CompilerArtifactMetadata,
+        changed: &[ExactModuleIdentity],
+    ) -> Result<CompilerArtifactMetadata, CompileError> {
+        let mut entries = prior.entries.clone();
+        let mut retained = prior.retained.as_ref().clone();
+        for owner in changed {
+            let row = self.selected.get(owner).expect("newly admitted type row");
+            let (binding, entry) = &row.interface;
+            entries.insert(owner.clone(), Arc::clone(entry));
+            retained
+                .artifacts
+                .insert(binding.artifact, Arc::clone(entry));
+            // The retained catalog uses the greatest canonical ID, unless a
+            // unique native carrier already owns the representative position.
+            if retained
+                .entries
+                .get(owner)
+                .is_none_or(|prior| !prior.is_native() && prior.descriptor.id < binding.artifact)
+            {
+                retained.entries.insert(owner.clone(), Arc::clone(entry));
+            }
+            let node = InventoryNodeKey::Artifact(*binding);
+            let proof = self.artifacts.lease.selection.scopes[&binding.selection].proof();
+            let start = proof
+                .dependencies
+                .partition_point(|(source, _, _)| *source < node);
+            for (_, target, dependency) in proof.dependencies[start..]
+                .iter()
+                .take_while(|(source, _, _)| *source == node)
+            {
+                retained.dependencies.insert((
+                    binding.artifact,
+                    target.artifact(),
+                    dependency.clone(),
+                ));
+            }
+        }
+        Ok(CompilerArtifactMetadata {
+            entries,
+            retained: Arc::new(retained),
         })
     }
 
@@ -2660,6 +2917,7 @@ impl NativeNamespaceContributions {
 enum CompilerRolePayloads<'a> {
     Retained(RetainedArtifactPayloads<'a>),
     Metadata(&'a BTreeMap<ArtifactId, Arc<ArtifactEntry>>),
+    PersistentMetadata(&'a imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>),
 }
 
 impl CompilerRolePayloads<'_> {
@@ -2667,6 +2925,7 @@ impl CompilerRolePayloads<'_> {
         match self {
             Self::Retained(payloads) => payloads.get(id),
             Self::Metadata(payloads) => payloads.get(id),
+            Self::PersistentMetadata(payloads) => payloads.get(id),
         }
     }
 }
@@ -3065,7 +3324,7 @@ impl CompilerInputProjection {
         metadata: Arc<RetainedArtifactMetadata>,
     ) -> Result<CompilerArtifactMetadata, CompileError> {
         Ok(CompilerArtifactMetadata {
-            entries: self.entries_from_metadata(&metadata)?,
+            entries: self.entries_from_metadata(&metadata)?.into_iter().collect(),
             retained: metadata,
         })
     }
@@ -3162,7 +3421,9 @@ impl CompilerInputProjection {
         &self,
         metadata: &RetainedArtifactMetadata,
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
-        self.entries_from_artifacts(&metadata.artifacts)
+        self.entries_from_payloads(CompilerRolePayloads::PersistentMetadata(
+            &metadata.artifacts,
+        ))
     }
 
     pub(crate) fn entries_from_artifacts(
@@ -3459,7 +3720,13 @@ mod tests {
                 .unwrap();
             let work = type_query_work::take();
             let after = inventory.metrics();
-            assert_eq!(demanded.metadata().entries, expected);
+            assert_eq!(
+                demanded.metadata().entries,
+                expected
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                    .collect()
+            );
             assert_eq!(
                 demanded.owners(),
                 &expected.keys().cloned().collect::<BTreeSet<_>>()
@@ -4002,7 +4269,7 @@ mod tests {
             let support = CompilerSourceSupport::new(projection.clone(), view.clone(), [], Default::default()).unwrap();
             let admission_work = type_query_work::take();
             proptest::prop_assert_eq!(admission_work.census_rows, entries.len());
-            proptest::prop_assert_eq!(support.selected.home_units.as_ref(), &expected_home_units);
+            proptest::prop_assert_eq!(support.selected.home_units.iter().cloned().collect::<BTreeSet<_>>(), expected_home_units);
             let context = Arc::new(ExactDeclarationContext::from_authenticated_interfaces([2; 32], &view, projection).unwrap());
             let source = crate::declaration_context::ValidatedOriginalSource::inputs_from(&context);
             let signature = type_signature("unit", "Selected");
@@ -4032,7 +4299,7 @@ mod tests {
                 let actual = result.compiler_source_support();
                 proptest::prop_assert_eq!(&actual.selected, &oracle.selected);
                 proptest::prop_assert_eq!(actual.artifacts.selection_snapshot(), oracle.artifacts.selection_snapshot());
-                proptest::prop_assert_eq!(actual.selected.home_units.as_ref(), &BTreeSet::from(["unit".to_owned()]));
+                proptest::prop_assert_eq!(actual.selected.home_units.iter().cloned().collect::<BTreeSet<_>>(), BTreeSet::from(["unit".to_owned()]));
                 for (owner, original) in &expected {
                     proptest::prop_assert_eq!(&actual.selected[owner].interface.1, original);
                 }
@@ -4598,6 +4865,228 @@ mod tests {
                 "native-fact-successor unrelated={unrelated} cold={cold:?} changed={delta:?}"
             );
         }
+    }
+
+    #[test]
+    fn keyed_type_interfaces_preserve_native_choices_and_bound_role_work() {
+        let mut observed = None;
+        for unrelated in [1, 32, 128] {
+            let inventory = ArtifactInventory::default();
+            let mut entries = decision_affinity_entries();
+            entries.extend((0..unrelated).map(|index| {
+                Arc::new(ArtifactEntry::canonical(
+                    crate::certified_products::fixture_module_interface(
+                        [2; 32],
+                        "unrelated",
+                        &format!("Prior{index}"),
+                        BTreeMap::new(),
+                    ),
+                ))
+            }));
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .unwrap();
+            let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+            let metadata = source
+                .projection
+                .project_metadata(source.artifacts.metadata_snapshot())
+                .unwrap();
+
+            let required = Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    [2; 32],
+                    "changed",
+                    "Required",
+                    BTreeMap::new(),
+                ),
+            ));
+            let addition = Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    [2; 32],
+                    "changed",
+                    "OnlyNew",
+                    BTreeMap::from([(
+                        ("changed".into(), "Required".into()),
+                        required.descriptor.interface_sha256,
+                    )]),
+                ),
+            ));
+            let incoming_inventory = ArtifactInventory::default();
+            let incoming_entries = vec![required, addition];
+            let incoming_projection =
+                CompilerInputProjection::from_issued_entries(&incoming_entries).unwrap();
+            let incoming_view = incoming_inventory
+                .admit_shared(&incoming_inventory.empty_view(), incoming_entries)
+                .unwrap();
+            let incoming = CompilerSourceSupport::new(
+                incoming_projection,
+                incoming_view,
+                [],
+                Default::default(),
+            )
+            .unwrap();
+            let before = inventory.metrics();
+            let registry_visits = inventory.0.lock().unwrap().views.len();
+            type_query_work::take();
+            crate::exact_context::take_native_fact_work();
+            let (changed, owners) = source.with_type_interfaces(&[&incoming], [2; 32]).unwrap();
+            let updated_metadata = changed.type_interface_metadata(&metadata, &owners).unwrap();
+            let work = type_query_work::take();
+            let native_work = crate::exact_context::take_native_fact_work();
+            let after = inventory.metrics();
+            assert_eq!(owners.len(), 2);
+            assert_eq!(work.census_rows, 0);
+            assert_eq!(work.resolved_rows, 0);
+            assert_eq!(work.canonical_checks, 0);
+            assert_eq!(work.certificate_hashes, 0);
+            assert_eq!(work.descriptor_serializations, 0);
+            assert_eq!(after.graph_visits, before.graph_visits);
+            assert_eq!(after.entry_handle_copies, before.entry_handle_copies);
+            assert_eq!(native_work.changed_entries, 2);
+            let mut logical_work = work;
+            // Persistent tree path copies clone fixed-size references; they
+            // are distinct from visiting/revalidating retained role facts.
+            logical_work.cloned_rows = 0;
+            if let Some(expected) = observed {
+                assert_eq!(logical_work, expected);
+            }
+            if unrelated >= 32 {
+                assert!(
+                    work.cloned_rows < unrelated,
+                    "path reference copies must not clone the retained namespace: {work:?}"
+                );
+            }
+            observed = Some(logical_work);
+            assert!(Arc::ptr_eq(&source.native_offers, &changed.native_offers));
+            assert_eq!(source.native_offer_facts, changed.native_offer_facts);
+            assert_eq!(source.native_availability, changed.native_availability);
+            assert_eq!(source.input_decisions, changed.input_decisions);
+            assert!(Arc::ptr_eq(
+                &metadata.retained.selected_native_groups,
+                &updated_metadata.retained.selected_native_groups
+            ));
+            assert!(Arc::ptr_eq(
+                &metadata.retained.ambiguous_native_owners,
+                &updated_metadata.retained.ambiguous_native_owners
+            ));
+            for (owner, row) in source.selected.iter() {
+                assert_eq!(&changed.selected[owner], row);
+            }
+            // An independent complete observation must agree with maintained
+            // metadata, including hidden native custody and canonical edges.
+            let complete = changed.artifacts.metadata_snapshot();
+            assert_eq!(complete.as_ref().entries, updated_metadata.retained.entries);
+            assert_eq!(complete.artifacts, updated_metadata.retained.artifacts);
+            assert_eq!(
+                complete.dependencies,
+                updated_metadata.retained.dependencies
+            );
+            assert_eq!(
+                complete.selected_native_groups,
+                updated_metadata.retained.selected_native_groups
+            );
+            assert_eq!(
+                complete.ambiguous_native_owners,
+                updated_metadata.retained.ambiguous_native_owners
+            );
+            let oracle = source
+                .extend_interfaces(&incoming.selected_interfaces().unwrap())
+                .unwrap();
+            assert_eq!(changed.selected, oracle.selected);
+            assert_eq!(changed.projection, oracle.projection);
+            assert_eq!(
+                changed.artifacts.capture_graph_selection(),
+                oracle.artifacts.capture_graph_selection()
+            );
+            type_query_work::take();
+            let (same, owners) = changed.with_type_interfaces(&[&incoming], [2; 32]).unwrap();
+            assert!(owners.is_empty());
+            assert!(Arc::ptr_eq(&same.selected, &changed.selected));
+            assert!(Arc::ptr_eq(&same.artifacts.lease, &changed.artifacts.lease));
+            eprintln!("keyed type delta: unrelated={unrelated}, work={work:?}, native_changes={}, residual_live_view_registry={}",
+                native_work.changed_entries, registry_visits);
+        }
+    }
+
+    #[test]
+    fn keyed_type_interfaces_refuse_conflicting_owner_and_equal_bytes_other_binding() {
+        let canonical = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                [2; 32],
+                "type",
+                "Shared",
+                BTreeMap::new(),
+            ),
+        ));
+        let extra = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                [2; 32],
+                "type",
+                "Extra",
+                BTreeMap::new(),
+            ),
+        ));
+        let issue = |entries: Vec<Arc<ArtifactEntry>>| {
+            let inventory = ArtifactInventory::default();
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .unwrap();
+            CompilerSourceSupport::new(projection, view, [], Default::default()).unwrap()
+        };
+        let source = issue(vec![Arc::clone(&canonical)]);
+        let independent = issue(vec![Arc::clone(&canonical), Arc::clone(&extra)]);
+        let owner = canonical.descriptor.owner.clone();
+        let same_bytes = independent
+            .selected_interfaces()
+            .unwrap()
+            .support_for_owners(vec![owner.clone()])
+            .unwrap();
+        assert_ne!(
+            source.selected[&owner].interface.0,
+            same_bytes.selected[&owner].interface.0
+        );
+        assert!(matches!(
+            source.with_type_interfaces(&[&same_bytes], [2; 32]),
+            Err(CompileError::ArtifactInventory(ArtifactInventoryError {
+                failure: ArtifactInventoryFailure::BindingAmbiguity { .. },
+                ..
+            }))
+        ));
+        let different = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                [2; 32],
+                "type",
+                "Shared",
+                BTreeMap::from([(
+                    ("type".into(), "Extra".into()),
+                    extra.descriptor.interface_sha256,
+                )]),
+            ),
+        ));
+        let conflicting = issue(vec![different, extra]);
+        assert!(matches!(
+            source.with_type_interfaces(&[&conflicting], [2; 32]),
+            Err(CompileError::ArtifactInventory(ArtifactInventoryError {
+                failure: ArtifactInventoryFailure::OwnerConflict { .. },
+                ..
+            }))
+        ));
+        let native_entries = decision_affinity_entries();
+        let inventory = ArtifactInventory::default();
+        let projection = CompilerInputProjection::from_issued_entries(&native_entries).unwrap();
+        let native = CompilerSourceSupport::from_selected_issuance(
+            projection,
+            inventory
+                .admit_shared(&inventory.empty_view(), native_entries)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            source.with_type_interfaces(&[&native], [2; 32]).is_err(),
+            "type-only ingress must not import implementation roles"
+        );
     }
 
     #[test]

@@ -50,6 +50,7 @@ rust_filegroup(
         "src/session/fixtures/checked-prior-declaration.hs": "tidepool/runtime/src/session/fixtures/checked-prior-declaration.hs",
         "src/session/fixtures/inherited-facade-subset.hs": "tidepool/runtime/src/session/fixtures/inherited-facade-subset.hs",
         "src/session/fixtures/shared_allocation_cell.hs": "tidepool/runtime/src/session/fixtures/shared_allocation_cell.hs",
+        "src/session/fixtures/world-lifetime.hs": "tidepool/runtime/src/session/fixtures/world-lifetime.hs",
         "src/session/generation_lease.rs": "tidepool/runtime/src/session/generation_lease.rs",
         "src/session/generation_lease/tests.rs": "tidepool/runtime/src/session/generation_lease/tests.rs",
         "src/session/inspection.rs": "tidepool/runtime/src/session/inspection.rs",
@@ -172,6 +173,7 @@ rust_filegroup(
         "src/session/fixtures/checked-prior-declaration.hs": "tidepool/runtime/src/session/fixtures/checked-prior-declaration.hs",
         "src/session/fixtures/inherited-facade-subset.hs": "tidepool/runtime/src/session/fixtures/inherited-facade-subset.hs",
         "src/session/fixtures/shared_allocation_cell.hs": "tidepool/runtime/src/session/fixtures/shared_allocation_cell.hs",
+        "src/session/fixtures/world-lifetime.hs": "tidepool/runtime/src/session/fixtures/world-lifetime.hs",
         "src/session/generation_lease.rs": "tidepool/runtime/src/session/generation_lease.rs",
         "src/session/generation_lease/tests.rs": "tidepool/runtime/src/session/generation_lease/tests.rs",
         "src/session/inspection.rs": "tidepool/runtime/src/session/inspection.rs",
@@ -370,6 +372,7 @@ rust_filegroup(
         "src/session/fixtures/typed-segment-zero-let-invalid-layout.hs": "tidepool/runtime/src/session/fixtures/typed-segment-zero-let-invalid-layout.hs",
         "src/session/fixtures/typed-segment-zero-let-newline.hs": "tidepool/runtime/src/session/fixtures/typed-segment-zero-let-newline.hs",
         "src/session/fixtures/unrelated-home-value.hs": "tidepool/runtime/src/session/fixtures/unrelated-home-value.hs",
+        "src/session/fixtures/world-lifetime.hs": "tidepool/runtime/src/session/fixtures/world-lifetime.hs",
         "src/session/generation_lease.rs": "tidepool/runtime/src/session/generation_lease.rs",
         "src/session/generation_lease/tests.rs": "tidepool/runtime/src/session/generation_lease/tests.rs",
         "src/session/inspection.rs": "tidepool/runtime/src/session/inspection.rs",
@@ -604,6 +607,7 @@ rust_filegroup(
         "src/session/fixtures/typed-segment-zero-let-invalid-layout.hs": "tidepool/runtime/src/session/fixtures/typed-segment-zero-let-invalid-layout.hs",
         "src/session/fixtures/typed-segment-zero-let-newline.hs": "tidepool/runtime/src/session/fixtures/typed-segment-zero-let-newline.hs",
         "src/session/fixtures/unrelated-home-value.hs": "tidepool/runtime/src/session/fixtures/unrelated-home-value.hs",
+        "src/session/fixtures/world-lifetime.hs": "tidepool/runtime/src/session/fixtures/world-lifetime.hs",
         "src/session/generation_lease.rs": "tidepool/runtime/src/session/generation_lease.rs",
         "src/session/generation_lease/tests.rs": "tidepool/runtime/src/session/generation_lease/tests.rs",
         "src/session/inspection.rs": "tidepool/runtime/src/session/inspection.rs",
@@ -811,17 +815,98 @@ tidepool_rust_test_cases(
 )
 
 tidepool_rust_test_cases(
+    name = "runtime_world_owner_controls",
+    binary = ":tidepool_runtime_unit_tests",
+    exact_tests = [
+        "session::resident::activation_input_tests::resident_parcel_preserves_original_authenticated_request_across_sessions",
+        "session::turn::tests::checked_declaration_cancellation_after_reservation_preserves_prefix",
+    ],
+    expected_count = 2,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 1260000,
+    case_compiler_modes = {"session::resident::activation_input_tests::resident_parcel_preserves_original_authenticated_request_across_sessions": "owned-resident", "session::turn::tests::checked_declaration_cancellation_after_reservation_preserves_prefix": "owned-resident"},
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//bridge/haskell:freer_resume_prepared",
+        "//bridge/haskell:freer_retention_prepared",
+        "//bridge/haskell:m3_vertical_prepared",
+        "toolchains//:ghc",
+        "//build/package:compiler_service_deployment",
+    ],
+    resource_env = {
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_FREER_RESUME_FIXTURE_DIR": "$(location //bridge/haskell:freer_resume_prepared)",
+        "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR": "$(location //bridge/haskell:freer_retention_prepared)",
+        "TIDEPOOL_GHC": "$(exe toolchains//:ghc)",
+        "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+        "TIDEPOOL_M3_FIXTURE_DIR": "$(location //bridge/haskell:m3_vertical_prepared)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "runtime_admission_tests",
     binary = ":tidepool_runtime_unit_tests",
     exact_tests = [
         "session::admission::tests::initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes",
         "session::admission::tests::native_admission_uses_exact_scoped_roots_and_keeps_its_original_ledger",
         "session::admission::tests::native_admission_commits_the_live_machine_export_owner",
+        "session::admission::tests::selected_native_imports_keep_exact_scoped_roots_and_refuse_sibling_only_values",
+        "session::admission::tests::settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots",
+        "session::admission::tests::world_private_admission_requires_the_actual_transaction_original",
+        "session::resident::authored_publication_tests::inspection_key_invalidates_hidden_inherited_binding_projection",
+        "session::resident::authored_publication_tests::never_visible_input_retirement_keeps_hidden_classification_until_last_lease",
     ],
-    expected_count = 3,
+    expected_count = 8,
     jobs = 1,
     timeout = 30,
-    test_rule_timeout_ms = 150000,
+    test_rule_timeout_ms = 300000,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "runtime_world_lifetime_tests",
+    binary = ":tidepool_runtime_unit_tests",
+    exact_tests = ["session::persistent::checkpoint_scope_tests::completed_world_holds_exact_source_custody_until_install_and_abandonment"],
+    expected_count = 1,
+    ignored = True,
+    jobs = 1,
+    timeout = 180,
+    test_rule_timeout_ms = 240000,
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//bridge/haskell:freer_resume_prepared",
+        "//bridge/haskell:freer_retention_prepared",
+        "//bridge/haskell:m3_vertical_prepared",
+        "toolchains//:ghc",
+        "//build/package:compiler_service_deployment",
+    ],
+    resource_env = {
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_FREER_RESUME_FIXTURE_DIR": "$(location //bridge/haskell:freer_resume_prepared)",
+        "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR": "$(location //bridge/haskell:freer_retention_prepared)",
+        "TIDEPOOL_GHC": "$(exe toolchains//:ghc)",
+        "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+        "TIDEPOOL_M3_FIXTURE_DIR": "$(location //bridge/haskell:m3_vertical_prepared)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    haskell_worker = True,
+    case_compiler_modes = {"session::persistent::checkpoint_scope_tests::completed_world_holds_exact_source_custody_until_install_and_abandonment": "owned-resident"},
     visibility = ["PUBLIC"],
 )
 
@@ -972,6 +1057,17 @@ tidepool_rust_test_cases(
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
     },
     haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_compiler_cell_program_requires_runtime_settlement",
+    source = "tests/compile_fail/compiler_cell_program_requires_runtime_settlement.rs",
+    control = "tests/compile_pass/compiler_cell_program_requires_runtime_settlement.rs",
+    expected = "tests/compile_fail/compiler_cell_program_requires_runtime_settlement.stderr",
+    dependencies = {
+        "tidepool_runtime": ":tidepool_runtime",
+    },
     visibility = ["PUBLIC"],
 )
 
@@ -1373,6 +1469,7 @@ filegroup(
         "tidepool/runtime/src/session/fixtures/typed-segment-zero-let-invalid-layout.hs": "src/session/fixtures/typed-segment-zero-let-invalid-layout.hs",
         "tidepool/runtime/src/session/fixtures/typed-segment-zero-let-newline.hs": "src/session/fixtures/typed-segment-zero-let-newline.hs",
         "tidepool/runtime/src/session/fixtures/unrelated-home-value.hs": "src/session/fixtures/unrelated-home-value.hs",
+        "tidepool/runtime/src/session/fixtures/world-lifetime.hs": "src/session/fixtures/world-lifetime.hs",
         "tidepool/runtime/src/session/generation_lease.rs": "src/session/generation_lease.rs",
         "tidepool/runtime/src/session/generation_lease/tests.rs": "src/session/generation_lease/tests.rs",
         "tidepool/runtime/src/session/inspection.rs": "src/session/inspection.rs",
@@ -1432,6 +1529,8 @@ filegroup(
         "tidepool/runtime/tests/prepared_residency.rs": "tests/prepared_residency.rs",
         "tidepool/runtime/tests/prepared_resident_composite.rs": "tests/prepared_resident_composite.rs",
         "tidepool/runtime/tests/prepared_unit_codegen_cost.rs": "tests/prepared_unit_codegen_cost.rs",
+        "tidepool/runtime/tests/service_cell_slice.rs": "tests/service_cell_slice.rs",
+        "tidepool/runtime/tests/service_cell_warm_timing.rs": "tests/service_cell_warm_timing.rs",
         "tidepool/runtime/tests/suites/session.rs": "tests/suites/session.rs",
     },
     visibility = ["PUBLIC"],

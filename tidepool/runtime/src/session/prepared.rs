@@ -1680,6 +1680,13 @@ impl RequestCompileAnnotations {
 }
 
 impl SiteTypeEvidence {
+    /// Original authenticated request type owner; observation grants no execution.
+    pub fn original_request_context(
+        &self,
+    ) -> Option<&Arc<tidepool_toolchain::declaration_join::ExactCompileContext>> {
+        self.request_context.as_ref()
+    }
+
     pub fn request_type_signatures(
         &self,
     ) -> Option<&Arc<tidepool_toolchain::checked_cell::RequestTypeSignatures>> {

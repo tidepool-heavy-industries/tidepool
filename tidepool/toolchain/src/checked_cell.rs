@@ -1689,6 +1689,11 @@ impl PartialEq for ExactHostBindingPrototype {
 impl Eq for ExactHostBindingPrototype {}
 
 impl ExactHostBindingPrototype {
+    /// The retained native TYPE witness; this read grants no binding or execution.
+    pub fn signature(&self) -> &ExactCheckedSignature {
+        &self.signature
+    }
+
     pub fn context(&self) -> &Arc<crate::declaration_context::ExactDeclarationContext> {
         &self.context
     }

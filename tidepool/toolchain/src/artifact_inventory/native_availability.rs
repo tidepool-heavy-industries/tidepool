@@ -1060,7 +1060,7 @@ impl CertifiedNativeDemandAcquisition {
 #[track_caller]
 pub(crate) fn validate_consumed_native_namespace(
     dependency: &ArtifactEntry,
-    namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+    namespace: &impl super::ArtifactEntryMap<ExactModuleIdentity>,
 ) -> Result<(), CompileError> {
     let ArtifactPayload::Original(product) = &dependency.payload else {
         return Err(failure("issued native dependency is not an original"));

@@ -7,6 +7,8 @@ load("//build/rust:codegen-md5.bzl", "tidepool_codegen_md5")
 
 load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")
 
+load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
+
 rust_filegroup(
     name = "tidepool_codegen_sources",
     mapped_srcs = {
@@ -295,6 +297,24 @@ tidepool_rust_isolated_test(
         "TIDEPOOL_FREER_RESUME_FIXTURE_DIR": "$(location //bridge/haskell:freer_resume_prepared)",
         "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR": "$(location //bridge/haskell:freer_retention_prepared)",
     },
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "codegen_publication_preparation_tests",
+    binary = ":tidepool_codegen_unit_tests_binary",
+    exact_tests = [
+        "binding_table::publication_preparation_tests::exact_visibility_query_tracks_frozen_and_promoted_identities",
+        "binding_table::publication_preparation_tests::prepared_projection_preserves_ancestor_after_local_removal",
+        "binding_table::publication_preparation_tests::promotion_shadowing_keeps_hidden_dependency_custody_without_install_allocations",
+        "binding_table::publication_preparation_tests::prepared_promotion_witness_matches_committed_history",
+        "binding_table::publication_preparation_tests::prepared_promotion_histories_match_visible_model",
+        "binding_table::publication_preparation_tests::prepared_promotion_witness_refuses_exhaustion_before_mutation",
+    ],
+    expected_count = 6,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 660000,
     visibility = ["PUBLIC"],
 )
 

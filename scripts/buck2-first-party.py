@@ -898,6 +898,21 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     return env, sorted(set(resources)), worker
 
 
+def compiler_service_test_inputs(package_name, target_name):
+    env, resources, worker = test_runtime_inputs(package_name, target_name, unit=True)
+    # The Rooted service owns its Nix library closure. Generic finite test
+    # loader paths must not enter that service's environment.
+    env.pop("LD_LIBRARY_PATH", None)
+    env.pop("TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES", None)
+    deployment = "//build/package:compiler_service_deployment"
+    env["TIDEPOOL_COMPILER_DEPLOYMENT"] = "$(location " + deployment + ")/compiler-deployment.json"
+    env["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = "$(location " + deployment + ")/compiler-service-source.bin"
+    resources = [resource for resource in resources
+                 if resource not in {"//build/package:compiler_deployment",
+                                     "//build/package:tidepool_extract_runtime_libraries"}]
+    return env, resources + [deployment], worker
+
+
 # Single-path execution inputs must be resolved and forwarded by the native
 # runner as declared resources. LD_LIBRARY_PATH here names one declared
 # runtime-libraries directory; scalar controls stay in ordinary env.
@@ -1064,6 +1079,7 @@ def compile_fail_cases(package, library):
         "native_group_issuer_is_not_artifact": (),
         "native_group_issuer_fields_are_private": (),
         "compiler_cell_requires_settled": (),
+        "compiler_cell_program_requires_runtime_settlement": (),
         "compiler_renderer_requires_settled": (),
         "compiler_settled_consumed_once": (),
         "compiler_settled_no_reassociation": (),
@@ -1098,6 +1114,28 @@ def compile_fail_cases(package, library):
         lines.extend(["    },", '    visibility = ["PUBLIC"],', ")", ""])
         rules.append("\n".join(lines))
     return "\n".join(rules)
+
+
+def codegen_publication_test_cases(binary):
+    tests = (
+        "exact_visibility_query_tracks_frozen_and_promoted_identities",
+        "prepared_projection_preserves_ancestor_after_local_removal",
+        "promotion_shadowing_keeps_hidden_dependency_custody_without_install_allocations",
+        "prepared_promotion_witness_matches_committed_history",
+        "prepared_promotion_histories_match_visible_model",
+        "prepared_promotion_witness_refuses_exhaustion_before_mutation",
+    )
+    return "\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "codegen_publication_preparation_tests",',
+        f"    binary = {json.dumps(binary)},",
+        "    exact_tests = [",
+        *(f"        {json.dumps('binding_table::publication_preparation_tests::' + test)}," for test in tests),
+        "    ],",
+        f"    expected_count = {len(tests)},",
+        "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+        '    visibility = ["PUBLIC"],', ")", "",
+    ])
 
 
 def toolchain_compiler_free_test_cases(binary):
@@ -1209,6 +1247,13 @@ def runtime_test_cases(binary):
         "initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes",
         "native_admission_uses_exact_scoped_roots_and_keeps_its_original_ledger",
         "native_admission_commits_the_live_machine_export_owner",
+        "selected_native_imports_keep_exact_scoped_roots_and_refuse_sibling_only_values",
+        "settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots",
+        "world_private_admission_requires_the_actual_transaction_original",
+    )]
+    tests += ["session::resident::authored_publication_tests::" + name for name in (
+        "inspection_key_invalidates_hidden_inherited_binding_projection",
+        "never_visible_input_retirement_keeps_hidden_classification_until_last_lease",
     )]
     compiler_env, compiler_resources, worker = test_runtime_inputs("tidepool-runtime", "")
     compiler_arguments = runtime_arguments(
@@ -1219,9 +1264,20 @@ def runtime_test_cases(binary):
         '    name = "runtime_admission_tests",',
         f"    binary = {json.dumps(':' + binary)},",
         "    exact_tests = [", render_strings(tests, 8), "    ],",
-        "    expected_count = 3,", "    jobs = 1,", "    timeout = 30,",
-        "    test_rule_timeout_ms = 150000,", '    visibility = ["PUBLIC"],', ")", "",
+        f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 30,",
+        f"    test_rule_timeout_ms = {(len(tests) * 30 + 60) * 1000},", '    visibility = ["PUBLIC"],', ")", "",
     ])]
+    lifetime_env, lifetime_resources, lifetime_worker = compiler_service_test_inputs("tidepool-runtime", "runtime_world_lifetime_tests")
+    lifetime_test = "session::persistent::checkpoint_scope_tests::completed_world_holds_exact_source_custody_until_install_and_abandonment"
+    rules.append("\n".join([
+        "tidepool_rust_test_cases(", '    name = "runtime_world_lifetime_tests",',
+        f"    binary = {json.dumps(':' + binary)},",
+        f"    exact_tests = [{json.dumps(lifetime_test)}],",
+        "    expected_count = 1,", "    ignored = True,", "    jobs = 1,", "    timeout = 180,",
+        "    test_rule_timeout_ms = 240000,", runtime_arguments(lifetime_env, lifetime_resources, lifetime_worker),
+        "    case_compiler_modes = {" + json.dumps(lifetime_test) + ': "owned-resident"},',
+        '    visibility = ["PUBLIC"],', ")", "",
+    ]))
     semantic_tests = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
         "signed_template_helpers_execute_recursion_and_polymorphism_once",
         "genuine_let_generalization_and_unused_inner_bottom_match_ghc",
@@ -1569,7 +1625,7 @@ for package_name, package in local.items():
     if package_name == "tidepool-toolchain":
         rules.append('load("//build/rust:executable_resource.bzl", "runtime_executable")\n')
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
-    if package_name == "tidepool-runtime":
+    if package_name in ("tidepool-runtime", "tidepool-codegen"):
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
     if package_name in ("tidepool-runtime", "tidepool-toolchain"):
         rules.append('load("//build/rust:compile_fail.bzl", "rust_compile_fail")\n')
@@ -1719,25 +1775,35 @@ tidepool_buildscript_run(
                         "resident_workbench::request_tests::durable_sleep_binding_observes_real_retraction_request_and_clean_end",
                     ]) + "},"] if package_name == "exomonad-actor" else []),
                 '    visibility = ["PUBLIC"],', ")", ""]))
+            if package_name == "tidepool-runtime":
+                world_tests = [
+                    "session::resident::activation_input_tests::resident_parcel_preserves_original_authenticated_request_across_sessions",
+                    "session::turn::tests::checked_declaration_cancellation_after_reservation_preserves_prefix",
+                ]
+                world_env, world_resources, world_worker = compiler_service_test_inputs(
+                    package_name, "runtime_world_owner_controls"
+                )
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "runtime_world_owner_controls",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings(world_tests, 8), "    ],",
+                    f"    expected_count = {len(world_tests)},",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1260000,",
+                    '    case_compiler_modes = {' + ", ".join(
+                        json.dumps(test) + ': "owned-resident"' for test in world_tests
+                    ) + "},",
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
             if package_name == "exomonad-actor":
                 world_tests = [
                     "resident_workbench::request_tests::public_module_world_hot_queries_skip_retained_history_preparation",
                     "resident_workbench::request_tests::public_module_world_retains_source_domain_and_invalidates_runtime_base",
                 ]
-                world_env, world_resources, world_worker = test_runtime_inputs(
-                    package_name, "actor_compiler_world_queries_test", unit=True
+                world_env, world_resources, world_worker = compiler_service_test_inputs(
+                    package_name, "actor_compiler_world_queries_test"
                 )
-                # The Rooted service owns its Nix library closure. Generic finite
-                # test loader paths must not enter that service's environment.
-                world_env.pop("LD_LIBRARY_PATH", None)
-                world_env.pop("TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES", None)
-                deployment = "//build/package:compiler_service_deployment"
-                world_env["TIDEPOOL_COMPILER_DEPLOYMENT"] = "$(location " + deployment + ")/compiler-deployment.json"
-                world_env["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = "$(location " + deployment + ")/compiler-service-source.bin"
-                world_resources = [resource for resource in world_resources
-                                   if resource not in {"//build/package:compiler_deployment",
-                                                       "//build/package:tidepool_extract_runtime_libraries"}]
-                world_resources.append(deployment)
                 rules.append("\n".join([
                     "tidepool_rust_test_cases(",
                     '    name = "actor_compiler_world_queries_test",',
@@ -1779,30 +1845,24 @@ tidepool_buildscript_run(
                 ]))
         NATIVE_TARGETS[package_name]["libraries"][library["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("" if shared else "_binary"), "test": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("_all" if shared else "")})
         if package_name == "tidepool-toolchain":
-            world_case = "artifacts::module_product_tests::real_world_output_seals_native_items_after_its_matching_compiler_end"
-            world_env, world_resources, world_worker = test_runtime_inputs(
-                package_name, "toolchain_world_native_seal_test", unit=True
-            )
-            world_env.pop("LD_LIBRARY_PATH", None)
-            world_env.pop("TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES", None)
-            deployment = "//build/package:compiler_service_deployment"
-            world_env["TIDEPOOL_COMPILER_DEPLOYMENT"] = "$(location " + deployment + ")/compiler-deployment.json"
-            world_env["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"] = "$(location " + deployment + ")/compiler-service-source.bin"
-            world_resources = [resource for resource in world_resources
-                               if resource not in {"//build/package:compiler_deployment",
-                                                   "//build/package:tidepool_extract_runtime_libraries"}]
-            world_resources.append(deployment)
-            rules.append("\n".join([
-                "tidepool_rust_test_cases(",
-                '    name = "toolchain_world_native_seal_test",',
-                f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
-                "    exact_tests = [" + json.dumps(world_case) + "],",
-                "    expected_count = 1,", "    ignored = True,",
-                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1260000,",
-                "    case_compiler_modes = {" + json.dumps(world_case) + ': "owned-resident"},',
-                runtime_arguments(world_env, world_resources, world_worker),
-                '    visibility = ["PUBLIC"],', ")", "",
-            ]))
+            for world_target, world_case in [
+                ("toolchain_world_native_seal_test", "artifacts::module_product_tests::real_world_output_seals_native_items_after_its_matching_compiler_end"),
+                ("toolchain_world_lifetime_test", "artifacts::module_product_tests::real_world_shadow_successors_release_transport_ancestors_before_cold_restore"),
+            ]:
+                world_env, world_resources, world_worker = compiler_service_test_inputs(
+                    package_name, world_target
+                )
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    f'    name = {json.dumps(world_target)},',
+                    f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
+                    "    exact_tests = [" + json.dumps(world_case) + "],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1260000,",
+                    "    case_compiler_modes = {" + json.dumps(world_case) + ': "owned-resident"},',
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
             env, resources, worker = test_runtime_inputs(package_name, "toolchain_source_proof_pairing_test", unit=True)
             rules.append("\n".join([
                 "tidepool_rust_test_cases(",
@@ -1888,6 +1948,8 @@ tidepool_buildscript_run(
     visibility = ["PUBLIC"],
 )
 ''')
+        if package_name == "tidepool-codegen":
+            rules.append(codegen_publication_test_cases(":" + unit_target["name"] + "_binary"))
         if package_name == "exomonad-host":
             rules.append(facade_test_cases(unit_target["name"]))
         if package_name == "tidepool-runtime":

@@ -8134,7 +8134,7 @@ mod tests {
         ).unwrap());
         let includes = view.include_paths(effects.include_paths());
         let admitted = resident.with_source_compiler_transaction(
-            source,
+            source.clone(),
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             crate::CompilerTransactionCancellation::new(), None, |_| {},
             |resident, settlement| {
