@@ -1310,3 +1310,17 @@ mod retirement_retention_tests {
         assert_eq!(state.reservations.len(), 5);
     }
 }
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GenerationRetirementNativeControl {
+    BeforeSend,
+    QueuedBeforeReceive,
+    KillAfterReserve,
+    PanicAfterReserve,
+    LostWaiterAfterReserve,
+    AfterCapture,
+}
+
+#[cfg(test)]
+mod retirement_owner_tests;

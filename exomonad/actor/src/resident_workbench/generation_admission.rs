@@ -2425,6 +2425,122 @@ mod tests {
         }
     }
 
+    pub(crate) async fn assert_native_retirement_owner_control(
+        workbench: &super::super::ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        state: Arc<super::super::InstalledToolsState>,
+        context: crate::ActorSessionContext,
+        descriptor: crate::ActorDescriptor,
+        expected: Arc<super::super::ActorGeneration>,
+        prepared: super::super::PreparedActorGeneration,
+        control: crate::local_actor::run_control::GenerationRetirementNativeControl,
+    ) {
+        assert_eq!(expected.context().actor, context.actor);
+        assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
+        let (directory, directory_task) = crate::LocalActorDirectory::start().await.unwrap();
+        let (start_entered, starting) = tokio::sync::oneshot::channel();
+        let (start_release, continue_start) = tokio::sync::oneshot::channel();
+        let (stopped_entered, stopped) = tokio::sync::oneshot::channel();
+        let (stopped_release, continue_stop) = tokio::sync::oneshot::channel();
+        let identity = context.actor;
+        let spawning = tokio::spawn(
+            crate::local_actor::spawn_local_actor_in_directory_with_identity(
+                None,
+                PopulationBehavior {
+                    start_entered: Some(start_entered),
+                    start_release: Some(continue_start),
+                    stopped_entered: Some(stopped_entered),
+                    stopped_release: Some(continue_stop),
+                    realm: crate::CleanupComponentOutcome::Confirmed,
+                },
+                identity,
+                directory.clone(),
+            ),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(10), starting)
+            .await
+            .unwrap()
+            .unwrap();
+        let actor = directory.resolve(identity).await.unwrap().unwrap();
+        assert_eq!(actor.identity(), expected.context().actor);
+        let kernel = directory.context(identity).await.unwrap().unwrap();
+        let runner = workbench.boundary_runner();
+        kernel
+            .lifecycle()
+            .configure_resident(
+                context.clone(),
+                descriptor.clone(),
+                None,
+                Arc::new(runner.clone()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        kernel
+            .register_resident(context, descriptor, false)
+            .await
+            .unwrap();
+        kernel.lifecycle().generation_published(expected.clone());
+        let observed = kernel
+            .lifecycle()
+            .public_owner(Some(expected.public_owner().clone()), false)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&observed, expected.public_owner()));
+        assert_eq!(kernel.lifecycle().identity(), identity);
+        let publication = tidepool_runtime::session::PublicationDecision::new();
+        let preparation = workbench
+            .generation_publisher(
+                state.clone(),
+                super::super::ActorPublicationOwner::Actor(kernel.lifecycle().clone()),
+            )
+            .into_retirement_preparation(
+                prepared,
+                publication.clone(),
+                super::super::ActorGenerationPublication::Terminal,
+                runner.compiler_scope(super::super::CompilerCloseOwner::ActorLifecycle(
+                    kernel.retained_exit(),
+                )),
+            );
+        assert_eq!(preparation.actor(), actor.identity());
+        assert!(Arc::ptr_eq(
+            preparation.expected_generation().unwrap(),
+            &expected
+        ));
+        assert!(actor.terminal().get().is_none());
+        directory
+            .assert_generation_retirement_owner_control(
+                directory_task,
+                preparation,
+                state,
+                expected,
+                publication,
+                control,
+            )
+            .await;
+        assert!(actor.terminal().get().is_none());
+        assert!(
+            actor.terminal().requested_shutdown().is_none(),
+            "native control loss must not initiate an actor stop"
+        );
+        start_release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+            .await
+            .unwrap()
+            .unwrap();
+        stopped_release.send(()).unwrap();
+        let (finished, task) = tokio::time::timeout(std::time::Duration::from_secs(10), spawning)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(finished.identity(), identity);
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn generation_population_reports_actual_unclassified_child_without_stopping_it() {
         use crate::local_actor::run_control::{
@@ -2659,3 +2775,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) use tests::assert_native_retirement_owner_control;

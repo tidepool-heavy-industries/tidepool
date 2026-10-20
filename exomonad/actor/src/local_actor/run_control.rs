@@ -18,6 +18,8 @@ mod generation;
 pub(crate) use generation::GenerationCompilerOwner;
 pub(crate) use generation::GenerationPopulation;
 #[cfg(test)]
+pub(crate) use generation::GenerationRetirementNativeControl;
+#[cfg(test)]
 pub(crate) use generation::{
     GenerationCollateralIdentity, GenerationLifetimeEdge, GenerationResourceIdentity,
     GenerationResourceState,
@@ -640,6 +642,11 @@ pub(super) enum RunControlMessage {
     #[cfg(test)]
     PanicForNativeRetention,
     #[cfg(test)]
+    PauseForNativeRetention {
+        entered: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    },
+    #[cfg(test)]
     ObserveActorPreparations {
         actor: ActorRef,
         reply: oneshot::Sender<Vec<(u64, bool)>>,
@@ -1093,6 +1100,11 @@ impl Actor for RunControl {
             #[cfg(test)]
             RunControlMessage::PanicForNativeRetention => {
                 panic!("run-control native retention test");
+            }
+            #[cfg(test)]
+            RunControlMessage::PauseForNativeRetention { entered, release } => {
+                let _ = entered.send(());
+                let _ = release.await;
             }
             #[cfg(test)]
             RunControlMessage::ObserveActorPreparations { actor, reply } => {

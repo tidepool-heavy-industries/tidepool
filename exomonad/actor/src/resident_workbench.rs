@@ -21192,6 +21192,9 @@ pub(crate) mod request_tests {
         BootstrapCheckoutRetired,
         ReplacementCheckoutRetired,
         ReplacementFrozenSource,
+        RetirementNativeOwnerLoss(
+            crate::local_actor::run_control::GenerationRetirementNativeControl,
+        ),
     }
 
     impl PublicationFailureControl {
@@ -21311,6 +21314,18 @@ pub(crate) mod request_tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn actual_retirement_owner_loss_after_reservation_retains_frozen_candidate() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::RetirementNativeOwnerLoss(
+                    crate::local_actor::run_control::GenerationRetirementNativeControl::KillAfterReserve,
+                )),
+            ).await;
+        }).await;
+    }
+
     async fn assert_real_publisher_checkout_loss(
         workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
         state: Arc<InstalledToolsState>,
@@ -21381,6 +21396,9 @@ pub(crate) mod request_tests {
         control: PublicationFailureControl,
     ) {
         match control {
+            PublicationFailureControl::RetirementNativeOwnerLoss(_) => {
+                unreachable!("native controls use their actual directory owner")
+            }
             PublicationFailureControl::BootstrapOwnerLoss
             | PublicationFailureControl::ReplacementOwnerLoss => {
                 assert_real_publisher_owner_loss(workbench, state, prepared).await;
@@ -21857,33 +21875,39 @@ pub(crate) mod request_tests {
                 public_selection.public_root()
             );
             assert_eq!(initial_originals[0].revision(), public_selection.revision());
-            if initial_originals[0].context().semantic_sha256()
-                != public_selection.context().semantic_sha256()
-            {
-                let source_identity =
-                    |context: &tidepool_toolchain::declaration_join::ExactDeclarationContext| {
-                        let mut identities = context.compiler_input_roles().into_iter().filter_map(|role| {
-                        let tidepool_toolchain::artifact_inventory::CompilerInputRole::PublishedSourceOriginal {
-                            interface, original, source_revision, original_input_identity, selection_sha256, ..
-                        } = role else { return None; };
-                        Some((interface, original, source_revision, original_input_identity, selection_sha256))
-                    }).collect::<Vec<_>>();
-                        identities.sort();
-                        identities
-                    };
-                let installed = initial_originals[0].context();
-                let issued = public_selection.context();
-                let installed_groups = installed.artifact_view().selected_native_groups();
-                let issued_groups = issued.artifact_view().selected_native_groups();
-                eprintln!("quoted initial original context comparison: source_identity={} installed_groups={} issued_groups={} issued_subset={} gained_first16={:?}",
-                    source_identity(installed) == source_identity(issued), installed_groups.len(), issued_groups.len(),
-                    issued_groups.is_subset(&installed_groups), installed_groups.difference(&issued_groups).take(16).collect::<Vec<_>>());
-            }
+            let source_identity =
+                |context: &tidepool_toolchain::declaration_join::ExactDeclarationContext| {
+                    let mut identities = context.compiler_input_roles().into_iter().filter_map(|role| {
+                    let tidepool_toolchain::artifact_inventory::CompilerInputRole::PublishedSourceOriginal {
+                        interface, original, source_revision, original_input_identity, selection_sha256, ..
+                    } = role else { return None; };
+                    Some((interface, original, source_revision, original_input_identity, selection_sha256))
+                }).collect::<Vec<_>>();
+                    identities.sort();
+                    identities
+                };
             assert_eq!(
-                initial_originals[0].context().semantic_sha256(),
-                public_selection.context().semantic_sha256(),
-                "ordinary installation carries the exact completed original before durability"
+                source_identity(initial_originals[0].context()),
+                source_identity(public_selection.context()),
+                "installation preserves the exact issued original selection"
             );
+            assert!(public_selection
+                .context()
+                .artifact_view()
+                .selected_native_groups()
+                .is_subset(
+                    &initial_originals[0]
+                        .context()
+                        .artifact_view()
+                        .selected_native_groups()
+                ));
+            if publication_failure.is_none() {
+                assert_eq!(
+                    initial_originals[0].context().semantic_sha256(),
+                    public_selection.context().semantic_sha256(),
+                    "ordinary installation carries the exact completed original before durability"
+                );
+            }
             workbench
                 .access
                 .with_machine(context.clone(), {
@@ -22261,6 +22285,33 @@ pub(crate) mod request_tests {
                     generation_source.clone(),
                     Some(candidate),
                 );
+                if let Some(control) = publication_failure.filter(|control| !control.bootstrap()) {
+                    let prepared = workbench
+                        .prepare_actor_generation(
+                            context.clone(),
+                            descriptor.clone(),
+                            ActorRequestSnapshot::Generation(initial.clone()),
+                            next_installation.clone(),
+                            prompts.clone(),
+                        )
+                        .await
+                        .unwrap();
+                    if let PublicationFailureControl::RetirementNativeOwnerLoss(control) = control {
+                        generation_admission::assert_native_retirement_owner_control(
+                            &workbench,
+                            state,
+                            context.clone(),
+                            descriptor.clone(),
+                            initial.clone(),
+                            prepared,
+                            control,
+                        )
+                        .await;
+                    } else {
+                        assert_real_publisher_failure(&workbench, state, prepared, control).await;
+                    }
+                    return;
+                }
                 for cancelled in [false, true] {
                     let rejected = workbench
                         .prepare_actor_generation(
@@ -22462,10 +22513,6 @@ pub(crate) mod request_tests {
                     revision,
                     "an unrelated public owner forces the prepared replacement to rebase"
                 );
-                if let Some(control) = publication_failure.filter(|control| !control.bootstrap()) {
-                    assert_real_publisher_failure(&workbench, state, prepared, control).await;
-                    return;
-                }
                 let replacement = match workbench
                     .generation_publisher(
                         state.clone(),
