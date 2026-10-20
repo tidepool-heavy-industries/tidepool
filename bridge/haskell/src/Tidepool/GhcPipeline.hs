@@ -111,7 +111,7 @@ import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, Type
   pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
 import Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences, prepareSegmentDemand
-  , SegmentDemandScope, newSegmentDemandScope )
+  , ParsedSegmentDemand, segmentDemandMatchesSource, SegmentDemandScope, newSegmentDemandScope )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, renderDiag, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -498,7 +498,7 @@ preparedDependencies
   :: HscEnv -> PipelineVariant -> DependencyEvidence -> Maybe ExactCompilation
   -> IO PreparedDependencies
 preparedDependencies _ variant fresh exact
-  | Just (WorldSourceInputBasis facts _ _) <- pvWorldSources variant = case exact of
+  | Just (WorldSourceInputBasis facts _ _ _) <- pvWorldSources variant = case exact of
       Nothing -> pure (WorldScoped fresh (worldInputsIdentityBytes facts)
         (worldSourceDomainSha256 (worldInputsSources facts)))
       Just _ -> throwIO CheckedPurposeMismatch
@@ -1217,6 +1217,7 @@ data PipelineVariant = PipelineVariant
 -- explicit selected-source receipt leaves the compile; no callback owns a world.
 data WorldSourceInputBasis = WorldSourceInputBasis WorldInputFacts [ExactIfaceArtifact]
   (IORef (Maybe (Maybe SourceSelectedOriginals,[((String,String,Bool),[(DependencyQualifier,String,Bool,String)])])))
+  ParsedSegmentDemand
 
 candidateManifestFor :: PipelineSelection result -> Maybe FilePath
 candidateManifestFor (PreparedProducts path) = path
@@ -2067,7 +2068,7 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   let source = capturedGeneratedScaffoldBytes capturedSource
       sourceText = Text.unpack (TextEncoding.decodeUtf8 source)
   effective <- liftIO (sourceModuleFlags flags sourceText >>= either (throwIO . SourceRejection . renderCellSplitError) pure)
-  liftIO (requireWorldModuleFlags path effective)
+  liftIO (requireWorldHeaderPolicy path flags effective)
   plan <- maybe (liftIO (throwIO WorldCellCorrupt)) pure (typedPurposePlan purpose)
   current <- getSession
   parsedDemand <- either (const (liftIO (throwIO WorldCellUnsupported))) pure
@@ -2126,7 +2127,7 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   let cycle = worldDependencyCycle dependencies universe attempt
       withAliases = variant
         { pvCompilerProducer=producer,pvWorldOnly=True
-        , pvWorldSources=Just (WorldSourceInputBasis facts [artifact | (artifact,_,_) <- bodies] importsRef)
+        , pvWorldSources=Just (WorldSourceInputBasis facts [artifact | (artifact,_,_) <- bodies] importsRef parsedDemand)
         , pvTransformParsed = \target environment summary parsed -> do
             annotated <- pvTransformParsed variant target environment summary parsed
             if ms_mod_name summary /= target then pure annotated else do
@@ -2952,6 +2953,35 @@ elideUnusedQuasiQuoteCodegen timing graph
         || xopt LangExt.StaticPointers (ms_hspp_opts summary)
     occurrences parsed = quasiQuoteOccurrences (ms_hspp_opts (pm_mod_summary parsed)) (pm_parsed_source parsed)
 
+-- World checking admits quote syntax only after proving that its provider
+-- cannot execute. The generated target borrows the same sealed parser proof
+-- used by demand; other demanded modules are parsed from downsweep buffers.
+-- Each source is proved before its renaming or code-generation phase.
+admitWorldQuoteFreeModuleGraph :: Bool -> Maybe (Module,ParsedSegmentDemand) -> ModuleGraph -> Ghc ModuleGraph
+admitWorldQuoteFreeModuleGraph timing targetProof graph = do
+  forM_ summaries $ \summary -> do
+    let flags = ms_hspp_opts summary
+    when (hasUnconditionallyUntrackedCompileTimeExecution flags)
+      (liftIO (throwIO (WorldModulePolicyFailure (ms_hspp_file summary) WorldUntrackedOptions)))
+    when (xopt LangExt.StaticPointers flags && backendGeneratesCode (backend flags))
+      (liftIO (throwIO (WorldModulePolicyFailure (ms_hspp_file summary) WorldCodeGeneration)))
+    when (xopt LangExt.QuasiQuotes flags) $ case targetProof of
+      Just (owner,_) | owner == ms_mod summary -> pure ()
+      _ -> do
+        when (isNothing (ms_hspp_buf summary))
+          (liftIO (throwIO (WorldModulePolicyFailure (ms_hspp_file summary) WorldUntrackedOptions)))
+        parsed <- parseModule summary
+        unless (classifyQuasiQuoteUse parsed == NoQuasiQuotes)
+          (liftIO (throwIO (WorldModulePolicyFailure (ms_hspp_file summary) WorldUntrackedOptions)))
+  let narrowed = mapMG (\summary -> if xopt LangExt.QuasiQuotes (ms_hspp_opts summary)
+        then summary {ms_hspp_opts=(ms_hspp_opts summary) {backend=noBackend}}
+        else summary) graph
+  current <- getSession
+  setSession current {hsc_mod_graph=narrowed}
+  liftIO (emitCount timing "world.quote_free_modules" (toInteger (length summaries)))
+  pure narrowed
+  where summaries = [summary | ModuleNode _ summary <- mgModSummaries' graph]
+
 -- Diagnostic only; the typed parser fact owns reuse eligibility.
 renderQuasiQuoteUse :: QuasiQuoteUse -> String
 renderQuasiQuoteUse NoQuasiQuotes = "none"
@@ -3229,10 +3259,18 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     policyTarget <- if pvWorldOnly variant && isJust capturedTarget
       then Just <$> liftIO (targetModuleFor modGraphDownsweep path)
       else pure Nothing
+    targetQuoteProof <- case (pvWorldSources variant,capturedTarget,policyTarget) of
+      (Just (WorldSourceInputBasis _ _ _ proof),Just bytes,Just owner)
+        | segmentDemandMatchesSource proof path bytes -> pure (Just (owner,proof))
+        | otherwise -> liftIO (throwIO WorldCellCorrupt)
+      (Nothing,_,_) -> pure Nothing
+      _ -> liftIO (throwIO WorldCellCorrupt)
+    modGraphRaw <- if checksPublicModule selection || pvWorldOnly variant
+      then admitWorldQuoteFreeModuleGraph timing targetQuoteProof modGraphDownsweep
+      else elideUnusedQuasiQuoteCodegen timing modGraphDownsweep
     when (checksPublicModule selection || pvWorldOnly variant) $
-      forM_ [summary | ModuleNode _ summary <- mgModSummaries' modGraphDownsweep] $ \summary -> liftIO $ do
-        requireWorldModuleFlags (ms_hspp_file summary) (ms_hspp_opts summary)
-        requireWorldOutputPolicy (ms_hspp_file summary) (hsc_dflags previous) (ms_hspp_opts summary)
+      forM_ [summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw] $ \summary -> liftIO $ do
+        requireWorldHeaderPolicy (ms_hspp_file summary) (hsc_dflags previous) (ms_hspp_opts summary)
         when (isReservedSessionModuleName (moduleNameString (ms_mod_name summary))
             && Just (ms_mod summary) /= policyTarget)
           (throwIO (WorldModulePolicyFailure (ms_hspp_file summary) WorldPrivateModule))
@@ -3243,7 +3281,6 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           ModuleNode _ summary -> ms_mod_name summary `Set.member` exactNames
           _ -> False) (mgModSummaries' modGraphDownsweep)) $
         liftIO $ ioError $ userError "fresh source collides with an admitted exact owner"
-    modGraphRaw <- elideUnusedQuasiQuoteCodegen timing modGraphDownsweep
     targetOwner <- liftIO (targetModuleFor modGraphRaw path)
     let targetName = moduleName targetOwner
         prepareTypedTarget summary env tcg = case typedPlanFor selection of
@@ -3593,7 +3630,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     let sourceOrder = [summary
           | ModuleNode _ summary <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing)
           , ms_hsc_src summary == HsSrcFile]
-    worldSources <- forM (pvWorldSources variant) $ \(WorldSourceInputBasis facts values receipt) -> do
+    worldSources <- forM (pvWorldSources variant) $ \(WorldSourceInputBasis facts values receipt _) -> do
       when (isJust (pvExactScope variant)) (liftIO (throwIO WorldCellCorrupt))
       selected <- withHeldWorldSourceRefusal (captureHeldWorldSourceSelection facts values modGraphRaw)
       liftIO (writeIORef receipt (Just selected))
@@ -6970,7 +7007,7 @@ withWorldModulePreprocessing enabled path action
   where
     install = do
       env <- getSession
-      liftIO (requireWorldModuleFlags path (hsc_dflags env))
+      liftIO (requireWorldModuleHeaderFlags path (hsc_dflags env))
       let admitted = hsc_dflags env
           original = runPhaseHook (hsc_hooks env)
           delegate :: forall value. TPhase value -> IO value
@@ -6983,15 +7020,9 @@ withWorldModulePreprocessing enabled path action
             T_Cpp _ _ source -> throwIO (WorldModulePolicyFailure source WorldPreprocessing)
             T_HsPp _ _ source _ -> throwIO (WorldModulePolicyFailure source WorldPreprocessing)
             T_FileArgs sourceEnv source -> do
-              requireWorldModuleFlags source (hsc_dflags sourceEnv)
-              requireWorldOutputPolicy source admitted (hsc_dflags sourceEnv)
+              requireWorldHeaderPolicy source admitted (hsc_dflags sourceEnv)
               result@(effective,_,_) <- delegate phase
-              requireWorldModuleFlags source effective
-              requireWorldOutputPolicy source admitted effective
-              unless (importPaths effective == importPaths admitted
-                  && workingDirectory effective == workingDirectory admitted
-                  && not (packageFlagsChanged admitted effective))
-                (throwIO (WorldModulePolicyFailure source WorldSearchInputsChanged))
+              requireWorldHeaderPolicy source admitted effective
               pure result
             _ -> delegate phase
       -- Existing load admission already refuses arbitrary custom phase hooks.
@@ -7001,9 +7032,12 @@ withWorldModulePreprocessing enabled path action
       setSession env {hsc_hooks=(hsc_hooks env) {runPhaseHook=Just (PhaseHook guarded)}}
       pure original
 
-requireWorldModuleFlags :: FilePath -> DynFlags -> IO ()
-requireWorldModuleFlags path flags = do
-  when (hasUntrackedCompileTimeExecution flags)
+-- QuasiQuotes enables syntax; only a parsed occurrence can run its provider.
+-- Header admission still precedes preprocessing and refuses every option that
+-- can execute before the immutable parser proof is available.
+requireWorldModuleHeaderFlags :: FilePath -> DynFlags -> IO ()
+requireWorldModuleHeaderFlags path flags = do
+  when (hasUnconditionallyUntrackedCompileTimeExecution flags)
     (throwIO (WorldModulePolicyFailure path WorldUntrackedOptions))
   -- GHC also records bytecode generation independently of the current backend.
   -- Keep every demanded source in the checking policy before make can invoke
@@ -7013,6 +7047,17 @@ requireWorldModuleFlags path flags = do
     (throwIO (WorldModulePolicyFailure path WorldCodeGeneration))
   when (any (`gopt` flags) [Opt_WriteHie,Opt_DumpToFile,Opt_Hpc])
     (throwIO (WorldModulePolicyFailure path WorldSideOutputs))
+
+-- Demand renaming can load interfaces before make starts. Both stages use
+-- the same admitted header policy before any interface or external input use.
+requireWorldHeaderPolicy :: FilePath -> DynFlags -> DynFlags -> IO ()
+requireWorldHeaderPolicy path admitted effective = do
+  requireWorldModuleHeaderFlags path effective
+  requireWorldOutputPolicy path admitted effective
+  unless (importPaths effective == importPaths admitted
+      && workingDirectory effective == workingDirectory admitted
+      && not (packageFlagsChanged admitted effective))
+    (throwIO (WorldModulePolicyFailure path WorldSearchInputsChanged))
 
 -- Compare with the operation's fixed admitted policy, not a source environment
 -- that may already contain another module's options. GHC sets dumpPrefix from
@@ -7339,10 +7384,10 @@ validateCanonicalSourceInputs worldOnly proofs interfaces inputArtifacts sourceL
     target <- guessTarget source Nothing Nothing
     pure target {targetAllowObjCode=False}
   setTargets (hsc_targets initial ++ targets)
-  graph <- withWorldModulePreprocessing worldOnly "<canonical source qualification>" (depanalSourceModules excluded)
+  swept <- withWorldModulePreprocessing worldOnly "<canonical source qualification>" (depanalSourceModules excluded)
+  graph <- if worldOnly then admitWorldQuoteFreeModuleGraph False Nothing swept else pure swept
   when worldOnly $ forM_ [summary | ModuleNode _ summary <- mgModSummaries' graph] $ \summary -> liftIO $ do
-    requireWorldModuleFlags (ms_hspp_file summary) (ms_hspp_opts summary)
-    requireWorldOutputPolicy (ms_hspp_file summary) (hsc_dflags initial) (ms_hspp_opts summary)
+    requireWorldHeaderPolicy (ms_hspp_file summary) (hsc_dflags initial) (ms_hspp_opts summary)
   env <- getSession
   current <- liftIO (dependencyEvidenceFor env ([],True) graph [])
   -- Fresh downsweep excludes admitted source-less owners. Restore only those
