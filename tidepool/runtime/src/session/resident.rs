@@ -8203,6 +8203,7 @@ where
                 ))?;
         let origin =
             CapturedSourceOrigin::capture(transaction).map_err(SessionError::SourceAdmission)?;
+        self.set_image_registry(Arc::clone(source_entry.image_registry()));
         let installation_scope = self.state.mint_isolated_scope_with_lease()?;
         let entry = self.prepare_startup_entry_in(
             StartupInput::Closed {

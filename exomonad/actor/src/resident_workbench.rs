@@ -9434,7 +9434,6 @@ where
         {
             self.access
                 .with_compiler_machine(context.clone(), move |session, _, _, _| {
-                    session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
                     let entry = session.prepare_source_startup_entry(&prepared.entry)?;
                     Ok((entry.installation_scope().clone(), Some(entry)))
                 })
