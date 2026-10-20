@@ -7581,7 +7581,7 @@ fn validate_owned_originals_with_validation(
 pub enum SelectedNativeImport {
     Source {
         binding: crate::artifact_inventory::NativeGroupBinding,
-        value: tidepool_repr::ValueId,
+        value: tidepool_repr::execution_schema::ValueId,
     },
     Retained {
         binding: crate::artifact_inventory::ArtifactBinding,

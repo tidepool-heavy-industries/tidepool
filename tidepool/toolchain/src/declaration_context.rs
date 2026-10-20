@@ -13350,7 +13350,7 @@ impl ExactDeclarationContext {
         let inherited_group_handle_clones = inherited_groups.len();
         let keyed = inherited_groups
             .iter()
-            .map(|(binding, row)| (*binding, row.as_ref()))
+            .map(|(binding, row)| (*binding, row.product.as_ref()))
             .collect();
         let start = std::time::Instant::now();
         let groups = certify_artifact_view_groups(
