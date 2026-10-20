@@ -8574,53 +8574,50 @@ where
                 }
             }
         };
-        let preview = match specialized {
-            Err((failure, producer_join)) => {
-                if matches!(failure.as_ref(), tidepool_runtime::session::RendererProductionFailure::Compile(
-                    tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(primary)
-                ) if matches!(primary.error, CompileError::Diagnostics(_)))
-                {
-                    (
-                        ActivationPreviewOutcome::Unavailable(
-                            ActivationPreviewUnavailable::Language,
-                        ),
-                        input_binding,
-                        admission,
-                    )
-                } else {
-                    return Err(committed(ResidentActorWorkbenchError::RendererProduction {
-                        failure,
-                        producer_join,
-                    }));
-                }
+        let specialized = match specialized {
+            Err((failure, producer_join)) if !matches!(failure.as_ref(), tidepool_runtime::session::RendererProductionFailure::Compile(_)) => {
+                return Err(committed(ResidentActorWorkbenchError::RendererProduction { failure, producer_join }));
             }
-            Ok(renderer) => {
-                #[cfg(test)]
-                if let Some(observer) = &renderer_observer {
-                    observer(ActivationPublicationObservation::RendererSelected(
-                        &admission,
-                    ))
-                    .map_err(committed)?;
-                }
-                let preview = self.access.with_compiler_machine(context.clone(), move |session, _, _, settlement| {
+            result => result,
+        };
+        #[cfg(test)]
+        if specialized.is_ok() {
+            if let Some(observer) = &renderer_observer {
+                observer(ActivationPublicationObservation::RendererSelected(
+                    &admission,
+                ))
+                .map_err(committed)?;
+            }
+        }
+        let preview = self.access.with_compiler_machine(context.clone(), move |session, _, _, settlement| {
             session.validate_activation_preview_admission(&admission)
                 .map_err(|error| committed(ResidentActorWorkbenchError::Resident(error)))?;
-            let compiled = match tidepool_runtime::session::turn::bind_activation_renderer(admission.clone(), &renderer) {
-                Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::Ready(compiled)) => compiled,
-                Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::Opaque) => {
-                    return Ok((ActivationPreviewOutcome::Opaque, input_binding, admission));
-                }
-                Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable) => {
-                    return Ok((ActivationPreviewOutcome::Unavailable(ActivationPreviewUnavailable::OriginalDisplayEvidenceUnavailable), input_binding, admission));
-                }
-                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Admission(error)) => {
-                    return Err(committed(ResidentActorWorkbenchError::Resident(error)));
-                }
-                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) => {
-                    return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error }));
-                }
-                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Native(error)) => {
-                    return Err(committed(ResidentActorWorkbenchError::Resident(error.into())));
+            let compiled = match specialized {
+                Ok(renderer) => match tidepool_runtime::session::turn::bind_activation_renderer(admission.clone(), &renderer) {
+                    Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::Ready(compiled)) => compiled,
+                    Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::Opaque) => {
+                        return Ok((ActivationPreviewOutcome::Opaque, input_binding, admission));
+                    }
+                    Ok(tidepool_runtime::session::turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable) => {
+                        return Ok((ActivationPreviewOutcome::Unavailable(ActivationPreviewUnavailable::OriginalDisplayEvidenceUnavailable), input_binding, admission));
+                    }
+                    Err(tidepool_runtime::session::turn::ActivationRendererFailure::Admission(error)) => {
+                        return Err(committed(ResidentActorWorkbenchError::Resident(error)));
+                    }
+                    Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) => {
+                        return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error }));
+                    }
+                    Err(tidepool_runtime::session::turn::ActivationRendererFailure::Native(error)) => {
+                        return Err(committed(ResidentActorWorkbenchError::Resident(error.into())));
+                    }
+                },
+                Err((failure, producer_join)) => {
+                    if matches!(failure.as_ref(), tidepool_runtime::session::RendererProductionFailure::Compile(
+                        tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(primary)
+                    ) if matches!(primary.error, CompileError::Diagnostics(_))) {
+                        return Ok((ActivationPreviewOutcome::Unavailable(ActivationPreviewUnavailable::Language), input_binding, admission));
+                    }
+                    return Err(committed(ResidentActorWorkbenchError::RendererProduction { failure, producer_join }));
                 }
             };
                 let preview = match session.run_activation_preview(compiled, settlement) {
@@ -8658,9 +8655,6 @@ where
                 };
                 Ok((preview, input_binding, admission))
         }).await.map_err(committed)?;
-                preview
-            }
-        };
         let (preview, input_binding, admission) = preview;
         let input = match preview {
             ActivationPreviewOutcome::Rendered { text, omitted } => bounded_activation_text(
