@@ -23934,6 +23934,7 @@ pub(crate) mod request_tests {
     async fn actual_initial_cancelled_body_preserves_its_owned_obligations() {
         with_test_compiler_owner(|client| async move {
             for persistence in [crate::ActorPersistencePolicy::Ephemeral, crate::ActorPersistencePolicy::Durable] {
+                eprintln!("initial publication control: preparing {persistence:?}");
                 quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
                     client.clone(), Some(persistence),
                     Some(PublicationFailureControl::BootstrapCancelledBody),
@@ -25022,6 +25023,41 @@ pub(crate) mod request_tests {
                 .await
                 .unwrap();
             assert!(warm_view.exact_declaration_context().is_none());
+            let publication = workbench_runner_for_test(&workbench)
+                .initialize_durable_public_owner(context.clone(), owner.clone())
+                .await
+                .expect("the actual public owner initializes its captured source scope");
+            match publication {
+                tidepool_runtime::session::DurablePublicOwnerPublication::Committed(_) => {}
+                tidepool_runtime::session::DurablePublicOwnerPublication::CommittedContinuing {
+                    cancellation_pending,
+                    ..
+                } => panic!(
+                    "public bootstrap continued with cancellation_pending={cancellation_pending}"
+                ),
+                tidepool_runtime::session::DurablePublicOwnerPublication::Refused { error } => {
+                    panic!("public bootstrap refused: {error:?}")
+                }
+                tidepool_runtime::session::DurablePublicOwnerPublication::RecoveryRequired {
+                    error,
+                } => {
+                    panic!("public bootstrap requires recovery: {error:?}")
+                }
+            }
+            let first_bootstrap = workbench
+                .access
+                .with_machine(context.clone(), {
+                    let owner = owner.clone();
+                    move |session, context, _| {
+                        session
+                            .begin_durable_public_bootstrap(owner, context.placement.lexical_scope)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })
+                    }
+                })
+                .await
+                .expect("the first installation borrows its actual public bootstrap ticket");
             let first = Arc::new(if generation_replacement.is_some() {
                 workbench
                     .install_tools_action(
@@ -25041,43 +25077,9 @@ pub(crate) mod request_tests {
                     .await
                     .unwrap()
             });
-            if publication_failure.is_some() {
-                let second = Arc::new(
-                    workbench
-                        .install_tools_action(
-                            context.clone(),
-                            2,
-                            vec![],
-                            warmed.effects.clone(),
-                            InstalledToolCode::SourcePrepared(warmed.prepared.clone()),
-                            ToolInstallationPurpose::InitialTools,
-                        )
-                        .await
-                        .unwrap()
-                        .tools,
-                );
-                assert!(Arc::ptr_eq(
-                    &first.code.prepared().unwrap(),
-                    &warmed.prepared
-                ));
-                assert!(Arc::ptr_eq(
-                    &second.code.prepared().unwrap(),
-                    &warmed.prepared
-                ));
-                assert_ne!(
-                    first._installation_scope.scope(),
-                    second._installation_scope.scope()
-                );
-                assert_eq!(first.surface(), second.surface());
-                let completed_executions =
-                    std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
-                assert_eq!(
-                    completed_executions, warm_executions,
-                    "both actual component installations retain the same completed original"
-                );
-                return (first, second, completed_executions, warmed, None);
-            }
-            if generation_replacement == Some(crate::ActorPersistencePolicy::Ephemeral) {
+            if generation_replacement == Some(crate::ActorPersistencePolicy::Ephemeral)
+                && publication_failure.is_none()
+            {
                 let lease = InstalledToolLease::new(
                     context.actor,
                     generation_source.clone(),
@@ -25147,18 +25149,15 @@ pub(crate) mod request_tests {
             }
             workbench
                 .access
-                .with_machine(context.clone(), {
-                    let owner = owner.clone();
-                    move |session, context, _| {
-                        session
-                            .initialize_durable_public_scope(owner, context.placement.lexical_scope)
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                            })
-                    }
+                .with_machine(context.clone(), move |session, _, _| {
+                    session
+                        .publish_durable_public_bootstrap(first_bootstrap)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })
                 })
                 .await
-                .unwrap();
+                .expect("the first installation publishes only its own bootstrap ticket");
             let installed_view = workbench
                 .access
                 .with_machine(context.clone(), |session, context, _| {
@@ -25414,7 +25413,12 @@ pub(crate) mod request_tests {
                         prompts.clone(),
                     )
                     .await
-                    .unwrap();
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "initial generation preparation {:?}: {error:?}",
+                            descriptor.persistence_policy()
+                        )
+                    });
                 let expected_work = InstallationObservationWork {
                     captures: 1,
                     encodings: usize::from(
