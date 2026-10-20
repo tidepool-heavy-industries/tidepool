@@ -139,7 +139,7 @@ fn validate_artifact_row(
             .get(&binding.artifact)
             .ok_or_else(|| failure("selected dependency payload missing"))?;
         if *label != ArtifactDependency::Interface
-            || required.is_native()
+            || !required.is_compiler_interface()
             || !requirements.remove(&required.descriptor.owner)
         {
             return Err(row_failure());
@@ -216,7 +216,7 @@ fn validate_group_row(
                     dependent_ordinal, ..
                 },
                 _,
-            ) if *dependent_ordinal == ordinal && !required.is_native() => {}
+            ) if *dependent_ordinal == ordinal && required.is_compiler_interface() => {}
             _ => return Err(row_failure()),
         }
     }
@@ -245,7 +245,10 @@ fn validate_transitive_conflicts(
             ArtifactPayload::Original(product) => {
                 ConflictOwner::Native(NativeOwnerKey::from_owner(product.owner()))
             }
-            _ => ConflictOwner::Interface(entry.descriptor.owner.clone()),
+            ArtifactPayload::PackageCode(_) => continue,
+            ArtifactPayload::Canonical(_) | ArtifactPayload::Interface(_, _) => {
+                ConflictOwner::Interface(entry.descriptor.owner.clone())
+            }
         };
         owners
             .entry(owner)
