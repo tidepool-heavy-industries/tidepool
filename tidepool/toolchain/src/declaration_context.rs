@@ -7105,6 +7105,32 @@ pub(crate) struct MatchedExactProductAdmission<'a> {
 }
 
 impl<'a> MatchedExactProductAdmission<'a> {
+    /// Bind a world source admission to the physical bytes that produced it.
+    /// `facts` is built once by `DemandedWorldCompilerInputs`; no second
+    /// request, resolver or certifier is introduced.
+    // boundary: see CELL-PREPARATION-BOUNDARY.md
+    fn world(
+        binding: &'a WorldCompilationIdentity,
+        source: &'a ExactSourceAdmission,
+        facts: ProductInputFacts<'a>,
+        worker_bytes: &'a [u8],
+        input_path: &'a Path,
+        target_source: &'a str,
+        inventory: &'a tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Self {
+        Self {
+            exact: ExactProductAdmission {
+                compilation_binding: ProductCompilationBinding::World(binding),
+                source,
+                facts,
+            },
+            worker_bytes,
+            input_path,
+            target_source,
+            inventory,
+        }
+    }
+
     pub(crate) fn exact(&self) -> &ExactProductAdmission<'a> {
         &self.exact
     }
@@ -8930,6 +8956,76 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
                 DemandNativeInputsError::Compiler(error) => error,
                 other => failure(format!("world primary native demand refused: {other}")),
             })
+    }
+
+    /// Issue segment original products from this already-decoded world source
+    /// owner. `raw` and `receipt` must be decoded exactly once from the same
+    /// captured common outputs this receipt names. Cold support, certified
+    /// groups and native permission are projected through the demanded owner;
+    /// no `ExactCompilationRequest` or finite baseline is manufactured.
+    // boundary: see CELL-PREPARATION-BOUNDARY.md
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn issue_segment_originals(
+        self,
+        receipt: crate::certified_products::CertifiedReceipt,
+        raw: crate::certified_products::ParsedModuleProducts,
+        candidates: Option<&crate::module_candidates::CandidateSet>,
+        selected_values: &crate::artifacts::SelectedSessionValueOwners,
+        produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<crate::certified_products::CertifiedSegmentOriginals, CompileError> {
+        let program = self.program;
+        let operation = program.validation().inventory.as_ref();
+        let demand = self.demand_primary_inputs()?;
+        let groups = demand.certify_receipt_groups(&receipt, validation)?;
+        let support = demand.semantic_source_support(&groups, operation)?;
+        let checked_values =
+            crate::checked_cell::CheckedValueImportAuthority::from_world_output(program)?;
+        let context = program.primary_context();
+        let binding = WorldCompilationIdentity::from_binding(&self.binding);
+        let inputs = DemandedWorldCompilerInputs::from_demand(
+            demand,
+            groups,
+            support,
+            binding.clone(),
+            context,
+            checked_values,
+        );
+        let facts = inputs.facts();
+        // The physical evidence stays owned by the decoded receipt; retain
+        // the exact bytes the receipt already carries for product admission.
+        let source_path = self.source.source_path.clone();
+        let target_source = self.source.source.clone();
+        let evidence_bytes = self.source.evidence_bytes.clone();
+        let source = facts.admit_source_facts(
+            SourceCompilationBinding::World(self.binding.clone()),
+            self.source,
+            None,
+            context,
+            validation,
+        )?;
+        let admission = MatchedExactProductAdmission::world(
+            &binding,
+            &source,
+            facts,
+            &evidence_bytes,
+            &source_path,
+            &target_source,
+            operation,
+        );
+        crate::certified_products::CertifiedSegmentOriginals::issue(
+            raw,
+            receipt,
+            admission,
+            program.directory().path(),
+            program.producer_identity_bytes(),
+            &self.aliases,
+            candidates,
+            selected_values,
+            produced,
+            validation,
+        )
+        .map_err(compiler_evidence_failure)
     }
 
     pub(crate) fn source_path_domain(

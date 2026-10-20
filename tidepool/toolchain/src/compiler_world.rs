@@ -2055,6 +2055,7 @@ impl WorldOutputFile {
 /// transport bytes, and so the item's binder, signature, provenance and
 /// native group ordinal stay correlated with the physical output that carried
 /// them. It grants no runtime value or execution permission by itself.
+// boundary: see CELL-PREPARATION-BOUNDARY.md
 pub(crate) struct WorldItemProof {
     index: usize,
     ordinal: u64,
@@ -2228,6 +2229,7 @@ impl CheckedWorldCellItem {
 /// receipt is not authority. It binds the reservation, logical world, distinct
 /// original/target selections, producer and issuing transaction origin,
 /// per-item generations and the exact output certificate.
+// boundary: see CELL-PREPARATION-BOUNDARY.md
 pub struct CheckedWorldCellProgram {
     output: WorldCellOutputAdmission,
     original: WorldSourceSelection,
@@ -2235,6 +2237,7 @@ pub struct CheckedWorldCellProgram {
     logical: WorldCellLogicalIdentity,
     items: Vec<CheckedWorldCellItem>,
     certificate_sha256: [u8; 32],
+    producer_identity: [u8; 32],
 }
 
 impl CheckedWorldCellProgram {
@@ -2260,6 +2263,13 @@ impl CheckedWorldCellProgram {
 
     pub fn producer_sha256(&self) -> &[u8; 32] {
         self.logical.producer_sha256()
+    }
+
+    /// Raw endpoint producer identity bytes retained by the same admission
+    /// that bound the plan. Their canonical digest is `producer_sha256`.
+    // boundary: see CELL-PREPARATION-BOUNDARY.md
+    pub(crate) fn producer_identity_bytes(&self) -> &[u8; 32] {
+        &self.producer_identity
     }
 
     pub fn plan_digest(&self) -> [u8; 32] {
@@ -2341,6 +2351,7 @@ impl CheckedWorldCellProgram {
         original: WorldSourceSelection,
         target: WorldSourceSelection,
         origin: &tidepool_extract_cmd::CompilerTransactionOrigin,
+        producer_identity: [u8; 32],
     ) -> Result<Self, CompileError> {
         if original == target {
             return Err(source_failure(
@@ -2366,6 +2377,13 @@ impl CheckedWorldCellProgram {
         let producer_sha256 = *plan.producer_sha256();
         if producer_sha256 == [0; 32] {
             return Err(source_failure("world cell plan has no producer"));
+        }
+        if CanonicalProducerIdentity::from_producer_bytes(&producer_identity).sha256()
+            != producer_sha256
+        {
+            return Err(source_failure(
+                "world cell plan belongs to another compiler producer",
+            ));
         }
         if output.item_proofs.len() != reservation.slots().len()
             || output.items.len() != reservation.slots().len()
@@ -2429,6 +2447,7 @@ impl CheckedWorldCellProgram {
             logical,
             items,
             certificate_sha256,
+            producer_identity,
         })
     }
 }
@@ -2523,6 +2542,7 @@ fn world_cell_output_certificate(
 /// Prepare and issue the SAME-certified checked World CellProgram. Preparation
 /// refusal remains the typed `WorldQueryRejection`; a decoded completion or a
 /// caller-built reservation cannot enter this owner.
+// boundary: see CELL-PREPARATION-BOUNDARY.md
 pub fn admit_world_cell_program(
     endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
     reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
@@ -2530,9 +2550,16 @@ pub fn admit_world_cell_program(
     target: WorldSourceSelection,
     origin: &tidepool_extract_cmd::CompilerTransactionOrigin,
 ) -> Result<Result<Arc<CheckedWorldCellProgram>, WorldQueryRejection>, CompileError> {
+    let producer_identity = *endpoint.identity().producer_bytes();
     match prepare_world_cell_outputs(endpoint, reservation)? {
-        Ok(output) => CheckedWorldCellProgram::admit(output, original, target, origin)
-            .map(|program| Ok(Arc::new(program))),
+        Ok(output) => CheckedWorldCellProgram::admit(
+            output,
+            original,
+            target,
+            origin,
+            producer_identity,
+        )
+        .map(|program| Ok(Arc::new(program))),
         Err(rejection) => Ok(Err(rejection)),
     }
 }
