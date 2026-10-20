@@ -858,8 +858,11 @@ automaticGenericDeclarations flags qualifier declarations =
 
 -- | Structural companions are deterministic. GHC resolves class identities
 -- and rejects only generated duplicates, so qualified unrelated classes never
--- suppress a companion merely because their occurrence names match.
+-- suppress a companion merely because their occurrence names match. Their
+-- representation-family constraint requires the recipe's UndecidableInstances
+-- capability; an optional companion cannot widen authored typechecking flags.
 structuralDisplayTargets :: DynFlags -> [CellAnalysisItem] -> [CellStructuralDisplayTarget]
+structuralDisplayTargets flags _ | not (xopt UndecidableInstances flags) = []
 structuralDisplayTargets flags declarations = case unP GHC.Parser.parseModule parserState of
   PFailed _ -> []
   POk _ parsed ->

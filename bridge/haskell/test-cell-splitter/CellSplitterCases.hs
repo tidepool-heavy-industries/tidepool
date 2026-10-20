@@ -2477,6 +2477,43 @@ genericDerivationTemplate = unlines
 
 data DisplayTestScope = OrdinaryDisplayTest | LegacyDisplayScopeTest
 
+optionalStructuralDisplayCapability :: IO ()
+optionalStructuralDisplayCapability = bracket structuralDisplayDirectory removeDirectoryRecursive $ \root -> do
+  effects <- requiredInput "TIDEPOOL_TEST_EFFECTS_DIR"
+  prelude <- requiredInput "TIDEPOOL_PRELUDE_DIR"
+  let includes = [root, "test-cell-splitter", effects, prelude]
+      path = root </> "GenericDerivation.hs"
+  withResidentPipelineSelectedRequests includes $ \runRequest ->
+    forM_ [("NoUndecidableInstances",False),("UndecidableInstances",True)] $ \(extension,rich) -> do
+      let source = unlines
+            [ "{-# LANGUAGE " ++ extension ++ " #-}"
+            , "import qualified Tidepool.Inspection.Display as CapabilityDisplay"
+            , "data Capability = Capability Int"
+            , "displayed = CapabilityDisplay.displayTree (Capability 7)"
+            ]
+      plan <- analyzeCell genericDerivationTemplate source >>= either (fail . renderCellSplitError) pure
+      assertEqual "automatic Generic survives optional Display capability"
+        ["Capability"] (map genericDeclarationTarget (cellPlanGenericDeclarations plan))
+      assertEqual "structural Display follows the authored extension capability"
+        (if rich then ["Capability"] else [])
+        (map structuralDisplayTargetName (cellPlanStructuralDisplayTargets plan))
+      rendered <- either fail pure (renderCellCheckSource genericDerivationTemplate plan)
+      writeFile path rendered
+      result <- runRequest (pure ()) $ \compiler ->
+        compiler CheckedEnvironment mempty
+          (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) GeneralCompile)
+          Nothing path includes Nothing
+      assertGenericInstances ["Capability"] result
+      let environment = crTargetTcGblEnv result
+          localDisplay = [instance' | instance' <- tcg_insts environment
+            , getOccString (className (is_cls instance')) == "Display"
+            , ty <- is_tys instance'
+            , Just (constructor,_) <- [splitTyConApp_maybe ty]
+            , getOccString (tyConName constructor) == "Capability"
+            , nameModule_maybe (tyConName constructor) == Just (tcg_mod environment)]
+      assertEqual "checked displayTree application has exactly the selected local companion"
+        (if rich then 1 else 0) (length localDisplay)
+
 structuralDisplayCompilation :: DisplayTestScope -> FilePath -> IO ()
 structuralDisplayCompilation LegacyDisplayScopeTest _ = bracket structuralDisplayDirectory removeDirectoryRecursive $ \root -> do
   let path = root </> "exact-scope.cbor"
