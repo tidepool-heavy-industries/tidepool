@@ -2613,7 +2613,7 @@ async fn composition_root_child_session_factory_runs_a_cell() {
                 let mut runtime_close = None;
                 let installed = child_machine
                     .with_source_compiler_transaction(
-                        source.clone(),
+                        source.original_source().clone(),
                         tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                         tidepool_runtime::CompilerTransactionCancellation::new(),
                         None,
@@ -2642,7 +2642,7 @@ async fn composition_root_child_session_factory_runs_a_cell() {
                     .expect("the runtime phase retains its cancellation owner")
                     .checkpoint()
                     .expect("cancelled child driver installation cannot advance");
-                source.validate_source_issuer().unwrap();
+                source.validate_lexical_issuer().unwrap();
                 let outcome = installed.into_outcome().action.expect(
                     "the driver cell the root itself bootstraps with also runs on a child machine",
                 );
