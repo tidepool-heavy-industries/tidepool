@@ -222,6 +222,7 @@ impl CompilerWorldCellPlan {
 /// remain separate issuers.
 #[derive(Debug)]
 pub struct CompilerWorldCellReservation {
+    defining_scope: u64,
     plan: Arc<CompilerWorldCellPlan>,
     admission_digest: [u8; 32],
     slots: Arc<[crate::checked_cell::CheckedPlannedCellSlot]>,
@@ -292,6 +293,7 @@ impl WorldCellAdmissionSubject {
 /// admission.
 #[derive(Debug)]
 pub struct WorldCellAdmissionToken {
+    defining_scope: u64,
     allocation: Arc<()>,
     admission_digest: [u8; 32],
     slots: Arc<[crate::checked_cell::CheckedPlannedCellSlot]>,
@@ -324,6 +326,7 @@ fn issue_world_cell_admission(
     }
     validate_world_cell_reservations(items, &slots, &expected_bindings)?;
     Ok(WorldCellAdmissionToken {
+        defining_scope: subject.scope,
         allocation: Arc::clone(allocation),
         admission_digest,
         slots: slots.into(),
@@ -412,9 +415,11 @@ impl CompilerWorldCellPlan {
         self: &Arc<Self>,
         token: WorldCellAdmissionToken,
     ) -> Result<Arc<CompilerWorldCellReservation>, CompileError> {
+        let defining_scope = token.defining_scope;
         let (slots, expected_bindings, admission_digest) =
             consume_world_cell_admission(&self.allocation, token)?;
         Ok(Arc::new(CompilerWorldCellReservation {
+            defining_scope,
             plan: Arc::clone(self),
             admission_digest,
             slots,
@@ -525,6 +530,11 @@ fn validate_world_cell_reservations(
 }
 
 impl CompilerWorldCellReservation {
+    /// Runtime-value placement retained from the same subject hashed into this
+    /// reservation. The held World's query scope may be its public ancestor.
+    pub fn defining_scope(&self) -> u64 {
+        self.defining_scope
+    }
     pub fn plan(&self) -> &Arc<CompilerWorldCellPlan> {
         &self.plan
     }
