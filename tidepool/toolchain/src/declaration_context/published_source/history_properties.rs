@@ -276,7 +276,13 @@ fn publication_reopening_refuses_incomplete_lexical_type_namespace() {
 fn published_role_refuses_missing_issuer_selection() {
     let (_, _, publication) = fixture(0);
     let mut roles = serde_json::to_value(publication.context().compiler_input_roles()).unwrap();
-    roles[0].as_object_mut().unwrap().remove("selection");
+    let published = publication
+        .context()
+        .compiler_input_roles()
+        .into_iter()
+        .position(|role| role.is_published_source_original())
+        .expect("fixture publication carries an exact source selection");
+    roles[published].as_object_mut().unwrap().remove("selection");
     assert!(
         serde_json::from_value::<Vec<CompilerInputRole>>(roles).is_err(),
         "legacy publication facts cannot reconstruct the issuer's selection from broader custody"

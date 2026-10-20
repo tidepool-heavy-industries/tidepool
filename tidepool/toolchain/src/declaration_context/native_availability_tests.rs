@@ -15,7 +15,7 @@ fn fixture_compiler_support(
 
 // Checked normalization issues permissions from these exact offers. Recovery
 // authenticates the recorded namespace and custody; raw offers alone grant none.
-fn fixture_support_with_issued_offers(
+pub(super) fn fixture_support_with_issued_offers(
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
     offers: impl IntoIterator<Item = crate::artifact_inventory::IssuedNativeOffer>,
@@ -5559,9 +5559,15 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
             )
             .unwrap();
         assert!(selected.selected_native_groups().is_empty());
-        let support =
-            recover_fixture_compiler_support(projection.clone(), selected.clone(), [offer.clone()])
-                .unwrap();
+        let issued = fixture_support_with_issued_offers(
+            projection.clone(),
+            selected.clone(),
+            [offer.clone()],
+        );
+        // Checked issuance supplies the normalized permission rows that
+        // activation request preparation requires; raw recovery custody alone
+        // carries none.
+        let support = issued.unwrap();
         let context = ExactDeclarationContext::from_authenticated_execution_support(
             producer.sha256(),
             support,
