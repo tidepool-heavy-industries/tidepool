@@ -19697,17 +19697,73 @@ pub(crate) mod request_tests {
                 }
             }
 
-            let history_context = workbench.access.with_machine(context.clone(), |session, context, _| {
-                let placement = crate::ActorPlacement { lexical_scope: session.mint_isolated_scope(), ..context.placement };
-                let mut history = crate::ActorDescriptor::new("unrelated history", placement)
-                    .admit_independent_world().session_context(crate::ActorRef::first(crate::ActorId(2)));
-                history.haskell_effects_alias = context.haskell_effects_alias.clone();
-                Ok(history)
-            }).await.unwrap();
-            workbench_runner_for_test(&workbench).adopt_final_source_scope(history_context.clone()).await.unwrap();
+            let history_source = captured.clone();
+            let history_context = workbench
+                .access
+                .with_machine(context.clone(), move |session, context, _| {
+                    let placement = crate::ActorPlacement {
+                        lexical_scope: session.mint_isolated_scope(),
+                        ..context.placement
+                    };
+                    let mut history = crate::ActorDescriptor::new("unrelated history", placement)
+                        .admit_independent_world()
+                        .session_context(crate::ActorRef::first(crate::ActorId(2)));
+                    history.haskell_effects_alias = context.haskell_effects_alias.clone();
+                    history.source_layer = crate::ActorSourceRoots::Complete(history_source);
+                    Ok(history)
+                })
+                .await
+                .unwrap();
+            workbench_runner_for_test(&workbench)
+                .adopt_final_source_scope(history_context.clone())
+                .await
+                .unwrap();
+            let history_descriptor =
+                crate::ActorDescriptor::new("unrelated history", history_context.placement);
+            let history_owner = crate::resident_actor::WorkbenchPublicOwner::issue(
+                &history_context,
+                &history_descriptor,
+                None,
+            )
+            .unwrap();
+            let layers: crate::ActorSourceLayerResolver = owner.clone();
             for retained in 0..=3 {
                 if retained > 0 {
-                    workbench.publish_cell_for_test(history_context.clone(), &format!("history{retained} <- pure ({retained} :: Int)")).await.unwrap();
+                    let private = Arc::new(
+                        workbench_runner_for_test(&workbench)
+                            .begin_private_execution(
+                                history_context.clone(),
+                                history_owner.clone(),
+                                tidepool_runtime::session::PublicationDecision::new(),
+                                None,
+                            )
+                            .await
+                            .unwrap(),
+                    );
+                    let mut private_context = history_context.clone();
+                    private_context.placement.lexical_scope = private.private_scope;
+                    let (writer_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                        private_context,
+                        captured.clone(),
+                        None,
+                        Some(&layers),
+                    )
+                    .expect("history cells require their actual retained source owner");
+                    let writer = workbench
+                        .shared_view()
+                        .with_compilation_authority(authority)
+                        .with_private_execution(private);
+                    writer
+                        .execute_cell_for_test(
+                            writer_context.clone(),
+                            &format!("history{retained} <- pure ({retained} :: Int)"),
+                        )
+                        .await
+                        .unwrap();
+                    writer
+                        .publish_completed_cell_for_test(writer_context)
+                        .await
+                        .unwrap();
                 }
                 for kind in [StructuredInspectionKind::Info, StructuredInspectionKind::Type] {
                     let observation = HostWorkObservation::new();
