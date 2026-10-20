@@ -18869,39 +18869,40 @@ pub(crate) mod request_tests {
             ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
             crate::ActorSessionContext,
         ) {
+            let layers: crate::ActorSourceLayerResolver = self.source_owner.clone();
+            let (mut context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                self.public.clone(),
+                self.captured.clone(),
+                None,
+                Some(&layers),
+            )
+            .expect("the actual captured source owner admits the original public context");
+            let frontend = self
+                .workbench
+                .shared_view()
+                .with_json_input(Some(serde_json::json!({"greeting": "hi"})))
+                .with_compilation_authority(authority);
+            let observation = frontend.capture_observation_scaffold(&context).await
+                .expect("the production public preflight settles the input TYPE prototype");
             let descriptor =
-                crate::ActorDescriptor::new("actual-world-json-input", self.public.placement);
+                crate::ActorDescriptor::new("actual-world-json-input", context.placement);
             let public_owner =
-                crate::resident_actor::WorkbenchPublicOwner::issue(&self.public, &descriptor, None)
+                crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
                     .unwrap();
             let private = Arc::new(
                 workbench_runner_for_test(&self.workbench)
                     .begin_private_execution(
-                        self.public.clone(),
+                        context.clone(),
                         public_owner,
                         tidepool_runtime::session::PublicationDecision::new(),
-                        None,
+                        Some(observation),
                     )
                     .await
                     .unwrap(),
             );
             assert_ne!(private.private_scope, self.public.placement.lexical_scope);
-            let mut private_context = self.public.clone();
-            private_context.placement.lexical_scope = private.private_scope;
-            let layers: crate::ActorSourceLayerResolver = self.source_owner.clone();
-            let (context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
-                private_context,
-                self.captured.clone(),
-                None,
-                Some(&layers),
-            )
-            .expect("the actual captured source owner admits private B over public A");
-            let frontend = self
-                .workbench
-                .shared_view()
-                .with_json_input(Some(serde_json::json!({"greeting": "hi"})))
-                .with_compilation_authority(authority)
-                .with_private_execution(private);
+            context.placement.lexical_scope = private.private_scope;
+            let frontend = frontend.with_private_execution(private);
             (frontend, context)
         }
 
