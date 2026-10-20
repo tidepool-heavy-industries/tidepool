@@ -1391,6 +1391,123 @@ mod tests {
     }
 
     #[test]
+    fn retirement_body_refusal_retains_the_same_guard_until_both_sources_settle() {
+        let fixture = PublicationFixture::replacement(true);
+        let mut guard = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        let attempt = guard.attempt.clone();
+        let mut original = capture_original(&mut guard);
+        let completion = super::super::PublicationBodyCompletion::Observed {
+            guard,
+            outcome: Err(crate::ResidentActorWorkbenchError::InvocationCancelled),
+        }
+        .for_retirement();
+        let super::super::ActorGenerationPublicationSettlement::Unpublished(mut refusal) =
+            completion
+        else {
+            panic!("observed unpublished work must retain its actual settlement owner");
+        };
+        assert!(Arc::ptr_eq(&attempt, &refusal.guard.attempt));
+        assert!(matches!(
+            refusal.outcome().as_ref(),
+            Err(crate::ResidentActorWorkbenchError::InvocationCancelled)
+        ));
+        assert!(expected.scope.admit_source().is_err());
+        assert!(fixture.generation.scope.admit_source().is_err());
+        refusal.refuse_retirement(&mut original).unwrap();
+        assert!(Arc::ptr_eq(
+            &fixture.state.current_generation().unwrap(),
+            &expected
+        ));
+        assert!(expected.scope.admit_source().is_ok());
+        assert!(fixture.generation.scope.admit_source().is_ok());
+        drop(refusal);
+        assert!(expected.scope.admit_source().is_ok());
+    }
+
+    #[test]
+    fn retirement_body_refusal_failure_shares_primary_and_retains_original_fence() {
+        let mut fixture = PublicationFixture::replacement(true);
+        let mut guard = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        let mut original = capture_original(&mut guard);
+        let completion = super::super::PublicationBodyCompletion::Observed {
+            guard,
+            outcome: Err(crate::ResidentActorWorkbenchError::InvocationCancelled),
+        }
+        .for_retirement();
+        let super::super::ActorGenerationPublicationSettlement::Unpublished(mut refusal) =
+            completion
+        else {
+            panic!("the actual guard must survive body refusal");
+        };
+        let primary = refusal.outcome().clone();
+        drop(fixture.preparation.take());
+        let error = refusal.refuse_retirement(&mut original).unwrap_err();
+        assert!(error.requires_recovery());
+        assert_eq!(
+            error.execution_failure_kind(),
+            Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
+        );
+        let crate::ResidentActorWorkbenchError::PublicationSettlement { failure } = error else {
+            panic!("restoration failure must retain both causes");
+        };
+        assert!(Arc::ptr_eq(&primary, &failure.outcome));
+        assert_eq!(original.pending_claims().unwrap(), 0);
+        assert!(expected.scope.admit_source().is_err());
+        drop(refusal);
+        fixture.assert_candidate_unavailable();
+    }
+
+    #[test]
+    fn retirement_unobserved_body_never_issues_a_refusal_continuation() {
+        let fixture = PublicationFixture::replacement(true);
+        let mut guard = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let _original = capture_original(&mut guard);
+        let completion = super::super::PublicationBodyCompletion::Unobserved {
+            guard,
+            primary: crate::ResidentActorWorkbenchError::InvocationCancelled,
+        }
+        .for_retirement();
+        let super::super::ActorGenerationPublicationSettlement::Settled(outcome) = completion
+        else {
+            panic!("body observation loss cannot authorize restoration");
+        };
+        let Err(error) = outcome.as_ref() else {
+            panic!("the body remains unconfirmed")
+        };
+        assert!(error.requires_recovery());
+        assert_eq!(
+            error.execution_failure_kind(),
+            Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
+        );
+        fixture.assert_candidate_unavailable();
+    }
+
+    #[test]
+    fn retirement_observed_unconfirmed_body_never_issues_a_refusal_continuation() {
+        let fixture = PublicationFixture::replacement(true);
+        let mut guard = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let _original = capture_original(&mut guard);
+        let completion = super::super::PublicationBodyCompletion::Observed {
+            guard,
+            outcome: Ok(super::super::ActorGenerationCommit::Unconfirmed(
+                "actual commit observation was lost".into(),
+            )),
+        }
+        .for_retirement();
+        let super::super::ActorGenerationPublicationSettlement::Settled(outcome) = completion
+        else {
+            panic!("unconfirmed physical publication cannot authorize restoration");
+        };
+        assert!(matches!(
+            outcome.as_ref(),
+            Ok(super::super::ActorGenerationCommit::Unconfirmed(_))
+        ));
+        fixture.assert_candidate_unavailable();
+    }
+
+    #[test]
     fn publisher_failed_settlement_retains_external_prerequisite_and_primary_outcome() {
         for bootstrap in [true, false] {
             for visible in [true, false] {
@@ -1596,7 +1713,7 @@ mod tests {
                     panic!("both facts remain owned")
                 };
                 assert!(matches!(
-                    failure.outcome,
+                    failure.outcome.as_ref(),
                     Err(crate::ResidentActorWorkbenchError::InvocationCancelled)
                 ));
                 assert!(
