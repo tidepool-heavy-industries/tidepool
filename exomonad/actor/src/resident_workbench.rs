@@ -28015,91 +28015,96 @@ pub(crate) mod request_tests {
         session
             .set_run_context(private_context.run_context())
             .unwrap();
-        let (receiver_source, snapshot) = fixture_setup(&mut session, &fixture_source, |session| {
-            snapshot_cell_program(
-                session,
-                &private_context,
-                source.clone(),
-                None,
-                None,
-                CellSnapshotAdmission::PrivateExecution(&execution),
-            )
-            .unwrap()
-        });
-        let prepared = receiver_source.prepare(&snapshot.view);
-        let preamble =
-            cell_module_preamble(&prepared.preamble, &snapshot.candidate_module.module_name())
-                .unwrap();
+        let world = execution.compiler_world().unwrap().clone();
+        let receiver_source = source.clone().for_workbench(&private_context, None);
+        let preamble = cell_module_preamble(
+            &hide_preamble_exports(
+                &receiver_source.preamble,
+                &[tidepool_runtime::session::ExportItem::Value {
+                    name: "print".into(),
+                }],
+            ),
+            "CellCheck",
+        )
+        .unwrap();
+        let imports = receiver_source.workbench_imports.template_text();
         let template = resident_cell_check_template(
             &preamble,
             private_context.haskell_effects_alias.expression(),
-            &prepared.imports,
+            &imports,
         );
         let templates = resident_workbench_templates(
-            &prepared.preamble,
+            &preamble,
             private_context.haskell_effects_alias.expression(),
-            &prepared.imports,
+            &imports,
         );
         let receiver_text = tidepool_testing::fixture_source(
             "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
         );
-        let specification = Arc::new(
-            tidepool_toolchain::checked_cell::CellRecipe::new(
-                receiver_text.clone(),
-                template.clone(),
-                templates
-                    .iter()
-                    .map(|template| {
-                        let kind = match template.kind {
-                            tidepool_runtime::session::TemplateSelector::Decl => "decl",
-                            tidepool_runtime::session::TemplateSelector::Bind => "bind",
-                            tidepool_runtime::session::TemplateSelector::BindDiscard => {
-                                "binddiscard"
-                            }
-                            tidepool_runtime::session::TemplateSelector::Expr => "expr",
-                        };
-                        (kind.to_owned(), template.source.clone())
-                    })
-                    .collect(),
-                prepared.injected.clone(),
+        let specification = Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+            source: receiver_text,
+            template,
+            turn_templates: templates
+                .iter()
+                .map(|template| {
+                    let kind = match template.kind {
+                        tidepool_runtime::session::TemplateSelector::Decl => "decl",
+                        tidepool_runtime::session::TemplateSelector::Bind => "bind",
+                        tidepool_runtime::session::TemplateSelector::BindDiscard => "binddiscard",
+                        tidepool_runtime::session::TemplateSelector::Expr => "expr",
+                    };
+                    (kind.to_owned(), template.source.clone())
+                })
+                .collect(),
+        });
+        let plan_work = crate::capabilities::CompilerOwnerScope::current()
+            .unwrap()
+            .with_source_dependency(&dependency)
+            .admit_work()
+            .unwrap();
+        let settled_plan = plan_work
+            .run_source_compiler_phase(
+                &dependency,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                |owner, _| {
+                    tidepool_runtime::session::turn::prepare_world_cell_plan_admitted(
+                        owner,
+                        &world,
+                        specification.clone(),
+                    )
+                },
             )
-            .unwrap(),
-        );
-        let plan = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                specification.clone(),
-                &prepared.include,
-                settlement,
-            )
-        })
-        .unwrap();
+            .unwrap();
+        let plan =
+            tidepool_runtime::session::turn::finish_world_cell_plan_admitted(settled_plan).unwrap();
         eprintln!(
             "activation fixture receiver parse: {:?}",
             receiver_started.elapsed()
         );
         let receiver_compile_started = std::time::Instant::now();
-        let authority =
-            crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone());
         let admission = fixture_setup(&mut session, &fixture_source, |session| {
             session
-                .admit_planned_cell_for_execution(
-                    execution.clone(),
-                    plan,
-                    specification.clone(),
-                    specification.specification_digest(),
-                    authority.authority_digest(),
-                    prepared.include.clone(),
-                    None,
-                )
+                .admit_world_planned_cell_for_execution(execution.clone(), plan)
                 .unwrap()
         });
-        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
-            tidepool_runtime::session::turn::compile_cell_program_admitted(
-                admission.clone(),
-                settlement,
+        let check_work = crate::capabilities::CompilerOwnerScope::current()
+            .unwrap()
+            .with_source_dependency(&dependency)
+            .admit_work()
+            .unwrap();
+        let prepared_program = check_work
+            .run_source_compiler_phase(
+                &dependency,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                |owner, settlement| {
+                    tidepool_runtime::session::turn::prepare_cell_program_admitted(
+                        owner, admission, settlement,
+                    )
+                },
             )
-        })
-        .unwrap();
+            .unwrap();
+        let (checked, program) =
+            tidepool_runtime::session::turn::finish_cell_program_admitted(prepared_program).unwrap();
         eprintln!(
             "activation fixture receiver compilation: {:?}",
             receiver_compile_started.elapsed()
@@ -28109,6 +28114,7 @@ pub(crate) mod request_tests {
             1,
             "receiver setup is one grouped binding"
         );
+        let item = program.items()[0].checked_item().clone();
         let prefix = fixture_setup(&mut session, &fixture_source, |session| {
             session
                 .begin_cell_program(program)
@@ -28117,7 +28123,7 @@ pub(crate) mod request_tests {
         });
         let reservation = fixture_setup(&mut session, &fixture_source, |session| {
             session
-                .admit_checked_item(prefix.clone(), checked.checked_item(0).unwrap())
+                .admit_checked_item(prefix.clone(), item)
                 .unwrap()
         });
         let TurnResult::Bind {
