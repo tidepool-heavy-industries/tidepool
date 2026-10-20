@@ -1209,7 +1209,7 @@ impl CompilerWorld {
             .replace_semantic_roots(
                 &staged,
                 SemanticRoots {
-                    primary: *prior.primary_root.cid(),
+                    primary: *prior.primary_root.root().cid(),
                     associations: *prior.primary_associations.root().cid(),
                     bindings: *prior.bindings.root().cid(),
                     lexical: lexical_root,
@@ -4565,7 +4565,7 @@ mod answer_tests {
         for (cid, body) in blocks.blocks() {
             store.put_keyed(cid, body).unwrap();
         }
-        let restored = crate::exact_context::hydrate_context(&store, &root).unwrap();
+        let restored = crate::exact_context::hydrate_context(&store, root.root()).unwrap();
         assert_eq!(restored.snapshot().producer_sha256(), canonical);
         let issued = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
             Some(bound),
@@ -4580,8 +4580,8 @@ mod answer_tests {
                     CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256()
                 )
                 .unwrap()
-                .1,
-            root
+                .1.root(),
+            root.root()
         );
         let wrong = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
             Some(Arc::new(
