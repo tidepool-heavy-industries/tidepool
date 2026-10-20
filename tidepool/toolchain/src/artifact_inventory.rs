@@ -348,6 +348,13 @@ enum NativeSourceUse {
 #[derive(Clone, Debug, Default)]
 struct NativeSourceReceipts(imbl::OrdMap<NativeSourceUse, Arc<[NativeSourceCause]>>);
 
+/// Live solver causes are not recoverable from authenticated graph facts.
+#[derive(Clone, Debug)]
+enum IssuedNativeSourceReceipt {
+    Solved(Arc<NativeSourceReceipts>),
+    Unwitnessed,
+}
+
 impl NativeSourceReceipts {
     fn insert(&mut self, key: NativeSourceUse, cause: NativeSourceCause) -> bool {
         let Some(held) = self.0.get(&key) else {
@@ -702,6 +709,7 @@ struct IssuedArtifactCustody {
     lease: Arc<ViewLease>,
     entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     target_native_selection: Option<IssuedTargetNativeSelection>,
+    source_receipt: IssuedNativeSourceReceipt,
 }
 
 impl IssuedArtifactCustody {
@@ -4603,6 +4611,7 @@ impl ArtifactInventory {
                     .map(|(id, entry)| (*id, Arc::clone(entry)))
                     .collect(),
                 target_native_selection: None,
+                source_receipt: IssuedNativeSourceReceipt::Unwitnessed,
             });
         }
         let materialization_parents = Vec::new();
@@ -5422,6 +5431,7 @@ impl ArtifactInventory {
                 }
             }
         }
+        let source_receipt = IssuedNativeSourceReceipt::Solved(Arc::new(source_receipts.clone()));
         let target_native_selection = target_groups.map(|groups| IssuedTargetNativeSelection {
             sources: source_receipts,
             roots: groups
@@ -5527,6 +5537,7 @@ impl ArtifactInventory {
             lease,
             entries: selected,
             target_native_selection,
+            source_receipt,
         })
     }
     /// Restore exact bound facts only after validating every certified edge and
@@ -5688,6 +5699,7 @@ impl ArtifactInventory {
             lease,
             entries: retained_entries,
             target_native_selection: None,
+            source_receipt: IssuedNativeSourceReceipt::Unwitnessed,
         })
     }
 
