@@ -18,11 +18,11 @@ use tidepool_toolchain::declaration_join::{
 
 use super::persistent::PersistentSession;
 use super::render::{
-    extend_exports_by_head, AdmittedDeclarationSurface, DeclTurn, JoinedDeclaration,
+    AdmittedDeclarationSurface, DeclTurn, JoinedDeclaration, extend_exports_by_head,
 };
 use super::{
-    recovery, DeclarationSource, PublicManifestBase, PublicVisibilitySnapshot, RecoveryPublicOwner,
-    SessionError, SessionLib, StagedPublicManifest,
+    DeclarationSource, PublicManifestBase, PublicVisibilitySnapshot, RecoveryPublicOwner,
+    SessionError, SessionLib, StagedPublicManifest, recovery,
 };
 
 #[derive(Clone)]
@@ -1499,34 +1499,8 @@ impl AcceptedDeclarationPublication {
         turn.items = receipt
             .exports()
             .iter()
-            .map(|export| match export.kind {
-                tidepool_toolchain::declaration_join::DeclarationKind::Value => {
-                    super::ExportItem::Value {
-                        name: export.head.occurrence.clone(),
-                    }
-                }
-                tidepool_toolchain::declaration_join::DeclarationKind::Type => {
-                    super::ExportItem::Type {
-                        name: export.head.occurrence.clone(),
-                        cons: export
-                            .children
-                            .iter()
-                            .map(|child| child.occurrence.clone())
-                            .collect(),
-                    }
-                }
-                tidepool_toolchain::declaration_join::DeclarationKind::Class => {
-                    super::ExportItem::Class {
-                        name: export.head.occurrence.clone(),
-                        methods: export
-                            .children
-                            .iter()
-                            .map(|child| child.occurrence.clone())
-                            .collect(),
-                    }
-                }
-            })
-            .collect();
+            .map(super::ExportItem::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
         let private_owners = base
             .intent
             .writes

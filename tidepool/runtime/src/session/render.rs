@@ -37,6 +37,8 @@ use super::SourceImports;
 pub enum ExportItem {
     /// A function/value binder.
     Value { name: String },
+    /// A GHC pattern synonym in the constructor namespace.
+    Pattern { name: String },
     /// A type/data constructor head plus its data-constructor children.
     Type { name: String, cons: Vec<String> },
     /// A typeclass head plus its method names.
@@ -74,9 +76,13 @@ fn op_wrap(name: &str) -> String {
     }
 }
 
-impl From<&tidepool_toolchain::declaration_join::DeclarationExport> for ExportItem {
-    fn from(export: &tidepool_toolchain::declaration_join::DeclarationExport) -> Self {
-        use tidepool_toolchain::declaration_join::DeclarationKind;
+impl TryFrom<&tidepool_toolchain::declaration_join::DeclarationExport> for ExportItem {
+    type Error = crate::CompileError;
+
+    fn try_from(
+        export: &tidepool_toolchain::declaration_join::DeclarationExport,
+    ) -> Result<Self, Self::Error> {
+        use tidepool_toolchain::declaration_join::{DeclarationKind, ExportNamespace};
         let name = export.head.occurrence.clone();
         let children = || {
             export
@@ -85,17 +91,29 @@ impl From<&tidepool_toolchain::declaration_join::DeclarationExport> for ExportIt
                 .map(|child| child.occurrence.clone())
                 .collect()
         };
-        match export.kind {
-            DeclarationKind::Value => Self::Value { name },
-            DeclarationKind::Type => Self::Type {
+        Ok(match (export.kind, export.head.namespace) {
+            (DeclarationKind::Value, ExportNamespace::Value) if export.children.is_empty() => {
+                Self::Value { name }
+            }
+            (DeclarationKind::Value, ExportNamespace::Constructor)
+                if export.children.is_empty() =>
+            {
+                Self::Pattern { name }
+            }
+            (DeclarationKind::Type, ExportNamespace::Type) => Self::Type {
                 name,
                 cons: children(),
             },
-            DeclarationKind::Class => Self::Class {
+            (DeclarationKind::Class, ExportNamespace::Type) => Self::Class {
                 name,
                 methods: children(),
             },
-        }
+            _ => {
+                return Err(crate::CompileError::ExtractFailed(
+                    "certified declaration export has an unsupported kind or namespace".into(),
+                ))
+            }
+        })
     }
 }
 
@@ -104,6 +122,7 @@ impl ExportItem {
         use tidepool_toolchain::declaration_join::ExportNamespace;
         match self {
             Self::Value { .. } => ExportNamespace::Value,
+            Self::Pattern { .. } => ExportNamespace::Constructor,
             Self::Type { .. } | Self::Class { .. } => ExportNamespace::Type,
         }
     }
@@ -111,7 +130,7 @@ impl ExportItem {
     #[must_use]
     pub fn kind(&self) -> DeclarationKind {
         match self {
-            ExportItem::Value { .. } => DeclarationKind::Value,
+            ExportItem::Value { .. } | ExportItem::Pattern { .. } => DeclarationKind::Value,
             ExportItem::Type { .. } => DeclarationKind::Type,
             ExportItem::Class { .. } => DeclarationKind::Class,
         }
@@ -122,6 +141,7 @@ impl ExportItem {
     pub fn head_name(&self) -> &str {
         match self {
             ExportItem::Value { name }
+            | ExportItem::Pattern { name }
             | ExportItem::Type { name, .. }
             | ExportItem::Class { name, .. } => name,
         }
@@ -137,7 +157,7 @@ impl ExportItem {
         let children: &[String] = match self {
             Self::Type { cons, .. } => cons,
             Self::Class { methods, .. } => methods,
-            Self::Value { .. } => &[],
+            Self::Value { .. } | Self::Pattern { .. } => &[],
         };
         head.into_iter().chain(children.iter().map(String::as_str))
     }
@@ -149,7 +169,7 @@ impl ExportItem {
         let cons: Box<dyn Iterator<Item = &str>> = match self {
             ExportItem::Type { cons, .. } => Box::new(cons.iter().map(String::as_str)),
             ExportItem::Class { methods, .. } => Box::new(methods.iter().map(String::as_str)),
-            ExportItem::Value { .. } => Box::new(std::iter::empty()),
+            ExportItem::Value { .. } | ExportItem::Pattern { .. } => Box::new(std::iter::empty()),
         };
         head.chain(cons)
     }
@@ -163,6 +183,7 @@ impl ExportItem {
     pub fn render_entry(&self) -> String {
         match self {
             ExportItem::Value { name } => op_wrap(name),
+            ExportItem::Pattern { name } => format!("pattern {}", op_wrap(name)),
             // A type synonym or family (empty cons) renders as a bare head;
             // `(..)` is rejected by GHC for synonyms.
             ExportItem::Type { name, cons } if cons.is_empty() => {
@@ -901,7 +922,7 @@ impl DeclLog {
             .into_iter()
             .filter_map(|(item, generation)| match item {
                 ExportItem::Value { name } => Some((name, generation)),
-                ExportItem::Type { .. } | ExportItem::Class { .. } => None,
+                ExportItem::Pattern { .. } | ExportItem::Type { .. } | ExportItem::Class { .. } => None,
             })
             .collect::<BTreeMap<_, _>>();
         for (name, generation, ty) in types {
@@ -1099,8 +1120,9 @@ pub(super) fn hide_session_heads(imp: &str, all_session_heads: &[&ExportItem]) -
         }
         prefix.to_string()
     } else {
-        let head_names: Vec<&str> = all_session_heads.iter().map(|p| p.head_name()).collect();
-        if let Some(rewritten) = subtract_import_list_names(imp, &head_names) {
+        if let Some(rewritten) = filter_import_list_entries(imp, |entry| {
+            !all_session_heads.iter().any(|item| item_matches_import_entry(item, entry))
+        }) {
             return rewritten;
         }
         imp.to_string()
@@ -1132,6 +1154,51 @@ fn import_is_qualified(line: &str) -> bool {
 /// patching, so the two shadowing stores can't drift on this shape again.
 #[must_use]
 pub fn subtract_import_list_names(line: &str, names: &[&str]) -> Option<String> {
+    filter_import_list_entries(line, |entry| {
+        let head = import_entry_head(entry);
+        !names
+            .iter()
+            .any(|name| *name == head || op_wrap(name) == head)
+    })
+}
+
+// Explicit namespace syntax must remain distinct: hiding a pattern P cannot
+// remove a same-spelled type P. Bare names retain the existing value/type
+// rendering rules; the pattern branch requires its explicit syntax.
+fn item_matches_import_entry(item: &ExportItem, entry: &str) -> bool {
+    let entry = entry.trim();
+    let (namespace, body) = if let Some(body) = entry.strip_prefix("pattern ") {
+        (
+            Some(tidepool_toolchain::declaration_join::ExportNamespace::Constructor),
+            body.trim(),
+        )
+    } else if let Some(body) = entry.strip_prefix("type ") {
+        (
+            Some(tidepool_toolchain::declaration_join::ExportNamespace::Type),
+            body.trim(),
+        )
+    } else {
+        (None, entry)
+    };
+    if let Some(namespace) = namespace {
+        if namespace != item.head_namespace() {
+            return false;
+        }
+    } else if matches!(item, ExportItem::Pattern { .. }) {
+        return false;
+    }
+    let head = import_entry_head(body);
+    head == item.head_name() || head == op_wrap(item.head_name())
+}
+
+fn import_entry_head(entry: &str) -> &str {
+    match entry.split('(').next().map(str::trim) {
+        Some("") | None => entry,
+        Some(head) => head,
+    }
+}
+
+fn filter_import_list_entries(line: &str, keep: impl Fn(&str) -> bool) -> Option<String> {
     let t = line.trim_start();
     if !t.starts_with("import ") || import_is_qualified(t) || line.contains(" hiding (") {
         return None;
@@ -1143,14 +1210,7 @@ pub fn subtract_import_list_names(line: &str, names: &[&str]) -> Option<String> 
     let kept: Vec<&str> = split_top_level_commas(&line[open + 1..close])
         .into_iter()
         .map(str::trim)
-        .filter(|e| !e.is_empty())
-        .filter(|e| {
-            let head = match e.split('(').next().map(str::trim) {
-                Some("") | None => *e, // operator entry like `(<+>)`
-                Some(h) => h,
-            };
-            !names.iter().any(|n| *n == head || format!("({n})") == head)
-        })
+        .filter(|entry| !entry.is_empty() && keep(entry))
         .collect();
     Some(format!(
         "{}({}){}",
@@ -1759,6 +1819,68 @@ mod tests {
         assert_eq!(
             hide_session_heads("import M ((<+>), pure)", &heads),
             "import M (pure)"
+        );
+    }
+
+    #[test]
+    fn pattern_exports_preserve_namespace_and_symbolic_syntax() {
+        use tidepool_toolchain::declaration_join::{
+            DeclarationExport, DeclarationKind, ExportIdentity, ExportNamespace,
+        };
+        let pattern = ExportItem::Pattern {
+            name: "PublishedPattern".into(),
+        };
+        let operator = ExportItem::Pattern { name: ":~:".into() };
+        assert_eq!(pattern.render_entry(), "pattern PublishedPattern");
+        assert_eq!(operator.render_entry(), "pattern (:~:)");
+        assert_eq!(pattern.head_namespace(), ExportNamespace::Constructor);
+        assert!(pattern.value_names().next().is_none());
+        let mut exports = vec![ty("PublishedPattern", &["Constructor"])];
+        extend_exports_by_head(&mut exports, std::slice::from_ref(&pattern));
+        assert_eq!(exports.len(), 2);
+        let mut certified = DeclarationExport {
+            kind: DeclarationKind::Value,
+            head: ExportIdentity {
+                unit: "main".into(),
+                module: "PatternOriginal".into(),
+                namespace: ExportNamespace::Constructor,
+                occurrence: "PublishedPattern".into(),
+                record_parent: None,
+            },
+            children: Vec::new(),
+        };
+        assert_eq!(ExportItem::try_from(&certified).unwrap(), pattern);
+        certified.head.namespace = ExportNamespace::Type;
+        assert!(ExportItem::try_from(&certified).is_err());
+    }
+
+    #[test]
+    fn pattern_hiding_preserves_same_spelled_type_imports() {
+        let pattern = ExportItem::Pattern {
+            name: "PublishedPattern".into(),
+        };
+        assert_eq!(
+            hide_session_heads(
+                "import Original (type PublishedPattern, pattern PublishedPattern, ordinary)",
+                &[&pattern]
+            ),
+            "import Original (type PublishedPattern, ordinary)"
+        );
+        assert_eq!(
+            hide_session_heads(
+                "import Original (PublishedPattern, pattern PublishedPattern)",
+                &[&pattern]
+            ),
+            "import Original (PublishedPattern)"
+        );
+        let operator = ExportItem::Pattern { name: ":~:".into() };
+        assert_eq!(
+            hide_session_heads("import Original (type (:~:), pattern (:~:))", &[&operator]),
+            "import Original (type (:~:))"
+        );
+        assert_eq!(
+            hide_session_heads("import Original", &[&pattern]),
+            "import Original hiding (pattern PublishedPattern)"
         );
     }
 

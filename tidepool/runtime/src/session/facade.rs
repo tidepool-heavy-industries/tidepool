@@ -9,7 +9,7 @@ use tidepool_toolchain::declaration_join::{
     DeclarationExport, ExactModuleIdentity, ExportIdentity,
 };
 
-use super::lexical_projection::{issue_projection, DeclarationProjectionBaseline};
+use super::lexical_projection::{DeclarationProjectionBaseline, issue_projection};
 use super::{CertifiedDeclarationProjection, ExportItem, SessionCompileView};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,21 +62,25 @@ impl ExactExportSurface {
         baseline: DeclarationProjectionBaseline,
         mut exports: Vec<DeclarationExport>,
         includes: Vec<PathBuf>,
-    ) -> Self {
+    ) -> Result<Self, crate::CompileError> {
         for export in &mut exports {
             export.children.sort();
         }
         exports.sort_by(|left, right| left.head.cmp(&right.head));
-        Self {
+        let items = exports
+            .iter()
+            .map(ExportItem::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
             session,
             source,
-            items: exports.iter().map(ExportItem::from).collect(),
+            items,
             authority: ExportAuthority::Certified {
                 baseline: Arc::new(baseline),
                 exports,
                 includes,
             },
-        }
+        })
     }
 
     pub fn session(&self) -> SessionId {
@@ -432,7 +436,7 @@ mod tests {
     #[test]
     fn inherited_certified_facade_subset_preserves_original_owners_and_default_visibility() {
         use crate::session::{ModuleEnv, PersistentSession, SessionLib};
-        use tidepool_toolchain::artifacts::{compile_invocation_in_context, CompileInvocation};
+        use tidepool_toolchain::artifacts::{CompileInvocation, compile_invocation_in_context};
         use tidepool_toolchain::declaration_join::ExactModuleIdentity;
 
         let root = tempfile::tempdir().unwrap();

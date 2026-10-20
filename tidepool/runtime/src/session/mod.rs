@@ -2250,7 +2250,7 @@ impl SessionLib {
                 baseline,
                 exports,
                 self.extra_include.clone(),
-            ))
+            )?)
         } else {
             Ok(ExactExportSurface::legacy(
                 self.id,
@@ -3165,6 +3165,7 @@ fn validate_rendered_module(
     for item in items {
         let term_names: &[String] = match item {
             ExportItem::Value { name } => std::slice::from_ref(name),
+            ExportItem::Pattern { .. } => &[],
             ExportItem::Type { cons, .. } => cons,
             ExportItem::Class { methods, .. } => methods,
         };
