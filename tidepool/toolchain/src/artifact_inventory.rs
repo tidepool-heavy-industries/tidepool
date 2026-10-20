@@ -10986,25 +10986,63 @@ mod tests {
                     )
                     .unwrap()
             };
-            let left = capture("InheritedLeft");
-            let right = capture("InheritedRight");
-            assert_eq!(left.namespace()[&id], right.namespace()[&id]);
-            assert_ne!(
-                left.capture_graph_selection().native_groups,
-                right.capture_graph_selection().native_groups
-            );
-            let chosen = left.merge_fixture_selections(&right).unwrap();
-            let mut selection = bound_selection_for_entries(&chosen, &[native.clone()]);
-            if explicit {
-                let requirement = NativeOriginalRequirement::from_selected_view(id, &left)
-                    .unwrap()
+            let mut supports = Vec::new();
+            for view in [capture("InheritedLeft"), capture("InheritedRight")] {
+                let projection =
+                    CompilerInputProjection::from_issued_entries(&view.entries()).unwrap();
+                let selection =
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        &projection,
+                        &view.metadata_snapshot(),
+                        &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                    )
                     .unwrap();
+                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                    &selection, &view,
+                )
+                .unwrap();
+                supports.push(CompilerSourceSupport::close_complete_output(&output).unwrap());
+            }
+            let left = &supports[0];
+            let right = &supports[1];
+            assert_eq!(
+                left.artifacts().namespace()[&id],
+                right.artifacts().namespace()[&id]
+            );
+            let left_groups = left.artifacts().selected_native_groups();
+            let right_groups = right.artifacts().selected_native_groups();
+            assert_eq!(left_groups.len(), 1);
+            assert_eq!(right_groups.len(), 1);
+            let expected = *left_groups.first().unwrap();
+            let competing = *right_groups.first().unwrap();
+            assert_ne!(expected, competing);
+            assert_ne!(expected.binding.selection(), competing.binding.selection());
+            let canonical = ArtifactEntry::canonical(match &native.payload {
+                ArtifactPayload::Original(product) => product.module_interface().unwrap().clone(),
+                _ => unreachable!(),
+            })
+            .descriptor
+            .id;
+            assert_eq!(
+                left.artifacts().namespace()[&canonical],
+                right.artifacts().namespace()[&canonical]
+            );
+            let peer = right.for_source_owners(&BTreeSet::new()).unwrap();
+            let chosen = left.merge(&peer).unwrap();
+            let chosen = chosen.artifacts();
+            assert_eq!(chosen.selected_native_groups(), BTreeSet::from([expected]));
+            let mut selection = bound_selection_for_entries(chosen, &[native.clone()]);
+            if explicit {
+                let requirement =
+                    NativeOriginalRequirement::from_selected_view(id, left.artifacts())
+                        .unwrap()
+                        .unwrap();
                 selection
                     .with_new_product_dependencies(&chosen.metadata_snapshot(), &[requirement])
                     .unwrap();
             }
             let mut fixed = inventory
-                .bind_segment(&chosen, vec![native.clone()], &selection)
+                .bind_segment(chosen, vec![native.clone()], &selection)
                 .unwrap();
             let imports = [issued_source(&native, 7)];
             let result = inventory
@@ -11016,16 +11054,15 @@ mod tests {
                     &selection,
                 )
                 .map(|admitted| admitted.artifacts);
-            if explicit {
-                let demanded = result.expect("issued exact Group requirement remains selected");
-                let expected = left.capture_graph_selection().native_groups[0];
-                assert!(demanded
-                    .roots()
-                    .contains(&InventoryNodeKey::Group(expected)));
-            } else {
-                assert!(matches!(result, Err(CompileError::ArtifactInventory(error))
-                    if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })));
-            }
+            let demanded =
+                result.expect("implicit and explicit demand consume the carried exact choice");
+            assert_eq!(
+                demanded.selected_native_groups(),
+                BTreeSet::from([expected])
+            );
+            assert!(demanded
+                .roots()
+                .contains(&InventoryNodeKey::Group(expected)));
         }
     }
 
@@ -14191,6 +14228,35 @@ mod tests {
                 NativeArtifactDemand::AllGroups,
             )
             .unwrap();
+        let mut produced = Vec::new();
+        for (physical, entries) in [
+            (
+                &issuer,
+                vec![Arc::new(root.clone()), Arc::new(child.clone())],
+            ),
+            (
+                &sibling,
+                vec![Arc::new(child.clone()), Arc::new(unrelated.clone())],
+            ),
+        ] {
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &physical.metadata_snapshot(),
+                    &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                )
+                .unwrap();
+            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &selection, physical,
+            )
+            .unwrap();
+            produced.push(CompilerSourceSupport::close_complete_output(&output).unwrap());
+        }
+        let root_output = &produced[0];
+        let sibling_output = &produced[1];
+        let issuer = root_output.artifacts();
+        let sibling = sibling_output.artifacts();
         let expected = issuer.capture_graph_selection().native_groups;
         let ordinary = CompilerInputProjection::from_issued_entries(&[
             Arc::new(root.clone()),
@@ -14198,6 +14264,28 @@ mod tests {
         ])
         .unwrap();
         let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let types = ordinary.interface_only();
+        let type_selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &types,
+                &carriers.metadata_snapshot(),
+                &validation.inventory,
+            )
+            .unwrap();
+        let type_output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+            &type_selection,
+            &carriers,
+        )
+        .unwrap();
+        let types = CompilerSourceSupport::close_complete_output(&type_output).unwrap();
+        let retained = types
+            .retain_custody(issuer)
+            .unwrap()
+            .retain_custody(sibling)
+            .unwrap();
+        assert!(retained.native_offers().is_empty());
+        assert!(retained.native_availability().rows().next().is_none());
+        assert!(retained.artifacts().selected_native_groups().is_empty());
         for projection in [
             ordinary.clone(),
             ordinary.for_source_owners(&BTreeSet::from([root.descriptor.owner.clone()])),
@@ -14211,16 +14299,16 @@ mod tests {
                 .iter()
                 .any(|role| role.original() == Some(child.descriptor.id));
             let facts =
-                NativeOriginalRequirement::for_projection(&projection, &issuer, &[]).unwrap();
+                NativeOriginalRequirement::for_projection(&projection, issuer, &[]).unwrap();
             let mut receipt =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
-                    &issuer.metadata_snapshot(),
+                    &retained.artifacts().metadata_snapshot(),
                     &validation.inventory,
                 )
                 .unwrap();
             if !child_reusable {
-                let broader = issuer.merge_fixture_selections(&sibling).unwrap();
+                let broader = retained.artifacts();
                 assert!(matches!(inventory.admit_certified_with_demand(
                     &broader, vec![Arc::new(root.clone())], NativeArtifactDemand::ScopeInterfaces, &receipt,
                 ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
@@ -14228,26 +14316,33 @@ mod tests {
                     if required == &child.descriptor.owner)));
             }
             receipt
-                .with_new_product_dependencies(&issuer.metadata_snapshot(), &facts)
+                .with_new_product_dependencies(&retained.artifacts().metadata_snapshot(), &facts)
                 .unwrap();
             for (joined, projected) in [
-                issuer.merge_fixture_selections(&sibling).unwrap(),
-                sibling.merge_fixture_selections(&issuer).unwrap(),
+                retained.clone(),
+                types
+                    .retain_custody(sibling)
+                    .unwrap()
+                    .retain_custody(issuer)
+                    .unwrap(),
             ]
             .into_iter()
             .flat_map(|joined| [(joined.clone(), false), (joined, true)])
             {
+                assert!(joined.native_offers().is_empty());
+                assert!(joined.native_availability().rows().next().is_none());
+                let joined = joined.artifacts();
                 let scopes_before = inventory.0.lock().unwrap().selection_plans.len();
                 let admitted = if projected {
                     inventory.admit_projected_with_native_requirements(
-                        &joined,
+                        joined,
                         vec![Arc::new(root.clone())],
                         &projection,
                         &facts,
                     )
                 } else {
                     inventory.admit_certified_with_demand(
-                        &joined,
+                        joined,
                         vec![Arc::new(root.clone())],
                         NativeArtifactDemand::ScopeInterfaces,
                         &receipt,
@@ -14306,20 +14401,46 @@ mod tests {
         let projection =
             ordinary.for_source_owners(&BTreeSet::from([root.descriptor.owner.clone()]));
         let mut facts =
-            NativeOriginalRequirement::for_projection(&projection, &issuer, &[]).unwrap();
-        let alternate = inventory
+            NativeOriginalRequirement::for_projection(&projection, issuer, &[]).unwrap();
+        let alternate_entries = vec![
+            Arc::new(root.clone()),
+            Arc::new(child.clone()),
+            Arc::new(unrelated.clone()),
+        ];
+        let alternate_physical = inventory
             .admit_shared_with_demand(
                 &carriers,
-                vec![Arc::new(root.clone()), Arc::new(unrelated.clone())],
+                alternate_entries.clone(),
                 NativeArtifactDemand::AllGroups,
             )
             .unwrap();
+        let alternate_projection =
+            CompilerInputProjection::from_issued_entries(&alternate_entries).unwrap();
+        let alternate_selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &alternate_projection,
+                &alternate_physical.metadata_snapshot(),
+                &validation.inventory,
+            )
+            .unwrap();
+        let alternate_output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+            &alternate_selection,
+            &alternate_physical,
+        )
+        .unwrap();
+        let alternate = CompilerSourceSupport::close_complete_output(&alternate_output).unwrap();
         facts.extend(
-            NativeOriginalRequirement::for_projection(&projection, &alternate, &[]).unwrap(),
+            NativeOriginalRequirement::for_projection(&projection, alternate.artifacts(), &[])
+                .unwrap(),
         );
-        let joined = issuer.merge_fixture_selections(&alternate).unwrap();
+        let joined = types
+            .retain_custody(issuer)
+            .unwrap()
+            .retain_custody(alternate.artifacts())
+            .unwrap();
+        let joined = joined.artifacts();
         let preserved =
-            NativeOriginalRequirement::for_projection(&projection, &joined, &facts).unwrap();
+            NativeOriginalRequirement::for_projection(&projection, joined, &facts).unwrap();
         assert_eq!(preserved.len(), 2);
         let mut ambiguous =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
@@ -19763,8 +19884,6 @@ mod tests {
         let before = inventory.metrics();
         let unchanged = inventory.admit(&view, Vec::new()).unwrap();
         assert!(Arc::ptr_eq(&view.lease, &unchanged.lease));
-        let merged = view.merge_fixture_selections(&unchanged).unwrap();
-        drop(merged);
         drop(unchanged);
         let after = inventory.metrics();
         assert_eq!(before.graph_visits, after.graph_visits);
@@ -19772,11 +19891,39 @@ mod tests {
             before.admission_owner_lookups,
             after.admission_owner_lookups
         );
+        let projection = CompilerInputProjection::from_issued_entries(&view.entries()).unwrap();
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &view.metadata_snapshot(),
+                &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+            )
+            .unwrap();
+        let output =
+            crate::declaration_context::OriginalCompilerInputs::from_selection(&selection, &view)
+                .unwrap();
+        let support = CompilerSourceSupport::close_complete_output(&output).unwrap();
+        let before_merge = inventory.metrics();
+        let merged = support.merge(&support).unwrap();
+        assert_eq!(
+            merged.artifacts().capture_graph_selection(),
+            support.artifacts().capture_graph_selection()
+        );
+        let after_merge = inventory.metrics();
+        eprintln!(
+            "separate_support_merge graph_visits={} admission_owner_lookups={}",
+            after_merge.graph_visits - before_merge.graph_visits,
+            after_merge.admission_owner_lookups - before_merge.admission_owner_lookups
+        );
+        drop(merged);
+        drop(support);
+        drop(output);
+        let before_consumer = inventory.metrics();
         let second = inventory
             .admit(&view, vec![entry("Consumer", &["Original"])])
             .unwrap();
         assert_eq!(
-            inventory.metrics().admission_owner_lookups - after.admission_owner_lookups,
+            inventory.metrics().admission_owner_lookups - before_consumer.admission_owner_lookups,
             4
         );
         drop(second);
