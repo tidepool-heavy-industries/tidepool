@@ -9,7 +9,7 @@ module Tidepool.CompilerRequest
   , boundRequestOperation, boundRequestExactScope, boundParserFlags
   , compileBoundRequest, compilePreparedRequest, compilePreparedSegmentRequest
   , runBoundGhc, withBoundExactInterfaceTransaction, cellSegmentRequest
-  , runBoundWorldQuery, runBoundWorldCellPlan, validateBoundWorldCell, commitPreparedWorldDependencies
+  , runBoundWorldQuery, runBoundWorldCellPlan, validateBoundWorldCell, boundWorldCellSlots, commitPreparedWorldDependencies
   , PreparedCompilation, preparedCompilationResult, preparedCompilationWorldInputs, prepareCompilationOriginals
   , PreparedArtifact(..), PreparedArtifactOutput(..), PreparedOutputIntent(..), preparedOutputIntent, prepareArtifacts, prepareArtifactsWithIntent
   , prepareArtifactsWithProjection, PreviewOriginalDependenciesUnavailable, requirePreviewProjection
@@ -78,24 +78,52 @@ import Tidepool.RequestCompletion (Completion, CleanupStage(CapabilitiesRestore)
 
 -- No caller-maintained compiler record updates: argument normalization, exact
 -- admission and the one executor are bound before any mode consumes the request.
+-- The admitted operation owns every field that admission already validated;
+-- later stages add only their own produced settings.
 data BoundCompilerRequest = BoundCompilerRequest CompilerScope WorkerRequest
-  RequestOperation CompilerInputBasis CompilerExecutionGrant CompilerExecutor (Maybe CellCompilationInputs)
+  AdmittedCompilerOperation CompilerExecutionGrant CompilerExecutor (Maybe CellCompilationInputs)
 
-data CompilerInputBasis = ExactScopeBasis (Maybe ExactScope) | HeldWorldBasis (Maybe HeldWorldQueryBinding)
+-- One operation shape after shape admission and exact/held acquisition. A
+-- World preparation retains its validated immutable plan; a failed acquisition
+-- is a typed refusal, not an admitted operation with absent fields.
+data AdmittedCompilerOperation
+  = AdmittedExactOperation (Maybe ExactScope) RequestOperation
+  | AdmittedHeldQueryOperation (Maybe HeldWorldQueryBinding) WorldPublicModuleRequest
+  | AdmittedHeldCellPlanOperation (Maybe HeldWorldQueryBinding) WorldCellPlanRequest
+  | AdmittedHeldCellPrepareOperation HeldWorldCellPreparation
+
+data HeldWorldCellPreparation
+  = HeldWorldCellRefused WorldCellPrepareRequest WorldCellRefusal
+  | HeldWorldCellAdmitted HeldWorldCellAdmission
+
+data HeldWorldCellAdmission = HeldWorldCellAdmission
+  { heldCellQuestion :: WorldCellPrepareRequest
+  , heldCellBinding :: HeldWorldQueryBinding
+  , heldCellPlan :: CellSourcePlan
+  , heldCellSlots :: [(Word64,PlannedCellSlot)]
+  }
 
 boundWorkerRequest :: BoundCompilerRequest -> WorkerRequest
-boundWorkerRequest (BoundCompilerRequest _ args _ _ _ _ _) = args
+boundWorkerRequest (BoundCompilerRequest _ args _ _ _ _) = args
 
 boundRequestOperation :: BoundCompilerRequest -> RequestOperation
-boundRequestOperation (BoundCompilerRequest _ _ operation _ _ _ _) = operation
+boundRequestOperation (BoundCompilerRequest _ _ admitted _ _ _) = admittedTag admitted
+  where
+    admittedTag (AdmittedExactOperation _ operation) = operation
+    admittedTag (AdmittedHeldQueryOperation _ question) = WorldPublicModuleOperation question
+    admittedTag (AdmittedHeldCellPlanOperation _ question) = WorldCellPlanOperation question
+    admittedTag (AdmittedHeldCellPrepareOperation preparation) =
+      WorldCellPrepareOperation (heldPreparationQuestion preparation)
+    heldPreparationQuestion (HeldWorldCellRefused question _) = question
+    heldPreparationQuestion (HeldWorldCellAdmitted admission) = heldCellQuestion admission
 
 boundRequestExactScope :: BoundCompilerRequest -> Maybe ExactScope
-boundRequestExactScope (BoundCompilerRequest _ _ _ basis _ _ _) = case basis of
-  ExactScopeBasis exact -> exact
-  HeldWorldBasis _ -> Nothing
+boundRequestExactScope (BoundCompilerRequest _ _ admitted _ _ _) = case admitted of
+  AdmittedExactOperation exact _ -> exact
+  _ -> Nothing
 
 boundParserFlags :: BoundCompilerRequest -> DynFlags
-boundParserFlags (BoundCompilerRequest scope _ _ _ _ _ _) = scopedParserFlags scope
+boundParserFlags (BoundCompilerRequest scope _ _ _ _ _) = scopedParserFlags scope
 
 withBoundCompilerRequest :: PhaseSink -> CompilerScope -> WorkerRequest -> (BoundCompilerRequest -> IO a) -> IO (Completion a)
 withBoundCompilerRequest sink compilerScope parsed use = do
@@ -150,16 +178,32 @@ withBoundCompilerRequest sink compilerScope parsed use = do
               && Map.null (requestRetainedGenerations args))
               (throwIO CheckedPurposeMismatch)
         pure scope
-      basis <- case operation of
-        WorldPublicModuleOperation question -> HeldWorldBasis <$>
+      admitted <- case operation of
+        WorldPublicModuleOperation question -> AdmittedHeldQueryOperation <$>
           scopedReadHeldWorld compilerScope (worldQueryIdentity question) (worldQueryRealization question)
-        WorldCellPlanOperation question -> HeldWorldBasis <$>
+          <*> pure question
+        WorldCellPlanOperation question -> AdmittedHeldCellPlanOperation <$>
           scopedReadHeldWorld compilerScope (worldCellPlanIdentity question) (worldCellPlanRealization question)
-        WorldCellPrepareOperation question -> HeldWorldBasis <$>
-          scopedReadHeldWorld compilerScope (worldCellPrepareIdentity question) (worldCellPrepareRealization question)
-        _ -> pure (ExactScopeBasis exact)
+          <*> pure question
+        WorldCellPrepareOperation question -> do
+          binding <- scopedReadHeldWorld compilerScope
+            (worldCellPrepareIdentity question) (worldCellPrepareRealization question)
+          preparation <- case binding of
+            Nothing -> pure (HeldWorldCellRefused question WorldCellUnavailable)
+            Just held -> do
+              validation <- scopedValidateWorldCell compilerScope (Just held) grant executor question
+              pure $ case validation of
+                Left refusal -> HeldWorldCellRefused question refusal
+                Right plan -> HeldWorldCellAdmitted HeldWorldCellAdmission
+                  { heldCellQuestion = question
+                  , heldCellBinding = held
+                  , heldCellPlan = plan
+                  , heldCellSlots = worldCellPrepareSlots question
+                  }
+          pure (AdmittedHeldCellPrepareOperation preparation)
+        _ -> pure (AdmittedExactOperation exact operation)
       emitPhase sink BodyStarted
-      result <- use (BoundCompilerRequest compilerScope args operation basis grant executor Nothing)
+      result <- use (BoundCompilerRequest compilerScope args admitted grant executor Nothing)
       emitPhase sink BodyFinished
       pure result
 
@@ -169,14 +213,16 @@ data CellCompilationInputs = CellCompilationInputs (Maybe ProgramSourceImports)
   [((String,String),String)] [CompletedValueImport]
 
 cellSegmentRequest :: BoundCompilerRequest -> ProgramCellState ExactScope -> BoundCompilerRequest
-cellSegmentRequest (BoundCompilerRequest _ _ _ (HeldWorldBasis _) _ _ _) _ = throw CheckedPurposeMismatch
-cellSegmentRequest (BoundCompilerRequest scope args operation _ grant executor _) state =
+cellSegmentRequest (BoundCompilerRequest _ _ (AdmittedHeldQueryOperation _ _) _ _ _) _ = throw CheckedPurposeMismatch
+cellSegmentRequest (BoundCompilerRequest _ _ (AdmittedHeldCellPlanOperation _ _) _ _ _) _ = throw CheckedPurposeMismatch
+cellSegmentRequest (BoundCompilerRequest _ _ (AdmittedHeldCellPrepareOperation _) _ _ _) _ = throw CheckedPurposeMismatch
+cellSegmentRequest (BoundCompilerRequest scope args (AdmittedExactOperation _ operation) grant executor _) state =
   let exact = programInput state
       values = map exactModule (maybe [] checkedValueInterfaces (scopeCheckedCell exact))
       inputs = CellCompilationInputs (programSourceImports state) (programOriginals state)
         (selectedProgramValues (programValues state))
   in BoundCompilerRequest scope (args {requestInjectVals=values,requestRetainedGenerations=programRetained state})
-    operation (ExactScopeBasis (Just exact)) grant executor (Just inputs)
+    (AdmittedExactOperation (Just exact) operation) grant executor (Just inputs)
 
 cellCompilationPurpose :: CellCompilationInputs -> CompilePurpose -> CompilePurpose
 cellCompilationPurpose (CellCompilationInputs imports originals values) = withProgramSourceImports imports . replacePurpose
@@ -193,16 +239,20 @@ cellCompilationPurpose (CellCompilationInputs imports originals values) = withPr
 compileBoundCompleted :: BoundCompilerRequest -> PipelineSelection result
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath
   -> IO (CompletedCompilerResult result)
-compileBoundCompleted (BoundCompilerRequest scope args _ basis grant executor cell) selection retained purpose session path = do
+compileBoundCompleted (BoundCompilerRequest scope args admitted grant executor cell) selection retained purpose session path = do
   requireCompilerExecutorOpen executor
   let effectivePurpose = maybe purpose (`cellCompilationPurpose` purpose) cell
-  case basis of
-    ExactScopeBasis exact -> scopedCompileCompleted scope (WithCompilerExecution grant executor selection) retained
-      (maybe effectivePurpose (ExactScopeCompile effectivePurpose) exact) session path
+  normalizedPurpose <- either throwIO pure (normalizeCompilePurpose effectivePurpose)
+  case admitted of
+    AdmittedExactOperation exact _ -> scopedCompileCompleted scope (WithCompilerExecution grant executor selection) retained
+      (maybe normalizedPurpose (ExactScopeCompile normalizedPurpose) exact) session path
       (requestIncludes args) (requestBuildProductsDir args)
-    HeldWorldBasis held -> case requestWorldCellPrepare args of
-      Just question -> scopedCompileWorldCell scope held grant executor question selection retained effectivePurpose path
-      Nothing -> throwIO CheckedPurposeMismatch
+    AdmittedHeldQueryOperation _ _ -> throwIO CheckedPurposeMismatch
+    AdmittedHeldCellPlanOperation _ _ -> throwIO CheckedPurposeMismatch
+    AdmittedHeldCellPrepareOperation preparation -> case preparation of
+      HeldWorldCellRefused _ refusal -> throwIO refusal
+      HeldWorldCellAdmitted admission -> scopedCompileWorldCell scope (Just (heldCellBinding admission))
+        grant executor (heldCellQuestion admission) selection retained normalizedPurpose path
 
 compileBoundRequest :: BoundCompilerRequest -> PipelineSelection result
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO result
@@ -254,7 +304,7 @@ prepareOriginals prepared recovery executor worklist context external =
 compileWithWorklist :: BoundCompilerRequest -> PipelineSelection result
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath
   -> IO (CompletedCompilerResult result, Maybe OriginalProductWorklist)
-compileWithWorklist request@(BoundCompilerRequest _ args _ _ _ executor _) selection retained purpose session path = do
+compileWithWorklist request@(BoundCompilerRequest _ args _ _ executor _) selection retained purpose session path = do
   localWorklist <- newIORef Nothing
   let completion env interfaces owner exact inputs = do
         recovery <- maybe (fail "resident completion has no selected recovery context") pure (completionRecovery inputs)
@@ -272,7 +322,7 @@ compileWithWorklist request@(BoundCompilerRequest _ args _ _ _ executor _) selec
 
 compilePreparedRequest :: BoundCompilerRequest -> PipelineSelection PreparedPipelineResult
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO PreparedCompilation
-compilePreparedRequest request@(BoundCompilerRequest _ args _ _ _ executor _) selection retained purpose session path = do
+compilePreparedRequest request@(BoundCompilerRequest _ args _ _ executor _) selection retained purpose session path = do
   (completed,worklist) <- case preparedOutputIntent args of
     NativeOriginals -> compileWithWorklist request selection retained purpose session path
     PortableExecutable -> do
@@ -284,7 +334,7 @@ compilePreparedRequest request@(BoundCompilerRequest _ args _ _ _ executor _) se
 
 compilePreparedSegmentRequest :: BoundCompilerRequest -> PipelineSelection PreparedSegmentProductsResult
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO (PreparedCompilation,TypedSegment)
-compilePreparedSegmentRequest request@(BoundCompilerRequest _ _ _ _ _ executor _) selection retained purpose session path = do
+compilePreparedSegmentRequest request@(BoundCompilerRequest _ _ _ _ executor _) selection retained purpose session path = do
   -- Typed segment preparation acquires its own Session bindings during the
   -- compiler pass. It has no early original observer; projection uses the
   -- captured recovery context and the existing fallback path.
@@ -296,53 +346,65 @@ compilePreparedSegmentRequest request@(BoundCompilerRequest _ _ _ _ _ executor _
     preparedSegmentCaptures result)
 
 runBoundGhc :: BoundCompilerRequest -> Ghc a -> IO a
-runBoundGhc (BoundCompilerRequest scope _ _ basis _ executor _) operation = do
+runBoundGhc (BoundCompilerRequest scope _ admitted _ executor _) operation = do
   requireCompilerExecutorOpen executor
-  case basis of HeldWorldBasis _ -> throwIO CheckedPurposeMismatch; ExactScopeBasis _ -> pure ()
+  case admitted of AdmittedExactOperation _ _ -> pure (); _ -> throwIO CheckedPurposeMismatch
   scopedRunGhc scope operation
 
 validateBoundWorldCell :: BoundCompilerRequest -> IO (Either WorldCellRefusal CellSourcePlan)
-validateBoundWorldCell (BoundCompilerRequest scope _ operation basis grant executor _) = do
+validateBoundWorldCell (BoundCompilerRequest _ _ admitted _ executor _) = do
   requireCompilerExecutorOpen executor
-  case (operation,basis) of
-    (WorldCellPrepareOperation question,HeldWorldBasis held) -> scopedValidateWorldCell scope held grant executor question
+  case admitted of
+    AdmittedHeldCellPrepareOperation (HeldWorldCellRefused _ refusal) -> pure (Left refusal)
+    AdmittedHeldCellPrepareOperation (HeldWorldCellAdmitted admission) -> pure (Right (heldCellPlan admission))
     _ -> throwIO CheckedPurposeMismatch
+
+-- The admitted preparation owns the slots already matched against its plan.
+-- Consumers use this collection rather than re-inspecting the wire question.
+boundWorldCellSlots :: BoundCompilerRequest -> Maybe [(Word64,PlannedCellSlot)]
+boundWorldCellSlots (BoundCompilerRequest _ _ admitted _ _ _) = case admitted of
+  AdmittedHeldCellPrepareOperation (HeldWorldCellAdmitted admission) ->
+    Just (heldCellSlots admission)
+  _ -> Nothing
 
 -- Terminal output success reborrows the actual held owner. Pending completion
 -- facts carry no source tree or usable compiler capability beyond scope END.
 commitPreparedWorldDependencies :: BoundCompilerRequest -> PreparedCompilation -> IO ()
-commitPreparedWorldDependencies (BoundCompilerRequest scope _ operation basis _ executor _)
+commitPreparedWorldDependencies (BoundCompilerRequest scope _ admitted _ executor _)
     (PreparedCompilation _ _ issuing guard _ _ pendingRef) = do
   guard
   requireCompilerExecutorOpen issuing
   requireCompilerExecutorOpen executor
   unless (sameCompilerExecutor issuing executor) (throwIO CheckedPurposeMismatch)
-  case (operation,basis) of
-    (WorldCellPrepareOperation question,HeldWorldBasis held) -> do
+  case admitted of
+    AdmittedHeldCellPrepareOperation preparation -> case preparation of
+      HeldWorldCellRefused _ refusal -> throwIO refusal
+      HeldWorldCellAdmitted admission -> do
       -- Consume before the guarded commit; cancellation cannot replay a pending
       -- publication through another invocation or replacement request owner.
-      pending <- atomicModifyIORef' pendingRef (\value -> (Nothing,value))
-      selected <- maybe (throwIO CheckedPurposeMismatch) pure pending
-      scopedCommitWorldDependencies scope held issuing question selected
+        pending <- atomicModifyIORef' pendingRef (\value -> (Nothing,value))
+        selected <- maybe (throwIO CheckedPurposeMismatch) pure pending
+        scopedCommitWorldDependencies scope (Just (heldCellBinding admission)) issuing
+          (heldCellQuestion admission) selected
     _ -> throwIO CheckedPurposeMismatch
 
 runBoundWorldCellPlan :: BoundCompilerRequest -> IO BS.ByteString
-runBoundWorldCellPlan (BoundCompilerRequest scope _ operation basis grant executor _) = do
+runBoundWorldCellPlan (BoundCompilerRequest scope _ admitted grant executor _) = do
   requireCompilerExecutorOpen executor
-  case (operation,basis) of
-    (WorldCellPlanOperation question,HeldWorldBasis held) -> scopedPlanWorldCell scope held grant executor question
+  case admitted of
+    AdmittedHeldCellPlanOperation held question -> scopedPlanWorldCell scope held grant executor question
     _ -> throwIO CheckedPurposeMismatch
 
 runBoundWorldQuery :: BoundCompilerRequest -> IO BS.ByteString
-runBoundWorldQuery (BoundCompilerRequest scope _ (WorldPublicModuleOperation question) (HeldWorldBasis world) grant executor _) = do
+runBoundWorldQuery (BoundCompilerRequest scope _ (AdmittedHeldQueryOperation world question) grant executor _) = do
   requireCompilerExecutorOpen executor
   scopedQueryWorld scope world grant executor question
 runBoundWorldQuery _ = throwIO CheckedPurposeMismatch
 
 withBoundExactInterfaceTransaction :: BoundCompilerRequest -> (ExactInterfaceOperations -> IO a) -> IO a
-withBoundExactInterfaceTransaction (BoundCompilerRequest scope args _ basis _ executor _) use = do
+withBoundExactInterfaceTransaction (BoundCompilerRequest scope args admitted _ executor _) use = do
   requireCompilerExecutorOpen executor
-  case basis of HeldWorldBasis _ -> throwIO CheckedPurposeMismatch; ExactScopeBasis _ -> pure ()
+  case admitted of AdmittedExactOperation _ _ -> pure (); _ -> throwIO CheckedPurposeMismatch
   withScopedExactInterfaceTransaction scope (requestIncludes args) use
 
 data PreparedArtifact = PreparedArtifact

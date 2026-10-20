@@ -36,6 +36,7 @@ module Tidepool.ExactScope
   , originalGroupFromProjected, originalGroupFromCandidate
   , WorldInputFacts, CapturedWorldSources, WorldSourceRoot
   , WorldBinding, WorldBindingRow, worldInputsBindingScope, worldInputsBindings
+  , WorldSourceClosureEntry(..)
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow
   , worldBindingRowInterface, worldBindingCertifiedArtifact, worldBindingCompilerReceipt, worldBindingRowFactCID
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
@@ -2247,6 +2248,16 @@ data WorldInputFacts = WorldInputFacts
   , worldInputsPrimary :: WorldPrimaryFacts
   }
 
+-- One demanded Context row carries its sealed interface bytes, canonical proof,
+-- decoded interface and package evidence together. Consumers borrow this
+-- collection rather than rejoining parallel maps by owner.
+data WorldSourceClosureEntry = WorldSourceClosureEntry
+  { worldSourceEntryArtifact :: ExactIfaceArtifact
+  , worldSourceEntryProof :: CanonicalInterfaceProof
+  , worldSourceEntryInterface :: ModIface
+  , worldSourceEntryPackages :: PackageImportEvidence
+  }
+
 -- Current occurrence selection is distinct from the referenced row's owner.
 -- In particular, a reexport's defining SymbolIdentity need not name that row.
 data WorldBinding = WorldBinding
@@ -2262,16 +2273,16 @@ data WorldBinding = WorldBinding
 -- closed Rust CheckedValueArtifact constructor, not an independently checked
 -- compiler receipt or a native/runtime permission in this receiver.
 data WorldBindingRow = WorldBindingRow
-  { worldBindingRowInterface :: ScopeInterfaceInput
+  { worldBindingRowInterface :: InterfaceRow
   , worldBindingCertifiedArtifact :: BS.ByteString
   , worldBindingCompilerReceipt :: BS.ByteString
   , worldBindingRowFactCID :: BS.ByteString
   }
 
 worldBindingInterfaceArtifact :: WorldBinding -> ExactIfaceArtifact
-worldBindingInterfaceArtifact binding = case worldBindingRowInterface (worldBindingRow binding) of
-  ScopeInterfaceInput (artifact,_,_) CheckedValueEvidence -> artifact
-  _ -> error "admitted world binding lost its checked value evidence"
+worldBindingInterfaceArtifact binding =
+  let (artifact,_,_) = worldBindingRowInterface (worldBindingRow binding)
+  in artifact
 
 -- Package authentication reads both the sidecar and its owning interface.
 -- Its callback may borrow only those sealed parts of the demanded rows.
@@ -2288,9 +2299,9 @@ readWorldBindingInputs :: HscEnv -> WorldInputFacts -> [String]
 readWorldBindingInputs env facts occurrences = do
   let selected = [(name,value) | name <- occurrences,Just value <- [Map.lookup name (worldInputsBindings facts)]]
       rows = [worldBindingRowInterface (worldBindingRow value) | (_,value) <- selected]
-      key (ScopeInterfaceInput (artifact,_,_) _) = (exactUnit artifact,exactModule artifact)
+      key (artifact,_,_) = (exactUnit artifact,exactModule artifact)
       distinct = Map.fromList [(key row,row) | row <- rows]
-      seals = worldPackageInputSeals [row | ScopeInterfaceInput row CheckedValueEvidence <- Map.elems distinct]
+      seals = worldPackageInputSeals (Map.elems distinct)
       tokens = worldInputsCustody facts
       readInput path cap = do
         sha <- maybe (fail "world value package proof is outside its selected rows") pure (Map.lookup path seals)
@@ -2301,7 +2312,7 @@ readWorldBindingInputs env facts occurrences = do
     then pure (Left "world value aliases select conflicting captured interface versions")
     else do
       packages <- extendAdmittedPackageImportsWith readInput emptyAdmittedPackageImports
-        [row | ScopeInterfaceInput row CheckedValueEvidence <- Map.elems distinct]
+        (Map.elems distinct)
       case packages of
         Left reason -> pure (Left reason)
         Right admitted -> do
@@ -2309,7 +2320,7 @@ readWorldBindingInputs env facts occurrences = do
           case valid of
             Left reason -> pure (Left reason)
             Right () -> do
-              captured <- forM (Map.elems distinct) $ \(ScopeInterfaceInput (artifact,path,sha) _) -> do
+              captured <- forM (Map.elems distinct) $ \(artifact,path,sha) -> do
                 body <- capturedRequestInputToken tokens (exactPath artifact) (exactSha256 artifact)
                 packages <- capturedRequestInputToken tokens path sha
                 pure (artifact,body,packages)
@@ -2331,8 +2342,7 @@ worldHasSelectedSource facts key = case Map.lookup key (worldPrimarySelected (wo
 -- This is canonical source/type custody; Original/native execution remains a
 -- distinct consumer. No universe inventory or historical base-row scan occurs.
 readWorldSourceInputs :: HscEnv -> WorldInputFacts -> [(String,String)]
-  -> IO (Either String (Map.Map (String,String) CanonicalInterfaceProof
-      ,[(ExactIfaceArtifact,ModIface)],Map.Map (String,String) PackageImportEvidence))
+  -> IO (Either String (Map.Map (String,String) WorldSourceClosureEntry))
 readWorldSourceInputs env facts roots = case walk Map.empty roots >>= validate of
   Left reason -> pure (Left reason)
   Right rows -> do
@@ -2370,7 +2380,24 @@ readWorldSourceInputs env facts roots = case walk Map.empty roots >>= validate o
                   pairs <- sequence decoded
                   let proofs = Map.fromList [(key,proof) | (key,(proof,_)) <- pairs]
                       packages = Map.fromList [(key,value) | (key,(_,value)) <- pairs]
-                  Right (proofs,interfaces,packages)
+                      interfaceByKey = Map.fromList
+                        [((exactUnit artifact,exactModule artifact),(artifact,iface))
+                        | (artifact,iface) <- interfaces]
+                  unless (length interfaces == Map.size interfaceByKey) $
+                    Left "demanded Context closure repeats an exact interface owner"
+                  entries <- forM (Map.toAscList rows) $ \(key,ScopeInterfaceInput (artifact,_,_) _) -> do
+                    proof <- maybe (Left "demanded Context owner lost its canonical proof") Right
+                      (Map.lookup key proofs)
+                    packages' <- maybe (Left "demanded Context owner lost its package evidence") Right
+                      (Map.lookup key packages)
+                    (artifact',iface) <- maybe (Left "demanded Context owner lost its exact interface") Right
+                      (Map.lookup key interfaceByKey)
+                    unless (exactUnit artifact' == exactUnit artifact && exactModule artifact' == exactModule artifact) $
+                      Left "demanded Context interface differs from its selected owner"
+                    pure (key,WorldSourceClosureEntry artifact' proof iface packages')
+                  unless (Map.keysSet interfaceByKey == Set.fromList (map fst entries)) $
+                    Left "demanded Context closure contains an unselected exact interface"
+                  pure (Map.fromList entries)
   where
     validate rows = do
       let seals = Map.map (\(ScopeInterfaceInput (artifact,_,_) _) -> exactSha256 artifact) rows
@@ -3020,7 +3047,10 @@ readWorldBindings frontier root producer visible = do
     (semantic,certified,receipt) <- decodeWorldBytes (decodeWorldBindingRow (BS.length body)) body
     input <- maybe (worldCorrupt "compiler world binding row differs from admitted visible value inputs") pure
       (Map.lookup semantic rows)
-    pure (cid,(WorldBindingRow input certified receipt cid,semantic,toInteger (BS.length body)))
+    checked <- case input of
+      ScopeInterfaceInput row CheckedValueEvidence -> pure row
+      _ -> worldCorrupt "compiler world binding row lost its checked value evidence"
+    pure (cid,(WorldBindingRow checked certified receipt cid,semantic,toInteger (BS.length body)))
   unless (length eligible == length visible && Map.keysSet rows == Set.fromList [semantic | (_,(_,semantic,_)) <- decoded])
     (worldCorrupt "compiler world visible input census differs from occurrence facts")
   let actual = Map.fromDistinctAscList decoded
@@ -3033,7 +3063,7 @@ readWorldBindings frontier root producer visible = do
   when (entries > toInteger (maxBound :: Int))
     (worldCorrupt "compiler world binding retention count exceeds host range")
   bindings <- forM selected $ \(symbol,variable,scope,generation,cid) -> case Map.lookup cid actual of
-    Just (row@(WorldBindingRow (ScopeInterfaceInput (artifact,_,_) CheckedValueEvidence) _ _ _),_,_) -> do
+    Just (row@(WorldBindingRow (artifact,_,_) _ _ _),_,_) -> do
       unless (parseSessionModule (exactModule artifact) == Just (SessionModule ValMod (Generation generation))
           && sessionModuleString (SessionModule ValMod (Generation generation)) == exactModule artifact)
         (worldCorrupt "compiler world binding generation differs from its checked value owner")

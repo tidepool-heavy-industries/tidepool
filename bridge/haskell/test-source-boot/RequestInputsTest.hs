@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse) where
 
 import Tidepool.RequestCompletion (finishCompletion)
 
@@ -23,10 +23,11 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.Directory (canonicalizePath, copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
+import System.Directory (canonicalizePath, copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, getTemporaryDirectory, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
 import System.Posix.Files (createSymbolicLink)
 import System.FilePath ((</>), takeDirectory)
-import System.IO (hClose, hFlush, hGetLine, hPutStrLn, Handle, stderr, utf8, BufferMode(NoBuffering), hGetEncoding, hGetBuffering, hSetEncoding, hSetBuffering, hSetBinaryMode)
+import System.IO (hClose, hFlush, hGetLine, hPutStrLn, openTempFile, Handle, stderr, stdout, utf8, BufferMode(NoBuffering), hGetEncoding, hGetBuffering, hSetEncoding, hSetBuffering, hSetBinaryMode)
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Foreign.C.String (CString, withCString)
 import Foreign.C.Types (CInt(..), CUInt(..))
 import System.Posix.Types (Fd(..))
@@ -56,6 +57,7 @@ import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Types (stringToUnit, GenWithIsBoot(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue, analyzeOrderedCellWithFlags
+  , CellSourcePlan(..), CellAnalysisItem(..), TurnKind(..), StmtBinders(..), cellInferenceSegments
   , prepareTypedSegmentSource, preparedTypedSegmentPlan, preparedTypedSegmentSource, preparedTypedSegmentOperations)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..) )
@@ -72,10 +74,16 @@ import Tidepool.ExactScope
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
   , exactInputRetentionLimits, commitWorldInputRetention
-  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldInputsFailure(..), WorldInputsFailureCause(..) )
+  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
+import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldCellPlan, validateBoundWorldCell, boundWorldCellSlots)
+import Tidepool.ExtractRequest
+  ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..)
+  , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
+  , RequestField(..), WorkerRequest, workerArgv, workerRequestFromArgv )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
+  , scopedEnsureWorld
   , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts
   , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents
   , withResidentCompilerScopes, scopedRunGhc )
@@ -498,10 +506,9 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
   withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
     environment <- getSession
     admitted <- liftIO (readWorldSourceInputs environment original selectedOwners) >>= either (liftIO . fail) pure
-    let (proofs,interfaces,packages) = admitted
-    unless (Map.keysSet proofs == Set.fromList selectedOwners
-        && Map.keysSet packages == Map.keysSet proofs
-        && Set.fromList [(exactUnit artifact,exactModule artifact) | (artifact,_) <- interfaces] == Map.keysSet proofs)
+    unless (Map.keysSet admitted == Set.fromList selectedOwners
+        && all (\(key,entry) -> (exactUnit (worldSourceEntryArtifact entry),exactModule (worldSourceEntryArtifact entry)) == key)
+             (Map.toList admitted))
       (liftIO (fail "demanded primary source input lost its genuine canonical/interface/package owners"))
     missing <- liftIO (readWorldSourceInputs environment original [("main","NeverSelectedInContext")])
     case missing of
@@ -667,9 +674,10 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
     captured <- liftIO (readWorldSourceInputs environment aliased selectedOwners)
     case captured of
       Left reason -> liftIO (fail ("captured package/owning-interface authentication failed for absent receiving aliases: " ++ reason))
-      Right (proofs,interfaces,packages) -> unless
-        (Map.keysSet proofs == Set.fromList selectedOwners && Map.keysSet packages == Map.keysSet proofs
-          && Set.fromList [(exactUnit artifact,exactModule artifact) | (artifact,_) <- interfaces] == Map.keysSet proofs)
+      Right closure -> unless
+        (Map.keysSet closure == Set.fromList selectedOwners
+          && all (\(key,entry) -> (exactUnit (worldSourceEntryArtifact entry),exactModule (worldSourceEntryArtifact entry)) == key)
+               (Map.toList closure))
         (liftIO (fail "captured package authentication lost a demanded owner after alias relocation"))
   where
     unsigned (TInt value) | value >= 0 = pure (toInteger value)
@@ -1378,6 +1386,232 @@ consumedChars buffer end
       | otherwise = do
           (character,next) <- readCharBuf (bufRaw buffer) index
           (character :) <$> go next
+
+-- One genuine preparation exercises the admitted-operation boundary. The
+-- held plan is parsed exactly once while binding the prepare request; neither
+-- the plan operation nor the consuming validation reparses the same recipe.
+-- Rooted boot supplies the production package profile through its actual
+-- service association rather than an observation-only fixture scope.
+worldCellAdmissionParse :: IO ()
+worldCellAdmissionParse = withTiming $ withScratch $ \work ->
+  bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
+    forM_ ["CanonicalSource.hs","CanonicalDependency.hs"] $ \name ->
+      copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+    original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+      Nothing (work </> "CanonicalSource.hs") [work] Nothing
+    fixture <- capturePreparedFixture work original
+    (scopePath,contextParcel) <- writeGenuineExecutionScopeWithContext
+      ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture
+    scope <- readExactScope scopePath >>= either fail pure
+    let producerHex = scopeProducerSha256 scope
+    producer <- rawWorldHex producerHex
+    profile <- rawWorldHex rootedProfileIdentity
+    (packetPath,_primary) <- writeWorldCellAdmissionPacket handles work producer profile contextParcel
+    owner <- newExactInputOwner
+    facts <- readWorldInputsWithOwner owner packetPath
+    let identity = worldInputsIdentity facts
+    worldDirectory <- canonicalizePath work
+    withRootedCompilerEnvironment worldDirectory $ do
+      (outcome,diagnostics) <- withQuietStdout $ captureDiagnostics $
+        withResidentCompilerScopes [] $ \runScope ->
+          runScope (pure ()) $ \compiler -> do
+            ready <- scopedEnsureWorld compiler (ExactInputsRequest identity (CompleteExactInputs packetPath))
+            reference <- case ready of
+              ExactInputsReady _ realization -> pure realization
+              other -> fail ("real preparation could not acquire its captured world: " ++ show other)
+            let recipe = WorldCellRecipe "(1 :: Int)"
+                  "module CellCheck where\n{{CELL_IMPORTS}}\n{{CELL_DECLS}}\n{{CELL_BODY}}" []
+                planOut = work </> "cell-plan.cbor"
+                planRequest = WorldCellPlanRequest identity reference recipe planOut
+            planArgs <- decodeWorldArgs [WorldCellPlan planRequest]
+            planBytes <- (withBoundCompilerRequest (const (pure ())) compiler planArgs >=> finishCompletion) $ \request ->
+              runBoundWorldCellPlan request
+            slots <- scopedRunGhc compiler $ do
+              environment <- getSession
+              plan <- liftIO (analyzeOrderedCellWithFlags (hsc_dflags environment)
+                (worldCellTemplate recipe) (worldCellSource recipe)) >>= either (liftIO . fail . show) pure
+              let items = cellPlanItems plan
+              liftIO $ unless (length items == 1
+                  && sbKind (cellAnalysisVerdict (head items)) == KExpr
+                  && length (cellInferenceSegments plan) == 1)
+                (fail ("admission fixture is not one executable expression item: items="
+                  ++ show (length items)
+                  ++ " kinds=" ++ show (map (sbKind . cellAnalysisVerdict) items)
+                  ++ " sources=" ++ show (map cellAnalysisSource items)
+                  ++ " segments=" ++ show (length (cellInferenceSegments plan))))
+              liftIO (pure [(0, PlannedExpression 1 "observation")])
+            let directory = work </> "cell-admission"
+                prepareRequest = WorldCellPrepareRequest identity reference recipe planBytes
+                  (BS.replicate 32 7) slots directory (directory </> "prepared.cbor")
+            createDirectoryIfMissing True directory
+            prepareArgs <- decodeWorldArgs [WorldCellPrepare prepareRequest]
+            (validated,admittedSlots) <- (withBoundCompilerRequest (const (pure ())) compiler prepareArgs >=> finishCompletion) $ \request -> do
+              validation <- validateBoundWorldCell request
+              pure (validation,boundWorldCellSlots request)
+            case validated of
+              Left refusal -> fail ("admitted real preparation refused its plan: " ++ show refusal)
+              Right admitted
+                | worldCellPreparePlan prepareRequest /= planBytes ->
+                    fail "admission changed the prepared plan bytes"
+                | otherwise -> pure ()
+            unless (admittedSlots == Just slots)
+              (fail "admitted preparation lost its matched slot collection")
+            pure ()
+      outcome `seq` pure ()
+      let admissionParses = counterValues "world.cell.admission_parses" diagnostics
+      hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
+      unless (admissionParses == [1])
+        (fail ("real preparation did not parse its recipe exactly once: "
+          ++ show admissionParses))
+
+-- The Context fixture's logical roots and captured bytes stay genuine. Only
+-- the transport restoration's profile field is rebound to the rooted service
+-- profile, and its owned acquisition is resealed as production DATA endpoints.
+writeWorldCellAdmissionPacket
+  :: IORef [Handle] -> FilePath -> BS.ByteString -> BS.ByteString -> BS.ByteString
+  -> IO (FilePath,BS.ByteString)
+writeWorldCellAdmissionPacket handles work producer profile parcelBytes = do
+  (primary,association,base,durable,contextBlocks) <- worldParcel parcelBytes
+  acquisition <- sealWorldParcel handles (TList durable)
+  (emptyPrimary,_,emptyBase,_,emptyBlocks) <- fixture "world-context-blocks" [TBytes producer] >>= worldParcel
+  unless (null emptyBase) (fail "empty world context published primary rows")
+  emptyBody <- maybe (fail "empty Context root is absent") pure (lookup emptyPrimary emptyBlocks)
+  emptyTerm <- decode emptyBody
+  emptyBinding <- case emptyTerm of
+    TMap fields -> case lookup (TString "roles") fields of
+      Just (TTagged 42 (TBytes bytes)) | not (BS.null bytes),BS.head bytes == 0 -> pure (BS.tail bytes)
+      _ -> fail "empty Materializer context omitted its empty map"
+    _ -> fail "empty Materializer Context descriptor changed"
+  pairs <- reachable [primary,association,emptyBinding] (contextBlocks ++ emptyBlocks)
+  let sources = "TPCSRC01" <> BS.replicate 8 0
+      sourcePath = work </> "world-admission-sources.bin"
+      text = TString . T.pack
+      blocks values = TList [TList [TBytes cid,TBytes body] | (cid,body) <- values]
+      visibility root = encode (TList [TString "TPCWBIND4",TInt 0,TBytes root])
+      restoration = encode (TList [TString "TPCWREST",TInt 3,TBytes primary,TBytes (SHA.hash sources)
+        ,TBytes producer,TBytes profile,TInt 0,TBytes association,TBytes emptyBinding])
+      packet = TList [TString "TPCWORLD",TInt 3,TBytes restoration,text sourcePath,TBytes producer
+        ,TBytes profile,TList [TList base,TList []],acquisition,TBytes (visibility emptyBinding)
+        ,TBytes primary,blocks pairs]
+  BS.writeFile sourcePath sources
+  let path = work </> "world-admission.cbor"
+  BS.writeFile path (encode packet)
+  pure (path,primary)
+  where
+    fixture operation arguments = do
+      path <- issueCodecFixturePacket work (operation ++ ".cbor") (encode
+        (TList [TString "TPCODECFIXTURE1",TString (T.pack operation),TList arguments]))
+      BS.readFile path
+    worldParcel bytes = case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
+      Right (remaining,TList [TBytes primary,TBytes association,TList rows,TList durable,TList pairs])
+        | BL.null remaining -> do
+            blocks <- forM pairs $ \entry -> case entry of
+              TList [TBytes cid,TBytes body] -> pure (cid,body)
+              _ -> fail "world fixture omitted its block array"
+            pure (primary,association,rows,durable,blocks)
+      _ -> fail "world fixture needs actual Context/association roots, rows, owned bytes and blocks"
+    sealWorldParcel owners (TList [TString "TPCWORLDFIXTUREBYTES1",TList arenas,TList images]) = do
+      live <- forM arenas $ \entry -> case entry of
+        TList [TString path,extent] -> do
+          amount <- unsigned extent
+          bytes <- BS.readFile (T.unpack path)
+          unless (toInteger (BS.length bytes) == amount) (fail "world fixture arena extent drifted")
+          mask $ \_ -> do
+            (handle,endpoint) <- acquireSealedInputBytes bytes
+            modifyIORef' owners (handle:)
+            pure (TList [TString (T.pack endpoint),extent])
+        _ -> fail "world fixture needs exact durable arena DATA"
+      pure (TList [TString "continue-originals",TList live,TList images])
+    sealWorldParcel _ _ = fail "world fixture bytes were not explicitly DATA before resealing"
+    reachable roots pairs = do
+      let available = Map.fromList pairs
+          visit seen [] = pure seen
+          visit seen (cid:rest) | Set.member cid seen = visit seen rest
+          visit seen (cid:rest) = case Map.lookup cid available of
+            Nothing -> fail "genuine world fixture omitted a reachable block"
+            Just body -> decode body >>= \term -> visit (Set.insert cid seen) (links term ++ rest)
+      selected <- visit Set.empty roots
+      pure (Map.toAscList (Map.restrictKeys available selected))
+    links (TTagged 42 (TBytes bytes)) | not (BS.null bytes),BS.head bytes == 0 = [BS.tail bytes]
+    links (TList values) = concatMap links values
+    links (TMap values) = concatMap (\(key,value) -> links key ++ links value) values
+    links _ = []
+    unsigned (TInt value) | value >= 0 = pure (toInteger value)
+    unsigned (TInteger value) | value >= 0 = pure value
+    unsigned _ = fail "world fixture extent must be unsigned"
+
+decodeWorldArgs :: [RequestField] -> IO WorkerRequest
+decodeWorldArgs fields = case workerRequestFromArgv (workerArgv fields) of
+  Right (Just request) -> pure request
+  other -> fail ("invalid held world admission fixture: " ++ show other)
+
+encode :: Term -> BS.ByteString
+encode = toStrictByteString . encodeTerm
+
+decode :: BS.ByteString -> IO Term
+decode bytes = case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
+  Right (remaining,term) | BL.null remaining -> pure term
+  _ -> fail "world fixture term has trailing or malformed bytes"
+
+rawWorldHex :: String -> IO BS.ByteString
+rawWorldHex [] = pure BS.empty
+rawWorldHex (a:b:rest) = case readHex [a,b] of
+  [(byte,"")] -> BS.cons byte <$> rawWorldHex rest
+  _ -> fail "world producer has malformed SHA"
+rawWorldHex _ = fail "world producer has an odd SHA length"
+
+-- The production package profile matched to this checkout's declared GHC
+-- libdir. The preparation test bootstraps that same profile through the
+-- resident compiler service rather than fabricating boot metadata.
+rootedProfilePath :: String
+rootedProfilePath = "/nix/store/bfa5qsshnhgxihzxf2klvzxx0d2pass9-compiler-package-profile-v1"
+
+rootedProfileSha256 :: String
+rootedProfileSha256 = "6722c5a9ea70c599d76a874dc6c4c014d1264abd700537293f9f347ab6d745ce"
+
+rootedProfileIdentity :: String
+rootedProfileIdentity = "15663ac19c31058a9203f6404f72cad491923a1f34209bc68cff3bbbf3111880"
+
+withRootedCompilerEnvironment :: FilePath -> IO a -> IO a
+withRootedCompilerEnvironment worldDirectory action = bracket
+  (traverse (\name -> (name,) <$> lookupEnv name) names)
+  (mapM_ (\(name,value) -> maybe (unsetEnv name) (setEnv name) value)) $ \_ -> do
+    unsetEnv "LD_LIBRARY_PATH"
+    unsetEnv "LD_PRELOAD"
+    unsetEnv "LD_AUDIT"
+    setEnv "TIDEPOOL_COMPILER_PACKAGE_PROFILE" rootedProfilePath
+    setEnv "TIDEPOOL_COMPILER_PACKAGE_PROFILE_SHA256" rootedProfileSha256
+    setEnv "TIDEPOOL_COMPILER_SERVICE_EPOCH" (replicate 64 '0')
+    setEnv "TIDEPOOL_COMPILER_PACKAGE_SOURCE_ID" (replicate 64 '0')
+    setEnv "TIDEPOOL_COMPILER_PACKAGE_PROFILE_ID" rootedProfileIdentity
+    setEnv "TIDEPOOL_COMPILER_WORKER_INSTANCE" (replicate 64 '0')
+    setEnv "TIDEPOOL_COMPILER_WORLD_DIRECTORY" worldDirectory
+    action
+  where
+    names =
+      [ "TIDEPOOL_COMPILER_PACKAGE_PROFILE"
+      , "TIDEPOOL_COMPILER_PACKAGE_PROFILE_SHA256"
+      , "TIDEPOOL_COMPILER_SERVICE_EPOCH"
+      , "TIDEPOOL_COMPILER_PACKAGE_SOURCE_ID"
+      , "TIDEPOOL_COMPILER_PACKAGE_PROFILE_ID"
+      , "TIDEPOOL_COMPILER_WORKER_INSTANCE"
+      , "TIDEPOOL_COMPILER_WORLD_DIRECTORY"
+      , "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT"
+      ]
+
+-- Rooted boot acknowledges its association on stdout. Keep that binary frame
+-- out of the test runner's protocol while the real association is exercised.
+withQuietStdout :: IO a -> IO a
+withQuietStdout action = mask $ \restore -> do
+  hFlush stdout
+  temporary <- getTemporaryDirectory
+  (path,output) <- openTempFile temporary "rooted-boot-ack"
+  let cleanup = hClose output `finally` removeFile path
+  bracket (hDuplicate stdout) hClose $ \saved -> do
+    (do hDuplicateTo output stdout
+        restore action `finally` (hFlush stdout >> hDuplicateTo saved stdout))
+      `finally` cleanup
+
 
 validationTimingControl :: IO ()
 validationTimingControl = do
