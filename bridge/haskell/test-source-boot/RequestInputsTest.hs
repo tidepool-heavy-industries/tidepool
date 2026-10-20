@@ -92,7 +92,7 @@ import Tidepool.ExtractRequest
   , RequestField(..), WorkerRequest, workerArgv, workerRequestFromArgv )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
-  , scopedEnsureWorld, scopedCompileWorldCell, scopedPrepareWorldCellStage
+  , scopedEnsureWorld, scopedReadExactScope, scopedCompileWorldCell, scopedPrepareWorldCellStage
   , heldWorldCellStagePath, heldWorldCellStageTypedSource
   , heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
   , WorldCellRefusal(..), emitWorldAcquisitionRejection
@@ -1459,7 +1459,7 @@ consumedChars buffer end
 -- Rooted boot supplies the production package profile through its actual
 -- service association rather than an observation-only fixture scope.
 withCapturedWorldContext
-  :: (IORef [Handle] -> FilePath -> BS.ByteString -> BS.ByteString -> BS.ByteString -> IO result)
+  :: (IORef [Handle] -> FilePath -> BS.ByteString -> BS.ByteString -> BS.ByteString -> FilePath -> IO result)
   -> IO result
 withCapturedWorldContext use = withTiming $ withScratch $ \work ->
   bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
@@ -1474,10 +1474,10 @@ withCapturedWorldContext use = withTiming $ withScratch $ \work ->
     let producerHex = scopeProducerSha256 scope
     producer <- rawWorldHex producerHex
     profile <- rawWorldHex rootedProfileIdentity
-    use handles work producer profile contextParcel
+    use handles work producer profile contextParcel scopePath
 
 worldCellAdmissionParse :: IO ()
-worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer profile contextParcel -> do
+worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer profile contextParcel _scopePath -> do
     (packetPath,_primary) <- writeWorldCellAdmissionPacket handles work producer profile contextParcel
     owner <- newExactInputOwner
     facts <- readWorldInputsWithOwner owner packetPath
@@ -1788,17 +1788,17 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
           ++ show admissionParses))
 
 worldResidencyBoundaries :: IO ()
-worldResidencyBoundaries = withCapturedWorldContext $ \handles work producer profile contextParcel -> do
+worldResidencyBoundaries = withCapturedWorldContext $ \handles work producer profile contextParcel scopePath -> do
   directory <- canonicalizePath work
   withRootedCompilerEnvironment directory $
-    withQuietStdout (worldResidencyHistories handles work producer profile contextParcel)
+    withQuietStdout (worldResidencyHistories handles work producer profile contextParcel scopePath)
 
 -- Reuse the actual compiled Context and owned arenas from the preparation
 -- fixture. Added captured files exercise storage scale without issuing native
 -- authority or compiling another fixed program.
 worldResidencyHistories :: IORef [Handle] -> FilePath -> BS.ByteString -> BS.ByteString
-  -> BS.ByteString -> IO ()
-worldResidencyHistories handles work producer profile parcel = do
+  -> BS.ByteString -> FilePath -> IO ()
+worldResidencyHistories handles work producer profile parcel scopePath = do
   let largeFiles = [(BS8.pack ("residency/" ++ show index ++ ".txt"),BS.empty)
         | index <- [0..4096 :: Int]]
       create label files = do
@@ -1843,6 +1843,17 @@ worldResidencyHistories handles work producer profile parcel = do
         same <- scopedEnsureWorld compiler (ExactInputsRequest firstRoot (ResidentExactInputs reference))
           >>= ready firstRoot retained
         unless (same == reference) (fail "END replaced a retained World realization")
+        -- The same universe also retains ordinary captured inputs. A large
+        -- World must reserve bytes without exhausting original-image slots.
+        (_,legacy) <- captureDiagnostics $ do
+          _ <- scopedReadExactScope compiler scopePath >>= either fail pure
+          scopedReadExactScope compiler scopePath >>= either fail pure
+        let sharedCharges = counterValues "original_inputs.shared_optional_charged_bytes" legacy
+        unless (sum (counterValues "original_inputs.retained_encoded_bytes" legacy) > 0
+            && sum (counterValues "original_inputs.world_reserved_bytes" legacy) > 0
+            && sum (counterValues "original_inputs.certificate.hits" legacy) > 0
+            && not (null sharedCharges) && all (<= 128 * 1024 * 1024) sharedCharges)
+          (fail "retained World consumed image slots or split the shared byte allowance")
       unchanged <- directories
       unless (unchanged == after)
         (fail "resident reuse rematerialized the retained World source backing")
