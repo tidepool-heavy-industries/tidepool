@@ -155,8 +155,10 @@ impl GenerationRetirementDiagnostic {
         &mut self,
         evidence: &Arc<crate::resident_actor::RetirementDiagnosticEvidence>,
     ) -> Option<crate::resident_actor::RecordedRetirementDiagnosticObservation> {
-        let Self::Operation { owner, handoff } = self else {
-            return None;
+        let (owner, handoff) = match self {
+            Self::Operation { owner, handoff } => (owner, handoff),
+            #[cfg(test)]
+            Self::CancelledComponent => return None,
         };
         if matches!(handoff, RetirementDiagnosticHandoff::Unprojected) {
             *handoff = RetirementDiagnosticHandoff::Projected {
