@@ -104,6 +104,7 @@ pub use admission::{
     PrivateExecutionAdmission, RuntimeBindingInterfaceReservation, RuntimeCellAdmission,
     RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
     RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission, RuntimeLexicalScopeLease,
+    RuntimeOriginalSource,
 };
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{

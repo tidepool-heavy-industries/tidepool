@@ -4781,12 +4781,24 @@ impl PersistentSession {
     /// registrations; it is not a byte-reclamation receipt.
     pub fn retire_scope(&mut self, scope: ScopeId) -> ScopeRetirement {
         let owner = self.admission_owner().clone();
-        owner.with_source_transition(|_| self.retire_scope_exclusive(scope))
+        owner.with_source_transition(|_| self.retire_scope_exclusive(scope, true))
     }
 
-    fn retire_scope_exclusive(&mut self, scope: ScopeId) -> ScopeRetirement {
+    /// Automatic lexical abandonment releases resources without cutting off a
+    /// source token still held by installed provenance or an admitted operation.
+    pub(super) fn release_lexical_scope_resources(&mut self, scope: ScopeId) -> ScopeRetirement {
+        let owner = self.admission_owner().clone();
+        owner.with_source_transition(|_| self.retire_scope_exclusive(scope, false))
+    }
+
+    fn retire_scope_exclusive(&mut self, scope: ScopeId, retire_source: bool) -> ScopeRetirement {
         let roots_before = self.persistent_roots_count();
         let doomed = self.scopes.retire(scope);
+        // Lexical abandonment may already have released the scope while actual
+        // installed code still retains its original-source token.
+        if retire_source && doomed.is_empty() && !scope.is_root() {
+            self.retire_source_admission(scope);
+        }
         let mut receipt = ScopeRetirement {
             scopes_retired: doomed.len(),
             bindings_retired: 0,
@@ -4795,7 +4807,11 @@ impl PersistentSession {
         let mut retired = Vec::new();
         let mut source_instances = Vec::new();
         for dead in &doomed {
-            self.retire_source_admission(*dead);
+            if retire_source {
+                self.retire_source_admission(*dead);
+            } else {
+                self.release_unheld_original_source_record(*dead);
+            }
             if let Some(lib) = self.lib.as_mut() {
                 lib.tips.remove(dead);
             }
