@@ -50,8 +50,8 @@ use super::*;
 /// carries a fixed budget instead of growing with the installed API. The
 /// runtime owns that budget ([`SCOPE_BINDING_LIMIT`]): `scopeBindings` applies
 /// it to the admitted world, and this module hands the same value to the
-/// extraction request (`BrowseBounded`/`TypeSearchBounded`) so the worker stops
-/// rendering at the cap rather than shipping an unbounded list that the handler
+/// extraction request (`TypeSearchBounded`) so the worker stops rendering at
+/// the cap rather than shipping an unbounded list that the handler
 /// trims after transit.
 ///
 /// Basis: 256 is a presentation/transport budget for one notebook answer, not a
@@ -1778,24 +1778,6 @@ mod tests {
             CompilerPlan::Queries(ref queries)
                 if matches!(queries.as_slice(), [InspectionQuery::TypeSearchBounded { .. }])
         ));
-
-        let enumerating = compiler_verbs()
-            .into_iter()
-            .filter(|query| {
-                matches!(
-                    planned(query),
-                    CompilerPlan::Queries(ref queries)
-                        if queries
-                            .iter()
-                            .any(|planned| matches!(planned, InspectionQuery::BrowseBounded { .. }))
-                )
-            })
-            .map(|query| query.operation())
-            .collect::<Vec<_>>();
-        assert!(
-            enumerating.is_empty(),
-            "{enumerating:?} still plans an enumerating browse"
-        );
     }
 
     #[test]
