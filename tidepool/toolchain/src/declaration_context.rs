@@ -9678,6 +9678,7 @@ impl WorldProgramContinuation {
 }
 
 pub(crate) struct WorldProgramSegment {
+    package_products: Arc<[Arc<crate::certified_products::CertifiedPackageCodeProduct>]>,
     pub(crate) originals: crate::certified_products::CertifiedSegmentOriginals,
     inputs: DemandedWorldCompilerInputs,
     binding: WorldCompilationIdentity,
@@ -9689,6 +9690,8 @@ pub(crate) struct WorldProgramSegment {
 }
 
 impl WorldProgramSegment {
+    pub(crate) fn package_products(&self) -> &[Arc<crate::certified_products::CertifiedPackageCodeProduct>] { &self.package_products }
+
     pub(crate) fn planned_declaration(
         &mut self,
         program: &crate::compiler_world::CheckedWorldCellProgram,
@@ -10246,6 +10249,15 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         )
         .map_err(compiler_evidence_failure)?;
 
+        validation.inventory.reserve::<Arc<crate::certified_products::CertifiedPackageCodeProduct>>(receipt.package_products.len())
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
+        let relative_prefix = outputs.certified_products().relative().parent()
+            .ok_or_else(|| failure("World package products have no stage namespace"))?;
+        let package_products = receipt.package_products.iter().map(|output| {
+            crate::certified_products::CertifiedPackageCodeProduct::from_world_output(
+                program, relative_prefix, output, &receipt, validation,
+            ).map_err(compiler_evidence_failure)
+        }).collect::<Result<Vec<_>, _>>()?;
         let operation = program.validation().inventory.as_ref();
         let native_inputs = ReceiptNativeInputDemand::from_products(
             &receipt,
@@ -10324,6 +10336,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         )
         .map_err(compiler_evidence_failure)?;
         Ok(WorldProgramSegment {
+            package_products: package_products.into(),
             originals,
             inputs,
             stage: Arc::clone(&self.binding.stage),
