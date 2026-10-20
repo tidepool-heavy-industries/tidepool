@@ -298,7 +298,7 @@ impl InvocationWork {
 
     pub(super) fn bind_original_source(
         &self,
-        source: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        source: Arc<tidepool_runtime::session::RuntimeOriginalSource>,
     ) -> Result<(), InvocationSourceBindingError> {
         crate::termination::ExecutionSourceOrigin::bind_original(&self.source, source)
     }

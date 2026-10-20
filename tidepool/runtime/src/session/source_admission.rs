@@ -625,9 +625,10 @@ mod tests {
     #[test]
     fn original_source_transaction_keeps_original_and_target_distinct() {
         let mut session = PersistentSession::new(None, 1024);
-        let original = session.mint_notebook_scope_with_lease(None).unwrap();
+        let original_scope = session.mint_notebook_scope_with_lease(None).unwrap();
+        let original = original_scope.original_source().clone();
         let target = session.mint_notebook_scope_with_lease(None).unwrap();
-        assert!(!Arc::ptr_eq(&original, &target));
+        assert!(!Arc::ptr_eq(&original, target.original_source()));
         let settled = original
             .with_source_compiler_transaction(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
@@ -636,7 +637,7 @@ mod tests {
                 |_| {},
                 |transaction, _| {
                     assert_eq!(
-                        transaction.admit_original(&target, Some(target.clone())),
+                        transaction.admit_original(target.original_source(), Some(target.clone())),
                         Err(SourceAdmissionError::DifferentOriginalSource),
                     );
                     assert_eq!(original.source_admission().0.state.lock().claims, 0);
@@ -665,7 +666,8 @@ mod tests {
     #[test]
     fn fenced_original_refuses_before_claiming_open_target() {
         let mut session = PersistentSession::new(None, 1024);
-        let original = session.mint_notebook_scope_with_lease(None).unwrap();
+        let original_scope = session.mint_notebook_scope_with_lease(None).unwrap();
+        let original = original_scope.original_source().clone();
         let target = session.mint_notebook_scope_with_lease(None).unwrap();
         let fence = original.source_admission().fence().unwrap();
         original.validate_source_issuer().unwrap();

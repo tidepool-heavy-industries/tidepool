@@ -68,7 +68,7 @@ impl BootstrapWorld {
         &self,
         scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     ) -> Result<(), GenerationAdmissionError> {
-        scope.validate_source_issuer()?;
+        scope.validate_lexical_issuer()?;
         if let Some(existing) = self.0.scope.get() {
             if !Arc::ptr_eq(existing, &scope) {
                 return Err(GenerationAdmissionError::StaleSourceLease);
@@ -145,7 +145,7 @@ impl BootstrapWorld {
             .scope
             .get()
             .ok_or(GenerationAdmissionError::Unqualified)?;
-        scope.validate_source_issuer()?;
+        scope.validate_lexical_issuer()?;
         if !Arc::ptr_eq(scope, target.runtime_lease()) {
             return Err(GenerationAdmissionError::StaleSourceLease);
         }
@@ -494,7 +494,7 @@ impl SourceDependency {
             Self::Unqualified => None,
         };
         if let Some(lease) = &lease {
-            lease.validate_source_issuer()?;
+            lease.validate_lexical_issuer()?;
         }
         let claim = match self {
             Self::World(world) => world.claim(),
@@ -504,7 +504,7 @@ impl SourceDependency {
             Self::Unqualified => Err(GenerationAdmissionError::Unqualified),
         }?;
         if let Some(lease) = &lease {
-            lease.validate_source_issuer()?;
+            lease.validate_lexical_issuer()?;
         }
         Ok(claim)
     }
