@@ -8579,8 +8579,16 @@ where
             }
         };
         let specialized = match specialized {
-            Err((failure, producer_join)) if !matches!(failure.as_ref(), tidepool_runtime::session::RendererProductionFailure::Compile(_)) => {
-                return Err(committed(ResidentActorWorkbenchError::RendererProduction { failure, producer_join }));
+            Err((failure, producer_join))
+                if !matches!(
+                    failure.as_ref(),
+                    tidepool_runtime::session::RendererProductionFailure::Compile(_)
+                ) =>
+            {
+                return Err(committed(ResidentActorWorkbenchError::RendererProduction {
+                    failure,
+                    producer_join,
+                }));
             }
             result => result,
         };
