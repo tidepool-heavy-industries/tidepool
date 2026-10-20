@@ -2410,7 +2410,7 @@ enum PublicationAuthority {
     World(generation_admission::WorldPublication),
     TargetFence {
         fence: PublicationFence,
-        prerequisite: Option<tidepool_runtime::session::RuntimeSourceLeaseClaim>,
+        prerequisite: Option<tidepool_runtime::session::RuntimeSourcePublicationPrerequisite>,
     },
 }
 
@@ -2452,12 +2452,29 @@ enum RetirementSettlementStage {
 impl PublicationFence {
     fn publication_view(
         &self,
+        prerequisite: Option<&tidepool_runtime::session::RuntimeSourcePublicationPrerequisite>,
     ) -> Result<tidepool_runtime::session::RuntimeSourcePublicationView, PublicationSettlementError>
     {
         match self {
-            Self::Held(fence) => Ok(fence.publication_view()),
+            Self::Held(fence) => Ok(fence.publication_view(prerequisite)),
             Self::ReopenAttempted => Err(PublicationSettlementError::ReopenAttempted),
         }
+    }
+
+    fn confirm(
+        &mut self,
+        target: &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        prerequisite: Option<&tidepool_runtime::session::RuntimeSourcePublicationPrerequisite>,
+        settle: impl for<'a> FnOnce(
+            tidepool_runtime::session::RuntimeSourceReopen<'a>,
+        ) -> Result<(), PublicationSettlementError>,
+    ) -> Result<(), PublicationSettlementError> {
+        let Self::Held(fence) = std::mem::replace(self, Self::ReopenAttempted) else {
+            return Err(PublicationSettlementError::ReopenAttempted);
+        };
+        fence
+            .confirm_publication_with(target, prerequisite, settle)?
+            .map(|_reopened| ())
     }
 
     fn reopen(
@@ -2536,7 +2553,12 @@ impl ActorPublicationGuard {
                 let prerequisite = target
                     .prerequisite()
                     .as_ref()
-                    .map(|parent| parent.runtime_lease().admit_source())
+                    .map(|parent| {
+                        parent
+                            .runtime_lease()
+                            .admit_source()
+                            .map(|claim| claim.for_publication())
+                    })
                     .transpose()?;
                 let fence = target.runtime_admission().fence_if_idle()?;
                 PublicationAuthority::TargetFence {
@@ -2643,9 +2665,10 @@ impl ActorPublicationGuard {
             ActorPublicationState::Armed(PublicationAuthority::World(world)) => {
                 world.source_publication_view()?
             }
-            ActorPublicationState::Armed(PublicationAuthority::TargetFence { fence, .. }) => {
-                fence.publication_view()?
-            }
+            ActorPublicationState::Armed(PublicationAuthority::TargetFence {
+                fence,
+                prerequisite,
+            }) => fence.publication_view(prerequisite.as_ref())?,
             ActorPublicationState::Settled => {
                 return Err(PublicationSettlementError::ReopenAttempted)
             }
@@ -2974,7 +2997,7 @@ impl PublicationAuthority {
                 fence,
                 prerequisite,
             } => {
-                fence.reopen(target.runtime_lease(), promote)?;
+                fence.confirm(target.runtime_lease(), prerequisite.as_ref(), promote)?;
                 drop(prerequisite.take());
                 Ok(())
             }
