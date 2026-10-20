@@ -45,6 +45,10 @@ import GHC.Types.Name (Name)
 import GHC.Types.Id (isDataConWorkId_maybe)
 import GHC.Types.TyThing (TyThing(..), implicitTyThings)
 import GHC.Types.Avail (availNames)
+import GHC.Core.Class (classOpItems)
+import GHC.Core.TyCon (tyConClass_maybe)
+import GHC.Core.ConLike (ConLike(..))
+import GHC.Core.PatSyn (patSynMatcher, patSynBuilder)
 import GHC.Types.Var (Id)
 import GHC.Driver.Env (HscEnv, hsc_all_home_unit_ids, hsc_HPT, lookupType)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
@@ -778,10 +782,7 @@ stagedDeclarationInputReferences prepared (StagedOriginalProducts originals _ _ 
           let iface = hm_iface home
               names = Set.toAscList (Set.fromList
                 (concatMap availNames (mi_exports iface) ++ map ifDFun (mi_insts iface)))
-          runtime <- forM names $ \name -> do
-            thing <- lookupType environment name
-            pure $ maybe (Left "published declaration runtime export has no compiler identity")
-              (Right . runtimeIds) thing
+          runtime <- mapM runtimeName names
           pure $ do
             roots <- Set.fromList . map preparedRootIdentity . concat <$> sequence runtime
             context <- maybe (Left "published declaration lacks its native certification context") Right
@@ -791,14 +792,32 @@ stagedDeclarationInputReferences prepared (StagedOriginalProducts originals _ _ 
   where
     environment = prHscEnv (pprPipelineResult prepared)
     owner = plannedOriginalOwner inventory
+    runtimeName name = do
+      thing <- lookupType environment name
+      maybe (pure (Left "published declaration runtime export has no compiler identity")) runtimeIds thing
     runtimeIds (AnId identifier)
       -- Constructor applications have structural representation; constructor
       -- workers cannot capture values and have no recoverable interface body.
-      | isJust (isDataConWorkId_maybe identifier) = []
-      | otherwise = [identifier]
-    runtimeIds thing@(ATyCon _) = concatMap runtimeIds (implicitTyThings thing)
-    runtimeIds thing@(AConLike _) = concatMap runtimeIds (implicitTyThings thing)
-    runtimeIds (ACoAxiom _) = []
+      | isJust (isDataConWorkId_maybe identifier) = pure (Right [])
+      | otherwise = pure (Right [identifier])
+    runtimeIds thing@(ATyCon tycon) = do
+      implicit <- mapM runtimeIds (implicitTyThings thing)
+      -- Default implementations are named by GHC's class inventory, but are
+      -- absent from implicitTyThings and may be used by a future instance.
+      defaults <- mapM runtimeName
+        [name | clas <- maybe [] pure (tyConClass_maybe tycon)
+          , (_,Just (name,_)) <- classOpItems clas]
+      pure (concat <$> sequence (implicit ++ defaults))
+    runtimeIds (AConLike (PatSynCon patternSynonym)) = do
+      let (matcher,_,_) = patSynMatcher patternSynonym
+          builders = case patSynBuilder patternSynonym of
+            Nothing -> []
+            Just (builder,_,_) -> [builder]
+      implementations <- mapM runtimeName (matcher:builders)
+      pure (concat <$> sequence implementations)
+    runtimeIds thing@(AConLike (RealDataCon _)) =
+      fmap (fmap concat . sequence) (mapM runtimeIds (implicitTyThings thing))
+    runtimeIds (ACoAxiom _) = pure (Right [])
 
 publishStagedOriginalProducts :: PreparedPipelineResult -> StagedOriginalProducts -> IO CertifiedOriginalProducts
 publishStagedOriginalProducts prepared (StagedOriginalProducts certified path bytes outputs _) = do

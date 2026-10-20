@@ -1839,6 +1839,12 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                           ,"readPublishedStage :: Int -> Int"
                           ,"readPublishedStage value = value + publishedBaseStage"]
                         ,[(0,PlannedBind 41),(1,PlannedDeclaration 42)]
+                        ,["exec","declaration"])
+                      ,("default-publication",unlines ["let defaultBaseStage = (7 :: Int)"
+                          ,"class PublishedDefault value where"
+                          ,"  readPublishedDefault :: value -> Int"
+                          ,"  readPublishedDefault _ = defaultBaseStage"]
+                        ,[(0,PlannedBind 51),(1,PlannedDeclaration 52)]
                         ,["exec","declaration"])] $ \(label,source,caseSlots,kinds) -> do
                       let ownRecipe = recipe {worldCellSource=source}
                           ownDirectory = work </> ("world-stages-" ++ label)
@@ -1875,7 +1881,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                                     && length completed == length caseSlots
                                     && length typed == length (filter (== "exec") kinds))
                                   (fail "ordered World changed stage kind, global ordinal, or executable-plan coverage")
-                                unless (if label == "mixed" || label == "publication"
+                                unless (if label `elem` ["mixed","publication","default-publication"]
                                     then any capturedByDeclaration inputRefs
                                     else null inputRefs)
                                   (fail "World execution inputs lost their actual native closure or original capture stage")
@@ -1906,7 +1912,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
       outcome `seq` pure ()
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
-      unless (admissionParses == replicate 5 1)
+      unless (admissionParses == replicate 6 1)
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 
