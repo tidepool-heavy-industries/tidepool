@@ -11071,26 +11071,48 @@ mod tests {
             );
             let peer = right.for_source_owners(&BTreeSet::new()).unwrap();
             let chosen = left.merge(&peer).unwrap();
-            let chosen = chosen.artifacts();
             let expected_keys = BTreeSet::from([NativeGroupKey {
                 artifact: id,
                 original_ordinal: 7,
             }]);
-            assert_eq!(chosen.selected_native_groups(), expected_keys);
-            assert!(chosen.roots().contains(&InventoryNodeKey::Group(expected)));
-            assert!(!chosen.roots().contains(&InventoryNodeKey::Group(competing)));
-            let mut selection = bound_selection_for_entries(chosen, &[native.clone()]);
+            assert_eq!(chosen.artifacts().selected_native_groups(), expected_keys);
+            assert!(chosen
+                .artifacts()
+                .roots()
+                .contains(&InventoryNodeKey::Group(expected)));
+            assert!(!chosen
+                .artifacts()
+                .roots()
+                .contains(&InventoryNodeKey::Group(competing)));
+            let context =
+                crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
+                    .unwrap()
+                    .extend_issued_compiler_support(&chosen)
+                    .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
+                .unwrap();
+            let mut selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    &inputs,
+                    &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                )
+                .unwrap();
+            let inventory = inputs.artifacts().inventory();
             if explicit {
                 let requirement =
                     NativeOriginalRequirement::from_selected_view(id, left.artifacts())
                         .unwrap()
                         .unwrap();
                 selection
-                    .with_new_product_dependencies(&chosen.metadata_snapshot(), &[requirement])
+                    .with_new_product_dependencies(
+                        &inputs.artifacts().metadata_snapshot(),
+                        &[requirement],
+                    )
                     .unwrap();
             }
             let mut fixed = inventory
-                .bind_segment(chosen, vec![native.clone()], &selection)
+                .bind_segment(inputs.artifacts(), vec![], &selection)
                 .unwrap();
             let imports = [issued_source(&native, 7)];
             let result = inventory
@@ -14303,6 +14325,38 @@ mod tests {
         let issuer = root_output.artifacts();
         let sibling = sibling_output.artifacts();
         let expected = issuer.capture_graph_selection().native_groups;
+        let historical_child = *expected
+            .iter()
+            .find(|group| group.binding.artifact() == child.descriptor.id)
+            .unwrap();
+        let expected_keys = BTreeSet::from([
+            NativeGroupKey { artifact: root.descriptor.id, original_ordinal: 12 },
+            NativeGroupKey { artifact: child.descriptor.id, original_ordinal: 7 },
+        ]);
+        // The new output owns its root; its dependency keeps the historical child.
+        let assert_new_target = |target: &ArtifactView| {
+            assert_eq!(target.selected_native_groups(), expected_keys);
+            let groups = target.capture_graph_selection().native_groups;
+            assert!(groups.contains(&historical_child));
+            let root_group = *groups
+                .iter()
+                .find(|group| group.binding.artifact() == root.descriptor.id)
+                .unwrap();
+            assert_eq!(root_group.original_ordinal, 12);
+            assert_eq!(
+                groups.into_iter().collect::<BTreeSet<_>>(),
+                BTreeSet::from([root_group, historical_child])
+            );
+            assert!(target.binding_dependencies().contains(&(
+                InventoryNodeKey::Group(root_group),
+                InventoryNodeKey::Group(historical_child),
+                ArtifactDependency::NativeGroup {
+                    dependent_ordinal: 12,
+                    required_ordinal: 7,
+                },
+            )));
+            assert!(!target.artifact_ids().contains(&unrelated.descriptor.id));
+        };
         let ordinary = CompilerInputProjection::from_issued_entries(&[
             Arc::new(root.clone()),
             Arc::new(child.clone()),
@@ -14394,19 +14448,30 @@ mod tests {
                     )
                 }
                 .unwrap();
-                let closed = admitted
-                    .select_admission_roots(vec![root.descriptor.id])
+                assert_eq!(
+                    inventory.0.lock().unwrap().selection_plans.len(),
+                    scopes_before
+                );
+                let imports = [issued_source(&root, 12)];
+                let mut fixed = inventory
+                    .bind_segment(&admitted, vec![Arc::new(root.clone())], &receipt)
                     .unwrap();
-                assert_eq!(closed.capture_graph_selection().native_groups, expected);
+                let closed = inventory
+                    .admit_bound_target(
+                        &mut fixed,
+                        &inventory.empty_view(),
+                        NativeArtifactDemand::CertifiedTargetImports(&imports),
+                        vec![],
+                        &receipt,
+                    )
+                    .unwrap()
+                    .artifacts;
+                assert_new_target(&closed);
                 assert_eq!(
                     closed.namespace().contains_key(&child.descriptor.id),
                     child_reusable
                 );
                 assert!(!closed.artifact_ids().contains(&unrelated.descriptor.id));
-                assert_eq!(
-                    inventory.0.lock().unwrap().selection_plans.len(),
-                    scopes_before
-                );
                 let cold = ArtifactInventory::default();
                 let reopened = cold
                     .recover_selection(
@@ -14432,10 +14497,20 @@ mod tests {
                     )
                 }
                 .unwrap();
-                let repeated = readmitted
-                    .select_admission_roots(vec![root.descriptor.id])
+                let mut fixed = cold
+                    .bind_segment(&readmitted, vec![Arc::new(root.clone())], &receipt)
                     .unwrap();
-                assert_eq!(repeated.capture_graph_selection().native_groups, expected);
+                let repeated = cold
+                    .admit_bound_target(
+                        &mut fixed,
+                        &cold.empty_view(),
+                        NativeArtifactDemand::CertifiedTargetImports(&imports),
+                        vec![],
+                        &receipt,
+                    )
+                    .unwrap()
+                    .artifacts;
+                assert_new_target(&repeated);
             }
         }
         assert!(

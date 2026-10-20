@@ -695,7 +695,13 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             &selection, &physical,
         )
         .unwrap();
-        let support = CompilerSourceSupport::close_complete_output(&output).unwrap();
+        let support = CompilerSourceSupport::close_complete_output(&output)
+            .unwrap()
+            .close_request(
+                None,
+                &crate::declaration_context::ProtectedScaffoldRequirements::default(),
+            )
+            .unwrap();
         // All three current outputs retain their complete selected bodies here;
         // the later target demand independently selects only its exact closure.
         let expected = (0..MODULES)
@@ -729,20 +735,10 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             .iter()
             .find(|offer| offer.original() == catalog.original(0, version).descriptor.id)
             .unwrap();
-        let carriers = offered.issued_group_carriers().unwrap();
-        let expected = catalog
+        let expected_keys = catalog
             .closure([(0, version, 11)])
             .into_iter()
-            .map(|group| {
-                let key = catalog.key(group);
-                *carriers
-                    .keys()
-                    .find(|binding| {
-                        binding.binding.artifact() == key.artifact
-                            && binding.original_ordinal == key.original_ordinal
-                    })
-                    .unwrap()
-            })
+            .map(|group| catalog.key(group))
             .collect::<BTreeSet<_>>();
         let edges = offered.custody_snapshot().binding_dependencies().unwrap();
         let peer = opposite.for_source_owners(&BTreeSet::new()).unwrap();
@@ -761,29 +757,47 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 .artifacts()
                 .artifact_ids()
                 .contains(&catalog.original(0, 1 - version).descriptor.id));
-            assert!(merged
+            let carried_offer = merged
                 .native_offers()
                 .iter()
-                .any(|retained| retained.same_issuance(offered)));
-            for edge in &edges {
-                assert!(merged.artifacts().binding_dependencies().contains(edge));
-            }
-            let mut receipt =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    merged.projection(),
-                    &merged.artifacts().metadata_snapshot(),
+                .find(|retained| retained.same_issuance(offered))
+                .unwrap();
+            assert_eq!(
+                carried_offer
+                    .custody_snapshot()
+                    .binding_dependencies()
+                    .unwrap(),
+                edges
+            );
+            let context = ExactDeclarationContext::new(&[], &[], Vec::new())
+                .unwrap()
+                .extend_issued_compiler_support(&merged)
+                .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs(
+                    catalog.original(0, version).descriptor.producer_sha256,
+                )
+                .unwrap();
+            let receipt =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    &inputs,
                     &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
                 )
                 .unwrap();
-            receipt
-                .with_new_product_dependencies(
-                    &merged.artifacts().metadata_snapshot(),
-                    std::slice::from_ref(offered.proof().unwrap()),
-                )
-                .unwrap();
-            let inventory = merged.artifacts().inventory();
+            let expected = selected_bindings(selected.artifacts())
+                .into_iter()
+                .filter(|binding| {
+                    expected_keys.contains(&NativeGroupKey {
+                        artifact: binding.binding.artifact(),
+                        original_ordinal: binding.original_ordinal,
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(expected.len(), expected_keys.len());
+            assert!(expected.is_subset(&selected_bindings(inputs.artifacts())));
+            let inventory = inputs.artifacts().inventory();
             let mut fixed = inventory
-                .bind_segment(merged.artifacts(), vec![], &receipt)
+                .bind_segment(inputs.artifacts(), vec![], &receipt)
                 .unwrap();
             let ArtifactPayload::Original(product) = &catalog.original(0, version).payload else {
                 unreachable!()
@@ -829,7 +843,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 binder: binder(0, 11),
             }];
             let mut fixed = inventory
-                .bind_segment(merged.artifacts(), vec![], &receipt)
+                .bind_segment(inputs.artifacts(), vec![], &receipt)
                 .unwrap();
             let refused = inventory.admit_bound_target(
                 &mut fixed,
