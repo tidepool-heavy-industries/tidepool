@@ -428,7 +428,9 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
                     ..
                 }
                 | CompilerEvidenceFailure::Contract
-                | CompilerEvidenceFailure::MissingRetainedCustody { .. } => FailureClass::VersionSkew,
+                | CompilerEvidenceFailure::MissingRetainedCustody { .. } => {
+                    FailureClass::VersionSkew
+                }
                 _ => FailureClass::Infra,
             };
             FailureEnvelope::new(class, Phase::Compile, err.to_string())
@@ -657,6 +659,7 @@ mod tests {
         );
 
         let completed = ExtractRun {
+            request_correlation: "representation-only".into(),
             output: std::process::Output {
                 status: std::process::ExitStatus::from_raw(0),
                 stdout: b"completed compiler response".to_vec(),

@@ -6,7 +6,7 @@ import SourceBootCases
 import CompilerRequestTest (completedRequestHistories, completedRequestCancellation, completedRequestRelease)
 import CompilerRequestTest (checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries)
 import BoundedReadTest (boundedReadChecks)
-import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse)
+import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldRejectionDiagnosticBoundaries)
 import RequestInputsTest (compilerServiceBootBoundaries)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
@@ -40,6 +40,7 @@ tests = testGroup "source-boot"
   , testCase "fresh output seal set laws" freshOutputSealSetLaws
   , testCase "request input admission boundaries" requestInputBoundaries
   , testCase "world cell admission parses one recipe" worldCellAdmissionParse
+  , testCase "bounded World rejection diagnostics" worldRejectionDiagnosticBoundaries
   , testCase "bounded artifact reads" boundedReadChecks
   , testCase "resident source summary continuation" sourceSummaryContinuation
   , testCase "physical native executable epoch" physicalExecutableEpoch

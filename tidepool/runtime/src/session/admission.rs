@@ -179,23 +179,17 @@ pub struct PrivateExecutionAdmission {
         std::collections::HashMap<tidepool_repr::SessionVarId, CertifiedPrivateValueWrite>,
     >,
     pub(super) final_intent: OnceLock<Arc<super::FinalExecutionIntent>>,
+    pub(super) host_retirements: parking_lot::Mutex<Vec<super::resident::PrivateHostRetirement>>,
 }
 
-enum PrivateExecutionCompilerBasis {
-    Finite {
-        view: SessionCompileView,
-        admitted: PublicVisibilitySnapshot,
-    },
-    World {
-        published: Arc<super::inspection::InspectionWorldAssociation>,
-        private_key: super::persistent::CompileViewKey,
-        source: Arc<super::GenerationArtifactReference>,
-        original_source: Arc<RuntimeLexicalScopeLease>,
-        admitted: PublicVisibilitySnapshot,
-        admitted_context:
-            Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
-        admitted_public_view: [u8; 32],
-    },
+struct PrivateExecutionCompilerBasis {
+    published: Arc<super::inspection::InspectionWorldAssociation>,
+    private_key: super::persistent::CompileViewKey,
+    source: Arc<super::GenerationArtifactReference>,
+    original_source: Arc<RuntimeOriginalSource>,
+    public_target: Arc<RuntimeLexicalScopeLease>,
+    admitted: PublicVisibilitySnapshot,
+    admitted_context: Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
 }
 
 /// Exact facts captured when a private execution borrows a published World.
@@ -204,11 +198,11 @@ enum PrivateExecutionCompilerBasis {
 pub(super) struct WorldExecutionAdmissionFacts {
     pub(super) published: Arc<super::inspection::InspectionWorldAssociation>,
     pub(super) source: Arc<super::GenerationArtifactReference>,
-    pub(super) original_source: Arc<RuntimeLexicalScopeLease>,
+    pub(super) original_source: Arc<RuntimeOriginalSource>,
+    pub(super) public_target: Arc<RuntimeLexicalScopeLease>,
     pub(super) admitted: PublicVisibilitySnapshot,
     pub(super) admitted_context:
         Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
-    pub(super) admitted_public_view: [u8; 32],
 }
 
 pub(super) struct CertifiedPrivateValueWrite {
@@ -430,6 +424,16 @@ pub struct PendingHostValueWrite {
     scope: ScopeId,
     id: tidepool_repr::SessionVarId,
     write: CertifiedPrivateValueWrite,
+    private_hidden_mount: Option<PrivateHiddenHostMount>,
+}
+
+/// The actual mount owner's transition across a fresh, never-visible input.
+/// It is carried by the original native/interface write, not registered apart
+/// from it or reconstructed from a later compiler view.
+struct PrivateHiddenHostMount {
+    execution: Arc<PrivateExecutionAdmission>,
+    before: Arc<super::inspection::InspectionWorldAssociation>,
+    after: Arc<super::inspection::InspectionWorldAssociation>,
 }
 
 impl std::fmt::Debug for PendingHostValueWrite {
@@ -496,12 +500,113 @@ impl PendingHostValueWrite {
                 root_id: entry.value.handle.raw().0,
                 proof,
             },
+            private_hidden_mount: None,
         })
+    }
+
+    pub(super) fn retain_private_hidden_mount(
+        mut self,
+        session: &PersistentSession,
+        execution: Arc<PrivateExecutionAdmission>,
+        before: Arc<super::inspection::InspectionWorldAssociation>,
+        after: Arc<super::inspection::InspectionWorldAssociation>,
+    ) -> Result<Self, SessionError> {
+        if !self.matches_private_mount(session, &execution)
+            || !Arc::ptr_eq(&before.world, &after.world)
+            || !Arc::ptr_eq(&before.world, execution.compiler_world()?)
+            || !Arc::ptr_eq(&before.base.source, &after.base.source)
+            || !before
+                .base
+                .original_source
+                .same_observation(&after.base.original_source)
+            || !before.base.target.same_observation(&after.base.target)
+            || !session.inspection_world_base_is_current(
+                &after.base,
+                &after.base.source,
+                &execution.original_source()?,
+            )
+            || !session
+                .lib()
+                .tips
+                .get(&self.scope)
+                .and_then(|tip| tip.inspection_world.as_ref())
+                .is_some_and(|live| Arc::ptr_eq(live, &after))
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        self.private_hidden_mount = Some(PrivateHiddenHostMount {
+            execution,
+            before,
+            after,
+        });
+        Ok(self)
+    }
+
+    pub(super) fn matches_private_mount(
+        &self,
+        session: &PersistentSession,
+        execution: &PrivateExecutionAdmission,
+    ) -> bool {
+        Arc::ptr_eq(&self.owner, &execution.owner)
+            && Arc::ptr_eq(&self.owner, session.admission_owner())
+            && self.owner_epoch == execution.owner_epoch
+            && self.owner_epoch == self.owner.epoch()
+            && self.scope == execution.private_scope()
+            && session
+                .bindings()
+                .get(self.id)
+                .is_some_and(|entry| entry.scope == self.scope && self.write.matches(entry))
+    }
+
+    pub(super) fn matches_private_hidden_mount(
+        &self,
+        session: &PersistentSession,
+        execution: &PrivateExecutionAdmission,
+        id: tidepool_repr::SessionVarId,
+    ) -> bool {
+        self.id == id
+            && self.matches_private_mount(session, execution)
+            && self
+                .private_hidden_mount
+                .as_ref()
+                .is_some_and(|mount| std::ptr::eq(mount.execution.as_ref(), execution))
+    }
+
+    pub(super) fn private_hidden_mount_key(
+        &self,
+        session: &PersistentSession,
+        execution: &Arc<PrivateExecutionAdmission>,
+    ) -> Result<super::persistent::CompileViewKey, SessionError> {
+        let mount = self
+            .private_hidden_mount
+            .as_ref()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        if !Arc::ptr_eq(&mount.execution, execution)
+            || !self.matches_private_mount(session, execution)
+            || !Arc::ptr_eq(&mount.before.world, execution.compiler_world()?)
+            || !session.inspection_world_base_is_current(
+                &mount.after.base,
+                &mount.after.base.source,
+                &execution.original_source()?,
+            )
+            || !session
+                .lib()
+                .tips
+                .get(&self.scope)
+                .and_then(|tip| tip.inspection_world.as_ref())
+                .is_some_and(|live| Arc::ptr_eq(live, &mount.after))
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        Ok(mount.after.base.key.clone())
     }
 
     /// Transfer an accepted effect's exact write to its existing private owner.
     /// Final publication revalidates the native identity under machine checkout.
     pub fn accept(self, admission: &PrivateExecutionAdmission) -> Result<(), SessionError> {
+        if self.private_hidden_mount.is_some() {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
         if !Arc::ptr_eq(&self.owner, &admission.owner)
             || self.owner_epoch != admission.owner_epoch
             || self.owner_epoch != self.owner.epoch()
@@ -539,10 +644,7 @@ impl PrivateExecutionAdmission {
     /// execution keeps the admitted visibility snapshot even though checking
     /// consumes the issued world key and binding tip instead of a rebuilt view.
     pub fn admitted_public(&self) -> Result<&PublicVisibilitySnapshot, SessionError> {
-        match &self.compiler_basis {
-            PrivateExecutionCompilerBasis::Finite { admitted, .. } => Ok(admitted),
-            PrivateExecutionCompilerBasis::World { admitted, .. } => Ok(admitted),
-        }
+        Ok(&self.compiler_basis.admitted)
     }
     pub fn public_scope(&self) -> ScopeId {
         self.public_scope
@@ -554,12 +656,7 @@ impl PrivateExecutionAdmission {
         self.session
     }
     pub fn view(&self) -> Result<&SessionCompileView, SessionError> {
-        match &self.compiler_basis {
-            PrivateExecutionCompilerBasis::Finite { view, .. } => Ok(view),
-            PrivateExecutionCompilerBasis::World { .. } => {
-                Err(SessionError::WorldCellRequiresServicePreparation)
-            }
-        }
+        Err(SessionError::WorldCellRequiresServicePreparation)
     }
     pub(super) fn world_basis(
         &self,
@@ -570,16 +667,10 @@ impl PrivateExecutionAdmission {
         ),
         SessionError,
     > {
-        match &self.compiler_basis {
-            PrivateExecutionCompilerBasis::World {
-                published,
-                private_key,
-                ..
-            } => Ok((&published.world, private_key)),
-            PrivateExecutionCompilerBasis::Finite { .. } => Err(
-                SessionError::MissingPublishedCompilerWorld(self.public_scope),
-            ),
-        }
+        Ok((
+            &self.compiler_basis.published.world,
+            &self.compiler_basis.private_key,
+        ))
     }
 
     // boundary: see CELL-PREPARATION-BOUNDARY.md
@@ -595,38 +686,21 @@ impl PrivateExecutionAdmission {
     /// Original source A captured with the published world. The private
     /// placement's lease is target B and stays separately reachable through
     /// [`Self::retained_lexical_scope`].
-    pub fn original_source(&self) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
-        match &self.compiler_basis {
-            PrivateExecutionCompilerBasis::World {
-                original_source, ..
-            } => Ok(original_source.clone()),
-            PrivateExecutionCompilerBasis::Finite { .. } => {
-                Err(SessionError::WorldCellRequiresServicePreparation)
-            }
-        }
+    pub fn original_source(&self) -> Result<Arc<RuntimeOriginalSource>, SessionError> {
+        Ok(self.compiler_basis.original_source.clone())
     }
 
-    /// The exact published association, source selection and admitted public
-    /// base for a World private execution. Finite execution has no World facts.
-    pub(super) fn world_execution_facts(&self) -> Option<WorldExecutionAdmissionFacts> {
-        match &self.compiler_basis {
-            PrivateExecutionCompilerBasis::World {
-                published,
-                source,
-                original_source,
-                admitted,
-                admitted_context,
-                admitted_public_view,
-                ..
-            } => Some(WorldExecutionAdmissionFacts {
-                published: published.clone(),
-                source: source.clone(),
-                original_source: original_source.clone(),
-                admitted: admitted.clone(),
-                admitted_context: admitted_context.clone(),
-                admitted_public_view: *admitted_public_view,
-            }),
-            PrivateExecutionCompilerBasis::Finite { .. } => None,
+    /// The exact published association and actual source/public target custody
+    /// captured by this execution's sole World birth owner.
+    pub(super) fn world_execution_facts(&self) -> WorldExecutionAdmissionFacts {
+        let basis = &self.compiler_basis;
+        WorldExecutionAdmissionFacts {
+            published: basis.published.clone(),
+            source: basis.source.clone(),
+            original_source: basis.original_source.clone(),
+            public_target: basis.public_target.clone(),
+            admitted: basis.admitted.clone(),
+            admitted_context: basis.admitted_context.clone(),
         }
     }
     pub fn binding_tip(&self) -> BindingTipId {
@@ -663,7 +737,7 @@ enum RuntimeCellCompilerBasis {
         source: Arc<super::GenerationArtifactReference>,
         /// Original A from the issuing source transaction; the cell's retained
         /// scope is the separately captured receiving target B.
-        original_source: Arc<RuntimeLexicalScopeLease>,
+        original_source: Arc<RuntimeOriginalSource>,
     },
 }
 
@@ -730,19 +804,243 @@ pub(super) struct RuntimeAdmissionOwner {
     identity: uuid::Uuid,
     epoch: std::sync::atomic::AtomicU64,
     source_issuance: parking_lot::RwLock<()>,
-    retired: parking_lot::Mutex<Vec<ScopeId>>,
+    retired: parking_lot::Mutex<Vec<RuntimeAdmissionRelease>>,
     lexical_leases: parking_lot::Mutex<BTreeMap<ScopeId, RuntimeLexicalScopeRecord>>,
     session_live: std::sync::atomic::AtomicBool,
-    uncertain_scopes: std::sync::Weak<parking_lot::Mutex<Vec<Arc<RuntimeLexicalScopeLease>>>>,
+    uncertain_scopes: std::sync::Weak<parking_lot::Mutex<RuntimeUnconfirmedSourceCustody>>,
 }
 
 struct RuntimeLexicalScopeRecord {
+    owner_epoch: u64,
+    lexical_live: bool,
     lease: Option<std::sync::Weak<RuntimeLexicalScopeLease>>,
+    original_source: Option<std::sync::Weak<RuntimeOriginalSource>>,
     owns_source_admission: bool,
     source_admission: super::RuntimeSourceAdmission,
     // The actual canonical lease owns strong prerequisites. Keeping them
     // strong in the issuer's own record would form owner→lease→owner cycles.
     prerequisites: Vec<std::sync::Weak<RuntimeLexicalScopeLease>>,
+    source_prerequisites: Vec<std::sync::Weak<RuntimeOriginalSource>>,
+}
+
+#[derive(Default)]
+pub(super) struct RuntimeUnconfirmedSourceCustody {
+    pub(super) originals: Vec<Arc<RuntimeOriginalSource>>,
+    pub(super) targets: Vec<Arc<RuntimeLexicalScopeLease>>,
+}
+
+enum RuntimeAdmissionRelease {
+    Lexical { scope: ScopeId, owner_epoch: u64 },
+    OriginalSource { scope: ScopeId, owner_epoch: u64 },
+}
+
+/// Canonical original-source authority, independent of mutable lexical roots.
+/// Its scope is a diagnostic identity and does not assert lexical liveness.
+pub struct RuntimeOriginalSource {
+    owner: Arc<RuntimeAdmissionOwner>,
+    owner_epoch: u64,
+    scope: ScopeId,
+    source_admission: super::RuntimeSourceAdmission,
+    prerequisites: Vec<Arc<RuntimeOriginalSource>>,
+}
+
+impl RuntimeOriginalSource {
+    fn validate_local_source_issuer(&self) -> Result<(), super::SourceAdmissionError> {
+        let canonical = self
+            .owner
+            .session_live
+            .load(std::sync::atomic::Ordering::Acquire)
+            && self.owner_epoch == self.owner.epoch()
+            && self
+                .owner
+                .lexical_leases
+                .lock()
+                .get(&self.scope)
+                .is_some_and(|record| {
+                    record.owner_epoch == self.owner_epoch
+                        && record.source_admission.same_owner(&self.source_admission)
+                        && record
+                            .original_source
+                            .as_ref()
+                            .and_then(std::sync::Weak::upgrade)
+                            .is_some_and(|source| std::ptr::eq(source.as_ref(), self))
+                });
+        if canonical {
+            Ok(())
+        } else {
+            Err(super::SourceAdmissionError::StaleSourceLease)
+        }
+    }
+
+    pub fn validate_source_issuer(self: &Arc<Self>) -> Result<(), super::SourceAdmissionError> {
+        Self::with_sources_and_targets([self.clone()], [], |_, _| Ok(()))
+    }
+
+    /// Validate both immutable source DAGs and actual lexical custody under one
+    /// total order of issuer locks. Inner validators never acquire issuer locks.
+    pub(crate) fn with_sources_and_targets<T>(
+        originals: impl IntoIterator<Item = Arc<Self>>,
+        targets: impl IntoIterator<Item = Arc<RuntimeLexicalScopeLease>>,
+        action: impl FnOnce(
+            &[Arc<Self>],
+            &[Arc<RuntimeLexicalScopeLease>],
+        ) -> Result<T, super::SourceAdmissionError>,
+    ) -> Result<T, super::SourceAdmissionError> {
+        fn source_dag(
+            source: Arc<RuntimeOriginalSource>,
+            sources: &mut Vec<Arc<RuntimeOriginalSource>>,
+        ) {
+            if sources.iter().any(|held| Arc::ptr_eq(held, &source)) {
+                return;
+            }
+            for prerequisite in &source.prerequisites {
+                source_dag(prerequisite.clone(), sources);
+            }
+            sources.push(source);
+        }
+        fn lexical_dag(
+            lease: Arc<RuntimeLexicalScopeLease>,
+            leases: &mut Vec<Arc<RuntimeLexicalScopeLease>>,
+        ) {
+            if leases.iter().any(|held| Arc::ptr_eq(held, &lease)) {
+                return;
+            }
+            for prerequisite in &lease.prerequisites {
+                lexical_dag(prerequisite.clone(), leases);
+            }
+            leases.push(lease);
+        }
+        let mut sources = Vec::new();
+        for source in originals {
+            source_dag(source, &mut sources);
+        }
+        let mut leases = Vec::new();
+        for target in targets {
+            lexical_dag(target, &mut leases);
+        }
+        for lease in &leases {
+            source_dag(lease.original_source.clone(), &mut sources);
+        }
+        let mut owners = sources
+            .iter()
+            .map(|source| source.owner.clone())
+            .chain(leases.iter().map(|lease| lease.owner.clone()))
+            .collect::<Vec<_>>();
+        owners.sort_unstable_by_key(|owner| owner.identity());
+        owners.dedup_by(|a, b| Arc::ptr_eq(a, b));
+        let _issuance = owners
+            .iter()
+            .map(|owner| owner.source_issuance.read())
+            .collect::<Vec<_>>();
+        let validate = || {
+            for source in &sources {
+                source.validate_local_source_issuer()?;
+            }
+            for lease in &leases {
+                lease.validate_local_source_issuer()?;
+            }
+            Ok::<_, super::SourceAdmissionError>(())
+        };
+        validate()?;
+        let result = action(&sources, &leases)?;
+        validate()?;
+        Ok(result)
+    }
+
+    pub fn retain_unconfirmed_source_custody(self: &Arc<Self>) {
+        for prerequisite in &self.prerequisites {
+            prerequisite.retain_unconfirmed_source_custody();
+        }
+        let Some(custody) = self.owner.uncertain_scopes.upgrade() else {
+            return;
+        };
+        let _issuance = self.owner.source_issuance.read();
+        let canonical = self
+            .owner
+            .session_live
+            .load(std::sync::atomic::Ordering::Acquire)
+            && self
+                .owner
+                .lexical_leases
+                .lock()
+                .get(&self.scope)
+                .is_some_and(|record| {
+                    record
+                        .original_source
+                        .as_ref()
+                        .and_then(std::sync::Weak::upgrade)
+                        .is_some_and(|source| Arc::ptr_eq(&source, self))
+                });
+        let mut held = custody.lock();
+        if canonical
+            && !held
+                .originals
+                .iter()
+                .any(|source| Arc::ptr_eq(source, self))
+        {
+            held.originals.push(self.clone());
+        }
+    }
+
+    pub fn with_open_target<T>(
+        self: &Arc<Self>,
+        target: &Arc<RuntimeLexicalScopeLease>,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, super::SourceAdmissionError> {
+        Self::with_sources_and_targets([self.clone()], [target.clone()], |sources, _| {
+            super::RuntimeSourceAdmission::with_open_admissions(
+                sources.iter().map(|source| source.source_admission()),
+                action,
+            )
+        })
+    }
+
+    pub fn with_open_source_admission<T>(
+        self: &Arc<Self>,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, super::SourceAdmissionError> {
+        Self::with_sources_and_targets([self.clone()], [], |sources, _| {
+            super::RuntimeSourceAdmission::with_open_admissions(
+                sources.iter().map(|source| source.source_admission()),
+                action,
+            )
+        })
+    }
+
+    pub fn admit_source(
+        self: &Arc<Self>,
+    ) -> Result<super::RuntimeSourceLeaseClaim, super::SourceAdmissionError> {
+        Self::with_sources_and_targets([self.clone()], [], |sources, targets| {
+            super::RuntimeSourceLeaseClaim::admit(sources, targets)
+        })
+    }
+
+    pub fn source_admission(&self) -> &super::RuntimeSourceAdmission {
+        &self.source_admission
+    }
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
+}
+
+impl std::fmt::Debug for RuntimeOriginalSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeOriginalSource")
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for RuntimeOriginalSource {
+    fn drop(&mut self) {
+        self.owner
+            .retired
+            .lock()
+            .push(RuntimeAdmissionRelease::OriginalSource {
+                scope: self.scope,
+                owner_epoch: self.owner_epoch,
+            });
+    }
 }
 
 /// Synchronous exclusion with registrations. Unknown commit or unwinding
@@ -778,7 +1076,7 @@ impl RuntimeAdmissionOwner {
         self.epoch.load(std::sync::atomic::Ordering::Acquire)
     }
     pub(super) fn new(
-        uncertain_scopes: &Arc<parking_lot::Mutex<Vec<Arc<RuntimeLexicalScopeLease>>>>,
+        uncertain_scopes: &Arc<parking_lot::Mutex<RuntimeUnconfirmedSourceCustody>>,
     ) -> Self {
         Self {
             identity: uuid::Uuid::new_v4(),
@@ -827,10 +1125,14 @@ pub struct RuntimeLexicalScopeLease {
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
     scope: ScopeId,
+    original_source: Arc<RuntimeOriginalSource>,
     source_admission: super::RuntimeSourceAdmission,
     prerequisites: Vec<Arc<RuntimeLexicalScopeLease>>,
 }
 impl RuntimeLexicalScopeLease {
+    pub fn original_source(&self) -> &Arc<RuntimeOriginalSource> {
+        &self.original_source
+    }
     fn validate_local_source_issuer(&self) -> Result<(), super::SourceAdmissionError> {
         if self.owner_epoch != self.owner.epoch() || !self.has_live_canonical_custody() {
             return Err(super::SourceAdmissionError::StaleSourceLease);
@@ -848,7 +1150,8 @@ impl RuntimeLexicalScopeLease {
                 .lock()
                 .get(&self.scope)
                 .is_some_and(|record| {
-                    record.source_admission.same_owner(&self.source_admission)
+                    record.lexical_live
+                        && record.source_admission.same_owner(&self.source_admission)
                         && record
                             .lease
                             .as_ref()
@@ -857,12 +1160,12 @@ impl RuntimeLexicalScopeLease {
                 })
     }
 
-    pub fn validate_source_issuer(&self) -> Result<(), super::SourceAdmissionError> {
+    pub fn validate_lexical_issuer(&self) -> Result<(), super::SourceAdmissionError> {
         let _issuance = self.owner.source_issuance.read();
         self.validate_local_source_issuer()?;
         drop(_issuance);
         for prerequisite in &self.prerequisites {
-            prerequisite.validate_source_issuer()?;
+            prerequisite.validate_lexical_issuer()?;
         }
         Ok(())
     }
@@ -879,49 +1182,16 @@ impl RuntimeLexicalScopeLease {
         roots: impl IntoIterator<Item = Arc<Self>>,
         action: impl FnOnce(&[Arc<Self>]) -> Result<T, super::SourceAdmissionError>,
     ) -> Result<T, super::SourceAdmissionError> {
-        fn collect(
-            lease: Arc<RuntimeLexicalScopeLease>,
-            leases: &mut Vec<Arc<RuntimeLexicalScopeLease>>,
-        ) {
-            if leases.iter().any(|held| Arc::ptr_eq(held, &lease)) {
-                return;
-            }
-            for prerequisite in &lease.prerequisites {
-                collect(prerequisite.clone(), leases);
-            }
-            leases.push(lease);
-        }
-        let mut leases = Vec::new();
-        for root in roots {
-            collect(root, &mut leases);
-        }
-        let mut owners = leases
-            .iter()
-            .map(|lease| lease.owner.clone())
-            .collect::<Vec<_>>();
-        owners.sort_unstable_by_key(|owner| owner.identity());
-        owners.dedup_by(|a, b| Arc::ptr_eq(a, b));
-        let _issuance = owners
-            .iter()
-            .map(|owner| owner.source_issuance.read())
-            .collect::<Vec<_>>();
-        for lease in &leases {
-            lease.validate_local_source_issuer()?;
-        }
-        let result = action(&leases)?;
-        for lease in &leases {
-            lease.validate_local_source_issuer()?;
-        }
-        Ok(result)
+        RuntimeOriginalSource::with_sources_and_targets([], roots, |_, leases| action(leases))
     }
 
     pub fn with_open_source_admission<T>(
         self: &Arc<Self>,
         action: impl FnOnce() -> T,
     ) -> Result<T, super::SourceAdmissionError> {
-        Self::with_source_leases([self.clone()], |leases| {
+        RuntimeOriginalSource::with_sources_and_targets([], [self.clone()], |sources, _| {
             super::RuntimeSourceAdmission::with_open_admissions(
-                leases.iter().map(|lease| lease.source_admission()),
+                sources.iter().map(|source| source.source_admission()),
                 action,
             )
         })
@@ -930,8 +1200,8 @@ impl RuntimeLexicalScopeLease {
     pub fn admit_source(
         self: &Arc<Self>,
     ) -> Result<super::RuntimeSourceLeaseClaim, super::SourceAdmissionError> {
-        Self::with_source_leases([self.clone()], |leases| {
-            super::RuntimeSourceLeaseClaim::admit(leases)
+        RuntimeOriginalSource::with_sources_and_targets([], [self.clone()], |sources, leases| {
+            super::RuntimeSourceLeaseClaim::admit(sources, leases)
         })
     }
 
@@ -947,8 +1217,10 @@ impl RuntimeLexicalScopeLease {
         };
         let _issuance = self.owner.source_issuance.read();
         let mut held = custody.lock();
-        if self.has_live_canonical_custody() && !held.iter().any(|lease| Arc::ptr_eq(lease, self)) {
-            held.push(self.clone());
+        if self.has_live_canonical_custody()
+            && !held.targets.iter().any(|lease| Arc::ptr_eq(lease, self))
+        {
+            held.targets.push(self.clone());
         }
     }
 
@@ -968,7 +1240,13 @@ impl std::fmt::Debug for RuntimeLexicalScopeLease {
 }
 impl Drop for RuntimeLexicalScopeLease {
     fn drop(&mut self) {
-        self.owner.retired.lock().push(self.scope);
+        self.owner
+            .retired
+            .lock()
+            .push(RuntimeAdmissionRelease::Lexical {
+                scope: self.scope,
+                owner_epoch: self.owner_epoch,
+            });
     }
 }
 
@@ -1454,6 +1732,10 @@ impl RuntimeCheckedPrefixSnapshot {
 }
 
 impl RuntimeCheckedPrefix {
+    pub(super) fn captured_source_origin(&self) -> &super::resident::CapturedSourceOrigin {
+        self.settled.captured_source_origin()
+    }
+
     pub fn cell_program(&self) -> &Arc<tidepool_toolchain::checked_cell::CellProgram> {
         &self.program
     }
@@ -1473,9 +1755,7 @@ impl RuntimeCheckedPrefix {
         self.settled.checkpoint()?;
         session.validate_lexical_scope_lease(scope, &self.admission._retained_scope)?;
         if self.admission.world_reservation().is_some() {
-            self.admission
-                .original_source_lease()?
-                .validate_source_issuer()?;
+            self.admission.original_source()?.validate_source_issuer()?;
         }
         let store = session.held_admission_store()?;
         let mut state = self.state.lock();
@@ -1611,7 +1891,7 @@ impl CheckedTurnCompletion {
         if self.prefix.admission.world_reservation().is_some() {
             self.prefix
                 .admission
-                .original_source_lease()?
+                .original_source()?
                 .validate_source_issuer()?;
         }
         let mut state = self.prefix.state.lock();
@@ -1709,6 +1989,12 @@ impl CheckedTurnCompletion {
         } else {
             None
         };
+        let predecessor_world = state.snapshot.world().map(|world| *world.logical_id());
+        let bound_binding_ids = native
+            .bindings
+            .iter()
+            .map(|binding| binding.id.raw())
+            .collect::<Vec<_>>();
         settle_checked_snapshot(
             session,
             &mut state,
@@ -1721,6 +2007,24 @@ impl CheckedTurnCompletion {
         )?;
         if let Some((private, values)) = completed_values {
             private.completed_values.lock().extend(values);
+        }
+        if let (
+            Some(predecessor_world),
+            Some(successor),
+            tidepool_toolchain::checked_cell::CellProgramBasis::World(output),
+        ) = (
+            predecessor_world,
+            state.snapshot.world(),
+            self.prefix.program.basis(),
+        ) {
+            tracing::debug!(target: "exomonad_harness::timing",
+                base_logical_world = ?output.logical().logical_id(),
+                predecessor_world = ?predecessor_world,
+                successor_world = ?successor.logical_id(),
+                output_certificate = ?output.certificate_sha256(),
+                item_ordinal = self.execution.item().index(),
+                bound_binding_ids = ?bound_binding_ids,
+                "checked World item successor installed");
         }
         state.in_flight = None;
         state.reservation = None;
@@ -2035,19 +2339,22 @@ impl RuntimeCellAdmission {
         &self,
         action: impl FnOnce() -> T,
     ) -> Result<T, super::SourceAdmissionError> {
-        let mut roots = vec![self._retained_scope.clone()];
-        if let RuntimeCellCompilerBasis::World {
-            original_source, ..
-        } = &self.compiler_basis
-        {
-            roots.push(original_source.clone());
-        }
-        RuntimeLexicalScopeLease::with_source_leases(roots, |leases| {
-            super::RuntimeSourceAdmission::with_open_admissions(
-                leases.iter().map(|lease| lease.source_admission()),
-                action,
-            )
-        })
+        let originals = match &self.compiler_basis {
+            RuntimeCellCompilerBasis::World {
+                original_source, ..
+            } => Some(original_source.clone()),
+            RuntimeCellCompilerBasis::Finite(_) => None,
+        };
+        RuntimeOriginalSource::with_sources_and_targets(
+            originals,
+            [self._retained_scope.clone()],
+            |sources, _| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    sources.iter().map(|source| source.source_admission()),
+                    action,
+                )
+            },
+        )
     }
 
     pub(super) fn world_source_reference(
@@ -2061,9 +2368,7 @@ impl RuntimeCellAdmission {
         }
     }
 
-    pub(super) fn original_source_lease(
-        &self,
-    ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
+    pub(super) fn original_source(&self) -> Result<Arc<RuntimeOriginalSource>, SessionError> {
         match &self.compiler_basis {
             RuntimeCellCompilerBasis::World {
                 original_source, ..
@@ -2385,7 +2690,7 @@ impl PersistentSession {
         if prefix.admission.world_reservation().is_some() {
             prefix
                 .admission
-                .original_source_lease()?
+                .original_source()?
                 .validate_source_issuer()?;
         }
         let store = self.held_admission_store()?;
@@ -2681,12 +2986,7 @@ impl PersistentSession {
         &self,
         scope: ScopeId,
     ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
-        self.prepared_lexical_scope_lease_with_source(
-            scope,
-            self.source_transaction
-                .as_ref()
-                .map(|owner| owner.source.clone()),
-        )
+        self.prepared_lexical_scope_lease_with_source(scope, None)
     }
 
     pub(super) fn prepared_lexical_scope_lease_with_source(
@@ -2698,7 +2998,7 @@ impl PersistentSession {
             return Err(SessionError::DeadScope(scope));
         }
         if let Some(prerequisite) = &prerequisite {
-            prerequisite.validate_source_issuer()?;
+            prerequisite.validate_lexical_issuer()?;
         }
         let mut leases = self.admission_owner().lexical_leases.lock();
         if let Some(existing) = leases.get(&scope).and_then(|record| record.lease.as_ref()) {
@@ -2707,7 +3007,7 @@ impl PersistentSession {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
             drop(leases);
-            lease.validate_source_issuer()?;
+            lease.validate_lexical_issuer()?;
             return Ok(lease);
         }
         let owns_source_admission = leases
@@ -2736,24 +3036,73 @@ impl PersistentSession {
                         .map(|lease| lease.source_admission().clone()),
                 )
             });
+        let mut source_prerequisites = match leases.get(&scope) {
+            Some(record) => record
+                .source_prerequisites
+                .iter()
+                .map(|source| {
+                    source
+                        .upgrade()
+                        .ok_or(super::SourceAdmissionError::StaleSourceLease)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            None => prerequisites
+                .iter()
+                .map(|lease| lease.original_source.clone())
+                .collect(),
+        };
+        if let Some(transaction) = &self.source_transaction {
+            if !source_prerequisites
+                .iter()
+                .any(|source| Arc::ptr_eq(source, &transaction.source))
+            {
+                source_prerequisites.push(transaction.source.clone());
+            }
+        }
+        let owner_epoch = self.admission_owner().epoch();
+        let original_source = match leases
+            .get(&scope)
+            .and_then(|record| record.original_source.as_ref())
+        {
+            Some(source) => source
+                .upgrade()
+                .ok_or(super::SourceAdmissionError::StaleSourceLease)?,
+            None => Arc::new(RuntimeOriginalSource {
+                owner: self.admission_owner().clone(),
+                owner_epoch,
+                scope,
+                source_admission: source_admission.clone(),
+                prerequisites: source_prerequisites,
+            }),
+        };
         let lease = Arc::new(RuntimeLexicalScopeLease {
             owner: self.admission_owner().clone(),
-            owner_epoch: self.admission_owner().epoch(),
+            owner_epoch,
             scope,
+            original_source,
             source_admission: source_admission.clone(),
             prerequisites,
         });
         leases.insert(
             scope,
             RuntimeLexicalScopeRecord {
+                owner_epoch,
+                lexical_live: true,
                 lease: Some(Arc::downgrade(&lease)),
+                original_source: Some(Arc::downgrade(&lease.original_source)),
                 owns_source_admission,
                 prerequisites: lease.prerequisites.iter().map(Arc::downgrade).collect(),
+                source_prerequisites: lease
+                    .original_source
+                    .prerequisites
+                    .iter()
+                    .map(Arc::downgrade)
+                    .collect(),
                 source_admission,
             },
         );
         drop(leases);
-        lease.validate_source_issuer()?;
+        lease.validate_lexical_issuer()?;
         Ok(lease)
     }
 
@@ -2779,7 +3128,7 @@ impl PersistentSession {
         prerequisite: Option<Arc<RuntimeLexicalScopeLease>>,
     ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
         if let Some(prerequisite) = &prerequisite {
-            prerequisite.validate_source_issuer()?;
+            prerequisite.validate_lexical_issuer()?;
         }
         // An unleased captured scope has custody provenance, but has not yet
         // selected its own executable world. Only initial notebook adoption
@@ -2815,25 +3164,37 @@ impl PersistentSession {
                     Some(lease) => vec![lease.clone()],
                     None => record.prerequisites.clone(),
                 };
-                (record.source_admission.clone(), prerequisites)
+                (
+                    record.source_admission.clone(),
+                    prerequisites,
+                    match &record.original_source {
+                        Some(source) => vec![source.clone()],
+                        None => record.source_prerequisites.clone(),
+                    },
+                )
             })
         }
         .or_else(|| {
             self.source_transaction.as_ref().map(|owner| {
                 (
                     owner.source.source_admission().clone(),
+                    Vec::new(),
                     vec![Arc::downgrade(&owner.source)],
                 )
             })
         });
-        if let Some((source_admission, prerequisites)) = inherited {
+        if let Some((source_admission, prerequisites, source_prerequisites)) = inherited {
             self.admission_owner().lexical_leases.lock().insert(
                 target,
                 RuntimeLexicalScopeRecord {
+                    owner_epoch: self.admission_owner().epoch(),
+                    lexical_live: true,
                     lease: None,
+                    original_source: None,
                     owns_source_admission: false,
                     source_admission,
                     prerequisites,
+                    source_prerequisites,
                 },
             );
         }
@@ -2851,16 +3212,53 @@ impl PersistentSession {
             let mut held = self.uncertain_source_scopes.lock();
             let mut released = Vec::new();
             let mut index = 0;
-            while index < held.len() {
-                if held[index].scope == scope {
-                    released.push(held.swap_remove(index));
+            while index < held.targets.len() {
+                if held.targets[index].scope == scope {
+                    released.push(held.targets.swap_remove(index));
                 } else {
                     index += 1;
                 }
             }
-            released
+            let mut original_released = Vec::new();
+            let mut index = 0;
+            while index < held.originals.len() {
+                if held.originals[index].scope == scope {
+                    original_released.push(held.originals.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            (released, original_released)
         };
         drop(released);
+    }
+
+    pub(super) fn release_unheld_original_source_record(&self, scope: ScopeId) {
+        let released = {
+            let mut records = self.admission_owner().lexical_leases.lock();
+            let unheld = records.get(&scope).is_some_and(|record| {
+                record
+                    .lease
+                    .as_ref()
+                    .is_none_or(|lease| lease.upgrade().is_none())
+                    && record
+                        .original_source
+                        .as_ref()
+                        .is_none_or(|source| source.upgrade().is_none())
+            });
+            unheld.then(|| records.remove(&scope)).flatten()
+        };
+        if let Some(record) = released {
+            if record.owns_source_admission {
+                record.source_admission.retire_scope(scope);
+            }
+        }
+    }
+
+    pub(super) fn invalidate_lexical_scope_custody(&self, scope: ScopeId) {
+        if let Some(record) = self.admission_owner().lexical_leases.lock().get_mut(&scope) {
+            record.lexical_live = false;
+        }
     }
     /// Validate a retained placement without minting another scope or changing
     /// its custody. Owner transfer invalidates an unconsumed placement grant.
@@ -2878,7 +3276,7 @@ impl PersistentSession {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
-        lease.validate_source_issuer()?;
+        lease.validate_lexical_issuer()?;
         Ok(())
     }
     pub fn mint_scope_from_lease(
@@ -3165,9 +3563,35 @@ impl PersistentSession {
     /// their detached lease scopes through the same binding/native owner.
     pub(crate) fn reap_admission_leases(&mut self) {
         let retired = std::mem::take(&mut *self.admission_owner().retired.lock());
-        for scope in retired {
-            self.retire_scope(scope);
-            self.admission_owner().lexical_leases.lock().remove(&scope);
+        for event in retired {
+            let (scope, owner_epoch, lexical) = match event {
+                RuntimeAdmissionRelease::Lexical { scope, owner_epoch } => {
+                    (scope, owner_epoch, true)
+                }
+                RuntimeAdmissionRelease::OriginalSource { scope, owner_epoch } => {
+                    (scope, owner_epoch, false)
+                }
+            };
+            let current = self
+                .admission_owner()
+                .lexical_leases
+                .lock()
+                .get(&scope)
+                .is_some_and(|record| {
+                    record.owner_epoch == owner_epoch
+                        && (!lexical
+                            || record
+                                .lease
+                                .as_ref()
+                                .is_some_and(|lease| lease.upgrade().is_none()))
+                });
+            if !current {
+                continue;
+            }
+            if lexical {
+                self.release_lexical_scope_resources(scope);
+            }
+            self.release_unheld_original_source_record(scope);
         }
     }
 
@@ -3304,7 +3728,7 @@ impl PersistentSession {
         &mut self,
         public_scope: ScopeId,
         source: &super::GenerationArtifactReference,
-        original_source: &Arc<RuntimeLexicalScopeLease>,
+        original_source: &Arc<RuntimeOriginalSource>,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
         let transaction = self
             .source_transaction
@@ -3326,23 +3750,21 @@ impl PersistentSession {
             })
             .cloned()
             .ok_or(SessionError::MissingPublishedCompilerWorld(public_scope))?;
+        let custody = published.base.acquire_custody()?;
         let admitted = self
             .public_visibility_snapshot_in(public_scope)
             .ok_or(SessionError::DeadScope(public_scope))?;
         let admitted_context = self.lib().current_exact_context_in(public_scope);
-        let admitted_public_view = self
-            .compile_view_digest_in(public_scope)
-            .ok_or(SessionError::StaleStagedDeclaration)?;
         let source = published.base.source.clone();
         self.begin_private_execution_with_world(
             public_scope,
             WorldExecutionAdmissionFacts {
                 published,
                 source,
-                original_source: original_source.clone(),
+                original_source: custody.original_source,
+                public_target: custody.target,
                 admitted,
                 admitted_context,
-                admitted_public_view,
             },
         )
     }
@@ -3377,16 +3799,16 @@ impl PersistentSession {
             private_scope
         };
         let scope_lease = self.prepared_lexical_scope_lease(private_scope)?;
-        let compiler_basis = PrivateExecutionCompilerBasis::World {
+        let compiler_basis = PrivateExecutionCompilerBasis {
             published: world.published,
             private_key: self
                 .compile_view_key_in(private_scope)
                 .ok_or(SessionError::StaleStagedDeclaration)?,
             source: world.source,
             original_source: world.original_source,
+            public_target: world.public_target,
             admitted: world.admitted,
             admitted_context: world.admitted_context,
-            admitted_public_view: world.admitted_public_view,
         };
         let binding_tip = self
             .binding_tip_id(private_scope)
@@ -3404,6 +3826,7 @@ impl PersistentSession {
             binding_tip,
             completed_values: parking_lot::Mutex::new(std::collections::HashMap::new()),
             final_intent: OnceLock::new(),
+            host_retirements: parking_lot::Mutex::new(Vec::new()),
         };
         let admission = store
             .as_ref()
@@ -3411,6 +3834,59 @@ impl PersistentSession {
             .transpose()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         super::complete_native_transition(admission)?;
+        // Detached runtime placement borrows the SAME published compiler World.
+        // A different runtime scope does not invent a compiler product or ID.
+        let facts = prepared.world_execution_facts();
+        RuntimeOriginalSource::with_sources_and_targets(
+            [facts.original_source.clone()],
+            [prepared.scope_lease.clone(), facts.public_target.clone()],
+            |sources, _| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    sources.iter().map(|source| source.source_admission()),
+                    || {
+                        if !Arc::ptr_eq(&prepared.owner, self.admission_owner())
+                            || prepared.owner_epoch != self.admission_owner().epoch()
+                            || !self.inspection_world_base_is_current(
+                                &facts.published.base,
+                                &facts.source,
+                                &facts.original_source,
+                            )
+                        {
+                            return Err(SessionError::WorldCellPublicationBaseStale);
+                        }
+                        let key = self
+                            .compile_view_key_in(private_scope)
+                            .ok_or(SessionError::StaleStagedDeclaration)?;
+                        if &key != prepared.world_basis()?.1 {
+                            return Err(SessionError::StaleStagedDeclaration);
+                        }
+                        let association = Arc::new(super::inspection::InspectionWorldAssociation {
+                            base: super::inspection::InspectionWorldBase {
+                                scope: private_scope,
+                                key,
+                                owner: prepared.owner.clone(),
+                                epoch: prepared.owner_epoch,
+                                source: facts.source.clone(),
+                                original_source:
+                                    super::inspection::InspectionWorldSourceObservation::new(
+                                        &facts.original_source,
+                                    ),
+                                target: super::inspection::InspectionWorldLeaseObservation::new(
+                                    &prepared.scope_lease,
+                                ),
+                            },
+                            world: facts.published.world.clone(),
+                        });
+                        self.lib_mut()
+                            .tips
+                            .entry(private_scope)
+                            .or_default()
+                            .inspection_world = Some(association);
+                        Ok(())
+                    },
+                )
+            },
+        )??;
         Ok(prepared)
     }
 
@@ -3995,8 +4471,7 @@ impl PersistentSession {
         successor: &Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
     ) -> Result<(), SessionError> {
         let RuntimeCellCompilerBasis::World {
-            original_source,
-            ..
+            original_source, ..
         } = &admission.compiler_basis
         else {
             return Err(SessionError::StaleStagedDeclaration);
@@ -4004,11 +4479,12 @@ impl PersistentSession {
         let source = admission.world_source_reference()?.clone();
         let original_source = original_source.clone();
         let target = admission._retained_scope.clone();
-        RuntimeLexicalScopeLease::with_source_leases(
-            [original_source.clone(), target.clone()],
-            |leases| {
+        RuntimeOriginalSource::with_sources_and_targets(
+            [original_source.clone()],
+            [target.clone()],
+            |sources, _| {
                 super::RuntimeSourceAdmission::with_open_admissions(
-                    leases.iter().map(|lease| lease.source_admission()),
+                    sources.iter().map(|source| source.source_admission()),
                     || {
                         if !admission.belongs_to(self)
                             || admission.scope != scope
@@ -4036,8 +4512,13 @@ impl PersistentSession {
                                 owner: self.admission_owner().clone(),
                                 epoch: self.admission_owner().epoch(),
                                 source: source.clone(),
-                                original_source: original_source.clone(),
-                                target: target.clone(),
+                                original_source:
+                                    super::inspection::InspectionWorldSourceObservation::new(
+                                        &original_source,
+                                    ),
+                                target: super::inspection::InspectionWorldLeaseObservation::new(
+                                    &target,
+                                ),
                             },
                             world: successor.clone(),
                         });
@@ -4284,6 +4765,15 @@ impl PersistentSession {
         execution: Arc<PrivateExecutionAdmission>,
         plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        self.admit_world_planned_cell_with_input(execution, plan, None)
+    }
+
+    pub fn admit_world_planned_cell_with_input(
+        &mut self,
+        execution: Arc<PrivateExecutionAdmission>,
+        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        input: Option<&PendingHostValueWrite>,
+    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         let scope = execution.private_scope();
         self.reap_admission_leases();
         if !Arc::ptr_eq(&execution.owner, self.admission_owner())
@@ -4291,27 +4781,23 @@ impl PersistentSession {
             || !self.has_lib()
             || execution.session() != self.lib().session_id()
             || execution.library != self.lib().compile_view_identity
-            || self.binding_tip_id(scope) != Some(execution.binding_tip())
+            || (input.is_none() && self.binding_tip_id(scope) != Some(execution.binding_tip()))
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        let (original_source, source) = match &execution.compiler_basis {
-            PrivateExecutionCompilerBasis::World { published, .. } => (
-                published.base.original_source.clone(),
-                published.base.source.clone(),
-            ),
-            PrivateExecutionCompilerBasis::Finite { .. } => {
-                return Err(SessionError::WorldCellRequiresServicePreparation)
-            }
+        let original_source = execution.compiler_basis.original_source.clone();
+        let source = execution.compiler_basis.source.clone();
+        let (world, original_key) = execution.world_basis()?;
+        let private_key = match input {
+            Some(input) => input.private_hidden_mount_key(self, &execution)?,
+            None => original_key.clone(),
         };
-        let (world, private_key) = execution.world_basis()?;
-        if self.compile_view_key_in(scope).as_ref() != Some(private_key)
+        if self.compile_view_key_in(scope).as_ref() != Some(&private_key)
             || !Arc::ptr_eq(plan.world().restoration(), world.restoration())
             || plan.world().logical_id() != world.logical_id()
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        let private_key = private_key.clone();
         self.reserve_world_cell(
             scope,
             plan,
@@ -4416,7 +4902,7 @@ impl PersistentSession {
         plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
         purpose: RuntimeCellPurpose,
         retained_scope: Arc<RuntimeLexicalScopeLease>,
-        original_source: Arc<RuntimeLexicalScopeLease>,
+        original_source: Arc<RuntimeOriginalSource>,
         source: Arc<super::GenerationArtifactReference>,
         session: super::SessionId,
         private_key: super::persistent::CompileViewKey,
@@ -4614,6 +5100,262 @@ mod tests {
     use super::*;
     use crate::session::{ModuleEnv, SessionId, SessionLib};
 
+    fn native_source_action<T>(
+        session: &mut PersistentSession,
+        source: &Arc<RuntimeLexicalScopeLease>,
+        action: impl FnOnce(&mut PersistentSession) -> T,
+    ) -> T {
+        let settled = session
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| action(session),
+            )
+            .unwrap()
+            .into_outcome();
+        assert_eq!(settled.close, crate::CompilerTransactionClose::NotStarted);
+        settled.action
+    }
+
+    #[test]
+    fn original_source_survives_lexical_resource_release_without_retaining_native_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let lib =
+            SessionLib::open(SessionId(984), root.path(), ModuleEnv::standalone_default()).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let lease = session.mint_isolated_scope_with_lease().unwrap();
+        let scope = lease.scope();
+        let original = lease.original_source().clone();
+        let gate = original.source_admission().clone();
+        let (id, handle) = native_source_action(&mut session, &lease, |session| {
+            let value = crate::session::prepared::tests::rooted_publication_fixture(
+                session,
+                "sourceOwned",
+                992,
+            );
+            let id = value.id;
+            let handle = value.value.handle;
+            session.bind_in(scope, value).unwrap();
+            (id, handle)
+        });
+        assert!(session.bindings().get(id).is_some());
+        let roots = session.persistent_roots_count();
+        assert!(roots > 0);
+        drop(lease);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(scope));
+        assert!(session.bindings().get(id).is_none());
+        assert!(session
+            .prepared()
+            .unwrap()
+            .prepared_handle_of(handle.raw())
+            .is_none());
+        assert!(session.persistent_roots_count() < roots);
+        original.with_open_source_admission(|| ()).unwrap();
+        drop(original);
+        session.reap_admission_leases();
+        assert!(!session
+            .admission_owner()
+            .lexical_leases
+            .lock()
+            .contains_key(&scope));
+        assert!(gate.admit().is_err());
+    }
+
+    #[test]
+    fn original_source_and_target_guard_refuses_cutoff_and_stale_target_independently() {
+        let mut session = PersistentSession::new(None, 1024);
+        let lease = session.mint_isolated_scope_with_lease().unwrap();
+        let original = lease.original_source().clone();
+        let scope = lease.scope();
+        let target = session.mint_isolated_scope_with_lease().unwrap();
+        original.with_open_target(&target, || ()).unwrap();
+        drop(lease);
+        session.reap_admission_leases();
+        original.with_open_target(&target, || ()).unwrap();
+        let run = || {
+            original.with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, _| owner.admit(Some(target.clone())),
+            )
+        };
+        let admitted = run().unwrap().into_outcome();
+        assert_eq!(admitted.close, crate::CompilerTransactionClose::NotStarted);
+        admitted.action.unwrap();
+        let _fence = original.source_admission().fence().unwrap();
+        assert!(matches!(
+            run().unwrap().into_outcome().action,
+            Err(super::super::SourceAdmissionError::Closed { .. })
+        ));
+        let retired = session.retire_scope(scope);
+        assert_eq!(retired.scopes_retired, 0);
+        assert_eq!(retired.bindings_retired, 0);
+        assert_eq!(retired.roots_released, 0);
+        assert!(matches!(
+            original.with_open_target(&target, || ()),
+            Err(super::super::SourceAdmissionError::StaleSourceLease)
+        ));
+        assert!(matches!(
+            run(),
+            Err(super::super::SourceAdmissionError::StaleSourceLease)
+        ));
+        target
+            .original_source()
+            .with_open_target(&target, || ())
+            .unwrap();
+        session.retire_scope(target.scope());
+        assert!(target
+            .original_source()
+            .with_open_target(&target, || ())
+            .is_err());
+    }
+
+    #[test]
+    fn automatic_ancestor_reap_invalidates_child_target_but_keeps_its_source() {
+        let mut session = PersistentSession::new(None, 1024);
+        let parent = session.mint_isolated_scope();
+        let child = session.mint_scope(parent).unwrap();
+        let child_lease = session.adopt_initial_notebook_scope(child).unwrap();
+        assert!(child_lease.prerequisites().is_empty());
+        let child_source = child_lease.original_source().clone();
+        let parent_lease = session.adopt_initial_notebook_scope(parent).unwrap();
+        let target = session.mint_isolated_scope_with_lease().unwrap();
+        child_source.with_open_target(&child_lease, || ()).unwrap();
+        drop(parent_lease);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(parent));
+        assert!(!session.scope_tree().is_live(child));
+        assert!(child_lease.validate_lexical_issuer().is_err());
+        assert!(child_source.with_open_target(&child_lease, || ()).is_err());
+        child_source.with_open_target(&target, || ()).unwrap();
+        assert!(session.adopt_initial_notebook_scope(child).is_err());
+        child_source.with_open_target(&target, || ()).unwrap();
+        let retired = session.retire_scope(child);
+        assert_eq!(retired.scopes_retired, 0);
+        assert_eq!(retired.roots_released, 0);
+        assert!(child_source.with_open_target(&target, || ()).is_err());
+    }
+
+    #[test]
+    fn token_only_transaction_adds_source_prerequisite_without_a_lexical_parent() {
+        let mut session = PersistentSession::new(None, 1024);
+        let original_lease = session.mint_isolated_scope_with_lease().unwrap();
+        let original_scope = original_lease.scope();
+        let original = original_lease.original_source().clone();
+        let settled = session
+            .with_source_compiler_transaction(
+                original.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| session.mint_isolated_scope_with_lease(),
+            )
+            .unwrap()
+            .into_outcome();
+        assert_eq!(settled.close, crate::CompilerTransactionClose::NotStarted);
+        let target = settled.action.unwrap();
+        assert!(target.prerequisites().is_empty());
+        assert!(target
+            .original_source()
+            .prerequisites
+            .iter()
+            .any(|source| Arc::ptr_eq(source, &original)));
+        drop(original_lease);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(original_scope));
+        target.validate_lexical_issuer().unwrap();
+        target.with_open_source_admission(|| ()).unwrap();
+        let fence = original.source_admission().fence().unwrap();
+        assert!(target.with_open_source_admission(|| ()).is_err());
+        target.validate_lexical_issuer().unwrap();
+        fence.reopen(&original).unwrap();
+        target.with_open_source_admission(|| ()).unwrap();
+    }
+
+    #[test]
+    fn uncertain_token_transaction_keeps_source_authority_and_target_resources_separately() {
+        let mut session = PersistentSession::new(None, 1024);
+        let original_lease = session.mint_isolated_scope_with_lease().unwrap();
+        let original_scope = original_lease.scope();
+        let original = original_lease.original_source().clone();
+        let target = session.mint_isolated_scope_with_lease().unwrap();
+        let target_scope = target.scope();
+        let source_observation = Arc::downgrade(&original);
+        let target_observation = Arc::downgrade(&target);
+        drop(original_lease);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(original_scope));
+        let close = std::cell::Cell::new(None);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = original.with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |settled| close.set(Some(settled)),
+                |owner, _| -> () {
+                    owner.admit(Some(target.clone())).unwrap();
+                    panic!("admitted operation unwinds before returning");
+                },
+            );
+        }));
+        assert!(panic.is_err());
+        assert_eq!(
+            close.take(),
+            Some(crate::CompilerTransactionClose::NotStarted)
+        );
+        drop(original);
+        drop(target);
+        session.reap_admission_leases();
+        let source = source_observation.upgrade().unwrap();
+        let retained_target = target_observation.upgrade().unwrap();
+        assert!(!session.scope_tree().is_live(original_scope));
+        assert!(session.scope_tree().is_live(target_scope));
+        assert!(matches!(
+            source.with_open_target(&retained_target, || ()),
+            Err(super::super::SourceAdmissionError::Unconfirmed { .. })
+        ));
+        drop(retained_target);
+        session.retire_scope(target_scope);
+        assert!(target_observation.upgrade().is_none());
+        drop(source);
+        session.retire_scope(original_scope);
+        assert!(source_observation.upgrade().is_none());
+    }
+
+    #[test]
+    fn retired_inherited_source_cannot_reappear_through_its_open_shared_gate() {
+        let mut session = PersistentSession::new(None, 1024);
+        let parent = session.mint_notebook_scope_with_lease(None).unwrap();
+        let child_scope = session.mint_scope(parent.scope()).unwrap();
+        let child = session.adopt_initial_notebook_scope(child_scope).unwrap();
+        let source = child.original_source().clone();
+        let target = session.mint_isolated_scope_with_lease().unwrap();
+        assert!(source
+            .source_admission()
+            .same_owner(parent.source_admission()));
+        assert!(!Arc::ptr_eq(&source, parent.original_source()));
+        source.with_open_target(&target, || ()).unwrap();
+        session.retire_scope(child_scope);
+        assert!(source.with_open_target(&target, || ()).is_err());
+        parent
+            .original_source()
+            .with_open_target(&target, || ())
+            .unwrap();
+        assert!(session.adopt_initial_notebook_scope(child_scope).is_err());
+        assert!(source.with_open_target(&target, || ()).is_err());
+        parent
+            .original_source()
+            .with_open_target(&target, || ())
+            .unwrap();
+    }
+
     #[test]
     fn world_private_admission_requires_the_actual_transaction_original() {
         let root = tempfile::tempdir().unwrap();
@@ -4628,16 +5370,22 @@ mod tests {
         let scope_count = session.scope_tree().len();
         let settled = session
             .with_source_compiler_transaction(
-                source_b.clone(),
+                source_b.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
                 |_| {},
                 |session, _| {
-                    let foreign =
-                        session.begin_world_private_execution(scope_a, &reference, &source_a);
-                    let matching =
-                        session.begin_world_private_execution(scope_b, &reference, &source_b);
+                    let foreign = session.begin_world_private_execution(
+                        scope_a,
+                        &reference,
+                        source_a.original_source(),
+                    );
+                    let matching = session.begin_world_private_execution(
+                        scope_b,
+                        &reference,
+                        source_b.original_source(),
+                    );
                     (foreign, matching)
                 },
             )
@@ -4824,52 +5572,57 @@ mod tests {
         let lib =
             SessionLib::open(SessionId(990), root.path(), ModuleEnv::standalone_default()).unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
-        let mut original =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 910);
-        original.value.identity.module = original.module.module_name();
-        let original_identity = original.value.identity.clone();
-        let original_id = original.id;
-        session.bind_in(public, original).unwrap();
-        let mut historical =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 911);
-        historical.value.identity.module = historical.module.module_name();
-        let historical_identity = historical.value.identity.clone();
-        session.bind_in(public, historical).unwrap();
+        let source = session.mint_notebook_scope_with_lease(None).unwrap();
+        let (public, retained, ledger, original_id, _sibling_source) =
+            native_source_action(&mut session, &source, |session| {
+                let public = session.mint_scope(ScopeId::ROOT).unwrap();
+                let _public_source = session.adopt_initial_notebook_scope(public).unwrap();
+                let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
+                let sibling_source = session.adopt_initial_notebook_scope(sibling).unwrap();
+                let mut original =
+                    crate::session::prepared::tests::rooted_publication_fixture(session, "x", 910);
+                original.value.identity.module = original.module.module_name();
+                let original_identity = original.value.identity.clone();
+                let original_id = original.id;
+                session.bind_in(public, original).unwrap();
+                let mut historical =
+                    crate::session::prepared::tests::rooted_publication_fixture(session, "x", 911);
+                historical.value.identity.module = historical.module.module_name();
+                let historical_identity = historical.value.identity.clone();
+                session.bind_in(public, historical).unwrap();
 
-        // A sibling sharing a module is still a different exact binding owner.
-        let mut foreign = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "foreign",
-            912,
-        );
-        foreign.module = SessionModule::val(Generation(910));
-        foreign.value.identity.module = foreign.module.module_name();
-        foreign.value.identity.occurrence = "foreign".into();
-        let foreign_identity = foreign.value.identity.clone();
-        session.bind_in(sibling, foreign).unwrap();
-        let retained = session.retain_lexical_scope(public).unwrap();
-        let ledger = Arc::new(session.capture_admitted_native_imports(public).unwrap());
-        assert!(ledger.entries.contains(&(original_identity.clone(), 910)));
-        assert!(ledger.entries.contains(&(historical_identity, 911)));
-        assert!(!ledger
-            .entries
-            .iter()
-            .any(|(identity, _)| identity == &foreign_identity));
+                // A sibling sharing a module is still a different exact binding owner.
+                let mut foreign = crate::session::prepared::tests::rooted_publication_fixture(
+                    session, "foreign", 912,
+                );
+                foreign.module = SessionModule::val(Generation(910));
+                foreign.value.identity.module = foreign.module.module_name();
+                foreign.value.identity.occurrence = "foreign".into();
+                let foreign_identity = foreign.value.identity.clone();
+                session.bind_in(sibling, foreign).unwrap();
+                let retained = session.retain_lexical_scope(public).unwrap();
+                let ledger = Arc::new(session.capture_admitted_native_imports(public).unwrap());
+                assert!(ledger.entries.contains(&(original_identity.clone(), 910)));
+                assert!(ledger.entries.contains(&(historical_identity, 911)));
+                assert!(!ledger
+                    .entries
+                    .iter()
+                    .any(|(identity, _)| identity == &foreign_identity));
 
-        let mut replacement =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 913);
-        replacement.value.identity.module = replacement.module.module_name();
-        let replacement_identity = replacement.value.identity.clone();
-        session.bind_in(public, replacement).unwrap();
-        assert!(session
-            .capture_admitted_native_imports(public)
-            .unwrap()
-            .entries
-            .contains(&(replacement_identity.clone(), 913)));
-        assert!(!ledger.entries.contains(&(replacement_identity, 913)));
-        assert!(ledger.entries.contains(&(original_identity.clone(), 910)));
+                let mut replacement =
+                    crate::session::prepared::tests::rooted_publication_fixture(session, "x", 913);
+                replacement.value.identity.module = replacement.module.module_name();
+                let replacement_identity = replacement.value.identity.clone();
+                session.bind_in(public, replacement).unwrap();
+                assert!(session
+                    .capture_admitted_native_imports(public)
+                    .unwrap()
+                    .entries
+                    .contains(&(replacement_identity.clone(), 913)));
+                assert!(!ledger.entries.contains(&(replacement_identity, 913)));
+                assert!(ledger.entries.contains(&(original_identity.clone(), 910)));
+                (public, retained, ledger, original_id, sibling_source)
+            });
         session.retire_scope(public);
         assert!(session.bindings().get(original_id).is_some());
         drop(ledger);
@@ -5125,122 +5878,130 @@ mod tests {
     #[test]
     fn selected_native_imports_keep_exact_scoped_roots_and_refuse_sibling_only_values() {
         let mut session = PersistentSession::new(None, 1024 * 1024);
-        let public = session.mint_isolated_scope();
-        let first =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 460);
-        let identity = first.value.identity.clone();
-        let first_root = first.value.handle.raw().0;
-        session.bind_in(public, first).unwrap();
-        let private = session.mint_detached_scope(public).unwrap();
-        let replacement =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 461);
-        session.bind_in(public, replacement).unwrap();
-        let sibling = session.mint_isolated_scope();
-        let mut foreign =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 462);
-        foreign.module = tidepool_repr::SessionModule::val(Generation(460));
-        let foreign_root = foreign.value.handle.raw().0;
-        assert_ne!(first_root, foreign_root);
-        session.bind_in(sibling, foreign).unwrap();
-        let selected = session
-            .capture_selected_native_imports(private, [(&identity, 460)])
-            .unwrap();
-        assert_eq!(selected.entries, [(identity.clone(), 460)]);
-        assert_eq!(
-            selected.owners.get(&(identity.clone(), 460)),
-            Some(&first_root)
-        );
-        let isolated = session.mint_isolated_scope();
-        assert!(matches!(
-            session.capture_selected_native_imports(isolated, [(&identity, 460)]),
-            Err(SessionError::StaleStagedDeclaration)
-        ));
-        let empty = session
-            .capture_selected_native_imports(private, [])
-            .unwrap();
-        assert!(empty.entries.is_empty());
-        assert!(empty.owners.is_empty());
+        let source = session.mint_notebook_scope_with_lease(None).unwrap();
+        native_source_action(&mut session, &source, |session| {
+            let public = session.mint_isolated_scope();
+            let _public_source = session.adopt_initial_notebook_scope(public).unwrap();
+            let first =
+                super::super::prepared::tests::rooted_publication_fixture(session, "value", 460);
+            let identity = first.value.identity.clone();
+            let first_root = first.value.handle.raw().0;
+            session.bind_in(public, first).unwrap();
+            let private = session.mint_detached_scope(public).unwrap();
+            let replacement =
+                super::super::prepared::tests::rooted_publication_fixture(session, "value", 461);
+            session.bind_in(public, replacement).unwrap();
+            let sibling = session.mint_isolated_scope();
+            let _sibling_source = session.adopt_initial_notebook_scope(sibling).unwrap();
+            let mut foreign =
+                super::super::prepared::tests::rooted_publication_fixture(session, "value", 462);
+            foreign.module = tidepool_repr::SessionModule::val(Generation(460));
+            let foreign_root = foreign.value.handle.raw().0;
+            assert_ne!(first_root, foreign_root);
+            session.bind_in(sibling, foreign).unwrap();
+            let selected = session
+                .capture_selected_native_imports(private, [(&identity, 460)])
+                .unwrap();
+            assert_eq!(selected.entries, [(identity.clone(), 460)]);
+            assert_eq!(
+                selected.owners.get(&(identity.clone(), 460)),
+                Some(&first_root)
+            );
+            let isolated = session.mint_isolated_scope();
+            assert!(matches!(
+                session.capture_selected_native_imports(isolated, [(&identity, 460)]),
+                Err(SessionError::StaleStagedDeclaration)
+            ));
+            let empty = session
+                .capture_selected_native_imports(private, [])
+                .unwrap();
+            assert!(empty.entries.is_empty());
+            assert!(empty.owners.is_empty());
+        });
     }
 
     #[test]
     fn settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots() {
         use tidepool_repr::execution_schema::{testing, Group};
         let mut session = PersistentSession::new(None, 1024 * 1024);
-        let baseline = Arc::new(
-            session
-                .capture_admitted_native_imports(ScopeId::ROOT)
-                .unwrap(),
-        );
-        let mut index = CheckedNativeIndex::new(baseline.clone());
-        let ambient_identity = testing::identity("Fixture", "entry");
-        let ambient = session
-            .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
-            .unwrap();
-        let mut own_wire = testing::wire_program();
-        let own_identity = testing::identity("Own", "entry");
-        let Group::NonRecursive(top) = &mut own_wire.bindings[0] else {
-            unreachable!()
-        };
-        top.identity = own_identity.clone();
-        let own = session
-            .install_prepared(testing::prepare(own_wire).unwrap(), None)
-            .unwrap();
-        let delta = session
-            .capture_checked_native_delta(
-                ScopeId::ROOT,
-                0,
-                Some(own),
-                &index,
-                [&ambient_identity, &own_identity].into_iter(),
-                [].into_iter(),
-            )
-            .unwrap();
-        assert_eq!(delta.imports.len(), 1);
-        assert_eq!(delta.imports[0].identity, own_identity);
-        let (ledger, added) = CheckedNativeImports::base(baseline.clone())
-            .append(delta, &index)
-            .unwrap();
-        index.extend(added);
-        assert!(!ledger
-            .imports()
-            .any(|(identity, _)| identity == &ambient_identity));
-        assert!(ledger
-            .imports()
-            .any(|(identity, _)| identity == &own_identity));
+        let source = session.mint_notebook_scope_with_lease(None).unwrap();
+        native_source_action(&mut session, &source, |session| {
+            let baseline = Arc::new(
+                session
+                    .capture_admitted_native_imports(ScopeId::ROOT)
+                    .unwrap(),
+            );
+            let mut index = CheckedNativeIndex::new(baseline.clone());
+            let ambient_identity = testing::identity("Fixture", "entry");
+            let ambient = session
+                .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
+                .unwrap();
+            let mut own_wire = testing::wire_program();
+            let own_identity = testing::identity("Own", "entry");
+            let Group::NonRecursive(top) = &mut own_wire.bindings[0] else {
+                unreachable!()
+            };
+            top.identity = own_identity.clone();
+            let own = session
+                .install_prepared(testing::prepare(own_wire).unwrap(), None)
+                .unwrap();
+            let delta = session
+                .capture_checked_native_delta(
+                    ScopeId::ROOT,
+                    0,
+                    Some(own),
+                    &index,
+                    [&ambient_identity, &own_identity].into_iter(),
+                    [].into_iter(),
+                )
+                .unwrap();
+            assert_eq!(delta.imports.len(), 1);
+            assert_eq!(delta.imports[0].identity, own_identity);
+            let (ledger, added) = CheckedNativeImports::base(baseline.clone())
+                .append(delta, &index)
+                .unwrap();
+            index.extend(added);
+            assert!(!ledger
+                .imports()
+                .any(|(identity, _)| identity == &ambient_identity));
+            assert!(ledger
+                .imports()
+                .any(|(identity, _)| identity == &own_identity));
 
-        // A target spelling an ambient definition does not acquire its CAF.
-        let repeated = session
-            .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
-            .unwrap();
-        assert_ne!(ambient, repeated);
-        let absent = session
-            .capture_checked_native_delta(
-                ScopeId::ROOT,
-                0,
-                Some(repeated),
-                &index,
-                [&ambient_identity].into_iter(),
-                [].into_iter(),
-            )
-            .unwrap();
-        assert!(absent.imports.is_empty());
-        let next = session
-            .capture_checked_native_delta(
-                ScopeId::ROOT,
-                0,
-                Some(repeated),
-                &index,
-                [&own_identity].into_iter(),
-                [].into_iter(),
-            )
-            .unwrap();
-        let (unchanged, added) = ledger.append(next, &index).unwrap();
-        assert!(added.is_empty());
-        assert!(Arc::ptr_eq(
-            ledger.tail.as_ref().unwrap(),
-            unchanged.tail.as_ref().unwrap()
-        ));
-        assert!(Arc::ptr_eq(&ledger.base, &baseline));
+            // A target spelling an ambient definition does not acquire its CAF.
+            let repeated = session
+                .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
+                .unwrap();
+            assert_ne!(ambient, repeated);
+            let absent = session
+                .capture_checked_native_delta(
+                    ScopeId::ROOT,
+                    0,
+                    Some(repeated),
+                    &index,
+                    [&ambient_identity].into_iter(),
+                    [].into_iter(),
+                )
+                .unwrap();
+            assert!(absent.imports.is_empty());
+            let next = session
+                .capture_checked_native_delta(
+                    ScopeId::ROOT,
+                    0,
+                    Some(repeated),
+                    &index,
+                    [&own_identity].into_iter(),
+                    [].into_iter(),
+                )
+                .unwrap();
+            let (unchanged, added) = ledger.append(next, &index).unwrap();
+            assert!(added.is_empty());
+            assert!(Arc::ptr_eq(
+                ledger.tail.as_ref().unwrap(),
+                unchanged.tail.as_ref().unwrap()
+            ));
+            assert!(Arc::ptr_eq(&ledger.base, &baseline));
+        });
     }
 
     #[test]
@@ -5425,37 +6186,40 @@ mod tests {
         let lib =
             SessionLib::open(SessionId(991), root.path(), ModuleEnv::standalone_default()).unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let unbound = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "nativeExport",
-            914,
-        );
-        let ordinary_identity = unbound.value.identity;
-        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
-        assert!(!session
-            .capture_admitted_native_imports(scope)
-            .unwrap()
-            .entries
-            .contains(&(ordinary_identity, 0)));
-        let (certified, _) =
-            crate::session::prepared::tests::certified_package_export_fixture([62; 32]);
-        *session.prepared_mut().unwrap() = certified;
-        let identity = tidepool_repr::execution_schema::testing::identity("Fixture", "entry");
-        let admitted = session.capture_admitted_native_imports(scope).unwrap();
-        assert!(admitted.entries.contains(&(identity.clone(), 0)));
-        let Some(ImportOwner::CodeExport { root_id, .. }) = session
-            .prepared()
-            .unwrap()
-            .retained_code_export_owner(&identity, 0)
-        else {
-            panic!("real installed export must have its native owner")
-        };
-        assert_ne!(root_id, 0);
-        let empty = PersistentSession::new(None, 1024 * 1024)
-            .capture_admitted_native_imports(ScopeId::ROOT)
-            .unwrap();
-        assert!(empty.entries.is_empty());
-        assert_ne!(admitted.commitment, empty.commitment);
+        let source = session.mint_notebook_scope_with_lease(None).unwrap();
+        native_source_action(&mut session, &source, |session| {
+            let unbound = crate::session::prepared::tests::rooted_publication_fixture(
+                session,
+                "nativeExport",
+                914,
+            );
+            let ordinary_identity = unbound.value.identity;
+            let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+            assert!(!session
+                .capture_admitted_native_imports(scope)
+                .unwrap()
+                .entries
+                .contains(&(ordinary_identity, 0)));
+            let (certified, _) =
+                crate::session::prepared::tests::certified_package_export_fixture([62; 32]);
+            *session.prepared_mut().unwrap() = certified;
+            let identity = tidepool_repr::execution_schema::testing::identity("Fixture", "entry");
+            let admitted = session.capture_admitted_native_imports(scope).unwrap();
+            assert!(admitted.entries.contains(&(identity.clone(), 0)));
+            let Some(ImportOwner::CodeExport { root_id, .. }) = session
+                .prepared()
+                .unwrap()
+                .retained_code_export_owner(&identity, 0)
+            else {
+                panic!("real installed export must have its native owner")
+            };
+            assert_ne!(root_id, 0);
+            let empty = PersistentSession::new(None, 1024 * 1024)
+                .capture_admitted_native_imports(ScopeId::ROOT)
+                .unwrap();
+            assert!(empty.entries.is_empty());
+            assert_ne!(admitted.commitment, empty.commitment);
+        });
     }
 
     #[test]

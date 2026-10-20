@@ -278,7 +278,8 @@ impl InputFixture {
             resident.resume(publication, (), settlement)
         })
         .expect("settle owned result publication");
-        assert!(resident.discard_custody(captured.custody));
+        drop(captured.custody);
+        resident.settle_dropped_custody();
         outcome
     }
 
@@ -365,7 +366,7 @@ fn source_action<T>(
         .expect("mint the fixture compiler source lease");
     let settled = resident
         .with_source_compiler_transaction(
-            source,
+            source.original_source().clone(),
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             crate::CompilerTransactionCancellation::new(),
             None,
@@ -1566,8 +1567,10 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
     assert!(receiver.parked_holes().is_empty());
     assert_eq!(receiver.stowed_roots_count(), 0);
     assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions);
-    assert!(receiver.discard_custody(imported));
-    assert!(receiver.discard_custody(runner));
+    drop(imported);
+    receiver.settle_dropped_custody();
+    drop(runner);
+    receiver.settle_dropped_custody();
     assert_eq!(receiver.outstanding_custody(), 0);
 }
 
@@ -1791,8 +1794,10 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     );
     assert_eq!(input.input_type(), original.sites[&site].inputs[0].ty);
     assert!(Arc::ptr_eq(&input.custody.provenance, &parked));
-    assert!(destination.discard_custody(imported));
-    assert!(destination.discard_custody(repeated));
+    drop(imported);
+    destination.settle_dropped_custody();
+    drop(repeated);
+    destination.settle_dropped_custody();
     let mut remaining_holes = destination
         .parked_holes()
         .into_iter()
@@ -6195,7 +6200,8 @@ fn request_input_layout_captures_original_nominal_input_and_optional_progress() 
             input.input_type(),
             layout.input().signature().presentation()
         );
-        assert!(resident.discard_custody(input.custody));
+        drop(input.custody);
+        resident.settle_dropped_custody();
         assert!(matches!(
             fixture.resume_activation(&mut resident, activation),
             ResidentOutcome::Completed { .. }

@@ -2752,7 +2752,7 @@ pub fn compile_activation_renderer(
     ActivationRendererFailure,
 > {
     source
-        .admit_original(&admission.original_source_lease(), Some(admission.source_lease()))
+        .admit_original(&admission.original_source(), Some(admission.source_lease()))
         .map_err(super::PreparedRuntimeError::from)?;
     super::resident::PreparedRenderer::prepare(|| {
         compile_activation_renderer_inner(admission, template_source, budget, includes, settlement)
@@ -3077,6 +3077,7 @@ fn compile_cell_program_admitted_work_controls(
 /// No endpoint or compiler lease survives in this host admission owner.
 pub struct PreparedRuntimeCell {
     origin: crate::CompilerTransactionOrigin,
+    source_origin: super::resident::CapturedSourceOrigin,
     admission: Arc<super::RuntimeCellAdmission>,
     checked: CellCheck,
     program: tidepool_toolchain::artifacts::PreparedCellProgram,
@@ -3088,12 +3089,16 @@ pub struct PreparedRuntimeCell {
 /// evidence alone cannot construct this inseparable pairing.
 #[derive(Clone, Debug)]
 pub struct SettledCellProgram {
+    source_origin: super::resident::CapturedSourceOrigin,
     admission: Arc<super::RuntimeCellAdmission>,
     program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
     cancellation: crate::HostAdmissionCancellation,
 }
 
 impl SettledCellProgram {
+    pub(super) fn captured_source_origin(&self) -> &super::resident::CapturedSourceOrigin {
+        &self.source_origin
+    }
     pub fn program(&self) -> &Arc<tidepool_toolchain::checked_cell::CellProgram> {
         &self.program
     }
@@ -3169,8 +3174,8 @@ pub fn prepare_cell_program_admitted(
     admission: Arc<super::RuntimeCellAdmission>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
-    admission.admit_compiler_preparation(source)?;
     prepare_cell_program_admitted_inner(
+        source,
         admission,
         #[cfg(test)]
         CellProgramAudit::None,
@@ -3272,6 +3277,7 @@ impl PreparedRuntimeCell {
                 }
             })?;
         Ok((self.checked, SettledCellProgram {
+            source_origin: self.source_origin,
             admission: self.admission,
             program,
             cancellation: cancellation.clone(),
@@ -3299,8 +3305,8 @@ fn compile_cell_program_admitted_inner(
         None,
         |close| settlement.borrow_mut()(close),
         |owner, _| {
-            owner.admit(None)?;
             prepare_cell_program_admitted_inner(
+                owner,
                 admission,
                 #[cfg(test)]
                 audit,
@@ -3358,10 +3364,13 @@ fn compile_cell_program_admitted_inner(
 
 #[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.prepare", level = "debug", skip_all, fields(inclusive = true, cell_bytes = tracing::field::Empty))]
 fn prepare_cell_program_admitted_inner(
+    source: &super::RuntimeSourceCompilerTransaction,
     admission: Arc<super::RuntimeCellAdmission>,
     #[cfg(test)] audit: CellProgramAudit<'_>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
+    admission.admit_compiler_preparation(source)?;
+    let source_origin = super::resident::CapturedSourceOrigin::capture(source)?;
     let origin = crate::CompilerTransactionOrigin::current().ok_or(
         CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
     )?;
@@ -3395,7 +3404,7 @@ fn prepare_cell_program_admitted_inner(
         checked.authority = Some(program.checked_cell().clone());
         checked.admission = Some(admission.clone());
         tracing::debug!(target: "exomonad_harness::timing", logical_world = ?output.logical().logical_id(), certificate = ?output.certificate_sha256(), origin = ?output.origin(), "world cell compiler output prepared");
-        return Ok(PreparedRuntimeCell { origin, admission, checked, program,
+        return Ok(PreparedRuntimeCell { origin, source_origin, admission, checked, program,
             evidence: PreparedRuntimeCellEvidence::World(output) });
     }
     let finite_failure =
@@ -3561,6 +3570,7 @@ fn prepare_cell_program_admitted_inner(
     checked.admission = Some(admission.clone());
     Ok(PreparedRuntimeCell {
         origin,
+        source_origin,
         admission,
         checked,
         program,
@@ -6491,7 +6501,7 @@ mod tests {
             let source = state.adopt_initial_notebook_scope(public).unwrap();
             let admitted = state
                 .with_source_compiler_transaction(
-                    source,
+                    source.original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -6577,7 +6587,7 @@ mod tests {
             let include_paths = view.include_paths(&roots);
             let admitted = resident
                 .with_source_compiler_transaction(
-                    execution.retained_lexical_scope(),
+                    execution.retained_lexical_scope().original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -6666,7 +6676,7 @@ mod tests {
         ) -> Vec<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
             let source = cell.admission.source_lease();
             let executed = resident.with_source_compiler_transaction(
-                source, tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                source.original_source().clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(), None, |_| {},
                 |resident, settlement| {
             let prefix = resident
@@ -6827,7 +6837,7 @@ mod tests {
             let restaged = self
                 .resident
                 .with_source_compiler_transaction(
-                    source.clone(),
+                    source.original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -6897,7 +6907,7 @@ mod tests {
             let admitted = self
                 .resident
                 .with_source_compiler_transaction(
-                    self.execution.retained_lexical_scope(),
+                    self.execution.retained_lexical_scope().original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -7811,7 +7821,7 @@ mod tests {
         let open = fixture
             .resident
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -7847,7 +7857,7 @@ mod tests {
         let closed = fixture
             .resident
             .with_source_compiler_transaction(
-                source,
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -8134,7 +8144,7 @@ mod tests {
         ).unwrap());
         let includes = view.include_paths(effects.include_paths());
         let admitted = resident.with_source_compiler_transaction(
-            source,
+            source.original_source().clone(),
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             crate::CompilerTransactionCancellation::new(), None, |_| {},
             |resident, settlement| {

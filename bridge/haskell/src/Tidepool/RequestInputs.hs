@@ -10,7 +10,7 @@ module Tidepool.RequestInputs
   , mergeCapturedOriginalContent, selectCapturedOriginalContent, capturedOriginalContentKeys
   , requestCaptureByteLimit
   , capturedRequestInputToken
-  , capturedRequestInput, mergeRequestInputs, aliasRequestInputs, requestInputRetained, retainRequestEncodedBytes, requestInputBytes, requestInputCount, requestInputBodies, transferRequestInputBodies, revalidateRequestInputs, revalidateRequestInputsWith ) where
+  , capturedRequestInput, mergeRequestInputs, aliasRequestInputs, requestInputRetained, retainRequestEncodedBytes, requestInputBytes, requestInputCount, requestInputBodies, transferRequestInputBodies, editDirectRequestInputBodies, revalidateRequestInputs, revalidateRequestInputsWith ) where
 
 import Control.Exception (IOException, try, finally, bracket)
 import Control.Monad (unless, when, forM_, foldM)
@@ -57,6 +57,26 @@ requestInputBodies (RequestOriginalInputs _ _ inputs _ aliases) =
 transferRequestInputBodies :: [(FilePath,ArtifactBytes)] -> RequestOriginalInputs -> Either String RequestOriginalInputs
 transferRequestInputBodies selected receiving =
   mergeRequestInputs receiving [RequestOriginalInputs 0 0 (Map.singleton path body) Map.empty Map.empty | (path,body) <- selected]
+
+-- A logical world's keyed row owner maintains path reference counts. Its
+-- custody contains direct bodies only, so retiring the last row reference can
+-- release a path without scanning or retaining earlier transport envelopes.
+-- Replacement is explicit; ordinary transfers continue to reject conflicts.
+editDirectRequestInputBodies :: [(FilePath,Maybe ArtifactBytes)] -> RequestOriginalInputs
+  -> Either String RequestOriginalInputs
+editDirectRequestInputBodies changes original@(RequestOriginalInputs _ _ _ encoded aliases) = do
+  unless (Map.null encoded && Map.null aliases)
+    (Left "direct input edits require custody without encoded bodies or aliases")
+  foldM edit original changes
+  where
+    edit (RequestOriginalInputs limit used files encoded' aliases') (path,replacement) = do
+      unless (isAbsolute path) (Left "direct input edit path must be absolute")
+      let previous = maybe 0 (toInteger . artifactLength) (Map.lookup path files)
+          nextUsed = used - previous + maybe 0 (toInteger . artifactLength) replacement
+      unless (nextUsed >= 0 && nextUsed <= limit)
+        (Left "direct input edits exceed the receiving byte budget")
+      let nextFiles = maybe (Map.delete path files) (\body -> Map.insert path body files) replacement
+      pure (RequestOriginalInputs limit nextUsed nextFiles encoded' aliases')
 
 -- Content has no path, request allowance or publication authority. A receiving
 -- invocation selects its own paths and observations before it can consume it.

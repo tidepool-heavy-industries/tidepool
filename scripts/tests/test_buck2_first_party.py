@@ -701,6 +701,19 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             self.assertIn(path, unit)
         self.assertIn("src/session/ordinary.rs", production)
         self.assertIn("src/session/fixtures/unreviewed.hs", production)
+        service = self.rule("tidepool/runtime", "runtime_world_owner_controls", "tidepool_rust_test_cases")
+        self.assertEqual(service["binary"], ":tidepool_runtime_unit_tests")
+        self.assertEqual(service["expected_count"], 2)
+        self.assertEqual(service["case_compiler_modes"], {
+            name: "owned-resident" for name in service["exact_tests"]
+        })
+        self.assertEqual(service["resource_env"]["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"],
+                         "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin")
+        self.assertIn("//build/package:compiler_service_deployment", service["resources"])
+        self.assertNotIn("//build/package:compiler_deployment", service["resources"])
+        for generic_loader in ("LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES"):
+            self.assertNotIn(generic_loader, service["resource_env"])
+            self.assertNotIn(generic_loader, service["env"])
 
     def test_registered_inline_toolchain_fixture_stays_in_unit_inputs(self):
         self.write("tidepool/toolchain/src/declaration_join.rs",

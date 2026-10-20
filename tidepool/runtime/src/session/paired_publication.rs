@@ -53,7 +53,7 @@ struct AuthoredWrite {
 pub struct FinalExecutionIntent {
     owner_stamp: super::OwnerStamp,
     library: uuid::Uuid,
-    private_view: [u8; 32],
+    private_view: super::PublicationViewWitness,
     durable_owner: Option<RecoveryPublicOwner>,
     _private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
     admitted: PublicVisibilitySnapshot,
@@ -79,9 +79,9 @@ pub struct FinalExecutionIntent {
 pub(super) struct WorldExecutionIntent {
     pub(super) association: Arc<super::inspection::InspectionWorldAssociation>,
     pub(super) source: Arc<super::GenerationArtifactReference>,
-    pub(super) original_source: Arc<super::RuntimeLexicalScopeLease>,
+    pub(super) original_source: Arc<super::RuntimeOriginalSource>,
     pub(super) target: Arc<super::RuntimeLexicalScopeLease>,
-    pub(super) public_view: [u8; 32],
+    pub(super) private: Arc<super::inspection::InspectionWorldAssociation>,
 }
 
 /// Name-winning publication is separate from an exact withdrawal. A runtime
@@ -334,7 +334,7 @@ fn paired_version(base: &PublicManifestBase) -> String {
         "owner": base.owner_stamp.owner.identity(), "epoch": base.owner_stamp.epoch,
         "target": target, "library": base.semantic.library,
         "public": snapshot_digest(&base.semantic.expected_public), "private": snapshot_digest(&base.semantic.expected_private),
-        "public_view": base.semantic.public_view, "private_view": base.semantic.private_view,
+        "public_view": base.semantic.public_view.version_fact(), "private_view": base.semantic.private_view.version_fact(),
     })).expect("paired baseline contains serializable identities");
     blake3::hash(&bytes).to_hex().to_string()
 }
@@ -483,12 +483,16 @@ impl FinalExecutionIntent {
     pub(super) fn private_snapshot(&self) -> &PublicVisibilitySnapshot {
         &self.private
     }
-    pub(super) fn private_view_digest(&self) -> [u8; 32] {
-        self.private_view
+    pub(super) fn private_view_is_current(&self, session: &PersistentSession) -> bool {
+        self.private_view.is_current(session, self.private.scope)
     }
     pub(super) fn library(&self) -> uuid::Uuid {
         self.library
     }
+    pub(super) fn retained_private_scope(&self) -> Option<&Arc<super::RuntimeLexicalScopeLease>> {
+        self._private_scope_lease.as_ref()
+    }
+
     pub(super) fn world(&self) -> Option<&WorldExecutionIntent> {
         self.world.as_ref()
     }
@@ -534,6 +538,7 @@ impl PersistentSession {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        self.settle_private_host_retirements(admission)?;
         if let Some(intent) = admission.final_intent.get() {
             let world_facts = admission.world_execution_facts();
             if self
@@ -541,20 +546,22 @@ impl PersistentSession {
                 .as_ref()
                 != Some(&intent.private)
                 || intent.library != self.lib().compile_view_identity
-                || self.compile_view_digest_in(intent.private.scope) != Some(intent.private_view)
-                || match (intent.world.as_ref(), world_facts.as_ref()) {
-                    (Some(world), Some(facts)) => {
-                        !Arc::ptr_eq(&world.association, &facts.published)
-                            || !Arc::ptr_eq(&world.source, &facts.source)
-                            || !Arc::ptr_eq(&world.original_source, &facts.original_source)
-                            || !Arc::ptr_eq(&world.target, &facts.published.base.target)
-                            || world.public_view != facts.admitted_public_view
-                            || intent.admitted != facts.admitted
-                            || intent.admitted_context != facts.admitted_context
-                    }
-                    (None, None) => false,
-                    _ => true,
-                }
+                || !intent.private_view_is_current(self)
+                || intent.world.as_ref().is_none_or(|world| {
+                    let facts = &world_facts;
+                    !Arc::ptr_eq(&world.association, &facts.published)
+                        || !Arc::ptr_eq(&world.source, &facts.source)
+                        || !Arc::ptr_eq(&world.original_source, &facts.original_source)
+                        || !Arc::ptr_eq(&world.target, &facts.public_target)
+                        || self
+                            .lib()
+                            .tips
+                            .get(&admission.private_scope())
+                            .and_then(|tip| tip.inspection_world.as_ref())
+                            .is_none_or(|current| !Arc::ptr_eq(current, &world.private))
+                        || intent.admitted != facts.admitted
+                        || intent.admitted_context != facts.admitted_context
+                })
             {
                 return Err(SessionError::StaleStagedDeclaration);
             }
@@ -592,21 +599,29 @@ impl PersistentSession {
             }
             return Ok(intent.clone());
         }
-        let world_facts = admission.world_execution_facts();
-        let world = world_facts.as_ref().map(|facts| WorldExecutionIntent {
-            association: facts.published.clone(),
-            source: facts.source.clone(),
-            original_source: facts.original_source.clone(),
-            target: facts.published.base.target.clone(),
-            public_view: facts.admitted_public_view,
+        let facts = admission.world_execution_facts();
+        let private = self
+            .lib()
+            .tips
+            .get(&admission.private_scope())
+            .and_then(|tip| tip.inspection_world.clone())
+            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+        if !self.inspection_world_base_is_current(
+            &private.base,
+            &facts.source,
+            &facts.original_source,
+        ) || !private.base.target.matches(&admission.scope_lease)
+        {
+            return Err(SessionError::WorldCellPublicationBaseStale);
+        }
+        let world = Some(WorldExecutionIntent {
+            association: facts.published,
+            source: facts.source,
+            original_source: facts.original_source,
+            target: facts.public_target,
+            private,
         });
-        let (admitted, admitted_context) = match world_facts.as_ref() {
-            Some(facts) => (facts.admitted.clone(), facts.admitted_context.clone()),
-            None => (
-                admission.admitted_public()?.clone(),
-                admission.view()?.exact_declaration_context().cloned(),
-            ),
-        };
+        let (admitted, admitted_context) = (facts.admitted, facts.admitted_context);
         let intent = self.freeze_execution_intent_from_snapshot(
             &admitted,
             admitted_context,
@@ -623,6 +638,70 @@ impl PersistentSession {
             "exclusive session checkout finalizes an admission once"
         );
         Ok(intent)
+    }
+
+    fn settle_private_host_retirements(
+        &mut self,
+        admission: &super::PrivateExecutionAdmission,
+    ) -> Result<(), SessionError> {
+        let mut records = admission.host_retirements.lock();
+        if records.is_empty() {
+            return Ok(());
+        }
+        if admission.final_intent.get().is_some() {
+            return Err(SessionError::WorldCellPublicationBaseStale);
+        }
+        let facts = admission.world_execution_facts();
+        let target = admission.retained_lexical_scope();
+        super::RuntimeOriginalSource::with_sources_and_targets(
+            [facts.original_source.clone()],
+            [target.clone()],
+            |sources, _| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    sources.iter().map(|source| source.source_admission()),
+                    || {
+                        let private = self
+                            .lib()
+                            .tips
+                            .get(&admission.private_scope())
+                            .and_then(|tip| tip.inspection_world.clone())
+                            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                        if !private.base.original_source.matches(&facts.original_source)
+                            || !private.base.target.matches(&target)
+                            || !Arc::ptr_eq(&private.base.owner, self.admission_owner())
+                            || private.base.epoch != self.admission_owner().epoch()
+                            || private.base.source.sha256() != facts.source.sha256()
+                        {
+                            return Err(SessionError::WorldCellPublicationBaseStale);
+                        }
+                        let mut key = &private.base.key;
+                        for record in records.iter() {
+                            key = record
+                                .following_key(self, &private, &target, key)
+                                .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                        }
+                        if self.compile_view_key_in(admission.private_scope()).as_ref() != Some(key)
+                        {
+                            return Err(SessionError::WorldCellPublicationBaseStale);
+                        }
+                        let mut base = private.base.clone();
+                        base.key = key.clone();
+                        let successor = Arc::new(super::inspection::InspectionWorldAssociation {
+                            base,
+                            world: private.world.clone(),
+                        });
+                        self.lib_mut()
+                            .tips
+                            .get_mut(&admission.private_scope())
+                            .expect("private association was checked")
+                            .inspection_world = Some(successor);
+                        records.clear();
+                        Ok(())
+                    },
+                )
+            },
+        )??;
+        Ok(())
     }
 
     fn freeze_execution_intent_from_snapshot(
@@ -769,9 +848,16 @@ impl PersistentSession {
         Ok(Arc::new(FinalExecutionIntent {
             owner_stamp: super::OwnerStamp::capture(self.admission_owner()),
             library: lib.compile_view_identity,
-            private_view: self
-                .compile_view_digest_in(private_scope)
-                .ok_or(SessionError::StaleStagedDeclaration)?,
+            private_view: match &world {
+                Some(world) => super::PublicationViewWitness::World {
+                    key: world.private.base.key.clone(),
+                    logical: *world.private.world.logical_id(),
+                },
+                None => super::PublicationViewWitness::Finite(
+                    self.compile_view_digest_in(private_scope)
+                        .ok_or(SessionError::StaleStagedDeclaration)?,
+                ),
+            },
             durable_owner,
             _private_scope_lease: private_scope_lease,
             admitted: admitted.clone(),
@@ -857,19 +943,20 @@ impl PersistentSession {
         if !intent.owner_stamp.matches(self.admission_owner())
             || !self.has_lib()
             || intent.library != self.lib().compile_view_identity
-            || self.compile_view_digest_in(intent.private.scope) != Some(intent.private_view)
+            || !intent.private_view_is_current(self)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
         if intent.durable_owner != owner {
             return Err(SessionError::WrongPublicManifestTicket);
         }
-        let mut public = self.snapshot_publication_target(
+        let mut public = self.snapshot_publication_target_with_world(
             owner,
             intent.admitted.scope,
             intent.private.scope,
             intent.write_ids.clone(),
             intent.source_keys.clone(),
+            intent.world(),
         )?;
         public.intent = super::PublicationIntent::Final(intent.clone());
         if public.semantic.expected_private != intent.private {
@@ -906,6 +993,9 @@ impl PersistentSession {
             public_context,
             surface,
         } = captured;
+        if intent.world().is_some() {
+            return Err(SessionError::WorldCellDeclarationPublicationCapabilityMissing);
+        }
         self.admit_source_work_in(public.semantic.expected_public.scope)?;
         let reserved = self.lib_mut().reserve_join_for_publication(&mut public)?;
         let expected_public_version = paired_version(&public);
@@ -985,7 +1075,10 @@ impl PersistentSession {
             .public_visibility_snapshot_in(base.private_scope)
             .as_ref()
             != Some(&base.semantic.expected_private)
-            || self.compile_view_digest_in(base.private_scope) != Some(base.semantic.private_view)
+            || !base
+                .semantic
+                .private_view
+                .is_current(self, base.private_scope)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
@@ -993,7 +1086,10 @@ impl PersistentSession {
             .public_visibility_snapshot_in(base.public_scope)
             .as_ref()
             == Some(&base.semantic.expected_public)
-            && self.compile_view_digest_in(base.public_scope) == Some(base.semantic.public_view))
+            && base
+                .semantic
+                .public_view
+                .is_current(self, base.public_scope))
     }
 }
 

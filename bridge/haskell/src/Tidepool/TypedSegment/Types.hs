@@ -162,6 +162,7 @@ data TypedSegmentFailure
   | AmbiguousCaptureRoot
   | UnprovedFixedUnitRoot
   | UnprovedRootAbstraction
+  | InputDemandRenameRejected String
   | UnprovedRootContinuation
   | UnprovedItemSequence Int
   | MissingLetBinder Int String

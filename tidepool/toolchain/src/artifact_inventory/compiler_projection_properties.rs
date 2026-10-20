@@ -322,7 +322,7 @@ impl Catalog {
             before.iter().map(|entry| entry.id).collect()
         );
         assert_eq!(
-            metadata.retained.selected_native_groups,
+            metadata.retained.selected_native_groups.as_ref().clone(),
             view.selected_native_groups(),
             "compiler roles cannot change group custody"
         );

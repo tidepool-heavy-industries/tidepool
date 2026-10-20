@@ -1390,7 +1390,7 @@ mod tests {
                         assert_eq!(machines.kind(id), Some(SlotKind::Idle));
                         drop(provisioned);
                         assert!(machines.kind(id).is_none());
-                        assert!(dependency.source_lease().unwrap().validate_source_issuer().is_err());
+                        assert!(dependency.source_lease().unwrap().validate_lexical_issuer().is_err());
                     }
                     _ => {
                         let error = result.err().expect("uncertain/cancelled preparation cannot advance");

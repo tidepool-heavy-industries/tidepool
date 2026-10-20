@@ -417,7 +417,7 @@ mod tests {
     ) -> T {
         session
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,

@@ -13,3 +13,9 @@ context. Native products and their own canonical companions do not enumerate
 interface-only dependencies. When narrowing a recovery fixture, pair a successful
 complete-closure round trip with a typed refusal after omitting a required
 interface; do not infer closure completeness from native owner counts.
+
+Compiler-free fixtures still require canonical source admission for native
+installation and binding publication. Keep the original lease explicit in the
+test and enter the production source transaction; an absent compiler worker
+never supplies runtime authority. Maintain these controls in the generated
+`runtime_admission_tests` cohort through `scripts/buck2-first-party.py`.

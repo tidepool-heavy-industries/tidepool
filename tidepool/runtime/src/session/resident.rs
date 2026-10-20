@@ -41,6 +41,42 @@ use crate::render::EvalResult;
 use crate::timing;
 use crate::{RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
 
+/// Issued only by successful retirement of an exact hidden private host owner.
+/// Compiler custody stays retained while its runtime name leaves visibility.
+pub(super) struct PrivateHostRetirement {
+    association: Arc<super::inspection::InspectionWorldAssociation>,
+    scope: Arc<super::RuntimeLexicalScopeLease>,
+    before: super::persistent::CompileViewKey,
+    after: super::persistent::CompileViewKey,
+    binder: SessionVarId,
+    name: BindingName,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HiddenHostBinding {
+    Generic,
+    /// Issued only while installing a globally fresh private host input ID.
+    PrivateInput,
+}
+
+impl PrivateHostRetirement {
+    pub(super) fn following_key<'a>(
+        &'a self,
+        session: &super::PersistentSession,
+        association: &Arc<super::inspection::InspectionWorldAssociation>,
+        scope: &Arc<super::RuntimeLexicalScopeLease>,
+        before: &super::persistent::CompileViewKey,
+    ) -> Option<&'a super::persistent::CompileViewKey> {
+        (Arc::ptr_eq(&self.association, association)
+            && Arc::ptr_eq(&self.scope, scope)
+            && &self.before == before
+            && session
+                .resolve_in(scope.scope(), &self.name.0)
+                .is_none_or(|entry| entry.id != self.binder))
+        .then_some(&self.after)
+    }
+}
+
 enum ResidentResumeInput {
     Response(Response),
     Handle(ValueHandle),
@@ -72,20 +108,20 @@ pub struct ProgramProvenance {
     // Authentication follows the original compiler bundle through owned roots.
     // Public metadata construction alone cannot authorize a host input mount.
     authenticated_inputs: BTreeMap<u64, AuthenticatedInputContext>,
-    original_sources: BTreeMap<u64, RuntimeSourceOrigin>,
+    original_sources: NativeSourceCustody,
 }
 
 /// Actual runtime source custody is independent of semantic compiler equality.
 /// Unknown retains every known contributor and cannot be repaired by a later merge.
 #[derive(Clone, Debug)]
 enum RuntimeSourceOrigin {
-    Known(Arc<super::RuntimeLexicalScopeLease>),
-    Ambiguous(Vec<Arc<super::RuntimeLexicalScopeLease>>),
-    Unknown(Vec<Arc<super::RuntimeLexicalScopeLease>>),
+    Known(Arc<super::RuntimeOriginalSource>),
+    Ambiguous(Vec<Arc<super::RuntimeOriginalSource>>),
+    Unknown(Vec<Arc<super::RuntimeOriginalSource>>),
 }
 
 impl RuntimeSourceOrigin {
-    fn known(&self) -> &[Arc<super::RuntimeLexicalScopeLease>] {
+    fn known(&self) -> &[Arc<super::RuntimeOriginalSource>] {
         match self {
             Self::Known(source) => std::slice::from_ref(source),
             Self::Ambiguous(sources) | Self::Unknown(sources) => sources,
@@ -112,7 +148,7 @@ impl RuntimeSourceOrigin {
     fn require_unique(
         &self,
         site: u64,
-    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, ResidentError> {
+    ) -> Result<Arc<super::RuntimeOriginalSource>, ResidentError> {
         match self {
             Self::Known(source) => Ok(source.clone()),
             Self::Ambiguous(sources) => Err(ResidentError::AmbiguousOriginalSource {
@@ -127,13 +163,104 @@ impl RuntimeSourceOrigin {
     }
 }
 
+/// Source authority captured by the actual compiler operation before END.
+/// Sealed native membership subsequently selects the sites it can describe.
+#[derive(Clone, Debug)]
+pub(super) struct CapturedSourceOrigin(Arc<super::RuntimeOriginalSource>);
+
+impl CapturedSourceOrigin {
+    pub(super) fn capture(
+        source: &super::RuntimeSourceCompilerTransaction,
+    ) -> Result<Self, super::SourceAdmissionError> {
+        source.admitted_original_source().map(Self)
+    }
+
+    pub(super) fn for_current_group(
+        &self,
+        group: tidepool_toolchain::artifacts::PhysicalCurrentNativeGroup<'_>,
+    ) -> NativeSourceCustody {
+        NativeSourceCustody {
+            sites: Arc::new(
+                group
+                    .sites()
+                    .map(|site| (site, RuntimeSourceOrigin::Known(self.0.clone())))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// Immutable per-site original-source custody shared with actual native owners.
+/// It retains no lexical roots, compiled turn, renderer or mutable session state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct NativeSourceCustody {
+    sites: Arc<BTreeMap<u64, RuntimeSourceOrigin>>,
+}
+
+impl NativeSourceCustody {
+    pub(super) fn unknown(sites: impl IntoIterator<Item = u64>) -> Self {
+        Self::complete(sites, BTreeMap::new())
+    }
+
+    fn complete(
+        sites: impl IntoIterator<Item = u64>,
+        mut pending: BTreeMap<u64, RuntimeSourceOrigin>,
+    ) -> Self {
+        for site in sites {
+            pending
+                .entry(site)
+                .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+        }
+        Self {
+            sites: Arc::new(pending),
+        }
+    }
+
+    pub(super) fn select(&self, sites: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            sites: Arc::new(
+                sites
+                    .into_iter()
+                    .map(|site| (site, self.source(site)))
+                    .collect(),
+            ),
+        }
+    }
+
+    pub(super) fn merge(&mut self, other: &Self) {
+        if Arc::ptr_eq(&self.sites, &other.sites) {
+            return;
+        }
+        let sites = Arc::make_mut(&mut self.sites);
+        for (site, source) in other.sites.iter() {
+            sites
+                .entry(*site)
+                .and_modify(|held| held.merge(source))
+                .or_insert_with(|| source.clone());
+        }
+    }
+
+    fn source(&self, site: u64) -> RuntimeSourceOrigin {
+        self.sites
+            .get(&site)
+            .cloned()
+            .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()))
+    }
+
+    pub(super) fn require_unique(
+        &self,
+        site: u64,
+    ) -> Result<Arc<super::RuntimeOriginalSource>, ResidentError> {
+        self.source(site).require_unique(site)
+    }
+}
+
 enum RuntimeSourceContribution<'a> {
     Retained {
         id: u64,
         provenance: &'a Arc<ProgramProvenance>,
     },
     MissingNative,
-    SourceNeutral,
 }
 
 fn classify_import_source<'a>(
@@ -148,10 +275,9 @@ fn classify_import_source<'a>(
             },
             None => RuntimeSourceContribution::MissingNative,
         },
-        ImportOwner::Source { .. } | ImportOwner::CodeExport { .. } => {
-            RuntimeSourceContribution::MissingNative
-        }
-        ImportOwner::Package { .. } => RuntimeSourceContribution::SourceNeutral,
+        ImportOwner::Source { .. }
+        | ImportOwner::CodeExport { .. }
+        | ImportOwner::Package { .. } => RuntimeSourceContribution::MissingNative,
     }
 }
 
@@ -171,16 +297,11 @@ fn contribute_import_sources<'a>(
                 retained.entry(id).or_insert(provenance);
             }
             RuntimeSourceContribution::MissingNative => unresolved_native = true,
-            RuntimeSourceContribution::SourceNeutral => {}
         }
     }
     for original in retained.values() {
         for site in original.sites.keys() {
-            let source = original
-                .original_sources
-                .get(site)
-                .cloned()
-                .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+            let source = original.original_sources.source(*site);
             sources
                 .entry(*site)
                 .and_modify(|held| held.merge(&source))
@@ -331,11 +452,7 @@ impl CompiledProvenancePlan {
             fresh_completion_sites: self.fresh_completion_sites.clone(),
             source_originals: self.source_originals.clone(),
             native_sites: self.native_sites.clone(),
-            original_sources: self
-                .sites
-                .keys()
-                .map(|site| (*site, RuntimeSourceOrigin::Unknown(Vec::new())))
-                .collect(),
+            original_sources: NativeSourceCustody::unknown(self.sites.keys().copied()),
             authenticated_inputs: self
                 .authenticated_inputs
                 .iter()
@@ -630,9 +747,10 @@ impl ProgramProvenance {
             } else {
                 self.sites.insert(site.site, site.clone());
             }
-            self.original_sources
-                .entry(site.site)
-                .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+            if !self.original_sources.sites.contains_key(&site.site) {
+                Arc::make_mut(&mut self.original_sources.sites)
+                    .insert(site.site, RuntimeSourceOrigin::Unknown(Vec::new()));
+            }
         }
         Ok(())
     }
@@ -676,20 +794,27 @@ impl ProgramProvenance {
             }
         }
         for site in other.sites.values() {
-            let existing = self.sites.contains_key(&site.site);
+            let existing = self.sites.contains_key(&site.site)
+                || self.original_sources.sites.contains_key(&site.site);
             self.extend(std::slice::from_ref(site))?;
-            let incoming = other
-                .original_sources
-                .get(&site.site)
-                .cloned()
-                .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+            let incoming = other.original_sources.source(site.site);
+            let sources = Arc::make_mut(&mut self.original_sources.sites);
             if existing {
-                self.original_sources
+                sources
                     .entry(site.site)
                     .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()))
                     .merge(&incoming);
             } else {
-                self.original_sources.insert(site.site, incoming);
+                sources.insert(site.site, incoming);
+            }
+        }
+        // Native receipts can carry raw effect sites without typed yield metadata.
+        for (site, incoming) in other.original_sources.sites.iter() {
+            if !other.sites.contains_key(site) {
+                Arc::make_mut(&mut self.original_sources.sites)
+                    .entry(*site)
+                    .and_modify(|held| held.merge(incoming))
+                    .or_insert_with(|| incoming.clone());
             }
         }
         for (site, interfaces) in &other.authenticated_inputs {
@@ -858,6 +983,7 @@ enum HostCarrierOrigin {
     Checked {
         admission: Arc<super::RuntimeCheckedItemAdmission>,
         binder: BoundBinder,
+        type_owner: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
     },
     Interface {
         admission: Arc<super::RuntimeHostBindingAdmission>,
@@ -962,10 +1088,17 @@ impl HostCarrier {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
         let (_, representation) = host_representation(&binder, &code, expected)?;
+        let type_owner =
+            tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_checked(execution)
+                .map_err(SessionError::Compile)?;
         Ok(Self {
             code: Arc::new(code.into_owned()),
             representation,
-            origin: HostCarrierOrigin::Checked { admission, binder },
+            origin: HostCarrierOrigin::Checked {
+                admission,
+                binder,
+                type_owner,
+            },
         })
     }
 
@@ -974,7 +1107,9 @@ impl HostCarrier {
         &self,
     ) -> Result<(&Arc<super::RuntimeCheckedItemAdmission>, &BoundBinder), ResidentError> {
         match &self.origin {
-            HostCarrierOrigin::Checked { admission, binder } => Ok((admission, binder)),
+            HostCarrierOrigin::Checked {
+                admission, binder, ..
+            } => Ok((admission, binder)),
             HostCarrierOrigin::Reusable(_) | HostCarrierOrigin::Interface { .. } => {
                 Err(ResidentError::UnsupportedCheckedTurn)
             }
@@ -991,11 +1126,36 @@ impl HostCarrier {
         }
     }
 
+    fn type_owner(
+        &self,
+    ) -> Result<&Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>, ResidentError>
+    {
+        match &self.origin {
+            HostCarrierOrigin::Checked { type_owner, .. } => Ok(type_owner),
+            HostCarrierOrigin::Interface { proof, .. } => Ok(proof.prototype()),
+            HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
+        }
+    }
+
+    /// Borrow the native type already retained by this exact checked carrier.
+    /// Generic representation-only embeddings do not supply this witness.
+    pub fn type_signature(
+        &self,
+    ) -> Result<&tidepool_toolchain::checked_cell::ExactCheckedSignature, ResidentError> {
+        Ok(self.type_owner()?.signature())
+    }
+
+    /// Retain the exact selected original type context, without execution custody.
+    pub fn type_context(
+        &self,
+    ) -> Result<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, ResidentError>
+    {
+        Ok(self.type_owner()?.context())
+    }
+
     pub fn session_root(&self) -> Result<&Path, ResidentError> {
         match &self.origin {
-            HostCarrierOrigin::Checked { admission, .. } => {
-                Ok(admission.snapshot().session_root())
-            }
+            HostCarrierOrigin::Checked { admission, .. } => Ok(admission.snapshot().session_root()),
             HostCarrierOrigin::Interface { admission, .. } => Ok(&admission.session_root),
             HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
         }
@@ -1354,7 +1514,7 @@ static_assertions::assert_not_impl_any!(RequestReceiverEntry: Clone, Copy);
 #[derive(Debug)]
 pub struct RuntimeActivationInput {
     custody: RootCustody,
-    original_source: Arc<super::RuntimeLexicalScopeLease>,
+    original_source: Arc<super::RuntimeOriginalSource>,
     site: u64,
     input_type: String,
     type_evidence: Arc<super::prepared::SiteTypeEvidence>,
@@ -1369,8 +1529,20 @@ pub struct RuntimeActivationInput {
 static_assertions::assert_not_impl_any!(RuntimeActivationInput: Clone, Copy);
 
 impl RuntimeActivationInput {
-    pub fn original_source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
+    pub fn original_source(&self) -> Arc<super::RuntimeOriginalSource> {
         self.original_source.clone()
+    }
+
+    /// The binding issued by the original activation-input admission.
+    pub fn binding_name() -> &'static str {
+        "sessionInput"
+    }
+
+    /// Original checked TYPE metadata, without mounting or exposing the value.
+    pub fn type_prototype(
+        &self,
+    ) -> &Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype> {
+        &self.prototype
     }
 
     pub fn input_type(&self) -> &str {
@@ -1461,7 +1633,7 @@ static_assertions::assert_not_impl_any!(RuntimeActivationInputAdmission: Clone, 
 /// A committed original live binding. Type authority does not authorize preview
 /// code; that executable is admitted separately after this mount.
 pub struct MountedActivationInput {
-    original_source: Arc<super::RuntimeLexicalScopeLease>,
+    original_source: Arc<super::RuntimeOriginalSource>,
     interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
     original_execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
     original_execution_identity: [u8; 32],
@@ -1550,7 +1722,7 @@ impl SpentActivationPreview {
 }
 
 impl RuntimeActivationPreviewAdmission {
-    pub fn original_source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
+    pub fn original_source(&self) -> Arc<super::RuntimeOriginalSource> {
         self.mounted.original_source.clone()
     }
 
@@ -1558,18 +1730,9 @@ impl RuntimeActivationPreviewAdmission {
         &self,
         action: impl FnOnce() -> T,
     ) -> Result<T, super::SourceAdmissionError> {
-        super::RuntimeLexicalScopeLease::with_source_leases(
-            [
-                self.mounted.original_source.clone(),
-                self.scope_lease.clone(),
-            ],
-            |leases| {
-                super::RuntimeSourceAdmission::with_open_admissions(
-                    leases.iter().map(|lease| lease.source_admission()),
-                    action,
-                )
-            },
-        )
+        self.mounted
+            .original_source
+            .with_open_target(&self.scope_lease, action)
     }
 
     pub fn source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
@@ -2821,10 +2984,7 @@ fn refuse_generic_activation_preview_install(
     if certification.is_some_and(|certification| {
         matches!(certification.purpose(), TurnPurpose::ActivationPreview(_))
     }) {
-        return Err(SessionError::SourceAdmission(
-            super::SourceAdmissionError::Unqualified,
-        )
-        .into());
+        return Err(SessionError::SourceAdmission(super::SourceAdmissionError::Unqualified).into());
     }
     Ok(())
 }
@@ -3676,7 +3836,7 @@ pub struct ResidentSession<H, O> {
     host_text_bindings: HashMap<SessionVarId, String>,
     /// Private request carriers remain rooted for closures that captured them,
     /// but never become ordinary unqualified workbench vocabulary.
-    hidden_host_bindings: HashMap<SessionVarId, ()>,
+    hidden_host_bindings: HashMap<SessionVarId, HiddenHostBinding>,
     /// At most one exact source contract per fixed host kind. Outstanding
     /// instances retain their superseded prototype through their admission.
     host_binding_prototypes: Vec<Arc<HostBindingPrototype>>,
@@ -3751,7 +3911,7 @@ where
     /// Own the exact source lease and all lower claims through physical END.
     pub fn with_source_compiler_transaction<T>(
         &mut self,
-        source: Arc<super::RuntimeLexicalScopeLease>,
+        source: Arc<super::RuntimeOriginalSource>,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         cancellation: crate::CompilerTransactionCancellation,
         supplemental_hook: Option<super::SourceAdmissionHook>,
@@ -3760,6 +3920,7 @@ where
     ) -> Result<crate::CompilerTransactionSettled<T>, super::SourceAdmissionError> {
         super::source_admission::run_source_compiler_transaction(
             source,
+            None,
             workload,
             cancellation,
             supplemental_hook,
@@ -3931,7 +4092,7 @@ where
     pub fn capture_notebook_generation_world(
         &self,
         prepared: &super::PreparedNotebookGeneration,
-        source: &Arc<super::RuntimeLexicalScopeLease>,
+        source: &Arc<super::RuntimeOriginalSource>,
     ) -> Result<super::AdmittedInspectionWorld, SessionError> {
         self.state.capture_notebook_generation_world(prepared, source, |id| {
             self.hidden_host_bindings.contains_key(&id)
@@ -4080,7 +4241,7 @@ where
 
     fn admit_original_source_work_in(
         &self,
-        original: &Arc<super::RuntimeLexicalScopeLease>,
+        original: &Arc<super::RuntimeOriginalSource>,
         scope: ScopeId,
     ) -> Result<(), SessionError> {
         let target = self.state.source_lease_in(scope)?;
@@ -4127,7 +4288,7 @@ where
         digest.update(&self.run_context.principal.incarnation.to_le_bytes());
         let reservation = self.state.admit_binding_interface(
             scope,
-            "sessionInput".into(),
+            RuntimeActivationInput::binding_name().into(),
             input.prototype.clone(),
             *digest.finalize().as_bytes(),
         )?;
@@ -4147,7 +4308,8 @@ where
         expected: HostBindingType,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
-        self.state.admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
+        self.state
+            .admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
     }
 
     /// Admit one compiler-issued binder reserved for a native host payload.
@@ -4246,6 +4408,18 @@ where
         self.settle_dropped_custody();
         self.state
             .admit_world_planned_cell_for_execution(execution, plan)
+    }
+
+    /// Reserve against the exact atomic private input mount retained by its guard.
+    pub fn admit_world_planned_cell_with_input(
+        &mut self,
+        execution: Arc<super::PrivateExecutionAdmission>,
+        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        input: Option<&super::PendingHostValueWrite>,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state
+            .admit_world_planned_cell_with_input(execution, plan, input)
     }
 
     pub fn admit_checked_item(
@@ -4802,10 +4976,13 @@ where
         });
         self.host_text_bindings
             .retain(|id, _| self.state.bindings().get(*id).is_some());
-        let previous_hidden = self.hidden_host_bindings.len();
-        self.hidden_host_bindings
-            .retain(|id, _| self.state.bindings().get(*id).is_some());
-        if self.hidden_host_bindings.len() != previous_hidden {
+        let mut removed_generic = false;
+        self.hidden_host_bindings.retain(|id, kind| {
+            let live = self.state.bindings().get(*id).is_some();
+            removed_generic |= !live && *kind == HiddenHostBinding::Generic;
+            live
+        });
+        if removed_generic {
             self.state.advance_compiler_input_revision();
         }
     }
@@ -4880,7 +5057,7 @@ where
         &self,
         scope: ScopeId,
         source: &super::GenerationArtifactReference,
-        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> Result<super::AdmittedInspectionWorld, SessionError> {
         self.state
             .capture_inspection_world_in(scope, source, original_source, |id| {
@@ -4893,7 +5070,7 @@ where
         &mut self,
         completed: &super::CompletedInspectionWorld,
         source: &super::GenerationArtifactReference,
-        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> bool {
         self.state
             .install_inspection_world_if_current(completed, source, original_source)
@@ -4904,10 +5081,11 @@ where
         &mut self,
         completed: &super::CompletedCompilerWorld,
         source: &super::GenerationArtifactReference,
-        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> bool {
         self.state.install_compiler_world_association_if_current(
             &completed.association,
+            &completed.custody,
             &completed.cancellation,
             source,
             original_source,
@@ -5032,7 +5210,7 @@ where
     pub fn parked_original_source(
         &mut self,
         hole: &ResidentHole,
-    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, ResidentError> {
+    ) -> Result<Arc<super::RuntimeOriginalSource>, ResidentError> {
         let invalid = || ResidentError::MissingOriginalSourceContinuation {
             hole: hole.cont_id().to_owned(),
         };
@@ -5046,15 +5224,7 @@ where
             .prepared_mut()
             .and_then(|engine| engine.parked_site(entry.id))
             .ok_or_else(invalid)?;
-        entry
-            .provenance
-            .original_sources
-            .get(&site)
-            .ok_or(ResidentError::MissingOriginalSource {
-                site,
-                known_origins: 0,
-            })?
-            .require_unique(site)
+        entry.provenance.original_sources.require_unique(site)
     }
 
     /// Whether the session has no parked frames (ready and quiescent).
@@ -5577,31 +5747,13 @@ where
         Ok(transfer.into_custody())
     }
 
-    /// Abandon a rooted value deliberately, releasing its root immediately.
-    pub fn discard_custody(&mut self, custody: RootCustody) -> bool {
-        if custody.checked_handle(&self.custody_cleanup).is_err() {
-            return false;
-        }
-        self.settle_dropped_custody();
-        let transfer = custody.into_transfer();
-        let discarded = self
-            .state
-            .prepared_mut()
-            .is_some_and(|engine| engine.discard_handle(transfer.handle));
-        if discarded {
-            transfer.commit();
-        }
-        discarded
-    }
-
     /// Export the value `custody` roots as a detached [`ResidentParcel`] another
     /// session's machine (sharing this run's [`tidepool_codegen::prepared_program::ImageRegistry`])
     /// can import -- the session-layer half of a value crossing two
     /// [`ResidentSession`]s. Consumes the custody: the export itself is a
     /// non-consuming read of the machine (`PreparedEngine::export_parcel`,
     /// like `inspect_retained`), so once the parcel is safely out this
-    /// releases the handle exactly as [`Self::discard_custody`] would --
-    /// the parcel is now the value's only owner on this side.
+    /// releases the original handle; the parcel then owns the exported value.
     pub fn export_custody(
         &mut self,
         custody: RootCustody,
@@ -5926,19 +6078,16 @@ where
         }
         self.admit_original_source_work_in(&owner.input.original_source, scope)?;
         let target = self.state.source_lease_in(scope).map_err(SessionError::SourceAdmission)?;
-        super::RuntimeLexicalScopeLease::with_source_leases(
-            [owner.input.original_source.clone(), target],
-            |leases| super::RuntimeSourceAdmission::with_open_admissions(
-                leases.iter().map(|lease| lease.source_admission()),
-                || self.state.consume_binding_interface(reservation, &interface),
-            ),
+        owner.input.original_source.with_open_target(
+            &target,
+            || self.state.consume_binding_interface(reservation, &interface),
         ).map_err(SessionError::SourceAdmission)??;
-        self.mount_compiled_binding_prepared(
+        self.mount_activation_binding_prepared(
             scope,
             &binder,
             generation,
             owner.input.custody,
-            Some(staged),
+            staged,
             settlement,
         )
         .map_err(|source| ResidentError::ActivationInputConsumed {
@@ -5964,53 +6113,6 @@ where
             visibility,
             run_context: self.run_context,
         })
-    }
-
-    /// Legacy host mounts use filesystem interfaces. Activation inputs use
-    /// their dedicated affine compiler/mount owner above.
-    pub fn mount_compiled_binding_in(
-        &mut self,
-        scope: ScopeId,
-        binder: &BoundBinder,
-        gen: Generation,
-        table: &DataConTable,
-        custody: RootCustody,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<(), ResidentError> {
-        custody.checked_handle(&self.custody_cleanup)?;
-        self.settle_dropped_custody();
-        if !self.state.scope_tree().is_live(scope) {
-            self.discard_custody(custody);
-            return Err(SessionError::DeadScope(scope).into());
-        }
-        if let Err(error) = self
-            .state
-            .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])
-        {
-            self.discard_custody(custody);
-            return Err(error.into());
-        }
-        let expected_module = SessionModule::val(gen).module_name();
-        if binder.module != expected_module {
-            self.discard_custody(custody);
-            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                format!(
-                    "compiled binder `{}` belongs to {}, expected {expected_module}",
-                    binder.name, binder.module
-                ),
-            ))));
-        }
-        self.state
-            .merge_table(table)
-            .map_err(ResidentError::TableCollision)?;
-        self.mount_compiled_binding_prepared(
-            scope,
-            binder,
-            gen,
-            custody,
-            None,
-            settlement,
-        )
     }
 
     /// Build and mount a compiler-typed JSON value without putting the
@@ -6110,16 +6212,7 @@ where
         if !admission.prefix().admission().belongs_to(&self.state) {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
-        let execution = carrier
-            .code
-            .certification
-            .as_ref()
-            .as_ref()
-            .and_then(|certification| certification.checked_execution())
-            .ok_or(ResidentError::UnsupportedCheckedTurn)?;
-        let compiler =
-            tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_checked(execution)
-                .map_err(SessionError::Compile)?;
+        let compiler = carrier.type_owner()?.clone();
         let code = carrier
             .code()
             .into_host_prototype()
@@ -6177,6 +6270,7 @@ where
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
     ) -> Result<super::PendingHostValueWrite, ResidentError> {
         let HostCarrierOrigin::Interface {
             admission,
@@ -6191,7 +6285,6 @@ where
         {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
-        self.settle_dropped_custody();
         self.validate_host_mount_geometry(admission.scope, binder, admission.generation)?;
         let staged = self
             .state
@@ -6209,6 +6302,7 @@ where
             admission.generation,
             carrier.code(),
             Some(staged),
+            private_input,
             move |engine, realm, _| representation.build(engine, realm, payload),
             settlement,
         )?;
@@ -6226,21 +6320,134 @@ where
         }
     }
 
-    /// Fill the sole compiler-issued host binder without entering a placeholder.
+    /// Mount a checked host value through its original native/interface owner.
     pub fn mount_checked_host_input(
         &mut self,
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<super::PendingHostValueWrite, ResidentError> {
+        self.settle_dropped_custody();
+        self.mount_checked_host_input_settled(carrier, payload, settlement, None)
+    }
+
+    /// Install an explicit input atomically as a never-visible private carrier.
+    /// The original pending write carries the actual World/key transition.
+    pub fn mount_private_hidden_host_input(
+        &mut self,
+        execution: &Arc<super::PrivateExecutionAdmission>,
+        carrier: &HostCarrier,
+        payload: HostPayload<'_>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<super::PendingHostValueWrite, ResidentError> {
+        self.settle_dropped_custody();
+        self.prune_binding_metadata();
+        if !self.state.has_lib() {
+            return Err(SessionError::MissingDeclarationLibrary.into());
+        }
+        let scope = execution.private_scope();
+        let binder = carrier.binding()?.clone();
+        let id = SessionVarId::from_extract(binder.var_id);
+        let facts = execution.world_execution_facts();
+        let target = execution.retained_lexical_scope();
+        let before = self
+            .state
+            .lib()
+            .tips
+            .get(&scope)
+            .and_then(|tip| tip.inspection_world.clone())
+            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+        // Fresh ID AND fresh name: this operation cannot retract a logical
+        // head, nor retroactively classify a previously visible host binding.
+        if !Arc::ptr_eq(&execution.owner, self.state.admission_owner())
+            || execution.owner_epoch != self.state.admission_owner().epoch()
+            || execution.session() != self.state.lib().session_id()
+            || execution.library != self.state.lib().compile_view_identity
+            || execution.final_intent.get().is_some()
+            || self.run_context.lexical_scope != scope
+            || self.state.bindings().get(id).is_some()
+            || self.state.resolve_in(scope, &binder.name).is_some()
+            || self.hidden_host_bindings.contains_key(&id)
+            || !execution.host_retirements.lock().is_empty()
+            || !Arc::ptr_eq(&before.world, execution.compiler_world()?)
+            || !Arc::ptr_eq(&before.base.source, &facts.source)
+            || !before.base.original_source.matches(&facts.original_source)
+            || !before.base.target.matches(&target)
+            || !self.state.inspection_world_base_is_current(
+                &before.base,
+                &facts.source,
+                &facts.original_source,
+            )
+        {
+            return Err(SessionError::WorldCellPublicationBaseStale.into());
+        }
+        let write =
+            self.mount_checked_host_input_settled(carrier, payload, settlement, Some(execution))?;
+        let result = facts
+            .original_source
+            .with_open_target(&target, || {
+                if self.hidden_host_bindings.get(&id) != Some(&HiddenHostBinding::PrivateInput)
+                    || !write.matches_private_mount(&self.state, execution)
+                    || !self
+                        .state
+                        .source_lease_in(scope)
+                        .is_ok_and(|live| Arc::ptr_eq(&live, &target))
+                    || self
+                        .state
+                        .lib()
+                        .tips
+                        .get(&scope)
+                        .and_then(|tip| tip.inspection_world.as_ref())
+                        .is_none_or(|live| !Arc::ptr_eq(live, &before))
+                {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                let key = self
+                    .state
+                    .compile_view_key_in(scope)
+                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                let mut base = before.base.clone();
+                base.key = key;
+                let after = Arc::new(super::inspection::InspectionWorldAssociation {
+                    base,
+                    world: before.world.clone(),
+                });
+                // The bind owner already classified this fresh input;
+                // publish its matching runtime association in this checkout.
+                self.state
+                    .lib_mut()
+                    .tips
+                    .get_mut(&scope)
+                    .expect("validated private association")
+                    .inspection_world = Some(after.clone());
+                write.retain_private_hidden_mount(&self.state, execution.clone(), before, after)
+            })
+            .map_err(SessionError::from)
+            .and_then(|result| result);
+        match result {
+            Ok(write) => Ok(write),
+            Err(error) => {
+                self.retire_binding_owner_settled(id);
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Fill the sole compiler-issued host binder without entering a placeholder.
+    fn mount_checked_host_input_settled(
+        &mut self,
+        carrier: &HostCarrier,
+        payload: HostPayload<'_>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
+    ) -> Result<super::PendingHostValueWrite, ResidentError> {
         if matches!(&carrier.origin, HostCarrierOrigin::Interface { .. }) {
-            return self.mount_host_interface_input(carrier, payload, settlement);
+            return self.mount_host_interface_input(carrier, payload, settlement, private_input);
         }
         let (admission, binder) = carrier.checked_binding()?;
         if !carrier.representation.matches_payload(&payload) {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
-        self.settle_dropped_custody();
         let scope = admission.prefix().admission().lexical_scope();
         let generation = admission.generation();
         if self.run_context.lexical_scope != scope {
@@ -6277,6 +6484,7 @@ where
             generation,
             carrier.code(),
             Some(staged),
+            private_input,
             move |engine, realm, _| representation.build(engine, realm, payload),
             settlement,
         )?;
@@ -6477,10 +6685,100 @@ where
                 "host binding identity changed before hiding".into(),
             ))));
         }
-        if self.hidden_host_bindings.insert(id, ()).is_none() {
+        self.hide_current_host_binding(scope, id);
+        Ok(())
+    }
+
+    fn hide_current_host_binding(&mut self, scope: ScopeId, id: SessionVarId) {
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.hidden_host_bindings.entry(id)
+        {
+            entry.insert(HiddenHostBinding::Generic);
             self.state.advance_compiler_input_revision();
             self.advance_public_visibility(scope);
         }
+    }
+
+    /// Retire the exact never-visible input issued to this execution. Its
+    /// original write stays borrowed until publication and the final lease drop.
+    pub fn retire_private_host_binding_owner(
+        &mut self,
+        execution: &super::PrivateExecutionAdmission,
+        binder: &BoundBinder,
+        write: &super::PendingHostValueWrite,
+    ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
+        self.prune_binding_metadata();
+        if !self.state.has_lib() {
+            return Err(SessionError::MissingDeclarationLibrary.into());
+        }
+        let target = execution.retained_lexical_scope();
+        let facts = execution.world_execution_facts();
+        facts
+            .original_source
+            .with_open_target(&target, || {
+                let scope = execution.private_scope();
+                let id = SessionVarId::from_extract(binder.var_id);
+                if !write.matches_private_hidden_mount(&self.state, execution, id)
+                    || execution.final_intent.get().is_some()
+                    || self.hidden_host_bindings.get(&id) != Some(&HiddenHostBinding::PrivateInput)
+                    || self
+                        .state
+                        .resolve_in(scope, &binder.name)
+                        .is_none_or(|entry| entry.id != id || entry.scope != scope)
+                {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                let association = self
+                    .state
+                    .lib()
+                    .tips
+                    .get(&scope)
+                    .and_then(|tip| tip.inspection_world.clone())
+                    .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                let before = self
+                    .state
+                    .compile_view_key_in(scope)
+                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                let mut records = execution.host_retirements.lock();
+                let mut expected = &association.base.key;
+                for record in records.iter() {
+                    expected = record
+                        .following_key(&self.state, &association, &target, expected)
+                        .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                }
+                if expected != &before
+                    || !association
+                        .base
+                        .original_source
+                        .matches(&facts.original_source)
+                    || !association.base.target.matches(&target)
+                    || !Arc::ptr_eq(&association.base.source, &facts.source)
+                {
+                    return Err(SessionError::WorldCellPublicationBaseStale);
+                }
+                records
+                    .try_reserve(1)
+                    .map_err(|error| SessionError::RecoveryManifest {
+                        path: self.state.lib().root.clone(),
+                        detail: error.to_string(),
+                    })?;
+                self.retire_binding_owner_settled(id);
+                let after = self
+                    .state
+                    .compile_view_key_in(scope)
+                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                records.push(PrivateHostRetirement {
+                    association,
+                    scope: target.clone(),
+                    before,
+                    after,
+                    binder: id,
+                    name: BindingName(binder.name.clone()),
+                });
+                Ok(())
+            })
+            .map_err(SessionError::from)??;
         Ok(())
     }
 
@@ -6501,12 +6799,17 @@ where
     /// Retire an exact binding owner while preserving existing dependency leases.
     pub fn retire_binding_owner(&mut self, id: SessionVarId) {
         self.settle_dropped_custody();
+        self.retire_binding_owner_settled(id);
+    }
+
+    fn retire_binding_owner_settled(&mut self, id: SessionVarId) {
         let scope = self.state.bindings().get(id).map(|entry| entry.scope);
         self.state.retire_binding_owner(id);
         if let Some(scope) = scope {
             self.advance_public_visibility(scope);
         }
-        if self.hidden_host_bindings.remove(&id).is_some() {
+        if self.hidden_host_bindings.get(&id) == Some(&HiddenHostBinding::Generic) {
+            self.hidden_host_bindings.remove(&id);
             self.state.advance_compiler_input_revision();
         }
         self.prune_binding_metadata();
@@ -6581,13 +6884,7 @@ where
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
         self.mount_host_value_with_interface_in(
-            scope,
-            binder,
-            gen,
-            code,
-            None,
-            build,
-            settlement,
+            scope, binder, gen, code, None, None, build, settlement,
         )
     }
 
@@ -6598,6 +6895,7 @@ where
         gen: Generation,
         code: TurnCode<'_>,
         staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
+        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
         build: impl FnOnce(
             &mut super::prepared::PreparedEngine,
             RealmId,
@@ -6620,9 +6918,8 @@ where
                 .state
                 .resolve_certification_in(scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
-            let (target, demanded) = super::prepared::ScopedTargetImage::compile_scoped(
-                prepared, &resolved, &registry,
-            )?;
+            let (target, demanded) =
+                super::prepared::ScopedTargetImage::compile_scoped(prepared, &resolved, &registry)?;
             self.install_certified_turn_in(
                 scope,
                 &table,
@@ -6649,6 +6946,7 @@ where
                 gen,
                 handle,
                 staged_interface,
+                private_input,
                 settlement,
             )
         })();
@@ -6671,6 +6969,7 @@ where
         gen: Generation,
         handle: PreparedHandle,
         staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
+        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         let engine = self.state.require_prepared()?;
@@ -6687,6 +6986,7 @@ where
             &[(binder, handle)],
             None,
             staged_interface,
+            private_input,
             settlement,
         )?;
         self.binding_provenance
@@ -6694,16 +6994,14 @@ where
         Ok(())
     }
 
-    /// The prepared arm of [`Self::mount_compiled_binding_in`]: the handle
-    /// becomes a prepared binding under the binder's value-module identity,
-    /// exactly as a prepared bind turn records it ([`Self::bind_prepared`]).
-    fn mount_compiled_binding_prepared(
+    /// Transfer an admitted activation input to its compiler-typed binding.
+    fn mount_activation_binding_prepared(
         &mut self,
         scope: ScopeId,
         binder: &BoundBinder,
         gen: Generation,
         custody: RootCustody,
-        staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
+        staged_interface: super::persistent::StagedCheckedValueInterface,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         custody.checked_handle(&self.custody_cleanup)?;
@@ -6727,7 +7025,8 @@ where
             gen,
             &[(binder, handle)],
             None,
-            staged_interface,
+            Some(staged_interface),
+            None,
             settlement,
         )?;
         self.binding_provenance.insert(binder.var_id, provenance);
@@ -6882,9 +7181,8 @@ where
     /// Number of live [`ValueHandle`]s outstanding on this session's machine
     /// (0 before the machine is bootstrapped) — the mount seam's ownership-
     /// accounting read: a handle minted over a finalize payload
-    /// ([`Self::live_payload_handle`]) counts here until a compiled-binding mount
-    /// ([`Self::mount_compiled_binding_in`]), an ordinary bind completion, or
-    /// a resource-scope close releases it.
+    /// ([`Self::live_payload_handle`]) counts here until binding installation,
+    /// owned custody release, or resource-scope close releases it.
     pub fn value_handle_count(&mut self) -> usize {
         self.settle_dropped_custody();
         self.state.value_handle_count()
@@ -7197,7 +7495,7 @@ where
         let mut sources = BTreeMap::<u64, RuntimeSourceOrigin>::new();
         let source = match code.certification().map(|proof| proof.purpose()) {
             Some(TurnPurpose::Execution { prefix, .. }) => {
-                Some(prefix.admission().original_source_lease()?)
+                Some(prefix.admission().original_source()?)
             }
             Some(TurnPurpose::Ordinary { original: Some(_) } | TurnPurpose::HostPrototype(_)) => {
                 self.state
@@ -7234,11 +7532,8 @@ where
             for original in retained {
                 provenance.merge(original)?;
             }
-            for (site, source) in &mut provenance.original_sources {
-                *source = sources
-                    .remove(site)
-                    .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new()));
-            }
+            provenance.original_sources =
+                NativeSourceCustody::complete(provenance.sites.keys().copied(), sources);
         }
         Ok(provenance)
     }
@@ -7638,9 +7933,7 @@ where
         let (program, source_keys) = if let Some(resolved) = resolved {
             let (target, demanded) = match images {
                 TurnImageAcquisition::Ready { bundle } => {
-                    super::prepared::ScopedTargetImage::lookup_scoped(
-                        prepared, &resolved, bundle,
-                    )?
+                    super::prepared::ScopedTargetImage::lookup_scoped(prepared, &resolved, bundle)?
                 }
                 TurnImageAcquisition::Compile => {
                     let registry = self.state.certified_image_registry();
@@ -7846,6 +8139,7 @@ where
                             &[(binder, handle)],
                             checked.as_deref(),
                             None,
+                            None,
                             settlement,
                         )?;
                         self.binding_provenance
@@ -7891,6 +8185,7 @@ where
                     generation,
                     &bound,
                     checked.as_deref(),
+                    None,
                     None,
                     settlement,
                 )?;
@@ -7960,6 +8255,7 @@ where
         bound: &[(&BoundBinder, PreparedHandle)],
         checked: Option<&CheckedTurnCompletion>,
         staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
+        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         if let Some(staged) = &staged_interface {
@@ -8045,7 +8341,33 @@ where
             };
             entries.push(entry);
         }
-        if let Some(completion) = private_overlay {
+        if let Some(execution) = private_input {
+            if execution.private_scope() != scope
+                || !Arc::ptr_eq(&execution.owner, self.state.admission_owner())
+                || execution.owner_epoch != self.state.admission_owner().epoch()
+                || entries.len() != 1
+                || self.state.bindings().get(entries[0].id).is_some()
+                || self.state.resolve_in(scope, &entries[0].name.0).is_some()
+            {
+                if let Some(engine) = self.state.prepared_mut() {
+                    engine.release_all(entries.into_iter().map(|entry| entry.value.handle));
+                }
+                return Err(SessionError::StaleStagedDeclaration.into());
+            }
+            // Explicit input is never a logical declaration/value head. It
+            // must not retract a declaration with the same spelling.
+            let id = entries[0].id;
+            let entry = entries.pop().expect("one private host entry");
+            let handle = entry.value.handle;
+            if let Err(error) = self.state.bind_in(scope, entry) {
+                if let Some(engine) = self.state.prepared_mut() {
+                    engine.release(handle);
+                }
+                return Err(error.into());
+            }
+            self.hidden_host_bindings
+                .insert(id, HiddenHostBinding::PrivateInput);
+        } else if let Some(completion) = private_overlay {
             self.state
                 .bind_checked_private_values_in(completion, scope, entries, &binders)?;
         } else {
@@ -9243,16 +9565,38 @@ mod custody_release_tests {
         }
     }
 
-    fn bind_fixture(session: &mut TestSession, scope: ScopeId, generation: u64) -> SessionVarId {
-        let mut binding = crate::session::prepared::tests::evaluated_publication_fixture(
-            &mut session.state,
-            "x",
-            generation,
+    fn bind_fixture(
+        session: &mut TestSession,
+        source: &Arc<super::super::RuntimeLexicalScopeLease>,
+        scope: ScopeId,
+        generation: u64,
+    ) -> SessionVarId {
+        let settled = session
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let mut binding =
+                        crate::session::prepared::tests::evaluated_publication_fixture(
+                            &mut session.state,
+                            "x",
+                            generation,
+                        );
+                    binding.scope = scope;
+                    let id = binding.id;
+                    session.state.bind_in(scope, binding).unwrap();
+                    id
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &crate::CompilerTransactionClose::NotStarted
         );
-        binding.scope = scope;
-        let id = binding.id;
-        session.state.bind_in(scope, binding).unwrap();
-        id
+        settled.into_outcome().action
     }
 
     fn major_collect(session: &mut TestSession) {
@@ -9279,8 +9623,10 @@ mod custody_release_tests {
     fn foreign_custody_never_enters_destination() {
         let mut source = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
         let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
-        bind_fixture(&mut source, ScopeId::ROOT, 47);
-        let destination_id = bind_fixture(&mut destination, ScopeId::ROOT, 47);
+        let source_lease = source.mint_isolated_scope_with_lease().unwrap();
+        let destination_lease = destination.mint_isolated_scope_with_lease().unwrap();
+        bind_fixture(&mut source, &source_lease, ScopeId::ROOT, 47);
+        let destination_id = bind_fixture(&mut destination, &destination_lease, ScopeId::ROOT, 47);
         let local = destination.retain_binding_custody("x").unwrap().unwrap();
         let foreign = source.retain_binding_custody("x").unwrap().unwrap();
         assert_ne!(
@@ -9341,39 +9687,20 @@ mod custody_release_tests {
             Err(ResidentError::ForeignCustody)
         ));
         source.settle_dropped_custody();
-        let foreign = source.retain_binding_custody("x").unwrap().unwrap();
-        assert!(!destination.discard_custody(foreign));
-        let foreign = source.retain_binding_custody("x").unwrap().unwrap();
-        let binder = BoundBinder {
-            name: "foreignBinding".into(),
-            var_id: 1401,
-            module: SessionModule::val(Generation(47)).module_name(),
-            tier: ValueTier::ForceData,
-            type_display: "Int".into(),
-            root_head: None,
-            host_authority: None,
-        };
-        assert!(matches!(
-            tidepool_testing::with_settlement(|settlement| destination.mount_compiled_binding_in(
-                ScopeId::ROOT,
-                &binder,
-                Generation(47),
-                &DataConTable::default(),
-                foreign,
-                settlement
-            )),
-            Err(ResidentError::ForeignCustody)
-        ));
         assert_eq!(destination.value_handle_count(), before);
         major_collect(&mut destination);
         assert_live_binding(&mut destination, ScopeId::ROOT, destination_id);
-        assert!(destination.discard_custody(local));
+        drop(local);
+        destination.settle_dropped_custody();
+        assert_eq!(destination.value_handle_count(), before - 1);
+        assert_live_binding(&mut destination, ScopeId::ROOT, destination_id);
     }
 
     #[test]
     fn exclusive_binding_custody_consumption_preserves_source_after_major_gc() {
         let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
-        let id = bind_fixture(&mut session, ScopeId::ROOT, 41);
+        let source = session.mint_isolated_scope_with_lease().unwrap();
+        let id = bind_fixture(&mut session, &source, ScopeId::ROOT, 41);
         let provenance = Arc::new(ProgramProvenance::default());
         session
             .binding_provenance
@@ -9382,7 +9709,8 @@ mod custody_release_tests {
         let custody = session.retain_binding_custody("x").unwrap().unwrap();
         assert!(Arc::ptr_eq(&custody.provenance, &provenance));
         assert_eq!(session.value_handle_count(), original + 1);
-        assert!(session.discard_custody(custody));
+        drop(custody);
+        session.settle_dropped_custody();
         major_collect(&mut session);
         assert_live_binding(&mut session, ScopeId::ROOT, id);
         let custody = session.retain_binding_custody("x").unwrap().unwrap();
@@ -9392,7 +9720,8 @@ mod custody_release_tests {
         drop(parcel);
         let custody = session.retain_binding_custody("x").unwrap().unwrap();
         let custody = session.rehome_custody(custody, RealmId::fresh()).unwrap();
-        assert!(session.discard_custody(custody));
+        drop(custody);
+        session.settle_dropped_custody();
         major_collect(&mut session);
         assert_live_binding(&mut session, ScopeId::ROOT, id);
         let custody = session.retain_binding_custody("x").unwrap().unwrap();
@@ -9410,13 +9739,15 @@ mod custody_release_tests {
         for (retain_binding, retain_lexical) in [(false, false), (true, false), (false, true)] {
             let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
             let other_scope = session.mint_scope(ScopeId::ROOT).unwrap();
-            let other_id = bind_fixture(&mut session, other_scope, 43);
+            let other_source = session.adopt_initial_notebook_scope(other_scope).unwrap();
+            let other_id = bind_fixture(&mut session, &other_source, other_scope, 43);
             let other_provenance = Arc::new(ProgramProvenance::default());
             session
                 .binding_provenance
                 .insert(other_id.raw(), Arc::clone(&other_provenance));
             let scope = session.mint_scope(ScopeId::ROOT).unwrap();
-            let id = bind_fixture(&mut session, scope, 42);
+            let source = session.adopt_initial_notebook_scope(scope).unwrap();
+            let id = bind_fixture(&mut session, &source, scope, 42);
             let provenance = Arc::new(ProgramProvenance::default());
             let weak = Arc::downgrade(&provenance);
             session
@@ -9442,6 +9773,8 @@ mod custody_release_tests {
             let retained = custody.handle.unwrap();
             session.set_run_context(SessionRunContext::ROOT).unwrap();
             session.retire_scope(scope);
+            drop(source);
+            session.settle_dropped_custody();
             assert_eq!(session.state.bindings().get(id).is_some(), leased);
             assert_eq!(session.binding_provenance.contains_key(&id.raw()), leased);
             assert!(Arc::ptr_eq(
@@ -9463,7 +9796,8 @@ mod custody_release_tests {
                 session.retain_binding_custody_in(scope, "x", id),
                 Err(ResidentError::Session(SessionError::DeadScope(_)))
             ));
-            assert!(session.discard_custody(custody));
+            drop(custody);
+            session.settle_dropped_custody();
             assert_eq!(weak.upgrade().is_some(), leased);
             drop(binding_lease);
             drop(lexical_lease);
@@ -9484,6 +9818,8 @@ mod custody_release_tests {
             major_collect(&mut session);
             assert_live_binding(&mut session, other_scope, other_id);
             session.retire_scope(other_scope);
+            drop(other_source);
+            session.settle_dropped_custody();
             assert!(!session.binding_provenance.contains_key(&other_id.raw()));
             major_collect(&mut session);
             assert_eq!(session.value_handle_count(), 0);
@@ -9493,7 +9829,8 @@ mod custody_release_tests {
     #[test]
     fn exact_borrowed_binding_refusals_precede_hole_access_and_root_allocation() {
         let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
-        let id = bind_fixture(&mut session, ScopeId::ROOT, 43);
+        let source = session.mint_isolated_scope_with_lease().unwrap();
+        let id = bind_fixture(&mut session, &source, ScopeId::ROOT, 43);
         let capture = session.mint_detached_scope(ScopeId::ROOT).unwrap();
         session
             .set_run_context(SessionRunContext {
@@ -9529,7 +9866,7 @@ mod custody_release_tests {
         // The detached capture retains the old root but original-name lookup
         // still refuses a later replacement of that exact request input.
         session.set_run_context(SessionRunContext::ROOT).unwrap();
-        bind_fixture(&mut session, ScopeId::ROOT, 44);
+        bind_fixture(&mut session, &source, ScopeId::ROOT, 44);
         session
             .set_run_context(SessionRunContext {
                 lexical_scope: capture,
@@ -9548,8 +9885,9 @@ mod custody_release_tests {
             ))
         .unwrap()
         .is_none());
-        let foreign_scope = session.mint_isolated_scope();
-        let foreign_id = bind_fixture(&mut session, foreign_scope, 45);
+        let foreign_source = session.mint_isolated_scope_with_lease().unwrap();
+        let foreign_scope = foreign_source.scope();
+        let foreign_id = bind_fixture(&mut session, &foreign_source, foreign_scope, 45);
         assert!(matches!(
             tidepool_testing::with_settlement(|settlement| session
                 .resume_framed_binding_sources_classified(
@@ -9696,10 +10034,7 @@ mod authored_publication_tests {
         })
         .unwrap();
         let first = checked.checked_item(0).unwrap();
-        let prefix = state
-            .begin_cell_program(program)
-            .unwrap()
-            .unwrap();
+        let prefix = state.begin_cell_program(program).unwrap().unwrap();
         let mut resident = TestSession::from_persistent_for_test(frunk::HNil, EmptyOutput, state);
         resident
             .set_run_context(SessionRunContext {
@@ -9812,8 +10147,12 @@ mod authored_publication_tests {
             id
         };
         let (_root, mut session) = startup_session();
+        let original = session.state.mint_notebook_scope_with_lease(None).unwrap();
         let parent = session.mint_isolated_scope();
-        let id = bind(&mut session, parent, 701);
+        let _parent = session.adopt_initial_notebook_scope(parent).unwrap();
+        let id = source_action(&mut session, &original, |session, _| {
+            bind(session, parent, 701)
+        });
         let child = session.mint_scope(parent).unwrap();
         let before = session.state.compile_view_key_in(child).unwrap();
         let visible = session.compile_view_in(child).unwrap();
@@ -9856,7 +10195,10 @@ mod authored_publication_tests {
             .is_current_for(&hidden));
 
         let orphan_owner = session.mint_isolated_scope();
-        let orphan = bind(&mut session, orphan_owner, 702);
+        let _orphan = session.adopt_initial_notebook_scope(orphan_owner).unwrap();
+        let orphan = source_action(&mut session, &original, |session, _| {
+            bind(session, orphan_owner, 702)
+        });
         let orphan_binder = BoundBinder {
             var_id: orphan.raw(),
             module: SessionModule::val(Generation(702)).module_name(),
@@ -9874,6 +10216,48 @@ mod authored_publication_tests {
         assert!(after_prune != before_prune);
         session.prune_binding_metadata();
         assert!(session.state.compile_view_key_in(child).as_ref() == Some(&after_prune));
+    }
+
+    #[test]
+    fn never_visible_input_retirement_keeps_hidden_classification_until_last_lease() {
+        let (_root, mut session) = startup_session();
+        let original = session.state.mint_notebook_scope_with_lease(None).unwrap();
+        let private = session.mint_isolated_scope();
+        let _private = session.adopt_initial_notebook_scope(private).unwrap();
+        let id = source_action(&mut session, &original, |session, _| {
+            let entry = crate::session::prepared::tests::evaluated_publication_fixture(
+                &mut session.state,
+                "input",
+                703,
+            );
+            let id = entry.id;
+            session.state.bind_in(private, entry).unwrap();
+            id
+        });
+        // Component state-machine fixture: production classification is issued
+        // solely by the atomic private mount, whose native receipt is separate.
+        session
+            .hidden_host_bindings
+            .insert(id, HiddenHostBinding::PrivateInput);
+        let leases = session.state.acquire_binding_leases([id]);
+        assert_eq!(leases.len(), 1);
+        let public_key = session.state.compile_view_key_in(ScopeId::ROOT).unwrap();
+        session.retire_binding_owner(id);
+        assert!(session.state.bindings().get(id).is_some());
+        assert_eq!(
+            session.hidden_host_bindings.get(&id),
+            Some(&HiddenHostBinding::PrivateInput)
+        );
+        session.prune_binding_metadata();
+        assert!(session.hidden_host_bindings.contains_key(&id));
+        assert!(session.state.compile_view_key_in(ScopeId::ROOT).as_ref() == Some(&public_key));
+        let expired = session.state.release_binding_leases(leases);
+        assert_eq!(expired.len(), 1);
+        session.state.release_binding_roots(expired);
+        assert!(session.state.bindings().get(id).is_none());
+        session.prune_binding_metadata();
+        assert!(!session.hidden_host_bindings.contains_key(&id));
+        assert!(session.state.compile_view_key_in(ScopeId::ROOT).as_ref() == Some(&public_key));
     }
 
     #[test]
@@ -9926,7 +10310,9 @@ mod authored_publication_tests {
             session.capture_inspection_inputs(&view),
             Err(SessionError::StaleStagedDeclaration)
         ));
-        session.hidden_host_bindings.insert(hidden_id, ());
+        session
+            .hidden_host_bindings
+            .insert(hidden_id, HiddenHostBinding::Generic);
         let normalized = session.compile_view_in(ScopeId::ROOT).unwrap();
         assert!(matches!(
             session.capture_inspection_inputs(&normalized),
@@ -10086,11 +10472,11 @@ mod authored_publication_tests {
             });
             value.scope = scope.scope();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _settled = session.with_source_compiler_transaction(scope.clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground, crate::CompilerTransactionCancellation::new(), None, |_| {}, |session, report| {
+                let _settled = session.with_source_compiler_transaction(scope.original_source().clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground, crate::CompilerTransactionCancellation::new(), None, |_| {}, |session, report| {
                     session.state.bind_replacing_decls_in(scope.scope(), vec![value], report).unwrap();
                     let fence = scope.source_admission().fence().unwrap();
                     assert_eq!(fence.pending_claims(), 1, "actual binding claim remains held inside its owner");
-                    fence.reopen(&scope).unwrap();
+                    fence.reopen(scope.original_source()).unwrap();
                     if unwind { panic!("compiler action unwind"); }
                     // Synthetic aggregate uncertainty checks joined custody, not a GHC END fault.
                     report(crate::CompilerTransactionClose::Unconfirmed(tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled, tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None })));
@@ -10101,7 +10487,7 @@ mod authored_publication_tests {
             assert_eq!(fence.pending_claims(), 1);
             assert_eq!(fence.unconfirmed_claims(), 1);
             assert!(matches!(
-                fence.reopen(&scope),
+                fence.reopen(scope.original_source()),
                 Err(super::super::SourceAdmissionError::Unconfirmed { .. })
             ));
         }
@@ -10159,7 +10545,7 @@ mod authored_publication_tests {
             value.scope = target_scope;
             let binding_id = value.id;
             recipient.with_source_compiler_transaction(
-                source.clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                source.original_source().clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(), None, |_| {},
                 |session, report| {
                     session.state.bind_replacing_decls_in(target_scope, vec![value], report).unwrap();
@@ -10220,7 +10606,9 @@ mod authored_publication_tests {
                     "explicit A retirement is not evidence of B END"
                 );
                 assert!(matches!(
-                    target_weak.upgrade().map(|lease| target_fence.reopen(&lease)),
+                    target_weak
+                        .upgrade()
+                        .map(|lease| target_fence.reopen(lease.original_source())),
                     Some(Err(super::super::SourceAdmissionError::Unconfirmed { .. }))
                 ));
                 recipient.state.retire_scope(target_scope);
@@ -10237,7 +10625,7 @@ mod authored_publication_tests {
                 "explicit retirement releases only that exact target hold"
             );
             assert!(recipient.state.bindings().get(binding_id).is_none());
-            assert!(source.validate_source_issuer().is_ok());
+            assert!(source.validate_lexical_issuer().is_ok());
             assert!(matches!(
                 source.source_admission().admit(),
                 Err(super::super::SourceAdmissionError::Unconfirmed { count: 1, .. })
@@ -10251,10 +10639,10 @@ mod authored_publication_tests {
             ));
             drop(_next);
             drop(recipient);
-            assert_eq!(source.validate_source_issuer().is_err(), shared_gate);
+            assert_eq!(source.validate_lexical_issuer().is_err(), shared_gate);
             drop(original);
             assert!(matches!(
-                source.validate_source_issuer(),
+                source.validate_lexical_issuer(),
                 Err(super::super::SourceAdmissionError::StaleSourceLease)
             ));
             drop(source);
@@ -10310,7 +10698,7 @@ mod authored_publication_tests {
         });
         child_session
             .with_source_compiler_transaction(
-                child.clone(),
+                child.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -10413,14 +10801,14 @@ mod authored_publication_tests {
                 1,
                 "distinct lexical owners sharing a gate earn only one gate claim"
             );
-            fence.reopen(&source).unwrap();
+            fence.reopen(source.original_source()).unwrap();
             id
         });
         recipient.state.retire_scope(captured.scope());
         assert!(recipient.state.bindings().get(recipient_binding).is_none());
         assert!(original.state.bindings().get(original_binding).is_some());
         assert_eq!(original.state.persistent_roots_count(), native_roots);
-        assert!(source.validate_source_issuer().is_ok());
+        assert!(source.validate_lexical_issuer().is_ok());
         drop(
             source
                 .source_admission()
@@ -10428,8 +10816,8 @@ mod authored_publication_tests {
                 .expect("foreign retirement leaves original gate open"),
         );
         drop(recipient);
-        assert!(captured.validate_source_issuer().is_err());
-        assert!(source.validate_source_issuer().is_ok());
+        assert!(captured.validate_lexical_issuer().is_err());
+        assert!(source.validate_lexical_issuer().is_ok());
         assert!(original.state.scope_tree().is_live(source.scope()));
         assert!(original.state.bindings().get(original_binding).is_some());
         assert_eq!(original.state.persistent_roots_count(), native_roots);
@@ -10562,7 +10950,7 @@ mod authored_publication_tests {
         let includes = view.include_paths(effects.include_paths());
         let admitted = original
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -10671,11 +11059,11 @@ mod authored_publication_tests {
             assert_eq!(transferred.epoch, predecessor_epoch + 1);
             assert!(original.state.scope_tree().is_live(source.scope()));
             assert!(matches!(
-                source.validate_source_issuer(),
+                source.validate_lexical_issuer(),
                 Err(super::super::SourceAdmissionError::StaleSourceLease)
             ));
             assert!(matches!(
-                admission.source_lease().validate_source_issuer(),
+                admission.source_lease().validate_lexical_issuer(),
                 Err(super::super::SourceAdmissionError::StaleSourceLease)
             ));
             drop(admission.source_lease().source_admission().admit().expect(
@@ -10746,7 +11134,7 @@ mod authored_publication_tests {
                 recipient.public_visibility_snapshot_in(unrelated.scope()),
                 before_public
             );
-            assert!(unrelated.validate_source_issuer().is_ok());
+            assert!(unrelated.validate_lexical_issuer().is_ok());
             drop(unrelated.source_admission().admit().unwrap());
             let entered = std::cell::Cell::new(false);
             let stale_entry = source.with_source_compiler_transaction(
@@ -10771,7 +11159,7 @@ mod authored_publication_tests {
     ) -> T {
         session
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -11406,7 +11794,8 @@ mod authored_publication_tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(carried, identities.into_iter().collect());
         assert!(Arc::ptr_eq(&reexported.provenance, &provenance));
-        assert!(destination.discard_custody(custody));
+        drop(custody);
+        destination.settle_dropped_custody();
     }
 
     #[test]
@@ -11538,7 +11927,8 @@ mod authored_publication_tests {
                 Arc::ptr_eq(&arrived.provenance, &provenance),
                 "binding re-export to a third machine cannot replace its provenance"
             );
-            assert!(third.discard_custody(arrived));
+            drop(arrived);
+            third.settle_dropped_custody();
             assert_eq!(
                 &destination
                     .state
@@ -11977,10 +12367,7 @@ mod authored_publication_tests {
         })
         .unwrap();
         let item = checked.checked_item(0).unwrap();
-        let prefix = session
-            .begin_cell_program(program)
-            .unwrap()
-            .unwrap();
+        let prefix = session.begin_cell_program(program).unwrap().unwrap();
         let item_admission = session.admit_checked_item(prefix.clone(), item).unwrap();
         let generation = item_admission.generation();
         let TurnResult::Bind {
@@ -12562,11 +12949,10 @@ mod source_origin_tests {
 
     fn issued(
         site_id: u64,
-        source: &Arc<super::super::RuntimeLexicalScopeLease>,
+        source: &Arc<super::super::RuntimeOriginalSource>,
     ) -> ProgramProvenance {
         let mut provenance = ProgramProvenance::from_sites(&[site(site_id)]).unwrap();
-        provenance
-            .original_sources
+        Arc::make_mut(&mut provenance.original_sources.sites)
             .insert(site_id, RuntimeSourceOrigin::Known(source.clone()));
         provenance
     }
@@ -12575,8 +12961,10 @@ mod source_origin_tests {
     fn independent_source_owners_survive_identical_compiler_evidence() {
         let mut a = PersistentSession::new(None, 1024);
         let mut b = PersistentSession::new(None, 1024);
-        let source_a = a.mint_notebook_scope_with_lease(None).unwrap();
-        let source_b = b.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical_a = a.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical_b = b.mint_notebook_scope_with_lease(None).unwrap();
+        let source_a = lexical_a.original_source().clone();
+        let source_b = lexical_b.original_source().clone();
         source_a.validate_source_issuer().unwrap();
         source_b.validate_source_issuer().unwrap();
         assert_ne!(source_a.scope(), ScopeId::ROOT);
@@ -12584,13 +12972,23 @@ mod source_origin_tests {
         assert!(!Arc::ptr_eq(&source_a, &source_b));
         let mut provenance = issued(17, &source_a);
         provenance.merge(&issued(17, &source_a)).unwrap();
+        drop(lexical_a);
+        drop(lexical_b);
+        a.reap_admission_leases();
+        b.reap_admission_leases();
+        assert!(!a.scope_tree().is_live(source_a.scope()));
+        assert!(!b.scope_tree().is_live(source_b.scope()));
+        source_a.validate_source_issuer().unwrap();
+        source_b.validate_source_issuer().unwrap();
         assert!(Arc::ptr_eq(
-            &provenance.original_sources[&17].require_unique(17).unwrap(),
+            &provenance.original_sources.sites[&17]
+                .require_unique(17)
+                .unwrap(),
             &source_a
         ));
         provenance.merge(&issued(17, &source_b)).unwrap();
         assert!(matches!(
-            provenance.original_sources[&17].require_unique(17),
+            provenance.original_sources.sites[&17].require_unique(17),
             Err(ResidentError::AmbiguousOriginalSource {
                 site: 17,
                 origins: 2
@@ -12601,29 +12999,54 @@ mod source_origin_tests {
     #[test]
     fn unknown_same_site_stays_missing_in_both_merge_orders() {
         let mut owner = PersistentSession::new(None, 1024);
-        let source = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let source = lexical.original_source().clone();
         source.validate_source_issuer().unwrap();
         assert_ne!(source.scope(), ScopeId::ROOT);
         let known = issued(17, &source);
+        let shared = known.original_sources.clone();
+        assert!(Arc::ptr_eq(&shared.sites, &known.original_sources.sites));
+        let mut selected = shared.select([17, 19]);
+        selected.merge(&NativeSourceCustody::unknown([17]));
+        assert!(matches!(
+            selected.require_unique(17),
+            Err(ResidentError::MissingOriginalSource {
+                known_origins: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            selected.require_unique(19),
+            Err(ResidentError::MissingOriginalSource {
+                known_origins: 0,
+                ..
+            })
+        ));
+        assert!(Arc::ptr_eq(&shared.require_unique(17).unwrap(), &source));
         let unknown = ProgramProvenance::from_sites(&[site(17)]).unwrap();
         for (mut left, right) in [(known.clone(), unknown.clone()), (unknown, known)] {
             left.merge(&right).unwrap();
             assert!(matches!(
-                left.original_sources[&17].require_unique(17),
+                left.original_sources.sites[&17].require_unique(17),
                 Err(ResidentError::MissingOriginalSource {
                     site: 17,
                     known_origins: 1
                 })
             ));
-            assert!(Arc::ptr_eq(&left.original_sources[&17].known()[0], &source));
+            assert!(Arc::ptr_eq(
+                &left.original_sources.sites[&17].known()[0],
+                &source
+            ));
         }
     }
 
     #[test]
     fn fresh_target_and_retained_dependency_keep_distinct_site_owners() {
         let mut owner = PersistentSession::new(None, 1024);
-        let source_a = owner.mint_notebook_scope_with_lease(None).unwrap();
-        let source_b = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical_a = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical_b = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let source_a = lexical_a.original_source().clone();
+        let source_b = lexical_b.original_source().clone();
         source_a.validate_source_issuer().unwrap();
         source_b.validate_source_issuer().unwrap();
         assert_ne!(source_a.scope(), ScopeId::ROOT);
@@ -12632,11 +13055,15 @@ mod source_origin_tests {
         let mut provenance = issued(23, &source_b);
         provenance.merge(&issued(17, &source_a)).unwrap();
         assert!(Arc::ptr_eq(
-            &provenance.original_sources[&17].require_unique(17).unwrap(),
+            &provenance.original_sources.sites[&17]
+                .require_unique(17)
+                .unwrap(),
             &source_a
         ));
         assert!(Arc::ptr_eq(
-            &provenance.original_sources[&23].require_unique(23).unwrap(),
+            &provenance.original_sources.sites[&23]
+                .require_unique(23)
+                .unwrap(),
             &source_b
         ));
     }
@@ -12644,7 +13071,8 @@ mod source_origin_tests {
     #[test]
     fn unresolved_import_owners_poison_only_selected_native_sites() {
         let mut owner = PersistentSession::new(None, 1024);
-        let source = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let source = lexical.original_source().clone();
         source.validate_source_issuer().unwrap();
         assert_ne!(source.scope(), ScopeId::ROOT);
         let binder = SymbolIdentity {
@@ -12671,10 +13099,16 @@ mod source_origin_tests {
                 binder: binder.clone(),
             },
             ImportOwner::CodeExport {
-                binder,
+                binder: binder.clone(),
                 generation: 1,
                 root_id: 9,
                 interface_digest: None,
+            },
+            ImportOwner::Package {
+                unit: binder.unit.clone(),
+                module: binder.module.clone(),
+                binder,
+                interface_digest: [2; 32],
             },
         ];
         for missing in &missing_owners {
@@ -12725,15 +13159,16 @@ mod source_origin_tests {
     #[test]
     fn missing_per_site_runtime_evidence_is_unknown_at_owner_boundaries() {
         let mut owner = PersistentSession::new(None, 1024);
-        let source = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let lexical = owner.mint_notebook_scope_with_lease(None).unwrap();
+        let source = lexical.original_source().clone();
         source.validate_source_issuer().unwrap();
         let known = issued(17, &source);
         let mut missing = known.clone();
-        missing.original_sources.clear();
+        Arc::make_mut(&mut missing.original_sources.sites).clear();
         for (mut left, right) in [(missing.clone(), known.clone()), (known, missing.clone())] {
             left.merge(&right).unwrap();
             assert!(matches!(
-                left.original_sources[&17].require_unique(17),
+                left.original_sources.sites[&17].require_unique(17),
                 Err(ResidentError::MissingOriginalSource {
                     site: 17,
                     known_origins: 1
@@ -12744,7 +13179,7 @@ mod source_origin_tests {
         metadata_only.sites.insert(17, site(17));
         metadata_only.extend(&[site(17)]).unwrap();
         assert!(matches!(
-            metadata_only.original_sources[&17].require_unique(17),
+            metadata_only.original_sources.sites[&17].require_unique(17),
             Err(ResidentError::MissingOriginalSource {
                 known_origins: 0,
                 ..
@@ -12762,6 +13197,56 @@ mod source_origin_tests {
                 ..
             })
         ));
+
+        let mut raw = ProgramProvenance::default();
+        raw.original_sources = NativeSourceCustody::complete(
+            [31],
+            BTreeMap::from([(29, RuntimeSourceOrigin::Known(source.clone()))]),
+        );
+        assert!(raw.sites.is_empty());
+        assert!(raw.authenticated_inputs.is_empty());
+        assert!(Arc::ptr_eq(
+            &raw.original_sources.require_unique(29).unwrap(),
+            &source,
+        ));
+        assert!(matches!(
+            raw.original_sources.require_unique(31),
+            Err(ResidentError::MissingOriginalSource {
+                known_origins: 0,
+                ..
+            })
+        ));
+        let typed = issued(29, &source);
+        for (mut left, right) in [(raw.clone(), typed.clone()), (typed, raw.clone())] {
+            left.merge(&right).unwrap();
+            assert!(Arc::ptr_eq(
+                &left.original_sources.require_unique(29).unwrap(),
+                &source,
+            ));
+            assert!(matches!(
+                left.original_sources.require_unique(31),
+                Err(ResidentError::MissingOriginalSource {
+                    known_origins: 0,
+                    ..
+                })
+            ));
+        }
+        let unknown_raw = ProgramProvenance {
+            original_sources: NativeSourceCustody::unknown([29]),
+            ..ProgramProvenance::default()
+        };
+        for (mut left, right) in [(raw.clone(), unknown_raw.clone()), (unknown_raw, raw)] {
+            left.merge(&right).unwrap();
+            assert!(left.sites.is_empty());
+            assert!(left.authenticated_inputs.is_empty());
+            assert!(matches!(
+                left.original_sources.require_unique(29),
+                Err(ResidentError::MissingOriginalSource {
+                    known_origins: 1,
+                    ..
+                })
+            ));
+        }
     }
 
     proptest! {
@@ -12771,36 +13256,40 @@ mod source_origin_tests {
             history in prop::collection::vec((0u64..5, 0usize..3, any::<bool>()), 1..80),
         ) {
             let mut owner = PersistentSession::new(None, 1024);
-            let leases = (0..3).map(|_| owner.mint_notebook_scope_with_lease(None).unwrap()).collect::<Vec<_>>();
-            for (index, lease) in leases.iter().enumerate() {
-                lease.validate_source_issuer().unwrap();
-                prop_assert_ne!(lease.scope(), ScopeId::ROOT);
-                for previous in &leases[..index] {
-                    prop_assert!(!Arc::ptr_eq(lease, previous));
+            let lexical = (0..3).map(|_| owner.mint_notebook_scope_with_lease(None).unwrap()).collect::<Vec<_>>();
+            let sources = lexical.iter().map(|lease| lease.original_source().clone()).collect::<Vec<_>>();
+            drop(lexical);
+            owner.reap_admission_leases();
+            for (index, source) in sources.iter().enumerate() {
+                source.validate_source_issuer().unwrap();
+                prop_assert_ne!(source.scope(), ScopeId::ROOT);
+                prop_assert!(!owner.scope_tree().is_live(source.scope()));
+                for previous in &sources[..index] {
+                    prop_assert!(!Arc::ptr_eq(source, previous));
                 }
             }
             let mut actual = ProgramProvenance::default();
             let mut model = BTreeMap::<u64, (BTreeSet<usize>, bool)>::new();
             for (site_id, source, missing) in history {
-                let mut contribution = issued(site_id, &leases[source]);
+                let mut contribution = issued(site_id, &sources[source]);
                 if missing {
-                    contribution.original_sources.insert(site_id, RuntimeSourceOrigin::Unknown(vec![leases[source].clone()]));
+                    Arc::make_mut(&mut contribution.original_sources.sites).insert(site_id, RuntimeSourceOrigin::Unknown(vec![sources[source].clone()]));
                 }
                 actual.merge(&contribution).unwrap();
                 let expected = model.entry(site_id).or_default();
                 expected.0.insert(source);
                 expected.1 |= missing;
                 for (site_id, (owners, unresolved)) in &model {
-                    let observed = &actual.original_sources[site_id];
+                    let observed = &actual.original_sources.sites[site_id];
                     let actual_owners = observed.known().iter().map(|lease| {
-                        leases.iter().position(|issued| Arc::ptr_eq(issued, lease)).unwrap()
+                        sources.iter().position(|issued| Arc::ptr_eq(issued, lease)).unwrap()
                     }).collect::<BTreeSet<_>>();
                     prop_assert_eq!(&actual_owners, owners);
                     prop_assert_eq!(observed.known().len(), owners.len());
                     match observed.require_unique(*site_id) {
                         Ok(lease) => {
                             prop_assert!(!unresolved && owners.len() == 1);
-                            prop_assert!(Arc::ptr_eq(&lease, &leases[*owners.first().unwrap()]));
+                            prop_assert!(Arc::ptr_eq(&lease, &sources[*owners.first().unwrap()]));
                         }
                         Err(ResidentError::MissingOriginalSource { known_origins, .. }) => {
                             prop_assert!(*unresolved);

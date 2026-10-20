@@ -194,10 +194,13 @@ impl RunControlClient {
                         capture.work,
                         GenerationRetirementWork::Unavailable
                     ));
-                    assert!(matches!(
-                        capture.physical_closure,
-                        GenerationCapturePhysicalClosure::UnknownPhysical
-                    ));
+                    let GenerationCapturePhysicalClosure::Guarded { actors, cells } =
+                        &capture.physical_closure;
+                    assert!(actors.contains(&actor));
+                    assert!(capture.actors.iter().any(|captured| {
+                        captured.identity() == actor
+                            && cells.contains(&captured.address().get_id())
+                    }));
                 }
                 (
                     _,

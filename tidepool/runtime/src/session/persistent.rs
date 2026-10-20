@@ -221,7 +221,7 @@ pub struct PersistentSession {
     catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
     admission_owner: Arc<super::admission::RuntimeAdmissionOwner>,
     pub(super) uncertain_source_scopes:
-        Arc<parking_lot::Mutex<Vec<Arc<super::RuntimeLexicalScopeLease>>>>,
+        Arc<parking_lot::Mutex<super::admission::RuntimeUnconfirmedSourceCustody>>,
     /// The resident machine — `None` before the first turn bootstraps it,
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
     /// turn's duration (stowed-XOR-running).
@@ -341,7 +341,14 @@ impl super::PreparedNotebookGeneration {
             || base.scope != self.scope
             || base.key != self.prospective_compiler_key()?
             || base.source.as_ref() != &self.next.references.source
-            || !Arc::ptr_eq(&base.original_source, &base.target)
+            || !Arc::ptr_eq(
+                &completed.custody.original_source,
+                completed.custody.target.original_source(),
+            )
+            || !base
+                .original_source
+                .matches(&completed.custody.original_source)
+            || !base.target.matches(&completed.custody.target)
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
@@ -434,7 +441,7 @@ impl PersistentSession {
     /// Own source preparation for callers that hold the session substrate.
     pub fn with_source_compiler_transaction<T>(
         &mut self,
-        source: Arc<super::RuntimeLexicalScopeLease>,
+        source: Arc<super::RuntimeOriginalSource>,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         cancellation: crate::CompilerTransactionCancellation,
         supplemental_hook: Option<super::SourceAdmissionHook>,
@@ -443,6 +450,7 @@ impl PersistentSession {
     ) -> Result<crate::CompilerTransactionSettled<T>, super::SourceAdmissionError> {
         super::source_admission::run_source_compiler_transaction(
             source,
+            None,
             workload,
             cancellation,
             supplemental_hook,
@@ -471,7 +479,9 @@ impl PersistentSession {
                 .value_generation
                 .max(lib.log.retained_value_generation_high_water());
         }
-        let uncertain_source_scopes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let uncertain_source_scopes = Arc::new(parking_lot::Mutex::new(
+            super::admission::RuntimeUnconfirmedSourceCustody::default(),
+        ));
         PersistentSession {
             source_transaction: None,
             admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new(
@@ -538,7 +548,7 @@ impl PersistentSession {
         };
     }
 
-    fn is_stub_module(&self, module: SessionModule) -> bool {
+    pub(super) fn is_stub_module(&self, module: SessionModule) -> bool {
         self.stub_generations.contains(&module.gen().0)
     }
 
@@ -1757,7 +1767,7 @@ impl PersistentSession {
         &self,
         scope: ScopeId,
         source: &super::GenerationArtifactReference,
-        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        original_source: &Arc<super::RuntimeOriginalSource>,
         hidden: impl Fn(tidepool_repr::SessionVarId) -> bool,
     ) -> Result<super::inspection::AdmittedInspectionWorld, SessionError> {
         use super::inspection::{
@@ -1781,7 +1791,9 @@ impl PersistentSession {
             );
             return Ok(AdmittedInspectionWorld {
                 base: association.base.clone(),
+                custody: association.base.acquire_custody()?,
                 inputs: InspectionWorldInputs::Published(association.world.clone()),
+                observation: None,
             });
         }
         tidepool_toolchain::timing::record_host_work(
@@ -1838,20 +1850,29 @@ impl PersistentSession {
             )?;
         let lexical = self.capture_compiler_world_lexical_in(scope)?;
         Ok(AdmittedInspectionWorld {
+            custody: super::inspection::InspectionWorldCustody {
+                original_source: original_source.clone(),
+                target: self.source_lease_in(scope)?,
+            },
             base: InspectionWorldBase {
                 scope,
                 key,
                 owner: self.admission_owner().clone(),
                 epoch: self.admission_owner().epoch(),
                 source: Arc::new(source.clone()),
-                original_source: original_source.clone(),
-                target: self.source_lease_in(scope)?,
+                original_source: super::inspection::InspectionWorldSourceObservation::new(
+                    original_source,
+                ),
+                target: super::inspection::InspectionWorldLeaseObservation::new(
+                    &self.source_lease_in(scope)?,
+                ),
             },
             inputs: InspectionWorldInputs::Cold {
                 primary: self.lib().current_exact_context_in(scope),
                 bindings,
                 lexical,
             },
+            observation: None,
         })
     }
 
@@ -1885,15 +1906,15 @@ impl PersistentSession {
         &self,
         base: &super::inspection::InspectionWorldBase,
         source: &super::GenerationArtifactReference,
-        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> bool {
         Arc::ptr_eq(&base.owner, self.admission_owner())
             && base.epoch == self.admission_owner().epoch()
             && base.source.sha256() == source.sha256()
-            && Arc::ptr_eq(&base.original_source, original_source)
+            && base.original_source.matches(original_source)
             && self
                 .source_lease_in(base.scope)
-                .is_ok_and(|lease| Arc::ptr_eq(&lease, &base.target))
+                .is_ok_and(|lease| base.target.matches(&lease))
             && self.compile_view_key_in(base.scope).as_ref() == Some(&base.key)
     }
 
@@ -1901,10 +1922,11 @@ impl PersistentSession {
         &mut self,
         completed: &super::inspection::CompletedInspectionWorld,
         source: &super::GenerationArtifactReference,
-        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> bool {
         self.install_compiler_world_association_if_current(
             &completed.prepared.association,
+            &completed.prepared.custody,
             &completed.cancellation,
             source,
             original_source,
@@ -1914,17 +1936,25 @@ impl PersistentSession {
     pub(super) fn install_compiler_world_association_if_current(
         &mut self,
         association: &Arc<super::inspection::InspectionWorldAssociation>,
+        custody: &super::inspection::InspectionWorldCustody,
         cancellation: &crate::HostAdmissionCancellation,
         source: &super::GenerationArtifactReference,
-        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> bool {
-        super::RuntimeLexicalScopeLease::with_source_leases(
-            [original_source.clone(), association.base.target.clone()],
-            |leases| {
+        super::RuntimeOriginalSource::with_sources_and_targets(
+            [custody.original_source.clone()],
+            [custody.target.clone()],
+            |sources, _| {
                 super::RuntimeSourceAdmission::with_open_admissions(
-                    leases.iter().map(|lease| lease.source_admission()),
+                    sources.iter().map(|source| source.source_admission()),
                     || {
-                        if cancellation.checkpoint().is_err()
+                        if !association
+                            .base
+                            .original_source
+                            .matches(&custody.original_source)
+                            || !association.base.target.matches(&custody.target)
+                            || !Arc::ptr_eq(original_source, &custody.original_source)
+                            || cancellation.checkpoint().is_err()
                             || !self.inspection_world_base_is_current(
                                 &association.base,
                                 source,
@@ -1961,7 +1991,7 @@ impl PersistentSession {
         action: impl FnOnce() -> T,
     ) -> Result<T, SessionError> {
         let association = &completed.association;
-        publication.with_current(&association.base.target, || {
+        publication.with_current(&completed.custody.target, || {
             completed
                 .cancellation
                 .checkpoint()
@@ -1969,13 +1999,18 @@ impl PersistentSession {
             if !self.inspection_world_base_is_current(
                 &association.base,
                 &association.base.source,
-                &association.base.original_source,
-            ) || !self
-                .lib()
-                .tips
-                .get(&association.base.scope)
-                .and_then(|state| state.inspection_world.as_ref())
-                .is_some_and(|installed| Arc::ptr_eq(installed, association))
+                &completed.custody.original_source,
+            ) || !association
+                .base
+                .original_source
+                .matches(&completed.custody.original_source)
+                || !association.base.target.matches(&completed.custody.target)
+                || !self
+                    .lib()
+                    .tips
+                    .get(&association.base.scope)
+                    .and_then(|state| state.inspection_world.as_ref())
+                    .is_some_and(|installed| Arc::ptr_eq(installed, association))
             {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
@@ -2728,7 +2763,7 @@ impl PersistentSession {
         prerequisite: Option<Arc<super::RuntimeLexicalScopeLease>>,
     ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
         if let Some(prerequisite) = &prerequisite {
-            prerequisite.validate_source_issuer()?;
+            prerequisite.validate_lexical_issuer()?;
         }
         self.reap_admission_leases();
         let scope = self.mint_isolated_scope();
@@ -2753,7 +2788,7 @@ impl PersistentSession {
         prerequisite: Option<Arc<super::RuntimeLexicalScopeLease>>,
     ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SessionError> {
         if let Some(prerequisite) = &prerequisite {
-            prerequisite.validate_source_issuer()?;
+            prerequisite.validate_lexical_issuer()?;
         }
         self.reap_admission_leases();
         if scope == ScopeId::ROOT {
@@ -3618,6 +3653,25 @@ impl PersistentSession {
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
     ) -> Result<PublicManifestBase, SessionError> {
+        self.snapshot_publication_target_with_world(
+            owner,
+            public_scope,
+            private_scope,
+            write_ids,
+            source_keys,
+            None,
+        )
+    }
+
+    pub(super) fn snapshot_publication_target_with_world(
+        &self,
+        owner: Option<RecoveryPublicOwner>,
+        public_scope: ScopeId,
+        private_scope: ScopeId,
+        write_ids: Vec<SessionVarId>,
+        source_keys: Vec<SourceLeaseKey>,
+        world: Option<&super::paired_publication::WorldExecutionIntent>,
+    ) -> Result<PublicManifestBase, SessionError> {
         if !self.scopes.is_live(public_scope) {
             return Err(SessionError::DeadScope(public_scope));
         }
@@ -3665,16 +3719,57 @@ impl PersistentSession {
             .lib
             .as_ref()
             .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let (public_view, private_view) = if let Some(world) = world {
+            let public = lib
+                .tips
+                .get(&public_scope)
+                .and_then(|tip| tip.inspection_world.as_ref())
+                .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+            let public_custody = public.base.observed_custody()?;
+            if !self.inspection_world_base_is_current(
+                &public.base,
+                &public.base.source,
+                &public_custody.original_source,
+            ) || !self.inspection_world_base_is_current(
+                &world.private.base,
+                &world.source,
+                &world.original_source,
+            ) || lib
+                .tips
+                .get(&private_scope)
+                .and_then(|tip| tip.inspection_world.as_ref())
+                .is_none_or(|current| !Arc::ptr_eq(current, &world.private))
+            {
+                return Err(SessionError::WorldCellPublicationBaseStale);
+            }
+            (
+                super::PublicationViewWitness::World {
+                    key: public.base.key.clone(),
+                    logical: *public.world.logical_id(),
+                },
+                super::PublicationViewWitness::World {
+                    key: world.private.base.key.clone(),
+                    logical: *world.private.world.logical_id(),
+                },
+            )
+        } else {
+            (
+                super::PublicationViewWitness::Finite(
+                    self.compile_view_digest_in(public_scope)
+                        .ok_or(SessionError::StaleStagedDeclaration)?,
+                ),
+                super::PublicationViewWitness::Finite(
+                    self.compile_view_digest_in(private_scope)
+                        .ok_or(SessionError::StaleStagedDeclaration)?,
+                ),
+            )
+        };
         let semantic = super::PublicationSemanticBase {
             library: lib.compile_view_identity,
             expected_public,
             expected_private,
-            public_view: self
-                .compile_view_digest_in(public_scope)
-                .ok_or(SessionError::StaleStagedDeclaration)?,
-            private_view: self
-                .compile_view_digest_in(private_scope)
-                .ok_or(SessionError::StaleStagedDeclaration)?,
+            public_view,
+            private_view,
         };
         let base = if let Some(owner) = owner {
             lib.snapshot_public_manifest(
@@ -3749,12 +3844,16 @@ impl PersistentSession {
             super::PublicPublicationBaseline::Durable(base) => Some(base.owner.clone()),
             super::PublicPublicationBaseline::Ephemeral => None,
         };
-        let mut current = self.snapshot_publication_target(
+        let mut current = self.snapshot_publication_target_with_world(
             owner,
             old.public_scope,
             old.private_scope,
             old.write_ids.clone(),
             old.source_keys.clone(),
+            match &old.intent {
+                super::PublicationIntent::Final(intent) => intent.world(),
+                _ => None,
+            },
         )?;
         if current.semantic.expected_private != old.semantic.expected_private
             || current.semantic.private_view != old.semantic.private_view
@@ -3769,13 +3868,6 @@ impl PersistentSession {
             || current.semantic.public_view != old.semantic.public_view
         {
             if let super::PublicationIntent::Final(intent) = &old.intent {
-                if intent.world().is_some() {
-                    return Ok(super::PublicationAttempt::Settled(
-                        PublicManifestCommit::Refused {
-                            error: Box::new(SessionError::WorldCellPublicationBaseStale),
-                        },
-                    ));
-                }
                 return Ok(super::PublicationAttempt::Rebase(intent.clone()));
             }
         }
@@ -3796,10 +3888,7 @@ impl PersistentSession {
     /// Exact World premises for installing a final binding/world pair. This is
     /// an observation of the SAME published association and admitted Arcs, not
     /// an issuer: it never reconstructs a compiler world or a public view.
-    fn world_execution_base_is_current(
-        &self,
-        intent: &super::FinalExecutionIntent,
-    ) -> bool {
+    fn world_execution_base_is_current(&self, intent: &super::FinalExecutionIntent) -> bool {
         let Some(world) = intent.world() else {
             return true;
         };
@@ -3817,27 +3906,19 @@ impl PersistentSession {
                 .public_visibility_snapshot_in(intent.private_scope())
                 .as_ref()
                 != Some(intent.private_snapshot())
-            || self.compile_view_digest_in(intent.private_scope())
-                != Some(intent.private_view_digest())
-            || self
-                .public_visibility_snapshot_in(intent.admitted_scope())
-                .as_ref()
-                != Some(intent.admitted_public())
-            || lib.current_exact_context_in(intent.admitted_scope()).as_ref()
-                != intent.admitted_context()
-            || self.compile_view_digest_in(intent.admitted_scope()) != Some(world.public_view)
+            || !intent.private_view_is_current(self)
         {
             return false;
         }
         let live = lib
             .tips
-            .get(&intent.admitted_scope())
+            .get(&intent.private_scope())
             .and_then(|state| state.inspection_world.as_ref());
-        if !live.is_some_and(|association| Arc::ptr_eq(association, &world.association)) {
+        if !live.is_some_and(|association| Arc::ptr_eq(association, &world.private)) {
             return false;
         }
         self.inspection_world_base_is_current(
-            &world.association.base,
+            &world.private.base,
             &world.source,
             &world.original_source,
         )
@@ -3846,6 +3927,46 @@ impl PersistentSession {
     /// Admit the frontend's short control claim only after exact native preflight.
     /// The claim callback must not await or perform native publication itself.
     pub fn attempt_public_manifest_admitted(
+        &mut self,
+        ticket: StagedPublicManifest,
+        claim: impl FnOnce() -> Option<super::PublicationClaim>,
+    ) -> Result<super::PublicationAttempt, SessionError> {
+        if let super::PublicationIntent::Final(intent) = &ticket.intent {
+            if let Some(world) = intent.world() {
+                let mut originals = vec![world.original_source.clone()];
+                let mut targets = vec![
+                    world.target.clone(),
+                    intent
+                        .retained_private_scope()
+                        .ok_or(SessionError::WorldCellPublicationBaseStale)?
+                        .clone(),
+                ];
+                if let Some(public) = self
+                    .lib
+                    .as_ref()
+                    .and_then(|lib| lib.tips.get(&ticket.public_scope))
+                    .and_then(|tip| tip.inspection_world.as_ref())
+                {
+                    let current = public.base.observed_custody()?;
+                    originals.push(current.original_source);
+                    targets.push(current.target);
+                }
+                return super::RuntimeOriginalSource::with_sources_and_targets(
+                    originals,
+                    targets,
+                    |sources, _| {
+                        super::RuntimeSourceAdmission::with_open_admissions(
+                            sources.iter().map(|source| source.source_admission()),
+                            || self.attempt_public_manifest_open(ticket, claim),
+                        )
+                    },
+                )?;
+            }
+        }
+        self.attempt_public_manifest_open(ticket, claim)
+    }
+
+    fn attempt_public_manifest_open(
         &mut self,
         mut ticket: StagedPublicManifest,
         claim: impl FnOnce() -> Option<super::PublicationClaim>,
@@ -3904,8 +4025,10 @@ impl PersistentSession {
             .public_visibility_snapshot_in(ticket.private_scope)
             .as_ref()
             != Some(&ticket.semantic.expected_private)
-            || self.compile_view_digest_in(ticket.private_scope)
-                != Some(ticket.semantic.private_view)
+            || !ticket
+                .semantic
+                .private_view
+                .is_current(self, ticket.private_scope)
         {
             return Ok(super::PublicationAttempt::Settled(
                 PublicManifestCommit::Refused {
@@ -3917,17 +4040,14 @@ impl PersistentSession {
             .public_visibility_snapshot_in(ticket.public_scope)
             .as_ref()
             != Some(&ticket.semantic.expected_public)
-            || self.compile_view_digest_in(ticket.public_scope) != Some(ticket.semantic.public_view)
+            || !ticket
+                .semantic
+                .public_view
+                .is_current(self, ticket.public_scope)
         {
             return Ok(match &ticket.intent {
                 super::PublicationIntent::Final(intent) => {
-                    if intent.world().is_some() {
-                        super::PublicationAttempt::Settled(PublicManifestCommit::Refused {
-                            error: Box::new(SessionError::WorldCellPublicationBaseStale),
-                        })
-                    } else {
-                        super::PublicationAttempt::Rebase(intent.clone())
-                    }
+                    super::PublicationAttempt::Rebase(intent.clone())
                 }
                 super::PublicationIntent::HostBindings(_) => {
                     super::PublicationAttempt::RestageMetadata(ticket.certified)
@@ -3980,14 +4100,71 @@ impl PersistentSession {
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
         // The final promotion witness must be taken from the SAME prepared
         // promotion that would commit. It is only meaningful after removals.
-        let world_promotion_witness = world_execution
-            .as_ref()
-            .map(|_| {
-                self.bindings
-                    .prepared_promotion_scope_witness(self.scope_tree(), &prepared)
-                    .map_err(SessionError::InvalidPublicBindingPromotion)
-            })
-            .transpose()?;
+        let promoted_world = if let Some(intent) = &world_execution {
+            if ticket.declaration.is_some() {
+                return Err(SessionError::WorldCellDeclarationPublicationCapabilityMissing);
+            }
+            let world = intent.world().expect("World execution was selected");
+            let public = self
+                .lib()
+                .tips
+                .get(&ticket.public_scope)
+                .and_then(|tip| tip.inspection_world.as_ref())
+                .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+            let public_custody = public.base.observed_custody()?;
+            if !self.inspection_world_base_is_current(
+                &public.base,
+                &public.base.source,
+                &public_custody.original_source,
+            ) || !public.base.target.matches(&world.target)
+            {
+                return Err(SessionError::WorldCellPublicationBaseStale);
+            }
+            let projection = self
+                .bindings
+                .prepared_promotion_projection(self.scope_tree(), &prepared)
+                .map_err(SessionError::InvalidPublicBindingPromotion)?;
+            if projection.target_scope() != ticket.public_scope {
+                return Err(SessionError::WorldCellPublicationBaseStale);
+            }
+            let successor = public.world.promote_private_bindings(
+                &world.association.world,
+                &world.private.world,
+                ticket.public_scope.0,
+                projection.visible_changes().map(|(name, entry)| {
+                    (
+                        name.0.as_str(),
+                        entry.map(|entry| (entry.id, entry.scope.0)),
+                    )
+                }),
+            )?;
+            let bindings = self
+                .bindings
+                .prepared_promotion_scope_witness(self.scope_tree(), &prepared)
+                .map_err(SessionError::InvalidPublicBindingPromotion)?;
+            Some(Arc::new(super::inspection::InspectionWorldAssociation {
+                base: super::inspection::InspectionWorldBase {
+                    scope: ticket.public_scope,
+                    key: CompileViewKey {
+                        library: self.lib().compile_view_identity,
+                        tip: self.lib().scope_tip(ticket.public_scope),
+                        bindings,
+                        compiler_inputs: self.compiler_input_revision,
+                        public_epoch: next_epoch,
+                    },
+                    owner: self.admission_owner().clone(),
+                    epoch: self.admission_owner().epoch(),
+                    source: world.source.clone(),
+                    original_source: super::inspection::InspectionWorldSourceObservation::new(
+                        &world.original_source,
+                    ),
+                    target: super::inspection::InspectionWorldLeaseObservation::new(&world.target),
+                },
+                world: successor,
+            }))
+        } else {
+            None
+        };
         self.public_visibility_epochs
             .try_reserve(1)
             .map_err(|error| SessionError::RecoveryManifest {
@@ -4003,25 +4180,18 @@ impl PersistentSession {
                     .prepare_resident_declaration(public_scope, declaration)
             })
             .transpose()?;
-        if let (Some(intent), Some(_witness)) = (&world_execution, world_promotion_witness) {
-            // Final compare after every fallible preparation and effect, before
-            // any claim or install. A stale base refuses without replay and
-            // preserves the executed effects and private prefix.
-            if !self.world_execution_base_is_current(intent) {
-                return Ok(super::PublicationAttempt::Settled(
-                    PublicManifestCommit::Refused {
-                        error: Box::new(SessionError::WorldCellPublicationBaseStale),
-                    },
-                ));
-            }
-            // The binding promotion and its exact post-removal scope witness
-            // are prepared, but installing the matching World association
-            // requires Warm's SAME final promotion product. The Host must not
-            // synthesize that product from raw receipts. Drop the prepared
-            // promotion without claiming or committing.
+        // The source guards and exclusive checkout still cover this final
+        // compare after every fallible construction, before the commit claim.
+        if world_execution.as_ref().is_some_and(|intent| {
+            !self.world_execution_base_is_current(intent)
+                || !ticket
+                    .semantic
+                    .public_view
+                    .is_current(self, ticket.public_scope)
+        }) {
             return Ok(super::PublicationAttempt::Settled(
                 PublicManifestCommit::Refused {
-                    error: Box::new(SessionError::WorldCellFinalPromotionCapabilityMissing),
+                    error: Box::new(SessionError::WorldCellPublicationBaseStale),
                 },
             ));
         }
@@ -4036,20 +4206,50 @@ impl PersistentSession {
             public_visibility_epochs,
             ..
         } = self;
+        let world_promotion = promoted_world.as_ref().map(|published| {
+            (
+                *world_execution
+                    .as_ref()
+                    .expect("World promotion has its original execution")
+                    .world()
+                    .expect("World execution was selected")
+                    .private
+                    .world
+                    .logical_id(),
+                *lib.as_ref()
+                    .expect("preflight library")
+                    .tips
+                    .get(&public_scope)
+                    .and_then(|tip| tip.inspection_world.as_ref())
+                    .expect("prepared public World")
+                    .world
+                    .logical_id(),
+                *published.world.logical_id(),
+            )
+        });
         let outcome = lib
             .as_mut()
             .expect("preflight library")
-            .publish_staged_public_manifest_unchecked(ticket, declaration, |_| {
-                // A World publication must commit its final association in
-                // this SAME callback, next to the binding promotion, using the
-                // SAME prepared promotion and scope witness. The finite path
-                // below cannot install a World pair and never runs for one.
+            .publish_staged_public_manifest_unchecked(ticket, declaration, |lib| {
                 bindings.commit_exact_binding_promotion(prepared);
                 public_visibility_epochs.insert(public_scope, next_epoch);
+                if let Some(world) = promoted_world {
+                    lib.tips
+                        .get_mut(&public_scope)
+                        .expect("the prepared public World association exists")
+                        .inspection_world = Some(world);
+                }
             });
         match &outcome {
             PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral => {
                 claim.published();
+                if let Some((private_world, predecessor_world, published_world)) = world_promotion {
+                    tracing::debug!(target: "exomonad_harness::timing",
+                        private_world = ?private_world,
+                        predecessor_world = ?predecessor_world,
+                        published_world = ?published_world,
+                        "checked World public promotion installed");
+                }
             }
             PublicManifestCommit::Refused { .. } => {
                 claim.before_rename_failure();
@@ -4590,12 +4790,24 @@ impl PersistentSession {
     /// registrations; it is not a byte-reclamation receipt.
     pub fn retire_scope(&mut self, scope: ScopeId) -> ScopeRetirement {
         let owner = self.admission_owner().clone();
-        owner.with_source_transition(|_| self.retire_scope_exclusive(scope))
+        owner.with_source_transition(|_| self.retire_scope_exclusive(scope, true))
     }
 
-    fn retire_scope_exclusive(&mut self, scope: ScopeId) -> ScopeRetirement {
+    /// Automatic lexical abandonment releases resources without cutting off a
+    /// source token still held by installed provenance or an admitted operation.
+    pub(super) fn release_lexical_scope_resources(&mut self, scope: ScopeId) -> ScopeRetirement {
+        let owner = self.admission_owner().clone();
+        owner.with_source_transition(|_| self.retire_scope_exclusive(scope, false))
+    }
+
+    fn retire_scope_exclusive(&mut self, scope: ScopeId, retire_source: bool) -> ScopeRetirement {
         let roots_before = self.persistent_roots_count();
         let doomed = self.scopes.retire(scope);
+        // Lexical abandonment may already have released the scope while actual
+        // installed code still retains its original-source token.
+        if retire_source && doomed.is_empty() && !scope.is_root() {
+            self.retire_source_admission(scope);
+        }
         let mut receipt = ScopeRetirement {
             scopes_retired: doomed.len(),
             bindings_retired: 0,
@@ -4604,7 +4816,12 @@ impl PersistentSession {
         let mut retired = Vec::new();
         let mut source_instances = Vec::new();
         for dead in &doomed {
-            self.retire_source_admission(*dead);
+            if retire_source {
+                self.retire_source_admission(*dead);
+            } else {
+                self.invalidate_lexical_scope_custody(*dead);
+                self.release_unheld_original_source_record(*dead);
+            }
             if let Some(lib) = self.lib.as_mut() {
                 lib.tips.remove(dead);
             }
@@ -4874,7 +5091,7 @@ mod checkpoint_scope_tests {
         let original_source = session.adopt_initial_notebook_scope(scope).unwrap();
         let settled = session
             .with_source_compiler_transaction(
-                original_source.clone(),
+                original_source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -4909,7 +5126,12 @@ mod checkpoint_scope_tests {
         let source = super::super::GenerationArtifactReference::capture(b"binding source".to_vec());
         let observation = HostWorkObservation::new();
         let refused = observation.scope(|| {
-            session.capture_inspection_world_in(scope, &source, &original_source, |_| false)
+            session.capture_inspection_world_in(
+                scope,
+                &source,
+                original_source.original_source(),
+                |_| false,
+            )
         });
         match refused {
             Err(SessionError::UnsupportedCompilerWorldBinding {
@@ -4943,11 +5165,13 @@ mod checkpoint_scope_tests {
             }
         }
         assert!(matches!(
-            session.capture_inspection_world_in(scope, &source, &original_source, |id| id == stub_id),
+            session.capture_inspection_world_in(scope, &source, original_source.original_source(), |id| id == stub_id),
             Err(SessionError::MissingRetainedValueInterface(module)) if module == legacy_module
         ));
         let hidden = session
-            .capture_inspection_world_in(scope, &source, &original_source, |_| true)
+            .capture_inspection_world_in(scope, &source, original_source.original_source(), |_| {
+                true
+            })
             .unwrap();
         assert!(
             hidden.needs_source_capture(),
@@ -4970,7 +5194,7 @@ mod checkpoint_scope_tests {
         let source =
             super::super::GenerationArtifactReference::capture(b"captured source".to_vec());
         let admitted = session
-            .capture_inspection_world_in(scope, &source, &original, |_| false)
+            .capture_inspection_world_in(scope, &source, original.original_source(), |_| false)
             .unwrap();
         let captured = std::cell::Cell::new(false);
         let settled = foreign
@@ -5000,7 +5224,7 @@ mod checkpoint_scope_tests {
             ))
         ));
         let admitted = session
-            .capture_inspection_world_in(scope, &source, &original, |_| false)
+            .capture_inspection_world_in(scope, &source, original.original_source(), |_| false)
             .unwrap();
         let settled = original
             .with_source_compiler_transaction(
@@ -5032,6 +5256,154 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
+    #[ignore = "requires the dedicated rooted compiler-world lifetime group"]
+    fn completed_world_holds_exact_source_custody_until_install_and_abandonment() {
+        use super::super::inspection::{
+            finish_admitted_compiler_world, run_admitted_compiler_world,
+        };
+        use tidepool_toolchain::compiler_world::{
+            CapturedCompilerSourceRoot, CapturedCompilerSources,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 418);
+        let original = session.mint_notebook_scope_with_lease(None).unwrap();
+        let original_scope = original.scope();
+        let target_scope = session.mint_isolated_scope();
+        let target = session
+            .prepared_lexical_scope_lease_with_source(target_scope, Some(original.clone()))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&original, &target));
+        assert!(target
+            .prerequisites()
+            .iter()
+            .any(|lease| Arc::ptr_eq(lease, &original)));
+
+        let source_owner = Arc::new(tempfile::tempdir().unwrap());
+        let body = include_bytes!("fixtures/world-lifetime.hs");
+        let path = PathBuf::from("WorldLifetime.hs");
+        std::fs::write(source_owner.path().join(&path), body).unwrap();
+        let manifest = tidepool_toolchain::cache::SourceRootManifest::from_file_digests([(
+            path.clone(),
+            blake3::hash(body).to_hex().to_string(),
+        )])
+        .unwrap();
+        let revision = tidepool_toolchain::cache::source_manifests_identity(
+            b"runtime-world-lifetime-test",
+            &[manifest.clone()],
+        );
+        let reference = super::super::GenerationArtifactReference::capture(
+            serde_json::to_vec(&(source_owner.path(), revision)).unwrap(),
+        );
+        let sources = Arc::new(
+            CapturedCompilerSources::from_captured_roots(
+                vec![CapturedCompilerSourceRoot {
+                    manifest,
+                    bodies: [(path, Arc::<[u8]>::from(body.as_slice()))]
+                        .into_iter()
+                        .collect(),
+                }],
+                Arc::from(reference.bytes()),
+                source_owner,
+            )
+            .unwrap(),
+        );
+        let admitted = session
+            .capture_inspection_world_in(
+                target_scope,
+                &reference,
+                original.original_source(),
+                |_| false,
+            )
+            .unwrap();
+        let settled = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, _| run_admitted_compiler_world(owner, admitted, || Ok(Some(sources))),
+            )
+            .unwrap();
+        assert!(
+            matches!(settled.close(), crate::CompilerTransactionClose::Clean),
+            "actual World acquisition close {:?}, primary {:?}",
+            settled.close(),
+            settled.action().as_ref().err()
+        );
+        let completed = finish_admitted_compiler_world(settled).unwrap();
+        let observation = completed.association.clone();
+        let world = completed.world().clone();
+        drop(original);
+        drop(target);
+        session.reap_admission_leases();
+        assert!(session.scope_tree().is_live(original_scope));
+        assert!(session.scope_tree().is_live(target_scope));
+        assert!(session.install_compiler_world_association_if_current(
+            &completed.association,
+            &completed.custody,
+            &completed.cancellation,
+            &reference,
+            &completed.custody.original_source
+        ));
+
+        // Observation is not fresh admission: earned custody can still be
+        // validated while its source is Fenced, and new work must refuse.
+        let fence = completed
+            .custody
+            .original_source
+            .source_admission()
+            .fence()
+            .unwrap();
+        assert!(observation.base.observed_custody().is_ok());
+        assert!(observation.base.acquire_custody().is_err());
+        fence.reopen(&completed.custody.original_source).unwrap();
+
+        // A real native root makes the final scope release observable. This
+        // owner-state fixture does not claim a checked notebook-cell success.
+        let original = completed.custody.original_source.clone();
+        let settled = session
+            .with_source_compiler_transaction(
+                original.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let entry = super::super::prepared::tests::rooted_publication_fixture(
+                        session, "held", 1408,
+                    );
+                    let id = entry.id;
+                    let handle = entry.value.handle;
+                    session.bind_in(target_scope, entry).unwrap();
+                    (id, handle)
+                },
+            )
+            .unwrap();
+        let (id, handle) = settled.into_outcome().action;
+        drop(original);
+        assert!(session.bindings().get(id).is_some());
+        assert!(session
+            .prepared()
+            .unwrap()
+            .prepared_handle_of(handle.raw())
+            .is_some());
+        drop(completed);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(target_scope));
+        assert!(!session.scope_tree().is_live(original_scope));
+        assert!(session.bindings().get(id).is_none());
+        assert!(session
+            .prepared()
+            .unwrap()
+            .prepared_handle_of(handle.raw())
+            .is_none());
+        assert!(observation.base.observed_custody().is_err());
+        assert!(observation.base.acquire_custody().is_err());
+        assert_eq!(world.logical_id(), observation.world.logical_id());
+    }
+
+    #[test]
     fn world_observation_refuses_changed_or_foreign_base() {
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
@@ -5040,26 +5412,32 @@ mod checkpoint_scope_tests {
         let original_source = session.adopt_initial_notebook_scope(scope).unwrap();
         let source = super::super::GenerationArtifactReference::capture(b"source A".to_vec());
         let admitted = session
-            .capture_inspection_world_in(scope, &source, &original_source, |_| false)
+            .capture_inspection_world_in(scope, &source, original_source.original_source(), |_| {
+                false
+            })
             .unwrap();
         assert!(admitted.needs_source_capture());
         assert!(session.inspection_world_base_is_current(
             &admitted.base,
             &source,
-            &original_source
+            original_source.original_source()
         ));
         let other_source = super::super::GenerationArtifactReference::capture(b"source B".to_vec());
         assert!(!session.inspection_world_base_is_current(
             &admitted.base,
             &other_source,
-            &original_source
+            original_source.original_source()
         ));
         let other = publication_session(&recovery, root.path(), 421);
-        assert!(!other.inspection_world_base_is_current(&admitted.base, &source, &original_source));
+        assert!(!other.inspection_world_base_is_current(
+            &admitted.base,
+            &source,
+            original_source.original_source()
+        ));
         let tip = session.lib().scope_tip(scope);
         let settled = session
             .with_source_compiler_transaction(
-                original_source.clone(),
+                original_source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -5081,14 +5459,24 @@ mod checkpoint_scope_tests {
         assert!(!session.inspection_world_base_is_current(
             &admitted.base,
             &source,
-            &original_source
+            original_source.original_source()
         ));
         let fresh = session
-            .capture_inspection_world_in(scope, &source, &original_source, |_| true)
+            .capture_inspection_world_in(scope, &source, original_source.original_source(), |_| {
+                true
+            })
             .unwrap();
-        assert!(session.inspection_world_base_is_current(&fresh.base, &source, &original_source));
+        assert!(session.inspection_world_base_is_current(
+            &fresh.base,
+            &source,
+            original_source.original_source()
+        ));
         session.retire_scope(scope);
-        assert!(!session.inspection_world_base_is_current(&fresh.base, &source, &original_source));
+        assert!(!session.inspection_world_base_is_current(
+            &fresh.base,
+            &source,
+            original_source.original_source()
+        ));
     }
 
     #[test]
@@ -5226,7 +5614,7 @@ mod checkpoint_scope_tests {
             let source = session.adopt_initial_notebook_scope(scope).unwrap();
             let settled = session
                 .with_source_compiler_transaction(
-                    source.clone(),
+                    source.original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -5316,7 +5704,7 @@ mod checkpoint_scope_tests {
         let tip = session.lib().scope_tip(scope);
         let settled = session
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -5341,7 +5729,7 @@ mod checkpoint_scope_tests {
         let inherited = session.compile_view_key_in(child).unwrap();
         let settled = session
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -5369,7 +5757,7 @@ mod checkpoint_scope_tests {
         let sibling_source = session.adopt_initial_notebook_scope(sibling).unwrap();
         let settled = session
             .with_source_compiler_transaction(
-                sibling_source.clone(),
+                sibling_source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -5422,7 +5810,7 @@ mod checkpoint_scope_tests {
     ) -> T {
         let settled = session
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -9042,10 +9430,11 @@ impl PersistentSession {
     pub(super) fn capture_notebook_generation_world(
         &self,
         prepared: &super::PreparedNotebookGeneration,
-        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        original_source: &Arc<super::RuntimeOriginalSource>,
         hidden: impl Fn(tidepool_repr::SessionVarId) -> bool,
     ) -> Result<super::AdmittedInspectionWorld, SessionError> {
-        if !Arc::ptr_eq(&self.source_lease_in(prepared.scope)?, original_source) {
+        let target = self.source_lease_in(prepared.scope)?;
+        if !Arc::ptr_eq(target.original_source(), original_source) {
             return Err(super::SourceAdmissionError::ForeignTransaction.into());
         }
         if !prepared.owner_stamp.matches(self.admission_owner())
@@ -9061,15 +9450,19 @@ impl PersistentSession {
                 1,
             );
             return Ok(super::inspection::AdmittedInspectionWorld {
+                custody: super::inspection::InspectionWorldCustody {
+                    original_source: original_source.clone(), target: target.clone(),
+                },
                 base: super::inspection::InspectionWorldBase {
                     scope: prepared.scope,
                     key: prepared.prospective_compiler_key()?,
                     owner: self.admission_owner().clone(),
                     epoch: self.admission_owner().epoch(),
                     source: Arc::new(prepared.next.references.source.clone()),
-                    original_source: original_source.clone(),
-                    target: original_source.clone(),
+                    original_source: super::inspection::InspectionWorldSourceObservation::new(original_source),
+                    target: super::inspection::InspectionWorldLeaseObservation::new(&target),
                 },
+                observation: None,
                 inputs: super::inspection::InspectionWorldInputs::Cold {
                     primary: Some(source.context.exact().clone()),
                     bindings: tidepool_toolchain::compiler_world::CompilerWorldBindings::from_published_bindings(
@@ -9120,7 +9513,7 @@ impl PersistentSession {
         continuing: bool,
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
         let super::PreparedNotebookGenerationWithWorld { prepared, world } = prepared;
-        let target = world.association.base.target.clone();
+        let target = world.custody.target.clone();
         source.with_current(&target, || {
             self.commit_notebook_generation_with_completion(
                 prepared,

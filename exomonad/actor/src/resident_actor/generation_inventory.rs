@@ -152,7 +152,7 @@ pub(crate) async fn assert_owner_observation_contract(dependency: GenerationDepe
         .unwrap();
     let original_pending = neutral_scope.admit_continuation().unwrap();
     original_pending
-        .bind_original_source(dependency.runtime_lease().clone())
+        .bind_original_source(dependency.runtime_lease().original_source().clone())
         .unwrap();
     let unknown_pending = neutral_scope.admit_continuation().unwrap();
 
@@ -198,7 +198,7 @@ pub(crate) async fn assert_owner_observation_contract(dependency: GenerationDepe
         .unwrap();
     let lifecycle_original = lifecycle_scope.admit_continuation().unwrap();
     lifecycle_original
-        .bind_original_source(dependency.runtime_lease().clone())
+        .bind_original_source(dependency.runtime_lease().original_source().clone())
         .unwrap();
     let lifecycle_independent = lifecycle_scope
         .clone()
@@ -280,7 +280,7 @@ pub(crate) async fn assert_owner_observation_contract(dependency: GenerationDepe
     }
     assert!(
         unknown_pending
-            .bind_original_source(dependency.runtime_lease().clone())
+            .bind_original_source(dependency.runtime_lease().original_source().clone())
             .is_err(),
         "a fenced issuer cannot bind a late source selection"
     );
