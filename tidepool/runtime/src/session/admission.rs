@@ -3984,8 +3984,7 @@ impl PersistentSession {
         successor: &Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
     ) -> Result<(), SessionError> {
         let RuntimeCellCompilerBasis::World {
-            original_source,
-            ..
+            original_source, ..
         } = &admission.compiler_basis
         else {
             return Err(SessionError::StaleStagedDeclaration);
@@ -4603,6 +4602,26 @@ mod tests {
     use super::*;
     use crate::session::{ModuleEnv, SessionId, SessionLib};
 
+    fn native_source_action<T>(
+        session: &mut PersistentSession,
+        action: impl FnOnce(&mut PersistentSession) -> T,
+    ) -> T {
+        let source = session.mint_notebook_scope_with_lease(None).unwrap();
+        let settled = session
+            .with_source_compiler_transaction(
+                source,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| action(session),
+            )
+            .unwrap()
+            .into_outcome();
+        assert_eq!(settled.close, crate::CompilerTransactionClose::NotStarted);
+        settled.action
+    }
+
     #[test]
     fn world_private_admission_requires_the_actual_transaction_original() {
         let root = tempfile::tempdir().unwrap();
@@ -4813,52 +4832,56 @@ mod tests {
         let lib =
             SessionLib::open(SessionId(990), root.path(), ModuleEnv::standalone_default()).unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
-        let mut original =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 910);
-        original.value.identity.module = original.module.module_name();
-        let original_identity = original.value.identity.clone();
-        let original_id = original.id;
-        session.bind_in(public, original).unwrap();
-        let mut historical =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 911);
-        historical.value.identity.module = historical.module.module_name();
-        let historical_identity = historical.value.identity.clone();
-        session.bind_in(public, historical).unwrap();
+        let (public, retained, ledger, original_id, _sibling_source) =
+            native_source_action(&mut session, |session| {
+                let public = session.mint_scope(ScopeId::ROOT).unwrap();
+                let _public_source = session.adopt_initial_notebook_scope(public).unwrap();
+                let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
+                let sibling_source = session.adopt_initial_notebook_scope(sibling).unwrap();
+                let mut original =
+                    crate::session::prepared::tests::rooted_publication_fixture(session, "x", 910);
+                original.value.identity.module = original.module.module_name();
+                let original_identity = original.value.identity.clone();
+                let original_id = original.id;
+                session.bind_in(public, original).unwrap();
+                let mut historical =
+                    crate::session::prepared::tests::rooted_publication_fixture(session, "x", 911);
+                historical.value.identity.module = historical.module.module_name();
+                let historical_identity = historical.value.identity.clone();
+                session.bind_in(public, historical).unwrap();
 
-        // A sibling sharing a module is still a different exact binding owner.
-        let mut foreign = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "foreign",
-            912,
-        );
-        foreign.module = SessionModule::val(Generation(910));
-        foreign.value.identity.module = foreign.module.module_name();
-        foreign.value.identity.occurrence = "foreign".into();
-        let foreign_identity = foreign.value.identity.clone();
-        session.bind_in(sibling, foreign).unwrap();
-        let retained = session.retain_lexical_scope(public).unwrap();
-        let ledger = Arc::new(session.capture_admitted_native_imports(public).unwrap());
-        assert!(ledger.entries.contains(&(original_identity.clone(), 910)));
-        assert!(ledger.entries.contains(&(historical_identity, 911)));
-        assert!(!ledger
-            .entries
-            .iter()
-            .any(|(identity, _)| identity == &foreign_identity));
+                // A sibling sharing a module is still a different exact binding owner.
+                let mut foreign = crate::session::prepared::tests::rooted_publication_fixture(
+                    session, "foreign", 912,
+                );
+                foreign.module = SessionModule::val(Generation(910));
+                foreign.value.identity.module = foreign.module.module_name();
+                foreign.value.identity.occurrence = "foreign".into();
+                let foreign_identity = foreign.value.identity.clone();
+                session.bind_in(sibling, foreign).unwrap();
+                let retained = session.retain_lexical_scope(public).unwrap();
+                let ledger = Arc::new(session.capture_admitted_native_imports(public).unwrap());
+                assert!(ledger.entries.contains(&(original_identity.clone(), 910)));
+                assert!(ledger.entries.contains(&(historical_identity, 911)));
+                assert!(!ledger
+                    .entries
+                    .iter()
+                    .any(|(identity, _)| identity == &foreign_identity));
 
-        let mut replacement =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 913);
-        replacement.value.identity.module = replacement.module.module_name();
-        let replacement_identity = replacement.value.identity.clone();
-        session.bind_in(public, replacement).unwrap();
-        assert!(session
-            .capture_admitted_native_imports(public)
-            .unwrap()
-            .entries
-            .contains(&(replacement_identity.clone(), 913)));
-        assert!(!ledger.entries.contains(&(replacement_identity, 913)));
-        assert!(ledger.entries.contains(&(original_identity.clone(), 910)));
+                let mut replacement =
+                    crate::session::prepared::tests::rooted_publication_fixture(session, "x", 913);
+                replacement.value.identity.module = replacement.module.module_name();
+                let replacement_identity = replacement.value.identity.clone();
+                session.bind_in(public, replacement).unwrap();
+                assert!(session
+                    .capture_admitted_native_imports(public)
+                    .unwrap()
+                    .entries
+                    .contains(&(replacement_identity.clone(), 913)));
+                assert!(!ledger.entries.contains(&(replacement_identity, 913)));
+                assert!(ledger.entries.contains(&(original_identity.clone(), 910)));
+                (public, retained, ledger, original_id, sibling_source)
+            });
         session.retire_scope(public);
         assert!(session.bindings().get(original_id).is_some());
         drop(ledger);
@@ -5114,122 +5137,128 @@ mod tests {
     #[test]
     fn selected_native_imports_keep_exact_scoped_roots_and_refuse_sibling_only_values() {
         let mut session = PersistentSession::new(None, 1024 * 1024);
-        let public = session.mint_isolated_scope();
-        let first =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 460);
-        let identity = first.value.identity.clone();
-        let first_root = first.value.handle.raw().0;
-        session.bind_in(public, first).unwrap();
-        let private = session.mint_detached_scope(public).unwrap();
-        let replacement =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 461);
-        session.bind_in(public, replacement).unwrap();
-        let sibling = session.mint_isolated_scope();
-        let mut foreign =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 462);
-        foreign.module = tidepool_repr::SessionModule::val(Generation(460));
-        let foreign_root = foreign.value.handle.raw().0;
-        assert_ne!(first_root, foreign_root);
-        session.bind_in(sibling, foreign).unwrap();
-        let selected = session
-            .capture_selected_native_imports(private, [(&identity, 460)])
-            .unwrap();
-        assert_eq!(selected.entries, [(identity.clone(), 460)]);
-        assert_eq!(
-            selected.owners.get(&(identity.clone(), 460)),
-            Some(&first_root)
-        );
-        let isolated = session.mint_isolated_scope();
-        assert!(matches!(
-            session.capture_selected_native_imports(isolated, [(&identity, 460)]),
-            Err(SessionError::StaleStagedDeclaration)
-        ));
-        let empty = session
-            .capture_selected_native_imports(private, [])
-            .unwrap();
-        assert!(empty.entries.is_empty());
-        assert!(empty.owners.is_empty());
+        native_source_action(&mut session, |session| {
+            let public = session.mint_isolated_scope();
+            let _public_source = session.adopt_initial_notebook_scope(public).unwrap();
+            let first =
+                super::super::prepared::tests::rooted_publication_fixture(session, "value", 460);
+            let identity = first.value.identity.clone();
+            let first_root = first.value.handle.raw().0;
+            session.bind_in(public, first).unwrap();
+            let private = session.mint_detached_scope(public).unwrap();
+            let replacement =
+                super::super::prepared::tests::rooted_publication_fixture(session, "value", 461);
+            session.bind_in(public, replacement).unwrap();
+            let sibling = session.mint_isolated_scope();
+            let _sibling_source = session.adopt_initial_notebook_scope(sibling).unwrap();
+            let mut foreign =
+                super::super::prepared::tests::rooted_publication_fixture(session, "value", 462);
+            foreign.module = tidepool_repr::SessionModule::val(Generation(460));
+            let foreign_root = foreign.value.handle.raw().0;
+            assert_ne!(first_root, foreign_root);
+            session.bind_in(sibling, foreign).unwrap();
+            let selected = session
+                .capture_selected_native_imports(private, [(&identity, 460)])
+                .unwrap();
+            assert_eq!(selected.entries, [(identity.clone(), 460)]);
+            assert_eq!(
+                selected.owners.get(&(identity.clone(), 460)),
+                Some(&first_root)
+            );
+            let isolated = session.mint_isolated_scope();
+            assert!(matches!(
+                session.capture_selected_native_imports(isolated, [(&identity, 460)]),
+                Err(SessionError::StaleStagedDeclaration)
+            ));
+            let empty = session
+                .capture_selected_native_imports(private, [])
+                .unwrap();
+            assert!(empty.entries.is_empty());
+            assert!(empty.owners.is_empty());
+        });
     }
 
     #[test]
     fn settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots() {
         use tidepool_repr::execution_schema::{testing, Group};
         let mut session = PersistentSession::new(None, 1024 * 1024);
-        let baseline = Arc::new(
-            session
-                .capture_admitted_native_imports(ScopeId::ROOT)
-                .unwrap(),
-        );
-        let mut index = CheckedNativeIndex::new(baseline.clone());
-        let ambient_identity = testing::identity("Fixture", "entry");
-        let ambient = session
-            .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
-            .unwrap();
-        let mut own_wire = testing::wire_program();
-        let own_identity = testing::identity("Own", "entry");
-        let Group::NonRecursive(top) = &mut own_wire.bindings[0] else {
-            unreachable!()
-        };
-        top.identity = own_identity.clone();
-        let own = session
-            .install_prepared(testing::prepare(own_wire).unwrap(), None)
-            .unwrap();
-        let delta = session
-            .capture_checked_native_delta(
-                ScopeId::ROOT,
-                0,
-                Some(own),
-                &index,
-                [&ambient_identity, &own_identity].into_iter(),
-                [].into_iter(),
-            )
-            .unwrap();
-        assert_eq!(delta.imports.len(), 1);
-        assert_eq!(delta.imports[0].identity, own_identity);
-        let (ledger, added) = CheckedNativeImports::base(baseline.clone())
-            .append(delta, &index)
-            .unwrap();
-        index.extend(added);
-        assert!(!ledger
-            .imports()
-            .any(|(identity, _)| identity == &ambient_identity));
-        assert!(ledger
-            .imports()
-            .any(|(identity, _)| identity == &own_identity));
+        native_source_action(&mut session, |session| {
+            let baseline = Arc::new(
+                session
+                    .capture_admitted_native_imports(ScopeId::ROOT)
+                    .unwrap(),
+            );
+            let mut index = CheckedNativeIndex::new(baseline.clone());
+            let ambient_identity = testing::identity("Fixture", "entry");
+            let ambient = session
+                .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
+                .unwrap();
+            let mut own_wire = testing::wire_program();
+            let own_identity = testing::identity("Own", "entry");
+            let Group::NonRecursive(top) = &mut own_wire.bindings[0] else {
+                unreachable!()
+            };
+            top.identity = own_identity.clone();
+            let own = session
+                .install_prepared(testing::prepare(own_wire).unwrap(), None)
+                .unwrap();
+            let delta = session
+                .capture_checked_native_delta(
+                    ScopeId::ROOT,
+                    0,
+                    Some(own),
+                    &index,
+                    [&ambient_identity, &own_identity].into_iter(),
+                    [].into_iter(),
+                )
+                .unwrap();
+            assert_eq!(delta.imports.len(), 1);
+            assert_eq!(delta.imports[0].identity, own_identity);
+            let (ledger, added) = CheckedNativeImports::base(baseline.clone())
+                .append(delta, &index)
+                .unwrap();
+            index.extend(added);
+            assert!(!ledger
+                .imports()
+                .any(|(identity, _)| identity == &ambient_identity));
+            assert!(ledger
+                .imports()
+                .any(|(identity, _)| identity == &own_identity));
 
-        // A target spelling an ambient definition does not acquire its CAF.
-        let repeated = session
-            .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
-            .unwrap();
-        assert_ne!(ambient, repeated);
-        let absent = session
-            .capture_checked_native_delta(
-                ScopeId::ROOT,
-                0,
-                Some(repeated),
-                &index,
-                [&ambient_identity].into_iter(),
-                [].into_iter(),
-            )
-            .unwrap();
-        assert!(absent.imports.is_empty());
-        let next = session
-            .capture_checked_native_delta(
-                ScopeId::ROOT,
-                0,
-                Some(repeated),
-                &index,
-                [&own_identity].into_iter(),
-                [].into_iter(),
-            )
-            .unwrap();
-        let (unchanged, added) = ledger.append(next, &index).unwrap();
-        assert!(added.is_empty());
-        assert!(Arc::ptr_eq(
-            ledger.tail.as_ref().unwrap(),
-            unchanged.tail.as_ref().unwrap()
-        ));
-        assert!(Arc::ptr_eq(&ledger.base, &baseline));
+            // A target spelling an ambient definition does not acquire its CAF.
+            let repeated = session
+                .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
+                .unwrap();
+            assert_ne!(ambient, repeated);
+            let absent = session
+                .capture_checked_native_delta(
+                    ScopeId::ROOT,
+                    0,
+                    Some(repeated),
+                    &index,
+                    [&ambient_identity].into_iter(),
+                    [].into_iter(),
+                )
+                .unwrap();
+            assert!(absent.imports.is_empty());
+            let next = session
+                .capture_checked_native_delta(
+                    ScopeId::ROOT,
+                    0,
+                    Some(repeated),
+                    &index,
+                    [&own_identity].into_iter(),
+                    [].into_iter(),
+                )
+                .unwrap();
+            let (unchanged, added) = ledger.append(next, &index).unwrap();
+            assert!(added.is_empty());
+            assert!(Arc::ptr_eq(
+                ledger.tail.as_ref().unwrap(),
+                unchanged.tail.as_ref().unwrap()
+            ));
+            assert!(Arc::ptr_eq(&ledger.base, &baseline));
+        });
     }
 
     #[test]
@@ -5414,37 +5443,39 @@ mod tests {
         let lib =
             SessionLib::open(SessionId(991), root.path(), ModuleEnv::standalone_default()).unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let unbound = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "nativeExport",
-            914,
-        );
-        let ordinary_identity = unbound.value.identity;
-        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
-        assert!(!session
-            .capture_admitted_native_imports(scope)
-            .unwrap()
-            .entries
-            .contains(&(ordinary_identity, 0)));
-        let (certified, _) =
-            crate::session::prepared::tests::certified_package_export_fixture([62; 32]);
-        *session.prepared_mut().unwrap() = certified;
-        let identity = tidepool_repr::execution_schema::testing::identity("Fixture", "entry");
-        let admitted = session.capture_admitted_native_imports(scope).unwrap();
-        assert!(admitted.entries.contains(&(identity.clone(), 0)));
-        let Some(ImportOwner::CodeExport { root_id, .. }) = session
-            .prepared()
-            .unwrap()
-            .retained_code_export_owner(&identity, 0)
-        else {
-            panic!("real installed export must have its native owner")
-        };
-        assert_ne!(root_id, 0);
-        let empty = PersistentSession::new(None, 1024 * 1024)
-            .capture_admitted_native_imports(ScopeId::ROOT)
-            .unwrap();
-        assert!(empty.entries.is_empty());
-        assert_ne!(admitted.commitment, empty.commitment);
+        native_source_action(&mut session, |session| {
+            let unbound = crate::session::prepared::tests::rooted_publication_fixture(
+                session,
+                "nativeExport",
+                914,
+            );
+            let ordinary_identity = unbound.value.identity;
+            let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+            assert!(!session
+                .capture_admitted_native_imports(scope)
+                .unwrap()
+                .entries
+                .contains(&(ordinary_identity, 0)));
+            let (certified, _) =
+                crate::session::prepared::tests::certified_package_export_fixture([62; 32]);
+            *session.prepared_mut().unwrap() = certified;
+            let identity = tidepool_repr::execution_schema::testing::identity("Fixture", "entry");
+            let admitted = session.capture_admitted_native_imports(scope).unwrap();
+            assert!(admitted.entries.contains(&(identity.clone(), 0)));
+            let Some(ImportOwner::CodeExport { root_id, .. }) = session
+                .prepared()
+                .unwrap()
+                .retained_code_export_owner(&identity, 0)
+            else {
+                panic!("real installed export must have its native owner")
+            };
+            assert_ne!(root_id, 0);
+            let empty = PersistentSession::new(None, 1024 * 1024)
+                .capture_admitted_native_imports(ScopeId::ROOT)
+                .unwrap();
+            assert!(empty.entries.is_empty());
+            assert_ne!(admitted.commitment, empty.commitment);
+        });
     }
 
     #[test]
