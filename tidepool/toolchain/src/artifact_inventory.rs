@@ -11484,10 +11484,10 @@ mod tests {
             .unwrap();
             value_sources.push(CompilerSourceSupport::close_complete_output(&output).unwrap());
         }
-        assert!(matches!(value_sources[0].merge(&value_sources[1]),
+        assert!(matches!(&value_sources[0].merge(&value_sources[1]),
             Err(CompileError::ArtifactInventory(error))
-                if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { owner }
-                    if owner == values_owner)));
+                if matches!(&error.failure, ArtifactInventoryFailure::OwnerConflict { owner }
+                    if owner == &values_owner)));
         let expected = roots
             .iter()
             .map(|(_, _, group, _)| *group)
