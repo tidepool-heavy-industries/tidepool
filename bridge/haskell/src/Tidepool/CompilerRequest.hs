@@ -262,19 +262,28 @@ compileBoundRequest request selection retained purpose session path =
 -- The constructor stays private. Retention does not grant executor use after its
 -- bracket closes; projection checks operation entry, while submissions fence a
 -- concurrent close. GHC's retained mutable package cells keep their existing owner.
+-- | One completion route for a prepared compilation. The World route always
+-- carries its issued input basis together with the single pending dependency
+-- slot consumed by 'commitPreparedWorldDependencies'; there is no empty World
+-- completion and no independent pending state.
+data PreparedCompletion
+  = PreparedOrdinaryCompletion
+  | PreparedWorldCompletion WorldCellInputs (IORef (Maybe PendingWorldDependencies))
+
 data PreparedCompilation = PreparedCompilation PreparedPipelineResult CompilerRecoveryCaches
-  CompilerExecutor (IO ()) (Maybe OriginalProductWorklist) (Maybe WorldCellInputs) (IORef (Maybe PendingWorldDependencies))
+  CompilerExecutor (IO ()) (Maybe OriginalProductWorklist) PreparedCompletion
 
 preparedCompilationResult :: PreparedCompilation -> PreparedPipelineResult
-preparedCompilationResult (PreparedCompilation result _ _ _ _ _ _) = result
+preparedCompilationResult (PreparedCompilation result _ _ _ _ _) = result
 
 preparedCompilationWorldInputs :: PreparedCompilation -> Maybe WorldCellInputs
-preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ inputs _) = inputs
+preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ PreparedOrdinaryCompletion) = Nothing
+preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion inputs _)) = Just inputs
 
 withPreparedCompilation :: PreparedCompilation
   -> (PreparedPipelineResult -> CompilerRecoveryCaches -> CompilerExecutor -> Maybe OriginalProductWorklist -> IO a)
   -> IO a
-withPreparedCompilation (PreparedCompilation result recovery executor guard worklist _ _) use = do
+withPreparedCompilation (PreparedCompilation result recovery executor guard worklist _) use = do
   guard
   requireCompilerExecutorOpen executor
   use result recovery executor worklist
@@ -328,9 +337,8 @@ compilePreparedRequest request@(BoundCompilerRequest _ args _ _ executor _) sele
     PortableExecutable -> do
       completed <- compileBoundCompleted request selection retained purpose session path
       pure (completed,Nothing)
-  pending <- newIORef (completedCompilerWorldDependencies completed)
-  pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) worklist
-    (completedCompilerWorldInputs completed) pending)
+  route <- preparedCompletionFor completed
+  pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) worklist route)
 
 compilePreparedSegmentRequest :: BoundCompilerRequest -> PipelineSelection PreparedSegmentProductsResult
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO (PreparedCompilation,TypedSegment)
@@ -340,9 +348,8 @@ compilePreparedSegmentRequest request@(BoundCompilerRequest _ _ _ _ executor _) 
   -- captured recovery context and the existing fallback path.
   completed <- compileBoundCompleted request selection retained purpose session path
   let result = completedCompilerResult completed
-  pending <- newIORef (completedCompilerWorldDependencies completed)
-  pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) Nothing
-      (completedCompilerWorldInputs completed) pending,
+  route <- preparedCompletionFor completed
+  pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) Nothing route,
     preparedSegmentCaptures result)
 
 runBoundGhc :: BoundCompilerRequest -> Ghc a -> IO a
@@ -371,7 +378,7 @@ boundWorldCellSlots (BoundCompilerRequest _ _ admitted _ _ _) = case admitted of
 -- facts carry no source tree or usable compiler capability beyond scope END.
 commitPreparedWorldDependencies :: BoundCompilerRequest -> PreparedCompilation -> IO ()
 commitPreparedWorldDependencies (BoundCompilerRequest scope _ admitted _ executor _)
-    (PreparedCompilation _ _ issuing guard _ _ pendingRef) = do
+    (PreparedCompilation _ _ issuing guard _ route) = do
   guard
   requireCompilerExecutorOpen issuing
   requireCompilerExecutorOpen executor
@@ -382,11 +389,21 @@ commitPreparedWorldDependencies (BoundCompilerRequest scope _ admitted _ executo
       HeldWorldCellAdmitted admission -> do
       -- Consume before the guarded commit; cancellation cannot replay a pending
       -- publication through another invocation or replacement request owner.
-        pending <- atomicModifyIORef' pendingRef (\value -> (Nothing,value))
-        selected <- maybe (throwIO CheckedPurposeMismatch) pure pending
-        scopedCommitWorldDependencies scope (Just (heldCellBinding admission)) issuing
-          (heldCellQuestion admission) selected
+        case route of
+          PreparedOrdinaryCompletion -> throwIO CheckedPurposeMismatch
+          PreparedWorldCompletion _ pendingRef -> do
+            pending <- atomicModifyIORef' pendingRef (\value -> (Nothing,value))
+            selected <- maybe (throwIO CheckedPurposeMismatch) pure pending
+            scopedCommitWorldDependencies scope (Just (heldCellBinding admission)) issuing
+              (heldCellQuestion admission) selected
     _ -> throwIO CheckedPurposeMismatch
+
+preparedCompletionFor :: CompletedCompilerResult result -> IO PreparedCompletion
+preparedCompletionFor completed = case completedCompilerWorldCompletion completed of
+  Nothing -> pure PreparedOrdinaryCompletion
+  Just world -> do
+    pending <- newIORef (Just (worldCompilerCompletionDependencies world))
+    pure (PreparedWorldCompletion (worldCompilerCompletionInputs world) pending)
 
 runBoundWorldCellPlan :: BoundCompilerRequest -> IO BS.ByteString
 runBoundWorldCellPlan (BoundCompilerRequest scope _ admitted grant executor _) = do

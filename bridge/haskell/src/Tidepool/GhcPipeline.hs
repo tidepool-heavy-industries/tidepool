@@ -41,7 +41,8 @@ module Tidepool.GhcPipeline
   , materializeWorldSources, worldMaterializationCharge, retainWorldMaterialization, releaseWorldMaterialization
   , worldMaterializationOwners, emitWorldAcquisitionRejection
   , CompletedCompilerResult, completedCompilerResult, completedCompilerRecovery, completedCompilerGuard
-  , completedCompilerWorldInputs, completedCompilerWorldDependencies, WorldCellInputs, worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports, worldCellSourceSelection, worldCellSourceRootAliases
+  , completedCompilerWorldCompletion, WorldCompilerCompletion, worldCompilerCompletionInputs, worldCompilerCompletionDependencies
+  , WorldCellInputs, worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports, worldCellSourceSelection, worldCellSourceRootAliases
   , PendingWorldDependencies
   , CompilerScopeRunner, withResidentCompilerScopes
   , CompilerRecoveryCaches(..)
@@ -2105,8 +2106,10 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   forM_ sourceSelection $ \selected -> do
     unchanged <- liftIO (revalidateSourceSelectedOriginals selected)
     unless unchanged (liftIO (throwIO WorldCellUnavailable))
-  pure (CompletedCompilerResult result recovery guard
-    (Just (WorldCellInputs generations references (target,SHA256.hash source) imports sourceSelection roots)) (Just pending))
+  pure (CompletedWorldCompilerResult result recovery guard
+    (WorldCompilerCompletion
+      (WorldCellInputs generations references (target,SHA256.hash source) imports sourceSelection roots)
+      pending))
 
 closedWorldCellPurpose :: CompilePurpose -> Bool
 closedWorldCellPurpose (ParsedImportSelection _ (GeneratedScaffoldCompile _
@@ -5883,24 +5886,39 @@ data WorldCellInputs = WorldCellInputs
   , worldCellSourceRootAliases :: [FilePath]
   }
 
-data CompletedCompilerResult result = CompletedCompilerResult result CompilerRecoveryCaches (IO ()) (Maybe WorldCellInputs) (Maybe PendingWorldDependencies)
+-- | The facts issued by a World compilation, always together. The completion
+-- route is a sum: an ordinary completion has no World data, while a World
+-- completion carries both its input basis and the one pending dependency
+-- completion issued by the same request. There is no empty World shape.
+data WorldCompilerCompletion = WorldCompilerCompletion WorldCellInputs PendingWorldDependencies
+
+worldCompilerCompletionInputs :: WorldCompilerCompletion -> WorldCellInputs
+worldCompilerCompletionInputs (WorldCompilerCompletion inputs _) = inputs
+
+worldCompilerCompletionDependencies :: WorldCompilerCompletion -> PendingWorldDependencies
+worldCompilerCompletionDependencies (WorldCompilerCompletion _ pending) = pending
+
+data CompletedCompilerResult result
+  = CompletedOrdinaryCompilerResult result CompilerRecoveryCaches (IO ())
+  | CompletedWorldCompilerResult result CompilerRecoveryCaches (IO ()) WorldCompilerCompletion
 
 completedCompilerResult :: CompletedCompilerResult result -> result
-completedCompilerResult (CompletedCompilerResult result _ _ _ _) = result
+completedCompilerResult (CompletedOrdinaryCompilerResult result _ _) = result
+completedCompilerResult (CompletedWorldCompilerResult result _ _ _) = result
 
 completedCompilerRecovery :: CompletedCompilerResult result -> CompilerRecoveryCaches
-completedCompilerRecovery (CompletedCompilerResult _ recovery _ _ _) = recovery
+completedCompilerRecovery (CompletedOrdinaryCompilerResult _ recovery _) = recovery
+completedCompilerRecovery (CompletedWorldCompilerResult _ recovery _ _) = recovery
 
-completedCompilerWorldInputs :: CompletedCompilerResult result -> Maybe WorldCellInputs
-completedCompilerWorldInputs (CompletedCompilerResult _ _ _ inputs _) = inputs
-
-completedCompilerWorldDependencies :: CompletedCompilerResult result -> Maybe PendingWorldDependencies
-completedCompilerWorldDependencies (CompletedCompilerResult _ _ _ _ pending) = pending
+completedCompilerWorldCompletion :: CompletedCompilerResult result -> Maybe WorldCompilerCompletion
+completedCompilerWorldCompletion (CompletedOrdinaryCompilerResult _ _ _) = Nothing
+completedCompilerWorldCompletion (CompletedWorldCompilerResult _ _ _ world) = Just world
 
 -- This closure retains only the issuing thread and its existing phase cell.
 -- It does not keep the resident universe or a usable compiler capability alive.
 completedCompilerGuard :: CompletedCompilerResult result -> IO ()
-completedCompilerGuard (CompletedCompilerResult _ _ guard _ _) = guard
+completedCompilerGuard (CompletedOrdinaryCompilerResult _ _ guard) = guard
+completedCompilerGuard (CompletedWorldCompilerResult _ _ guard _) = guard
 
 type CompletedResidentCompiler = forall result.
   PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
@@ -6451,7 +6469,7 @@ residentCompileOne guard producer selection retained universeRef active interpre
       , universeOriginalVersions=if admitted then Map.unionWith preferOriginalVersion
           originalVersions (universeOriginalVersions current)
           else universeOriginalVersions current })
-  pure (CompletedCompilerResult result recovery guard Nothing Nothing)
+  pure (CompletedOrdinaryCompilerResult result recovery guard)
 
 -- Each key owns one immutable product. Upgrade incomplete acceleration once,
 -- retaining the original completed facts on ordinary hits across changing views.
