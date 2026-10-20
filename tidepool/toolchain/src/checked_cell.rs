@@ -601,7 +601,7 @@ pub enum CheckedItemKind {
 }
 
 #[derive(Clone, Debug)]
-struct CheckedItem {
+pub(crate) struct CheckedItem {
     kind: CheckedItemKind,
     source: String,
     binders: Vec<String>,
@@ -4333,6 +4333,240 @@ pub(crate) fn read_program_typed_segments(
     )?;
     decode_typed_segment_plans(&header[11], program)
 }
+/// Normalize the cell observations once at the checked-item owner. Both compiler
+/// routes consume this representation; this does not grant executable authority.
+fn decode_checked_items<'a>(
+    output: &[Value],
+    typed_segments: impl Clone + Iterator<Item = &'a CheckedTypedSegmentPlan>,
+    signatures: impl Clone + Iterator<Item = &'a ExactCheckedSignature>,
+    ordered: bool,
+) -> Result<Vec<CheckedItem>, CompileError> {
+    let mut signature_keys = BTreeSet::new();
+    if signatures
+        .clone()
+        .any(|signature| !signature_keys.insert(&signature.key))
+    {
+        return Err(if ordered {
+            typed_metadata_failure()
+        } else {
+            failure("duplicate signature authority")
+        });
+    }
+    let pins = list(&output[1], 65536)?;
+    let expressions = list(&output[4], 65536)?;
+    if ordered && !pins.is_empty() {
+        return Err(typed_metadata_failure());
+    }
+    let items = list(&output[0], 65536)?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let fields = row(value, 6)?;
+            let kind = match string(&fields[1])? {
+                "decl" => CheckedItemKind::Declaration,
+                "bind" => CheckedItemKind::Bind,
+                "expr" => CheckedItemKind::Expression,
+                _ => return Err(failure("unknown checked item kind")),
+            };
+            let verdict = row(&fields[3], 2)?;
+            let binders = list(&verdict[0], 65536)?
+                .iter()
+                .map(|value| string(value).map(str::to_owned))
+                .collect::<Result<Vec<_>, _>>()?;
+            let typed_item = if ordered && kind != CheckedItemKind::Declaration {
+                Some(
+                    typed_segments
+                        .clone()
+                        .flat_map(|plan| &plan.items)
+                        .find(|item| item.ordinal == index)
+                        .ok_or_else(typed_metadata_failure)?,
+                )
+            } else {
+                None
+            };
+            let item_pins = if !ordered && kind == CheckedItemKind::Bind {
+                binders
+                    .iter()
+                    .map(|binder| {
+                        unique_key(pins, &format!("__tidepool_cell_pin_{index}_{binder}"), 3)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                Vec::new()
+            };
+            let expression = if kind == CheckedItemKind::Expression {
+                let key = typed_item.map_or_else(
+                    || format!("__tidepool_cell_expr_{index}"),
+                    |item| item.entry.clone(),
+                );
+                Some(unique_key(expressions, &key, 4).map_err(|error| {
+                    if ordered {
+                        typed_metadata_failure()
+                    } else {
+                        error
+                    }
+                })?)
+            } else {
+                None
+            };
+            let keys = match typed_item {
+                Some(item) => {
+                    if let Some(expression) = &expression {
+                        decode_expression_lift(expression).map_err(|_| typed_metadata_failure())?;
+                    }
+                    match &item.body {
+                        CheckedTypedSegmentBody::Action { captures, .. }
+                        | CheckedTypedSegmentBody::Let { captures, .. } => captures
+                            .iter()
+                            .map(|capture| typed_capture_signature_key(&item.entry, capture))
+                            .collect(),
+                        CheckedTypedSegmentBody::Observation { capture, .. } => {
+                            vec![typed_capture_signature_key(&item.entry, capture)]
+                        }
+                    }
+                }
+                None => {
+                    let mut keys = item_pins
+                        .iter()
+                        .map(|value| {
+                            row(value, 3)
+                                .and_then(|row| string(&row[0]))
+                                .map(str::to_owned)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if let Some(expression) = &expression {
+                        keys.push(string(&row(expression, 4)?[0])?.to_owned());
+                    }
+                    keys
+                }
+            };
+            let item_signatures = keys
+                .iter()
+                .map(|key| {
+                    signatures
+                        .clone()
+                        .find(|signature| &signature.key == key)
+                        .cloned()
+                        .ok_or_else(|| {
+                            if ordered {
+                                typed_metadata_failure()
+                            } else {
+                                failure("checked item lacks complete signature Name authority")
+                            }
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(CheckedItem {
+                kind,
+                source: string(&fields[2])?.to_owned(),
+                binders,
+                pins: item_pins,
+                expression,
+                signatures: item_signatures,
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    let used = items
+        .iter()
+        .flat_map(|item| &item.signatures)
+        .map(|signature| &signature.key)
+        .collect::<BTreeSet<_>>();
+    if used.len() != signatures.clone().count()
+        || pins.len() != items.iter().map(|item| item.pins.len()).sum::<usize>()
+        || expressions.len()
+            != items
+                .iter()
+                .filter(|item| item.expression.is_some())
+                .count()
+    {
+        return Err(if ordered {
+            typed_metadata_failure()
+        } else {
+            failure("whole-cell authority contains an unowned pin, plan or signature")
+        });
+    }
+    Ok(items)
+}
+
+impl CheckedItem {
+    pub(crate) fn signatures(&self) -> &[ExactCheckedSignature] {
+        &self.signatures
+    }
+}
+
+/// Consume the already captured World observations with their correlated item
+/// proofs. The result is the same item representation held by ExactCheckedCell;
+/// the World reservation remains distinct from a finite CheckedCellRequest.
+pub(crate) fn admit_world_checked_items(
+    observations: &[u8],
+    reservation: &crate::cell_plan::CompilerWorldCellReservation,
+    segments: &[Arc<CheckedTypedSegmentPlan>],
+    proofs: &[crate::compiler_world::WorldItemProof],
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<Vec<CheckedItem>, CompileError> {
+    let value = operation
+        .decode_value(observations, 32 << 20)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let output = cell_observations(&value)?;
+    operation
+        .charge_value_copies(&value, 1)
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    operation
+        .reserve::<CheckedItem>(reservation.slots().len())
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    for proof in proofs {
+        operation
+            .reserve::<ExactCheckedSignature>(proof.signatures().len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        for signature in proof.signatures() {
+            // Interface payloads are shared Arcs; names and presentation text
+            // are the additional owned copies in the normalized item.
+            let text_bytes = signature.names.iter().fold(
+                signature
+                    .key
+                    .len()
+                    .saturating_add(signature.presentation.len()),
+                |bytes, name| {
+                    bytes
+                        .saturating_add(name.unit.len())
+                        .saturating_add(name.module.len())
+                        .saturating_add(name.namespace.len())
+                        .saturating_add(name.occurrence.len())
+                },
+            );
+            operation
+                .reserve::<ExactSignatureName>(signature.names.len())
+                .and_then(|()| operation.charge(text_bytes))
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        }
+    }
+    let signatures = proofs.iter().flat_map(|proof| proof.signatures());
+    let items = decode_checked_items(output, segments.iter().map(AsRef::as_ref), signatures, true)?;
+    if items.len() != reservation.plan().items().len() || items.len() != proofs.len() {
+        return Err(failure(
+            "world observations differ from the reserved item inventory",
+        ));
+    }
+    for ((item, parsed), proof) in items.iter().zip(reservation.plan().items()).zip(proofs) {
+        let kind = match parsed.kind() {
+            crate::cell_plan::ParsedCellPlanKind::Prologue
+            | crate::cell_plan::ParsedCellPlanKind::Declaration => CheckedItemKind::Declaration,
+            crate::cell_plan::ParsedCellPlanKind::Bind => CheckedItemKind::Bind,
+            crate::cell_plan::ParsedCellPlanKind::Expression => CheckedItemKind::Expression,
+        };
+        if item.kind != kind
+            || item.source != parsed.source()
+            || item.binders != parsed.binders()
+            || item.signatures != proof.signatures()
+        {
+            return Err(failure(
+                "world observations differ from their checked item proof",
+            ));
+        }
+    }
+    Ok(items)
+}
+
 pub(crate) fn admit_checked_cell<'a>(
     root: &Path,
     producer: &[u8],
@@ -4429,131 +4663,12 @@ pub(crate) fn admit_checked_cell<'a>(
         .iter()
         .map(decode_signature)
         .collect::<Result<Vec<_>, _>>()?;
-    let mut signature_keys = BTreeSet::new();
-    if signatures
-        .iter()
-        .any(|signature| !signature_keys.insert(&signature.key))
-    {
-        return Err(if program.is_some() {
-            typed_metadata_failure()
-        } else {
-            failure("duplicate signature authority")
-        });
-    }
-    let pins = list(&output[1], 65536)?;
-    let expressions = list(&output[4], 65536)?;
-    if program.is_some() && !pins.is_empty() {
-        return Err(typed_metadata_failure());
-    }
-    let items = list(&output[0], 65536)?
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let fields = row(value, 6)?;
-            let kind = match string(&fields[1])? {
-                "decl" => CheckedItemKind::Declaration,
-                "bind" => CheckedItemKind::Bind,
-                "expr" => CheckedItemKind::Expression,
-                _ => return Err(failure("unknown checked item kind")),
-            };
-            let verdict = row(&fields[3], 2)?;
-            let binders = list(&verdict[0], 65536)?
-                .iter()
-                .map(|value| string(value).map(str::to_owned))
-                .collect::<Result<Vec<_>, _>>()?;
-            let typed_item = if program.is_some() && kind != CheckedItemKind::Declaration {
-                Some(
-                    typed_segments
-                        .iter()
-                        .flat_map(|plan| &plan.items)
-                        .find(|item| item.ordinal == index)
-                        .ok_or_else(typed_metadata_failure)?,
-                )
-            } else {
-                None
-            };
-            let item_pins = if program.is_none() && kind == CheckedItemKind::Bind {
-                binders
-                    .iter()
-                    .map(|binder| {
-                        unique_key(pins, &format!("__tidepool_cell_pin_{index}_{binder}"), 3)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                Vec::new()
-            };
-            let expression = if kind == CheckedItemKind::Expression {
-                let key = typed_item.map_or_else(
-                    || format!("__tidepool_cell_expr_{index}"),
-                    |item| item.entry.clone(),
-                );
-                Some(unique_key(expressions, &key, 4).map_err(|error| {
-                    if program.is_some() {
-                        typed_metadata_failure()
-                    } else {
-                        error
-                    }
-                })?)
-            } else {
-                None
-            };
-            let keys = match typed_item {
-                Some(item) => {
-                    if let Some(expression) = &expression {
-                        decode_expression_lift(expression).map_err(|_| typed_metadata_failure())?;
-                    }
-                    match &item.body {
-                        CheckedTypedSegmentBody::Action { captures, .. }
-                        | CheckedTypedSegmentBody::Let { captures, .. } => captures
-                            .iter()
-                            .map(|capture| typed_capture_signature_key(&item.entry, capture))
-                            .collect(),
-                        CheckedTypedSegmentBody::Observation { capture, .. } => {
-                            vec![typed_capture_signature_key(&item.entry, capture)]
-                        }
-                    }
-                }
-                None => {
-                    let mut keys = item_pins
-                        .iter()
-                        .map(|value| {
-                            row(value, 3)
-                                .and_then(|row| string(&row[0]))
-                                .map(str::to_owned)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if let Some(expression) = &expression {
-                        keys.push(string(&row(expression, 4)?[0])?.to_owned());
-                    }
-                    keys
-                }
-            };
-            let item_signatures = keys
-                .iter()
-                .map(|key| {
-                    signatures
-                        .iter()
-                        .find(|signature| &signature.key == key)
-                        .cloned()
-                        .ok_or_else(|| {
-                            if program.is_some() {
-                                typed_metadata_failure()
-                            } else {
-                                failure("checked item lacks complete signature Name authority")
-                            }
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(CheckedItem {
-                kind,
-                source: string(&fields[2])?.to_owned(),
-                binders,
-                pins: item_pins,
-                expression,
-                signatures: item_signatures,
-            })
-        })
-        .collect::<Result<Vec<_>, CompileError>>()?;
+    let items = decode_checked_items(
+        output,
+        typed_segments.iter(),
+        signatures.iter(),
+        program.is_some(),
+    )?;
     let declaration_indices = items
         .iter()
         .enumerate()
@@ -4588,25 +4703,6 @@ pub(crate) fn admit_checked_cell<'a>(
                 return Err(failure("prepared items differ from parser plan"));
             }
         }
-    }
-    let used = items
-        .iter()
-        .flat_map(|item| &item.signatures)
-        .map(|signature| &signature.key)
-        .collect::<BTreeSet<_>>();
-    if used.len() != signatures.len()
-        || pins.len() != items.iter().map(|item| item.pins.len()).sum::<usize>()
-        || expressions.len()
-            != items
-                .iter()
-                .filter(|item| item.expression.is_some())
-                .count()
-    {
-        return Err(if program.is_some() {
-            typed_metadata_failure()
-        } else {
-            failure("whole-cell authority contains an unowned pin, plan or signature")
-        });
     }
     admission_timing.advance("assemble_checked_owner");
     let cell = Arc::new(ExactCheckedCell {
@@ -8385,6 +8481,67 @@ mod tests {
             root_head[1] = version;
             assert!(decode_world_item_binders(&array([invalid]), &expected).is_err());
         }
+    }
+
+    #[test]
+    fn ordered_item_observations_require_typed_segment_and_exhaustive_evidence() {
+        // Deliberately untrusted decoder input, not a checked/executable owner.
+        let mut output = vec![
+            array([array([
+                Value::Integer(0.into()),
+                text("bind"),
+                text("pure ()"),
+                array([array([]), Value::Null]),
+                Value::Null,
+                Value::Null,
+            ])]),
+            array([]),
+            text("checked source"),
+            Value::Null,
+            array([]),
+        ];
+        let segment = CheckedTypedSegmentPlan {
+            digest: "segment".into(),
+            root: "root".into(),
+            items: vec![CheckedTypedSegmentItem {
+                ordinal: 0,
+                entry: "entry".into(),
+                generation: 1,
+                body: CheckedTypedSegmentBody::Action {
+                    step: "step".into(),
+                    probe: "probe".into(),
+                    marker: "marker".into(),
+                    captures: vec![],
+                },
+            }],
+        };
+        let decode = |output: &[Value], segments: &[CheckedTypedSegmentPlan]| {
+            decode_checked_items(output, segments.iter(), std::iter::empty(), true)
+        };
+        let segments = [segment];
+        let items = decode(&output, &segments).unwrap();
+        assert_eq!(items[0].kind, CheckedItemKind::Bind);
+        assert_eq!(items[0].source, "pure ()");
+        assert!(
+            decode(&output, &[]).is_err(),
+            "missing typed entry must refuse"
+        );
+        output[1] = array([array([text("foreign"), Value::Null, Value::Null])]);
+        assert!(
+            decode(&output, &segments).is_err(),
+            "ordered pins must refuse"
+        );
+        output[1] = array([]);
+        output[4] = array([array([
+            text("foreign"),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ])]);
+        assert!(
+            decode(&output, &segments).is_err(),
+            "unowned observation must refuse"
+        );
     }
 
     #[test]

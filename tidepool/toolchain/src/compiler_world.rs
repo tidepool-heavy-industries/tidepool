@@ -2183,7 +2183,7 @@ pub struct CheckedWorldCellItem {
     symbol: tidepool_repr::execution_schema::SymbolIdentity,
     manifest: BTreeMap<PathBuf, [u8; 32]>,
     binders: Vec<crate::checked_cell::WorldItemBinder>,
-    signatures: Vec<crate::checked_cell::ExactCheckedSignature>,
+    checked: crate::checked_cell::CheckedItem,
 }
 
 impl CheckedWorldCellItem {
@@ -2216,7 +2216,7 @@ impl CheckedWorldCellItem {
     }
 
     pub(crate) fn signatures(&self) -> &[crate::checked_cell::ExactCheckedSignature] {
-        &self.signatures
+        self.checked.signatures()
     }
 
     pub(crate) fn manifest(&self) -> &BTreeMap<PathBuf, [u8; 32]> {
@@ -2392,11 +2392,26 @@ impl CheckedWorldCellProgram {
                 "world cell preparation does not cover every reserved slot",
             ));
         }
+        let checked_items = crate::checked_cell::admit_world_checked_items(
+            &output.observations,
+            reservation,
+            &output.segments,
+            &output.item_proofs,
+            &output.validation.inventory,
+        )?;
+        // TODO(engine V): carry these same checked items and captured products
+        // through World original-execution/typed-entry assembly into
+        // PreparedCheckedItemOutput. SegmentCursor's finite request continuation
+        // and CellProgram's finite ParsedCellPlan are not World evidence. Keep
+        // refusal until those owners receive the World reservation; executable
+        // sealing still requires finish_cell_program_admitted's matching END
+        // and HostAdmissionCancellation. No reread or finite request substitute.
         let mut items = Vec::with_capacity(output.item_proofs.len());
-        for (ordinal, (proof, slot)) in output
+        for (ordinal, ((proof, slot), checked)) in output
             .item_proofs
             .iter()
             .zip(reservation.slots())
+            .zip(checked_items)
             .enumerate()
         {
             if proof.index() != ordinal
@@ -2421,7 +2436,7 @@ impl CheckedWorldCellProgram {
                 symbol: proof.symbol().clone(),
                 manifest: proof.manifest().clone(),
                 binders: proof.binders().to_vec(),
-                signatures: proof.signatures().to_vec(),
+                checked,
             });
         }
         let logical = WorldCellLogicalIdentity {
@@ -2512,7 +2527,7 @@ fn world_cell_output_certificate(
                 crate::checked_cell::WorldItemBinderTier::RetainOpaque => 1,
             }]);
         }
-        for signature in &item.signatures {
+        for signature in item.signatures() {
             frame(signature.key().as_bytes());
             frame(signature.presentation().as_bytes());
             for name in signature.names() {
