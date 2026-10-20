@@ -2366,7 +2366,7 @@ fn settle_checked_snapshot(
     admission: &RuntimeCellAdmission,
     interface: Option<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>>,
     native_delta: Option<CapturedNativeDelta>,
-    successor: Option<Arc<tidepool_toolchain::compiler_world::CompilerWorld>>,
+    successor: Option<tidepool_toolchain::compiler_world::CheckedWorldSuccessor>,
 ) -> Result<(), SessionError> {
     let visibility = session
         .public_visibility_snapshot_in(scope)
@@ -2407,20 +2407,22 @@ fn settle_checked_snapshot(
     if let Some(interface) = interface {
         session.retain_checked_value_interface(interface)?;
     }
-    let snapshot = match (&state.snapshot.basis, successor) {
-        (RuntimeCheckedPrefixBasis::World { .. }, Some(world)) => Arc::new(world_checked_snapshot(
-            world,
-            session
-                .compile_view_key_in(scope)
-                .ok_or(SessionError::DeadScope(scope))?,
-            state.snapshot.session_root.clone(),
-            visibility,
-            interfaces,
-            compiler_prefix,
-            admission.digest(),
-            retained,
-            native_imports,
-        )),
+    let snapshot = match (&state.snapshot.basis, successor.as_ref()) {
+        (RuntimeCheckedPrefixBasis::World { .. }, Some(successor)) => {
+            Arc::new(world_checked_snapshot(
+                Arc::clone(successor.world()),
+                session
+                    .compile_view_key_in(scope)
+                    .ok_or(SessionError::DeadScope(scope))?,
+                state.snapshot.session_root.clone(),
+                visibility,
+                interfaces,
+                compiler_prefix,
+                admission.digest(),
+                retained,
+                native_imports,
+            ))
+        }
         (RuntimeCheckedPrefixBasis::Finite { .. }, None) => {
             let view = session
                 .compile_view_in(scope)
@@ -2448,7 +2450,7 @@ fn settle_checked_snapshot(
         }
         _ => return Err(SessionError::StaleStagedDeclaration),
     };
-    if let (Some(predecessor), Some(successor)) = (state.snapshot.world(), snapshot.world()) {
+    if let (Some(predecessor), Some(successor)) = (state.snapshot.world(), successor.as_ref()) {
         session.adopt_checked_world_successor_in(scope, admission, predecessor, successor)?;
     }
     if let Some((generation, digest)) = added_interface {
@@ -3414,10 +3416,11 @@ impl PersistentSession {
                                 &target,
                             ),
                         },
-                        world: successor.clone(),
+                        world: Arc::clone(successor.world()),
                     });
+                    let context = Arc::clone(successor.compiler_context());
                     let next = Arc::new(world_checked_snapshot(
-                        successor,
+                        Arc::clone(successor.world()),
                         key,
                         prior.session_root.clone(),
                         visibility,
@@ -3428,10 +3431,9 @@ impl PersistentSession {
                         native_imports,
                     ));
                     Ok(move |lib: &mut super::SessionLib| {
-                        lib.tips
-                            .get_mut(&scope)
-                            .expect("prepared declaration scope")
-                            .inspection_world = Some(association);
+                        let tip = lib.tips.get_mut(&scope).expect("prepared declaration scope");
+                        tip.exact_context = Some(super::recovery::ScopedCompilerContext::new(context));
+                        tip.inspection_world = Some(association);
                         state.snapshot = next;
                         state.reservation = None;
                     })
@@ -4961,7 +4963,7 @@ impl PersistentSession {
         scope: ScopeId,
         admission: &RuntimeCellAdmission,
         predecessor: &Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
-        successor: &Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
+        successor: &tidepool_toolchain::compiler_world::CheckedWorldSuccessor,
     ) -> Result<(), SessionError> {
         let RuntimeCellCompilerBasis::World {
             original_source, ..
@@ -4972,7 +4974,7 @@ impl PersistentSession {
         let source = admission.world_source_reference()?.clone();
         let original_source = original_source.clone();
         let target = admission._retained_scope.clone();
-        RuntimeOriginalSource::with_sources_and_targets(
+        let replaced = RuntimeOriginalSource::with_sources_and_targets(
             [original_source.clone()],
             [target.clone()],
             |sources, _| {
@@ -5013,18 +5015,25 @@ impl PersistentSession {
                                     &target,
                                 ),
                             },
-                            world: successor.clone(),
+                            world: Arc::clone(successor.world()),
                         });
-                        self.lib_mut()
-                            .tips
-                            .entry(scope)
-                            .or_default()
-                            .inspection_world = Some(association);
-                        Ok(())
+                        let tip = self.lib_mut().tips.entry(scope).or_default();
+                        let old_context =
+                            tip.exact_context
+                                .replace(super::recovery::ScopedCompilerContext::new(Arc::clone(
+                                    successor.compiler_context(),
+                                )));
+                        let old_world = tip.inspection_world.replace(association);
+                        Ok((old_context, old_world))
                     },
                 )
             },
         )??;
+        // Completion changes runtime compiler custody even when the item's
+        // Haskell names and TYPE input are unchanged. Future captures must read
+        // the newly installed context rather than a cached predecessor view.
+        self.invalidate_compile_view_in(scope);
+        drop(replaced);
         Ok(())
     }
 
