@@ -278,7 +278,7 @@ fn check_admission_shapes(ordinals: &[u32], choices: &[(u8, u8, u8)]) {
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap();
-    assert_eq!(admitted, selected_groups);
+    assert_eq!(admitted.groups().as_ref(), selected_groups.as_slice());
 
     for changed in [changed_imports(first), changed_body(first)] {
         compare_admission(
