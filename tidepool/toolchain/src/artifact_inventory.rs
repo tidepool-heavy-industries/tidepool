@@ -3118,13 +3118,7 @@ pub(crate) struct BoundArtifactSelection {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum BoundNativeGroup {
-    Issued {
-        binding: NativeGroupBinding,
-        /// Present only when this operation demanded the key and one of the
-        /// provenance constructors produced the exact fact. Groups reached
-        /// transitively through an issued closure carry no fabricated reason.
-        provenance: Option<native_availability::NativeBindingProvenance>,
-    },
+    Issued { binding: NativeGroupBinding },
 }
 
 impl BoundNativeGroup {
@@ -3522,7 +3516,7 @@ impl ArtifactInventory {
             offers: demanded_offers,
         } = acquisition;
         for (key, group) in &bound_inputs {
-            let Some(binding) = group.binding else {
+            let Some(binding) = group.binding() else {
                 // A current-product completion is issued by this admission's
                 // own plan, so it cannot conflict with an earlier binding yet.
                 continue;
@@ -3590,32 +3584,19 @@ impl ArtifactInventory {
                     },
                 ));
             }
-            // A historical child reached through exactly one authenticated
-            // parent edge keeps that exact binding; the current namespace
-            // carrier cannot substitute for the recorded child.
-            if let Some(verified) = bound_inputs.get(&group) {
-                if matches!(
-                    verified.provenance,
-                    native_availability::NativeBindingProvenance::Historical { .. }
-                ) && fixed.groups.get(&group).is_none()
-                {
-                    let binding = verified.binding.expect("historical binding is exact");
-                    resolved_groups.insert(group, binding);
-                    reused.insert(group);
-                    continue;
-                }
+            // Issued groups keep their exact owner and complete edge set.
+            if let Some(binding) = bound_inputs
+                .get(&group)
+                .and_then(|verified| verified.binding())
+            {
+                resolved_groups.insert(group, binding);
+                reused.insert(group);
+                continue;
             }
             let exact_dependencies = match bound_inputs.get(&group) {
-                Some(verified)
-                    if verified.binding.is_none() && fixed.groups.get(&group).is_none() =>
-                {
-                    match &verified.dependencies {
-                        native_availability::NativeProductDependencies::Exact(edges) => {
-                            Some(edges.clone())
-                        }
-                        _ => None,
-                    }
-                }
+                Some(native_availability::VerifiedNativeBinding::NewCurrent {
+                    dependencies: native_availability::NativeProductDependencies::Exact(edges),
+                }) if fixed.groups.get(&group).is_none() => Some(edges.clone()),
                 _ => None,
             };
             if let Some(exact_dependencies) = exact_dependencies {
@@ -3727,11 +3708,8 @@ impl ArtifactInventory {
             // decide reuse. Independently issued carriers cannot substitute.
             let pending_binding = bound_inputs
                 .get(&group)
-                .and_then(|verified| verified.binding)
-                .map(|binding| BoundNativeGroup::Issued {
-                    binding,
-                    provenance: bound_inputs.get(&group).map(|verified| verified.provenance),
-                });
+                .and_then(|verified| verified.binding())
+                .map(|binding| BoundNativeGroup::Issued { binding });
             let resolution = match fixed.groups.get(&group).or(pending_binding.as_ref()) {
                 Some(bound) => {
                     crate::certified_products::NativeGroupCandidates::IssuedAvailability(
@@ -4132,13 +4110,9 @@ impl ArtifactInventory {
                     artifact: group.binding.artifact(),
                     original_ordinal: group.original_ordinal,
                 };
-                fixed.groups.insert(
-                    key,
-                    BoundNativeGroup::Issued {
-                        binding: *group,
-                        provenance: bound_inputs.get(&key).map(|verified| verified.provenance),
-                    },
-                );
+                fixed
+                    .groups
+                    .insert(key, BoundNativeGroup::Issued { binding: *group });
             }
         }
         tracing::debug!(target: "exomonad_harness::timing", phase = "products.bound_native_demand", issued_native_groups = issued_count, reused_native_groups = reused_count, canonical_hits_total = totals.0, canonical_comparisons_total = totals.1, canonical_bytes_offered_total = totals.2, issued_scope_nodes_total = totals.3, graph_visits_total = totals.4, entry_handle_copies_total = totals.5, "bound native demand inventory observation");
@@ -4149,8 +4123,7 @@ impl ArtifactInventory {
                 Some((
                     key,
                     BoundNativeGroup::Issued {
-                        binding: verified.binding?,
-                        provenance: Some(verified.provenance),
+                        binding: verified.binding()?,
                     },
                 ))
             }));
@@ -4821,6 +4794,7 @@ impl ArtifactInventory {
             demanded_offers.extend(acquired.offers);
         }
         let mut prebound = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
+        let mut issued_pairs = BTreeMap::new();
         if let ArtifactRootIntent::Certified(selection) = root_intent {
             let native_availability::CertifiedNativeDemandAcquisition {
                 entries: incoming,
@@ -4835,10 +4809,15 @@ impl ArtifactInventory {
                 selection,
             )?;
             selected.extend(incoming);
+            issued_pairs.extend(
+                bindings
+                    .iter()
+                    .filter_map(|(key, verified)| Some((*key, verified.carrier_pair()?))),
+            );
             prebound.extend(
                 bindings
                     .into_iter()
-                    .filter_map(|(key, verified)| Some((key, verified.binding?))),
+                    .filter_map(|(key, verified)| Some((key, verified.binding()?))),
             );
             demanded_offers = offers;
         }
@@ -4929,32 +4908,16 @@ impl ArtifactInventory {
                 let ArtifactPayload::Original(product) = &entry.payload else {
                     return Err(failure("chosen Original root lacks its original payload"));
                 };
-                let recorded_carrier = |source, artifact| {
-                    let bindings = state
-                        .outgoing(source)
-                        .filter_map(|(target, edge)| match target {
-                            InventoryNodeKey::Artifact(binding)
-                                if binding.artifact == artifact
-                                    && *edge == ArtifactDependency::Interface =>
-                            {
-                                Some(binding)
-                            }
-                            _ => None,
-                        })
-                        .collect::<BTreeSet<_>>();
-                    if bindings.len() != 1 {
-                        return Err(admission_failure(
-                            ArtifactInventoryFailure::BindingAmbiguity { artifact },
-                        ));
-                    }
-                    Ok(*bindings.first().unwrap())
-                };
-                let carrier = recorded_carrier(InventoryNodeKey::Group(*chosen), key.artifact)?;
-                let canonical =
+                let canonical_id =
                     ArtifactEntry::canonical_artifact_id(product.module_interface().ok_or_else(
-                        || failure("chosen Original root lacks its canonical interface"),
+                        || failure("chosen Original root lacks canonical interface"),
                     )?);
-                let canonical = recorded_carrier(InventoryNodeKey::Artifact(carrier), canonical)?;
+                let (carrier, canonical) = match issued_pairs.get(key) {
+                    Some(pair) => *pair,
+                    None => {
+                        native_availability::issued_carrier_pair(parent, *chosen, canonical_id)?
+                    }
+                };
                 for binding in [carrier, canonical] {
                     if prebound_artifacts
                         .insert(binding.artifact, binding)
@@ -16123,8 +16086,11 @@ mod tests {
                     &mut bound, &recovered,
                     NativeArtifactDemand::CertifiedTargetImports(&helper_imports),
                     vec![], &certified,
-                ).map(|admitted| admitted.artifacts), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
-                    ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == helper.descriptor.id)));
+                ).map(|admitted| admitted.artifacts), Err(CompileError::ArtifactInventory(error))
+                    if error.native_refusal == Some(NativeAdmissionRefusal::CurrentProductNotCompleted {
+                        original: helper.descriptor.id,
+                        original_ordinal: 7,
+                    })));
                 assert_eq!(recovered_inventory.node_count(), before_bound_nodes);
                 assert_eq!(recovered.capture_graph_selection(), before_bound_graph);
 
