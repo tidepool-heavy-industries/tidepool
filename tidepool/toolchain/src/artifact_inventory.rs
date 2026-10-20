@@ -14611,11 +14611,19 @@ mod tests {
                         &receipt,
                     )
                     .unwrap();
-                assert!(interfaces.selected_native_groups().is_empty());
+                // This admission grants no group roots; inherited exact proof
+                // history remains available as custody without body permission.
                 assert!(interfaces
-                    .roots()
+                    .lease
+                    .admission_roots
                     .iter()
                     .all(|root| matches!(root, InventoryNodeKey::Artifact(_))));
+                for fact in &facts {
+                    assert_eq!(
+                        fact.issued_groups(&interfaces).unwrap(),
+                        fact.issued_groups(broader).unwrap(),
+                    );
+                }
                 let mut unproved = inventory
                     .bind_segment(&interfaces, vec![Arc::new(root.clone())], &receipt)
                     .unwrap();
