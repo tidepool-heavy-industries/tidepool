@@ -4810,6 +4810,7 @@ impl PersistentSession {
             if retire_source {
                 self.retire_source_admission(*dead);
             } else {
+                self.invalidate_lexical_scope_custody(*dead);
                 self.release_unheld_original_source_record(*dead);
             }
             if let Some(lib) = self.lib.as_mut() {
