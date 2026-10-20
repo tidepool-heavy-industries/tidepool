@@ -142,9 +142,12 @@ the actual item/native-group witnesses and published declaration runtime roots.
 Those roots include all published instance dictionaries, class defaults and
 pattern implementations; an unpublished unused helper creates no runtime value
 obligation. Earlier captures retain their original scope, seal and stage
-witness. `TPCWPREP4` reports executable typed plans, closed executable/original
-item proofs and an ordered stage table. Each stage names its sealed source,
-module and certificate outputs under `stage-<firstOrdinal>/`; it grants no runtime
+witness. `TPCWPREP5` reports executable typed plans, closed executable/original
+item proofs and an ordered stage table. Each stage owns its selected runtime
+references and names its sealed source, module and certificate outputs under
+`stage-<firstOrdinal>/`; the program-wide union is derived only for native
+preparation. A transitive reference may reuse only an exact earlier selected
+capture, preserving its original witness. The table grants no runtime
 value permission. The private `TPCWSOURCE3` receipt carries the same closed stage
 identity and the completion's ordered materialized root aliases as transport
 DATA. Their positions map back to the captured source domain;
