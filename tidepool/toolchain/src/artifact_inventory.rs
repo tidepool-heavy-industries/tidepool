@@ -1536,6 +1536,7 @@ pub enum ArtifactKind {
     CanonicalModuleInterface,
     ValueInterface,
     LexicalJoin,
+    PackageCode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -2068,6 +2069,7 @@ pub(crate) enum ArtifactPayload {
     Original(CertifiedRecoveryProduct),
     Canonical(crate::certified_products::CertifiedModuleInterface),
     Interface(CertifiedJoinedInterface, JoinedInterfaceRole),
+    PackageCode(Arc<crate::certified_products::CertifiedPackageCodeProduct>),
 }
 
 impl PartialEq for ArtifactPayload {
@@ -2078,6 +2080,7 @@ impl PartialEq for ArtifactPayload {
             (Self::Interface(left, left_role), Self::Interface(right, right_role)) => {
                 left_role == right_role && left == right
             }
+            (Self::PackageCode(left), Self::PackageCode(right)) => left == right,
             _ => false,
         }
     }
@@ -2090,6 +2093,7 @@ impl ArtifactPayload {
             Self::Original(_) => ArtifactKind::OriginalModule,
             Self::Canonical(_) => ArtifactKind::CanonicalModuleInterface,
             Self::Interface(_, role) => role.artifact_kind(),
+            Self::PackageCode(_) => ArtifactKind::PackageCode,
         }
     }
 }
@@ -2100,6 +2104,7 @@ pub(crate) enum ArtifactFactsHandle {
     Original(Arc<crate::recovery_artifacts::OriginalFacts>),
     Canonical(Arc<crate::certified_products::CanonicalFacts>),
     Joined(Arc<JoinedFacts>),
+    PackageCode(Arc<crate::certified_products::CertifiedPackageCodeProduct>),
 }
 
 impl PartialEq for ArtifactFactsHandle {
@@ -2109,6 +2114,7 @@ impl PartialEq for ArtifactFactsHandle {
                 (Self::Original(a), Self::Original(b)) => a == b,
                 (Self::Canonical(a), Self::Canonical(b)) => a == b,
                 (Self::Joined(a), Self::Joined(b)) => a == b,
+                (Self::PackageCode(a), Self::PackageCode(b)) => a == b,
                 _ => false,
             }
     }
@@ -2127,6 +2133,7 @@ impl ArtifactFactsHandle {
             (Self::Original(a), Self::Original(b)) => Arc::ptr_eq(a, b),
             (Self::Canonical(a), Self::Canonical(b)) => Arc::ptr_eq(a, b),
             (Self::Joined(a), Self::Joined(b)) => Arc::ptr_eq(a, b),
+            (Self::PackageCode(a), Self::PackageCode(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -2238,6 +2245,9 @@ impl ArtifactEntry {
             (ArtifactPayload::Interface(_, _), ArtifactFactsHandle::Joined(owner)) => {
                 ArtifactPayload::Interface(owner.interface.clone(), owner.role)
             }
+            (ArtifactPayload::PackageCode(_), ArtifactFactsHandle::PackageCode(owner)) => {
+                ArtifactPayload::PackageCode(Arc::clone(owner))
+            }
             _ => unreachable!("canonical facts variant"),
         };
         let mut adopted = self.clone();
@@ -2257,7 +2267,7 @@ impl ArtifactEntry {
             ArtifactPayload::Original(product) => product
                 .module_interface()
                 .and_then(|interface| interface.catalog_input_custody()),
-            ArtifactPayload::Interface(_, _) => None,
+            ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
         }
     }
 
@@ -2451,6 +2461,31 @@ impl ArtifactEntry {
             payload: ArtifactPayload::Canonical(interface),
             requirements: interface_seals.keys().cloned().collect(),
             interface_seals,
+            native: None,
+        }
+    }
+
+    /// Package products retain executable bytes without acquiring compiler roles.
+    pub(crate) fn package_code(
+        product: Arc<crate::certified_products::CertifiedPackageCodeProduct>,
+    ) -> Self {
+        let owner = product.code().owner();
+        let imports = digest(&product.import_interfaces().concat());
+        let descriptor = descriptor(
+            ArtifactKind::PackageCode,
+            ExactModuleIdentity { unit: owner.unit.clone(), module: owner.module.clone() },
+            owner.compiler_sha256,
+            owner.interface_sha256,
+            Some(*product.product_sha256()),
+            imports,
+            None,
+        );
+        Self {
+            descriptor,
+            facts: ArtifactFactsHandle::PackageCode(Arc::clone(&product)),
+            payload: ArtifactPayload::PackageCode(product),
+            requirements: Vec::new(),
+            interface_seals: BTreeMap::new(),
             native: None,
         }
     }
@@ -2759,6 +2794,9 @@ impl InventoryState {
                 owner.role == *role
                     && owner.requirements == entry.requirements
                     && owner.interface == *interface
+            }
+            (ArtifactFactsHandle::PackageCode(owner), ArtifactPayload::PackageCode(product)) => {
+                Arc::ptr_eq(owner, product)
             }
             _ => false,
         };
@@ -3108,6 +3146,8 @@ impl SelectedOwners {
                 selected
                     .native
                     .insert(NativeOwnerKey::from_owner(product.owner()), *id)
+            } else if matches!(entry.payload, ArtifactPayload::PackageCode(_)) {
+                continue;
             } else {
                 selected
                     .interfaces
@@ -7312,7 +7352,7 @@ impl ArtifactView {
                 let owner = entry.descriptor.owner.clone();
                 if entry.is_native() {
                     natives.entry(owner).or_default().push(id);
-                } else {
+                } else if !matches!(entry.payload, ArtifactPayload::PackageCode(_)) {
                     entries.insert(owner, id);
                 }
                 artifacts.insert(id, Arc::clone(entry));
@@ -7377,7 +7417,8 @@ impl ArtifactView {
     ) -> BTreeMap<ExactModuleIdentity, ArtifactKind> {
         self.descriptors()
             .into_iter()
-            .filter(|descriptor| descriptor.kind != ArtifactKind::CanonicalModuleInterface)
+            .filter(|descriptor| matches!(descriptor.kind,
+                ArtifactKind::OriginalModule | ArtifactKind::ValueInterface | ArtifactKind::LexicalJoin))
             .map(|descriptor| (descriptor.owner, descriptor.kind))
             .collect()
     }
