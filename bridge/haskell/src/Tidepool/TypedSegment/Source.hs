@@ -2,88 +2,134 @@
 -- Authored nested do expressions remain opaque to this rewrite.
 module Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences
+  , ParsedSegmentDemand, prepareSegmentDemand
+  , SegmentDemandScope, newSegmentDemandScope
   ) where
 
 import Control.Exception (throwIO)
+import Control.Monad (forM)
 import Data.Data (Data)
 import Data.Generics (everything, mkQ)
 import Data.List (intersect, nub)
-import qualified Data.Set as Set
+import qualified Data.Map.Strict as Map
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import GHC (ParsedModule (..))
-import GHC.Driver.Session (DynFlags, GeneralFlag(Opt_HelpfulErrors,Opt_DeferOutOfScopeVariables), gopt_set, gopt_unset)
-import GHC.Driver.Env (HscEnv, hsc_dflags, hscUpdateFlags)
-import GHC.Rename.Expr (rnLExpr)
-import GHC.Rename.Unbound (isUnboundName)
-import GHC.Tc.Utils.Monad (initTcInteractive, discardErrs)
-import GHC.Types.Name (nameOccName)
+import GHC.Driver.Session (DynFlags, GeneralFlag(Opt_HelpfulErrors,Opt_DeferOutOfScopeVariables), gopt_set, gopt_unset, xopt)
+import GHC.Driver.Env (HscEnv, hsc_NC, hscUpdateFlags)
+import GHC.Iface.Env (allocateGlobalBinder)
+import GHC.LanguageExtensions.Type qualified as LangExt
+import GHC.Rename.Module (findSplice, rnSrcDecls)
+import GHC.Rename.Names (rnImports)
+import GHC.Tc.Types (TcGblEnv(..))
+import GHC.Tc.Utils.Monad (initTcInteractive, getGblEnv, setGblEnv, failM)
+import GHC.Types.Name (Name)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Parser qualified as Parser
+import GHC.Parser.Header (mkPrelImports)
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
 import GHC.Data.FastString (mkFastString)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Ppr (showPpr)
 import GHC.Hs
 import GHC.Types.Basic (Boxity (Boxed), DoPmc (SkipPmc), GenReason (OtherExpansion), Origin (Generated))
-import GHC.Types.Name.Occurrence (isVarOcc, mkVarOcc, occNameString)
-import GHC.Types.Name.Reader (RdrName, isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc)
+import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
+import GHC.Types.Name.Reader
+  ( RdrName, isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc
+  , GlobalRdrEnv, mkGlobalRdrEnv, mkLocalVanillaGRE, Parent(NoParent)
+  , plusGlobalRdrEnv, shadowNames )
 import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan, mkRealSrcLoc)
+import GHC.Unit.Types (interactiveUnit, mkModule)
+import GHC.Unit.Module (mkModuleName)
 import GHC.Unit.Module.ModSummary (ms_hspp_opts)
 import GHC.Utils.Outputable (ppr, text, (<+>))
 import Tidepool.TypedSegment.Types
+import Tidepool.ExactHydration
+  ( CapturedGeneratedScaffoldSource, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath )
+import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 
--- GHC owns lexical scope here, before any old binding is hydrated. An empty
--- global environment leaves unresolved uses as HsUnboundVar, preserving the
--- original qualifier. The submitted module value group supplies its own
--- mutually scoped names; GHC also resolves let/do/lambda/case locals.
--- Expected missing-global diagnostics are discarded only for this demand
--- probe. Its syntax is never admitted or typechecked, and the real compiler
--- still validates the complete submitted program through its normal owner.
--- Constructor/class/foreign-generated value bindings need the full module
--- renamer environment. This value-group slice refuses those declarations,
--- rather than misclassifying a same-named historical binding as an input.
--- Callers must apply the world effective-flag/execution policy before entry.
-typedSegmentInputOccurrences :: HscEnv -> TypedSegmentPlan -> String -> IO (Either TypedSegmentFailure [String])
-typedSegmentInputOccurrences environment plan source = case rootExpression of
-  Left failure -> pure (Left failure)
-  Right expression -> do
-    let probeFlags = gopt_set (gopt_unset flags Opt_HelpfulErrors) Opt_DeferOutOfScopeVariables
-        probe = hscUpdateFlags (const probeFlags) environment
-    (_,renamed) <- initTcInteractive probe (discardErrs (fst <$> rnLExpr expression))
-    pure $ case renamed of
-      Nothing -> Left UnprovedRootAbstraction
-      Just result -> Right (Set.toAscList (Set.fromList
-        (everything (++) (mkQ [] selected) result)))
+-- The source issuer has already checked these bytes against its protected
+-- recipe. This parser result is also the no-quasiquote proof required before
+-- the demand renamer can load any imported interface.
+data ParsedSegmentDemand = ParsedSegmentDemand DynFlags (Located (HsModule GhcPs))
+
+prepareSegmentDemand :: TypedSegmentPlan -> DynFlags -> CapturedGeneratedScaffoldSource
+  -> Either TypedSegmentFailure ParsedSegmentDemand
+prepareSegmentDemand plan flags captured = case unP Parser.parseModule parser of
+  PFailed _ -> Left UnprovedRootAbstraction
+  POk _ parsed
+    | null (quasiQuoteOccurrences flags parsed), roots parsed == [()] ->
+        Right (ParsedSegmentDemand flags parsed)
+    | otherwise -> Left UnprovedRootAbstraction
   where
-    flags = hsc_dflags environment
+    source = Text.unpack (TextEncoding.decodeUtf8 (capturedGeneratedScaffoldBytes captured))
     parser = initParserState (initParserOpts flags) (stringToStringBuffer source)
-      (mkRealSrcLoc (mkFastString "<held-world-segment>") 1 1)
-    rootExpression = case unP Parser.parseModule parser of
-      PFailed _ -> Left UnprovedRootAbstraction
-      POk _ parsed ->
-        let declarations = hsmodDecls (unLoc parsed)
-            bindings = [L location binding | L location (ValD _ binding) <- declarations]
-            signatures = [L location signature | L location (SigD _ signature) <- declarations]
-            roots = [() | FunBind {fun_id=identifier} <- map unLoc bindings
-              , occNameString (rdrNameOcc (unLoc identifier)) == typedSegmentPlanRoot plan]
-            local = HsValBinds noAnn (ValBinds NoAnnSortKey bindings signatures)
-        in case (all (supportedDeclaration . unLoc) declarations,roots) of
-          (True,[()]) -> Right (noLocA (HsLet noAnn local
-            (nlHsVar (mkRdrUnqual (mkVarOcc (typedSegmentPlanRoot plan))))))
-          _ -> Left UnprovedRootAbstraction
-    supportedDeclaration :: HsDecl GhcPs -> Bool
-    supportedDeclaration (ValD _ FunBind{}) = True
-    supportedDeclaration (ValD _ PatBind{}) = True
-    supportedDeclaration SigD{} = True
-    supportedDeclaration DefD{} = True
-    supportedDeclaration (TyClD _ SynDecl{}) = True
-    supportedDeclaration DocD{} = True
-    supportedDeclaration _ = False
-    selected :: HsExpr GhcRn -> [String]
-    selected (HsUnboundVar _ name)
-      | isUnqual name && isVarOcc (rdrNameOcc name) = [occNameString (rdrNameOcc name)]
-    selected (HsVar _ (L _ name))
-      | isUnboundName name && isVarOcc (nameOccName name) = [occNameString (nameOccName name)]
-    selected _ = []
+      (mkRealSrcLoc (mkFastString (capturedGeneratedScaffoldPath captured)) 1 1)
+    roots parsed =
+      [ () | L _ (ValD _ FunBind {fun_id=identifier}) <- hsmodDecls (unLoc parsed)
+      , occNameString (rdrNameOcc (unLoc identifier)) == typedSegmentPlanRoot plan ]
+
+-- Placeholder Names describe only the world's lexical aliases. Their exact
+-- association stays with the supplied admitted binding; they never supply a type,
+-- native identity or value certificate. A fixed private interactive module
+-- lets NameCache share each alias across worlds without retaining per-cell
+-- namespaces. GHC gives each query's declarations their own module.
+data SegmentDemandScope binding = SegmentDemandScope
+  !GlobalRdrEnv !(Map.Map Name (String,binding))
+
+newSegmentDemandScope :: HscEnv -> Map.Map String binding -> IO (SegmentDemandScope binding)
+newSegmentDemandScope environment bindings = do
+  entries <- forM (Map.toAscList bindings) $ \(alias,binding) -> do
+    name <- allocateGlobalBinder (hsc_NC environment)
+      (mkModule interactiveUnit (mkModuleName "TidepoolDemand")) (mkVarOcc alias) noSrcSpan
+    pure (name,(alias,binding))
+  pure (SegmentDemandScope
+    (mkGlobalRdrEnv [mkLocalVanillaGRE NoParent name | (name,_) <- entries])
+    (Map.fromList entries))
+
+-- GHC owns the complete module and local lexical scopes, including class
+-- defaults, instance methods, constructors and record fields. All imports
+-- retain their real identities and qualification. The notebook alias GREs
+-- shadow imported values through the same GHC operation used by GHCi; new
+-- module declarations then shadow those aliases during rnSrcDecls.
+--
+-- The owning admission must validate source execution policy before entry and
+-- install only its actually selected source interfaces. No compiler environment
+-- escapes the probe, and genuine renamer errors are never discarded.
+typedSegmentInputOccurrences :: HscEnv -> SegmentDemandScope binding -> ParsedSegmentDemand
+  -> IO (Either TypedSegmentFailure [(String,binding)])
+typedSegmentInputOccurrences environment (SegmentDemandScope aliases bindings)
+    (ParsedSegmentDemand flags parsed) = do
+  let probeFlags = gopt_set (gopt_unset flags Opt_HelpfulErrors) Opt_DeferOutOfScopeVariables
+      probe = hscUpdateFlags (const probeFlags) environment
+      syntax = unLoc parsed
+      imports = hsmodImports syntax
+      owner = maybe (mkModuleName "Main") unLoc (hsmodName syntax)
+      allImports = mkPrelImports owner noSrcSpan (xopt LangExt.ImplicitPrelude flags) imports ++ imports
+  (_,renamed) <- initTcInteractive probe $ do
+    (_,_,imported,available,_,_) <- rnImports
+      [(declaration,text "held-world demand") | declaration <- allImports]
+    current <- getGblEnv
+    let scope = plusGlobalRdrEnv aliases (shadowNames False imported aliases)
+    setGblEnv (current {tcg_rdr_env=scope,tcg_imports=available}) $ do
+      (group,splice) <- findSplice (hsmodDecls syntax)
+      case splice of
+        Just _ -> failM
+        Nothing -> pure ()
+      (_,result) <- rnSrcDecls group
+      pure result
+  pure $ case renamed of
+    Nothing -> Left UnprovedRootAbstraction
+    Just result ->
+      let selected = everything (++) (mkQ [] occurrence) result
+          demanded = Map.fromList
+            [ (alias,(alias,binding))
+            | name <- selected, Just (alias,binding) <- [Map.lookup name bindings] ]
+      in Right (Map.elems demanded)
+  where
+    occurrence :: HsExpr GhcRn -> [Name]
+    occurrence (HsVar _ (L _ name)) = [name]
+    occurrence _ = []
 
 rewriteParsedSegmentRoot :: GeneratedSegmentOperations -> TypedSegmentPlan -> ParsedModule -> IO ParsedModule
 rewriteParsedSegmentRoot operations plan parsed = case rewriteModule of

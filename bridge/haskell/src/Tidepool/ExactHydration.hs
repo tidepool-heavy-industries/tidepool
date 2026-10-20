@@ -33,6 +33,8 @@ module Tidepool.ExactHydration
   , generatedScaffoldRecipeWithProtectedImports, generatedCheckingTemplateRecipeWithProtectedImports
   , generatedTypedSegmentRecipeWithProtectedImports
   , generatedActivationPreviewRecipe, captureGeneratedScaffoldTarget
+  , CapturedGeneratedScaffoldSource, captureGeneratedScaffoldSource
+  , capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
   , permitsGeneratedScaffoldImport
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority
   , installExactLexicalGraphWithScaffold
@@ -494,12 +496,25 @@ generatedActivationPreviewRecipe flags interfaces originalOwner protectedTemplat
       _ -> Left "activation preview lacks its sealed original target"
     pure (GeneratedScaffoldRecipe canonical target bytes line selected interfaces (OriginalPreviewInstances originalTarget) role)
 
-captureGeneratedScaffoldTarget :: GeneratedScaffoldRecipe -> FilePath -> IO (Either String BS.ByteString)
-captureGeneratedScaffoldTarget (GeneratedScaffoldRecipe path _ expected _ _ _ _ _) requested = do
+data CapturedGeneratedScaffoldSource = CapturedGeneratedScaffoldSource FilePath BS.ByteString
+
+capturedGeneratedScaffoldBytes :: CapturedGeneratedScaffoldSource -> BS.ByteString
+capturedGeneratedScaffoldBytes (CapturedGeneratedScaffoldSource _ bytes) = bytes
+
+capturedGeneratedScaffoldPath :: CapturedGeneratedScaffoldSource -> FilePath
+capturedGeneratedScaffoldPath (CapturedGeneratedScaffoldSource path _) = path
+
+captureGeneratedScaffoldSource :: GeneratedScaffoldRecipe -> FilePath -> IO (Either String CapturedGeneratedScaffoldSource)
+captureGeneratedScaffoldSource (GeneratedScaffoldRecipe path _ expected _ _ _ _ _) requested = do
   canonical <- canonicalizePath requested
   actual <- BS.readFile canonical
-  pure $ if canonical == path && actual == expected then Right expected
+  pure $ if canonical == path && actual == expected
+    then Right (CapturedGeneratedScaffoldSource path expected)
     else Left "generated scaffold target differs from its protected recipe"
+
+captureGeneratedScaffoldTarget :: GeneratedScaffoldRecipe -> FilePath -> IO (Either String BS.ByteString)
+captureGeneratedScaffoldTarget recipe requested =
+  fmap capturedGeneratedScaffoldBytes <$> captureGeneratedScaffoldSource recipe requested
 
 data GeneratedScaffoldOwner
   = NativeScaffoldOwner ExecutionSourceIdentity
