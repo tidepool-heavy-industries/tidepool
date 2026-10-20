@@ -1789,9 +1789,14 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
 
 worldResidencyBoundaries :: IO ()
 worldResidencyBoundaries = withCapturedWorldContext $ \handles work producer profile contextParcel scopePath -> do
+  ownedScope <- ownedFixtureScope handles scopePath
+  continued <- readScopeCodecFixture ownedScope
+  case scopeCodecAcquisition continued of
+    Just (ContinueCodecOriginals _ (TList images)) | not (null images) -> pure ()
+    _ -> fail "World/image interleave requires actual continued original images"
   directory <- canonicalizePath work
   withRootedCompilerEnvironment directory $
-    withQuietStdout (worldResidencyHistories handles work producer profile contextParcel scopePath)
+    withQuietStdout (worldResidencyHistories handles work producer profile contextParcel ownedScope)
 
 -- Reuse the actual compiled Context and owned arenas from the preparation
 -- fixture. Added captured files exercise storage scale without issuing native
@@ -1848,12 +1853,16 @@ worldResidencyHistories handles work producer profile parcel scopePath = do
         (_,legacy) <- captureDiagnostics $ do
           _ <- scopedReadExactScope compiler scopePath >>= either fail pure
           scopedReadExactScope compiler scopePath >>= either fail pure
-        let sharedCharges = counterValues "original_inputs.shared_optional_charged_bytes" legacy
-        unless (sum (counterValues "original_inputs.retained_encoded_bytes" legacy) > 0
-            && sum (counterValues "original_inputs.world_reserved_bytes" legacy) > 0
-            && sum (counterValues "original_inputs.certificate.hits" legacy) > 0
+        let retainedImages = counterValues "original_inputs.retained_encoded_bytes" legacy
+            reservedWorld = counterValues "original_inputs.world_reserved_bytes" legacy
+            certificateHits = counterValues "original_inputs.certificate.hits" legacy
+            sharedCharges = counterValues "original_inputs.shared_optional_charged_bytes" legacy
+        unless (sum retainedImages > 0
+            && sum reservedWorld > 0
+            && sum certificateHits > 0
             && not (null sharedCharges) && all (<= 128 * 1024 * 1024) sharedCharges)
-          (fail "retained World consumed image slots or split the shared byte allowance")
+          (fail ("retained World consumed image slots or split the shared byte allowance: "
+            ++ show (retainedImages,reservedWorld,certificateHits,sharedCharges)))
       unchanged <- directories
       unless (unchanged == after)
         (fail "resident reuse rematerialized the retained World source backing")
