@@ -1923,6 +1923,13 @@ pub struct BindingLease {
     cleanup: CustodyLease,
 }
 
+impl BindingLease {
+    /// Exact roots retained by the binding owner's dependency-closure admission.
+    pub fn retained_bindings(&self) -> &[SessionVarId] {
+        &self.retained
+    }
+}
+
 /// One installed startup program awaiting its actor's durable application
 /// boundary. The capsule owns its original install pin and cannot be cloned.
 #[must_use]

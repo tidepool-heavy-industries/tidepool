@@ -9597,12 +9597,8 @@ where
             .iter()
             .map(|id| tidepool_repr::VarId(id.raw()))
             .collect::<Vec<_>>();
-        tracing::debug!(target: "exomonad_harness::timing",
-            logical_world = ?world_output.logical().logical_id(),
-            output_certificate = ?world_output.certificate_sha256(),
-            leased_runtime_roots = demanded_bindings.len(),
-            leased_binding_ids = ?world_output.demanded_session_bindings().iter().map(|id| id.raw()).collect::<Vec<_>>(),
-            "checked World runtime binding demand");
+        let logical_world = *world_output.logical().logical_id();
+        let output_certificate = *world_output.certificate_sha256();
         let item_capabilities = program
             .items()
             .iter()
@@ -9633,7 +9629,18 @@ where
         let bindings = self
             .access
             .with_machine(context, move |session, _, _| {
-                Ok(session.lease_bindings(&demanded_bindings))
+                let bindings = session.lease_bindings(&demanded_bindings);
+                let mut retained = bindings.retained_bindings().iter().map(|id| id.raw()).collect::<Vec<_>>();
+                retained.sort_unstable();
+                tracing::debug!(target: "exomonad_harness::timing",
+                    logical_world = ?logical_world,
+                    output_certificate = ?output_certificate,
+                    demanded_runtime_roots = demanded_bindings.len(),
+                    demanded_binding_ids = ?demanded_bindings.iter().map(|id| id.0).collect::<Vec<_>>(),
+                    leased_runtime_roots = retained.len(),
+                    leased_binding_ids = ?retained,
+                    "checked World runtime binding demand");
+                Ok(bindings)
             })
             .await?;
         Ok((
