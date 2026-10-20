@@ -1077,9 +1077,31 @@ fn decode_typed_segment_plan_facts(
 #[derive(Debug)]
 pub struct CellProgram {
     pub(crate) checked: Arc<ExactCheckedCell>,
-    pub(crate) parsed: Arc<crate::cell_plan::ParsedCellPlan>,
+    pub(crate) basis: CellProgramBacking,
     pub(crate) slots: Vec<CheckedPlannedCellSlot>,
     pub(crate) items: Vec<CellProgramItem>,
+}
+
+/// Physical plan owner of an executable program. World evidence retains the
+/// checked output that issued its reservation and item successor descriptions.
+pub(crate) enum CellProgramBacking {
+    Finite(Arc<crate::cell_plan::ParsedCellPlan>),
+    World(Arc<crate::compiler_world::CheckedWorldCellProgram>),
+}
+
+impl std::fmt::Debug for CellProgramBacking {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Finite(plan) => formatter.debug_tuple("Finite").field(plan).finish(),
+            Self::World(program) => formatter.debug_tuple("World")
+                .field(program.certificate_sha256()).finish(),
+        }
+    }
+}
+
+pub enum CellProgramBasis<'a> {
+    Finite(&'a Arc<crate::cell_plan::ParsedCellPlan>),
+    World(&'a Arc<crate::compiler_world::CheckedWorldCellProgram>),
 }
 
 #[derive(Debug)]
@@ -1099,8 +1121,11 @@ impl CellProgram {
     pub fn checked_cell(&self) -> &Arc<ExactCheckedCell> {
         &self.checked
     }
-    pub fn parsed_plan(&self) -> &Arc<crate::cell_plan::ParsedCellPlan> {
-        &self.parsed
+    pub fn basis(&self) -> CellProgramBasis<'_> {
+        match &self.basis {
+            CellProgramBacking::Finite(plan) => CellProgramBasis::Finite(plan),
+            CellProgramBacking::World(program) => CellProgramBasis::World(program),
+        }
     }
     pub fn admission_digest(&self) -> [u8; 32] {
         self.checked.admission_digest()
