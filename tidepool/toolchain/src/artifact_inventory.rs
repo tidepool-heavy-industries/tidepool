@@ -3387,13 +3387,6 @@ impl ArtifactInventory {
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
         let mut materialization_parents = fixed.materializations.clone();
         cursor.collect_cached_materializations(&mut materialization_parents)?;
-        // Completion evidence needs its own view snapshot, which takes the
-        // inventory lock. Capture it before entering the locked admission.
-        let mut completions = native_availability::NativeProductCompletions::from_bound_selection(
-            &fixed.native_source,
-            &fixed.view,
-            &fixed.entries,
-        );
         let mut state = self.0.lock().expect("inventory lock");
         let unbound = demanded
             .iter()
@@ -3407,7 +3400,6 @@ impl ArtifactInventory {
             incoming,
             &unbound,
             &fixed.native_source,
-            &mut completions,
         )
         .map_err(|error| {
             tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
@@ -4037,16 +4029,20 @@ impl ArtifactInventory {
                     artifact: group.binding.artifact(),
                     original_ordinal: group.original_ordinal,
                 };
-                fixed.groups.insert(key, BoundNativeGroup::Issued {
-                    binding: *group,
-                    provenance: bound_inputs.get(&key).map(|verified| verified.provenance),
-                });
+                fixed.groups.insert(
+                    key,
+                    BoundNativeGroup::Issued {
+                        binding: *group,
+                        provenance: bound_inputs.get(&key).map(|verified| verified.provenance),
+                    },
+                );
             }
         }
         tracing::debug!(target: "exomonad_harness::timing", phase = "products.bound_native_demand", issued_native_groups = issued_count, reused_native_groups = reused_count, canonical_hits_total = totals.0, canonical_comparisons_total = totals.1, canonical_bytes_offered_total = totals.2, issued_scope_nodes_total = totals.3, graph_visits_total = totals.4, entry_handle_copies_total = totals.5, "bound native demand inventory observation");
         fixed.entries.extend(incoming);
-        fixed.groups.extend(
-            bound_inputs.into_iter().filter_map(|(key, verified)| {
+        fixed
+            .groups
+            .extend(bound_inputs.into_iter().filter_map(|(key, verified)| {
                 Some((
                     key,
                     BoundNativeGroup::Issued {
@@ -4054,8 +4050,7 @@ impl ArtifactInventory {
                         provenance: Some(verified.provenance),
                     },
                 ))
-            }),
-        );
+            }));
         let mut inherited_materializations = materialization_parents.clone();
         let mut view = ArtifactView::new(ViewDraft {
             roots: roots,
@@ -4514,18 +4509,6 @@ impl ArtifactInventory {
         let materialization_parents = Vec::new();
         let retained_roots: Option<Vec<InventoryNodeKey>> = None;
         let custody_roots = Vec::<ArtifactBindingNode>::new();
-        let mut completions = match &root_intent {
-            ArtifactRootIntent::Certified(selection) => {
-                let supplied = entries
-                    .iter()
-                    .map(|entry| (entry.descriptor.id, Arc::clone(entry)))
-                    .collect::<BTreeMap<_, _>>();
-                native_availability::NativeProductCompletions::from_pending_selection(
-                    selection, &supplied,
-                )
-            }
-            _ => native_availability::NativeProductCompletions::empty(),
-        };
         let mut expanded = entries;
         let mut implicit = Vec::new();
         for entry in &expanded {
@@ -4740,7 +4723,6 @@ impl ArtifactInventory {
                 BTreeMap::new(),
                 &groups,
                 selection,
-                &mut completions,
             )?;
             selected.extend(incoming);
             prebound.extend(
@@ -9063,9 +9045,7 @@ mod tests {
         let operation = InventoryOperation::new(Default::default());
         let observation = HostWorkObservation::new();
         let selected = observation
-            .scope(|| {
-                cold.select_acquired_compiler_bindings(&namespace, &groups, &operation)
-            })
+            .scope(|| cold.select_acquired_compiler_bindings(&namespace, &groups, &operation))
             .unwrap();
 
         // R7: demand must not require or capture a cold read projection, and
