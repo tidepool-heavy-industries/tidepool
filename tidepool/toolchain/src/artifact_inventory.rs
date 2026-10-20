@@ -30,6 +30,8 @@ pub(crate) use native_availability::{
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;
 mod cold_validation;
+pub use package_code::PackageCodeBinding;
+pub(crate) use package_code::IssuedPackageCodeGraph;
 
 /// Exact artifacts persist SHA-256 of the compiler's stable producer bytes.
 /// Endpoint identities and their raw producer bytes are not this identity.
@@ -749,6 +751,8 @@ pub(crate) struct ResolvedNativeTarget<'a> {
 }
 
 impl ResolvedNativeTarget<'_> {
+    pub(crate) fn artifacts(&self) -> &ArtifactView { self.owner.artifacts() }
+
     pub(crate) fn has_only_current_source(&self, group: NativeGroupBinding) -> bool {
         self.sources
             .0
@@ -1543,6 +1547,7 @@ pub enum ArtifactKind {
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactDependency {
     Interface,
+    PackageCodeImport { global_index: u32 },
     NativeGroup {
         dependent_ordinal: u32,
         required_ordinal: u32,
@@ -2513,6 +2518,10 @@ impl ArtifactEntry {
 
     fn is_native(&self) -> bool {
         matches!(self.payload, ArtifactPayload::Original(_))
+    }
+
+    pub(crate) fn is_compiler_interface(&self) -> bool {
+        matches!(self.payload, ArtifactPayload::Canonical(_) | ArtifactPayload::Interface(_, _))
     }
 
     pub(crate) fn interface(
@@ -9663,7 +9672,7 @@ impl ArtifactView {
                     .entry(entry.descriptor.owner.clone())
                     .or_default()
                     .push(id);
-            } else {
+            } else if entry.is_compiler_interface() {
                 interfaces.insert(entry.descriptor.owner.clone(), id);
             }
         }
@@ -9694,7 +9703,7 @@ impl ArtifactView {
         self.read_projection(&state)
             .entries
             .iter()
-            .filter(|entry| !entry.is_native())
+            .filter(|entry| entry.is_compiler_interface())
             .map(|entry| ExactInterfaceOwner {
                 owner: entry.descriptor.owner.clone(),
                 requirements: entry.requirements.clone(),
@@ -21699,4 +21708,77 @@ mod tests {
         );
         assert_eq!(inventory.metrics().nodes, 7);
     }
+}
+
+mod package_code {
+//! Exact package code custody, independent of compiler namespace and HOME roles.
+use super::*;
+use crate::certified_products::CertifiedPackageCodeProduct;
+use tidepool_repr::execution_schema::{SymbolIdentity, ValueId};
+
+/// A package occurrence borrowed from its actual immutable graph issuer.
+/// The scalar binding alone does not grant this acquired owner.
+#[derive(Clone)]
+pub struct PackageCodeBinding {
+    graph: Arc<IssuedPackageCodeGraph>,
+    binding: ArtifactBinding,
+}
+
+impl PartialEq for PackageCodeBinding {
+    fn eq(&self, other: &Self) -> bool { self.binding == other.binding }
+}
+impl Eq for PackageCodeBinding {}
+
+impl std::fmt::Debug for PackageCodeBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PackageCodeBinding").field(&self.binding).finish()
+    }
+}
+
+impl PackageCodeBinding {
+    pub fn binding(&self) -> ArtifactBinding { self.binding }
+    pub fn product(&self) -> &Arc<CertifiedPackageCodeProduct> {
+        &self.graph.rows[&self.binding].product
+    }
+    pub fn imports(&self) -> impl ExactSizeIterator<Item = Self> + '_ {
+        self.graph.rows[&self.binding].imports.iter().map(|binding| Self {
+            graph: Arc::clone(&self.graph), binding: *binding,
+        })
+    }
+    pub fn exported_value(&self, symbol: &SymbolIdentity) -> Option<ValueId> {
+        self.product().code().exported_values()
+            .find_map(|(identity, value)| (identity == symbol).then_some(value))
+    }
+}
+
+#[derive(Debug)]
+struct PackageCodeRow {
+    product: Arc<CertifiedPackageCodeProduct>,
+    imports: Arc<[ArtifactBinding]>,
+}
+
+/// One admitted package graph. Rows retain ordered slots; the inventory view
+/// retains the same exact scope proofs and immutable payload acquisitions.
+#[derive(Debug)]
+pub(crate) struct IssuedPackageCodeGraph {
+    artifacts: ArtifactView,
+    roots: Arc<[ArtifactBinding]>,
+    rows: BTreeMap<ArtifactBinding, Arc<PackageCodeRow>>,
+}
+
+impl IssuedPackageCodeGraph {
+    pub(crate) fn artifacts(&self) -> &ArtifactView { &self.artifacts }
+    pub(crate) fn roots(&self) -> &[ArtifactBinding] { &self.roots }
+    pub(crate) fn get(self: &Arc<Self>, binding: ArtifactBinding) -> Option<PackageCodeBinding> {
+        self.rows.contains_key(&binding).then(|| PackageCodeBinding {
+            graph: Arc::clone(self), binding,
+        })
+    }
+    pub(crate) fn bindings(self: &Arc<Self>) -> impl ExactSizeIterator<Item = PackageCodeBinding> + '_ {
+        self.rows.keys().map(|binding| PackageCodeBinding {
+            graph: Arc::clone(self), binding: *binding,
+        })
+    }
+}
+
 }
