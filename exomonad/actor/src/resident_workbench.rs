@@ -17877,6 +17877,71 @@ pub(crate) mod request_tests {
                     && matches!(&receipt.origin, WorldModuleOrigin::Home { root: 4, path, source_sha256 }
                         if path == "WorldQuestion.hs" && source_sha256 == expected.sha256())));
             assert!(matches!(first.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Int"));
+            let receiving_context = workbench
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    let placement = crate::ActorPlacement {
+                        lexical_scope: session.mint_isolated_scope(),
+                        ..context.placement
+                    };
+                    Ok(
+                        crate::ActorDescriptor::new("world installation receiver", placement)
+                            .admit_independent_world()
+                            .session_context(crate::ActorRef::first(crate::ActorId(2))),
+                    )
+                })
+                .await
+                .unwrap();
+            workbench_runner_for_test(&workbench)
+                .adopt_final_source_scope(receiving_context.clone())
+                .await
+                .unwrap();
+            let original = context.source_dependency().source_lease().unwrap();
+            let target = receiving_context
+                .source_dependency()
+                .source_lease()
+                .unwrap();
+            assert!(!Arc::ptr_eq(&original, &target));
+            let mut transferred = context.clone();
+            transferred.placement = receiving_context.placement;
+            let completed = installed_world_query(
+                &workbench,
+                transferred.clone(),
+                captured.clone(),
+                "WorldQuestion",
+                StructuredInspectionKind::Type,
+                HostWorkObservation::new(),
+            )
+            .await;
+            assert!(
+                matches!(completed.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Int")
+            );
+            let gate_source = captured.clone();
+            let gate_results = workbench.access.with_machine(transferred, move |session, context, _| {
+                let reference = &gate_source.generation_evidence().unwrap().reference;
+                let before = session.public_visibility_snapshot_in(context.placement.lexical_scope);
+                assert!(session.install_inspection_world_if_current(&completed, reference, &original));
+                let mut results = Vec::new();
+                for (label, lease) in [("original source", &original), ("receiving scope", &target)] {
+                    let fence = lease.source_admission().fence().unwrap();
+                    // Gate state is the only change: source, epoch, scope and
+                    // compile-view identities still match this actual output.
+                    results.push((label, session.install_inspection_world_if_current(&completed, reference, &original)));
+                    assert_eq!(session.public_visibility_snapshot_in(context.placement.lexical_scope), before);
+                    assert!(matches!(completed.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Int"));
+                    fence.reopen_with(lease, |reopen| {
+                        reopen.commit();
+                        Ok::<_, ()>(())
+                    }).unwrap().unwrap();
+                    assert!(session.install_inspection_world_if_current(&completed, reference, &original));
+                }
+                Ok(results)
+            }).await.unwrap();
+            assert_eq!(
+                gate_results,
+                [("original source", false), ("receiving scope", false)],
+                "each actual closed source gate must refuse installation independently"
+            );
             let initially_absent = installed_world_query(&workbench, context.clone(), captured.clone(), "CreatedLater", StructuredInspectionKind::Info, HostWorkObservation::new()).await;
             assert!(matches!(initially_absent.resolution(), WorldModuleResolution::Absent(missing) if missing.module == "CreatedLater"));
             let mut reversed_bodies = bodies.clone();
