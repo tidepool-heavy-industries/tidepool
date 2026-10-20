@@ -230,7 +230,7 @@ pub(crate) struct CompilerWorkRegistration {
 pub(crate) enum ExecutionSourceOrigin {
     Neutral,
     Actor(crate::resident_workbench::generation_admission::SourceDependency),
-    Original(Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>),
+    Original(Arc<tidepool_runtime::session::RuntimeOriginalSource>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -302,7 +302,7 @@ impl ExecutionSourceOrigin {
 
     pub(crate) fn bind_original(
         slot: &OnceLock<Self>,
-        source: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        source: Arc<tidepool_runtime::session::RuntimeOriginalSource>,
     ) -> Result<(), ExecutionSourceBindingError> {
         source
             .clone()
@@ -466,7 +466,7 @@ impl CompilerWorkTicket {
     /// recipient's current source is not an acceptable substitute.
     pub(crate) fn bind_original_source(
         &self,
-        source: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        source: Arc<tidepool_runtime::session::RuntimeOriginalSource>,
     ) -> Result<(), ExecutionSourceBindingError> {
         ExecutionSourceOrigin::bind_original(&self.source, source)
     }
@@ -532,7 +532,7 @@ impl CompilerWorkTicket {
         let cancellation = ticket.control.cancellation.clone();
         session
             .with_source_compiler_transaction(
-                source,
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 cancellation,
                 Some(hook),
@@ -545,7 +545,7 @@ impl CompilerWorkTicket {
     pub(crate) fn run_original_source_transaction<H, O, T>(
         session: &mut tidepool_runtime::session::ResidentSession<H, O>,
         ticket: Self,
-        source: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        source: Arc<tidepool_runtime::session::RuntimeOriginalSource>,
         action: impl FnOnce(
             &mut tidepool_runtime::session::ResidentSession<H, O>,
             &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
@@ -574,7 +574,7 @@ impl CompilerWorkTicket {
 
     pub(crate) fn run_original_source_compiler_phase<T>(
         self,
-        source: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        source: Arc<tidepool_runtime::session::RuntimeOriginalSource>,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         action: impl FnOnce(
             &tidepool_runtime::session::RuntimeSourceCompilerTransaction,

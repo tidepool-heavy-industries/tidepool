@@ -1422,7 +1422,7 @@ static_assertions::assert_not_impl_any!(RequestReceiverEntry: Clone, Copy);
 #[derive(Debug)]
 pub struct RuntimeActivationInput {
     custody: RootCustody,
-    original_source: Arc<super::RuntimeLexicalScopeLease>,
+    original_source: Arc<super::RuntimeOriginalSource>,
     site: u64,
     input_type: String,
     type_evidence: Arc<super::prepared::SiteTypeEvidence>,
@@ -1437,7 +1437,7 @@ pub struct RuntimeActivationInput {
 static_assertions::assert_not_impl_any!(RuntimeActivationInput: Clone, Copy);
 
 impl RuntimeActivationInput {
-    pub fn original_source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
+    pub fn original_source(&self) -> Arc<super::RuntimeOriginalSource> {
         self.original_source.clone()
     }
 
@@ -1541,7 +1541,7 @@ static_assertions::assert_not_impl_any!(RuntimeActivationInputAdmission: Clone, 
 /// A committed original live binding. Type authority does not authorize preview
 /// code; that executable is admitted separately after this mount.
 pub struct MountedActivationInput {
-    original_source: Arc<super::RuntimeLexicalScopeLease>,
+    original_source: Arc<super::RuntimeOriginalSource>,
     interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
     original_execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
     original_execution_identity: [u8; 32],
@@ -1630,7 +1630,7 @@ impl SpentActivationPreview {
 }
 
 impl RuntimeActivationPreviewAdmission {
-    pub fn original_source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
+    pub fn original_source(&self) -> Arc<super::RuntimeOriginalSource> {
         self.mounted.original_source.clone()
     }
 
@@ -1638,18 +1638,9 @@ impl RuntimeActivationPreviewAdmission {
         &self,
         action: impl FnOnce() -> T,
     ) -> Result<T, super::SourceAdmissionError> {
-        super::RuntimeLexicalScopeLease::with_source_leases(
-            [
-                self.mounted.original_source.clone(),
-                self.scope_lease.clone(),
-            ],
-            |leases| {
-                super::RuntimeSourceAdmission::with_open_admissions(
-                    leases.iter().map(|lease| lease.source_admission()),
-                    action,
-                )
-            },
-        )
+        self.mounted
+            .original_source
+            .with_open_target(&self.scope_lease, action)
     }
 
     pub fn source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
@@ -3828,7 +3819,7 @@ where
     /// Own the exact source lease and all lower claims through physical END.
     pub fn with_source_compiler_transaction<T>(
         &mut self,
-        source: Arc<super::RuntimeLexicalScopeLease>,
+        source: Arc<super::RuntimeOriginalSource>,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         cancellation: crate::CompilerTransactionCancellation,
         supplemental_hook: Option<super::SourceAdmissionHook>,
@@ -3837,6 +3828,7 @@ where
     ) -> Result<crate::CompilerTransactionSettled<T>, super::SourceAdmissionError> {
         super::source_admission::run_source_compiler_transaction(
             source,
+            None,
             workload,
             cancellation,
             supplemental_hook,
@@ -4008,7 +4000,7 @@ where
     pub fn capture_notebook_generation_world(
         &self,
         prepared: &super::PreparedNotebookGeneration,
-        source: &Arc<super::RuntimeLexicalScopeLease>,
+        source: &Arc<super::RuntimeOriginalSource>,
     ) -> Result<super::AdmittedInspectionWorld, SessionError> {
         self.state.capture_notebook_generation_world(prepared, source, |id| {
             self.hidden_host_bindings.contains_key(&id)
@@ -4157,7 +4149,7 @@ where
 
     fn admit_original_source_work_in(
         &self,
-        original: &Arc<super::RuntimeLexicalScopeLease>,
+        original: &Arc<super::RuntimeOriginalSource>,
         scope: ScopeId,
     ) -> Result<(), SessionError> {
         let target = self.state.source_lease_in(scope)?;
@@ -4973,7 +4965,7 @@ where
         &self,
         scope: ScopeId,
         source: &super::GenerationArtifactReference,
-        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> Result<super::AdmittedInspectionWorld, SessionError> {
         self.state
             .capture_inspection_world_in(scope, source, original_source, |id| {
@@ -4986,7 +4978,7 @@ where
         &mut self,
         completed: &super::CompletedInspectionWorld,
         source: &super::GenerationArtifactReference,
-        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> bool {
         self.state
             .install_inspection_world_if_current(completed, source, original_source)
@@ -4997,7 +4989,7 @@ where
         &mut self,
         completed: &super::CompletedCompilerWorld,
         source: &super::GenerationArtifactReference,
-        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        original_source: &Arc<super::RuntimeOriginalSource>,
     ) -> bool {
         self.state.install_compiler_world_association_if_current(
             &completed.association,
@@ -6020,12 +6012,9 @@ where
         }
         self.admit_original_source_work_in(&owner.input.original_source, scope)?;
         let target = self.state.source_lease_in(scope).map_err(SessionError::SourceAdmission)?;
-        super::RuntimeLexicalScopeLease::with_source_leases(
-            [owner.input.original_source.clone(), target],
-            |leases| super::RuntimeSourceAdmission::with_open_admissions(
-                leases.iter().map(|lease| lease.source_admission()),
-                || self.state.consume_binding_interface(reservation, &interface),
-            ),
+        owner.input.original_source.with_open_target(
+            &target,
+            || self.state.consume_binding_interface(reservation, &interface),
         ).map_err(SessionError::SourceAdmission)??;
         self.mount_compiled_binding_prepared(
             scope,
@@ -6368,59 +6357,47 @@ where
         }
         let write =
             self.mount_checked_host_input_settled(carrier, payload, settlement, Some(execution))?;
-        let result = super::RuntimeLexicalScopeLease::with_source_leases(
-            [facts.original_source.clone(), target.clone()],
-            |leases| {
-                super::RuntimeSourceAdmission::with_open_admissions(
-                    leases.iter().map(|lease| lease.source_admission()),
-                    || {
-                        if self.hidden_host_bindings.get(&id)
-                            != Some(&HiddenHostBinding::PrivateInput)
-                            || !write.matches_private_mount(&self.state, execution)
-                            || !self
-                                .state
-                                .source_lease_in(scope)
-                                .is_ok_and(|live| Arc::ptr_eq(&live, &target))
-                            || self
-                                .state
-                                .lib()
-                                .tips
-                                .get(&scope)
-                                .and_then(|tip| tip.inspection_world.as_ref())
-                                .is_none_or(|live| !Arc::ptr_eq(live, &before))
-                        {
-                            return Err(SessionError::StaleStagedDeclaration);
-                        }
-                        let key = self
-                            .state
-                            .compile_view_key_in(scope)
-                            .ok_or(SessionError::StaleStagedDeclaration)?;
-                        let mut base = before.base.clone();
-                        base.key = key;
-                        let after = Arc::new(super::inspection::InspectionWorldAssociation {
-                            base,
-                            world: before.world.clone(),
-                        });
-                        // The bind owner already classified this fresh input;
-                        // publish its matching runtime association in this checkout.
-                        self.state
-                            .lib_mut()
-                            .tips
-                            .get_mut(&scope)
-                            .expect("validated private association")
-                            .inspection_world = Some(after.clone());
-                        write.retain_private_hidden_mount(
-                            &self.state,
-                            execution.clone(),
-                            before,
-                            after,
-                        )
-                    },
-                )
-            },
-        )
-        .map_err(SessionError::from)
-        .and_then(|result| result);
+        let result = facts
+            .original_source
+            .with_open_target(&target, || {
+                if self.hidden_host_bindings.get(&id) != Some(&HiddenHostBinding::PrivateInput)
+                    || !write.matches_private_mount(&self.state, execution)
+                    || !self
+                        .state
+                        .source_lease_in(scope)
+                        .is_ok_and(|live| Arc::ptr_eq(&live, &target))
+                    || self
+                        .state
+                        .lib()
+                        .tips
+                        .get(&scope)
+                        .and_then(|tip| tip.inspection_world.as_ref())
+                        .is_none_or(|live| !Arc::ptr_eq(live, &before))
+                {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                let key = self
+                    .state
+                    .compile_view_key_in(scope)
+                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                let mut base = before.base.clone();
+                base.key = key;
+                let after = Arc::new(super::inspection::InspectionWorldAssociation {
+                    base,
+                    world: before.world.clone(),
+                });
+                // The bind owner already classified this fresh input;
+                // publish its matching runtime association in this checkout.
+                self.state
+                    .lib_mut()
+                    .tips
+                    .get_mut(&scope)
+                    .expect("validated private association")
+                    .inspection_world = Some(after.clone());
+                write.retain_private_hidden_mount(&self.state, execution.clone(), before, after)
+            })
+            .map_err(SessionError::from)
+            .and_then(|result| result);
         match result {
             Ok(write) => Ok(write),
             Err(error) => {
@@ -6711,78 +6688,71 @@ where
         }
         let target = execution.retained_lexical_scope();
         let facts = execution.world_execution_facts();
-        super::RuntimeLexicalScopeLease::with_source_leases(
-            [facts.original_source.clone(), target.clone()],
-            |leases| {
-                super::RuntimeSourceAdmission::with_open_admissions(
-                    leases.iter().map(|lease| lease.source_admission()),
-                    || {
-                        let scope = execution.private_scope();
-                        let id = SessionVarId::from_extract(binder.var_id);
-                        if !write.matches_private_hidden_mount(&self.state, execution, id)
-                            || execution.final_intent.get().is_some()
-                            || self.hidden_host_bindings.get(&id)
-                                != Some(&HiddenHostBinding::PrivateInput)
-                            || self
-                                .state
-                                .resolve_in(scope, &binder.name)
-                                .is_none_or(|entry| entry.id != id || entry.scope != scope)
-                        {
-                            return Err(SessionError::StaleStagedDeclaration);
-                        }
-                        let association = self
-                            .state
-                            .lib()
-                            .tips
-                            .get(&scope)
-                            .and_then(|tip| tip.inspection_world.clone())
-                            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
-                        let before = self
-                            .state
-                            .compile_view_key_in(scope)
-                            .ok_or(SessionError::StaleStagedDeclaration)?;
-                        let mut records = execution.host_retirements.lock();
-                        let mut expected = &association.base.key;
-                        for record in records.iter() {
-                            expected = record
-                                .following_key(&self.state, &association, &target, expected)
-                                .ok_or(SessionError::WorldCellPublicationBaseStale)?;
-                        }
-                        if expected != &before
-                            || !association
-                                .base
-                                .original_source
-                                .matches(&facts.original_source)
-                            || !association.base.target.matches(&target)
-                            || !Arc::ptr_eq(&association.base.source, &facts.source)
-                        {
-                            return Err(SessionError::WorldCellPublicationBaseStale);
-                        }
-                        records
-                            .try_reserve(1)
-                            .map_err(|error| SessionError::RecoveryManifest {
-                                path: self.state.lib().root.clone(),
-                                detail: error.to_string(),
-                            })?;
-                        self.retire_binding_owner_settled(id);
-                        let after = self
-                            .state
-                            .compile_view_key_in(scope)
-                            .ok_or(SessionError::StaleStagedDeclaration)?;
-                        records.push(PrivateHostRetirement {
-                            association,
-                            scope: target.clone(),
-                            before,
-                            after,
-                            binder: id,
-                            name: BindingName(binder.name.clone()),
-                        });
-                        Ok(())
-                    },
-                )
-            },
-        )
-        .map_err(SessionError::from)??;
+        facts
+            .original_source
+            .with_open_target(&target, || {
+                let scope = execution.private_scope();
+                let id = SessionVarId::from_extract(binder.var_id);
+                if !write.matches_private_hidden_mount(&self.state, execution, id)
+                    || execution.final_intent.get().is_some()
+                    || self.hidden_host_bindings.get(&id) != Some(&HiddenHostBinding::PrivateInput)
+                    || self
+                        .state
+                        .resolve_in(scope, &binder.name)
+                        .is_none_or(|entry| entry.id != id || entry.scope != scope)
+                {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                let association = self
+                    .state
+                    .lib()
+                    .tips
+                    .get(&scope)
+                    .and_then(|tip| tip.inspection_world.clone())
+                    .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                let before = self
+                    .state
+                    .compile_view_key_in(scope)
+                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                let mut records = execution.host_retirements.lock();
+                let mut expected = &association.base.key;
+                for record in records.iter() {
+                    expected = record
+                        .following_key(&self.state, &association, &target, expected)
+                        .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                }
+                if expected != &before
+                    || !association
+                        .base
+                        .original_source
+                        .matches(&facts.original_source)
+                    || !association.base.target.matches(&target)
+                    || !Arc::ptr_eq(&association.base.source, &facts.source)
+                {
+                    return Err(SessionError::WorldCellPublicationBaseStale);
+                }
+                records
+                    .try_reserve(1)
+                    .map_err(|error| SessionError::RecoveryManifest {
+                        path: self.state.lib().root.clone(),
+                        detail: error.to_string(),
+                    })?;
+                self.retire_binding_owner_settled(id);
+                let after = self
+                    .state
+                    .compile_view_key_in(scope)
+                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                records.push(PrivateHostRetirement {
+                    association,
+                    scope: target.clone(),
+                    before,
+                    after,
+                    binder: id,
+                    name: BindingName(binder.name.clone()),
+                });
+                Ok(())
+            })
+            .map_err(SessionError::from)??;
         Ok(())
     }
 

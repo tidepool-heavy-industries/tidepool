@@ -2752,7 +2752,7 @@ pub fn compile_activation_renderer(
     ActivationRendererFailure,
 > {
     source
-        .admit_original(&admission.original_source_lease(), Some(admission.source_lease()))
+        .admit_original(&admission.original_source(), Some(admission.source_lease()))
         .map_err(super::PreparedRuntimeError::from)?;
     super::resident::PreparedRenderer::prepare(|| {
         compile_activation_renderer_inner(admission, template_source, budget, includes, settlement)

@@ -68,7 +68,7 @@ impl BootstrapWorld {
         &self,
         scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     ) -> Result<(), GenerationAdmissionError> {
-        scope.validate_source_issuer()?;
+        scope.validate_lexical_issuer()?;
         if let Some(existing) = self.0.scope.get() {
             if !Arc::ptr_eq(existing, &scope) {
                 return Err(GenerationAdmissionError::StaleSourceLease);
@@ -145,7 +145,7 @@ impl BootstrapWorld {
             .scope
             .get()
             .ok_or(GenerationAdmissionError::Unqualified)?;
-        scope.validate_source_issuer()?;
+        scope.validate_lexical_issuer()?;
         if !Arc::ptr_eq(scope, target.runtime_lease()) {
             return Err(GenerationAdmissionError::StaleSourceLease);
         }
@@ -494,7 +494,7 @@ impl SourceDependency {
             Self::Unqualified => None,
         };
         if let Some(lease) = &lease {
-            lease.validate_source_issuer()?;
+            lease.validate_lexical_issuer()?;
         }
         let claim = match self {
             Self::World(world) => world.claim(),
@@ -504,7 +504,7 @@ impl SourceDependency {
             Self::Unqualified => Err(GenerationAdmissionError::Unqualified),
         }?;
         if let Some(lease) = &lease {
-            lease.validate_source_issuer()?;
+            lease.validate_lexical_issuer()?;
         }
         Ok(claim)
     }
@@ -685,7 +685,7 @@ impl GenerationDependency {
         };
         match self
             .runtime_admission()
-            .fence_with(self.runtime_lease(), compare)
+            .fence_with(self.runtime_lease().original_source(), compare)
         {
             Ok(Ok(fence)) => super::ActorGenerationRetirementCutoff::Fenced(retain(fence)),
             Ok(Err(tidepool_runtime::session::SourceFenceTransitionFailure::Refused(error))) => {
@@ -799,7 +799,7 @@ impl GenerationRetirementFence {
         };
         fence
             .fence
-            .reopen_with(fence.dependency.runtime_lease(), settle)?
+            .reopen_with(fence.dependency.runtime_lease().original_source(), settle)?
             .map(|_reopened| ())
     }
 }
@@ -818,7 +818,7 @@ impl GenerationFence {
     pub(crate) fn reopen(self) -> Result<(), GenerationAdmissionError> {
         let lease = self.dependency.runtime_lease();
         self.fence
-            .reopen_with(lease, |reopen| {
+            .reopen_with(lease.original_source(), |reopen| {
                 reopen.commit();
                 Ok::<_, ()>(())
             })
@@ -1499,7 +1499,7 @@ mod tests {
                 assert_eq!(parent_fence.pending_claims(), 0);
                 assert_eq!(parent_fence.unconfirmed_claims(), 0);
                 parent_fence
-                    .reopen_with(parent.runtime_lease(), |reopen| {
+                    .reopen_with(parent.runtime_lease().original_source(), |reopen| {
                         reopen.commit();
                         Ok::<_, ()>(())
                     })

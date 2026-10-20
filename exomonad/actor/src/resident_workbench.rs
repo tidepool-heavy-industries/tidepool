@@ -2334,7 +2334,7 @@ impl PublicationFence {
         let Self::Held(fence) = std::mem::replace(self, Self::ReopenAttempted) else {
             return Err(PublicationSettlementError::ReopenAttempted);
         };
-        fence.reopen_with(target, settle)?.map(|_reopened| ())
+        fence.reopen_with(target.original_source(), settle)?.map(|_reopened| ())
     }
 }
 
@@ -2388,7 +2388,7 @@ impl ActorPublicationGuard {
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
         owner: ActorPublicationOwner,
     ) -> Result<Option<Self>, ResidentActorWorkbenchError> {
-        target.runtime_lease().validate_source_issuer()?;
+        target.runtime_lease().validate_lexical_issuer()?;
         let authority = match (&expected, source) {
             (
                 ActorRequestSnapshot::Bootstrap(_),
@@ -7658,7 +7658,7 @@ where
     async fn with_original_source_compiler_machine<ResultValue>(
         &self,
         context: crate::ActorSessionContext,
-        original: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        original: Arc<tidepool_runtime::session::RuntimeOriginalSource>,
         operation: impl FnOnce(
                 &mut ResidentSession<H, O>,
                 &crate::ActorSessionContext,
@@ -9208,7 +9208,7 @@ where
 
         #[cfg(test)]
         let preview_observer = self.activation_preview_observer.clone();
-        let original_source = input.original_source_lease();
+        let original_source = input.original_source();
         let (input_binding, admission, includes) = self
             .access
             .with_original_source_compiler_machine(
@@ -9299,7 +9299,7 @@ where
                     let mut cancel_on_drop =
                         CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
                     let compiler_admission = admission.clone();
-                    let compiler_source = admission.original_source_lease();
+                    let compiler_source = admission.original_source();
                     let compiler_template = template.clone();
                     let compiler_includes = includes.clone();
                     #[cfg(test)]
@@ -9397,7 +9397,7 @@ where
                     }));
                 }
                 let validating = admission.clone();
-                let original_source = admission.original_source_lease();
+                let original_source = admission.original_source();
                 if let Err(error) = self
                     .access
                     .with_original_source_compiler_machine(
@@ -9424,7 +9424,7 @@ where
                 )
             }
             Ok(renderer) => {
-                let original_source = admission.original_source_lease();
+                let original_source = admission.original_source();
                 self.access.with_original_source_compiler_machine(context.clone(), original_source, move |session, _, _, settlement| {
             session.validate_activation_preview_admission(&admission)
                 .map_err(|error| committed(ResidentActorWorkbenchError::Resident(error)))?;
@@ -10499,7 +10499,7 @@ where
                             "world query lacks retained source evidence".into(),
                         )
                     })?;
-                    let original_source = context.source_dependency().source_lease()?;
+                    let original_source = context.source_dependency().source_lease()?.original_source().clone();
                     let observation_pin =
                         view_source.inspection_scope(session, context, query_scope)?;
                     let admitted = session
@@ -10592,7 +10592,7 @@ where
                                     "world query lost source evidence".into(),
                                 )
                             })?;
-                            let original_source = context.source_dependency().source_lease()?;
+                            let original_source = context.source_dependency().source_lease()?.original_source().clone();
                             match view_source.inspection_provenance(session, context, query_scope) {
                                 Err(error) => StructuredIntrospectionAnswer::QueryError(
                                     unobserved_inspection_source(error)?,
@@ -19083,7 +19083,7 @@ pub(crate) mod request_tests {
                 }
                 assert_world_hot_work(&refusal.snapshot(), WorldEnsureExpectation::RefusedBeforeEnsure);
                 fence
-                    .reopen_with(lease, |reopen| {
+                    .reopen_with(lease.original_source(), |reopen| {
                         reopen.commit();
                         Ok::<_, ()>(())
                     })
@@ -19182,7 +19182,7 @@ pub(crate) mod request_tests {
                     results.push((label, session.install_inspection_world_if_current(&completed, reference, &original)));
                     assert_eq!(session.public_visibility_snapshot_in(context.placement.lexical_scope), before);
                     assert!(matches!(completed.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Int"));
-                    fence.reopen_with(lease, |reopen| {
+                    fence.reopen_with(lease.original_source(), |reopen| {
                         reopen.commit();
                         Ok::<_, ()>(())
                     }).unwrap().unwrap();
