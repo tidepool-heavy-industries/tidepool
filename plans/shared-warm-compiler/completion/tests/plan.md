@@ -92,6 +92,23 @@ tests and direct consumers so missed callers fail. Do not add tests whose only
 assertion searches code text. Review generated Buck mappings after fixture
 changes; test-only files must not invalidate unrelated production/browser inputs.
 
+## Representation and oracle checks from the source review
+
+Apply [quality Q10](../quality/plan.md), plus each receiving leaf's specific
+controls. Positive histories use actual issuers; raw malformed wire fixtures
+remain negative inputs. Meaningful external compile-fail controls cover bare DTOs,
+wrong typed stages and removed independent-field constructors. A foreign owner
+with the same valid type still needs runtime identity checks; independent histories
+establish those checks, revocation, settlement and atomicity. Private construction
+privileges must not become positive test authority.
+
+An empty `all(close_is_clean)` observation is not proof of compiler execution.
+An unrelated bootstrap timing row is not proof about the second cell. Correlate
+actual operation/origin/world/terminal observations and executed outcomes, and
+exercise missing/misattributed evidence controls. Refusal-before-submission and
+successful submitted work have different expected observations. Use existing
+hosted trace joins/census; no new fixture backend or telemetry framework.
+
 ## The 32 recorded failures and their obligations
 
 Evidence: `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/final-join/TOOLCHAIN-SWEEP.md`

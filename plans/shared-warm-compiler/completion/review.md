@@ -94,6 +94,33 @@ required lock held over compiler/shutdown waits. This is acceptance of the writt
 contracts, not proof that a future implementation obeys them. Concrete candidate
 diffs, real consumer compilation and joined tests still need independent review.
 
+## Code-quality follow-up
+
+A second read-only pass at plan checkpoint `3e21ebd0da` (same code `92fa518105`)
+examined representation and idioms, rather than only missing features. Five Sol
+reviews and coordinator source review produced [the quality plan](quality/plan.md).
+Each item is assigned to its existing receiving leaf and checkpoint.
+
+Confirmed source findings include construction-work counters in semantic identity,
+duplicate parsing/retained item representations, renderer secondary-evidence loss,
+an omitted state-owned reply reference at terminal cleanup, and incompatible
+query pin schemes. Whole-module `rowFit` really runs the GHC solver, but for many
+values before selecting one. Crossed-owner constructors, phase products and raw
+compiler-environment getters are representation hazards; this review does not
+claim that their possible misuses have been executed in a live actor.
+
+The follow-up preserves strengthened exact checks and reuses existing owners.
+Adversarial review corrected four tempting overextensions: native availability
+must be issued from physically bound output rather than require itself as input;
+future GHC stage outputs cannot be demanded at initial request bind; private
+compiler staging need not be buffered until manifest validation; and terminal
+Retired must remain distinct from legitimate pre-installation Empty. Public
+aliases/re-exports remain a name-resolution step before canonical keyed fit.
+
+Detailed provenance, counterexamples and evidence limits are in the private
+`idioms-review/{native,worker,runtime,tests,queries}.md` notes. No new builds or
+test executions establish these changes as implemented or qualified.
+
 ## Open investigation, not unresolved permission
 
 A1c's exact lost binding, the actual accepted-candidate receipt, several deeper

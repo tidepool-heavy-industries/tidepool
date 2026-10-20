@@ -31,6 +31,20 @@ same-base checks and post-removal promotion witness are useful skeletons, not
 an implemented positive path. Existing hosted successor passes use the finite
 route and do not qualify this migration.
 
+## Representation changes in this leaf
+
+Apply [quality Q5, Q7 and Q8](../quality/plan.md) with the lifecycle owner.
+Compiler source labels and origin identity remain descriptive facts; derive A/B
+and reservation facts from the existing runtime admission and retain the matching
+checked output/settled transaction there. Install consumes that preparation, not
+independently supplied source labels. Preserve all original/target liveness checks.
+
+Carry compound renderer failures without discarding END/publication evidence.
+Delete the obsolete split install path with finite admission rather than repair
+it into a second mechanism. Publication's exclusive fence alternatives belong in
+one private enum. Lifecycle owns terminal installation/reply drainage; coordinate
+those shared-file edits and keep independently issued request snapshots alive.
+
 ## Wave R1: replace the actual front door in place
 
 Pair signatures with service-cells and compile real consumers immediately.

@@ -80,6 +80,27 @@ Keep structured types: `IdentifierInfo`/`DeclarationInfo`, `TypeExpression`,
 or availability. Detail queries and matched compiler results supply those facts;
 do not add nullable guesses or generic documentation maps.
 
+## Representation and demand changes
+
+Apply [quality Q9](../quality/plan.md). Admit World answer structure once into a
+coupled typed outcome; raw retained bytes are evidence, not another internal
+interpretation. Resolve the current `Absent + Unsupported` validator disagreement.
+Keep wire-domain types below runtime and its association/END/view checks in runtime.
+
+Carry one semantic view pin issued by the runtime owner across public `info` and
+all compiler-query verbs, separately from the compiler-world receipt identity.
+The differing current fingerprint schemes are a source-confirmed mismatch whose
+cross-verb control must execute. Do not fix it by ignoring fingerprints.
+
+Replace `rowFit`'s broad browse-and-filter plan with a keyed question on the same
+compiler service and existing GHC solver. Resolve public aliases/re-exports to
+canonical identity before checking; preserve namespace, ambiguity and stale-view
+refusals. Reuse the held-world resolver's failure-versus-closed-absence distinction;
+do not convert any module-loading `SourceError` into `UnknownModule`. This is
+bounded work removal, not a second lookup engine. Use existing
+solver functions for a test oracle without keeping a callable legacy resident
+route. Pin/answer correctness belongs to G2; measured keyed work removal to G3.
+
 ## Observation and continuation changes
 
 1. Consume the runtime owner's semantic compile-view identity. Scope labels are

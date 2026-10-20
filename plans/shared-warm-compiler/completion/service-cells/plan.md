@@ -54,6 +54,22 @@ request scheduler, BEGIN/END/cancellation owner and optional retention policy.
 `residentCompileOne` still constructs an attempt/HPT, and normal cycles perform
 `depanalSourceModules`; the migration does not establish removal of that work.
 
+## Representation changes in this leaf
+
+Apply [quality Q1–Q3 and Q6](../quality/plan.md) during this migration. Reuse the
+existing semantic `logical_id` and delete the construction-work frontier digest.
+Carry one admitted Haskell operation/immutable plan, with stage-derived settings
+added only by their actual stage. Emit/admit one correlated item collection and
+demanded closure rather than parallel lists or proof-to-item copies. Keep original
+bytes for custody/evidence without retaining redundant control-flow views.
+
+Before the first successor reuse, keep live GHC environments behind the existing
+guarded product operations and return immutable observations or owned products.
+Remove the raw post-close environment escape, not necessary internal live-stage
+callbacks. Receive native Q4's owner-derived product contract and runtime Q5's
+source-bound preparation; do not substitute compiler-origin labels for runtime
+admission. These changes remove assembly paths rather than add another certifier.
+
 ## Wave S1: executable output through the existing issuer
 
 Agree one received boundary with runtime-publication: authored `WorldCellRecipe`,

@@ -35,6 +35,26 @@ test framework or teardown supervisor.
 - No machine checkout or mutable actor-state borrow spans compiler/shutdown waits.
   Exact output and cleanup ownership survive a disappearing waiter.
 
+## Representation boundaries
+
+Apply [the code-quality decisions](quality/plan.md) at the existing owners.
+Admitted operations retain their parsed plan; completed products derive their
+views without separately supplied owner facts. Use one typed item/closure entry
+instead of rejoining parallel tables. Keep recorded facts separate from acquired
+live roles, and descriptive compiler labels separate from runtime permission.
+The compiler's logical identity comes from its existing semantic roots, never
+work counters or transport layout. Preserve the native issuance order: physically
+bound current output enters the availability issuer, which produces issued current
+availability for execution consumers; pending output cannot enter that issuer.
+
+Prefer private complete payloads, small enums and consuming transitions over
+independent flags, optional required fields and public trusted-value builders.
+Delete replaced constructors and raw escape accessors. Immutable facts remain
+shareable; exact acquisition identity and temporal authority remain dynamic.
+Normalize immutable input once without demanding future GHC stage outputs early
+or serializing a live compiler environment. Carry compound failures through their
+actual consumer and drain every state-owned resource on terminal transition.
+
 ## Prepared output, item settlement and final publication
 
 Extend the existing checked output owner; do not pair free-standing world IDs with

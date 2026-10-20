@@ -19,6 +19,13 @@ claims, remaining investigation and cross-plan findings. "Production profile"
 below means the recorded deployment profile and real prepared catalog/service
 path (which may be `fast-dev`), not a new build profile named `production`.
 
+[The code-quality plan](quality/plan.md) adds reviewed representation changes to
+these same leaves: carry owner-issued relationships, remove duplicate derivation,
+separate recorded facts from live admission, and make invalid lifecycle states
+unavailable to callers. Read its receiving-owner/checkpoint table before dispatch.
+It is mandatory receiving-boundary work, not an independent refactoring queue or
+a reason to preserve the finite engine while building another abstraction layer.
+
 ## What the review established
 
 - The compiler-query handlers reach real GHC. A persistent compiler universe and
@@ -114,8 +121,9 @@ or account handoff. No implementation wave is started merely by writing this pla
 2. Record source and evidence for every retained parcel and dirty worktree. Keep
    the scratch diagnostics untouched. Root-E, custody, Batch B/C and reload are
    source material for reviewed forward repairs, not an automatic merge queue.
-3. Adopt `contracts.md`; compile shared signature changes and their actual
-   consumers early. Read local contributor guides and the pinned build guide.
+3. Adopt `contracts.md` and the receiving sections of `quality/plan.md`; compile
+   shared signature changes and their actual consumers early. Read local
+   contributor guides and the pinned build guide.
 4. Establish the native exact-binding refusal and real world-cell execution
    controls. Diagnose A1c at the exact receiving source using existing bounded
    owner/choice traces. Do not broaden inventories to make it pass.

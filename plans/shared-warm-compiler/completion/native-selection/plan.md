@@ -167,6 +167,23 @@ consumption and current compiler roles have different obligations. Do not put
 request selection policy into `NativeOriginalRequirement`. Several retained
 alternatives are legal; conflicting choices in one consuming closure refuse.
 
+## Representation changes in this leaf
+
+Apply [quality Q4](../quality/plan.md) while changing these owners. Delete the
+six-argument demanded-product assembly and independent completion
+inventory/baseline/producer arguments. The existing issuing chain supplies them.
+Keep `PendingCurrent -> BoundCurrent -> IssuedCurrent` distinct: the availability
+issuer consumes physically bound output, and execution consumers require issued
+availability. Preserve current-product provenance after issuance and stage batch
+changes before publishing them. Do not erase historical choices or forbid shared
+immutable completed evidence.
+
+Separate recorded publication DTOs from opaque acquired live roles; remove live
+deserialization/dereference and zero-digest live-role assembly. Native acquisition
+and endorsement still authenticate exact relationships. Review service Q1's
+deletion of the duplicate frontier identity; no construction-work metric belongs
+in semantic identity. Port the affected positive fixtures through these owners.
+
 ## Implementation waves
 
 ### N0: exact counterexamples and shared signatures

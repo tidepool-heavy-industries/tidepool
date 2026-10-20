@@ -83,6 +83,21 @@ dependencies and current production consumers; port the missing behavior onto th
 join rather than merge the 46-file branch wholesale. Its older preview installer
 and fixture migrations are not an accepted replacement for current code.
 
+## Representation changes in this leaf
+
+Apply [quality Q5, Q7 and Q8](../quality/plan.md). Original/target descriptions
+cannot stand in for the runtime's actual source admission. Preserve the existing
+renderer failure's primary and independent close/publication facts through the
+actor consumer. The current diagnostic loss is confirmed; unsafe retry is not.
+
+Replace mutually exclusive publication fence `Option`s with one owner-held sum.
+Terminal drainage must release both installation and reply-activation references
+owned by `InstalledToolsState`, even if an otherwise idle external policy retains
+the state. Distinguish Retired from fresh Empty so bootstrap still works. Refuse
+late repopulation after retirement, drop extracted owners outside guards, and
+preserve separately issued request snapshots. Use the existing terminal owner;
+do not add a teardown registry or infer physical release from empty local state.
+
 ## Wave 1: source and custody
 
 ### Issuance and use
