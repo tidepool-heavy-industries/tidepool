@@ -735,6 +735,7 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
         + 38 * toInteger (Set.size (Set.fromList (links term)))
         | (cid,body) <- blockPairs,Right (remaining,term) <- [deserialiseFromBytes decodeTerm (BL.fromStrict body)]
         ,BL.null remaining]
+      -- The retained demand scope reserves the encoded binding basis again.
       expectedCharge = (rawBytes + 2 * toInteger (BS.length emptyNode) + primaryBytes
           + toInteger (BS.length lexicalBody) + rowBytes + frontierBytes
         ,Map.size uniqueParts + 2 + primaryEntries + length base + length blockPairs)
