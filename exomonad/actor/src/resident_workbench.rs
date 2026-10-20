@@ -1877,6 +1877,73 @@ impl PreparedActorGeneration {
     }
 }
 
+/// The reservation owns its frozen candidate and the sole publication guard.
+#[must_use]
+pub(crate) struct ReservedActorGeneration {
+    prepared: PreparedActorGeneration,
+    guard: ActorPublicationGuard,
+    publication_kind: ActorGenerationPublication,
+}
+
+pub(crate) enum ActorGenerationReservation {
+    Reserved(ReservedActorGeneration),
+    Refused(String),
+}
+
+pub(crate) enum ActorGenerationRetirementCutoff {
+    Fenced(generation_admission::GenerationRetirementFence),
+    Refused(ResidentActorWorkbenchError),
+    Unconfirmed {
+        fence: generation_admission::GenerationRetirementFence,
+        error: ResidentActorWorkbenchError,
+    },
+}
+
+impl ReservedActorGeneration {
+    pub(crate) fn expected_generation(&self) -> Option<&Arc<ActorGeneration>> {
+        self.guard.attempt.expected.generation()
+    }
+
+    pub(crate) fn reload_report(&self) -> Option<&PreparedReloadReport> {
+        self.prepared.reload_report()
+    }
+
+    pub(crate) fn fence_original(&mut self) -> ActorGenerationRetirementCutoff {
+        self.guard.fence_original()
+    }
+
+    pub(crate) fn refuse_unstarted(
+        &mut self,
+        detail: &str,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.guard.refuse_unstarted().map_err(|settlement| {
+            ResidentActorWorkbenchError::PublicationSettlement {
+                failure: Box::new(ActorPublicationSettlementFailure {
+                    outcome: Ok(ActorGenerationCommit::Refused(detail.to_owned())),
+                    settlement,
+                }),
+            }
+        })
+    }
+
+    pub(crate) fn refuse_retirement(
+        &mut self,
+        original: &mut generation_admission::GenerationRetirementFence,
+        detail: &str,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.guard
+            .refuse_retirement(original)
+            .map_err(
+                |settlement| ResidentActorWorkbenchError::PublicationSettlement {
+                    failure: Box::new(ActorPublicationSettlementFailure {
+                        outcome: Ok(ActorGenerationCommit::Refused(detail.to_owned())),
+                        settlement,
+                    }),
+                },
+            )
+    }
+}
+
 /// Prospective durable facts retained only when initial publication is unknown.
 /// This has no bound public owner and is never an installed generation.
 struct InitialPublicationCandidate {
@@ -2012,6 +2079,19 @@ enum PublicationSettlementError {
     BodyUnobserved,
     #[error("publication completion cannot establish whether visibility committed")]
     PublicationUnconfirmed,
+    #[error("retirement {stage} settlement failed: {source}")]
+    Retirement {
+        stage: RetirementSettlementStage,
+        source: Box<PublicationSettlementError>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+enum RetirementSettlementStage {
+    #[error("candidate")]
+    Candidate,
+    #[error("original")]
+    Original,
 }
 
 impl PublicationFence {
@@ -2197,7 +2277,112 @@ impl ActorPublicationGuard {
         }
     }
 
+    fn cutoff_error(error: PublicationSettlementError) -> ResidentActorWorkbenchError {
+        ResidentActorWorkbenchError::PublicationSettlement {
+            failure: Box::new(ActorPublicationSettlementFailure {
+                outcome: Ok(ActorGenerationCommit::Refused(
+                    "generation cutoff was refused".into(),
+                )),
+                settlement: PublicationSettlementError::Retirement {
+                    stage: RetirementSettlementStage::Original,
+                    source: Box::new(error),
+                },
+            }),
+        }
+    }
+
+    fn fence_original(&mut self) -> ActorGenerationRetirementCutoff {
+        let Some(expected) = self.attempt.expected.generation() else {
+            return ActorGenerationRetirementCutoff::Refused(Self::cutoff_error(
+                PublicationSettlementError::SelectionChanged,
+            ));
+        };
+        if !matches!(&self.settlement, ActorPublicationState::Armed(_)) {
+            return ActorGenerationRetirementCutoff::Refused(Self::cutoff_error(
+                PublicationSettlementError::SelectionChanged,
+            ));
+        }
+        expected.dependency().fence_selected_with(|transition| {
+            self.owner.with_live_source_settlement(|| {
+                let record = self.state.0.lock();
+                if !matches!(&record.availability, InstalledToolsAvailability::PublicationInProgress(issued) if Arc::ptr_eq(issued, &self.attempt)) {
+                    return Err(PublicationSettlementError::SelectionChanged);
+                }
+                transition.commit();
+                Ok(())
+            }).ok_or(PublicationSettlementError::OwnerUnavailable)?
+        })
+    }
+
+    fn refuse_retirement(
+        &mut self,
+        original: &mut generation_admission::GenerationRetirementFence,
+    ) -> Result<(), PublicationSettlementError> {
+        let at = |stage, source| PublicationSettlementError::Retirement {
+            stage,
+            source: Box::new(source),
+        };
+        original
+            .validate_held()
+            .map_err(|error| at(RetirementSettlementStage::Original, error))?;
+        let Some(expected) = self.attempt.expected.generation() else {
+            return Err(at(
+                RetirementSettlementStage::Original,
+                PublicationSettlementError::SelectionChanged,
+            ));
+        };
+        if !expected.dependency().same_prepared(original.dependency()) {
+            return Err(at(
+                RetirementSettlementStage::Original,
+                PublicationSettlementError::SelectionChanged,
+            ));
+        }
+        let owner = self.owner.clone();
+        let state = self.state.clone();
+        let attempt = self.attempt.clone();
+        let ActorPublicationState::Armed(authority) = &mut self.settlement else {
+            return Err(at(
+                RetirementSettlementStage::Candidate,
+                PublicationSettlementError::ReopenAttempted,
+            ));
+        };
+        authority.refused_when(&attempt.target, |reopen| {
+            owner.with_live_source_settlement(|| {
+                let record = state.0.lock();
+                if !matches!(&record.availability, InstalledToolsAvailability::PublicationInProgress(issued) if Arc::ptr_eq(issued, &attempt)) {
+                    return Err(PublicationSettlementError::SelectionChanged);
+                }
+                reopen.commit();
+                Ok(())
+            }).ok_or(PublicationSettlementError::OwnerUnavailable)?
+        }).map_err(|error| at(RetirementSettlementStage::Candidate, error))?;
+        #[cfg(test)]
+        if let Some(probe) = &self.settlement_probe {
+            probe.wait();
+        }
+        original.reopen_with(|reopen| {
+            owner.with_live_source_settlement(|| {
+                let mut record = state.0.lock();
+                if !matches!(&record.availability, InstalledToolsAvailability::PublicationInProgress(issued) if Arc::ptr_eq(issued, &attempt)) {
+                    return Err(PublicationSettlementError::SelectionChanged);
+                }
+                let ActorRequestSnapshot::Generation(generation) = &attempt.expected else {
+                    return Err(PublicationSettlementError::SelectionChanged);
+                };
+                record.availability = InstalledToolsAvailability::Generation(generation.clone());
+                reopen.commit();
+                Ok(())
+            }).ok_or(PublicationSettlementError::OwnerUnavailable)?
+        }).map_err(|error| at(RetirementSettlementStage::Original, error))?;
+        self.settlement = ActorPublicationState::Settled;
+        Ok(())
+    }
+
     fn refused(mut self) -> Result<(), PublicationSettlementError> {
+        self.refuse_unstarted()
+    }
+
+    fn refuse_unstarted(&mut self) -> Result<(), PublicationSettlementError> {
         let restore = |reopen: tidepool_runtime::session::RuntimeSourceReopen<'_>| {
             self.owner.with_live_source_settlement(|| {
                 let mut record = self.state.0.lock();
@@ -2421,8 +2606,20 @@ where
         publication: Arc<tidepool_runtime::session::PublicationDecision>,
         publication_kind: ActorGenerationPublication,
     ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        match self.reserve(prepared, publication, publication_kind)? {
+            ActorGenerationReservation::Reserved(reserved) => self.publish_reserved(reserved).await,
+            ActorGenerationReservation::Refused(detail) => Ok(ActorGenerationCommit::Refused(detail)),
+        }
+    }
+
+    pub(crate) fn reserve(
+        &self,
+        prepared: PreparedActorGeneration,
+        publication: Arc<tidepool_runtime::session::PublicationDecision>,
+        publication_kind: ActorGenerationPublication,
+    ) -> Result<ActorGenerationReservation, ResidentActorWorkbenchError> {
         if !self.owner.matches_actor(prepared.checkout_context.actor) {
-            return Ok(ActorGenerationCommit::Refused(
+            return Ok(ActorGenerationReservation::Refused(
                 "publication owner belongs to another actor".into(),
             ));
         }
@@ -2431,7 +2628,7 @@ where
             Arc::downgrade(&owner)
         };
         if !prepared.machine_owner.ptr_eq(&machine_owner) {
-            return Ok(ActorGenerationCommit::Refused(
+            return Ok(ActorGenerationReservation::Refused(
                 "prepared generation belongs to a different machine owner".into(),
             ));
         }
@@ -2449,10 +2646,33 @@ where
             self.owner.clone(),
         )?
         else {
-            return Ok(ActorGenerationCommit::Refused(
+            return Ok(ActorGenerationReservation::Refused(
                 "actor generation changed during reload preparation".into(),
             ));
         };
+        Ok(ActorGenerationReservation::Reserved(ReservedActorGeneration {
+            prepared,
+            guard: owner,
+            publication_kind,
+        }))
+    }
+
+    pub(crate) async fn publish_reserved(
+        &self,
+        reserved: ReservedActorGeneration,
+    ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        let ReservedActorGeneration { prepared, guard: owner, publication_kind } = reserved;
+        if !matches!(&owner.settlement, ActorPublicationState::Armed(_)) {
+            return Ok(ActorGenerationCommit::Refused("publication reservation already settled".into()));
+        }
+        let machine_owner = {
+            let owner: Arc<dyn std::any::Any + Send + Sync> = self.access.machines.clone();
+            Arc::downgrade(&owner)
+        };
+        if !Arc::ptr_eq(&self.state, &owner.state) || !prepared.machine_owner.ptr_eq(&machine_owner) {
+            return owner.complete(Ok(ActorGenerationCommit::Refused("publication reservation belongs to another publisher".into())));
+        }
+        let publication = owner.decision.clone();
         let visibility = owner.visibility();
         // The affine phase/fence owner is outside checkout, including cancellation
         // and setup failure. The worker receives visibility rights only.

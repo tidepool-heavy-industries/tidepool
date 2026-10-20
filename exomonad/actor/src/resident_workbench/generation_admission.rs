@@ -658,6 +658,41 @@ impl GenerationDependency {
             fence: self.0.admission.fence()?,
         })
     }
+
+    pub(super) fn fence_selected_with(
+        &self,
+        compare: impl for<'a> FnOnce(
+            tidepool_runtime::session::RuntimeSourceFenceTransition<'a>,
+        ) -> Result<(), super::PublicationSettlementError>,
+    ) -> super::ActorGenerationRetirementCutoff {
+        let retain = |fence| {
+            GenerationRetirementFence::new(GenerationFence {
+                dependency: self.clone(),
+                fence,
+            })
+        };
+        match self
+            .runtime_admission()
+            .fence_with(self.runtime_lease(), compare)
+        {
+            Ok(Ok(fence)) => super::ActorGenerationRetirementCutoff::Fenced(retain(fence)),
+            Ok(Err(tidepool_runtime::session::SourceFenceTransitionFailure::Refused(error))) => {
+                super::ActorGenerationRetirementCutoff::Refused(
+                    super::ActorPublicationGuard::cutoff_error(error),
+                )
+            }
+            Ok(Err(tidepool_runtime::session::SourceFenceTransitionFailure::Unconfirmed {
+                fence,
+                error,
+            })) => super::ActorGenerationRetirementCutoff::Unconfirmed {
+                fence: retain(fence),
+                error: super::ActorPublicationGuard::cutoff_error(error),
+            },
+            Err(error) => super::ActorGenerationRetirementCutoff::Refused(
+                super::ActorPublicationGuard::cutoff_error(error.into()),
+            ),
+        }
+    }
 }
 
 #[must_use]
@@ -665,6 +700,98 @@ pub(crate) struct GenerationFence {
     dependency: GenerationDependency,
     fence: tidepool_runtime::session::RuntimeSourceFence,
 }
+
+/// The retirement attempt retains the exact original even after reopening has
+/// consumed its lower fence. A failed attempt cannot manufacture a fresh fence.
+pub(crate) struct GenerationRetirementFence {
+    state: GenerationRetirementFenceState,
+}
+
+enum GenerationRetirementFenceState {
+    Held(GenerationFence),
+    ReopenAttempted(GenerationDependency),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum GenerationRetirementFenceError {
+    #[error("the original retirement fence was consumed by a reopen attempt")]
+    ReopenAttempted,
+    #[error(transparent)]
+    Admission(#[from] GenerationAdmissionError),
+}
+
+impl GenerationRetirementFence {
+    pub(crate) fn new(fence: GenerationFence) -> Self {
+        Self {
+            state: GenerationRetirementFenceState::Held(fence),
+        }
+    }
+
+    pub(crate) fn dependency(&self) -> &GenerationDependency {
+        match &self.state {
+            GenerationRetirementFenceState::Held(fence) => fence.dependency(),
+            GenerationRetirementFenceState::ReopenAttempted(dependency) => dependency,
+        }
+    }
+
+    fn held(&self) -> Result<&GenerationFence, GenerationRetirementFenceError> {
+        match &self.state {
+            GenerationRetirementFenceState::Held(fence) => Ok(fence),
+            GenerationRetirementFenceState::ReopenAttempted(_) => {
+                Err(GenerationRetirementFenceError::ReopenAttempted)
+            }
+        }
+    }
+
+    pub(crate) fn pending_claims(&self) -> Result<usize, GenerationRetirementFenceError> {
+        Ok(self.held()?.pending_claims())
+    }
+
+    pub(crate) async fn wait_for_claims(&self) -> Result<(), GenerationRetirementFenceError> {
+        Ok(self.held()?.wait_for_claims().await?)
+    }
+
+    pub(crate) fn retire(
+        self,
+        successor: NotebookGenerationId,
+    ) -> Result<(), GenerationRetirementFenceError> {
+        match self.state {
+            GenerationRetirementFenceState::Held(fence) => Ok(fence.retire(successor)?),
+            GenerationRetirementFenceState::ReopenAttempted(_) => {
+                Err(GenerationRetirementFenceError::ReopenAttempted)
+            }
+        }
+    }
+
+    pub(super) fn validate_held(&self) -> Result<(), super::PublicationSettlementError> {
+        match self.state {
+            GenerationRetirementFenceState::Held(_) => Ok(()),
+            GenerationRetirementFenceState::ReopenAttempted(_) => {
+                Err(super::PublicationSettlementError::ReopenAttempted)
+            }
+        }
+    }
+
+    pub(super) fn reopen_with(
+        &mut self,
+        settle: impl for<'a> FnOnce(
+            tidepool_runtime::session::RuntimeSourceReopen<'a>,
+        ) -> Result<(), super::PublicationSettlementError>,
+    ) -> Result<(), super::PublicationSettlementError> {
+        let replacement =
+            GenerationRetirementFenceState::ReopenAttempted(self.dependency().clone());
+        let GenerationRetirementFenceState::Held(fence) =
+            std::mem::replace(&mut self.state, replacement)
+        else {
+            return Err(super::PublicationSettlementError::ReopenAttempted);
+        };
+        fence
+            .fence
+            .reopen_with(fence.dependency.runtime_lease(), settle)?
+            .map(|_reopened| ())
+    }
+}
+
 impl GenerationFence {
     pub(crate) fn dependency(&self) -> &GenerationDependency {
         &self.dependency
@@ -886,7 +1013,12 @@ mod tests {
                     assert_eq!(scope, self.generation.scope.scope());
                 }
                 Err(GenerationAdmissionError::Unconfirmed { scope, count }) => {
-                    let parent = self.generation.dependency().prerequisite().as_ref().unwrap();
+                    let parent = self
+                        .generation
+                        .dependency()
+                        .prerequisite()
+                        .as_ref()
+                        .unwrap();
                     assert_eq!(scope, parent.runtime_lease().scope());
                     assert_eq!(count, 1);
                 }
@@ -922,6 +1054,225 @@ mod tests {
                 super::super::InstalledToolsObservation::SourceUnavailable(_)
             ));
         }
+    }
+
+    fn capture_original(
+        owner: &mut super::super::ActorPublicationGuard,
+    ) -> GenerationRetirementFence {
+        match owner.fence_original() {
+            super::super::ActorGenerationRetirementCutoff::Fenced(fence) => fence,
+            _ => panic!("the selected publication owner must issue its original cutoff"),
+        }
+    }
+
+    #[test]
+    fn retirement_cutoff_selection_loss_leaves_original_gate_unchanged() {
+        let fixture = PublicationFixture::replacement(true);
+        let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        drop(fixture.state.drain_retired());
+        assert!(matches!(
+            owner.fence_original(),
+            super::super::ActorGenerationRetirementCutoff::Refused(_)
+        ));
+        assert!(expected.scope.admit_source().is_ok());
+        drop(owner);
+        assert!(fixture.state.is_retired());
+    }
+
+    #[test]
+    fn retirement_refusal_settles_candidate_before_exact_original_reopen() {
+        let fixture = PublicationFixture::replacement(true);
+        let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        let mut original = capture_original(&mut owner);
+        owner.refuse_retirement(&mut original).unwrap();
+        assert!(Arc::ptr_eq(
+            &fixture.state.current_generation().unwrap(),
+            &expected
+        ));
+        assert!(expected.dependency().runtime_lease().admit_source().is_ok());
+        assert!(fixture.generation.scope.admit_source().is_ok());
+        assert!(matches!(
+            original.pending_claims(),
+            Err(GenerationRetirementFenceError::ReopenAttempted)
+        ));
+        assert!(owner.refuse_retirement(&mut original).is_err());
+        drop(owner);
+        assert!(Arc::ptr_eq(
+            &fixture.state.current_generation().unwrap(),
+            &expected
+        ));
+    }
+
+    #[test]
+    fn retirement_failed_candidate_settlement_keeps_original_fence_held() {
+        let mut fixture = PublicationFixture::replacement(true);
+        let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        let mut original = capture_original(&mut owner);
+        drop(fixture.preparation.take());
+        let error = owner.refuse_retirement(&mut original).unwrap_err();
+        assert!(
+            matches!(error, super::super::PublicationSettlementError::Retirement {
+            stage: super::super::RetirementSettlementStage::Candidate,
+            source,
+        } if matches!(*source, super::super::PublicationSettlementError::OwnerUnavailable))
+        );
+        assert_eq!(original.pending_claims().unwrap(), 0);
+        assert!(expected
+            .dependency()
+            .runtime_lease()
+            .admit_source()
+            .is_err());
+        drop(owner);
+        fixture.assert_candidate_unavailable();
+    }
+
+    #[test]
+    fn retirement_unstarted_refusal_preserves_an_existing_original_fence() {
+        let fixture = PublicationFixture::replacement(true);
+        let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        let held_elsewhere = expected.dependency().fence().unwrap();
+        assert!(matches!(
+            owner.fence_original(),
+            super::super::ActorGenerationRetirementCutoff::Refused(_)
+        ));
+        owner.refuse_unstarted().unwrap();
+        assert!(Arc::ptr_eq(
+            &fixture.state.current_generation().unwrap(),
+            &expected
+        ));
+        assert!(expected.scope.admit_source().is_err());
+        assert!(fixture.generation.scope.admit_source().is_ok());
+        held_elsewhere.reopen().unwrap();
+        assert!(expected.scope.admit_source().is_ok());
+    }
+
+    #[test]
+    fn retirement_owner_loss_between_settlements_preserves_consumed_original_phase() {
+        let mut fixture = PublicationFixture::replacement(true);
+        let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        let mut original = capture_original(&mut owner);
+        let (entered, started) = std::sync::mpsc::sync_channel(0);
+        let (release, finish) = std::sync::mpsc::sync_channel(0);
+        owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
+            entered,
+            release: parking_lot::Mutex::new(finish),
+            unwind: false,
+        }));
+        let preparation = fixture.preparation.take().unwrap();
+        let target = fixture.generation.scope.clone();
+        let closer = std::thread::spawn(move || {
+            started
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            assert!(
+                target.admit_source().is_ok(),
+                "the candidate really settled first"
+            );
+            drop(preparation);
+            release.send(()).unwrap();
+        });
+        let error = owner.refuse_retirement(&mut original).unwrap_err();
+        closer.join().unwrap();
+        assert!(
+            matches!(error, super::super::PublicationSettlementError::Retirement {
+            stage: super::super::RetirementSettlementStage::Original,
+            source,
+        } if matches!(*source, super::super::PublicationSettlementError::OwnerUnavailable))
+        );
+        assert!(matches!(
+            original.pending_claims(),
+            Err(GenerationRetirementFenceError::ReopenAttempted)
+        ));
+        assert!(expected
+            .dependency()
+            .runtime_lease()
+            .admit_source()
+            .is_err());
+        assert!(owner.refuse_retirement(&mut original).is_err());
+        drop(owner);
+        assert!(fixture.state.current_generation().is_none());
+        assert!(
+            fixture.generation.scope.admit_source().is_ok(),
+            "unselected settled candidate needs no invented rollback"
+        );
+    }
+
+    #[test]
+    fn retirement_terminal_clear_between_settlements_never_restores_original() {
+        let fixture = PublicationFixture::replacement(true);
+        let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        let mut original = capture_original(&mut owner);
+        let (entered, started) = std::sync::mpsc::sync_channel(0);
+        let (release, finish) = std::sync::mpsc::sync_channel(0);
+        owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
+            entered,
+            release: parking_lot::Mutex::new(finish),
+            unwind: false,
+        }));
+        let state = fixture.state.clone();
+        let clearer = std::thread::spawn(move || {
+            started
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            drop(state.drain_retired());
+            release.send(()).unwrap();
+        });
+        let error = owner.refuse_retirement(&mut original).unwrap_err();
+        clearer.join().unwrap();
+        assert!(
+            matches!(error, super::super::PublicationSettlementError::Retirement {
+            stage: super::super::RetirementSettlementStage::Original,
+            source,
+        } if matches!(*source, super::super::PublicationSettlementError::SelectionChanged))
+        );
+        assert!(matches!(
+            original.pending_claims(),
+            Err(GenerationRetirementFenceError::ReopenAttempted)
+        ));
+        drop(owner);
+        assert!(matches!(
+            &fixture.state.0.lock().availability,
+            super::super::InstalledToolsAvailability::Retired
+        ));
+        assert!(expected.scope.admit_source().is_err());
+    }
+
+    #[test]
+    fn retirement_unwind_after_candidate_settlement_keeps_original_held() {
+        let fixture = PublicationFixture::replacement(true);
+        let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        let mut original = capture_original(&mut owner);
+        let (entered, started) = std::sync::mpsc::sync_channel(0);
+        let (release, finish) = std::sync::mpsc::sync_channel(0);
+        owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
+            entered,
+            release: parking_lot::Mutex::new(finish),
+            unwind: true,
+        }));
+        let observer = std::thread::spawn(move || {
+            started
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            release.send(()).unwrap();
+        });
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || owner.refuse_retirement(&mut original)
+        ))
+        .is_err());
+        observer.join().unwrap();
+        assert_eq!(original.pending_claims().unwrap(), 0);
+        assert!(expected.scope.admit_source().is_err());
+        assert!(fixture.generation.scope.admit_source().is_ok());
+        drop(owner);
+        assert!(fixture.state.current_generation().is_none());
+        assert!(expected.scope.admit_source().is_err());
     }
 
     #[test]
@@ -1927,6 +2278,101 @@ mod tests {
         fn child_exited(&mut self, _notice: crate::ChildExitNotice) {
             unreachable!("population fixture owns no children")
         }
+    }
+
+    #[tokio::test]
+    async fn generation_population_reports_actual_unclassified_child_without_stopping_it() {
+        use crate::local_actor::run_control::{
+            GenerationCollateralIdentity, GenerationLifetimeEdge,
+        };
+        struct PhysicalChild;
+        impl ractor::Actor for PhysicalChild {
+            type Msg = ();
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _myself: ractor::ActorRef<()>,
+                (): (),
+            ) -> Result<(), ractor::ActorProcessingErr> {
+                Ok(())
+            }
+        }
+
+        let mut history = History::new();
+        let dependency = generation(&mut history, NotebookGenerationId::INITIAL, None);
+        let (directory, directory_task) = crate::LocalActorDirectory::start().await.unwrap();
+        let reservation = directory
+            .reserve_source_actor(
+                &SourceDependency::Generation(dependency.clone()),
+                crate::Incarnation::FIRST,
+            )
+            .await
+            .unwrap();
+        let identity = reservation.identity();
+        let terminal = reservation.terminal().clone();
+        let (start_entered, starting) = tokio::sync::oneshot::channel();
+        let (start_release, continue_start) = tokio::sync::oneshot::channel();
+        let (stopped_entered, stopped) = tokio::sync::oneshot::channel();
+        let (stopped_release, continue_stop) = tokio::sync::oneshot::channel();
+        let spawning = tokio::spawn(crate::local_actor::spawn_reserved_local_actor(
+            None,
+            PopulationBehavior {
+                start_entered: Some(start_entered),
+                start_release: Some(continue_start),
+                stopped_entered: Some(stopped_entered),
+                stopped_release: Some(continue_stop),
+                realm: crate::CleanupComponentOutcome::Confirmed,
+            },
+            reservation,
+            directory.clone(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(10), starting)
+            .await
+            .unwrap()
+            .unwrap();
+        let parent = directory.resolve(identity).await.unwrap().unwrap();
+        let (child, child_task) = <PhysicalChild as ractor::Actor>::spawn_linked(
+            None,
+            PhysicalChild,
+            (),
+            parent.address().get_cell(),
+        )
+        .await
+        .unwrap();
+        let fence = dependency.fence().unwrap();
+        let population = directory.generation_population(&fence).await.unwrap();
+        assert_eq!(population.resources.len(), 1);
+        assert_eq!(population.collateral.len(), 1);
+        assert_eq!(
+            population.collateral[0].affected,
+            GenerationCollateralIdentity::UnclassifiedPhysical(child.get_id())
+        );
+        assert_eq!(
+            population.collateral[0].edge,
+            GenerationLifetimeEdge::PhysicalSupervision
+        );
+        assert!(terminal.get().is_none());
+        assert!(terminal.requested_shutdown().is_none());
+        assert_ne!(child.get_status(), ractor::ActorStatus::Stopped);
+        fence.reopen().unwrap();
+        drop(SourceDependency::Generation(dependency).claim().unwrap());
+
+        child
+            .stop_and_wait(None, Some(std::time::Duration::from_secs(2)))
+            .await
+            .unwrap();
+        child_task.await.unwrap();
+        start_release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+            .await
+            .unwrap()
+            .unwrap();
+        stopped_release.send(()).unwrap();
+        let (_, task) = spawning.await.unwrap().unwrap();
+        task.await.unwrap();
+        directory.stop_owner_for_test().await;
+        directory_task.await.unwrap();
     }
 
     #[tokio::test]
