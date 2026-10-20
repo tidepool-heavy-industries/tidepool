@@ -440,6 +440,11 @@ Each executable inference segment has one successful authored frontend and
 one canonical finalized module with all its kept entry roots. Descriptors retain
 actual GHC capture Ids, their types and Name-keyed fixities; Session's existing
 decoder supplies the global Ids substituted into later roots before simplification.
+Held-world item identities pair the admitted authored source fingerprint with
+its reserved ordinal and slot before segment rendering. Original and executable
+receipt writers consume that issued identity. Generated instances and retry
+rewrites have their own compilation provenance; never hash their rendered source
+as a replacement for the admitted authored item.
 Planned receipts seal the complete ordered segment plan and each entry's actual
 source owner and compiler-issued original group ordinal. Generalized lets retain
 their real GHC sigma types. Unresolved action-bound captures require a concrete
