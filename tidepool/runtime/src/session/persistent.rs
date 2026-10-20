@@ -2608,6 +2608,14 @@ impl PersistentSession {
                 changes,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let entries = self
+            .bindings
+            .prepared_iter_current_in(&self.scopes, scope, Some(origin), changes)
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let source_selection = self
+            .bindings
+            .prepared_scope_snapshot_in(&self.scopes, scope, Some(origin), Some(changes))
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         self.bindings.commit_prepared_detached_scope(capture);
         let lib = self
             .lib
@@ -2624,10 +2632,6 @@ impl PersistentSession {
         ));
         lib.tips.insert(child, tip);
 
-        let entries = self
-            .bindings
-            .prepared_iter_current_in(&self.scopes, scope, changes)
-            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let mut view = self.build_scoped_compile_view(scope, self.lib());
         let projection = Arc::make_mut(&mut view.projection);
         projection.library = Some(super::view::CompileLibrary::Certified {
@@ -2674,10 +2678,6 @@ impl PersistentSession {
             .into_iter()
             .collect::<Vec<_>>();
         source_instances.sort();
-        let source_selection = self
-            .bindings
-            .prepared_scope_snapshot_in(&self.scopes, scope, Some(origin), Some(changes))
-            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let visibility = super::PublicVisibilitySnapshot {
             scope,
             epoch: next_epoch,
