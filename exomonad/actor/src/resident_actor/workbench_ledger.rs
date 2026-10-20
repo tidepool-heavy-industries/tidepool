@@ -93,6 +93,30 @@ pub(super) enum WorkbenchBoundaryRecord {
 }
 
 impl WorkbenchExecutions {
+    pub(super) fn admit_source_invocation(
+        journal: &Arc<Mutex<Self>>,
+        actor: ActorRef,
+        reservation: RequestReservationOwner,
+        source: crate::resident_workbench::generation_admission::SourceDependency,
+        request: &WorkbenchRequest,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+        control: Option<&Arc<crate::WorkbenchExecutionControl>>,
+    ) -> Result<
+        Arc<InvocationWork>,
+        crate::resident_workbench::generation_admission::GenerationAdmissionError,
+    > {
+        source.clone().with_open_admission(|| {
+            let work = InvocationWork::new_source(actor, reservation, source);
+            let mut journal = journal.lock();
+            if let Some(execution) = request.execution_id() {
+                journal.begin(execution, request.clone(), invocation);
+                journal.bind_provider_finalization(execution, invocation, control);
+            }
+            journal.retain_invocation_work(work.clone(), request.execution_id(), invocation);
+            work
+        })
+    }
+
     /// Publish the active record and its selection-pending cleanup owner under
     /// the same journal lock. Retirement must never observe active work without
     /// either its issued source or an explicit unclassified root.
@@ -131,16 +155,9 @@ impl WorkbenchExecutions {
             // The exact compiled coordinator only exempts its continuation.
             // Its compiler and resource cleanup obligations are still observed.
             observed.extend(work.generation_observations(dependency, active));
-            let source_dependent = match work.source_observation() {
-                invocation_work::InvocationSourceObservation::Neutral => false,
-                invocation_work::InvocationSourceObservation::Unclassified => true,
-                invocation_work::InvocationSourceObservation::Source(source) => {
-                    matches!(
-                    source,
-                    crate::resident_workbench::generation_admission::SourceDependency::Unqualified
-                ) || source.depends_on(dependency)
-                }
-            };
+            let source_dependent = work
+                .source_observation()
+                .is_none_or(|origin| origin.is_unclassified() || origin.depends_on(dependency));
             if source_dependent {
                 for display in record.display_settlements.retirement_observations() {
                     let state = match display {
@@ -324,7 +341,7 @@ impl WorkbenchExecutions {
             root.matches(actor, &reservation)
                 && matches!(
                     root.source_observation(),
-                    invocation_work::InvocationSourceObservation::Neutral
+                    Some(crate::termination::ExecutionSourceOrigin::Neutral)
                 )
         }) {
             return root.clone();
@@ -370,7 +387,7 @@ impl WorkbenchExecutions {
     ) -> Option<Arc<InvocationWork>> {
         self.1.iter().find(|root| {
             root.matches(actor, reservation)
-                && matches!(root.source_observation(), invocation_work::InvocationSourceObservation::Source(selected) if selected == source)
+                && matches!(root.source_observation(), Some(crate::termination::ExecutionSourceOrigin::Actor(selected)) if selected == source)
         }).cloned()
     }
 

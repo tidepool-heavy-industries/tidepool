@@ -23,6 +23,10 @@ pub enum SourceAdmissionError {
     MissingTransaction,
     #[error("source compiler transactions cannot borrow a foreign or nested transaction")]
     ForeignTransaction,
+    #[error("source compiler transaction differs from the original runtime source owner")]
+    DifferentOriginalSource,
+    #[error("a source-neutral owner cannot admit original-source compiler work")]
+    NeutralSourceOwner,
     #[error("source lexical lease belongs to a stale issuing epoch")]
     StaleSourceLease,
     #[error("source work has no live canonical target lease for scope {scope:?}")]
@@ -619,6 +623,83 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
+    fn original_source_transaction_keeps_original_and_target_distinct() {
+        let mut session = PersistentSession::new(None, 1024);
+        let original_scope = session.mint_notebook_scope_with_lease(None).unwrap();
+        let original = original_scope.original_source().clone();
+        let target = session.mint_notebook_scope_with_lease(None).unwrap();
+        assert!(!Arc::ptr_eq(&original, target.original_source()));
+        let settled = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |transaction, _| {
+                    assert_eq!(
+                        transaction.admit_original(target.original_source(), Some(target.clone())),
+                        Err(SourceAdmissionError::DifferentOriginalSource),
+                    );
+                    assert_eq!(original.source_admission().0.state.lock().claims, 0);
+                    assert_eq!(target.source_admission().0.state.lock().claims, 0);
+                    transaction
+                        .admit_original(&original, Some(target.clone()))
+                        .unwrap();
+                    assert_eq!(original.source_admission().0.state.lock().claims, 1);
+                    assert_eq!(target.source_admission().0.state.lock().claims, 1);
+                    transaction
+                        .admit_original(&original, Some(target.clone()))
+                        .unwrap();
+                    assert_eq!(original.source_admission().0.state.lock().claims, 1);
+                    assert_eq!(target.source_admission().0.state.lock().claims, 1);
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            settled.close(),
+            crate::CompilerTransactionClose::NotStarted
+        ));
+        assert_eq!(original.source_admission().0.state.lock().claims, 0);
+        assert_eq!(target.source_admission().0.state.lock().claims, 0);
+    }
+
+    #[test]
+    fn fenced_original_refuses_before_claiming_open_target() {
+        let mut session = PersistentSession::new(None, 1024);
+        let original_scope = session.mint_notebook_scope_with_lease(None).unwrap();
+        let original = original_scope.original_source().clone();
+        let target = session.mint_notebook_scope_with_lease(None).unwrap();
+        let fence = original.source_admission().fence().unwrap();
+        original.validate_source_issuer().unwrap();
+        let settled = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |transaction, _| {
+                    assert!(matches!(
+                        transaction.admit_original(&original, Some(target.clone())),
+                        Err(SourceAdmissionError::Closed {
+                            phase: SourceAdmissionPhase::Fenced { .. },
+                            ..
+                        }),
+                    ));
+                    assert_eq!(target.source_admission().0.state.lock().claims, 0);
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            settled.close(),
+            crate::CompilerTransactionClose::NotStarted
+        ));
+        assert_eq!(fence.pending_claims(), 0);
+        fence.reopen(&original).unwrap();
+        assert!(original.admit_source().is_ok());
+        assert!(target.admit_source().is_ok());
+    }
+
+    #[test]
     fn publication_view_requires_its_exact_still_held_fence() {
         let mut session = PersistentSession::new(None, 0);
         let lease = session.mint_notebook_scope_with_lease(None).unwrap();
@@ -752,7 +833,7 @@ mod tests {
             let lease = session.mint_notebook_scope_with_lease(None).unwrap();
             let gate = lease.source_admission();
             assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = gate.fence_with::<()>(&lease, |transition| {
+                let _ = gate.fence_with::<()>(lease.original_source(), |transition| {
                     if commit {
                         transition.commit();
                     }
@@ -1057,7 +1138,7 @@ mod tests {
                         if let Ok(fence) = result { phases[gate] = 1; fences[gate] = Some(fence); }
                     }
                     2 => if let Some(fence) = fences[gate].take() {
-                        let result = fence.reopen(leases[gate]);
+                        let result = fence.reopen(leases[gate].original_source());
                         prop_assert_eq!(result.is_ok(), uncertainty[gate] == 0);
                         if result.is_ok() { phases[gate] = 0; }
                     },
@@ -1117,7 +1198,7 @@ impl RuntimeSourceCompilerTransaction {
         target: Option<Arc<super::RuntimeLexicalScopeLease>>,
     ) -> Result<(), SourceAdmissionError> {
         if !Arc::ptr_eq(&self.source, original) {
-            return Err(SourceAdmissionError::ForeignTransaction);
+            return Err(SourceAdmissionError::DifferentOriginalSource);
         }
         self.admit(target)
     }

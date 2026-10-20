@@ -158,6 +158,23 @@ pub(super) fn reload_disposition(
         Ok(SrReloadOutcome::ReloadPublicationUnconfirmed(..)) => {
             WorkbenchOperationDisposition::Unknown
         }
+        Ok(SrReloadOutcome::ReloadRetirement(receipt)) => {
+            use tidepool_bridge_effects::{RlCleanupOutcome, RlRetirementState, RlStopOutcome};
+            match &receipt.state {
+                RlRetirementState::ReloadRetirementFenced(_) => WorkbenchOperationDisposition::Unknown,
+                RlRetirementState::ReloadBPublished(..) => WorkbenchOperationDisposition::Committed,
+                RlRetirementState::ReloadAReopened => {
+                    if receipt.outcomes.iter().any(|outcome| {
+                        matches!(&outcome.stop, RlStopOutcome::ReloadStopConfirmed)
+                            || matches!(&outcome.cleanup, RlCleanupOutcome::ReloadCleanupConfirmed)
+                    }) {
+                        WorkbenchOperationDisposition::Committed
+                    } else {
+                        WorkbenchOperationDisposition::Rejected
+                    }
+                }
+            }
+        }
     }
 }
 

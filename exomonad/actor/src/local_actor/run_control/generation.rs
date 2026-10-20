@@ -67,6 +67,19 @@ pub(crate) struct GenerationPopulation {
     pub(crate) resources: Vec<GenerationResourceObservation>,
     pub(crate) unclassified: Vec<GenerationResourceObservation>,
     pub(crate) collateral: Vec<GenerationCollateral>,
+    pub(crate) compilers: Vec<GenerationDirectoryCompilerObservation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GenerationCompilerOwner {
+    Actor(ActorRef),
+    Preparation(u64),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GenerationDirectoryCompilerObservation {
+    pub(crate) owner: GenerationCompilerOwner,
+    pub(crate) compiler: crate::termination::GenerationCompilerObservation,
 }
 
 impl RunState {
@@ -76,7 +89,18 @@ impl RunState {
     ) -> GenerationPopulation {
         let mut resources = Vec::new();
         let mut unclassified = Vec::new();
+        let mut compilers = Vec::new();
         for (actor, record) in &self.reservations {
+            compilers.extend(
+                record
+                    .terminal
+                    .generation_compiler_observations(&dependency)
+                    .into_iter()
+                    .map(|compiler| GenerationDirectoryCompilerObservation {
+                        owner: GenerationCompilerOwner::Actor(*actor),
+                        compiler,
+                    }),
+            );
             let resources = if matches!(record.dependency, Some(SourceDependency::Unqualified)) {
                 &mut unclassified
             } else if record
@@ -191,6 +215,16 @@ impl RunState {
             });
         }
         for (id, record) in &self.preparations {
+            compilers.extend(
+                record
+                    .compiler
+                    .generation_compiler_observations(&dependency)
+                    .into_iter()
+                    .map(|compiler| GenerationDirectoryCompilerObservation {
+                        owner: GenerationCompilerOwner::Preparation(*id),
+                        compiler,
+                    }),
+            );
             let resources = if matches!(record.dependency, Some(SourceDependency::Unqualified)) {
                 &mut unclassified
             } else if record
@@ -224,6 +258,7 @@ impl RunState {
             resources,
             unclassified,
             collateral,
+            compilers,
         }
     }
 

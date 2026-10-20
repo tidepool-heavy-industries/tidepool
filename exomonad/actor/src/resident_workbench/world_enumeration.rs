@@ -143,7 +143,7 @@ where
                         "scopeBindings lacks retained source evidence".into(),
                     )
                 })?;
-                let original_source = context.source_dependency().source_lease()?;
+                let original_source = context.source_dependency().source_lease()?.original_source().clone();
                 let admitted = session
                     .capture_inspection_world_in(
                         context.placement.lexical_scope,

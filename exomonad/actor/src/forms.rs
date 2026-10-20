@@ -97,7 +97,7 @@ impl FormCleanup {
     ) -> Result<Arc<Self>, crate::resident_workbench::generation_admission::GenerationAdmissionError>
     {
         let scope = source.source_lease()?;
-        scope.validate_source_issuer()?;
+        scope.validate_lexical_issuer()?;
         Ok(Arc::new(Self {
             actor,
             mount,

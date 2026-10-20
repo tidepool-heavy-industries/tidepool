@@ -2681,8 +2681,7 @@ pub fn bind_activation_renderer(
     // A revoked original lease can never execute this preview. Refuse before
     // claiming the affine admission so the refusal cannot strand it bound.
     admission
-        .source_lease()
-        .validate_source_issuer()
+        .with_open_sources(|| ())
         .map_err(|error| {
             super::ResidentError::Session(crate::session::SessionError::SourceAdmission(error))
         })?;
@@ -2753,7 +2752,7 @@ pub fn compile_activation_renderer(
     ActivationRendererFailure,
 > {
     source
-        .admit(Some(admission.source_lease()))
+        .admit_original(&admission.original_source(), Some(admission.source_lease()))
         .map_err(super::PreparedRuntimeError::from)?;
     super::resident::PreparedRenderer::prepare(|| {
         compile_activation_renderer_inner(admission, template_source, budget, includes, settlement)
@@ -6502,7 +6501,7 @@ mod tests {
             let source = state.adopt_initial_notebook_scope(public).unwrap();
             let admitted = state
                 .with_source_compiler_transaction(
-                    source,
+                    source.original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -6588,7 +6587,7 @@ mod tests {
             let include_paths = view.include_paths(&roots);
             let admitted = resident
                 .with_source_compiler_transaction(
-                    execution.retained_lexical_scope(),
+                    execution.retained_lexical_scope().original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -6677,7 +6676,7 @@ mod tests {
         ) -> Vec<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
             let source = cell.admission.source_lease();
             let executed = resident.with_source_compiler_transaction(
-                source, tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                source.original_source().clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(), None, |_| {},
                 |resident, settlement| {
             let prefix = resident
@@ -6838,7 +6837,7 @@ mod tests {
             let restaged = self
                 .resident
                 .with_source_compiler_transaction(
-                    source.clone(),
+                    source.original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -6908,7 +6907,7 @@ mod tests {
             let admitted = self
                 .resident
                 .with_source_compiler_transaction(
-                    self.execution.retained_lexical_scope(),
+                    self.execution.retained_lexical_scope().original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -7821,7 +7820,7 @@ mod tests {
         let open = fixture
             .resident
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -7857,7 +7856,7 @@ mod tests {
         let closed = fixture
             .resident
             .with_source_compiler_transaction(
-                source,
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -8190,38 +8189,18 @@ mod tests {
             .unwrap(),
         );
         let includes = view.include_paths(effects.include_paths());
-        let admitted = resident
-            .with_source_compiler_transaction(
-                source.clone(),
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                crate::CompilerTransactionCancellation::new(),
-                None,
-                |_| {},
-                |resident, settlement| {
-                    let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-                        specification.clone(),
-                        &includes,
-                        settlement,
-                    )?;
-                    resident
-                        .admit_host_carrier_cell_in(
-                            scope,
-                            plan,
-                            specification.clone(),
-                            specification.specification_digest(),
-                            [1; 32],
-                            includes,
-                            "carrier".to_owned(),
-                            HostBindingType::TEXT,
-                            None,
-                        )
-                        .map_err(|error| CompileError::ExtractFailed(error.to_string()))
-                },
-            )
-            .unwrap()
-            .into_outcome()
-            .action
-            .unwrap();
+        let admitted = resident.with_source_compiler_transaction(
+            source.original_source().clone(),
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(), None, |_| {},
+            |resident, settlement| {
+                let plan = tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &includes, settlement)?;
+                resident.admit_host_carrier_cell_in(
+                    scope, plan, specification.clone(), specification.specification_digest(),
+                    [1;32], includes, "carrier".to_owned(), HostBindingType::TEXT, None,
+                ).map_err(|error| CompileError::ExtractFailed(error.to_string()))
+            },
+        ).unwrap().into_outcome().action.unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
         let outcome = admitted
             .source_lease()

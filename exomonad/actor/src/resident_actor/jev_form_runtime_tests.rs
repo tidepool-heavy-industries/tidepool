@@ -380,7 +380,7 @@ impl Fixture {
             .expect("workbench issuer adopted its final canonical source scope");
         assert_eq!(source_lease.scope(), context.placement.lexical_scope);
         source_lease
-            .validate_source_issuer()
+            .validate_lexical_issuer()
             .expect("actual workbench source issuer remains live");
         let (reply, receive) = tokio::sync::oneshot::channel();
         actor
