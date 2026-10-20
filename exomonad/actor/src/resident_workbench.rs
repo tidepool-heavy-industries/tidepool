@@ -19133,27 +19133,43 @@ pub(crate) mod request_tests {
             drop(other_input);
             other.wait_for_host_input_retirement_for_test(other_context, other_name).await;
 
-            // Two genuine affine parser results let one refusal consume a plan
-            // while another still owns physical custody after logical retirement.
+            // Each refusal consumes a genuine affine parser result; the last
+            // plan independently keeps physical custody through real retirement.
             let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let plan = plan.ok().unwrap();
-            let (retained_plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
+            let (missing_input_plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
+            let missing_input_plan = missing_input_plan.ok().unwrap();
+            let (retained_plan, mut input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let retained_plan = retained_plan.ok().unwrap();
             let input_name = input.mounted_input().binder.name.clone();
             let roots_with_input = frontend.access.with_machine(context.clone(), |session, _, _| Ok(session.persistent_roots_count())).await.unwrap();
-            drop(input);
+            input.retire_for_publication().await.unwrap();
             frontend.wait_for_host_input_retirement_for_test(context.clone(), input_name.clone()).await;
             let execution = frontend.private_execution.as_ref().unwrap().admission.clone();
-            frontend.access.with_machine(context.clone(), move |session, context, _| {
+            let input = frontend.access.with_machine(context.clone(), move |session, context, _| {
                 let scope = context.placement.lexical_scope;
                 assert!(session.current_binding_in(scope, &input_name).is_none());
                 assert_eq!(session.persistent_roots_count(), roots_with_input,
                     "retained parser plans keep physical custody without reviving the logical mount");
                 let before = (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
                     session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope));
-                assert!(matches!(session.admit_world_planned_cell_for_execution(execution, plan),
+                assert!(matches!(session.admit_world_planned_cell_with_input(execution, plan, input.write.as_ref()),
                     Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)),
-                    "a retained Some-input plan cannot execute after its actual guard is gone");
+                    "the same authentic input write must refuse after its actual mount retires");
+                assert_eq!(before, (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
+                    session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope)));
+                assert_eq!(session.persistent_roots_count(), roots_with_input);
+                Ok(input)
+            }).await.unwrap();
+            drop(input);
+            let execution = frontend.private_execution.as_ref().unwrap().admission.clone();
+            frontend.access.with_machine(context.clone(), move |session, context, _| {
+                let scope = context.placement.lexical_scope;
+                let before = (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
+                    session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope));
+                assert!(matches!(session.admit_world_planned_cell_for_execution(execution, missing_input_plan),
+                    Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)),
+                    "a Some-input plan also refuses when its caller supplies no input");
                 assert_eq!(before, (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
                     session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope)));
                 assert_eq!(session.persistent_roots_count(), roots_with_input);
