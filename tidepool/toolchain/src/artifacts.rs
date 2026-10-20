@@ -8738,6 +8738,7 @@ mod module_product_tests {
                 .action
                 .expect("actual World native preparation");
             if mixed && !cancel_after_end {
+                crate::declaration_context::assert_world_repeated_source_refusals(&checked);
                 use crate::compiler_world::WorldCellRuntimeInputOrigin;
                 assert_eq!(checked.stages().len(), 3);
                 assert_eq!(checked.stages()[0].ordinals(), &[0]);

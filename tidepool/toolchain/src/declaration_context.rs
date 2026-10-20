@@ -9733,6 +9733,152 @@ pub(crate) struct WorldStageSourceAdmission {
     pub(crate) aliases: Vec<PathBuf>,
 }
 
+#[cfg(test)]
+pub(crate) fn assert_world_repeated_source_refusals(
+    program: &crate::compiler_world::CheckedWorldCellProgram,
+) {
+    #[derive(Clone, Copy, Debug)]
+    enum Observation {
+        Unchanged,
+        ChangedSource,
+        ChangedImport,
+        Boot,
+    }
+    for observation in [
+        Observation::Unchanged,
+        Observation::ChangedSource,
+        Observation::ChangedImport,
+        Observation::Boot,
+    ] {
+        let mut validation =
+            PackageInterfaceValidation::with_inventory(Arc::clone(&program.validation().inventory));
+        let produced = crate::checked_cell::CheckedValueInputs::capture_world_produced_types(
+            program,
+            &mut validation,
+        )
+        .expect("actual produced interfaces");
+        let first = &program.stages()[0];
+        let end = first.ordinals().last().expect("actual first stage") + 1;
+        let stage_produced = produced.for_segment(0..end).unwrap();
+        let mut segment = decode_world_source_receipt(program, 0)
+            .unwrap()
+            .issue_segment_originals(
+                None,
+                Some(&stage_produced),
+                &mut validation,
+                WorldProgramContinuation::begin(program).unwrap(),
+            )
+            .expect("actual first stage admission");
+        let output = IssuedOriginalOutput::from_segment_originals(&segment.originals).unwrap();
+        segment
+            .admit_program_support(program, &output, &stage_produced)
+            .unwrap();
+        for ordinal in first.ordinals() {
+            let crate::checked_cell::CheckedPlannedCellSlot::Bind { value } =
+                &program.reservation().slots()[*ordinal]
+            else {
+                panic!("mixed fixture begins with a real binding");
+            };
+            segment
+                .admit_value_interface(produced.current_interface(*value).unwrap().clone())
+                .unwrap();
+        }
+        let (continuation, first_source) = segment.finish();
+        let mut next = decode_world_source_receipt(program, 1).unwrap();
+        let repeated = next
+            .source
+            .evidence
+            .modules
+            .iter()
+            .position(|module| {
+                continuation
+                    .program
+                    .program_support
+                    .as_ref()
+                    .unwrap()
+                    .source_original(&identity(&module.unit, &module.module))
+                    .is_some()
+            })
+            .expect("actual mixed history repeats source support");
+        assert!(next.source.evidence.modules.iter().any(|module| {
+            module.product == crate::cache::ProductAvailability::Ready
+                && first_source.source.evidence.modules.iter().any(|prior| {
+                    prior.unit == module.unit
+                        && prior.module == module.module
+                        && prior.product == crate::cache::ProductAvailability::InterfaceOnly
+                })
+        }));
+        let changed = tempfile::tempdir().unwrap();
+        let module = &mut next.source.evidence.modules[repeated];
+        match observation {
+            Observation::Unchanged => {}
+            Observation::ChangedSource => {
+                let mut bytes = std::fs::read(&module.source).unwrap();
+                bytes.extend_from_slice(b"\n-- changed source observation\n");
+                let path = changed.path().join("Changed.hs");
+                std::fs::write(&path, &bytes).unwrap();
+                module.source = path.clone();
+                next.source
+                    .evidence
+                    .sources
+                    .push(crate::cache::SourceEvidence {
+                        path,
+                        sha256: hex(&sha2::Sha256::digest(&bytes)),
+                    });
+            }
+            Observation::ChangedImport => {
+                let imported = module
+                    .imports
+                    .iter_mut()
+                    .find(|edge| edge.selected.is_none())
+                    .expect("actual support imports a package");
+                imported.qualifier =
+                    crate::cache::ImportQualifier::OtherUnit("foreign-package".into());
+                next.source
+                    .evidence
+                    .resolutions
+                    .push(crate::cache::ResolutionEvidence {
+                        qualifier: imported.qualifier.clone(),
+                        module: imported.module.clone(),
+                        boot: imported.boot,
+                        selected: None,
+                        candidates: vec![],
+                    });
+            }
+            Observation::Boot => {
+                module.boot = true;
+                module.product = crate::cache::ProductAvailability::Boot;
+                next.source
+                    .edges
+                    .iter_mut()
+                    .find(|edge| {
+                        edge.owner.unit == module.unit && edge.owner.module == module.module
+                    })
+                    .unwrap()
+                    .boot = true;
+            }
+        }
+        next.source.evidence_bytes = serde_json::to_vec(&next.source.evidence).unwrap();
+        let stage_produced = produced.for_segment(1..1).unwrap();
+        let result = next.issue_segment_originals(
+            None,
+            Some(&stage_produced),
+            &mut validation,
+            continuation,
+        );
+        match (observation, result) {
+            (Observation::Unchanged, Ok(_)) => {}
+            (Observation::ChangedSource | Observation::ChangedImport,
+                Err(CompileError::CompilerEvidence(error))) if matches!(error.as_ref(),
+                    crate::certified_products::CertificationError::Mismatch("same-program source original changed")) => {}
+            (Observation::Boot, Err(CompileError::ExtractFailed(detail))) if detail ==
+                "exact declaration context: fresh module replaced an admitted exact owner" => {}
+            (observation, Err(error)) => panic!("{observation:?}: unexpected refusal: {error:?}"),
+            (observation, Ok(_)) => panic!("{observation:?}: altered source was admitted"),
+        }
+    }
+}
+
 impl<'a> DecodedWorldSourceReceipt<'a> {
     /// Clamp untrusted completed-source demand to this preparation's cold
     /// primary issuer. This is not source, group or instance admission.
