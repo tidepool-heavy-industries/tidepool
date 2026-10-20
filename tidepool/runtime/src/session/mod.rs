@@ -105,6 +105,7 @@ pub use admission::{
     RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
     RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission, RuntimeLexicalScopeLease,
     RuntimeOriginalSource,
+    RuntimeWorldCellOperand,
 };
 pub use paired_publication::FinalExecutionIntent;
 pub use paired_publication::{

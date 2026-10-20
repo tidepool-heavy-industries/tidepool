@@ -3103,39 +3103,64 @@ enum PreparedRuntimeCellEvidence {
 /// carries authored source and protected templates only: includes, imports,
 /// the baseline and every other compiler input come from the published world
 /// rather than from a reconstructed compile view.
-///
-/// The returned one-shot plan is consumed by
-/// `PersistentSession::admit_world_planned_cell_for_execution` (or the
-/// host-carrier entry) inside the admission's source transaction.
-pub fn plan_world_cell_admitted(
+fn plan_world_cell_admitted(
     source: &super::RuntimeSourceCompilerTransaction,
     world: &tidepool_toolchain::compiler_world::CompilerWorld,
     recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
-) -> Result<Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>, CompileError> {
-    source
-        .admit(None)
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    operand: Option<Arc<super::RuntimeWorldCellOperand>>,
+) -> Result<RuntimeWorldCellPlan, super::WorldInspectionError> {
+    match &operand {
+        Some(operand) => operand
+            .admit_preparation(source, world)
+            .map_err(crate::RuntimeError::from)?,
+        None => source.admit(None).map_err(crate::RuntimeError::from)?,
+    }
     let command = extract_cmd()?;
     let endpoint = bind_extract_cmd(&command)?;
-    tidepool_toolchain::compiler_world::plan_cell(&endpoint, world, recipe, None)
+    let plan = tidepool_toolchain::compiler_world::plan_cell(
+        &endpoint,
+        world,
+        recipe,
+        operand.as_ref().map(|operand| operand.compiler.clone()),
+    )?;
+    Ok(RuntimeWorldCellPlan { plan, operand })
+}
+
+/// A settled parser result paired with the exact private operand it inspected.
+/// Only runtime preparation constructs this pair; native admission consumes it.
+pub struct RuntimeWorldCellPlan {
+    plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+    operand: Option<Arc<super::RuntimeWorldCellOperand>>,
+}
+
+impl RuntimeWorldCellPlan {
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        Option<Arc<super::RuntimeWorldCellOperand>>,
+    ) {
+        (self.plan, self.operand)
+    }
 }
 
 pub struct PreparedWorldCellPlan {
     origin: crate::CompilerTransactionOrigin,
-    plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+    plan: RuntimeWorldCellPlan,
 }
 
 pub fn prepare_world_cell_plan_admitted(
     source: &super::RuntimeSourceCompilerTransaction,
     world: &tidepool_toolchain::compiler_world::CompilerWorld,
     recipe: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+    operand: Option<Arc<super::RuntimeWorldCellOperand>>,
 ) -> Result<PreparedWorldCellPlan, super::WorldInspectionError> {
     let origin = crate::CompilerTransactionOrigin::current().ok_or(
         CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
     )?;
     Ok(PreparedWorldCellPlan {
         origin,
-        plan: plan_world_cell_admitted(source, world, recipe)?,
+        plan: plan_world_cell_admitted(source, world, recipe, operand)?,
     })
 }
 
@@ -3143,8 +3168,7 @@ pub fn finish_world_cell_plan_admitted(
     settled: crate::CompilerTransactionSettled<
         Result<PreparedWorldCellPlan, super::WorldInspectionError>,
     >,
-) -> Result<Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>, super::WorldInspectionError>
-{
+) -> Result<RuntimeWorldCellPlan, super::WorldInspectionError> {
     super::inspection::finish_world_operation(settled, |prepared| &prepared.origin)
         .map(|(prepared, _)| prepared.plan)
 }

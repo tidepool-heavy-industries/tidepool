@@ -3971,7 +3971,7 @@ where
     pub fn admit_world_planned_host_carrier_cell_in(
         &mut self,
         scope: ScopeId,
-        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        plan: super::turn::RuntimeWorldCellPlan,
         binding: String,
         expected: HostBindingType,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
@@ -4071,7 +4071,7 @@ where
     pub fn admit_world_planned_cell_for_execution(
         &mut self,
         execution: Arc<super::PrivateExecutionAdmission>,
-        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        plan: super::turn::RuntimeWorldCellPlan,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state
@@ -4082,12 +4082,25 @@ where
     pub fn admit_world_planned_cell_with_input(
         &mut self,
         execution: Arc<super::PrivateExecutionAdmission>,
-        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        plan: super::turn::RuntimeWorldCellPlan,
         input: Option<&super::PendingHostValueWrite>,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
         self.state
             .admit_world_planned_cell_with_input(execution, plan, input)
+    }
+
+    /// Capture the actual private input through its original mount receipt.
+    /// Its binding lease survives compiler waiting and uncertain delivery.
+    pub fn world_cell_operand_for_input(
+        &mut self,
+        execution: Arc<super::PrivateExecutionAdmission>,
+        input: &super::PendingHostValueWrite,
+    ) -> Result<Arc<super::RuntimeWorldCellOperand>, SessionError> {
+        self.settle_dropped_custody();
+        input.private_hidden_mount_key(&self.state, &execution)?;
+        let binding = self.lease_bindings(&[tidepool_repr::VarId(input.id().raw())]);
+        input.world_cell_operand(&self.state, execution, binding)
     }
 
     pub fn admit_checked_item(

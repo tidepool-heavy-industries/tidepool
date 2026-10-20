@@ -205,6 +205,7 @@ pub(super) struct WorldExecutionAdmissionFacts {
         Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
 }
 
+#[derive(Clone)]
 pub(super) struct CertifiedPrivateValueWrite {
     name: String,
     identity: SymbolIdentity,
@@ -436,6 +437,52 @@ struct PrivateHiddenHostMount {
     after: Arc<super::inspection::InspectionWorldAssociation>,
 }
 
+/// One actual private host input, paired with its compiler interface and roots.
+/// This never adds the input to the public compiler World.
+pub struct RuntimeWorldCellOperand {
+    pub(super) compiler: Arc<tidepool_toolchain::compiler_world::CompilerWorldCellOperand>,
+    execution: Arc<PrivateExecutionAdmission>,
+    id: tidepool_repr::SessionVarId,
+    write: CertifiedPrivateValueWrite,
+    _binding: super::resident::BindingLease,
+}
+
+impl RuntimeWorldCellOperand {
+    pub(super) fn admit_preparation(
+        &self,
+        source: &super::RuntimeSourceCompilerTransaction,
+        world: &tidepool_toolchain::compiler_world::CompilerWorld,
+    ) -> Result<(), SessionError> {
+        let original = source.admitted_original_source()?;
+        let expected = self.execution.original_source()?;
+        let held_world = self.execution.compiler_world()?;
+        if !Arc::ptr_eq(&original, &expected)
+            || !Arc::ptr_eq(world.restoration(), held_world.restoration())
+            || world.logical_id() != held_world.logical_id()
+        {
+            return Err(super::SourceAdmissionError::ForeignTransaction.into());
+        }
+        source.admit(Some(self.execution.retained_lexical_scope()))?;
+        Ok(())
+    }
+
+    fn matches(
+        &self,
+        execution: &Arc<PrivateExecutionAdmission>,
+        input: &PendingHostValueWrite,
+        compiler: &Arc<tidepool_toolchain::compiler_world::CompilerWorldCellOperand>,
+    ) -> bool {
+        Arc::ptr_eq(&self.execution, execution)
+            && Arc::ptr_eq(&self.compiler, compiler)
+            && self.id == input.id
+            && self.write.name == input.write.name
+            && self.write.identity == input.write.identity
+            && self.write.generation == input.write.generation
+            && self.write.root_id == input.write.root_id
+            && self.write.proof.same_original(&input.write.proof)
+    }
+}
+
 impl std::fmt::Debug for PendingHostValueWrite {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -447,6 +494,58 @@ impl std::fmt::Debug for PendingHostValueWrite {
 }
 
 impl PendingHostValueWrite {
+    pub(super) fn id(&self) -> tidepool_repr::SessionVarId {
+        self.id
+    }
+
+    pub(super) fn world_cell_operand(
+        &self,
+        session: &PersistentSession,
+        execution: Arc<PrivateExecutionAdmission>,
+        binding: super::resident::BindingLease,
+    ) -> Result<Arc<RuntimeWorldCellOperand>, SessionError> {
+        self.private_hidden_mount_key(session, &execution)?;
+        if !binding.retained_bindings().contains(&self.id) {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let world = execution.compiler_world()?;
+        use tidepool_toolchain::compiler_world::{
+            CompilerWorldCellOperand, WorldCellOperandExposure,
+        };
+        let compiler = match &self.write.proof {
+            CertifiedPrivateValueProof::Execution(proof) => {
+                CompilerWorldCellOperand::from_checked_host_execution(
+                    world,
+                    WorldCellOperandExposure::Input,
+                    self.scope.0,
+                    proof,
+                )?
+            }
+            CertifiedPrivateValueProof::HostInterface(proof) => {
+                CompilerWorldCellOperand::from_host_interface(
+                    world,
+                    WorldCellOperandExposure::Input,
+                    self.scope.0,
+                    proof,
+                )?
+            }
+        };
+        if compiler.session_var() != self.id
+            || compiler.symbol() != &self.write.identity
+            || compiler.generation() != self.write.generation.0
+            || compiler.defining_scope() != self.scope.0
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        Ok(Arc::new(RuntimeWorldCellOperand {
+            compiler,
+            execution,
+            id: self.id,
+            write: self.write.clone(),
+            _binding: binding,
+        }))
+    }
+
     pub(super) fn mounted(
         session: &PersistentSession,
         scope: ScopeId,
@@ -733,6 +832,7 @@ enum RuntimeCellCompilerBasis {
     Finite(RuntimeFiniteCellInputs),
     World {
         reservation: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation>,
+        _operand: Option<Arc<RuntimeWorldCellOperand>>,
         private_key: super::persistent::CompileViewKey,
         source: Arc<super::GenerationArtifactReference>,
         /// Original A from the issuing source transaction; the cell's retained
@@ -4671,7 +4771,7 @@ impl PersistentSession {
     pub fn admit_world_planned_cell_for_execution(
         &mut self,
         execution: Arc<PrivateExecutionAdmission>,
-        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        plan: super::turn::RuntimeWorldCellPlan,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.admit_world_planned_cell_with_input(execution, plan, None)
     }
@@ -4679,9 +4779,16 @@ impl PersistentSession {
     pub fn admit_world_planned_cell_with_input(
         &mut self,
         execution: Arc<PrivateExecutionAdmission>,
-        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        plan: super::turn::RuntimeWorldCellPlan,
         input: Option<&PendingHostValueWrite>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        let (plan, operand) = plan.into_parts();
+        match (&operand, input, plan.operand()) {
+            (Some(operand), Some(input), Some(compiler))
+                if operand.matches(&execution, input, compiler) => {}
+            (None, None, None) => {}
+            _ => return Err(SessionError::StaleStagedDeclaration),
+        }
         let scope = execution.private_scope();
         self.reap_admission_leases();
         if !Arc::ptr_eq(&execution.owner, self.admission_owner())
@@ -4709,6 +4816,7 @@ impl PersistentSession {
         self.reserve_world_cell(
             scope,
             plan,
+            operand,
             RuntimeCellPurpose::PrivateExecution(execution.clone()),
             execution.retained_lexical_scope(),
             original_source,
@@ -4725,10 +4833,14 @@ impl PersistentSession {
     pub fn admit_world_planned_host_carrier_cell_in(
         &mut self,
         scope: ScopeId,
-        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        plan: super::turn::RuntimeWorldCellPlan,
         binding: String,
         expected: super::resident::HostBindingType,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        let (plan, operand) = plan.into_parts();
+        if operand.is_some() || plan.operand().is_some() {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
         self.reap_admission_leases();
         if !self.has_lib() {
@@ -4792,6 +4904,7 @@ impl PersistentSession {
         self.reserve_world_cell(
             scope,
             plan,
+            None,
             RuntimeCellPurpose::HostCarrier { binding, expected },
             retained_scope,
             original_source,
@@ -4808,6 +4921,7 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        operand: Option<Arc<RuntimeWorldCellOperand>>,
         purpose: RuntimeCellPurpose,
         retained_scope: Arc<RuntimeLexicalScopeLease>,
         original_source: Arc<RuntimeLexicalScopeLease>,
@@ -4972,6 +5086,7 @@ impl PersistentSession {
             initial_value_generation,
             compiler_basis: RuntimeCellCompilerBasis::World {
                 reservation,
+                _operand: operand,
                 private_key,
                 source,
                 original_source,
