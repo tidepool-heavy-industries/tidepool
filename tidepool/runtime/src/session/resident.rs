@@ -2546,8 +2546,8 @@ pub enum ResidentError {
     },
     #[error("request receiver registration has no live entry: {hole}")]
     MissingRequestReceiverEntry { hole: String },
-    #[error("parked continuation does not match original-source site {site}")]
-    InvalidOriginalSourceSite { site: u64 },
+    #[error("parked continuation has no original-source site: {hole}")]
+    MissingOriginalSourceContinuation { hole: String },
     #[error("site {site} lacks an original runtime source contribution ({known_origins} known)")]
     MissingOriginalSource { site: u64, known_origins: usize },
     #[error("site {site} has {origins} distinct original runtime source owners")]
@@ -5029,25 +5029,23 @@ where
 
     /// Retain source custody for the actual suspended site, including raw tools
     /// which have no activation input or compiler-authenticated input witness.
-    pub fn parked_site_original_source(
+    pub fn parked_original_source(
         &mut self,
         hole: &ResidentHole,
-        site: u64,
     ) -> Result<Arc<super::RuntimeLexicalScopeLease>, ResidentError> {
-        let invalid = || ResidentError::InvalidOriginalSourceSite { site };
+        let invalid = || ResidentError::MissingOriginalSourceContinuation {
+            hole: hole.cont_id().to_owned(),
+        };
         let entry = self
             .parked
             .iter()
             .find(|entry| entry.name == hole.cont_id())
             .ok_or_else(invalid)?;
-        let parked = self
+        let site = self
             .state
             .prepared_mut()
             .and_then(|engine| engine.parked_site(entry.id))
             .ok_or_else(invalid)?;
-        if parked != site {
-            return Err(invalid());
-        }
         entry
             .provenance
             .original_sources
@@ -5308,7 +5306,7 @@ where
         if parked_site != site {
             return Err(invalid());
         }
-        let original_source = self.parked_site_original_source(hole, site)?;
+        let original_source = self.parked_original_source(hole)?;
         let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
         if !provenance.authenticated_inputs.contains_key(&site) {
             return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
