@@ -206,20 +206,13 @@ impl NativeSourceCustody {
         sites: impl IntoIterator<Item = u64>,
         mut pending: BTreeMap<u64, RuntimeSourceOrigin>,
     ) -> Self {
+        for site in sites {
+            pending
+                .entry(site)
+                .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+        }
         Self {
-            sites: Arc::new(
-                sites
-                    .into_iter()
-                    .map(|site| {
-                        (
-                            site,
-                            pending
-                                .remove(&site)
-                                .unwrap_or_else(|| RuntimeSourceOrigin::Unknown(Vec::new())),
-                        )
-                    })
-                    .collect(),
-            ),
+            sites: Arc::new(pending),
         }
     }
 
@@ -801,7 +794,8 @@ impl ProgramProvenance {
             }
         }
         for site in other.sites.values() {
-            let existing = self.sites.contains_key(&site.site);
+            let existing = self.sites.contains_key(&site.site)
+                || self.original_sources.sites.contains_key(&site.site);
             self.extend(std::slice::from_ref(site))?;
             let incoming = other.original_sources.source(site.site);
             let sources = Arc::make_mut(&mut self.original_sources.sites);
@@ -812,6 +806,15 @@ impl ProgramProvenance {
                     .merge(&incoming);
             } else {
                 sources.insert(site.site, incoming);
+            }
+        }
+        // Native receipts can carry raw effect sites without typed yield metadata.
+        for (site, incoming) in other.original_sources.sites.iter() {
+            if !other.sites.contains_key(site) {
+                Arc::make_mut(&mut self.original_sources.sites)
+                    .entry(*site)
+                    .and_modify(|held| held.merge(incoming))
+                    .or_insert_with(|| incoming.clone());
             }
         }
         for (site, interfaces) in &other.authenticated_inputs {
@@ -13194,6 +13197,56 @@ mod source_origin_tests {
                 ..
             })
         ));
+
+        let mut raw = ProgramProvenance::default();
+        raw.original_sources = NativeSourceCustody::complete(
+            [31],
+            BTreeMap::from([(29, RuntimeSourceOrigin::Known(source.clone()))]),
+        );
+        assert!(raw.sites.is_empty());
+        assert!(raw.authenticated_inputs.is_empty());
+        assert!(Arc::ptr_eq(
+            &raw.original_sources.require_unique(29).unwrap(),
+            &source,
+        ));
+        assert!(matches!(
+            raw.original_sources.require_unique(31),
+            Err(ResidentError::MissingOriginalSource {
+                known_origins: 0,
+                ..
+            })
+        ));
+        let typed = issued(29, &source);
+        for (mut left, right) in [(raw.clone(), typed.clone()), (typed, raw.clone())] {
+            left.merge(&right).unwrap();
+            assert!(Arc::ptr_eq(
+                &left.original_sources.require_unique(29).unwrap(),
+                &source,
+            ));
+            assert!(matches!(
+                left.original_sources.require_unique(31),
+                Err(ResidentError::MissingOriginalSource {
+                    known_origins: 0,
+                    ..
+                })
+            ));
+        }
+        let unknown_raw = ProgramProvenance {
+            original_sources: NativeSourceCustody::unknown([29]),
+            ..ProgramProvenance::default()
+        };
+        for (mut left, right) in [(raw.clone(), unknown_raw.clone()), (unknown_raw, raw)] {
+            left.merge(&right).unwrap();
+            assert!(left.sites.is_empty());
+            assert!(left.authenticated_inputs.is_empty());
+            assert!(matches!(
+                left.original_sources.require_unique(29),
+                Err(ResidentError::MissingOriginalSource {
+                    known_origins: 1,
+                    ..
+                })
+            ));
+        }
     }
 
     proptest! {
