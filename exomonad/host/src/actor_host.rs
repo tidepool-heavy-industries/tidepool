@@ -145,6 +145,8 @@ mod jev_tests;
 #[cfg(test)]
 mod observation_budget_tests;
 #[cfg(test)]
+mod operation_identity_oracle;
+#[cfg(test)]
 mod persona_file_tools_acceptance_tests;
 #[cfg(test)]
 mod researcher_acceptance_tests;

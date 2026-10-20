@@ -6810,14 +6810,20 @@ mod typed_site_tests {
             std::env::remove_var(crate::toolchain::ENV_COMPILER_DEPLOYMENT);
             std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
         }
-        let error = crate::artifacts::test_support::compile_targets(
+        let mut closes = Vec::new();
+        let error = crate::artifacts::compile_targets(
             "result = 1",
             &["result"],
             &[directory.path().into()],
             |_, _, _| {},
+            &mut |close| closes.push(close),
         )
         .err()
         .expect("unconfigured observed endpoint must be refused");
+        assert!(
+            closes.is_empty(),
+            "a refused endpoint must not close a compiler transaction: {closes:?}"
+        );
         assert!(
             matches!(error,CompileError::ExtractFailed(ref message) if message.contains("no configured deployment authority"))
         );
@@ -8455,13 +8461,7 @@ mod module_product_tests {
         let refusal = with_compiler_transaction_for_workload(
             CompileWorkload::Preparation,
             |_| {},
-            || {
-                crate::artifacts::test_support::prepare_frozen_production_entry(
-                    &sources,
-                    root.path(),
-                    &output,
-                )
-            },
+            || prepare_frozen_production_entry(&sources, root.path(), &output, &mut |_| {}),
         );
         let Err(CompileError::CompilerEndpoint(error)) = &refusal.action else {
             panic!(
@@ -8479,13 +8479,7 @@ mod module_product_tests {
         let foreground = with_compiler_transaction_for_workload(
             CompileWorkload::Foreground,
             |_| {},
-            || {
-                crate::artifacts::test_support::prepare_frozen_production_entry(
-                    &sources,
-                    root.path(),
-                    &output,
-                )
-            },
+            || prepare_frozen_production_entry(&sources, root.path(), &output, &mut |_| {}),
         );
         foreground.action.unwrap();
         assert_eq!(foreground.close, CompilerTransactionClose::Clean);
@@ -8507,14 +8501,16 @@ mod module_product_tests {
         let output = root.path().join("entry");
         let absent_target = root.path().join("absent-target");
         std::os::unix::fs::symlink(&absent_target, &output).unwrap();
-        assert!(matches!(
-            crate::artifacts::test_support::prepare_frozen_production_entry(
-                &sources,
-                root.path(),
-                &output
-            ),
-            Err(CompileError::ExtractFailed(_))
-        ));
+        let mut closes = Vec::new();
+        let refusal =
+            prepare_frozen_production_entry(&sources, root.path(), &output, &mut |close| {
+                closes.push(close)
+            });
+        assert!(matches!(refusal, Err(CompileError::ExtractFailed(_))));
+        assert!(
+            closes.is_empty(),
+            "reservation refusal must precede any compiler transaction: {closes:?}"
+        );
         assert_eq!(std::fs::read_link(&output).unwrap(), absent_target);
         assert!(!root.path().join("entry.preparing").exists());
     }
@@ -8527,26 +8523,39 @@ mod module_product_tests {
         std::fs::write(&source, "module Input where\n__prepared = (1 :: Int)\n").unwrap();
         let sources = FrozenEntrySources::capture(&[root.path().to_owned()], &source).unwrap();
         let output = root.path().join("entry");
+        let mut closes = Vec::new();
         let error = production_entry::with_failure(
             production_entry::EntryCheckpoint::ReservationSync,
             || {
-                crate::artifacts::test_support::prepare_frozen_production_entry(
-                    &sources,
-                    root.path(),
-                    &output,
-                )
+                prepare_frozen_production_entry(&sources, root.path(), &output, &mut |close| {
+                    closes.push(close)
+                })
             },
         )
         .unwrap_err();
+        assert!(
+            closes.is_empty(),
+            "reservation sync failure must precede any compiler transaction: {closes:?}"
+        );
         assert!(matches!(error, CompileError::Io(_)));
         assert!(!output.exists());
         let unfinished = root.path().join("entry.preparing");
         assert!(unfinished.is_dir());
         assert!(!unfinished.join("raw").exists());
+        let mut retry_closes = Vec::new();
         assert!(matches!(
-            crate::artifacts::test_support::prepare_frozen_production_entry(&sources, root.path(), &output),
+            prepare_frozen_production_entry(
+                &sources,
+                root.path(),
+                &output,
+                &mut |close| retry_closes.push(close),
+            ),
             Err(CompileError::EntryPreparationUnfinished { path }) if path == unfinished
         ));
+        assert!(
+            retry_closes.is_empty(),
+            "unfinished reservation refusal must precede any compiler transaction: {retry_closes:?}"
+        );
         assert_eq!(std::fs::read_dir(unfinished).unwrap().count(), 0);
     }
 
@@ -8637,8 +8646,17 @@ mod module_product_tests {
             } else {
                 assert!(matches!(error, CompileError::Io(_)));
                 assert!(!output.exists());
+                let mut closes = Vec::new();
+                let refused =
+                    prepare_frozen_production_entry(&sources, root.path(), &output, &mut |close| {
+                        closes.push(close)
+                    });
+                assert!(
+                    closes.is_empty(),
+                    "unfinished entry refusal must precede any compiler transaction: {closes:?}"
+                );
                 assert!(matches!(
-                    crate::artifacts::test_support::prepare_frozen_production_entry(&sources, root.path(), &output),
+                    refused,
                     Err(CompileError::EntryPreparationUnfinished { ref path }) if path == &unfinished
                 ));
             }
@@ -8884,10 +8902,11 @@ mod module_product_tests {
                         cancellation,
                         |_| {},
                         || {
-                            crate::artifacts::test_support::prepare_frozen_production_entry(
+                            prepare_frozen_production_entry(
                                 &sources,
                                 root.path(),
                                 &output,
+                                &mut |_| {},
                             )
                         },
                     )
@@ -8917,12 +8936,17 @@ mod module_product_tests {
             let raw = if stage == EntryCheckpoint::TreeSync {
                 assert!(!output.exists());
                 let unfinished = root.path().join(format!("entry-{index}.preparing"));
+                let mut closes = Vec::new();
+                let refused =
+                    prepare_frozen_production_entry(&sources, root.path(), &output, &mut |close| {
+                        closes.push(close)
+                    });
+                assert!(
+                    closes.is_empty(),
+                    "cancelled unfinished entry must not reopen a compiler transaction: {closes:?}"
+                );
                 assert!(matches!(
-                    crate::artifacts::test_support::prepare_frozen_production_entry(
-                        &sources,
-                        root.path(),
-                        &output
-                    ),
+                    refused,
                     Err(CompileError::EntryPreparationUnfinished { .. })
                 ));
                 unfinished.join("raw")
@@ -10804,6 +10828,10 @@ pub(crate) mod test_support {
         }));
         let closes = observation.lock().unwrap();
         assert!(
+            !closes.is_empty(),
+            "compiler close was not observed: {closes:?}"
+        );
+        assert!(
             closes.iter().all(|close| matches!(
                 close,
                 CompilerTransactionClose::Clean | CompilerTransactionClose::NotStarted
@@ -10814,6 +10842,51 @@ pub(crate) mod test_support {
         match result {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::with_settlement;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        use tidepool_extract_cmd::{
+            CompilerTransactionClose, CompilerTransactionCloseEvidence,
+            CompilerTransactionCloseReason, CompilerTransactionRetirement,
+        };
+
+        fn panic_text(panic: Box<dyn std::any::Any + Send>) -> String {
+            if let Some(text) = panic.downcast_ref::<&str>() {
+                (*text).to_string()
+            } else if let Some(text) = panic.downcast_ref::<String>() {
+                text.clone()
+            } else {
+                "non-string panic".into()
+            }
+        }
+
+        #[test]
+        fn settlement_rejects_an_unobserved_close() {
+            let panic = catch_unwind(AssertUnwindSafe(|| with_settlement(|_| ())))
+                .expect_err("empty close observations are not settled");
+            let text = panic_text(panic);
+            assert!(text.contains("compiler close was not observed"), "{text}");
+            assert!(!text.contains("compiler close is unconfirmed"), "{text}");
+        }
+
+        #[test]
+        fn settlement_distinguishes_an_unconfirmed_close() {
+            let close =
+                CompilerTransactionClose::Unconfirmed(CompilerTransactionCloseEvidence::new(
+                    CompilerTransactionCloseReason::Abandoned,
+                    CompilerTransactionRetirement::DaemonUnobserved { disconnect: None },
+                ));
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                with_settlement(|recipient| recipient(close))
+            }))
+            .expect_err("an unconfirmed close is not settled");
+            let text = panic_text(panic);
+            assert!(text.contains("compiler close is unconfirmed"), "{text}");
+            assert!(!text.contains("compiler close was not observed"), "{text}");
         }
     }
 
