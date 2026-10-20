@@ -19,3 +19,5 @@ mod prepared_resident_composite;
 mod prepared_unit_codegen_cost;
 #[path = "../service_cell_slice.rs"]
 mod service_cell_slice;
+#[path = "../service_cell_warm_timing.rs"]
+mod service_cell_warm_timing;
