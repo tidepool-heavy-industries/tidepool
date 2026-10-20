@@ -136,8 +136,42 @@ where
                     SrReloadOutcome::ReloadUnchanged(previous),
                 ));
             }
+            // A authorizes preparation; B's independent source is born outside
+            // any A compiler transaction and retains only the actual parent.
+            let expected = self.expected.clone();
+            let source = staged.source().clone();
+            let (_preparation_permission, unpublished, candidate_context) = self
+                .workbench
+                .access
+                .with_machine(self.expected.context.clone(), move |session, context, _| {
+                    let permission = context.source_dependency().claim()?;
+                    let parent = expected.dependency().prerequisite().clone();
+                    let unpublished = session.mint_unpublished_notebook_scope(
+                        parent
+                            .as_ref()
+                            .map(|dependency| dependency.runtime_lease().clone()),
+                    )?;
+                    let generation = expected.id().next().map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?;
+                    let dependency = generation_admission::GenerationDependency::new(
+                        context.actor,
+                        generation,
+                        source,
+                        unpublished.lease(),
+                        parent,
+                    );
+                    let mut next = context.clone();
+                    next.placement.lexical_scope = unpublished.lease().scope();
+                    next.source_imports = crate::ActorSourceImports::default();
+                    next.source_dependency =
+                        generation_admission::SourceDependency::Generation(dependency);
+                    Ok((permission, unpublished, next))
+                })
+                .await
+                .map_err(unreadable)?;
             let (context, authority) = WorkbenchCompilationAuthority::admit(
-                self.expected.context.clone(),
+                candidate_context,
                 staged.source().clone(),
                 None,
                 Some(&self.layers),
@@ -242,12 +276,13 @@ where
             );
             let prompts = staged.prompt_snapshot().clone();
             let mut prepared = workbench
-                .prepare_actor_generation(
+                .prepare_actor_generation_in(
                     context.clone(),
                     self.descriptor.clone(),
                     ActorRequestSnapshot::Generation(self.expected.clone()),
                     installation,
                     prompts,
+                    Some(unpublished),
                 )
                 .await
                 .map_err(unreadable)?;

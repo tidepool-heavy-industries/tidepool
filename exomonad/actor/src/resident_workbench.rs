@@ -1934,6 +1934,7 @@ pub(crate) struct PreparedActorGeneration {
     checkout_context: crate::ActorSessionContext,
     expected: ActorRequestSnapshot,
     reload_report: Option<PreparedReloadReport>,
+    unpublished: Option<tidepool_runtime::session::UnpublishedNotebookScope>,
     candidate: Arc<ActorGenerationCandidate>,
     commit: PreparedGenerationCommit,
     public_owner: crate::resident_actor::PreparedWorkbenchGenerationOwner,
@@ -1989,6 +1990,7 @@ impl ActorGenerationCandidateObserver {
 }
 
 struct PreparingActorGeneration {
+    unpublished: Option<tidepool_runtime::session::UnpublishedNotebookScope>,
     machine_owner: std::sync::Weak<dyn std::any::Any + Send + Sync>,
     checkout_context: crate::ActorSessionContext,
     expected: ActorRequestSnapshot,
@@ -4405,6 +4407,26 @@ where
         installation: InstalledToolLease,
         prompts: tidepool_runtime::session::ComposedPromptSnapshot,
     ) -> Result<PreparedActorGeneration, ResidentActorWorkbenchError> {
+        self.prepare_actor_generation_in(
+            context,
+            descriptor,
+            expected_snapshot,
+            installation,
+            prompts,
+            None,
+        )
+        .await
+    }
+
+    async fn prepare_actor_generation_in(
+        &self,
+        context: crate::ActorSessionContext,
+        descriptor: crate::ActorDescriptor,
+        expected_snapshot: ActorRequestSnapshot,
+        installation: InstalledToolLease,
+        prompts: tidepool_runtime::session::ComposedPromptSnapshot,
+        unpublished: Option<tidepool_runtime::session::UnpublishedNotebookScope>,
+    ) -> Result<PreparedActorGeneration, ResidentActorWorkbenchError> {
         if context.actor != installation.actor()
             || expected_snapshot.installation().actor() != context.actor
         {
@@ -4444,7 +4466,9 @@ where
                     },
                     |generation| generation.dependency().prerequisite().clone(),
                 );
-                let scope = if expected.is_some() {
+                let scope = if let Some(owner) = &unpublished {
+                    owner.lease().clone()
+                } else if expected.is_some() {
                     let retained = session
                         .mint_notebook_scope_with_lease(
                             prerequisite
@@ -4567,15 +4591,32 @@ where
                     PreparedGenerationCommit::Restored { selected, .. }
                     | PreparedGenerationCommit::Durable { selected, .. } => selected.generation(),
                 };
-                let dependency = generation_admission::SourceDependency::Generation(
-                    generation_admission::GenerationDependency::new(
-                        context.actor,
-                        generation,
-                        installation.source().clone(),
-                        &scope,
-                        prerequisite,
-                    ),
-                );
+                let dependency = if unpublished.is_some() {
+                    match context.source_dependency() {
+                        generation_admission::SourceDependency::Generation(dependency)
+                            if dependency.generation() == generation
+                                && Arc::ptr_eq(dependency.runtime_lease(), &scope) =>
+                        {
+                            generation_admission::SourceDependency::Generation(dependency.clone())
+                        }
+                        _ => {
+                            return Err(
+                                generation_admission::GenerationAdmissionError::StaleSourceLease
+                                    .into(),
+                            )
+                        }
+                    }
+                } else {
+                    generation_admission::SourceDependency::Generation(
+                        generation_admission::GenerationDependency::new(
+                            context.actor,
+                            generation,
+                            installation.source().clone(),
+                            &scope,
+                            prerequisite,
+                        ),
+                    )
+                };
                 installation.dependency = dependency.clone();
                 next_context.source_dependency = dependency;
                 let public_owner = crate::resident_actor::WorkbenchPublicOwner::prepare_generation(
@@ -4585,6 +4626,7 @@ where
                     native_owner,
                 )?;
                 Ok(PreparingActorGeneration {
+                    unpublished,
                     machine_owner,
                     checkout_context,
                     expected: expected_snapshot,
@@ -4703,6 +4745,7 @@ where
             checkout_context: preparing.checkout_context,
             expected: preparing.expected,
             reload_report: None,
+            unpublished: preparing.unpublished,
             candidate: Arc::new(ActorGenerationCandidate {
                 installation: preparing.installation,
                 prompts: preparing.prompts,
@@ -9731,17 +9774,27 @@ where
         let public_scope = context.placement.lexical_scope;
         let mut compile_context = context.clone();
         compile_context.haskell_effects_alias = dispatcher_effects.clone();
-        let installation_scope = self
-            .access
-            .with_machine(context.clone(), move |session, _, _| {
-                // Each installation has an independent CAF/source domain even
-                // when actors share the surrounding machine and native images.
-                let isolated = session.mint_isolated_scope();
-                let retained = session.retain_lexical_scope(isolated)?;
-                session.retire_scope(isolated);
-                Ok(retained)
-            })
-            .await?;
+        let (installation_scope, source_startup) = if let Some(prepared) = code.prepared().cloned()
+        {
+            self.access
+                .with_compiler_machine(context.clone(), move |session, _, _, _| {
+                    session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
+                    let entry = session.prepare_source_startup_entry(&prepared.entry)?;
+                    Ok((entry.installation_scope().clone(), Some(entry)))
+                })
+                .await?
+        } else {
+            let retained = self
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    let isolated = session.mint_isolated_scope();
+                    let retained = session.retain_lexical_scope(isolated)?;
+                    session.retire_scope(isolated);
+                    Ok(retained)
+                })
+                .await?;
+            (retained, None)
+        };
         compile_context.placement.lexical_scope = installation_scope.scope();
         let abort_guard = ParkedHoleAbortGuard::with_retained_latest(
             &self.access,
@@ -9775,13 +9828,6 @@ where
                     }
                 };
                 move |session, context, _, settlement| {
-                    let startup = prepared
-                        .as_ref()
-                        .map(|prepared| {
-                            session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
-                            session.prepare_startup_entry(prepared.entry.compiled().code())
-                        })
-                        .transpose()?;
                     let pending_originals = if matches!(
                         purpose,
                         ToolInstallationPurpose::InitialTools
@@ -9795,9 +9841,9 @@ where
                     } else {
                         None
                     };
-                    let (outcome, warnings) = match (prepared, startup, installer) {
+                    let (outcome, warnings) = match (prepared, source_startup, installer) {
                         (Some(prepared), Some(entry), None) => (
-                            session.run_startup_entry(entry, settlement),
+                            session.run_source_startup_entry(entry, settlement),
                             prepared.entry.compiled().warnings.warnings.clone(),
                         ),
                         (None, None, Some(installer)) => (
