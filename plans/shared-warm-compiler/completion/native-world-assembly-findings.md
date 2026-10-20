@@ -40,12 +40,14 @@ qualify actor execution or the complete language contract.
 - The native BUCK generator initially refused the existing checked-request
   compile-fail contracts. The test owner supplied `c1e07eef5f`, received here as
   `54977fe2fd`; canonical generation then accepted the new World fixture.
-- The actual rooted World control now passes output admission and closes with
-  Clean END, then refuses at `certified_products.rs`, source recipe admission,
-  with `source recipe compilation route`. Haskell `CompilerProducts.hs` emits
-  `Ordinary` when no finite exact request exists, while World correctly supplies
-  an exact World source admission. H/root own the explicit World recipe contract;
-  native assembly must not fabricate a finite request or relabel `Ordinary`.
+- The rooted control exposed `source recipe compilation route`: Haskell
+  `CompilerProducts.hs` emitted `Ordinary` because no finite exact request
+  existed. H repair `ddce287fd9` carries actual World provenance in the existing
+  private dependency sum. Receiver `baea57bd12` admits only the distinct
+  `world-unavailable` recipe with the same actual base World identity and
+  captured-source domain. The nested TPCERT10 tag has strict byte lengths and
+  the explicit unsupported-recipe reason. It publishes no execution-source
+  graph and does not reinterpret ordinary or finite-exact evidence.
 - At this base the Haskell World producer lacks declaration/prologue original
   products and refuses these inputs. H owns that producer extension; native
   assembly must consume the actual authored declaration certificate when it
@@ -54,8 +56,10 @@ qualify actor execution or the complete language contract.
 - `compiler_world.rs` still contains the intermediate native-seal TODO and retains
   decoded raw item observations alongside normalized item proofs. The engine
   owns that file and will remove the obsolete TODO after receiving the consumer.
-  Raw captured certificate bytes remain necessary evidence; a second decoded
-  item tree is a separate potential retention cost, not yet measured here.
+  Raw captured certificate bytes remain necessary evidence. The retained raw
+  `WorldCellOutputAdmission.items` tree is read only for its length in admission;
+  dropping that decoded copy is an engine-owned opportunity, not a measured
+  memory improvement.
 
 ## Untested relationships
 
@@ -70,8 +74,36 @@ At source `f60f6deed8` plus the source-domain and issuer-control changes, the
 production target compiles and four focused controls pass (build
 `1732a458-e116-4e9b-863b-08f299ac47a4`, exit 0). Log:
 `/srv/swarm/evidence/inanna/native-world-entry-and-source-controls-20261020.log`.
-The actual World control is still one executed failure, not a successful seal:
+The pre-recipe actual failure remains retained at
 `/srv/swarm/evidence/inanna/native-world-after-entry-fix-20261020.log`.
+
+At source `d946652328bad37d93cdc3fad6a81ccdd90db2db`, the named actual World
+control passes 1/1, exit 0 (build `bfecec64-fd21-472f-b103-bf172df67024`):
+
+```sh
+swarm-build just test-native //tidepool/toolchain:toolchain_world_native_seal_test --output-dir /srv/swarm/evidence/inanna/native-world-explicit-recipe-20261020 --retain-artifacts
+```
+
+It prepares and seals a real captured bind after matching origin and Clean END.
+A second genuine preparation cancels the same transaction-issued post-END
+observer and refuses sealing with `Io(Interrupted)`. All six compiler operations
+are retained as completed; owned compiler cleanup is confirmed with no diagnostic
+issues or unmarked scratch. Log: `native-world-explicit-recipe-20261020.log` in
+the evidence directory. The retained report directory has the same basename.
+The test executable SHA-256 is
+`009deb830139a9d7b6006b65ab46e1712f075f2d660b8d17ccc03662a6ca3d36`;
+the Haskell worker SHA-256 is
+`ccf0785498ea921f9d05536869f9ba151b7f2c1dfc509ad5fc8564e09ea7a11b`.
+
+The strict World recipe codec, finite-exact sidecar ownership and native entry
+issuer controls pass 3/3, exit 0 (build
+`11a37d79-383f-401d-978e-117f089d44e6`). Log:
+`/srv/swarm/evidence/inanna/native-world-recipe-controls-final-20261020.log`.
+These are compiler/native evidence checks, not actor execution qualification.
+The joined source-domain controls also pass 3/3, exit 0 (build
+`41bc805e-e276-4e25-b174-5bea0e43a2b7`), covering captured alias lifetime,
+envelope bounds, and named-reference refusal. Log:
+`/srv/swarm/evidence/inanna/native-world-joined-source-controls-20261020.log`.
 
 The actual run retains all three completed compiler transaction directories and
 reports no scratch-marker issues. An initial scratch inspection omitted hidden
