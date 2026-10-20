@@ -6468,10 +6468,8 @@ mod tests {
                 .capture_checked_native_delta(ScopeId::ROOT, 924, [].into_iter())
                 .unwrap();
             assert!(absent.imports.is_empty());
-            let next = session
-                .capture_checked_native_delta(ScopeId::ROOT, 924, [("answer", 924)].into_iter())
-                .unwrap();
-            let (unchanged, added) = ledger.append(next, &index).unwrap();
+            assert!(absent.bindings.is_empty());
+            let (unchanged, added) = ledger.append(absent, &index).unwrap();
             assert!(added.is_empty());
             assert!(Arc::ptr_eq(
                 ledger.tail.as_ref().unwrap(),
