@@ -2529,15 +2529,28 @@ mod tests {
             .unwrap()
             .unwrap();
         stopped_release.send(()).unwrap();
-        let (finished, task) = tokio::time::timeout(std::time::Duration::from_secs(10), spawning)
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), spawning)
             .await
-            .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(finished.identity(), identity);
-        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        let error = match result {
+            Err(error @ ractor::SpawnErr::StartupFailed(_)) => error,
+            _ => panic!("startup cannot attach its lifecycle after the real run owner is lost"),
+        };
+        let cleanup = crate::local_actor::startup_cleanup(&error)
+            .expect("the real refused startup retains its cleanup observation");
+        assert_eq!(cleanup.actor, identity);
+        assert_eq!(cleanup.hook, crate::CleanupComponentOutcome::Confirmed);
+        assert_eq!(cleanup.realm, crate::CleanupComponentOutcome::Confirmed);
+        assert!(matches!(
+            cleanup.children,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        actor
+            .address()
+            .get_cell()
+            .wait(Some(std::time::Duration::from_secs(10)))
             .await
-            .unwrap()
             .unwrap();
     }
 
