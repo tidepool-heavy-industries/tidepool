@@ -6,7 +6,7 @@ module Tidepool.ExtractRequest
   , ExactInputsRequest(..), ExactInputsAcquisition(..)
   , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), WorldObservationQuery(..), publicQuestionInspection, publicQuestionIsType
   , WorldCellRecipe(..), WorldCellOperandRequest(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
-  , EnsureExactInputsOutcome(..), ExactInputsRejection(..), encodeEnsureExactInputsOutcomeWithin
+  , EnsureExactInputsOutcome(..), ExactInputsRejection(..), WorldResidency(..), WorldNonRetentionReason(..), encodeEnsureExactInputsOutcomeWithin
   , RequestField(..)
   , InspectionRequest(..)
   , StructuredInspection(..)
@@ -204,9 +204,15 @@ validWorldQueryRequest request = validWorldIdentity (worldQueryIdentity request)
   where current question = structuredScope question == StructuredCurrentScope && validReference (structuredName question)
 
 data EnsureExactInputsOutcome
-  = ExactInputsReady String String
+  = ExactInputsReady String String WorldResidency
   | ExactInputsNeedsAcquisition String
   | ExactInputsRejected ExactInputsRejection
+  deriving (Eq, Show)
+
+-- Storage observations from the actual admission; neither constructor pins a worker.
+data WorldResidency = WorldRetainedAtAdmission | WorldActiveOnly WorldNonRetentionReason
+  deriving (Eq, Show)
+data WorldNonRetentionReason = WorldStorageAllowanceExceeded Integer Integer
   deriving (Eq, Show)
 
 data ExactInputsRejection
@@ -217,18 +223,24 @@ data ExactInputsRejection
 -- frame length are charged to the existing aggregate response payload budget.
 encodeEnsureExactInputsOutcomeWithin :: Integer -> EnsureExactInputsOutcome -> Maybe BS.ByteString
 encodeEnsureExactInputsOutcomeWithin budget outcome = case outcome of
-  ExactInputsReady root reference | validWorldIdentity root -> do
+  ExactInputsReady root reference residency | validWorldIdentity root -> do
+    storage <- residencyFrame residency
     encodedRoot <- referenceFrame (budget - 13) root
-    encodedReference <- referenceFrame (budget - 9 - toInteger (BS.length encodedRoot)) reference
-    pure ("TPEXO002" <> BS.singleton 0 <> encodedRoot <> encodedReference)
-  ExactInputsReady _ _ -> Nothing
+    encodedReference <- referenceFrame (budget - 9 - toInteger (BS.length encodedRoot) - toInteger (BS.length storage)) reference
+    pure ("TPEXO003" <> BS.singleton 0 <> encodedRoot <> encodedReference <> storage)
+  ExactInputsReady _ _ _ -> Nothing
   ExactInputsNeedsAcquisition root | validWorldIdentity root ->
-    ("TPEXO002" <>) . (BS.singleton 1 <>) <$> referenceFrame (budget - 9) root
+    ("TPEXO003" <>) . (BS.singleton 1 <>) <$> referenceFrame (budget - 9) root
   ExactInputsNeedsAcquisition _ -> Nothing
   ExactInputsRejected cause
     | budget < 10 -> Nothing
-    | otherwise -> Just ("TPEXO002" <> BS.pack [2, rejectionTag cause])
+    | otherwise -> Just ("TPEXO003" <> BS.pack [2, rejectionTag cause])
   where
+    residencyFrame WorldRetainedAtAdmission = Just (BS.singleton 0)
+    residencyFrame (WorldActiveOnly (WorldStorageAllowanceExceeded required limit))
+      | all (\n -> n >= 0 && n <= toInteger (maxBound :: Word64)) [required,limit] =
+          Just (BS.singleton 1 <> putU64 (fromInteger required) <> putU64 (fromInteger limit))
+      | otherwise = Nothing
     referenceFrame remaining reference
       | remaining < 4 = Nothing
       | otherwise =

@@ -62,14 +62,26 @@ pub enum ExactInputsRejection {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnsureExactInputsOutcome {
-    Ready { world: String, realization: String },
+    Ready { world: String, realization: String, residency: WorldResidency },
     NeedsAcquisition(String),
     Rejected(ExactInputsRejection),
 }
 
+/// Optional storage observed at admission, never a residency lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldResidency {
+    RetainedAtAdmission,
+    ActiveOnly(WorldNonRetentionReason),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldNonRetentionReason {
+    StorageAllowanceExceeded { required_bytes: u64, limit_bytes: u64 },
+}
+
 impl EnsureExactInputsOutcome {
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        if bytes.get(..8) != Some(b"TPEXO002") {
+        if bytes.get(..8) != Some(b"TPEXO003") {
             return Err(ProtocolError::InvalidHeader);
         }
         let mut decoder = Decoder { bytes, cursor: 8 };
@@ -80,10 +92,19 @@ impl EnsureExactInputsOutcome {
                 if !valid_world_identity(world) || !valid_reference(realization) {
                     return Err(ProtocolError::InvalidExactInputs);
                 }
+                let residency = match decoder.byte()? {
+                    0 => WorldResidency::RetainedAtAdmission,
+                    1 => WorldResidency::ActiveOnly(WorldNonRetentionReason::StorageAllowanceExceeded {
+                        required_bytes: decoder.u64()?,
+                        limit_bytes: decoder.u64()?,
+                    }),
+                    _ => return Err(ProtocolError::InvalidExactInputs),
+                };
                 decoder.finish()?;
                 Ok(Self::Ready {
                     world: world.to_owned(),
                     realization: realization.to_owned(),
+                    residency,
                 })
             }
             1 => {
@@ -3128,6 +3149,7 @@ mod tests {
         let query = WorldQueryRequest {
             world: "a".repeat(64),
             realization: "realized".into(),
+                    residency: WorldResidency::RetainedAtAdmission,
             question: WorldQueryQuestion::PublicInfo(StructuredInspection {
                 scope: InspectionScope::PublicModule("Data.List".into()),
                 namespace: InspectionNamespace::Value,
@@ -3680,30 +3702,31 @@ mod tests {
     fn exact_inputs_outcomes_match_closed_wire_and_reject_uncertain_frames() {
         let cases = [
             (
-                "545045584f303032004000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564",
+                "545045584f303033004000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a656400",
                 EnsureExactInputsOutcome::Ready {
                     world: "a".repeat(64),
                     realization: "realized".into(),
+                    residency: WorldResidency::RetainedAtAdmission,
                 },
             ),
             (
-                "545045584f303032014000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+                "545045584f303033014000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
                 EnsureExactInputsOutcome::NeedsAcquisition("a".repeat(64)),
             ),
             (
-                "545045584f3030320200",
+                "545045584f3030330200",
                 EnsureExactInputsOutcome::Rejected(ExactInputsRejection::UnsupportedOperation),
             ),
             (
-                "545045584f3030320201",
+                "545045584f3030330201",
                 EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRealization),
             ),
             (
-                "545045584f3030320202",
+                "545045584f3030330202",
                 EnsureExactInputsOutcome::Rejected(ExactInputsRejection::InvalidRoot),
             ),
             (
-                "545045584f3030320203",
+                "545045584f3030330203",
                 EnsureExactInputsOutcome::Rejected(ExactInputsRejection::AcquisitionRejected),
             ),
         ];
@@ -3721,10 +3744,10 @@ mod tests {
             );
         }
         for hex in [
-            "545045584f30303203",
-            "545045584f3030320204",
-            "545045584f3030320000000000",
-            "545045584f303032010100000000",
+            "545045584f30303303",
+            "545045584f3030330204",
+            "545045584f3030330000000000",
+            "545045584f303033010100000000",
             "545045584f3030310200",
         ] {
             assert!(EnsureExactInputsOutcome::decode(&unhex(hex).unwrap()).is_err());
