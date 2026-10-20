@@ -24,7 +24,7 @@ import Tidepool.CompilerRequest (withBoundCompilerRequest, compileBoundRequest)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..))
 import Tidepool.ExtractRequest
   ( workerRequestFromArgv, workerArgv, RequestField(..)
-  , EnsureExactInputsOutcome(..), ExactInputsRejection(..), encodeEnsureExactInputsOutcomeWithin )
+  , EnsureExactInputsOutcome(..), ExactInputsRejection(..), WorldResidency(..), encodeEnsureExactInputsOutcomeWithin )
 import Tidepool.GhcPipeline
   ( withResidentCompilerScopes, PipelineSelection(CheckedEnvironment), CompilePurpose(GeneralCompile) )
 import System.Posix.Resource
@@ -77,9 +77,9 @@ workerChild oneFreeFd scratch = do
       pure $ case args of
         ["source-free"] -> ExactInputsResponse (ExactInputsNeedsAcquisition (replicate 64 'a'))
         ["source-free-rejected"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
-        ["source-free-capture-overflow"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') "realization")
-        ["source-free-response-overflow"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (repeat 'x'))
-        ["source-free-capture-failure"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') "realization")
+        ["source-free-capture-overflow"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') "realization" WorldRetainedAtAdmission)
+        ["source-free-response-overflow"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (repeat 'x') WorldRetainedAtAdmission)
+        ["source-free-capture-failure"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') "realization" WorldRetainedAtAdmission)
         ["source-free-rejected-capture-failure"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
         _ -> DiagnosticResponse []
 

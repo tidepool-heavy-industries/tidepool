@@ -85,7 +85,7 @@ import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
-  ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
+  ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..), WorldResidency(..)
   , encodeEnsureExactInputsOutcomeWithin
   , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), WorldObservationQuery(..)
   , WorldCellRecipe(..), WorldCellOperandRequest(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
@@ -1025,12 +1025,12 @@ checkingSourceRequestRoundTrip = do
       other -> fail ("truncated exact inputs accepted: " ++ show other)
   let framedWorld = "\64\0\0\0" <> BS.replicate 64 97
       outcomeCases =
-        [ (ExactInputsReady world "realized", "TPEXO002\0" <> framedWorld <> "\8\0\0\0realized")
-        , (ExactInputsNeedsAcquisition world, "TPEXO002\1" <> framedWorld)
-        , (ExactInputsRejected UnsupportedOperation, "TPEXO002\2\0")
-        , (ExactInputsRejected InvalidRealization, "TPEXO002\2\1")
-        , (ExactInputsRejected InvalidRoot, "TPEXO002\2\2")
-        , (ExactInputsRejected AcquisitionRejected, "TPEXO002\2\3") ]
+        [ (ExactInputsReady world "realized" WorldRetainedAtAdmission, "TPEXO003\0" <> framedWorld <> "\8\0\0\0realized" <> BS.singleton 0)
+        , (ExactInputsNeedsAcquisition world, "TPEXO003\1" <> framedWorld)
+        , (ExactInputsRejected UnsupportedOperation, "TPEXO003\2\0")
+        , (ExactInputsRejected InvalidRealization, "TPEXO003\2\1")
+        , (ExactInputsRejected InvalidRoot, "TPEXO003\2\2")
+        , (ExactInputsRejected AcquisitionRejected, "TPEXO003\2\3") ]
   forM_ outcomeCases $ \(outcome, bytes) ->
     assertEqual "source-free result matches closed independent Rust fixture" (Just bytes)
       (encodeEnsureExactInputsOutcomeWithin (toInteger (BS.length bytes)) outcome)
@@ -1039,14 +1039,14 @@ checkingSourceRequestRoundTrip = do
       assertEqual "source-free result charges its complete envelope" Nothing
         (encodeEnsureExactInputsOutcomeWithin budget outcome)
   assertEqual "UTF-8 framing charges bytes instead of characters"
-    (Just ("TPEXO002\0" <> framedWorld <> "\2\0\0\0\206\187"))
-    (encodeEnsureExactInputsOutcomeWithin 83 (ExactInputsReady world "λ"))
+    (Just ("TPEXO003\0" <> framedWorld <> "\2\0\0\0\206\187" <> BS.singleton 0))
+    (encodeEnsureExactInputsOutcomeWithin 84 (ExactInputsReady world "λ" WorldRetainedAtAdmission))
   assertEqual "UTF-8 expansion cannot exceed the payload budget" Nothing
-    (encodeEnsureExactInputsOutcomeWithin 82 (ExactInputsReady world "λ"))
+    (encodeEnsureExactInputsOutcomeWithin 83 (ExactInputsReady world "λ" WorldRetainedAtAdmission))
   assertEqual "over-budget reference does not force its complete construction" Nothing
     (encodeEnsureExactInputsOutcomeWithin 84 (ExactInputsReady world
-      (replicate 100000 'x' ++ error "source-free encoder forced beyond its budget")))
-  forM_ [ExactInputsReady world "", ExactInputsNeedsAcquisition "root\0other"] $ \invalid ->
+      (replicate 100000 'x' ++ error "source-free encoder forced beyond its budget") WorldRetainedAtAdmission))
+  forM_ [ExactInputsReady world "" WorldRetainedAtAdmission, ExactInputsNeedsAcquisition "root\0other"] $ \invalid ->
     assertEqual "source-free outcomes reject invalid opaque transport text" Nothing
       (encodeEnsureExactInputsOutcomeWithin 100 invalid)
   let publicInspection = StructuredInspection (StructuredPublicModule "Data.List") StructuredValueName "map"
