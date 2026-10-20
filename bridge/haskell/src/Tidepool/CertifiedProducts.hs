@@ -5,7 +5,7 @@ module Tidepool.CertifiedProducts
   , CertifiedProductKind(..), TargetCertificationContext
   , encodeCertifiedOriginalProducts, encodeCertifiedOriginalProductsWithPrior, encodeCertifiedItemProducts
   , encodeCertifiedItemProductsWithInputs
-  , certifiedContextBinders
+  , certifiedContextBinders, certifiedBinderInputClosure
   , resolvePackageGlobal, homeInterfaceUsageOwners, sourceProductSha256 ) where
 
 import Prelude hiding (product)
@@ -83,6 +83,18 @@ data TargetCertificationContext = TargetCertificationContext
 
 certifiedContextBinders :: TargetCertificationContext -> Set.Set SymbolIdentity
 certifiedContextBinders = targetBinderAvailability
+
+-- Publication roots are real runtime binders, so every one must resolve to
+-- the same certified group. Availability cannot silently narrow publication.
+certifiedBinderInputClosure :: TargetCertificationContext -> Set.Set SymbolIdentity
+  -> Either String (Set.Set (SymbolIdentity,Word64))
+certifiedBinderInputClosure context roots = do
+  witnesses <- forM (Set.toAscList roots) $ \identity -> do
+    coordinate <- maybe (Left ("published runtime binder lacks its certified native owner: " ++ show identity)) Right
+      (Map.lookup identity (targetBinderOwners context))
+    maybe (Left "published runtime binder lacks its certified native group") Right
+      (Map.lookup coordinate (targetGroupWitnesses context))
+  retainedInputClosure context (concat witnesses)
 
 data ProductOrigin = FreshProduct | CachedProduct | RetainedCoreProduct deriving (Eq)
 

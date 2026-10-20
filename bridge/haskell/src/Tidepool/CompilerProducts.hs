@@ -12,6 +12,7 @@ module Tidepool.CompilerProducts
   , StagedOriginalProducts, stagedOriginalEntryOrdinal, stagedFinalizedArtifacts, stagedOriginalOutputFiles
   , stagedOriginalBinders, withPriorStagedOriginalProducts, newPreparedOriginalInterfaceArtifactsWithPrior
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, writeCertifiedSegmentItemProductsWithInputs
+  , stagedDeclarationInputReferences
   , publishStagedOriginalProducts, retainStagedProgramProducts
   , prepareCompilerProjectionContext, prepareCompilerProjectionContextForEnvironment, exactProgramProductVersionFromDigest
   , OriginalProjectionCollector, newOriginalProjectionCollector, observeOriginalProjection
@@ -41,10 +42,15 @@ import Data.Text.Encoding qualified as TE
 import Data.Word (Word32, Word64)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Types.Name (Name)
+import GHC.Types.Id (isDataConWorkId_maybe)
+import GHC.Types.TyThing (TyThing(..), implicitTyThings)
+import GHC.Types.Avail (availNames)
 import GHC.Types.Var (Id)
-import GHC.Driver.Env (HscEnv, hsc_all_home_unit_ids)
+import GHC.Driver.Env (HscEnv, hsc_all_home_unit_ids, hsc_HPT, lookupType)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
+import GHC.Iface.Syntax (IfaceClsInst(..))
 import GHC.Unit.Module (Module, ModuleName, moduleName, moduleNameString, moduleUnit, mkModuleName, mkModule)
-import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_iface_hash, mi_final_exts)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_iface_hash, mi_final_exts, mi_exports, mi_insts)
 import GHC.Unit.Types (unitString, stringToUnit, toUnitId)
 import Numeric (readHex)
 import System.Directory (canonicalizePath, doesPathExist, makeAbsolute)
@@ -54,7 +60,7 @@ import System.Info qualified as SystemInfo
 import System.Mem.StableName (makeStableName)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256)
 import Tidepool.CertifiedProducts
-  ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders
+  ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders, certifiedBinderInputClosure
   , encodeCertifiedItemProducts, encodeCertifiedItemProductsWithInputs, sourceProductSha256 )
 import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts )
@@ -84,7 +90,9 @@ import Tidepool.ExecutionProjection
   , rawOriginalProductBinders, rawOriginalProductDemands
   , rawProjectionObservation, observeRawOriginalGroupWork
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
-  , RawModuleProducts, preparedTopIdentityBindings )
+  , RawModuleProducts, preparedTopIdentityBindings, preparedRootIdentity )
+import Tidepool.PlannedDeclaration
+  ( PlannedDeclarationInventory, plannedOriginalOwner, plannedInterfaceFingerprint )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..), WireProgram
   , GlobalDecl(..), ProjectedGroup(..) )
@@ -752,6 +760,45 @@ writeCertifiedSegmentItemProductsWithInputs prepared (StagedOriginalProducts ori
   let name = "certified-products.cbor"
   BS.writeFile (directory </> name) bytes
   pure (name,inputs)
+
+-- A published original retains the values needed by its public runtime
+-- exports and every instance dictionary in its actual interface inventory.
+-- This reads the completed compiler owner; it neither recertifies declarations
+-- nor treats the checking wrapper's unit root as the publication root.
+stagedDeclarationInputReferences
+  :: PreparedPipelineResult -> StagedOriginalProducts -> PlannedDeclarationInventory
+  -> IO (Either String (Set.Set (SymbolIdentity,Word64)))
+stagedDeclarationInputReferences prepared (StagedOriginalProducts originals _ _ _ _) inventory =
+  case lookupHpt (hsc_HPT environment) (mkModuleName (snd owner)) of
+    Nothing -> pure (Left "published declaration lost its completed compiler interface")
+    Just home
+      | let iface = hm_iface home
+      , (unitString (moduleUnit (mi_module iface)),moduleNameString (moduleName (mi_module iface))) == owner
+      , show (mi_iface_hash (mi_final_exts iface)) == plannedInterfaceFingerprint inventory -> do
+          let iface = hm_iface home
+              names = Set.toAscList (Set.fromList
+                (concatMap availNames (mi_exports iface) ++ map ifDFun (mi_insts iface)))
+          runtime <- forM names $ \name -> do
+            thing <- lookupType environment name
+            pure $ maybe (Left "published declaration runtime export has no compiler identity")
+              (Right . runtimeIds) thing
+          pure $ do
+            roots <- Set.fromList . map preparedRootIdentity . concat <$> sequence runtime
+            context <- maybe (Left "published declaration lacks its native certification context") Right
+              (certifiedTargetContext originals)
+            certifiedBinderInputClosure context roots
+      | otherwise -> pure (Left "published declaration differs from its completed compiler interface")
+  where
+    environment = prHscEnv (pprPipelineResult prepared)
+    owner = plannedOriginalOwner inventory
+    runtimeIds (AnId identifier)
+      -- Constructor applications have structural representation; constructor
+      -- workers cannot capture values and have no recoverable interface body.
+      | isJust (isDataConWorkId_maybe identifier) = []
+      | otherwise = [identifier]
+    runtimeIds thing@(ATyCon _) = concatMap runtimeIds (implicitTyThings thing)
+    runtimeIds thing@(AConLike _) = concatMap runtimeIds (implicitTyThings thing)
+    runtimeIds (ACoAxiom _) = []
 
 publishStagedOriginalProducts :: PreparedPipelineResult -> StagedOriginalProducts -> IO CertifiedOriginalProducts
 publishStagedOriginalProducts prepared (StagedOriginalProducts certified path bytes outputs _) = do

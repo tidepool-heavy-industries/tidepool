@@ -44,6 +44,7 @@ import Tidepool.CompilerProducts
   , stagedOriginalEntryOrdinal, stagedOriginalOutputFiles, publishStagedOriginalProducts
   , certifiedOriginalProducts, certifiedFinalizedArtifacts
   , StagedOriginalProducts, stagedOriginalBinders, withPriorStagedOriginalProducts
+  , stagedDeclarationInputReferences
   , newPreparedOriginalInterfaceArtifactsWithPrior
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, PreparedProductContext
   , prepareOriginalProductsWithCacheAndReuse, prepareOriginalProductsWithWorklist
@@ -1061,6 +1062,9 @@ prepareWorldCellQuestion bound question = do
         let (iface,_,_) = localFinalizedInterface local
         unless (exactSha256 iface == shaHex interfaceBytes) (throwIO WorldCellCorrupt)
         _ <- either fail pure (admitLocalNativeDeclaration original inventory local)
+        publicationInputs <- stagedDeclarationInputReferences prepared staged inventory >>= either (\reason -> do
+          emitWorldAcquisitionRejection "world declaration native publication" stageDirectory reason
+          throwIO WorldCellUnsupported) pure
         let identity = encodeListLen 4 <> text kind <> encodeWord64 ordinal <> text unit <> text owner
             description = toStrictByteString (encodeListLen 8 <> text "TPCWORIGINAL1"
               <> encodeBytes base <> encodeBytes planDigest <> encodeBytes admission
@@ -1073,7 +1077,7 @@ prepareWorldCellQuestion bound question = do
         BS.writeFile (child </> "world-item.cbor") description
         let item = PreparedWorldCellItem (ordinal,generation,SHA256.hash description) Nothing
         finishStage stageDirectory identity [fromIntegral ordinal] finalized (plannedSource original)
-          [item] [] completion prepared staged Set.empty
+          [item] [] completion prepared staged publicationInputs
     finishStage stageDirectory identity ordinals finalized rendered preparedItems plans completion prepared staged executionInputs = do
         validateDependencyEvidence (preparedFreshDependencies prepared)
         inputFacts <- maybe (fail "world cell completion lost its actual input basis") pure

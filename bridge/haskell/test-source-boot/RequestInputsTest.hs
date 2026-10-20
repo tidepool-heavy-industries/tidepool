@@ -1753,7 +1753,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                 itemSha <- case deserialiseFromBytes decodeTerm (BL.fromStrict output) of
                   Right (remaining,TList [TString "TPCWPREP4",_,_,_
                     ,TList [TString "prepared",TList [TList [TInt 0,TInt 1,TBytes sha]]]
-                    ,_,_,TList common,TList [_]
+                    ,_,TList [],TList common,TList [_]
                     ,TList [TList [identity@(TList [TString "exec",TString _]),TList [TInt 0]
                       ,TList refs]]]) | BL.null remaining -> do
                         unless (map (\entry -> case entry of
@@ -1834,7 +1834,12 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                           ,"readMixedStage answerStage"]
                         ,[(0,PlannedBind 31),(1,PlannedDeclaration 32),(2,PlannedBind 33)
                           ,(3,PlannedExpression 34 "ownedStageObservation")]
-                        ,["exec","declaration","exec"])] $ \(label,source,caseSlots,kinds) -> do
+                        ,["exec","declaration","exec"])
+                      ,("publication",unlines ["let publishedBaseStage = (7 :: Int)"
+                          ,"readPublishedStage :: Int -> Int"
+                          ,"readPublishedStage value = value + publishedBaseStage"]
+                        ,[(0,PlannedBind 41),(1,PlannedDeclaration 42)]
+                        ,["exec","declaration"])] $ \(label,source,caseSlots,kinds) -> do
                       let ownRecipe = recipe {worldCellSource=source}
                           ownDirectory = work </> ("world-stages-" ++ label)
                           ownPlan = planRequest {worldCellPlanRecipe=ownRecipe
@@ -1854,7 +1859,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                         bytes <- BS.readFile (worldCellPrepareOutput ownPrepare)
                         case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
                           Right (remaining,TList [TString "TPCWPREP4",_,_,_
-                            ,TList [TString "prepared",TList completed],_,_,_,TList typed,TList stages])
+                            ,TList [TString "prepared",TList completed],_,TList inputRefs,_,TList typed,TList stages])
                               | BL.null remaining -> do
                                 let stageKind entry = case entry of
                                       TList [TList (TString kind:_),TList _,TList _] -> kind
@@ -1862,11 +1867,18 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                                     stageOrdinals entry = case entry of
                                       TList [_,TList ordinals,_] -> ordinals
                                       _ -> []
+                                    capturedByDeclaration entry = case entry of
+                                      TList [TList [TInt 1,TInt 0,TInt 1],_,_,_,_,_,_] -> True
+                                      _ -> False
                                 unless (map stageKind stages == kinds
                                     && concatMap stageOrdinals stages == map (TInt . fromIntegral . fst) caseSlots
                                     && length completed == length caseSlots
                                     && length typed == length (filter (== "exec") kinds))
                                   (fail "ordered World changed stage kind, global ordinal, or executable-plan coverage")
+                                unless (if label == "mixed" || label == "publication"
+                                    then any capturedByDeclaration inputRefs
+                                    else null inputRefs)
+                                  (fail "World execution inputs lost their actual native closure or original capture stage")
                           _ -> fail "ordered World omitted its terminal stage table"
                         forM_ caseSlots $ \(ordinal,slot) -> case slot of
                           PlannedBind _ -> pure ()
@@ -1894,7 +1906,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
       outcome `seq` pure ()
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
-      unless (admissionParses == replicate 4 1)
+      unless (admissionParses == replicate 5 1)
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 
