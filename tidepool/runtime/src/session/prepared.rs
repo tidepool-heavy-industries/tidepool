@@ -16,8 +16,6 @@ use tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces;
 use super::binding_table::BindingIndex;
 use super::resident::NativeSourceCustody;
 use tidepool_codegen::machine_state::MachineFailure;
-#[cfg(test)]
-use tidepool_codegen::prepared_program::{ScopedCertifiedGroup, SourceInstanceDomain};
 use tidepool_codegen::prepared_program::{
     BatchImport, BatchLeaseRequest, BatchProgram, CompileError, CompiledProgram, DefinitionFacts,
     DemandError, DemandedImage, ExecutionError, ImageRegistry, ImportBindings,
@@ -28,6 +26,8 @@ use tidepool_codegen::prepared_program::{
     ScopedDemandedImage, ScopedSourceBinder, SourceBinder, SourceInstanceAttachment,
     SourceInstanceLease, SourceLiteral, MAX_ANSWER_DEPTH,
 };
+#[cfg(test)]
+use tidepool_codegen::prepared_program::{ScopedCertifiedGroup, SourceInstanceDomain};
 // Re-exported: callers of this module's resource-scope cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
 // separate `tidepool_codegen` dependency of their own.
@@ -36,10 +36,10 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CachedHomeOwner, CertifiedGroup, ConstructorIdentity, ConstructorReply,
-    DefinitionsView, GlobalId, Group, HeapRhs, ImportOwner, ImportedValue, JsonLayout, LinkError,
-    MachineImports, ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow,
-    SymbolIdentity, TypeIdentity, TypeNodeId, TypeVersion, ValueId,
+    link_program, CachedHomeOwner, CertifiedGroup, CertifiedGroupCode, ConstructorIdentity,
+    ConstructorReply, DefinitionsView, GlobalId, Group, HeapRhs, ImportOwner, ImportedValue,
+    JsonLayout, LinkError, MachineImports, ParseError, PreparedProgram, RuntimeRep, Signature,
+    SiteDelivery, SiteRow, SymbolIdentity, TypeIdentity, TypeNodeId, TypeVersion, ValueId,
 };
 use tidepool_repr::type_graph::{
     DataView, DeclarationForm as GraphDeclarationForm, GraphLimits, TypeCursor, TypeEdge,
@@ -769,6 +769,44 @@ pub(crate) struct ScopedTargetImage {
     sources: NativeSourceCustody,
 }
 
+/// Immutable native definitions without runtime import or scope authority.
+struct NativeCodePlan {
+    target: ImageTarget,
+    groups: Vec<NativeGroupImage>,
+}
+
+struct NativeGroupImage {
+    code: CertifiedGroupCode,
+    image: Arc<CompiledProgram>,
+}
+
+impl NativeCodePlan {
+    fn retained_images(
+        &self,
+        registry: &Arc<ImageRegistry>,
+        resolved: &super::persistent::ResolvedCertifiedTurn,
+    ) -> Result<NativeImageBundle, PreparedRuntimeError> {
+        if self.groups.len() != resolved.groups.len()
+            || self
+                .groups
+                .iter()
+                .zip(&resolved.groups)
+                .any(|(saved, current)| saved.code != current.group().original().code_identity())
+        {
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+        }
+        let target = Arc::as_ptr(&self.target.image) as usize;
+        Ok(NativeImageBundle {
+            registry: registry.clone(),
+            images: std::iter::once(self.target.image.clone())
+                .chain(self.groups.iter().map(|group| group.image.clone()))
+                .map(|image| (Arc::as_ptr(&image) as usize, image))
+                .collect(),
+            target,
+        })
+    }
+}
+
 /// Native code and source evidence from the same selected runtime group.
 pub(crate) struct SelectedNativeImage {
     native: DemandedImage,
@@ -817,6 +855,22 @@ impl std::ops::Deref for ScopedTargetImage {
 }
 
 impl ScopedTargetImage {
+    /// Discard scoped admission, retaining code only. The result cannot install
+    /// or certify that its inputs form a closed runtime instantiation.
+    fn into_neutral_code(self) -> NativeCodePlan {
+        NativeCodePlan {
+            target: self.base,
+            groups: self
+                .demanded
+                .into_iter()
+                .map(|selected| NativeGroupImage {
+                    code: selected.native.group().code_identity(),
+                    image: selected.native.image().clone(),
+                })
+                .collect(),
+        }
+    }
+
     pub(crate) fn demanded(&self) -> &[SelectedNativeImage] {
         &self.demanded
     }
@@ -1150,7 +1204,7 @@ fn immutable_literal_owners(
 pub struct PreparedSourceEntry {
     compiled: Arc<super::turn::CompiledTurn>,
     registry: Arc<ImageRegistry>,
-    _images: Vec<Arc<CompiledProgram>>,
+    native: NativeCodePlan,
 }
 
 impl PreparedSourceEntry {
@@ -1190,14 +1244,10 @@ impl PreparedSourceEntry {
             &resolved,
             &registry,
         )?;
-        let demanded = target.demanded();
-        let mut images = Vec::with_capacity(demanded.len() + 1);
-        images.push(Arc::clone(&target.image));
-        images.extend(demanded.iter().map(|image| Arc::clone(image.image())));
         Ok(Self {
             compiled,
             registry,
-            _images: images,
+            native: target.into_neutral_code(),
         })
     }
 
@@ -1207,6 +1257,13 @@ impl PreparedSourceEntry {
 
     pub fn image_registry(&self) -> &Arc<ImageRegistry> {
         &self.registry
+    }
+
+    pub(super) fn retained_native_images(
+        &self,
+        resolved: &super::persistent::ResolvedCertifiedTurn,
+    ) -> Result<NativeImageBundle, PreparedRuntimeError> {
+        self.native.retained_images(&self.registry, resolved)
     }
 }
 
@@ -1326,7 +1383,11 @@ impl ImageTarget {
         prepared: PreparedProgram,
         registry: &ImageRegistry,
     ) -> Result<Self, CompileError> {
-        Self::compile_certified(prepared, registry, CertifiedTargetPackageInterfaces::default())
+        Self::compile_certified(
+            prepared,
+            registry,
+            CertifiedTargetPackageInterfaces::default(),
+        )
     }
 
     #[cfg(test)]
@@ -1552,11 +1613,7 @@ impl ScopedTargetImage {
         resolved: &super::persistent::ResolvedCertifiedTurn,
         bundle: &NativeImageBundle,
     ) -> Result<Self, PreparedRuntimeError> {
-        ImageTarget::acquire_scoped(
-            prepared,
-            resolved,
-            NativeImageAcquisition::Ready(bundle),
-        )
+        ImageTarget::acquire_scoped(prepared, resolved, NativeImageAcquisition::Ready(bundle))
     }
 
     fn qualified_source(&self, source: &SourceBinder) -> Result<ScopedSourceBinder, DemandError> {
@@ -7707,8 +7764,7 @@ pub(super) mod tests {
             },
         }));
         let target =
-            ImageTarget::compile(testing::prepare(target_wire).unwrap(), &registry)
-                .unwrap();
+            ImageTarget::compile(testing::prepare(target_wire).unwrap(), &registry).unwrap();
         assert_eq!(target.image.package_literals(|_, _| Some([9; 32])).len(), 1);
         assert!(target.package_literals.is_empty());
         let mut group_wire = testing::wire_program();
