@@ -755,8 +755,21 @@ mod tests {
 
         fn with_prerequisite(external: bool) -> Self {
             let mut history = History::new();
-            let prerequisite =
-                external.then(|| generation(&mut history, NotebookGenerationId::INITIAL, None));
+            let prerequisite = external.then(|| {
+                let scope = history
+                    .session
+                    .mint_notebook_scope_with_lease(None)
+                    .unwrap();
+                let parent = GenerationDependency::new(
+                    crate::ActorRef::first(crate::ActorId(99)),
+                    NotebookGenerationId::INITIAL,
+                    crate::CheckpointSourceLayer::default(),
+                    &scope,
+                    None,
+                );
+                history.scopes.push(scope);
+                parent
+            });
             let dependency = generation(
                 &mut history,
                 NotebookGenerationId::INITIAL,
@@ -957,7 +970,7 @@ mod tests {
                     failure.settlement,
                     super::super::PublicationSettlementError::OwnerUnavailable
                 ));
-                assert_eq!(parent_fence.pending_claims(), 0);
+                assert_eq!(parent_fence.pending_claims(), 1);
                 assert_eq!(parent_fence.unconfirmed_claims(), 1);
                 {
                     let state = fixture.state.0.lock();
@@ -1053,12 +1066,69 @@ mod tests {
             assert!(fixture.state.0.try_lock().is_none());
             release.send(()).unwrap();
             assert!(settling.join().unwrap().is_err());
-            assert_eq!(parent_fence.pending_claims(), 0);
+            assert_eq!(parent_fence.pending_claims(), 1);
             assert_eq!(parent_fence.unconfirmed_claims(), 1);
             assert!(
                 matches!(&fixture.state.0.lock().availability, super::super::InstalledToolsAvailability::GenerationUnavailable(selected) if Arc::ptr_eq(selected, &fixture.generation))
             );
             fixture.assert_candidate_unavailable();
+        }
+    }
+
+    #[test]
+    fn publisher_unobserved_body_and_uncertain_phase_preserve_primary_recovery_obligations() {
+        for bootstrap in [true, false] {
+            for body_observed in [true, false] {
+                let fixture = if bootstrap {
+                    PublicationFixture::with_prerequisite(true)
+                } else {
+                    PublicationFixture::replacement(true)
+                };
+                let decision = tidepool_runtime::session::PublicationDecision::new();
+                let owner = fixture.reserve(decision.clone());
+                let parent = fixture
+                    .generation
+                    .dependency()
+                    .prerequisite()
+                    .as_ref()
+                    .unwrap()
+                    .clone();
+                let parent_fence = parent.runtime_admission().fence().unwrap();
+                let primary = crate::ResidentActorWorkbenchError::InvocationCancelled;
+                let error = if body_observed {
+                    let _claim = decision.claim_commit().unwrap();
+                    match owner.complete(Err(primary)) {
+                        Err(error) => error,
+                        Ok(_) => panic!("unconfirmed commit must not become ordinary cancellation"),
+                    }
+                } else {
+                    owner.unobserved(primary)
+                };
+                assert!(error.requires_recovery());
+                assert_eq!(
+                    error.execution_failure_kind(),
+                    Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
+                );
+                let crate::ResidentActorWorkbenchError::PublicationSettlement { failure } = error
+                else {
+                    panic!("both facts remain owned")
+                };
+                assert!(matches!(
+                    failure.outcome,
+                    Err(crate::ResidentActorWorkbenchError::InvocationCancelled)
+                ));
+                assert!(
+                    matches!(failure.settlement,
+                    super::super::PublicationSettlementError::PublicationUnconfirmed if body_observed)
+                        || matches!(failure.settlement, super::super::PublicationSettlementError::BodyUnobserved if !body_observed)
+                );
+                assert_eq!(parent_fence.pending_claims(), 1);
+                assert_eq!(parent_fence.unconfirmed_claims(), 1);
+                assert!(matches!(
+                    fixture.state.0.lock().availability,
+                    super::super::InstalledToolsAvailability::PublicationUnavailable(_)
+                ));
+            }
         }
     }
 
@@ -1085,7 +1155,7 @@ mod tests {
         assert!(world.0.state.lock().uncertainty_fence.is_some());
         drop(owner);
         assert!(world.0.state.lock().uncertainty_fence.is_some());
-        assert_eq!(parent_fence.pending_claims(), 0);
+        assert_eq!(parent_fence.pending_claims(), 1);
         assert_eq!(parent_fence.unconfirmed_claims(), 1);
         assert!(matches!(
             fixture.state.0.lock().availability,

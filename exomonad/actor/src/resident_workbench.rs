@@ -1964,6 +1964,10 @@ enum PublicationSettlementError {
     OwnerUnavailable,
     #[error("publication already attempted to reopen its source fence")]
     ReopenAttempted,
+    #[error("publication's worker outcome was not observed")]
+    BodyUnobserved,
+    #[error("publication completion cannot establish whether visibility committed")]
+    PublicationUnconfirmed,
 }
 
 impl PublicationFence {
@@ -2105,8 +2109,15 @@ impl ActorPublicationGuard {
             self.refused()
         } else if matches!(&outcome, Ok(ActorGenerationCommit::Published { .. })) {
             self.confirmed()
-        } else {
+        } else if matches!(&outcome, Ok(ActorGenerationCommit::Unconfirmed(_))) {
             return outcome;
+        } else {
+            return Err(ResidentActorWorkbenchError::PublicationSettlement {
+                failure: Box::new(ActorPublicationSettlementFailure {
+                    outcome,
+                    settlement: PublicationSettlementError::PublicationUnconfirmed,
+                }),
+            });
         };
         if let Err(settlement) = settlement {
             return Err(ResidentActorWorkbenchError::PublicationSettlement {
@@ -2117,6 +2128,15 @@ impl ActorPublicationGuard {
             });
         }
         outcome
+    }
+
+    fn unobserved(self, primary: ResidentActorWorkbenchError) -> ResidentActorWorkbenchError {
+        ResidentActorWorkbenchError::PublicationSettlement {
+            failure: Box::new(ActorPublicationSettlementFailure {
+                outcome: Err(primary),
+                settlement: PublicationSettlementError::BodyUnobserved,
+            }),
+        }
     }
 
     fn visibility(&self) -> ActorPublicationVisibility {
@@ -2489,7 +2509,7 @@ where
         }).await;
         let outcome = match completed {
             Ok(outcome) => outcome,
-            Err(error) => return Err(error),
+            Err(error) => return Err(owner.unobserved(error)),
         };
         #[cfg(test)]
         if let Some(probe) = &self.settlement_probe {
@@ -6545,7 +6565,7 @@ impl ResidentActorWorkbenchError {
             Self::RendererProduction { failure } => renderer_production_diagnostic(failure),
             Self::PublicationSettlement { failure } => Some(tidepool_toolchain::failclass::FailureEnvelope::new(
                 FailureClass::Infra,
-                tidepool_toolchain::failclass::Phase::Compile,
+                tidepool_toolchain::failclass::Phase::Install,
                 failure.to_string(),
             )),
             Self::CompileInfrastructure(diagnostic) => Some(diagnostic.clone()),
@@ -20342,7 +20362,7 @@ pub(crate) mod request_tests {
         assert!(
             matches!(&state.0.lock().availability, InstalledToolsAvailability::GenerationUnavailable(generation) if generation.dependency().same_prepared(&target))
         );
-        assert_eq!(parent_fence.pending_claims(), 0);
+        assert_eq!(parent_fence.pending_claims(), 1);
         assert_eq!(parent_fence.unconfirmed_claims(), 1);
         assert!(target.runtime_lease().admit_source().is_err());
     }
