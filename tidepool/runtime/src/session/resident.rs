@@ -5663,31 +5663,13 @@ where
         Ok(transfer.into_custody())
     }
 
-    /// Abandon a rooted value deliberately, releasing its root immediately.
-    pub fn discard_custody(&mut self, custody: RootCustody) -> bool {
-        if custody.checked_handle(&self.custody_cleanup).is_err() {
-            return false;
-        }
-        self.settle_dropped_custody();
-        let transfer = custody.into_transfer();
-        let discarded = self
-            .state
-            .prepared_mut()
-            .is_some_and(|engine| engine.discard_handle(transfer.handle));
-        if discarded {
-            transfer.commit();
-        }
-        discarded
-    }
-
     /// Export the value `custody` roots as a detached [`ResidentParcel`] another
     /// session's machine (sharing this run's [`tidepool_codegen::prepared_program::ImageRegistry`])
     /// can import -- the session-layer half of a value crossing two
     /// [`ResidentSession`]s. Consumes the custody: the export itself is a
     /// non-consuming read of the machine (`PreparedEngine::export_parcel`,
     /// like `inspect_retained`), so once the parcel is safely out this
-    /// releases the handle exactly as [`Self::discard_custody`] would --
-    /// the parcel is now the value's only owner on this side.
+    /// releases the original handle; the parcel then owns the exported value.
     pub fn export_custody(
         &mut self,
         custody: RootCustody,
@@ -6016,12 +5998,12 @@ where
             &target,
             || self.state.consume_binding_interface(reservation, &interface),
         ).map_err(SessionError::SourceAdmission)??;
-        self.mount_compiled_binding_prepared(
+        self.mount_activation_binding_prepared(
             scope,
             &binder,
             generation,
             owner.input.custody,
-            Some(staged),
+            staged,
             settlement,
         )
         .map_err(|source| ResidentError::ActivationInputConsumed {
@@ -6047,46 +6029,6 @@ where
             visibility,
             run_context: self.run_context,
         })
-    }
-
-    /// Legacy host mounts use filesystem interfaces. Activation inputs use
-    /// their dedicated affine compiler/mount owner above.
-    pub fn mount_compiled_binding_in(
-        &mut self,
-        scope: ScopeId,
-        binder: &BoundBinder,
-        gen: Generation,
-        table: &DataConTable,
-        custody: RootCustody,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<(), ResidentError> {
-        custody.checked_handle(&self.custody_cleanup)?;
-        self.settle_dropped_custody();
-        if !self.state.scope_tree().is_live(scope) {
-            self.discard_custody(custody);
-            return Err(SessionError::DeadScope(scope).into());
-        }
-        if let Err(error) = self
-            .state
-            .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])
-        {
-            self.discard_custody(custody);
-            return Err(error.into());
-        }
-        let expected_module = SessionModule::val(gen).module_name();
-        if binder.module != expected_module {
-            self.discard_custody(custody);
-            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                format!(
-                    "compiled binder `{}` belongs to {}, expected {expected_module}",
-                    binder.name, binder.module
-                ),
-            ))));
-        }
-        self.state
-            .merge_table(table)
-            .map_err(ResidentError::TableCollision)?;
-        self.mount_compiled_binding_prepared(scope, binder, gen, custody, None, settlement)
     }
 
     /// Build and mount a compiler-typed JSON value without putting the
@@ -6968,16 +6910,14 @@ where
         Ok(())
     }
 
-    /// The prepared arm of [`Self::mount_compiled_binding_in`]: the handle
-    /// becomes a prepared binding under the binder's value-module identity,
-    /// exactly as a prepared bind turn records it ([`Self::bind_prepared`]).
-    fn mount_compiled_binding_prepared(
+    /// Transfer an admitted activation input to its compiler-typed binding.
+    fn mount_activation_binding_prepared(
         &mut self,
         scope: ScopeId,
         binder: &BoundBinder,
         gen: Generation,
         custody: RootCustody,
-        staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
+        staged_interface: super::persistent::StagedCheckedValueInterface,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         custody.checked_handle(&self.custody_cleanup)?;
@@ -7001,7 +6941,7 @@ where
             gen,
             &[(binder, handle)],
             None,
-            staged_interface,
+            Some(staged_interface),
             None,
             settlement,
         )?;
@@ -7157,9 +7097,8 @@ where
     /// Number of live [`ValueHandle`]s outstanding on this session's machine
     /// (0 before the machine is bootstrapped) — the mount seam's ownership-
     /// accounting read: a handle minted over a finalize payload
-    /// ([`Self::live_payload_handle`]) counts here until a compiled-binding mount
-    /// ([`Self::mount_compiled_binding_in`]), an ordinary bind completion, or
-    /// a resource-scope close releases it.
+    /// ([`Self::live_payload_handle`]) counts here until binding installation,
+    /// owned custody release, or resource-scope close releases it.
     pub fn value_handle_count(&mut self) -> usize {
         self.settle_dropped_custody();
         self.state.value_handle_count()
@@ -9643,33 +9582,13 @@ mod custody_release_tests {
             Err(ResidentError::ForeignCustody)
         ));
         source.settle_dropped_custody();
-        let foreign = source.retain_binding_custody("x").unwrap().unwrap();
-        assert!(!destination.discard_custody(foreign));
-        let foreign = source.retain_binding_custody("x").unwrap().unwrap();
-        let binder = BoundBinder {
-            name: "foreignBinding".into(),
-            var_id: 1401,
-            module: SessionModule::val(Generation(47)).module_name(),
-            tier: ValueTier::ForceData,
-            type_display: "Int".into(),
-            root_head: None,
-            host_authority: None,
-        };
-        assert!(matches!(
-            tidepool_testing::with_settlement(|settlement| destination.mount_compiled_binding_in(
-                ScopeId::ROOT,
-                &binder,
-                Generation(47),
-                &DataConTable::default(),
-                foreign,
-                settlement
-            )),
-            Err(ResidentError::ForeignCustody)
-        ));
         assert_eq!(destination.value_handle_count(), before);
         major_collect(&mut destination);
         assert_live_binding(&mut destination, ScopeId::ROOT, destination_id);
-        assert!(destination.discard_custody(local));
+        drop(local);
+        destination.settle_dropped_custody();
+        assert_eq!(destination.value_handle_count(), before - 1);
+        assert_live_binding(&mut destination, ScopeId::ROOT, destination_id);
     }
 
     #[test]
@@ -9684,7 +9603,8 @@ mod custody_release_tests {
         let custody = session.retain_binding_custody("x").unwrap().unwrap();
         assert!(Arc::ptr_eq(&custody.provenance, &provenance));
         assert_eq!(session.value_handle_count(), original + 1);
-        assert!(session.discard_custody(custody));
+        drop(custody);
+        session.settle_dropped_custody();
         major_collect(&mut session);
         assert_live_binding(&mut session, ScopeId::ROOT, id);
         let custody = session.retain_binding_custody("x").unwrap().unwrap();
@@ -9694,7 +9614,8 @@ mod custody_release_tests {
         drop(parcel);
         let custody = session.retain_binding_custody("x").unwrap().unwrap();
         let custody = session.rehome_custody(custody, RealmId::fresh()).unwrap();
-        assert!(session.discard_custody(custody));
+        drop(custody);
+        session.settle_dropped_custody();
         major_collect(&mut session);
         assert_live_binding(&mut session, ScopeId::ROOT, id);
         let custody = session.retain_binding_custody("x").unwrap().unwrap();
@@ -9765,7 +9686,8 @@ mod custody_release_tests {
                 session.retain_binding_custody_in(scope, "x", id),
                 Err(ResidentError::Session(SessionError::DeadScope(_)))
             ));
-            assert!(session.discard_custody(custody));
+            drop(custody);
+            session.settle_dropped_custody();
             assert_eq!(weak.upgrade().is_some(), leased);
             drop(binding_lease);
             drop(lexical_lease);
@@ -11758,7 +11680,8 @@ mod authored_publication_tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(carried, identities.into_iter().collect());
         assert!(Arc::ptr_eq(&reexported.provenance, &provenance));
-        assert!(destination.discard_custody(custody));
+        drop(custody);
+        destination.settle_dropped_custody();
     }
 
     #[test]
@@ -11890,7 +11813,8 @@ mod authored_publication_tests {
                 Arc::ptr_eq(&arrived.provenance, &provenance),
                 "binding re-export to a third machine cannot replace its provenance"
             );
-            assert!(third.discard_custody(arrived));
+            drop(arrived);
+            third.settle_dropped_custody();
             assert_eq!(
                 &destination
                     .state

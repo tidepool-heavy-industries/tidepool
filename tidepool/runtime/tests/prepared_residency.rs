@@ -562,7 +562,7 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     assert_eq!(
         left.session.value_handle_count(),
         left_handles_before - 1,
-        "export releases the exported handle exactly as discard_custody would"
+        "export releases the original rooted handle"
     );
 
     // Checked later-cell use is covered independently by
@@ -609,7 +609,7 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
 
     // There are no declaration-binding imports to retain after releasing the
     // transferred value. The receiver's independently installed binding survives.
-    assert!(right.session.discard_custody(imported));
+    drop(imported);
     assert_eq!(right.session.value_handle_count(), right_handles_before);
     assert_eq!(
         right.session.current_binding_in(root, "held").as_ref(),
