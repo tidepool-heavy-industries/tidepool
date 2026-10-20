@@ -32,7 +32,10 @@ pub(crate) mod forms;
 mod generation_inventory;
 pub(crate) use generation_inventory::{GenerationWorkObservations, ResidentGenerationInventory};
 pub use workbench_ledger::WorkbenchDiagnosticRefusal;
-pub(crate) use workbench_ledger::{RecordedRetirementDiagnosticObservation, RetirementDiagnosticEvidence, WorkbenchOperationDiagnosticOwner};
+pub(crate) use workbench_ledger::{
+    RecordedRetirementDiagnostic, RecordedRetirementDiagnosticObservation,
+    RetirementDiagnosticEvidence, WorkbenchOperationDiagnosticOwner,
+};
 #[cfg(test)]
 pub(crate) use generation_inventory::assert_owner_observation_contract;
 pub(crate) mod green;
@@ -3001,6 +3004,7 @@ impl WorkbenchDisplayBudget {
 
 struct WorkbenchUnitExecution<'a> {
     execution: Option<&'a WorkbenchExecutionId>,
+    invocation: Option<&'a crate::resident_tools::WorkbenchCallKey>,
     input_unit_index: usize,
     total: usize,
     named_tool: bool,
@@ -6193,6 +6197,7 @@ where
         context: &ActorSessionContext,
         effect_owner: &CurrentEffectOwner<'_>,
         boundary: ResidentActorBoundary,
+        diagnostic: Option<WorkbenchOperationDiagnosticOwner>,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<
@@ -6226,6 +6231,7 @@ where
                     continuation,
                     request,
                     authorized,
+                    diagnostic,
                 );
                 return Box::pin(std::future::ready(Ok(operation)));
             }
@@ -6951,7 +6957,7 @@ where
             Err(error) => return commands::CommandResolution::from_outcome(Err(error)),
         };
         let boundary = match self
-            .prepare_independent_effect(kernel, context, &effect_owner, boundary)
+            .prepare_independent_effect(kernel, context, &effect_owner, boundary, None)
             .await
         {
             Ok(operation) => return operation.await,
@@ -10441,11 +10447,36 @@ where
                                     )))
                                 }
                                 boundary => {
+                                    // Only this actual admitted Reload boundary
+                                    // issues its non-Clone diagnostic owner.
+                                    let diagnostic = if matches!(
+                                        &boundary,
+                                        ResidentActorBoundary::Reload { .. }
+                                    ) && effect_owner
+                                        .admits_reload(context.actor)
+                                    {
+                                        let execution = unit.execution.ok_or(
+                                            crate::WorkbenchDiagnosticRefusal::ExecutionMissing,
+                                        )?;
+                                        Some(WorkbenchExecutions::admit_operation_diagnostic(
+                                            &self.workbench_executions,
+                                            WorkbenchOperationId {
+                                                execution: execution.clone(),
+                                                input_unit_index: unit.input_unit_index,
+                                                effect_ordinal: ordinal,
+                                            },
+                                            unit.invocation,
+                                            &execution_state.invocation_work,
+                                        )?)
+                                    } else {
+                                        None
+                                    };
                                     self.prepare_invocation_wait(
                                         kernel,
                                         context,
                                         &effect_owner,
                                         boundary,
+                                        diagnostic,
                                     )
                                     .await?
                                 }
@@ -10817,6 +10848,7 @@ where
                 effects,
                 request,
                 cursor,
+                invocation,
                 ..
             } = execution_state;
             let context = effects.context.clone();
@@ -11076,6 +11108,7 @@ where
                                     .expect("after-tool retains original fragment cursor"),
                                 WorkbenchUnitExecution {
                                     execution: execution.as_ref(),
+                                    invocation: invocation.as_ref(),
                                     input_unit_index: cursor.index,
                                     total: request.items.len(),
                                     named_tool: true,
@@ -11273,6 +11306,7 @@ where
                                     .expect("cell retained its running unit"),
                                 WorkbenchUnitExecution {
                                     execution: execution.as_ref(),
+                                    invocation: invocation.as_ref(),
                                     input_unit_index: cursor.index,
                                     total: request.items.len(),
                                     named_tool: request.tool_call().is_some(),

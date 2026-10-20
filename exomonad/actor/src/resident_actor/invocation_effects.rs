@@ -12,6 +12,7 @@ where
         context: &ActorSessionContext,
         effect_owner: &CurrentEffectOwner<'_>,
         boundary: ResidentActorBoundary,
+        diagnostic: Option<WorkbenchOperationDiagnosticOwner>,
     ) -> Result<Result<OwnedWorkbenchWait, ResidentActorBoundary>, ResidentActorWorkbenchError>
     {
         Ok(match boundary {
@@ -47,7 +48,7 @@ where
             }
             boundary => {
                 match self
-                    .prepare_independent_effect(kernel, context, effect_owner, boundary)
+                    .prepare_independent_effect(kernel, context, effect_owner, boundary, diagnostic)
                     .await
                 {
                     Ok(operation) => Ok(OwnedWorkbenchWait::Prepared(operation)),

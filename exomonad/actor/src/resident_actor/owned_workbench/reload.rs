@@ -11,6 +11,7 @@ pub(crate) struct CoherentReloadOperation<H, O> {
     checked: Vec<String>,
     policy: RlPolicy,
     lifecycle: Option<crate::LifecycleHandle>,
+    diagnostic: WorkbenchOperationDiagnosticOwner,
 }
 
 fn unreadable(error: impl std::fmt::Display) -> SourceError {
@@ -117,6 +118,7 @@ where
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
         checked: Vec<String>,
         policy: RlPolicy,
+        diagnostic: WorkbenchOperationDiagnosticOwner,
     ) -> Result<CoherentReloadOperation<H, O>, SourceError> {
         let active = self.installed_tools.current_generation().ok_or_else(|| {
             SourceError::SourceUnavailable("actor generation admission is unavailable".into())
@@ -159,6 +161,7 @@ where
             checked,
             policy,
             lifecycle: self.lifecycle.clone(),
+            diagnostic,
         })
     }
 }

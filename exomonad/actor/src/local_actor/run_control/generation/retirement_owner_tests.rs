@@ -245,6 +245,7 @@ impl RunControlClient {
             .send_message(RunControlMessage::BeginGenerationRetirement {
                 preparation,
                 inventory: GenerationRetirementInventory::Unavailable,
+                diagnostic: GenerationRetirementDiagnostic::CancelledComponent,
                 reply,
             })
             .unwrap();
@@ -329,7 +330,7 @@ impl RunControlClient {
                 let attempt = custody.attempts[0].active_for_test();
                 assert!(candidate.same_candidate(&attempt.candidate));
                 assert!(Arc::ptr_eq(&attempt.expected, &expected));
-                let RetainedGenerationRetirementPhase::Publication {
+                let GenerationRetirementPhase::Entered {
                     observer: issued, ..
                 } = &attempt.phase
                 else {
@@ -349,11 +350,11 @@ impl RunControlClient {
             recovery.reconcile_publications();
             assert!(
                 matches!(recovery.custody.as_ref().unwrap().attempts.as_slice(),
-                [RetainedGenerationRetirementRecord::SourcesSettled { actor: completed, completion: GenerationRetirementCompletion::AReopened { .. }, .. }]
+                [GenerationRetirementCore::SourcesSettled { actor: completed, completion: GenerationRetirementCompletion::AReopened { .. }, .. }]
                     if *completed == actor)
             );
             let resource_witness = native_resource.as_ref().unwrap();
-            let RetainedGenerationRetirementRecord::SourcesSettled {
+            let GenerationRetirementCore::SourcesSettled {
                 cutoff: GenerationRetirementCutoffPhase::Captured { capture, .. },
                 ..
             } = &recovery.custody.as_ref().unwrap().attempts[0]
@@ -560,6 +561,7 @@ impl RunControlClient {
                 .send_message(RunControlMessage::BeginGenerationRetirement {
                     preparation,
                     inventory: GenerationRetirementInventory::Unavailable,
+                    diagnostic: GenerationRetirementDiagnostic::CancelledComponent,
                     reply,
                 })
                 .unwrap();
@@ -678,10 +680,11 @@ impl RunControlClient {
             assert_eq!(attempt.actor, actor);
             assert!(candidate.same_candidate(&attempt.candidate));
             assert!(Arc::ptr_eq(&attempt.expected, &expected));
-            let RetainedGenerationRetirementPhase::Reserved {
-                reserved,
+            let GenerationRetirementPhase::Unstarted {
+                publication: GenerationUnstartedPublication::Available(reserved),
                 observer,
                 cutoff,
+                ..
             } = &attempt.phase
             else {
                 panic!("successful reserve must retain the same actual reservation")
