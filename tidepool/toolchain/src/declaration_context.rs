@@ -9376,17 +9376,15 @@ impl WorldProgramSegment {
     pub(crate) fn admit_program_support(
         &mut self,
         program: &crate::compiler_world::CheckedWorldCellProgram,
-        support: &ArtifactView,
+        output: &IssuedOriginalOutput,
         produced: &crate::checked_cell::ProducedValueTypeInterfaces,
-        selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let fragment = crate::artifact_inventory::CompilerSourceSupport::world_stage_fragment(
             program,
             &self.stage,
             &self.source,
             &self.source_text,
-            selection,
-            support,
+            output,
         )?;
         let context = &self.continuation.context;
         let imports = self.source.home_imports()?;
