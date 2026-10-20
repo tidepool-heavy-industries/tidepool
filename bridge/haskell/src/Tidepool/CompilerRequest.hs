@@ -769,9 +769,10 @@ data PreparedWorldCellStage = PreparedWorldCellStage
   , preparedWorldStageSource :: String
   , preparedWorldStageCompilerInputs :: [WorldCellInputReference]
   , preparedWorldStageExecutionInputs :: Set.Set (SymbolIdentity,Word64)
+  , preparedWorldStageRuntimeReferences :: [WorldCellInputReference]
   , preparedWorldStageFiles :: [(FilePath,BS.ByteString)]
   , preparedWorldStageTypedPlans :: [TypedSegmentPlan]
-  , preparedWorldStageReceipt :: Encoding
+  , preparedWorldStageReceiptFields :: Encoding
   , preparedWorldStageCompletion :: PreparedCompilation
   , preparedWorldStageNative :: StagedOriginalProducts
   }
@@ -833,28 +834,23 @@ prepareWorldCellQuestion bound question = do
     Left refusal -> rejected refusal
     Right preparation
       | let initial = heldWorldCellPlan preparation
-      , null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "") [] [] [] [] >> pure (Right [])
+      , null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "") [] [] [] >> pure (Right [])
       | otherwise -> do
           let initial = heldWorldCellPlan preparation
-          attempted <- trySynchronous (prepareStages preparation Nothing [])
+          attempted <- trySynchronous (prepareStages preparation Nothing Set.empty [])
           case attempted of
             Right stages -> do
               let items = concatMap preparedWorldStageItems stages
                   finalized = initial {cellPlanItems = concatMap (cellPlanItems . preparedWorldStagePlan) stages}
                   observations = encodeCellOut finalized [] (mapMaybe preparedWorldCellObservation items)
                     (concatMap preparedWorldStageSource stages)
-                  compilerInputs = Set.toAscList (Set.fromList (concatMap preparedWorldStageCompilerInputs stages))
-                  executionInputs = Set.unions (map preparedWorldStageExecutionInputs stages)
-                  compilerInputKeys = Set.fromList (map worldCellInputReferenceBinding compilerInputs)
                   common = concatMap preparedWorldStageFiles stages
                   plans = concatMap preparedWorldStageTypedPlans stages
               unless (map (\item -> let (ordinal,_,_) = preparedWorldCellItemManifest item in ordinal) items
                     == map fst (heldWorldCellSlots preparation)
-                  && Map.size (Map.fromList common) == length common
-                  && executionInputs `Set.isSubsetOf` compilerInputKeys)
+                  && Map.size (Map.fromList common) == length common)
                 (throwIO WorldCellCorrupt)
-              inputs <- either throwIO pure (selectWorldCellExecutionInputReferences executionInputs compilerInputs)
-              writeResult (Right items) observations inputs common plans (map preparedWorldStageReceipt stages)
+              writeResult (Right items) observations common plans (map encodeStageReceipt stages)
               pure (Right (map preparedWorldStageCompletion stages))
             Left failure -> case fromException failure of
               Just refusal -> rejected refusal
@@ -864,8 +860,8 @@ prepareWorldCellQuestion bound question = do
                   rejected WorldCellUnsupported
                 Nothing -> throwIO failure
   where
-    rejected refusal = writeResult (Left refusal) BS.empty [] [] [] [] >> pure (Left refusal)
-    prepareStages preparation prior reversed = do
+    rejected refusal = writeResult (Left refusal) BS.empty [] [] [] >> pure (Left refusal)
+    prepareStages preparation prior earlierSelected reversed = do
       next <- nextStage preparation
       case next of
         Nothing -> pure (reverse reversed)
@@ -878,7 +874,22 @@ prepareWorldCellQuestion bound question = do
             [item] | sbKind (cellAnalysisVerdict item) == KDecl ->
               prepareDeclaration preparation prior stageDirectory initial slots
             _ -> prepareSegment preparation prior stageDirectory offset initial
-          prepareStages preparation (Just (preparedWorldStageNative output)) (output:reversed)
+          let needed = preparedWorldStageExecutionInputs output
+              current = preparedWorldStageCompilerInputs output
+              currentKeys = Set.fromList (map worldCellInputReferenceBinding current)
+              inherited = Set.toAscList earlierSelected
+          -- A stage owns its actual demand. Earlier compiler availability is
+          -- insufficient: only an already selected capture can be inherited.
+          _ <- either throwIO pure (selectWorldCellExecutionInputReferences needed (current ++ inherited))
+          direct <- either throwIO pure (selectWorldCellExecutionInputReferences needed current)
+          transitive <- either throwIO pure (selectWorldCellExecutionInputReferences
+            (needed `Set.difference` currentKeys) inherited)
+          let selected = Set.fromList (direct ++ transitive)
+          unless (needed `Set.isSubsetOf` Set.fromList (map worldCellInputReferenceBinding (Set.toAscList selected)))
+            (throwIO WorldCellCorrupt)
+          let finalizedOutput = output {preparedWorldStageRuntimeReferences=Set.toAscList selected}
+          prepareStages preparation (Just (preparedWorldStageNative output))
+            (Set.union earlierSelected selected) (finalizedOutput:reversed)
     nextStage preparation = case bound of
       BoundCompilerRequest scope _ _ _ _ _ -> scopedPrepareWorldCellStage scope preparation
     requireStage preparation = nextStage preparation >>= maybe (throwIO WorldCellCorrupt) pure
@@ -891,8 +902,11 @@ prepareWorldCellQuestion bound question = do
     refusalTag WorldCellUnsupported = 0
     refusalTag WorldCellUnavailable = 1
     refusalTag WorldCellCorrupt = 2
-    writeResult outcome observations inputs common plans stages = BS.writeFile (worldCellPrepareOutput question) $
-      toStrictByteString (encodeListLen 10 <> text "TPCWPREP4" <> encodeBytes base
+    encodeStageReceipt stage = encodeListLen 4 <> preparedWorldStageReceiptFields stage
+      <> encodeListLen (fromIntegral (length (preparedWorldStageRuntimeReferences stage)))
+      <> foldMap encodeWorldCellInputReference (preparedWorldStageRuntimeReferences stage)
+    writeResult outcome observations common plans stages = BS.writeFile (worldCellPrepareOutput question) $
+      toStrictByteString (encodeListLen 9 <> text "TPCWPREP5" <> encodeBytes base
         <> encodeBytes planDigest <> encodeBytes admission
         <> (case outcome of
           Left refusal -> encodeListLen 2 <> text "rejected" <> encodeWord64 (refusalTag refusal)
@@ -901,8 +915,6 @@ prepareWorldCellQuestion bound question = do
               <> encodeWord64 generation <> encodeBytes sha)
               (map preparedWorldCellItemManifest items))
         <> encodeBytes observations
-        <> encodeListLen (fromIntegral (length inputs))
-        <> foldMap encodeWorldCellInputReference inputs
         <> encodeListLen (fromIntegral (length common))
         <> foldMap (\(path,sha) -> encodeListLen 2 <> text path <> encodeBytes sha) common
         <> encodeListLen (fromIntegral (length plans)) <> foldMap encodeTypedSegmentPlan plans
@@ -1118,7 +1130,7 @@ prepareWorldCellQuestion bound question = do
             sourceReceiptName = stageName "world-source.cbor"
         BS.writeFile (directory </> sourceReceiptName) sourceEnvelope
         let receiptRef = encodeListLen 2 <> text sourceReceiptName <> encodeBytes (SHA256.hash sourceEnvelope)
-            stageReceipt = encodeListLen 3 <> identity
+            stageReceiptFields = identity
               <> encodeListLen (fromIntegral (length ordinals)) <> foldMap (encodeWord64 . fromIntegral) ordinals
               <> encodeListLen 3 <> receiptRef
               <> fileRef (stageName "module-products.cbor") <> fileRef (stageName "certified-products.cbor")
@@ -1128,9 +1140,10 @@ prepareWorldCellQuestion bound question = do
           , preparedWorldStageSource = rendered
           , preparedWorldStageCompilerInputs = worldCellCompilerInputReferences inputFacts
           , preparedWorldStageExecutionInputs = executionInputs
+          , preparedWorldStageRuntimeReferences = []
           , preparedWorldStageFiles = (sourceReceiptName,SHA256.hash sourceEnvelope):common
           , preparedWorldStageTypedPlans = plans
-          , preparedWorldStageReceipt = stageReceipt
+          , preparedWorldStageReceiptFields = stageReceiptFields
           , preparedWorldStageCompletion = completion
           , preparedWorldStageNative = staged
           }
