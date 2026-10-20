@@ -818,7 +818,6 @@ fn check_retained_core_promotion_history(item_count: usize) {
             .select_item(
                 decode_segment_item_with_operation(&empty_delta, &validation.inventory).unwrap(),
                 &prepared,
-                &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
                 None,
                 &mut validation,
             )
@@ -908,13 +907,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             packages: BTreeMap::from([(owner.clone(), witness.clone())]),
         };
         let (selected, globals, packages) = shared
-            .select_item(
-                addition(),
-                &target,
-                &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
-                None,
-                &mut validation,
-            )
+            .select_item(addition(), &target, None, &mut validation)
             .unwrap();
         assert_eq!(packages.len(), 1);
         assert!(packages.contains_key(&owner));
@@ -935,7 +928,6 @@ fn check_retained_core_promotion_history(item_count: usize) {
                     packages: BTreeMap::new(),
                 },
                 &prepared,
-                &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
                 None,
                 &mut validation,
             )
@@ -944,13 +936,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         let mut unused = addition();
         unused.globals.clear();
         assert!(matches!(
-            shared.select_item(
-                unused,
-                &prepared,
-                &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
-                None,
-                &mut validation
-            ),
+            shared.select_item(unused, &prepared, None, &mut validation),
             Err(CertificationError::Mismatch(
                 "item package has no target demand"
             ))
@@ -958,13 +944,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         std::fs::write(&path, [0xFF]).unwrap();
         let mut recapture = PackageInterfaceValidation::with_inventory(shared.operation().clone());
         assert!(matches!(
-            shared.select_item(
-                addition(),
-                &target,
-                &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
-                None,
-                &mut recapture
-            ),
+            shared.select_item(addition(), &target, None, &mut recapture),
             Err(CertificationError::StaleEvidence)
         ));
     }
@@ -976,7 +956,6 @@ fn check_retained_core_promotion_history(item_count: usize) {
                 packages: BTreeMap::new()
             },
             &prepared,
-            &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
             None,
             &mut other_validation,
         ),

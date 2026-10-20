@@ -883,13 +883,6 @@ pub fn prepare_world_cell_program(
     let mut item_contexts = BTreeMap::new();
     for stage in program.stages() {
         crate::host_work::checkpoint()?;
-        let names = stage
-            .demanded_rows()
-            .iter()
-            .map(|row| row.owner().module_name())
-            .collect::<Vec<_>>();
-        let runtime_values =
-            SelectedSessionValueOwners::capture(names.iter().map(std::ffi::OsStr::new))?;
         let first = *stage
             .ordinals()
             .first()
@@ -996,13 +989,7 @@ pub fn prepare_world_cell_program(
                 .map_err(compiler_evidence_failure)?;
                 let (certified, globals, packages) = segment
                     .originals
-                    .select_item(
-                        item_receipt,
-                        &target,
-                        &runtime_values,
-                        Some(&produced),
-                        &mut validation,
-                    )
+                    .select_item(item_receipt, &target, Some(&produced), &mut validation)
                     .map_err(compiler_evidence_failure)?;
                 let generated = segment.source().generated_source_owner()?;
                 let entry = checked_cell::CheckedTypedEntry::issue_world_item(
@@ -4022,7 +4009,6 @@ fn seal_turn_outputs_with_validation(
                 .select_item(
                     item,
                     prepared,
-                    &offer.selected_session_values,
                     Some(produced_types.ok_or_else(|| {
                         CompileError::ExtractFailed(
                             "segment item lacks its checked type selection".into(),

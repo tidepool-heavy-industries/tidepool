@@ -1538,6 +1538,15 @@ impl ProducedValueTypeInterfaces {
         })
     }
 
+    /// A byte-equal recapture is not a view of this physical output owner.
+    /// Every view preserves the paired immutable entries and lookup; only its
+    /// ordinal selection changes.
+    pub(crate) fn is_item_of(&self, segment: &Self) -> bool {
+        Arc::ptr_eq(&self.lookup, &segment.lookup)
+            && self.selection.0.start.checked_add(1) == Some(self.selection.0.end)
+            && segment.selection.requires(self.selection.0.start)
+    }
+
     pub(crate) fn matches_artifact(
         &self,
         entry: &crate::artifact_inventory::ArtifactEntry,
