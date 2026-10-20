@@ -881,10 +881,17 @@ mod tests {
         }
 
         fn assert_candidate_unavailable(&self) {
-            assert!(matches!(
-                self.generation.installation.source_dependency().claim(),
-                Err(GenerationAdmissionError::Closed { .. })
-            ));
+            match self.generation.installation.source_dependency().claim() {
+                Err(GenerationAdmissionError::Closed { scope, .. }) => {
+                    assert_eq!(scope, self.generation.scope.scope());
+                }
+                Err(GenerationAdmissionError::Unconfirmed { scope, count }) => {
+                    let parent = self.generation.dependency().prerequisite().as_ref().unwrap();
+                    assert_eq!(scope, parent.runtime_lease().scope());
+                    assert_eq!(count, 1);
+                }
+                _ => panic!("candidate or its exact prerequisite must refuse source admission"),
+            }
             assert!(self.state.snapshot_for_call().is_err());
             assert!(self.state.current_generation().is_none());
         }
