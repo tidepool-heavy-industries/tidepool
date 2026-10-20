@@ -13270,10 +13270,13 @@ pub(crate) mod tests {
         let product = fixture_finalized_product(
             full_native_fixture("BoundOriginal", vec![(7, vec![]), (11, vec![])], 1), producer);
         let entry = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
-        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+        let other_product = fixture_finalized_product(
+            full_native_fixture("OtherSelected", vec![(7, vec![])], 2), producer);
+        let other_entry = Arc::new(ArtifactEntry::original(producer, other_product).unwrap());
+        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone(), other_entry.clone()]).unwrap();
         let inventory = ArtifactInventory::default();
         let physical = inventory
-            .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+            .admit_shared(&inventory.empty_view(), vec![entry.clone(), other_entry.clone()])
             .unwrap();
         let operation = InventoryOperation::new(Default::default());
         let mut selected = CertifiedSourceSelection::from_compiler_projection(
@@ -13285,7 +13288,7 @@ pub(crate) mod tests {
         let output = OriginalCompilerInputs::issue_segment_native_availability(
             &mut selected,
             &physical,
-            vec![entry.clone()],
+            vec![entry.clone(), other_entry.clone()],
         )
         .unwrap();
         let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
@@ -13349,6 +13352,8 @@ pub(crate) mod tests {
                 ..
             })
         ));
+        assert!(matches!(resolve_selected_original_binding(&completed, &other_entry.descriptor.owner, interface, original,
+            &binder, &operation), Err(CertificationError::InputDecision { reason: InputDecisionRefusal::ArtifactIdentityMismatch, .. })));
         let missing = testing::identity("BoundOriginal", "absent");
         assert!(
             matches!(resolve_selected_original_binding(&completed, &owner, interface, original,
@@ -13386,7 +13391,7 @@ pub(crate) mod tests {
         let context = ExactDeclarationContext::from_authenticated_execution(
             producer,
             &partial,
-            projection,
+            CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
             vec![ExactLexicalNode {
                 owner: owner.clone(),
                 imports: vec![],
