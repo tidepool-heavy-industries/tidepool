@@ -907,6 +907,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             sha256: sha(&payload),
         };
         let addition = || SegmentItemReceipt {
+                package_products: Vec::new(),
             globals: vec![global.clone()],
             packages: BTreeMap::from([(owner.clone(), witness.clone())]),
         };
@@ -929,6 +930,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             .select_item(
                 &mut cursor,
                 SegmentItemReceipt {
+                package_products: Vec::new(),
                     globals: vec![],
                     packages: BTreeMap::new(),
                 },
@@ -958,6 +960,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         shared.select_item(
             &mut cursor,
             SegmentItemReceipt {
+                package_products: Vec::new(),
                 globals: vec![],
                 packages: BTreeMap::new()
             },
