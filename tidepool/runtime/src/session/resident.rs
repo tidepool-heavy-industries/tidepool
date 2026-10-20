@@ -3695,18 +3695,20 @@ where
         &mut self,
         prepared: super::PreparedNotebookGenerationWithWorld,
         publication: &Arc<super::PublicationDecision>,
+        source: &super::RuntimeSourcePublicationView,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.state.commit_notebook_generation_with_world(prepared, publication, on_visible)
+        self.state.commit_notebook_generation_with_world(prepared, publication, source, on_visible)
     }
 
     pub fn commit_notebook_generation_with_world_continuing(
         &mut self,
         prepared: super::PreparedNotebookGenerationWithWorld,
         publication: &Arc<super::PublicationDecision>,
+        source: &super::RuntimeSourcePublicationView,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.state.commit_notebook_generation_with_world_continuing(prepared, publication, on_visible)
+        self.state.commit_notebook_generation_with_world_continuing(prepared, publication, source, on_visible)
     }
 
     pub fn commit_notebook_generation(
