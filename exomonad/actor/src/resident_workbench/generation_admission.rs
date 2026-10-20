@@ -1506,7 +1506,7 @@ mod tests {
     fn typed_durable_refusal_keeps_refusal_control_and_unassessed_obligations() {
         use super::super::{
             ActorGenerationCommit, ActorGenerationPublicationRefusalObservation as Observation,
-            ActorGenerationRefusal, ActorPublicationFailureCause as Cause,
+            ActorGenerationPublicationIssue, ActorPublicationFailureCause as Cause,
         };
         use tidepool_runtime::session::{SessionError, StoreError, StoreErrorKind};
         let fixture = PublicationFixture::replacement(true);
@@ -1516,7 +1516,7 @@ mod tests {
             guard,
             obligations: super::super::PublicationBodyObligations::Retained,
             outcome: Ok(ActorGenerationCommit::Refused(
-                ActorGenerationRefusal::Durable(Box::new(SessionError::RecoveryStore(Box::new(
+                ActorGenerationPublicationIssue::Durable(Box::new(SessionError::RecoveryStore(Box::new(
                     StoreError {
                         path: "typed-refusal-control.db".into(),
                         kind: StoreErrorKind::Storage,
@@ -1535,7 +1535,7 @@ mod tests {
         assert!(matches!(
             primary.as_ref(),
             Ok(ActorGenerationCommit::Refused(
-                ActorGenerationRefusal::Durable(_)
+                ActorGenerationPublicationIssue::Durable(_)
             ))
         ));
         assert_eq!(
@@ -1557,6 +1557,53 @@ mod tests {
         };
         assert!(reason.to_string().contains("actual typed storage cause"));
         assert!(reason.failure_diagnostic().is_some());
+    }
+
+    #[test]
+    fn unconfirmed_durable_publication_retains_exact_storage_cause_and_uncertainty() {
+        use super::super::{
+            ActorGenerationCommit, ActorGenerationPublicationIssue, ActorPublicationFailureCause,
+        };
+        use tidepool_runtime::session::{SessionError, StoreError, StoreErrorKind};
+        let fixture = PublicationFixture::replacement(true);
+        let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let error = Box::new(SessionError::RecoveryStore(Box::new(StoreError {
+            path: "unconfirmed-owner-control.db".into(),
+            kind: StoreErrorKind::RecoveryRequired,
+            detail: "original storage uncertainty".into(),
+        })));
+        let original = std::ptr::from_ref(error.as_ref());
+        let outcome = owner
+            .complete(Ok(ActorGenerationCommit::Unconfirmed(
+                ActorGenerationPublicationIssue::Durable(error),
+            )))
+            .unwrap();
+        let ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(error)) =
+            &outcome
+        else {
+            panic!("actual uncertainty must keep its typed storage cause");
+        };
+        assert!(std::ptr::eq(error.as_ref(), original));
+        assert!(fixture.state.current_generation().is_none());
+        assert!(fixture.generation.scope.admit_source().is_err());
+        let failure = outcome
+            .into_initial_generation()
+            .err()
+            .expect("a typed unconfirmed outcome cannot finish startup");
+        assert!(failure.requires_recovery());
+        assert_eq!(
+            failure.publication_failure_cause(),
+            ActorPublicationFailureCause::RecoveryStore(StoreErrorKind::RecoveryRequired)
+        );
+        let crate::ResidentActorWorkbenchError::PublicationSettlement { failure } = failure else {
+            panic!("the independent publication uncertainty must remain explicit");
+        };
+        let Ok(ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(error))) =
+            failure.outcome.as_ref()
+        else {
+            unreachable!()
+        };
+        assert!(std::ptr::eq(error.as_ref(), original));
     }
 
     #[test]

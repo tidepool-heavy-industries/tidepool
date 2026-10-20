@@ -2437,10 +2437,10 @@ impl ActorGenerationPublicationRefusal {
 
     pub(crate) fn observation(&self) -> ActorGenerationPublicationRefusalObservation {
         match self.outcome.as_ref() {
-            Ok(ActorGenerationCommit::Refused(ActorGenerationRefusal::Detail(_))) => {
+            Ok(ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Detail(_))) => {
                 ActorGenerationPublicationRefusalObservation::Refused
             }
-            Ok(ActorGenerationCommit::Refused(ActorGenerationRefusal::Durable(error))) => {
+            Ok(ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Durable(error))) => {
                 ActorGenerationPublicationRefusalObservation::Failed {
                     cause: publication_session_failure_cause(
                         error,
@@ -3406,7 +3406,7 @@ where
                         Ok(result) => result,
                         Err(error) if matches!(publication.phase(),tidepool_runtime::session::PublicationPhase::Published | tidepool_runtime::session::PublicationPhase::CommitClaimed { .. }) => {
                             visibility.retain_unconfirmed(&mut candidate);
-                            return Ok(ActorGenerationCommit::Unconfirmed(error.to_string()));
+                            return Ok(ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(Box::new(error))));
                         },
                         Err(error) => return Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(error))),
                     };
@@ -3415,10 +3415,10 @@ where
                             visible = visible.map(|(generation, _)| (generation, cancellation_pending));
                         },
                         tidepool_runtime::session::DurablePublicOwnerPublication::Committed(_) => {},
-                        tidepool_runtime::session::DurablePublicOwnerPublication::Refused { error } => return Ok(ActorGenerationCommit::Refused(ActorGenerationRefusal::Durable(error))),
+                        tidepool_runtime::session::DurablePublicOwnerPublication::Refused { error } => return Ok(ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Durable(error))),
                         tidepool_runtime::session::DurablePublicOwnerPublication::RecoveryRequired { error } => {
                             visibility.retain_unconfirmed(&mut candidate);
-                            return Ok(ActorGenerationCommit::Unconfirmed(error.to_string()));
+                            return Ok(ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(error)));
                         },
                     }
                 },
@@ -3469,31 +3469,31 @@ pub(crate) enum ActorGenerationCommit {
         generation: Arc<ActorGeneration>,
         cancellation_pending: bool,
     },
-    Refused(ActorGenerationRefusal),
-    Unconfirmed(String),
+    Refused(ActorGenerationPublicationIssue),
+    Unconfirmed(ActorGenerationPublicationIssue),
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ActorGenerationRefusal {
+pub(crate) enum ActorGenerationPublicationIssue {
     #[error("{0}")]
     Detail(String),
     #[error(transparent)]
     Durable(Box<tidepool_runtime::session::SessionError>),
 }
 
-impl From<String> for ActorGenerationRefusal {
+impl From<String> for ActorGenerationPublicationIssue {
     fn from(detail: String) -> Self {
         Self::Detail(detail)
     }
 }
 
-impl From<&str> for ActorGenerationRefusal {
+impl From<&str> for ActorGenerationPublicationIssue {
     fn from(detail: &str) -> Self {
         Self::Detail(detail.into())
     }
 }
 
-impl ActorGenerationRefusal {
+impl ActorGenerationPublicationIssue {
     pub(crate) fn failure_diagnostic(
         &self,
     ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
@@ -3510,10 +3510,10 @@ impl ActorGenerationCommit {
     ) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
         match self {
             Self::Published { generation, .. } => Ok(generation),
-            Self::Refused(ActorGenerationRefusal::Detail(detail)) => {
+            Self::Refused(ActorGenerationPublicationIssue::Detail(detail)) => {
                 Err(ResidentActorWorkbenchError::ActorProtocol(detail))
             }
-            Self::Refused(ActorGenerationRefusal::Durable(error)) => Err(
+            Self::Refused(ActorGenerationPublicationIssue::Durable(error)) => Err(
                 ResidentActorWorkbenchError::Resident(ResidentError::Session(*error)),
             ),
             outcome @ Self::Unconfirmed(_) => {
@@ -7856,6 +7856,12 @@ impl ResidentActorWorkbenchError {
             Self::PreparedEntryAbsent { .. } => Cause::PreparedEntryAbsent,
             Self::PublicationSettlement { failure } => match failure.outcome.as_ref() {
                 Err(primary) => primary.publication_failure_cause(),
+                Ok(
+                    ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Durable(error))
+                    | ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(
+                        error,
+                    )),
+                ) => publication_session_failure_cause(error, Cause::PublicationSettlement),
                 Ok(_) => Cause::PublicationSettlement,
             },
             Self::Resident(error) => publication_resident_failure_cause(error, Cause::Resident),
@@ -22851,7 +22857,7 @@ pub(crate) mod request_tests {
         };
         assert!(matches!(
             failure.outcome.as_ref(),
-            Ok(ActorGenerationCommit::Unconfirmed(ref observed)) if observed == detail
+            Ok(ActorGenerationCommit::Unconfirmed(ref observed)) if observed.to_string() == detail
         ));
         assert!(matches!(
             failure.settlement,
@@ -23189,7 +23195,7 @@ pub(crate) mod request_tests {
         let diagnostic = error.to_string();
         let observed = crate::resident_actor::reload_publication_result(Err(error)).unwrap();
         assert!(
-            matches!(observed, ActorGenerationCommit::Unconfirmed(ref detail) if detail == &diagnostic && detail.contains("publication checkout control retired the actual owner"))
+            matches!(observed, ActorGenerationCommit::Unconfirmed(ref detail) if detail.to_string() == diagnostic && detail.to_string().contains("publication checkout control retired the actual owner"))
         );
         assert!(
             matches!(&state.0.lock().availability, InstalledToolsAvailability::PublicationUnavailable(attempt) if attempt.target.same_prepared(&target))

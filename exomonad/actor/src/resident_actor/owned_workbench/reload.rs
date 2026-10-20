@@ -22,7 +22,7 @@ pub(crate) fn reload_publication_result(
 ) -> Result<ActorGenerationCommit, SourceError> {
     match result {
         Err(error) if error.requires_recovery() => {
-            Ok(ActorGenerationCommit::Unconfirmed(error.to_string()))
+            Ok(ActorGenerationCommit::Unconfirmed(error.to_string().into()))
         }
         result => result.map_err(unreadable),
     }
@@ -100,7 +100,7 @@ where
             }
             ActorGenerationCommit::Refused(detail) => Err(SourceError::SourceUnavailable(detail.to_string())),
             ActorGenerationCommit::Unconfirmed(detail) => Ok(
-                SrReloadOutcome::ReloadPublicationUnconfirmed(report.candidate, detail),
+                SrReloadOutcome::ReloadPublicationUnconfirmed(report.candidate, detail.to_string()),
             ),
         }
     }
