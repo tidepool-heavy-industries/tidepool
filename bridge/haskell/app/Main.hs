@@ -47,7 +47,7 @@ import Tidepool.Binders
   , analyzeCellWithFlags, analyzeOrderedCellWithFlags, cellInferenceSegments
   , renderCellCheckSource, renderCellCheckSourceWithLineOffset, CellSourceSpan(..)
   , PreparedTypedSegmentSource(..), prepareTypedSegmentSource
-  , CellSourcePlan(..), CellAnalysisItem(..), CellBindingForm(..), CellExpressionPlan(..), BoundBinder(..),
+  , CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..), CellBindingForm(..), CellExpressionPlan(..), BoundBinder(..),
     SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ImportIntent(..), ExpressionLiftPlan(..)
   , declarationSourceWithTemplateFlags, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
@@ -55,7 +55,7 @@ import Tidepool.Binders
   , StmtBinders(..), TurnOut(..), renderAskJson, renderVerdictsJson
   )
 import Tidepool.TypedSegment
-  ( TypedSegmentPlan, typedSegmentPlanRoot, typedSegmentPlanItems, typedSegmentPlanDigest, typedSegmentReservationDigest
+  ( TypedItem, TypedSegmentPlan, typedSegmentPlanRoot, typedSegmentPlanItems, typedSegmentPlanDigest, typedSegmentReservationDigest
   , TypedItemPlan(..), TypedItemBody(..), typedSegmentOriginalRoot, typedSegmentItems, typedItemPlan, typedItemRoot
   , typedItemCaptures, typedCaptureIdentifier, typedCaptureType, typedItemObservation
   , typedObservationLift, typedObservationValueType, ObservationLift(..) )
@@ -136,6 +136,7 @@ import Tidepool.ExactScope
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CellProgramState
 import Tidepool.CheckedCell (encodeCheckedSignature, captureCheckedSignature
+  , CheckedSignature
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness
   , validateOriginalInputTypeWitness)
 import Tidepool.TypePolicy (nominalHeadsOfType)
@@ -146,6 +147,7 @@ import Tidepool.PlannedDeclaration
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
   , SessionModule(..), SessionModuleKind(..), Generation(..)
+  , CapturedSessionInterface
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
   , sessionHiPath, sessionModuleString, capturedSessionInterface, capturedSessionInterfaceEvidence )
 import Tidepool.FatIface
@@ -944,6 +946,102 @@ runCellPlanMode parserFlags args cellPath = do
 -- aliases whose types need only fixed packages. Other closures are refused.
 -- It never
 -- constructs an ExactScope or publishes a runtime world during compilation.
+-- Per-item facts admitted for one held-world cell. Parsed source, captures,
+-- signatures, issued interface and artifact are correlated by exact identity
+-- before any terminal manifest or response is exposed.
+data WorldCellItemSource = WorldCellItemSource
+  { worldCellItemTyped :: TypedItem
+  , worldCellItemParsed :: CellAnalysisItem
+  , worldCellItemCaptures :: [BoundBinder]
+  , worldCellItemSignatures :: [CheckedSignature]
+  , worldCellItemInterface :: Maybe CapturedSessionInterface
+  , worldCellItemArtifact :: PreparedArtifact
+  }
+
+data PreparedWorldCellItem = PreparedWorldCellItem
+  { preparedWorldCellItemSource :: WorldCellItemSource
+  , preparedWorldCellItemManifest :: (Word64,Word64,BS.ByteString)
+  }
+
+correlateWorldCellItems
+  :: [TypedItem] -> [PreparedArtifact] -> [CellAnalysisItem]
+  -> [(Int,[BoundBinder])] -> [(Int,[CheckedSignature])]
+  -> [CapturedSessionInterface] -> IO [WorldCellItemSource]
+correlateWorldCellItems typedItems artifacts parsedItems captures signatures interfaces = do
+  let itemPlan item = typedItemPlan item
+      itemOrdinal = plannedItemOrdinal . itemPlan
+      itemTarget = plannedItemEntry . itemPlan
+      expected = Set.fromList (map itemOrdinal typedItems)
+      targets = Set.fromList (map itemTarget typedItems)
+  unless (Set.size expected == length typedItems)
+    (fail "world typed items repeat an item ordinal")
+  unless (Set.size targets == length typedItems)
+    (fail "world typed items repeat an item target")
+  capturesByItem <- Map.map snd <$> uniqueEntries "world item captures" fst captures
+  signaturesByItem <- Map.map snd <$> uniqueEntries "world item capture signatures" fst signatures
+  unless (Map.keysSet capturesByItem == expected)
+    (fail "world item captures do not cover exactly the typed items")
+  unless (Map.keysSet signaturesByItem == expected)
+    (fail "world item capture signatures do not cover exactly the typed items")
+  artifactsByTarget <- uniqueEntries "world item artifacts" paTarget artifacts
+  unless (Map.keysSet artifactsByTarget == targets)
+    (fail "world item artifacts do not cover exactly the typed items")
+  parsedByOrdinal <- forM parsedItems $ \parsed -> case cellAnalysisSourceItems parsed of
+    [source] -> pure (cellAnalysisSourceOrdinal source,parsed)
+    _ -> fail "world parsed item does not carry exactly one original source item"
+  let parsedByKey = Map.fromList parsedByOrdinal
+  unless (length parsedByOrdinal == Map.size parsedByKey)
+    (fail "world parsed items repeat an original source ordinal")
+  unless (Map.keysSet parsedByKey == expected)
+    (fail "world parsed items do not cover exactly the typed items")
+  sources <- forM typedItems $ \item -> do
+    let plan = itemPlan item
+        key = plannedItemOrdinal plan
+    parsed <- maybe (fail "world typed item lost its parsed source") pure
+      (Map.lookup key parsedByKey)
+    selected <- maybe (fail "world typed item lost its captures") pure
+      (Map.lookup key capturesByItem)
+    itemSignatures <- maybe (fail "world typed item lost its capture witnesses") pure
+      (Map.lookup key signaturesByItem)
+    artifact <- maybe (fail "world typed item lost its prepared artifact") pure
+      (Map.lookup (plannedItemEntry plan) artifactsByTarget)
+    interface <- selectWorldCellInterface interfaces selected
+    pure (WorldCellItemSource item parsed selected itemSignatures interface artifact)
+  let interfaceOwner value =
+        let (owner,_) = capturedSessionInterface value in moduleNameString (moduleName owner)
+      interfaceBytes = snd . capturedSessionInterface
+      selectedInterfaces = [(interfaceOwner value,value)
+        | source <- sources, Just value <- [worldCellItemInterface source]]
+      issuedInterfaces = [(interfaceOwner value,value) | value <- interfaces]
+      selectedMap = Map.fromList selectedInterfaces
+      issuedMap = Map.fromList issuedInterfaces
+  unless (length issuedInterfaces == Map.size issuedMap)
+    (fail "world issued interfaces repeat an exact owner")
+  unless (length selectedInterfaces == Map.size selectedMap)
+    (fail "world items select one issued interface more than once")
+  unless (Map.keysSet selectedMap == Map.keysSet issuedMap
+      && all (\(name,value) -> maybe False ((== interfaceBytes value) . interfaceBytes)
+           (Map.lookup name issuedMap)) (Map.toList selectedMap))
+    (fail "world issued interfaces do not cover exactly the captured items")
+  pure sources
+  where
+    uniqueEntries label key values = do
+      let keyed = Map.fromList [(key value,value) | value <- values]
+      unless (length values == Map.size keyed)
+        (fail (label ++ " repeat an item identity"))
+      pure keyed
+
+selectWorldCellInterface
+  :: [CapturedSessionInterface] -> [BoundBinder] -> IO (Maybe CapturedSessionInterface)
+selectWorldCellInterface _ [] = pure Nothing
+selectWorldCellInterface interfaces (binder:_) =
+  case [value | value <- interfaces
+      , let (owner,_) = capturedSessionInterface value
+      , moduleNameString (moduleName owner) == bbModule binder] of
+    [value] -> pure (Just value)
+    [] -> fail "world value output lacks one exact issued thin interface"
+    _ -> fail "world value output has an ambiguous issued thin interface"
+
 runWorldCellPrepareMode :: BoundCompilerRequest -> WorldCellPrepareRequest -> IO [Diag]
 runWorldCellPrepareMode bound question = do
   admitted <- validateBoundWorldCell bound
@@ -952,7 +1050,9 @@ runWorldCellPrepareMode bound question = do
     Right initial
       | null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "") [] [] []
       | otherwise -> do
-          attempted <- trySynchronous (prepareSegment initial)
+          matchedSlots <- maybe (fail "world cell preparation lost its admitted matched slots")
+            pure (boundWorldCellSlots bound)
+          attempted <- trySynchronous (prepareSegment initial matchedSlots)
           case attempted of
             Right (items,observations,inputs,common,plans,completion) -> do
               writeResult (Right items) observations inputs common plans
@@ -984,7 +1084,8 @@ runWorldCellPrepareMode bound question = do
           Left refusal -> encodeListLen 2 <> text "rejected" <> encodeWord64 (refusalTag refusal)
           Right items -> encodeListLen 2 <> text "prepared" <> encodeListLen (fromIntegral (length items))
             <> foldMap (\(ordinal,generation,sha) -> encodeListLen 3 <> encodeWord64 ordinal
-              <> encodeWord64 generation <> encodeBytes sha) items)
+              <> encodeWord64 generation <> encodeBytes sha)
+              (map preparedWorldCellItemManifest items))
         <> encodeBytes observations
         <> encodeListLen (fromIntegral (length inputs))
         <> foldMap (\(occurrence,symbol,variable,scope,generation,row) -> encodeListLen 6
@@ -993,13 +1094,13 @@ runWorldCellPrepareMode bound question = do
         <> encodeListLen (fromIntegral (length common))
         <> foldMap (\(path,sha) -> encodeListLen 2 <> text path <> encodeBytes sha) common
         <> encodeListLen (fromIntegral (length plans)) <> foldMap encodeTypedSegmentPlan plans)
-    prepareSegment initial = do
+    prepareSegment initial matchedSlots = do
       createDirectoryIfMissing True directory
       preparedBatch <- newIORef Nothing
       attempt <- newIORef (0 :: Int)
       let template = worldCellTemplate recipe
           checkingTemplate = either error id (replaceTemplateModuleHeader "module CellCheck where" template)
-          slots = [(fromIntegral ordinal,generation,observation) | (ordinal,slot) <- worldCellPrepareSlots question
+          slots = [(fromIntegral ordinal,generation,observation) | (ordinal,slot) <- matchedSlots
             , (generation,observation) <- case slot of
                 PlannedBind value -> [(value,Nothing)]
                 PlannedExpression value name -> [(value,Just name)]
@@ -1065,16 +1166,20 @@ runWorldCellPrepareMode bound question = do
       let generations = Map.union producedGenerations retainedGenerations
       (artifacts,context) <- prepareArtifacts originalInterfaces directory completion targets (standardAuxiliaryRoots binds)
         generations (typedSegmentSessionBindingRepresentations batch)
-      unless (length artifacts == length items && length items == length (cellPlanItems finalized))
-        (fail "world cell output lost a parsed item")
+      correlated <- correlateWorldCellItems items artifacts (cellPlanItems finalized) captures
+        signaturesByItem (typedSegmentSessionInterfaces batch)
       products <- maybe (fail "world cell has no actual original inventory") pure context
       staged <- writeCertifiedSegmentProducts (importPaths (hsc_dflags (prHscEnv result))) originalInterfaces directory prepared products
-      descriptions <- forM (zip3 items artifacts (cellPlanItems finalized)) $ \(item,artifact,sourceItem) -> do
-        let itemPlan = typedItemPlan item
+      preparedItems <- forM correlated $ \correlatedItem -> do
+        let item = worldCellItemTyped correlatedItem
+            sourceItem = worldCellItemParsed correlatedItem
+            artifact = worldCellItemArtifact correlatedItem
+            selected = worldCellItemCaptures correlatedItem
+            itemSignatures = worldCellItemSignatures correlatedItem
+            itemPlan = typedItemPlan item
             ordinal = plannedItemOrdinal itemPlan
             generation = plannedItemGeneration itemPlan
             child = directory </> "item-" ++ show ordinal
-            selected = maybe (error "world typed batch lost its actual item") id (lookup ordinal captures)
             output = artifact {paTarget=preparedScaffoldTargetName}
             turn = TBind (map (T.pack . bbName) selected) 0 selected (paYieldSites output) (T.pack rendered)
         createDirectoryIfMissing True child
@@ -1083,19 +1188,15 @@ runWorldCellPrepareMode bound question = do
         productFile <- writeCertifiedSegmentItemProducts prepared staged child (paProgram output)
         let turnFile = "turn.cbor"
         BS.writeFile (child </> turnFile) (encodeTurnOut turn)
-        valueFiles <- case selected of
-          [] -> pure []
-          binder:_ -> case [value | value <- typedSegmentSessionInterfaces batch
-              , let (owner,_) = capturedSessionInterface value
-              , moduleNameString (moduleName owner) == bbModule binder] of
-            [value] -> case capturedSessionInterfaceEvidence value of
-              Just (packages,requirements,_) -> do
-                let (_,interface) = capturedSessionInterface value
-                forM_ [("value.hi",interface),("value.hi.packages",packages),("value.hi.requirements",requirements)] $ \(name,bytes) ->
-                  BS.writeFile (child </> name) bytes
-                pure ["value.hi","value.hi.packages","value.hi.requirements"]
-              Nothing -> fail "world value output lacks its actual package/requirement capture"
-            _ -> fail "world value output lacks one exact issued thin interface"
+        valueFiles <- case worldCellItemInterface correlatedItem of
+          Nothing -> pure []
+          Just value -> case capturedSessionInterfaceEvidence value of
+            Just (packages,requirements,_) -> do
+              let (_,interface) = capturedSessionInterface value
+              forM_ [("value.hi",interface),("value.hi.packages",packages),("value.hi.requirements",requirements)] $ \(name,bytes) ->
+                BS.writeFile (child </> name) bytes
+              pure ["value.hi","value.hi.packages","value.hi.requirements"]
+            Nothing -> fail "world value output lacks its actual package/requirement capture"
         nativeOrdinal <- stagedOriginalEntryOrdinal staged (preparedRootIdentity (typedItemRoot item))
         files <- forM (programFiles ++ sidecarFiles ++ [turnFile,productFile] ++ valueFiles) $ \name -> do
           bytes <- BS.readFile (child </> name)
@@ -1108,12 +1209,12 @@ runWorldCellPrepareMode bound question = do
               <> encodeWord64 (fromIntegral nativeOrdinal)
               <> encodeListLen 2
               <> encodeListLen (fromIntegral (length selected)) <> foldMap encodeBoundBinder selected
-              <> (let signatures = maybe (error "world typed item lost its capture witnesses") id (lookup ordinal signaturesByItem)
-                  in encodeListLen (fromIntegral (length signatures)) <> foldMap encodeCheckedSignature signatures)
+              <> encodeListLen (fromIntegral (length itemSignatures))
+              <> foldMap encodeCheckedSignature itemSignatures
               <> encodeListLen (fromIntegral (length files))
               <> foldMap (\(name,sha) -> encodeListLen 2 <> text name <> encodeBytes sha) files)
         BS.writeFile (child </> "world-item.cbor") description
-        pure (fromIntegral ordinal,generation,SHA256.hash description)
+        pure (PreparedWorldCellItem correlatedItem (fromIntegral ordinal,generation,SHA256.hash description))
       -- Actual certification completes before exposing any private item table.
       -- Nothing here adopts a runtime value or updates an actor-current world.
       _ <- publishStagedOriginalProducts prepared staged
@@ -1158,10 +1259,13 @@ runWorldCellPrepareMode bound question = do
             (case typedObservationLift observation of PureObservation -> ExpressionPure; EffectfulObservation -> ExpressionEffectful)
             (showSDoc (hsc_dflags (prHscEnv result)) (ppr (typedObservationValueType observation)))
             (nominalHeadsOfType (typedObservationValueType observation))
-            | item <- items,Just observation <- [typedItemObservation item]]
-          prefix = recordTypedSegment finalized typedPlan observations (concatMap snd signaturesByItem) rendered
+            | preparedItem <- preparedItems
+            , let item = worldCellItemTyped (preparedWorldCellItemSource preparedItem)
+            , Just observation <- [typedItemObservation item]]
+          prefix = recordTypedSegment finalized typedPlan observations
+            (concatMap (worldCellItemSignatures . preparedWorldCellItemSource) preparedItems) rendered
             (initialProgramCellState (cellPlanPrologue initial) (worldCellPrepareIdentity question,planDigest) Map.empty)
-      pure (descriptions,encodeCellOut finalized [] (programObservations prefix) (concat (programSources prefix))
+      pure (preparedItems,encodeCellOut finalized [] (programObservations prefix) (concat (programSources prefix))
         ,worldCellInputReferences inputFacts,(sourceReceiptName,SHA256.hash sourceEnvelope):common,[typedPlan],completion)
     rawWorldID [] = BS.empty
     rawWorldID (a:b:rest) = BS.cons (fromIntegral (16 * digitToInt a + digitToInt b)) (rawWorldID rest)

@@ -16,7 +16,7 @@ module Tidepool.GhcPipeline
   , CompilerProducerIdentity, captureCompilerProducerIdentity
   , captureSupportedPackageProfile
   , runPipelineSessionSelectedWithProducer
-  , CompilePurpose(..), withSourceImportIntents
+  , CompilePurpose(..), CompilePurposeConflict(..), normalizeCompilePurpose, withSourceImportIntents
   , PipelineResult, prBinds, prHscEnv, prInjectedSessionInterfaces, prProducedSessionInterfaces
   , prCanonicalInterfaceAdmissions, prCapturedType, prCheckedBinderPins, prResultType, prWarnings
   , prTargetRdrEnv, prTargetTcGblEnv
@@ -288,7 +288,7 @@ import Tidepool.ExactScope
   , scopeAvailableOriginalProducts
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
   , exactInputRetentionLimits, commitWorldInputRetention
-  , WorldInputFacts, CapturedWorldSources, readWorldInputsWithOwner, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
+  , WorldInputFacts, CapturedWorldSources, WorldSourceClosureEntry(..), readWorldInputsWithOwner, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
   , worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsRetainedCharge, worldInputsBindings
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow, worldBindingRowFactCID
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
@@ -1991,6 +1991,8 @@ instance Exception WorldCellRefusal
 
 validateHeldWorldCell :: DynFlags -> WorldInputFacts -> WorldCellPrepareRequest -> IO (Either WorldCellRefusal CellSourcePlan)
 validateHeldWorldCell flags facts question = do
+  timing <- readTimingEnabled
+  emitCount timing "world.cell.admission_parses" 1
   plan <- parseWorldCellPlan flags (worldCellPrepareRecipe question)
   let slots = worldCellPrepareSlots question
       matches (ordinal,slot) (index,item) = ordinal == index && case (sbKind (cellAnalysisVerdict item),slot) of
@@ -2173,6 +2175,74 @@ data CompilePurpose = GeneralCompile | InspectionTypeCompile | CertifyHomeProduc
   | ParsedImportSelection [ImportIntent] CompilePurpose
   | CompletedProgramImports ProgramSourceImports CompilePurpose
   deriving (Eq, Show)
+
+data CompilePurposeConflict
+  = DuplicateCompilePurposeSetting String
+  | MultipleCompilePurposeLeaves
+  | MissingCompilePurposeLeaf
+  deriving (Eq, Show)
+
+instance Exception CompilePurposeConflict
+
+-- Admission normalizes the requested compile settings once. Equivalent wrapper
+-- orders no longer make one nesting order a hidden contract; genuinely
+-- repeated settings refuse instead of silently shadowing each other.
+data CompilePurposeSettings = CompilePurposeSettings
+  { settingsExactScopes :: [ExactScope]
+  , settingsProgramImports :: Maybe ProgramSourceImports
+  , settingsImportIntents :: Maybe [ImportIntent]
+  , settingsScaffold :: Maybe GeneratedScaffoldRecipe
+  , settingsInstance :: Maybe GeneratedInstanceRecipe
+  , settingsSegment :: Maybe (TypedSegmentPlan, GeneratedSegmentOperations)
+  , settingsLeaf :: Maybe CompilePurpose
+  }
+
+emptyCompilePurposeSettings :: CompilePurposeSettings
+emptyCompilePurposeSettings = CompilePurposeSettings [] Nothing Nothing Nothing Nothing Nothing Nothing
+
+normalizeCompilePurpose :: CompilePurpose -> Either CompilePurposeConflict CompilePurpose
+normalizeCompilePurpose purpose = rebuild =<< collect purpose emptyCompilePurposeSettings
+  where
+    collect (ExactScopeCompile inner scope) settings = collect inner settings
+      { settingsExactScopes = settingsExactScopes settings ++ [scope] }
+    collect (CompletedProgramImports imports inner) settings
+      | isJust (settingsProgramImports settings) =
+          Left (DuplicateCompilePurposeSetting "CompletedProgramImports")
+      | otherwise = collect inner settings { settingsProgramImports = Just imports }
+    collect (ParsedImportSelection intents inner) settings
+      | isJust (settingsImportIntents settings) =
+          Left (DuplicateCompilePurposeSetting "ParsedImportSelection")
+      | otherwise = collect inner settings { settingsImportIntents = Just intents }
+    collect (GeneratedScaffoldCompile recipe inner) settings
+      | isJust (settingsScaffold settings) =
+          Left (DuplicateCompilePurposeSetting "GeneratedScaffoldCompile")
+      | otherwise = collect inner settings { settingsScaffold = Just recipe }
+    collect (GeneratedInstanceCheck recipe inner) settings
+      | isJust (settingsInstance settings) =
+          Left (DuplicateCompilePurposeSetting "GeneratedInstanceCheck")
+      | otherwise = collect inner settings { settingsInstance = Just recipe }
+    collect (TypedSegmentCompile plan operations inner) settings
+      | isJust (settingsSegment settings) =
+          Left (DuplicateCompilePurposeSetting "TypedSegmentCompile")
+      | otherwise = collect inner settings { settingsSegment = Just (plan,operations) }
+    collect leaf settings = case settingsLeaf settings of
+      Nothing -> Right settings { settingsLeaf = Just leaf }
+      Just _ -> Left MultipleCompilePurposeLeaves
+    rebuild settings = do
+      leaf <- maybe (Left MissingCompilePurposeLeaf) Right (settingsLeaf settings)
+      let segment = case settingsSegment settings of
+            Nothing -> leaf
+            Just (plan,operations) -> TypedSegmentCompile plan operations leaf
+          instanceCheck = maybe segment (\recipe -> GeneratedInstanceCheck recipe segment)
+            (settingsInstance settings)
+          scaffold = maybe instanceCheck (\recipe -> GeneratedScaffoldCompile recipe instanceCheck)
+            (settingsScaffold settings)
+          intents = maybe scaffold (\selected -> ParsedImportSelection selected scaffold)
+            (settingsImportIntents settings)
+          imports = maybe intents (\selected -> CompletedProgramImports selected intents)
+            (settingsProgramImports settings)
+      pure (foldr (\scope inner -> ExactScopeCompile inner scope) imports
+        (settingsExactScopes settings))
 
 -- The original parser supplies demand intent; rendered template imports and
 -- inferred type requirements cannot manufacture a current-source request.
@@ -6128,10 +6198,9 @@ withResidentCompilerScopes baseIncludes useRequests = do
                       | worldInputsIdentity facts == identity && issued == reference
                         && worldCellPrepareIdentity question == identity
                         && worldCellPrepareRealization question == reference -> do
-                          -- The consuming compiler entry enforces admission;
-                          -- no caller can skip the parser/slot/recipe proof.
-                          admitted <- validateHeldWorldCell parserFlags facts question
-                          either throwIO (const (pure ())) admitted
+                          -- Request binding already parsed and admitted this
+                          -- immutable recipe. Consumption rechecks held-world
+                          -- liveness but does not reparse the same plan.
                           selected <- readIORef universe
                           bracket (reflectGhc getSession session) (\original -> reflectGhc (setSession original) session) $ \_ ->
                             reflectGhc (compileHeldWorldCell requireReady producer selected baseEnv timing interpreterAttempt world grant executor
@@ -7086,14 +7155,17 @@ captureHeldWorldSourceSelection facts values graph = do
   if Set.null demanded then pure (Nothing,snd (sourceEvidenceGraphFor Map.empty graph)) else do
     initial <- getSession
     captured <- liftIO (readWorldSourceInputs initial facts (Set.toAscList demanded))
-    (proofs,interfaces,packages) <- case captured of
+    entries <- case captured of
       Left reason -> do
         liftIO (emitWorldAcquisitionRejection "world source import" "<held Context association>" reason)
         liftIO (throwIO WorldCellUnsupported)
       Right inputs -> pure inputs
-    let artifacts = map fst interfaces
-        readPackages key = maybe (throwIO (ExecutionSourcePackageChanged key)) pure (Map.lookup key packages)
-        originals = Map.fromList [((exactUnit artifact,exactModule artifact),artifact) | artifact <- artifacts]
+    let artifacts = [worldSourceEntryArtifact entry | entry <- Map.elems entries]
+        interfaces = [(worldSourceEntryArtifact entry,worldSourceEntryInterface entry)
+          | entry <- Map.elems entries]
+        proofs = Map.map worldSourceEntryProof entries
+        readPackages key = maybe (throwIO (ExecutionSourcePackageChanged key))
+          (pure . worldSourceEntryPackages) (Map.lookup key entries)
     (validation,selectedKeys) <- validateCanonicalSourceInputs True proofs interfaces (artifacts ++ values)
       (map (mkModuleName . exactModule) values) readPackages graph
       (Set.toAscList demanded)
@@ -7121,8 +7193,10 @@ captureHeldWorldSourceSelection facts values graph = do
             ,isNothing (dependencyImportSelected edge)
             ,(dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge)
               `Set.notMember` validatedOriginalExactImports validation])}
-        claims = [(key,canonicalCertificateSha256 proof,exactSha256 (originals Map.! key),canonicalSourceSha256 proof)
-          | key <- Set.toAscList selectedKeys,let proof = proofs Map.! key]
+        claims = [(key,canonicalCertificateSha256 (worldSourceEntryProof entry)
+          ,exactSha256 (worldSourceEntryArtifact entry)
+          ,canonicalSourceSha256 (worldSourceEntryProof entry))
+          | (key,entry) <- Map.toAscList entries,key `Set.member` selectedKeys]
     pure (Just (SourceSelectedOriginals claims evidence),imports)
 
 data ValidatedOriginalSources = ValidatedOriginalSources

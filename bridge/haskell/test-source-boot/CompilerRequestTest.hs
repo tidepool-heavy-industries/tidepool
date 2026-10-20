@@ -107,6 +107,11 @@ worldRequestBoundaries = do
         :: IO (Either WorldCellRefusal CheckedEnvironmentResult)
       unless (either (== WorldCellUnavailable) (const False) compiled)
         (fail "world compiler bypassed its actual hold/admission owner")
+      conflict <- try (compileBoundRequest request CheckedEnvironment Set.empty
+        (ParsedImportSelection [] (ParsedImportSelection [] GeneralCompile)) Nothing "/unavailable/target.hs")
+        :: IO (Either CompilePurposeConflict CheckedEnvironmentResult)
+      unless (either (== DuplicateCompilePurposeSetting "ParsedImportSelection") (const False) conflict)
+        (fail "conflicting compile purpose was not refused before held-world work")
       pure (void (validateBoundWorldCell request))
     pure (latePlan,latePrepare)
   try latePlan >>= requireCancellation
