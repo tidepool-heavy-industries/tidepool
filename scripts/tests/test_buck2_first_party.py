@@ -1079,8 +1079,10 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             'resident_workbench::request_tests::actual_retirement_waiter_loss_retains_frozen_candidate',
             'resident_workbench::request_tests::actual_retirement_owner_loss_after_capture_retains_guarded_membership',
             'resident_workbench::request_tests::actual_retirement_publication_body_refusal_retains_same_guard',
+            'resident_workbench::request_tests::actual_retirement_linked_publication_worker_settles_cancelled_body',
+            'resident_workbench::request_tests::actual_retirement_native_recovery_consumes_same_linked_publication_result',
         ])
-        self.assertEqual(retirement['expected_count'], 8)
+        self.assertEqual(retirement['expected_count'], 10)
         self.assertTrue(retirement['ignored'])
         self.assertEqual(retirement['case_compiler_modes'], {
             name: 'owned-resident' for name in retirement['exact_tests']
@@ -1113,6 +1115,20 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         })
         self.assertEqual(capture['resource_env'], rooted['resource_env'])
         self.assertEqual(capture['resources'], rooted['resources'])
+        worker = self.rule('exomonad/actor', 'actor_generation_retirement_worker_tests',
+                           'tidepool_rust_test_cases')
+        self.assertEqual(worker['binary'], retirement['binary'])
+        self.assertEqual(worker['exact_tests'], [
+            'resident_workbench::request_tests::actual_retirement_linked_publication_worker_settles_cancelled_body',
+            'resident_workbench::request_tests::actual_retirement_native_recovery_consumes_same_linked_publication_result',
+        ])
+        self.assertEqual(worker['expected_count'], 2)
+        self.assertTrue(worker['ignored'])
+        self.assertEqual(worker['case_compiler_modes'], {
+            name: 'owned-resident' for name in worker['exact_tests']
+        })
+        self.assertEqual(worker['resource_env'], rooted['resource_env'])
+        self.assertEqual(worker['resources'], rooted['resources'])
 
     def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [

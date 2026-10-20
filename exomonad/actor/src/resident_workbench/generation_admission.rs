@@ -2962,6 +2962,7 @@ mod tests {
                     state,
                     expected,
                     publication,
+                    target,
                     control,
                     disposed,
                 )

@@ -34,6 +34,207 @@ impl RunControlClient {
         assert!(custody.as_ref().unwrap().attempts.is_empty());
     }
 
+    async fn assert_generation_publication_worker_control(
+        &self,
+        owner_task: ractor::concurrency::JoinHandle<()>,
+        preparation: ActorGenerationRetirementPreparation,
+        state: Arc<InstalledToolsState>,
+        expected: Arc<ActorGeneration>,
+        decision: Arc<tidepool_runtime::session::PublicationDecision>,
+        target: GenerationDependency,
+        control: GenerationRetirementNativeControl,
+    ) {
+        let actor = preparation.actor();
+        let candidate = preparation.candidate_custody();
+        let candidate_retention = candidate.retention_observer();
+        let retained = self.native_cleanup.clone();
+        let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        let (reply, answer) = oneshot::channel();
+        self.owner
+            .send_message(RunControlMessage::BeginGenerationRetirement {
+                preparation,
+                inventory: GenerationRetirementInventory::Unavailable,
+                reply,
+            })
+            .unwrap();
+        let observer = expect_begin(answer.await.unwrap());
+        assert_eq!(
+            self.resolve(actor).await.unwrap().unwrap().identity(),
+            actor
+        );
+        assert_eq!(
+            decision.request_cancellation(),
+            tidepool_runtime::session::PublicationCancellation::RequestedBeforeCommit
+        );
+        let (reply, answer) = oneshot::channel();
+        self.owner
+            .send_message(RunControlMessage::DispatchCancelledGenerationPublication {
+                actor,
+                observer: observer.clone(),
+                reply,
+            })
+            .unwrap();
+        let pause = if control == GenerationRetirementNativeControl::WorkerNativeLossAfterBody {
+            let (entered, paused) = oneshot::channel();
+            let (release, parked) = oneshot::channel();
+            // The current-thread owning test queues this pause before yielding;
+            // the worker's eventual ready notification must remain behind it.
+            self.owner
+                .send_message(RunControlMessage::PauseForNativeRetention {
+                    entered,
+                    release: parked,
+                })
+                .unwrap();
+            Some((release, paused))
+        } else {
+            None
+        };
+        let terminal = answer.await.unwrap().unwrap();
+        let release = if let Some((release, paused)) = pause {
+            paused.await.unwrap();
+            Some(release)
+        } else {
+            None
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while terminal.get().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            terminal.get(),
+            Some(preparation::PublicationTerminalObservation::Completed(
+                preparation::PublicationOutcomeObservation::Refused
+            ))
+        ));
+        if control == GenerationRetirementNativeControl::WorkerNativeLossAfterBody {
+            assert!(state.current_generation().is_none());
+            assert!(SourceDependency::Generation(expected.dependency().clone())
+                .claim()
+                .is_err());
+            assert!(SourceDependency::Generation(target.clone())
+                .claim()
+                .is_err());
+            self.owner.get_cell().kill();
+            tokio::time::timeout(Duration::from_secs(10), owner_task)
+                .await
+                .unwrap()
+                .unwrap();
+            drop(release);
+            let recovery = retained.take_recovery().unwrap();
+            assert_eq!(
+                retained.observation(),
+                NativeRecoveryObservation::Recovering
+            );
+            assert!(matches!(
+                retained.take_recovery(),
+                Err(NativeRecoveryUnavailable::Busy)
+            ));
+            {
+                let custody = recovery.custody.as_ref().unwrap();
+                assert_eq!(custody.attempts.len(), 1);
+                let attempt = custody.attempts[0].active_for_test();
+                assert!(candidate.same_candidate(&attempt.candidate));
+                assert!(Arc::ptr_eq(&attempt.expected, &expected));
+                let RetainedGenerationRetirementPhase::Publication {
+                    observer: issued, ..
+                } = &attempt.phase
+                else {
+                    panic!("the same receiver must survive native owner loss");
+                };
+                assert!(issued.same_attempt(&observer));
+            }
+            // Cancellation of the first unique consumer returns the same
+            // unsettled candidate, held fence, and sole result receiver.
+            drop(recovery);
+            let mut recovery = retained.take_recovery().unwrap();
+            assert!(candidate.same_candidate(
+                &recovery.custody.as_ref().unwrap().attempts[0]
+                    .active_for_test()
+                    .candidate
+            ));
+            recovery.reconcile_publications();
+            assert!(
+                matches!(recovery.custody.as_ref().unwrap().attempts.as_slice(),
+                [RetainedGenerationRetirementRecord::SourcesSettled { actor: completed, completion: GenerationRetirementCompletion::AReopened { .. }, .. }]
+                    if *completed == actor)
+            );
+            drop(recovery);
+        } else {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let (reply, answer) = oneshot::channel();
+                    self.owner
+                        .send_message(RunControlMessage::ObserveGenerationRetirementCompletion {
+                            actor,
+                            reply,
+                        })
+                        .unwrap();
+                    if let Some(completion) = answer.await.unwrap() {
+                        assert!(matches!(
+                            completion,
+                            GenerationRetirementCompletion::AReopened { .. }
+                        ));
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            self.owner.get_cell().kill();
+            tokio::time::timeout(Duration::from_secs(10), owner_task)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        drop(candidate);
+        assert!(
+            !candidate_retention.is_retained(),
+            "known settled records release the same frozen candidate product"
+        );
+        assert_eq!(
+            retained.observation(),
+            NativeRecoveryObservation::Retained {
+                attempts: 0,
+                completed: usize::from(
+                    control == GenerationRetirementNativeControl::WorkerLiveRefusal
+                ),
+                sources_settled: usize::from(
+                    control == GenerationRetirementNativeControl::WorkerNativeLossAfterBody
+                ),
+                worker_transfers: 0,
+                resource_transfers: 0,
+            }
+        );
+        assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
+        drop(
+            SourceDependency::Generation(expected.dependency().clone())
+                .claim()
+                .unwrap(),
+        );
+        drop(SourceDependency::Generation(target).claim().unwrap());
+        drop(
+            SourceDependency::Generation(
+                expected
+                    .dependency()
+                    .prerequisite()
+                    .as_ref()
+                    .unwrap()
+                    .clone(),
+            )
+            .claim()
+            .unwrap(),
+        );
+        assert_eq!(
+            decision.phase(),
+            tidepool_runtime::session::PublicationPhase::CancellationRequested
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), compiler_calls);
+    }
+
     pub(crate) async fn assert_generation_retirement_owner_control(
         &self,
         owner_task: ractor::concurrency::JoinHandle<()>,
@@ -41,9 +242,27 @@ impl RunControlClient {
         state: Arc<InstalledToolsState>,
         expected: Arc<ActorGeneration>,
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
+        target: GenerationDependency,
         control: GenerationRetirementNativeControl,
         disposed: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) {
+        if matches!(
+            control,
+            GenerationRetirementNativeControl::WorkerLiveRefusal
+                | GenerationRetirementNativeControl::WorkerNativeLossAfterBody
+        ) {
+            self.assert_generation_publication_worker_control(
+                owner_task,
+                preparation,
+                state,
+                expected,
+                decision,
+                target,
+                control,
+            )
+            .await;
+            return;
+        }
         let actor = preparation.actor();
         let candidate = preparation.candidate_custody();
         assert_eq!(actor, expected.context().actor);
