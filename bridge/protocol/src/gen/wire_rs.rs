@@ -188,10 +188,6 @@ fn rust_type(e: &Effect, ty: &HsType) -> String {
         HsType::Either(left, right) => {
             format!("Result<{}, {}>", rust_type(e, right), rust_type(e, left))
         }
-        // `[(GitOid, GitOid)]` (`HeadChangeKind::Rewritten`) is the only tuple
-        // seen in a wire record today; a Haskell list-of-tuple is a Rust
-        // `Vec<(..)>`, same as every other `HsType::List` — the tuple itself
-        // renders as an ordinary Rust tuple.
         HsType::Tuple(tys) => {
             let inner: Vec<String> = tys.iter().map(|t| rust_type(e, t)).collect();
             format!("({})", inner.join(", "))
