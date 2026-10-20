@@ -18225,10 +18225,19 @@ pub(crate) mod tests {
         .unwrap();
         let output = OriginalCompilerInputs::from_selection(&original, &issued).unwrap();
         let closure = original.selected_original_closure(&issued).unwrap();
-        let support = CompilerSourceSupport::close_complete_output(&output)
-            .unwrap()
-            .certify_original_closure(&closure)
-            .unwrap();
+        let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
+        let support = completed.certify_original_closure(&closure).unwrap_or_else(|error| {
+            panic!(
+                "initial closure transfer: {error:?}; R={:?} G={:?} Rcanonical={:?} Gcanonical={:?}; roles={:?}; receiving_groups={:?}; closure_groups={:?}",
+                r_entry.descriptor.id,
+                g_entry.descriptor.id,
+                ArtifactEntry::canonical_artifact_id(r.module_interface().unwrap()),
+                ArtifactEntry::canonical_artifact_id(g.module_interface().unwrap()),
+                completed.projection().snapshot_roles(),
+                completed.artifacts().capture_graph_selection().native_groups,
+                closure.native_closure().capture_graph_selection().native_groups,
+            )
+        });
         let old_groups = support.artifacts().capture_graph_selection().native_groups;
         assert_eq!(old_groups.len(), 2);
         let old_g = *old_groups
