@@ -745,7 +745,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     assert_eq!(public.semantic_sha256(), public_hash);
     assert!(request.context().lexical_graph().is_empty());
     assert!(request.context().compiler_input_roles().is_empty());
-    // CertifiedTargetImage::compile_originals uses this same-target digest to
+    // ImageTarget::acquire_originals uses this same-target digest to
     // admit the package literal token consumed by the original reader group.
     assert_eq!(
         certified_target.interface_digest(PACKAGE_UNIT, PACKAGE_MODULE),

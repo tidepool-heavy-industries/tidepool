@@ -782,6 +782,9 @@ pub(crate) struct ScopedTargetImage {
 impl std::ops::Deref for ScopedTargetImage {
     type Target = ImageTarget;
 
+    // Invariant: no method on `ImageTarget` may install or compile without a
+    // source-domain plan. Adding such a method is a security-relevant change;
+    // it would let this deref silently forward a plan-less entry point.
     fn deref(&self) -> &ImageTarget {
         &self.base
     }
@@ -1285,8 +1288,8 @@ impl ImageTarget {
     }
 
     /// Image-level test constructor. It carries no resolved source-domain
-    /// plan, so it cannot be installed until [`Self::with_source_plan`] issues
-    /// a [`ScopedTargetImage`].
+    /// plan, so it cannot be installed until it is issued as a
+    /// [`ScopedTargetImage`].
     #[cfg(test)]
     pub(crate) fn compile(
         prepared: PreparedProgram,
@@ -1468,9 +1471,11 @@ impl ImageTarget {
         )
     }
 
-    /// Issue the installable form. `owners` are the certified import owners
-    /// [`Self::acquire_originals`] validated against these declared globals.
-    pub(crate) fn with_source_plan(
+    /// Issue the installable form. Private because a plan and owner list are
+    /// only meaningful when paired with the image by [`Self::acquire_scoped`]:
+    /// its [`Self::acquire_originals`] validates the owners against these
+    /// declared globals and the plan comes from the same resolved turn.
+    fn with_source_plan(
         self,
         plan: super::persistent::ResolvedSourceDomainPlan,
         owners: Arc<[ImportOwner]>,
