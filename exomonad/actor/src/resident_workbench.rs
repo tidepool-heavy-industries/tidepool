@@ -27557,7 +27557,6 @@ pub(crate) mod request_tests {
         }
         context.haskell_effects_alias = "'[Replies]".into();
         context.effect_policy = tidepool_effect::EffectRunPolicy::SuspendAll;
-        context.placement.lexical_scope = ScopeId::ROOT;
         let root = tempfile::tempdir().unwrap();
         let mut lib = SessionLib::open(
             context.placement.session,
@@ -27573,6 +27572,67 @@ pub(crate) mod request_tests {
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(lib),
         );
+        let fixture_source = session.mint_notebook_scope_with_lease(None).unwrap();
+        context.placement.lexical_scope = fixture_source.scope();
+        context
+            .source_dependency()
+            .adopt_final_scope(&mut session, fixture_source.scope())
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &fixture_source,
+            &context.source_dependency().source_lease().unwrap()
+        ));
+        session
+            .validate_lexical_scope_lease(context.placement.lexical_scope, &fixture_source)
+            .unwrap();
+        type FixtureSession = ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>;
+        fn fixture_setup<T>(
+            session: &mut FixtureSession,
+            source: &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+            action: impl FnOnce(&mut FixtureSession) -> T,
+        ) -> T {
+            let settled = session
+                .with_source_compiler_transaction(
+                    source.clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    tidepool_runtime::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, _| action(session),
+                )
+                .unwrap();
+            assert_eq!(
+                settled.close(),
+                &tidepool_runtime::CompilerTransactionClose::NotStarted,
+                "pure renderer fixture setup must submit no compiler request"
+            );
+            settled.into_outcome().action
+        }
+        fn fixture_execution<T>(
+            session: &mut FixtureSession,
+            source: &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+            action: impl FnOnce(
+                &mut FixtureSession,
+                &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+            ) -> T,
+        ) -> T {
+            let settled = session
+                .with_source_compiler_transaction(
+                    source.clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    tidepool_runtime::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    action,
+                )
+                .unwrap();
+            assert!(
+                settled.close().resources_retired(),
+                "renderer fixture execution: {:?}",
+                settled.close()
+            );
+            settled.into_outcome().action
+        }
         session
             .set_actor_execution(
                 context.run_context(),
@@ -27701,25 +27761,27 @@ pub(crate) mod request_tests {
         );
         let receiver_started = std::time::Instant::now();
         let previous_context = session.run_context();
-        let execution = Arc::new(
+        let execution = Arc::new(fixture_setup(&mut session, &fixture_source, |session| {
             session
                 .begin_ephemeral_private_execution(context.placement.lexical_scope)
-                .unwrap(),
-        );
+                .unwrap()
+        }));
         let mut private_context = context.clone();
         private_context.placement.lexical_scope = execution.private_scope();
         session
             .set_run_context(private_context.run_context())
             .unwrap();
-        let (receiver_source, snapshot) = snapshot_cell_program(
-            &mut session,
-            &private_context,
-            source.clone(),
-            None,
-            None,
-            CellSnapshotAdmission::PrivateExecution(&execution),
-        )
-        .unwrap();
+        let (receiver_source, snapshot) = fixture_setup(&mut session, &fixture_source, |session| {
+            snapshot_cell_program(
+                session,
+                &private_context,
+                source.clone(),
+                None,
+                None,
+                CellSnapshotAdmission::PrivateExecution(&execution),
+            )
+            .unwrap()
+        });
         let prepared = receiver_source.prepare(&snapshot.view);
         let preamble =
             cell_module_preamble(&prepared.preamble, &snapshot.candidate_module.module_name())
@@ -27774,17 +27836,19 @@ pub(crate) mod request_tests {
         let receiver_compile_started = std::time::Instant::now();
         let authority =
             crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone());
-        let admission = session
-            .admit_planned_cell_for_execution(
-                execution.clone(),
-                plan,
-                specification.clone(),
-                specification.specification_digest(),
-                authority.authority_digest(),
-                prepared.include.clone(),
-                None,
-            )
-            .unwrap();
+        let admission = fixture_setup(&mut session, &fixture_source, |session| {
+            session
+                .admit_planned_cell_for_execution(
+                    execution.clone(),
+                    plan,
+                    specification.clone(),
+                    specification.specification_digest(),
+                    authority.authority_digest(),
+                    prepared.include.clone(),
+                    None,
+                )
+                .unwrap()
+        });
         let (checked, program) = tidepool_testing::with_settlement(|settlement| {
             tidepool_runtime::session::turn::compile_cell_program_admitted(
                 admission.clone(),
@@ -27801,13 +27865,17 @@ pub(crate) mod request_tests {
             1,
             "receiver setup is one grouped binding"
         );
-        let prefix = session
-            .begin_cell_program(admission, program)
-            .unwrap()
-            .unwrap();
-        let reservation = session
-            .admit_checked_item(prefix.clone(), checked.checked_item(0).unwrap())
-            .unwrap();
+        let prefix = fixture_setup(&mut session, &fixture_source, |session| {
+            session
+                .begin_cell_program(admission, program)
+                .unwrap()
+                .unwrap()
+        });
+        let reservation = fixture_setup(&mut session, &fixture_source, |session| {
+            session
+                .admit_checked_item(prefix.clone(), checked.checked_item(0).unwrap())
+                .unwrap()
+        });
         let TurnResult::Bind {
             compiled: receiver,
             bound,
@@ -27853,7 +27921,7 @@ pub(crate) mod request_tests {
             receiver_interface.owner(),
             tidepool_repr::SessionModule::val(reservation.generation())
         );
-        let outcome = tidepool_testing::with_settlement(|settlement| {
+        let outcome = fixture_execution(&mut session, &fixture_source, |session, settlement| {
             session.run_projected_bind_with_sites(
                 "activationReceiverFixture",
                 receiver.code(),
@@ -27864,22 +27932,27 @@ pub(crate) mod request_tests {
         })
         .unwrap();
         assert!(matches!(outcome, ResidentOutcome::BindingsCommitted { .. }));
-        let intent = session.freeze_private_execution(&execution).unwrap();
-        let tidepool_runtime::session::ExecutionPublication::Bindings(publication) = session
-            .restage_ephemeral_execution_publication(intent)
-            .unwrap()
+        let intent = fixture_setup(&mut session, &fixture_source, |session| {
+            session.freeze_private_execution(&execution).unwrap()
+        });
+        let tidepool_runtime::session::ExecutionPublication::Bindings(publication) =
+            fixture_setup(&mut session, &fixture_source, |session| {
+                session
+                    .restage_ephemeral_execution_publication(intent)
+                    .unwrap()
+            })
         else {
             panic!("receiver setup publishes only native bindings");
         };
         let ticket = publication.stage().unwrap();
         assert!(matches!(
-            session
+            fixture_setup(&mut session, &fixture_source, |session| session
                 .attempt_public_manifest(
                     ticket,
                     &tidepool_runtime::session::PublicationDecision::new(),
                 )
                 .map(crate::resident_workbench::settled_manifest_attempt)
-                .unwrap(),
+                .unwrap()),
             tidepool_runtime::session::PublicManifestCommit::Ephemeral
         ));
         session.set_run_context(previous_context).unwrap();
@@ -27914,7 +27987,7 @@ pub(crate) mod request_tests {
             other => panic!("native activation fixture must suspend: {other:?}"),
         };
         let mut reservation = suspend(
-            tidepool_testing::with_settlement(|settlement| {
+            fixture_execution(&mut session, &fixture_source, |session, settlement| {
                 session.run_with_sites("originalActivationRequests", producer.code(), settlement)
             })
             .unwrap(),
@@ -27923,7 +27996,7 @@ pub(crate) mod request_tests {
         let requests = if renderer_values { 20 } else { 2 };
         for request in 1_i64..=requests {
             let submission = suspend(
-                tidepool_testing::with_settlement(|settlement| {
+                fixture_execution(&mut session, &fixture_source, |session, settlement| {
                     session.resume(reservation, Ok::<i64, ()>(request), settlement)
                 })
                 .unwrap(),
@@ -27937,7 +28010,7 @@ pub(crate) mod request_tests {
                 .unwrap()
                 .unwrap();
             let activation = suspend(
-                tidepool_testing::with_settlement(|settlement| {
+                fixture_execution(&mut session, &fixture_source, |session, settlement| {
                     session.run_rooted_application(
                         "originalActivationInput",
                         &receiver,
@@ -27965,7 +28038,7 @@ pub(crate) mod request_tests {
                 .expect("original authenticated input site");
             inputs.push((activation, input));
             assert!(session.parked_holes().contains(&submission.cont_id()));
-            let next = tidepool_testing::with_settlement(|settlement| {
+            let next = fixture_execution(&mut session, &fixture_source, |session, settlement| {
                 session.resume(submission, Ok::<(), ()>(()), settlement)
             })
             .unwrap();

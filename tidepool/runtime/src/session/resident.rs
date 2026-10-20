@@ -1612,8 +1612,9 @@ impl<E: std::fmt::Display> std::fmt::Display for RendererProductionFailure<E> {
     }
 }
 
-/// Move this affine lease into the compiler's blocking owner. Publish or drop
-/// it only after that owner's native transaction has closed.
+/// Move this affine lease into the compiler's blocking owner. Publication and
+/// retry require its settled transaction; a started producer lost before
+/// settlement retains terminal evidence for all observers.
 pub struct RendererProduction<T, E> {
     slot: Option<Arc<RendererSlot<T, E>>>,
     native: RendererNativeState,
@@ -12596,6 +12597,65 @@ mod renderer_slot_tests {
         }
     }
 
+    #[tokio::test]
+    async fn renderer_actual_retirement_retains_terminal_cause_for_observers() {
+        tidepool_testing::eval_harness::require_extract();
+        let slot = RendererSlot::<usize, crate::CompileError>::new();
+        let RendererAccess::Produce(mut producer) = slot.acquire() else {
+            panic!("producer")
+        };
+        let RendererAccess::Wait(waiter) = slot.acquire() else {
+            panic!("current observer")
+        };
+        let cancellation = crate::CompilerTransactionCancellation::new();
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let outcome = crate::settle_compiler_transaction_cancellable_for_workload(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            cancellation.clone(),
+            |_| {},
+            |report| {
+                producer.begin_native().unwrap();
+                let prepared = PreparedRenderer::prepare(|| {
+                    crate::compile_haskell(
+                        "module RendererEnd where\nrenderer = (42 :: Int)\n",
+                        "renderer",
+                        &[],
+                        report,
+                    )
+                    .map(|_| 42)
+                })
+                .unwrap();
+                assert!(
+                    prepared.value.is_ok(),
+                    "the actual compiler response must precede cancellation: {:?}",
+                    prepared.value
+                );
+                cancellation.cancel();
+                Ok::<_, crate::CompileError>(prepared)
+            },
+        );
+        let close = outcome.close().clone();
+        assert!(
+            matches!(close, crate::CompilerTransactionClose::Retired(_)),
+            "actual cancellation after compiler response must retain retirement: {close:?}"
+        );
+        assert!(close.resources_retired());
+        let failure = producer.settle_native(outcome).unwrap_err();
+        assert!(
+            matches!(failure.as_ref(), RendererProductionFailure::CloseUnconfirmed {
+                close: observed, action_error: None,
+            } if observed == &close)
+        );
+        let RendererAccess::Terminal(waited) = waiter.wait().await else {
+            panic!("retired producer observer")
+        };
+        let RendererAccess::Terminal(later) = slot.acquire() else {
+            panic!("retired production must never admit another producer");
+        };
+        assert!(Arc::ptr_eq(&failure, &waited));
+        assert!(Arc::ptr_eq(&failure, &later));
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count() - before, 1);
+    }
     #[test]
     fn renderer_idle_producer_loss_allows_retry_without_terminal_evidence() {
         let slot = RendererSlot::<usize, &'static str>::new();
