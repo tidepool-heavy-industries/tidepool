@@ -1798,6 +1798,9 @@ tidepool_buildscript_run(
                         "resident_workbench::request_tests::public_module_world_hot_queries_skip_retained_history_preparation",
                         "resident_workbench::request_tests::public_module_world_retains_source_domain_and_invalidates_runtime_base",
                     ]),
+                    ("actor_world_status_test", [
+                        "resident_workbench::request_tests::binding_status_rejects_actual_world_answer_after_publication",
+                    ]),
                     ("actor_world_cell_input_test", [
                         "resident_workbench::request_tests::private_world_cell_json_operand_survives_plan_end_and_preparation",
                         "resident_workbench::request_tests::private_world_cell_operand_refuses_crossed_and_retired_owners",

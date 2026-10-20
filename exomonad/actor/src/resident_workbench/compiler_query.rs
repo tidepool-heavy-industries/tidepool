@@ -440,11 +440,13 @@ pub(super) fn compiler_query_answer(
     }
 }
 
-fn compiler_query_failure(
-    query: &CompilerQuery,
-    error: ResidentActorWorkbenchError,
-) -> CompilerQueryAnswer {
-    let compile = match &error {
+pub(super) fn is_expression_rejection(error: &ResidentActorWorkbenchError) -> bool {
+    compiler_query_compile_error(error)
+        .is_some_and(|error| classify_compile(error).class == FailureClass::UserHaskell)
+}
+
+fn compiler_query_compile_error(error: &ResidentActorWorkbenchError) -> Option<&CompileError> {
+    match error {
         ResidentActorWorkbenchError::Compile(error)
         | ResidentActorWorkbenchError::Resident(ResidentError::Run(
             tidepool_runtime::RuntimeError::Compile(error),
@@ -455,7 +457,14 @@ fn compiler_query_failure(
             ),
         ) => Some(error),
         _ => None,
-    };
+    }
+}
+
+fn compiler_query_failure(
+    query: &CompilerQuery,
+    error: ResidentActorWorkbenchError,
+) -> CompilerQueryAnswer {
+    let compile = compiler_query_compile_error(&error);
     if matches!(
         query,
         CompilerQuery::TypeOfExpression { .. } | CompilerQuery::TypeSearch { .. }
@@ -812,12 +821,82 @@ pub(super) enum ScopedWorldInspection {
     ),
 }
 
+/// A completed observation checked against its actual source and runtime view
+/// in the checkout that consumes it. This carries answers, never a new grant.
+pub(super) enum FinishedScopedWorldInspection {
+    ScopeChanged {
+        before: ScopeProvenance,
+        after: ScopeProvenance,
+    },
+    QueryError(QueryError),
+    CompilerUnavailable(String),
+    Answer {
+        before: ScopeProvenance,
+        current: ScopeProvenance,
+        outcome: tidepool_toolchain::compiler_world::WorldObservationOutcome,
+    },
+}
+
+pub(super) fn finish_scoped_world_inspection<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    request_scope: Option<&RequestWorkbenchScope>,
+    inspected: ScopedWorldInspection,
+) -> Result<FinishedScopedWorldInspection, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    use FinishedScopedWorldInspection as F;
+    let completed = match inspected {
+        ScopedWorldInspection::ScopeChanged { before, after } => {
+            return Ok(F::ScopeChanged { before, after })
+        }
+        ScopedWorldInspection::Unsupported(detail) => {
+            return Ok(F::QueryError(QueryError::Unsupported(detail)))
+        }
+        ScopedWorldInspection::Completed(completed) => completed,
+    };
+    let current =
+        match source.inspection_provenance(session, context, request_scope, NameScope::Current) {
+            Ok(current) => current,
+            Err(error) => return Ok(F::QueryError(unobserved_inspection_source(error)?)),
+        };
+    if !completed.provenance().same_view(&current) {
+        return Ok(F::ScopeChanged {
+            before: completed.provenance().clone(),
+            after: current,
+        });
+    }
+    let captured_source = public_module_query_source(&context.source_layer)
+        .map_err(|_| ActorCompileViewError::UnownedSourceLayer)?;
+    let evidence = captured_source.generation_evidence().ok_or_else(|| {
+        ResidentActorWorkbenchError::ActorProtocol("world query lost source evidence".into())
+    })?;
+    let original = context
+        .source_dependency()
+        .source_lease()?
+        .original_source()
+        .clone();
+    if !session.install_inspection_world_if_current(&completed, &evidence.reference, &original) {
+        return Ok(F::CompilerUnavailable(
+            "inspection world base changed before consumption".into(),
+        ));
+    }
+    Ok(F::Answer {
+        before: completed.provenance().clone(),
+        current,
+        outcome: completed.answer().clone(),
+    })
+}
+
 impl<H, O> ResidentActorWorkbench<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    async fn query_scoped_world(
+    pub(super) async fn query_scoped_world(
         &self,
         context: crate::ActorSessionContext,
         question: tidepool_toolchain::compiler_world::WorldObservationQuestion,
@@ -972,57 +1051,26 @@ where
         self.access
             .with_compiler_machine(context, move |session, context, _, settlement| {
                 let answer = match inspected {
-                    Ok(ScopedWorldInspection::ScopeChanged { before, after }) => {
-                        StructuredIntrospectionAnswer::ScopeChanged { before, after }
-                    }
-                    Ok(ScopedWorldInspection::Unsupported(detail)) => {
-                        StructuredIntrospectionAnswer::QueryError(QueryError::Unsupported(detail))
-                    }
-                    Ok(ScopedWorldInspection::Completed(completed)) => {
-                        match source.inspection_provenance(
-                            session,
-                            context,
-                            request_scope.as_ref(),
-                            NameScope::Current,
-                        ) {
-                            Err(error) => StructuredIntrospectionAnswer::QueryError(
-                                unobserved_inspection_source(error)?,
-                            ),
-                            Ok(current) if !completed.provenance().same_view(&current) => {
-                                StructuredIntrospectionAnswer::ScopeChanged {
-                                    before: completed.provenance().clone(),
-                                    after: current,
-                                }
-                            }
-                            Ok(_) => {
-                                let captured_source =
-                                    public_module_query_source(&context.source_layer)
-                                        .map_err(|_| ActorCompileViewError::UnownedSourceLayer)?;
-                                let evidence =
-                                    captured_source.generation_evidence().ok_or_else(|| {
-                                        ResidentActorWorkbenchError::ActorProtocol(
-                                            "world query lost source evidence".into(),
-                                        )
-                                    })?;
-                                let original = context
-                                    .source_dependency()
-                                    .source_lease()?
-                                    .original_source()
-                                    .clone();
-                                if session.install_inspection_world_if_current(
-                                    &completed,
-                                    &evidence.reference,
-                                    &original,
-                                ) {
-                                    scoped_structured_answer(kind, completed.answer())
-                                } else {
-                                    StructuredIntrospectionAnswer::CompilerUnavailable(
-                                        "inspection world base changed before resumption".into(),
-                                    )
-                                }
-                            }
+                    Ok(inspected) => match finish_scoped_world_inspection(
+                        session,
+                        context,
+                        &source,
+                        request_scope.as_ref(),
+                        inspected,
+                    )? {
+                        FinishedScopedWorldInspection::ScopeChanged { before, after } => {
+                            StructuredIntrospectionAnswer::ScopeChanged { before, after }
                         }
-                    }
+                        FinishedScopedWorldInspection::QueryError(error) => {
+                            StructuredIntrospectionAnswer::QueryError(error)
+                        }
+                        FinishedScopedWorldInspection::CompilerUnavailable(detail) => {
+                            StructuredIntrospectionAnswer::CompilerUnavailable(detail)
+                        }
+                        FinishedScopedWorldInspection::Answer { outcome, .. } => {
+                            scoped_structured_answer(kind, &outcome)
+                        }
+                    },
                     Err(
                         error @ ResidentActorWorkbenchError::CompileView(
                             ActorCompileViewError::UnobservedSourceIdentity,
@@ -1078,62 +1126,28 @@ where
         self.access
             .with_compiler_machine(context, move |session, context, _, settlement| {
                 let answer = match inspected {
-                    Ok(ScopedWorldInspection::ScopeChanged { before, after }) => {
-                        CompilerQueryAnswer::ScopeChanged { before, after }
-                    }
-                    Ok(ScopedWorldInspection::Unsupported(detail)) => {
-                        CompilerQueryAnswer::QueryError(QueryError::Unsupported(detail))
-                    }
-                    Ok(ScopedWorldInspection::Completed(completed)) => {
-                        match source.inspection_provenance(
-                            session,
-                            context,
-                            request_scope.as_ref(),
-                            NameScope::Current,
-                        ) {
-                            Err(error) => CompilerQueryAnswer::QueryError(
-                                unobserved_inspection_source(error)?,
-                            ),
-                            Ok(current) if !completed.provenance().same_view(&current) => {
-                                CompilerQueryAnswer::ScopeChanged {
-                                    before: completed.provenance().clone(),
-                                    after: current,
-                                }
-                            }
-                            Ok(current) => {
-                                let captured_source =
-                                    public_module_query_source(&context.source_layer)
-                                        .map_err(|_| ActorCompileViewError::UnownedSourceLayer)?;
-                                let evidence =
-                                    captured_source.generation_evidence().ok_or_else(|| {
-                                        ResidentActorWorkbenchError::ActorProtocol(
-                                            "world query lost source evidence".into(),
-                                        )
-                                    })?;
-                                let original = context
-                                    .source_dependency()
-                                    .source_lease()?
-                                    .original_source()
-                                    .clone();
-                                if session.install_inspection_world_if_current(
-                                    &completed,
-                                    &evidence.reference,
-                                    &original,
-                                ) {
-                                    compiler_query_answer(
-                                        &query,
-                                        completed.provenance().clone(),
-                                        current,
-                                        Ok(completed.answer().clone()),
-                                    )
-                                } else {
-                                    CompilerQueryAnswer::CompilerUnavailable(
-                                        "inspection world base changed before resumption".into(),
-                                    )
-                                }
-                            }
+                    Ok(inspected) => match finish_scoped_world_inspection(
+                        session,
+                        context,
+                        &source,
+                        request_scope.as_ref(),
+                        inspected,
+                    )? {
+                        FinishedScopedWorldInspection::ScopeChanged { before, after } => {
+                            CompilerQueryAnswer::ScopeChanged { before, after }
                         }
-                    }
+                        FinishedScopedWorldInspection::QueryError(error) => {
+                            CompilerQueryAnswer::QueryError(error)
+                        }
+                        FinishedScopedWorldInspection::CompilerUnavailable(detail) => {
+                            CompilerQueryAnswer::CompilerUnavailable(detail)
+                        }
+                        FinishedScopedWorldInspection::Answer {
+                            before,
+                            current,
+                            outcome,
+                        } => compiler_query_answer(&query, before, current, Ok(outcome)),
+                    },
                     Err(
                         error @ ResidentActorWorkbenchError::CompileView(
                             ActorCompileViewError::UnobservedSourceIdentity,

@@ -61,11 +61,11 @@ use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::HostCarrier;
 use tidepool_runtime::session::{
     hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
-    resident_cell_check_template, resident_workbench_templates, run_admitted_inspections,
-    BoundBinder, CellCheck, CompiledTurn, HostBindingAuthority, HostBindingType, HostPayload,
-    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, RequestReceiverEntry,
-    ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError,
-    ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind, TurnResult,
+    resident_cell_check_template, resident_workbench_templates, BoundBinder, CellCheck,
+    CompiledTurn, HostBindingAuthority, HostBindingType, HostPayload, OutputSink, ParsedBlock,
+    RequestReceiverEntry, ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentResumeError, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind,
+    TurnResult,
 };
 #[cfg(test)]
 use tidepool_runtime::session::{run_turn, TurnRequest};
@@ -7598,6 +7598,13 @@ pub enum ResidentActorWorkbenchError {
     ActivationPreviewSuspended { cleanup: Option<ResidentError> },
     #[error("could not inspect the saved value: {0}")]
     Inspection(String),
+    #[error("inspection scope changed before consumption: {before:?} -> {after:?}")]
+    InspectionScopeChanged {
+        before: tidepool_runtime::session::ScopeProvenance,
+        after: tidepool_runtime::session::ScopeProvenance,
+    },
+    #[error("inspection world unavailable: {0}")]
+    InspectionWorldUnavailable(String),
     #[error("completed result observation failed: {detail}")]
     CompletedResultObservation {
         detail: String,
@@ -10482,14 +10489,150 @@ where
         context: crate::ActorSessionContext,
         discovery: crate::status_tool::StatusDiscovery,
     ) -> Result<String, ResidentActorWorkbenchError> {
-        let request_scope = self.request_scope.clone();
+        match discovery {
+            crate::status_tool::StatusDiscovery::Recovery => {
+                self.access
+                    .with_machine(context, |session, _, _| Ok(render_recovery_status(session)))
+                    .await
+            }
+            crate::status_tool::StatusDiscovery::Bindings => self.binding_status(context).await,
+        }
+    }
+
+    async fn binding_status(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<String, ResidentActorWorkbenchError> {
+        use compiler_query::FinishedScopedWorldInspection as F;
+        use tidepool_toolchain::compiler_world::{
+            WorldObservationOutcome as O, WorldObservationQuestion as Q,
+        };
+        use tidepool_toolchain::inspection::ScopedReply;
 
         let source = self.access.source.config.clone();
+        let snapshot_source = source.clone();
+        let request_scope = self.request_scope.clone();
+        let snapshot_request = request_scope.clone();
+        let (mut bindings, expected) = self
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let bindings = session.workbench_bindings_in(context.placement.lexical_scope);
+                let expected = if bindings
+                    .iter()
+                    .any(|binding| binding.type_query().is_some())
+                {
+                    Some(snapshot_source.inspection_provenance(
+                        session,
+                        context,
+                        snapshot_request.as_ref(),
+                        tidepool_runtime::session::NameScope::Current,
+                    )?)
+                } else {
+                    None
+                };
+                Ok((bindings, expected))
+            })
+            .await?;
+        let Some(expected) = expected else {
+            return Ok(render_binding_status(&bindings));
+        };
+        let mut observations = Vec::new();
+        // Bindings is the requested visible scope listing. Recovery and other
+        // status views never enter this enrichment path. Existing live-value
+        // metadata is not a compiler query, even when its type is unknown.
+        for (index, binding) in bindings.iter().enumerate() {
+            let Some(expression) = binding.type_query() else {
+                continue;
+            };
+            let expression = expression.to_owned();
+            let inspected = match self
+                .query_scoped_world(
+                    context.clone(),
+                    Q::Expression(expression.clone()),
+                    Some(expected.clone()),
+                )
+                .await
+            {
+                Ok(inspected) => Some(inspected),
+                Err(error) if compiler_query::is_expression_rejection(&error) => None,
+                Err(error) => return Err(error),
+            };
+            observations.push((index, expression, inspected));
+        }
         self.access
-            .with_compiler_machine(context, move |session, context, _, settlement| {
-                let source = source.for_workbench(context, request_scope.as_ref());
-                run_status_discovery(session, context, &source, discovery, settlement)?
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)
+            .with_machine(context, move |session, context, _| {
+                let current = source.inspection_provenance(
+                    session,
+                    context,
+                    request_scope.as_ref(),
+                    tidepool_runtime::session::NameScope::Current,
+                )?;
+                if !expected.same_view(&current) {
+                    return Err(ResidentActorWorkbenchError::InspectionScopeChanged {
+                        before: expected,
+                        after: current,
+                    });
+                }
+                let mut retained = Vec::new();
+                for (index, expression, inspected) in observations {
+                    let Some(inspected) = inspected else {
+                        continue;
+                    };
+                    let display = match compiler_query::finish_scoped_world_inspection(
+                        session,
+                        context,
+                        &source,
+                        request_scope.as_ref(),
+                        inspected,
+                    )? {
+                        F::ScopeChanged { before, after } => {
+                            return Err(ResidentActorWorkbenchError::InspectionScopeChanged {
+                                before,
+                                after,
+                            })
+                        }
+                        F::CompilerUnavailable(detail) => {
+                            return Err(ResidentActorWorkbenchError::InspectionWorldUnavailable(
+                                detail,
+                            ))
+                        }
+                        F::QueryError(_) => None,
+                        F::Answer {
+                            outcome: O::Rejected(_),
+                            ..
+                        }
+                        | F::Answer {
+                            outcome: O::Answer(ScopedReply::Error(_)),
+                            ..
+                        } => None,
+                        F::Answer {
+                            outcome:
+                                O::Answer(ScopedReply::Expression {
+                                    expression: actual,
+                                    display,
+                                    ..
+                                }),
+                            ..
+                        } if actual == expression => Some(display),
+                        F::Answer { .. } => {
+                            return Err(ResidentActorWorkbenchError::InspectionWorldUnavailable(
+                                "status type answer differs from its admitted expression".into(),
+                            ))
+                        }
+                    };
+                    if let Some(display) = display {
+                        let binding = &mut bindings[index];
+                        if let Some(generation) = binding.defining_generation() {
+                            retained.push((binding.name.clone(), generation, display.clone()));
+                        }
+                        binding.type_display = Some(display);
+                    }
+                }
+                // No declaration metadata is changed until the entire observed
+                // snapshot passed its final source/view checks.
+                session
+                    .retain_declaration_value_types_in(context.placement.lexical_scope, &retained);
+                Ok(render_binding_status(&bindings))
             })
             .await
     }
@@ -16146,77 +16289,32 @@ fn generated_binds_verdict(binders: &[String]) -> TurnClassification {
     }
 }
 
-fn run_status_discovery<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    command: crate::status_tool::StatusDiscovery,
-    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
-) -> Result<Result<String, String>, ResidentActorWorkbenchError>
+fn render_binding_status(bindings: &[tidepool_runtime::session::WorkbenchBinding]) -> String {
+    if bindings.is_empty() {
+        return "no persistent bindings".into();
+    }
+    bindings
+        .iter()
+        .map(|binding| {
+            let display = binding
+                .type_display
+                .as_deref()
+                .unwrap_or("<type unavailable>");
+            format!("{} :: {display} [{}]", binding.name, binding.kind.label())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_recovery_status<H, O>(session: &ResidentSession<H, O>) -> String
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    match command {
-        crate::status_tool::StatusDiscovery::Bindings => {
-            let bindings = session.workbench_bindings_in(context.placement.lexical_scope);
-            let queries = bindings
-                .iter()
-                .filter_map(|binding| binding.type_query())
-                .map(|expression| InspectionQuery::TypeOf(expression.to_owned()))
-                .collect::<Vec<_>>();
-            let inspected = if queries.is_empty() {
-                Vec::new()
-            } else {
-                inspect_actor_batch(session, context, source, &queries, settlement)?
-            };
-            let retained = bindings
-                .iter()
-                .filter(|binding| binding.type_query().is_some())
-                .zip(inspected.iter())
-                .filter_map(|(binding, result)| {
-                    let Ok(tidepool_runtime::session::InspectionResult::Type { display, .. }) =
-                        result
-                    else {
-                        return None;
-                    };
-                    Some((
-                        binding.name.clone(),
-                        binding.defining_generation()?,
-                        display.clone(),
-                    ))
-                })
-                .collect::<Vec<_>>();
-            session.retain_declaration_value_types_in(context.placement.lexical_scope, &retained);
-            let mut inspected = inspected.into_iter();
-            let lines = bindings
-                .into_iter()
-                .map(|binding| {
-                    let needs_inspection = binding.type_query().is_some();
-                    let kind = binding.kind.label();
-                    let rendered = match binding.type_display {
-                        Some(type_display) => format!("{} :: {type_display}", binding.name),
-                        None if needs_inspection => inspected
-                            .next()
-                            .and_then(Result::ok)
-                            .map(|result| result.render())
-                            .unwrap_or_else(|| format!("{} :: <type unavailable>", binding.name)),
-                        None => format!("{} :: <type unavailable>", binding.name),
-                    };
-                    format!("{rendered} [{kind}]")
-                })
-                .collect::<Vec<_>>();
-            Ok(Ok(if lines.is_empty() {
-                "no persistent bindings".into()
-            } else {
-                lines.join("\n")
-            }))
-        }
-        crate::status_tool::StatusDiscovery::Recovery => {
-            let Some(report) = session.declaration_recovery_report() else {
-                return Ok(Ok("declaration recovery is not configured".into()));
-            };
-            let mut lines = vec![format!(
+    let Some(report) = session.declaration_recovery_report() else {
+        return "declaration recovery is not configured".into();
+    };
+    let mut lines = vec![format!(
                 "declaration recovery: source_session={}; successor_session={}; restored={}; unavailable_bindings={}; durability_unconfirmed={}",
                 report.source_session,
                 report.successor_session,
@@ -16224,124 +16322,19 @@ where
                 report.unavailable_bindings.len(),
                 report.durability_unconfirmed,
             )];
-            lines.extend(report.restored.iter().map(|item| {
-                format!(
-                    "restored generation {} module {}",
-                    item.generation, item.module
-                )
-            }));
-            lines.extend(report.unavailable_bindings.iter().map(|item| {
-                format!(
-                    "unavailable binding {} session {} variable {}",
-                    item.name, item.session, item.variable
-                )
-            }));
-            Ok(Ok(lines.join("\n")))
-        }
-    }
-}
-
-fn inspect_actor_batch<H, O>(
-    session: &ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    queries: &[InspectionQuery],
-    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
-) -> Result<
-    Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
-    ResidentActorWorkbenchError,
->
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    if queries.is_empty() {
-        return Ok(Vec::new());
-    }
-    if queries.iter().all(|query| matches!(query,
-        InspectionQuery::StructuredInfo { query, .. } | InspectionQuery::StructuredType { query, .. }
-            if matches!(query.scope, tidepool_runtime::session::NameScope::PublicModule(_))))
-    {
-        return Ok(queries.iter().map(|query| {
-            let error = tidepool_runtime::session::QueryError::Unsupported(
-                "public-module structured inspection requires the off-checkout world route".into());
-            Ok(match query {
-                InspectionQuery::StructuredInfo { .. } => tidepool_runtime::session::InspectionResult::StructuredInfo(Err(error)),
-                InspectionQuery::StructuredType { .. } => tidepool_runtime::session::InspectionResult::StructuredType(Err(error)),
-                _ => unreachable!("pure public-module structured batch"),
-            })
-        }).collect());
-    }
-    let compile_view = actor_compile_view(session, context, source)?;
-    let inputs = session
-        .capture_inspection_inputs(compile_view.session_view())
-        .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
-    inspect_compile_view(
-        &compile_view,
-        &inputs,
-        source,
-        queries,
-        &context.haskell_effects_alias,
-        settlement,
-    )
-}
-
-fn inspect_compile_view(
-    compile_view: &crate::ActorCompileView,
-    inputs: &tidepool_runtime::session::AdmittedInspectionInputs,
-    source: &ActorWorkbenchSource,
-    queries: &[InspectionQuery],
-    effects: &tidepool_runtime::session::HaskellTypeSource,
-    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
-) -> Result<
-    Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
-    ResidentActorWorkbenchError,
-> {
-    let prepared = source.prepare(compile_view);
-    let include_refs = prepared
-        .include
-        .iter()
-        .map(PathBuf::as_path)
-        .collect::<Vec<_>>();
-    match run_admitted_inspections(
-        InspectionRequest {
-            exact_context: compile_view.exact_compile_context(),
-            preamble: &prepared.preamble,
-            imports: &prepared.imports,
-            include: &include_refs,
-            session_root: compile_view.session_root(),
-            inject_modules: &prepared.injected,
-            queries,
-            effects: Some(effects),
-        },
-        compile_view.session_view(),
-        inputs,
-        settlement,
-    ) {
-        Ok(results) if results.len() == queries.len() => Ok(results
-            .into_iter()
-            .map(|result| match result {
-                tidepool_runtime::session::InspectionResult::NotFound { .. }
-                | tidepool_runtime::session::InspectionResult::ModuleNotFound { .. }
-                | tidepool_runtime::session::InspectionResult::Rejected { .. } => {
-                    Err(result.render())
-                }
-                _ => Ok(result),
-            })
-            .collect()),
-        Ok(results) => Err(ResidentActorWorkbenchError::CompileInfrastructure(
-            format!(
-                "inspection returned {} results for {} queries",
-                results.len(),
-                queries.len()
-            )
-            .into(),
-        )),
-        Err(error) if classify_compile(&error).class == FailureClass::UserHaskell => {
-            Ok(vec![Err(classify_compile(&error).message)])
-        }
-        Err(error) => Err(ResidentActorWorkbenchError::Compile(error)),
-    }
+    lines.extend(report.restored.iter().map(|item| {
+        format!(
+            "restored generation {} module {}",
+            item.generation, item.module
+        )
+    }));
+    lines.extend(report.unavailable_bindings.iter().map(|item| {
+        format!(
+            "unavailable binding {} session {} variable {}",
+            item.name, item.session, item.variable
+        )
+    }));
+    lines.join("\n")
 }
 
 fn unobserved_inspection_source(
@@ -20358,80 +20351,111 @@ pub(crate) mod request_tests {
     }
 
     #[test]
-    fn public_module_batch_refuses_before_checked_preparation() {
-        use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
-        let session_id = tidepool_repr::SessionId(44_201);
-        let (session, _root) = bare_session_at(session_id);
-        let context = crate::ActorSessionContext {
-            source_dependency: generation_admission::SourceDependency::Unqualified,
-            actor: crate::ActorRef::first(crate::ActorId(1)),
-            placement: crate::ActorPlacement {
-                session: session_id,
-                resource_scope: RealmId::ROOT,
-                lexical_scope: ScopeId::ROOT,
-            },
-            effect_policy: tidepool_effect::EffectRunPolicy::HandleOrSuspend,
-            live_payload: tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-            source_imports: crate::ActorSourceImports::default(),
-            haskell_effects_alias: "'[]".into(),
-            current_model: None,
-            source_layer: Vec::new().into(),
-            ..crate::ActorDescriptor::new(
-                "fixture",
-                crate::ActorPlacement {
-                    session: session_id,
-                    resource_scope: RealmId::ROOT,
-                    lexical_scope: ScopeId::ROOT,
-                },
-            )
-            .admit_independent_world()
-            .session_context(crate::ActorRef::first(crate::ActorId(1)))
-        };
-        let source = ActorWorkbenchSource::new("unused", Vec::new());
-        let query = tidepool_runtime::session::NameQuery {
-            scope: tidepool_runtime::session::NameScope::PublicModule("Data.Maybe".into()),
-            namespace: tidepool_runtime::session::NameNamespace::Value,
-            name: "isJust".into(),
-        };
-        let provenance = tidepool_runtime::session::ScopeProvenance {
-            scope: query.scope.clone(),
-            generation: 0,
-            fingerprint: "unused".into(),
-        };
-        let queries = [
-            InspectionQuery::StructuredInfo {
-                query: query.clone(),
-                provenance: provenance.clone(),
-            },
-            InspectionQuery::StructuredType { query, provenance },
+    fn binding_status_preserves_retained_type_text_and_unknown_values() {
+        use tidepool_runtime::session::WorkbenchBinding as B;
+        let bindings = [
+            B::typed_declaration("poly".into(), "forall a.  a ->\n  a".into()),
+            B::materialized("live".into(), Some("Int".into())),
+            B::materialized("unknown".into(), None),
         ];
-        let observation = HostWorkObservation::new();
-        let results = observation
-            .scope(|| {
-                tidepool_testing::with_settlement(|settlement| {
-                    inspect_actor_batch(&session, &context, &source, &queries, settlement)
-                })
-            })
+        assert_eq!(render_binding_status(&bindings),
+            "poly :: forall a.  a ->\n  a [declaration]\nlive :: Int [live value]\nunknown :: <type unavailable> [live value]");
+        assert_eq!(render_binding_status(&[]), "no persistent bindings");
+    }
+
+    #[tokio::test]
+    async fn status_recovery_and_empty_bindings_do_not_admit_compiler_work() {
+        let owner = crate::CompilerPreparationOwner::new();
+        let cleanup = owner.cleanup();
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let workbench =
+            ResidentActorWorkbench::new(machines, source.bind_preparation(owner.client()), None);
+        workbench_runner_for_test(&workbench)
+            .adopt_final_source_scope(context.clone())
+            .await
             .unwrap();
-        assert!(matches!(
-            &results[..],
-            [
-                Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(
-                    Err(tidepool_runtime::session::QueryError::Unsupported(_))
-                )),
-                Ok(tidepool_runtime::session::InspectionResult::StructuredType(
-                    Err(tidepool_runtime::session::QueryError::Unsupported(_))
-                ))
-            ]
-        ));
-        for kind in [
-            HostWorkCounter::ActorCompileViewCapture,
-            HostWorkCounter::CompileViewCapture,
-            HostWorkCounter::InspectionInputCapture,
-            HostWorkCounter::ActorSourcePrepare,
-        ] {
-            assert_eq!(observation.snapshot().get(kind), 0);
-        }
+        assert!(
+            crate::ActorCompilerCloseOwner::current().is_err(),
+            "no compiler invocation scope installed"
+        );
+        let spawns = tidepool_extract_cmd::extract_spawn_count();
+        assert_eq!(
+            workbench
+                .status_discovery(
+                    context.clone(),
+                    crate::status_tool::StatusDiscovery::Recovery
+                )
+                .await
+                .unwrap(),
+            "declaration recovery is not configured"
+        );
+        assert_eq!(
+            workbench
+                .status_discovery(context, crate::status_tool::StatusDiscovery::Bindings)
+                .await
+                .unwrap(),
+            "no persistent bindings"
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), spawns);
+        drop(workbench);
+        owner.close();
+        assert!(cleanup
+            .wait_for_settlement(std::time::Duration::from_secs(5))
+            .await
+            .is_confirmed());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn binding_status_rejects_actual_world_answer_after_publication() {
+        with_test_compiler_owner(|client| async move {
+            use compiler_query::{FinishedScopedWorldInspection as F, ScopedWorldInspection};
+            use tidepool_toolchain::compiler_world::{WorldObservationOutcome as O, WorldObservationQuestion as Q};
+            use tidepool_toolchain::inspection::ScopedReply;
+            let fixture = RootedWorldInputTest::new(client, 7).await;
+            let completed = fixture.workbench.query_scoped_world(
+                fixture.public.clone(), Q::Expression("(7 :: Int)".into()), None,
+            ).await.expect("actual scoped query completes before the publication");
+            assert!(matches!(&completed, ScopedWorldInspection::Completed(value)
+                if matches!(value.answer(), O::Answer(ScopedReply::Expression { display, .. }) if display == "Int")));
+            let layers: crate::ActorSourceLayerResolver = fixture.source_owner.clone();
+            let descriptor = crate::ActorDescriptor::new("status publication", fixture.public.placement);
+            let public_owner = crate::resident_actor::WorkbenchPublicOwner::issue(&fixture.public, &descriptor, None).unwrap();
+            let private = Arc::new(workbench_runner_for_test(&fixture.workbench).begin_private_execution(
+                fixture.public.clone(), public_owner, tidepool_runtime::session::PublicationDecision::new(), None,
+            ).await.unwrap());
+            let mut context = fixture.public.clone();
+            context.placement.lexical_scope = private.private_scope;
+            let (writer_context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                context, fixture.captured.clone(), None, Some(&layers),
+            ).expect("the actual source issuer admits the private writer");
+            let writer = fixture.workbench.shared_view().with_compilation_authority(authority).with_private_execution(private);
+            writer.execute_cell_for_test(writer_context.clone(), "let statusRace = (9 :: Int)").await.unwrap();
+            writer.publish_completed_cell_for_test(writer_context).await.unwrap();
+            let source = fixture.workbench.access.source.config.clone();
+            let request_scope = fixture.workbench.request_scope.clone();
+            fixture.workbench.access.with_machine(fixture.public.clone(), move |session, context, _| {
+                let before = session.workbench_bindings_in(context.placement.lexical_scope);
+                assert!(before.iter().any(|binding| binding.name == "statusRace"));
+                let before_metadata = before.iter().map(|binding|
+                    (binding.name.clone(), binding.defining_generation(), binding.type_display.clone())
+                ).collect::<Vec<_>>();
+                let checked = compiler_query::finish_scoped_world_inspection(
+                    session, context, &source, request_scope.as_ref(), completed,
+                )?;
+                assert!(matches!(checked, F::ScopeChanged { before, after } if !before.same_view(&after)));
+                let after_metadata = session.workbench_bindings_in(context.placement.lexical_scope).iter().map(|binding|
+                    (binding.name.clone(), binding.defining_generation(), binding.type_display.clone())
+                ).collect::<Vec<_>>();
+                assert_eq!(after_metadata, before_metadata, "stale completion must not attach a type to any current generation");
+                Ok(())
+            }).await.unwrap();
+            let spawns = tidepool_extract_cmd::extract_spawn_count();
+            let text = fixture.workbench.status_discovery(fixture.public.clone(), crate::status_tool::StatusDiscovery::Bindings).await.unwrap();
+            assert!(text.contains("statusRace :: Int [live value]"), "{text}");
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), spawns,
+                "the actual published value's retained display requires no compiler query");
+        }).await;
     }
 
     #[test]
