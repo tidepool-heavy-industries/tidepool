@@ -2671,16 +2671,17 @@ admitWorldRows state producer acquisition offered = do
   images <- case acquisition of
     ContinueOwnedOriginals values -> pure values
     FreshFiles -> worldCorrupt "world descriptor requires owned original acquisition"
-  when (null offered && not (null images))
-    (worldCorrupt "compiler world acquisition has images without row edits")
-  mapM_ (worldRowImage producer images) offered
+  -- Available custody can include historical originals unrelated to the
+  -- selected semantic rows. Only those rows select images for capture; passive
+  -- images neither authorize types nor require access to their DATA endpoints.
+  selectedImages <- mapM (selectWorldRowImage producer images) offered
   retained <- if null offered then pure [] else do
     RetainedOriginalInputs values _ _ _ _ <- readMVar state
     pure values
   let available = foldl' (\content (_,more) -> mergeCapturedOriginalContent content more)
         emptyCapturedOriginalContent retained
   originals <- continueRequestInputs available
-    [reference | OriginalInputImage _ _ _ parts <- images, (_,reference) <- parts]
+    [reference | OriginalInputImage _ _ _ parts <- selectedImages, (_,reference) <- parts]
   (rows,_) <- withCapturedRequestInputTokens originals $ \readToken -> do
     let verified artifact cap sha = do
           token <- readToken artifact cap
@@ -4037,9 +4038,9 @@ worldSemanticRowEncoding producer ((row@(iface,_,_),evidence),image) = do
     <> foldMap (\(ownerUnit,ownerName) -> E.encodeListLen 2 <> text ownerUnit <> text ownerName) required)
   where text = E.encodeString . T.pack
 
-worldRowImage :: BS.ByteString -> [OriginalInputImage] -> OfferedWorldRow -> IO BS.ByteString
-worldRowImage producer images ((row@(iface,packages,packageSha),evidence),expectedImage) = case matching of
-  [seal] -> either worldCorrupt pure (unhexDigest seal)
+selectWorldRowImage :: BS.ByteString -> [OriginalInputImage] -> OfferedWorldRow -> IO OriginalInputImage
+selectWorldRowImage producer images ((row@(iface,packages,packageSha),evidence),expectedImage) = case matching of
+  [image] -> pure image
   _ -> worldCorrupt "world interface row lacks one exact owned input image"
   where
     expected = [(InputInterface,exactPath iface,exactSha256 iface),(InputPackages,packages,packageSha)]
@@ -4048,7 +4049,7 @@ worldRowImage producer images ((row@(iface,packages,packageSha),evidence),expect
           [(InputCertificate,descriptorCertificatePath descriptor,descriptorCertificateSha256 descriptor)]
             ++ [(InputCore,canonicalCorePath core,canonicalCoreSha256 core) | core <- maybe [] pure (descriptorCore descriptor)]
         _ -> []
-    matching = [seal | OriginalInputImage issuer key seal parts <- images
+    matching = [image | image@(OriginalInputImage issuer key seal parts) <- images
       , issuer == hexBytes producer, key == rowOwner row, seal == hexBytes expectedImage
       , all (`elem` [(kind,originalInputPath reference,originalInputSha256 reference) | (kind,reference) <- parts]) expected]
 
@@ -4094,17 +4095,6 @@ rawWorldDigest = decodeBytes >>= \bytes -> if BS.length bytes == 32 then pure (B
 
 hexBytes :: BS.ByteString -> String
 hexBytes = concatMap (\byte -> let value = showHex byte "" in replicate (2-length value) '0' ++ value) . BS.unpack
-
-unhexDigest :: String -> Either String BS.ByteString
-unhexDigest value
-  | length value /= 64 || any (\c -> not (c >= '0' && c <= '9' || c >= 'a' && c <= 'f')) value = Left "invalid image content identity"
-  | otherwise = Right (BS.pack (go value))
-  where
-    nibble c | c >= '0' && c <= '9' = fromEnum c - fromEnum '0'
-             | otherwise = fromEnum c - fromEnum 'a' + 10
-    go [] = []
-    go (a:b:rest) = fromIntegral (nibble a * 16 + nibble b) : go rest
-    go _ = []
 
 type WorldSourceParser = StateT BS.ByteString (Either String)
 

@@ -689,16 +689,26 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
       emptyPacket = packet 4 emptyProduct emptyPrimary emptyPairs [] [] emptyAcquisition emptyBinding
   emptyWorld <- readPacket "world-v4-empty" emptyPacket
   unless (worldInputsPrimaryIsEmpty emptyWorld) (fail "actual empty primary issuer became selected")
-  -- Immutable bytes can be in broader custody without the corresponding
-  -- Context-selected type association. They cannot satisfy a demanded type.
-  custodyOnly <- readPacket "world-custody-only-types"
-    (packet 4 emptyProduct emptyPrimary emptyPairs [] [] acquisition emptyBinding)
-  unless (worldInputsRetainedCharge custodyOnly > worldInputsRetainedCharge emptyWorld)
-    (fail "unselected-type refusal requires actual broader captured custody")
+  -- The genuine acquisition includes more available custody than this empty
+  -- Context selects. Closed endpoints prove passive images are never read,
+  -- and equal charges prove their bodies are not retained under the world.
+  let passiveAcquisition = case acquisition of
+        TList [tag,TList arenas,images] -> TList [tag,TList
+          [TList [TString (T.pack ("/proc/2147483647/fd/" ++ show index)),extent]
+          | (index,TList [_,extent]) <- zip [0 :: Int ..] arenas],images]
+        _ -> error "genuine world acquisition omitted its owned arenas"
+  passive <- readPacket "world-v4-empty-passive-custody"
+    (packet 4 emptyProduct emptyPrimary emptyPairs [] [] passiveAcquisition emptyBinding)
+  unless (worldInputsIdentityBytes passive == worldInputsIdentityBytes emptyWorld
+      && worldInputsRetainedCharge passive == worldInputsRetainedCharge emptyWorld
+      && worldInputsPrimaryIsEmpty passive && Map.null (worldInputsBindings passive))
+    (fail "passive available images changed empty selected world facts or custody")
+  requireCorrupt (Just "world interface row lacks one exact owned input image") "world-selected-image-missing"
+    (packet 4 product primary blockPairs base [] emptyAcquisition emptyBinding)
   withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
     environment <- getSession
     owner <- liftIO newExactInputOwner
-    result <- liftIO (readWorldTypeInputs owner environment custodyOnly selectedOwners)
+    result <- liftIO (readWorldTypeInputs owner environment passive selectedOwners)
     case result of
       Left _ -> pure ()
       Right _ -> liftIO (fail "World type closure widened from selected primary into broader custody")
