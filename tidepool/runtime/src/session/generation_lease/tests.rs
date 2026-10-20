@@ -715,7 +715,7 @@ fn fenced_run_refuses_prepared_item_admission_and_native_start() {
         let native = item.native().cloned();
         let item = item.checked_item().clone();
         let prefix = session
-            .begin_cell_program(admission, program)
+            .begin_cell_program(program)
             .unwrap()
             .unwrap();
         let mut missing_library = crate::session::PersistentSession::new(None, 1024 * 1024);
@@ -828,7 +828,7 @@ fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor
     };
     let item = item.checked_item().clone();
     let prefix = session
-        .begin_cell_program(admission, program)
+        .begin_cell_program(program)
         .unwrap()
         .unwrap();
     let reservation = session.admit_checked_item(prefix.clone(), item).unwrap();

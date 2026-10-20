@@ -1294,6 +1294,7 @@ impl<I: Clone + AsRef<ValueInterfaceSnapshot>> CheckedInterfaces<I> {
 /// Snapshots remain immutable while compilation runs off checkout.
 #[derive(Debug)]
 pub struct RuntimeCheckedPrefix {
+    settled: super::SettledCellProgram,
     admission: Arc<RuntimeCellAdmission>,
     first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
     program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
@@ -1469,6 +1470,7 @@ impl RuntimeCheckedPrefix {
         scope: ScopeId,
         execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
     ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
+        self.settled.checkpoint()?;
         session.validate_lexical_scope_lease(scope, &self.admission._retained_scope)?;
         if self.admission.world_reservation().is_some() {
             self.admission
@@ -2376,6 +2378,7 @@ impl PersistentSession {
         prefix: Arc<RuntimeCheckedPrefix>,
         item: tidepool_toolchain::checked_cell::ExactCheckedItem,
     ) -> Result<Arc<RuntimeCheckedItemAdmission>, SessionError> {
+        prefix.settled.checkpoint()?;
         let scope = prefix.admission.scope;
         self.validate_lexical_scope_lease(scope, &prefix.admission._retained_scope)?;
         if prefix.admission.world_reservation().is_some() {
@@ -2915,14 +2918,16 @@ impl PersistentSession {
 
     pub fn begin_cell_program(
         &self,
-        admission: Arc<RuntimeCellAdmission>,
-        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        settled: super::SettledCellProgram,
     ) -> Result<Option<Arc<RuntimeCheckedPrefix>>, SessionError> {
+        settled.checkpoint()?;
+        let admission = settled.admission().clone();
+        let program = settled.program().clone();
         if !admission.has_execution_purpose() {
             return Err(SessionError::StaleStagedDeclaration);
         }
         if admission.world_reservation().is_some() {
-            return self.begin_world_cell_program(admission, program);
+            return self.begin_world_cell_program(admission, program, settled);
         }
         let finite = admission.finite_inputs()?;
         let planned = admission
@@ -2968,7 +2973,7 @@ impl PersistentSession {
                 .map_err(|_| SessionError::StaleStagedDeclaration)?;
             return Ok(None);
         };
-        self.begin_cell_program_prefix(admission, first.checked_item().clone(), program)
+        self.begin_cell_program_prefix(admission, first.checked_item().clone(), program, settled)
             .map(Some)
     }
 
@@ -2976,6 +2981,7 @@ impl PersistentSession {
         &self,
         admission: Arc<RuntimeCellAdmission>,
         program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        settled: super::SettledCellProgram,
     ) -> Result<Option<Arc<RuntimeCheckedPrefix>>, SessionError> {
         use tidepool_toolchain::checked_cell::CellProgramBasis;
         let CellProgramBasis::World(checked) = program.basis() else {
@@ -3056,6 +3062,7 @@ impl PersistentSession {
                 .map_err(|_| SessionError::StaleStagedDeclaration)
         })??;
         Ok(Some(Arc::new(RuntimeCheckedPrefix {
+            settled,
             admission,
             first_item,
             program,
@@ -3075,6 +3082,7 @@ impl PersistentSession {
         admission: Arc<RuntimeCellAdmission>,
         first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
         program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        settled: super::SettledCellProgram,
     ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
         if admission.world_reservation().is_some() {
             return Err(SessionError::WorldCellCheckedProgramCapabilityMissing);
@@ -3137,6 +3145,7 @@ impl PersistentSession {
         let native_index = CheckedNativeIndex::new(finite.native_imports.clone());
         let compile_inputs = finite.compile_inputs.clone();
         Ok(Arc::new(RuntimeCheckedPrefix {
+            settled,
             admission,
             first_item,
             program,
