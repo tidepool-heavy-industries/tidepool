@@ -4388,42 +4388,19 @@ mod tests {
                 assert_eq!(interface.interface_bytes(), bytes.as_slice());
                 assert!(row.original.is_none());
             }
-            // This independently validates the constructor, not the old
-            // selection topology: both routes use select_owners. The legacy
-            // route also gets an already-warm parent, explicitly reported below.
-            let baseline_view = interfaces
-                .select_owners(narrowed.projection.roles.keys().cloned().collect())
-                .unwrap();
-            let baseline = CompilerSourceSupport::new(
-                narrowed.projection.clone(),
-                baseline_view,
-                [],
-                Default::default(),
-            )
-            .unwrap();
-            let after = inventory.metrics();
-            assert_eq!(narrowed.projection, baseline.projection);
-            assert_eq!(narrowed.selected, baseline.selected);
-            assert_eq!(
-                narrowed.artifacts.selection_snapshot(),
-                baseline.artifacts.selection_snapshot()
-            );
-            assert_eq!(narrowed.input_decisions, baseline.input_decisions);
-            assert!(
-                baseline
-                    .artifacts
-                    .reads
-                    .read_projection
-                    .get()
-                    .is_some_and(|projection| projection.metadata.get().is_some()),
-                "legacy constructor must sensitize the output metadata observation"
-            );
+            // Explicit metadata observation initializes the cache only after
+            // the measured narrowing has preserved its untouched state.
+            narrowed.artifacts.metadata_snapshot();
+            assert!(narrowed
+                .artifacts
+                .reads
+                .read_projection
+                .get()
+                .is_some_and(|projection| projection.metadata.get().is_some()));
             eprintln!(
-                "closed-role-work unrelated={unrelated} candidate_graph={} candidate_handles={} legacy_warm_parent_graph={} legacy_warm_parent_handles={}",
+                "closed-role-work unrelated={unrelated} graph={} handles={}",
                 candidate.graph_visits - before.graph_visits,
                 candidate.entry_handle_copies - before.entry_handle_copies,
-                after.graph_visits - candidate.graph_visits,
-                after.entry_handle_copies - candidate.entry_handle_copies
             );
             assert!(interfaces
                 .support_for_owners(vec![ExactModuleIdentity {
@@ -4433,24 +4410,23 @@ mod tests {
                 .is_err());
             let owners = BTreeSet::from([owner]);
             let source = support.source_support(&owners).unwrap();
-            let legacy = support
+            let recomputed = support
                 .projection
                 .source_support(&support.artifacts, &owners)
                 .unwrap();
-            let legacy = support
-                .rebuild_narrowed(legacy.projection, legacy.artifacts, [])
+            let recomputed = support
+                .rebuild_narrowed(recomputed.projection, recomputed.artifacts, [])
                 .unwrap();
-            assert_eq!(source.projection, legacy.projection);
-            assert_eq!(source.selected, legacy.selected);
+            assert_eq!(source.projection, recomputed.projection);
+            assert_eq!(source.selected, recomputed.selected);
             assert_eq!(
                 source.artifacts.selection_snapshot(),
-                legacy.artifacts.selection_snapshot()
+                recomputed.artifacts.selection_snapshot()
             );
-            assert_eq!(source.input_decisions, legacy.input_decisions);
+            assert_eq!(source.input_decisions, recomputed.input_decisions);
             drop(interfaces);
             drop(support);
-            drop(baseline);
-            drop(legacy);
+            drop(recomputed);
             // This checks retained semantic facts, not physical materialization
             // release: the fixture still holds its original entry handle.
             assert_eq!(

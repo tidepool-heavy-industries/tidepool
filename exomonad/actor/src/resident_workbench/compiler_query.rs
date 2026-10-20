@@ -29,7 +29,6 @@
 //! read whatever binding now holds the same spelling.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use tidepool_bridge::FromHaskell;
 use tidepool_bridge_derive::FromHaskell as DeriveFromHaskell;
@@ -403,22 +402,6 @@ fn row_fit_target(module: &RowFitModule, live: &LiveSessionModules) -> RowFitTar
             RowFitTarget::Module(module.clone())
         }
     }
-}
-
-/// The compile-view identity an answer is relative to.
-///
-/// Reuse the structured-introspection identity so `currentScopeView`, `info`,
-/// and `typeOf` name the same snapshot for one view. The triple (scope,
-/// generation, content fingerprint) is the only identity the actor can observe:
-/// `ActorCompileView` has no world/publication accessor, and synthesizing a
-/// `compiler-world:` fingerprint would fabricate one. Correlating this triple
-/// with world-publication identity is a separate runtime-owner follow-up.
-fn current_scope_provenance(
-    compile_view: &crate::ActorCompileView,
-    source: &ActorWorkbenchSource,
-    scope: NameScope,
-) -> ScopeProvenance {
-    super::structured_provenance(compile_view, source, scope)
 }
 
 /// Whether a callable's effects fit the inspecting actor's row. Mirrors the
@@ -1165,14 +1148,41 @@ where
         query: CompilerQuery,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let source = self.access.source.config.clone();
+        if matches!(&query, CompilerQuery::CurrentScopeView) {
+            return self
+                .access
+                .with_continuation_machine(context, move |session, context, _, settlement| {
+                    let answer =
+                        match source.inspection_provenance(session, context, NameScope::Current) {
+                            Ok(provenance) => CompilerQueryAnswer::ScopeView(provenance),
+                            Err(error) => {
+                                CompilerQueryAnswer::QueryError(unobserved_inspection_source(error)?)
+                            }
+                        };
+                    session
+                        .resume_classified(hole, answer, settlement)
+                        .map_err(classify_resumption)
+                })
+                .await;
+        }
         let snapshot_source = source.clone();
         let query_for_snapshot = query.clone();
         let snapshot = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 let view = actor_compile_view(session, context, &snapshot_source)?;
-                let provenance =
-                    current_scope_provenance(&view, &snapshot_source, NameScope::Current);
+                let provenance = match snapshot_source.inspection_provenance(
+                    session,
+                    context,
+                    NameScope::Current,
+                ) {
+                    Ok(provenance) => provenance,
+                    Err(error) => {
+                        return Ok(Err(CompilerQueryAnswer::QueryError(
+                            unobserved_inspection_source(error)?,
+                        )))
+                    }
+                };
                 let live = LiveSessionModules::of(view.session_view());
                 let plan = query_for_snapshot.plan(&live, &provenance);
                 // A pinned view that already moved is refused before any
@@ -1185,10 +1195,22 @@ where
                         .capture_inspection_inputs(view.session_view())
                         .map_err(|error| error.to_string())
                 });
-                Ok((view, provenance, plan, inputs))
+                Ok(Ok((view, provenance, plan, inputs)))
             })
             .await?;
-        let (compile_view, provenance, plan, inputs) = snapshot;
+        let (compile_view, provenance, plan, inputs) = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(answer) => {
+                return self
+                    .access
+                    .with_continuation_machine(context, move |session, _, _, settlement| {
+                        session
+                            .resume_classified(hole, answer, settlement)
+                            .map_err(classify_resumption)
+                    })
+                    .await;
+            }
+        };
 
         if let Some(refusal) = entry_scope_refusal(&query, &provenance) {
             return self
@@ -1294,9 +1316,15 @@ where
 
         self.access
             .with_continuation_machine(context, move |session, context, _, settlement| {
-                let current_view = actor_compile_view(session, context, &source)?;
-                let current = current_scope_provenance(&current_view, &source, NameScope::Current);
-                let answer = compiler_query_answer(&query, provenance, current, inspected);
+                let answer =
+                    match source.inspection_provenance(session, context, NameScope::Current) {
+                        Ok(current) => {
+                            compiler_query_answer(&query, provenance, current, inspected)
+                        }
+                        Err(error) => {
+                            CompilerQueryAnswer::QueryError(unobserved_inspection_source(error)?)
+                        }
+                    };
                 session
                     .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)

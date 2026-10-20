@@ -249,6 +249,50 @@ impl ActorWorkbenchSource {
         .map_err(ResidentActorWorkbenchError::Compile)
     }
 
+    fn inspection_scope<H, O>(
+        &self,
+        session: &ResidentSession<H, O>,
+        context: &crate::ActorSessionContext,
+        label: tidepool_runtime::session::NameScope,
+    ) -> Result<tidepool_runtime::session::InspectionScopeSnapshot, ResidentActorWorkbenchError>
+    where
+        H: DispatchEffect<O> + Send,
+        O: OutputSink + Sync,
+    {
+        let source_revision = match &context.source_layer {
+            crate::ActorSourceRoots::Complete(source) => source.source_revision_identity(),
+            crate::ActorSourceRoots::Deployment(_) => None,
+        }
+        .filter(|revision| !revision.is_empty())
+        .ok_or(ActorCompileViewError::UnobservedSourceIdentity)?;
+        let inputs = self.compile_inputs(context)?;
+        let mut imports = context.selected_source_imports();
+        imports.extend(&self.workbench_imports);
+        session
+            .capture_inspection_scope_in(
+                context.placement.lexical_scope,
+                source_revision.as_bytes(),
+                &imports,
+                &inputs,
+                label,
+            )
+            .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))
+    }
+
+    fn inspection_provenance<H, O>(
+        &self,
+        session: &ResidentSession<H, O>,
+        context: &crate::ActorSessionContext,
+        label: tidepool_runtime::session::NameScope,
+    ) -> Result<tidepool_runtime::session::ScopeProvenance, ResidentActorWorkbenchError>
+    where
+        H: DispatchEffect<O> + Send,
+        O: OutputSink + Sync,
+    {
+        self.inspection_scope(session, context, label)
+            .map(|snapshot| snapshot.provenance())
+    }
+
     fn request_annotations(
         &self,
     ) -> Result<Option<tidepool_runtime::session::RequestCompileAnnotations>, CompileError> {
@@ -1875,6 +1919,73 @@ impl PreparedActorGeneration {
     }
 }
 
+/// The reservation owns its frozen candidate and the sole publication guard.
+#[must_use]
+pub(crate) struct ReservedActorGeneration {
+    prepared: PreparedActorGeneration,
+    guard: ActorPublicationGuard,
+    publication_kind: ActorGenerationPublication,
+}
+
+pub(crate) enum ActorGenerationReservation {
+    Reserved(ReservedActorGeneration),
+    Refused(String),
+}
+
+pub(crate) enum ActorGenerationRetirementCutoff {
+    Fenced(generation_admission::GenerationRetirementFence),
+    Refused(ResidentActorWorkbenchError),
+    Unconfirmed {
+        fence: generation_admission::GenerationRetirementFence,
+        error: ResidentActorWorkbenchError,
+    },
+}
+
+impl ReservedActorGeneration {
+    pub(crate) fn expected_generation(&self) -> Option<&Arc<ActorGeneration>> {
+        self.guard.attempt.expected.generation()
+    }
+
+    pub(crate) fn reload_report(&self) -> Option<&PreparedReloadReport> {
+        self.prepared.reload_report()
+    }
+
+    pub(crate) fn fence_original(&mut self) -> ActorGenerationRetirementCutoff {
+        self.guard.fence_original()
+    }
+
+    pub(crate) fn refuse_unstarted(
+        &mut self,
+        detail: &str,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.guard.refuse_unstarted().map_err(|settlement| {
+            ResidentActorWorkbenchError::PublicationSettlement {
+                failure: Box::new(ActorPublicationSettlementFailure {
+                    outcome: Ok(ActorGenerationCommit::Refused(detail.to_owned())),
+                    settlement,
+                }),
+            }
+        })
+    }
+
+    pub(crate) fn refuse_retirement(
+        &mut self,
+        original: &mut generation_admission::GenerationRetirementFence,
+        detail: &str,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.guard
+            .refuse_retirement(original)
+            .map_err(
+                |settlement| ResidentActorWorkbenchError::PublicationSettlement {
+                    failure: Box::new(ActorPublicationSettlementFailure {
+                        outcome: Ok(ActorGenerationCommit::Refused(detail.to_owned())),
+                        settlement,
+                    }),
+                },
+            )
+    }
+}
+
 /// Prospective durable facts retained only when initial publication is unknown.
 /// This has no bound public owner and is never an installed generation.
 struct InitialPublicationCandidate {
@@ -2010,6 +2121,19 @@ enum PublicationSettlementError {
     BodyUnobserved,
     #[error("publication completion cannot establish whether visibility committed")]
     PublicationUnconfirmed,
+    #[error("retirement {stage} settlement failed: {source}")]
+    Retirement {
+        stage: RetirementSettlementStage,
+        source: Box<PublicationSettlementError>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+enum RetirementSettlementStage {
+    #[error("candidate")]
+    Candidate,
+    #[error("original")]
+    Original,
 }
 
 impl PublicationFence {
@@ -2195,7 +2319,112 @@ impl ActorPublicationGuard {
         }
     }
 
+    fn cutoff_error(error: PublicationSettlementError) -> ResidentActorWorkbenchError {
+        ResidentActorWorkbenchError::PublicationSettlement {
+            failure: Box::new(ActorPublicationSettlementFailure {
+                outcome: Ok(ActorGenerationCommit::Refused(
+                    "generation cutoff was refused".into(),
+                )),
+                settlement: PublicationSettlementError::Retirement {
+                    stage: RetirementSettlementStage::Original,
+                    source: Box::new(error),
+                },
+            }),
+        }
+    }
+
+    fn fence_original(&mut self) -> ActorGenerationRetirementCutoff {
+        let Some(expected) = self.attempt.expected.generation() else {
+            return ActorGenerationRetirementCutoff::Refused(Self::cutoff_error(
+                PublicationSettlementError::SelectionChanged,
+            ));
+        };
+        if !matches!(&self.settlement, ActorPublicationState::Armed(_)) {
+            return ActorGenerationRetirementCutoff::Refused(Self::cutoff_error(
+                PublicationSettlementError::SelectionChanged,
+            ));
+        }
+        expected.dependency().fence_selected_with(|transition| {
+            self.owner.with_live_source_settlement(|| {
+                let record = self.state.0.lock();
+                if !matches!(&record.availability, InstalledToolsAvailability::PublicationInProgress(issued) if Arc::ptr_eq(issued, &self.attempt)) {
+                    return Err(PublicationSettlementError::SelectionChanged);
+                }
+                transition.commit();
+                Ok(())
+            }).ok_or(PublicationSettlementError::OwnerUnavailable)?
+        })
+    }
+
+    fn refuse_retirement(
+        &mut self,
+        original: &mut generation_admission::GenerationRetirementFence,
+    ) -> Result<(), PublicationSettlementError> {
+        let at = |stage, source| PublicationSettlementError::Retirement {
+            stage,
+            source: Box::new(source),
+        };
+        original
+            .validate_held()
+            .map_err(|error| at(RetirementSettlementStage::Original, error))?;
+        let Some(expected) = self.attempt.expected.generation() else {
+            return Err(at(
+                RetirementSettlementStage::Original,
+                PublicationSettlementError::SelectionChanged,
+            ));
+        };
+        if !expected.dependency().same_prepared(original.dependency()) {
+            return Err(at(
+                RetirementSettlementStage::Original,
+                PublicationSettlementError::SelectionChanged,
+            ));
+        }
+        let owner = self.owner.clone();
+        let state = self.state.clone();
+        let attempt = self.attempt.clone();
+        let ActorPublicationState::Armed(authority) = &mut self.settlement else {
+            return Err(at(
+                RetirementSettlementStage::Candidate,
+                PublicationSettlementError::ReopenAttempted,
+            ));
+        };
+        authority.refused_when(&attempt.target, |reopen| {
+            owner.with_live_source_settlement(|| {
+                let record = state.0.lock();
+                if !matches!(&record.availability, InstalledToolsAvailability::PublicationInProgress(issued) if Arc::ptr_eq(issued, &attempt)) {
+                    return Err(PublicationSettlementError::SelectionChanged);
+                }
+                reopen.commit();
+                Ok(())
+            }).ok_or(PublicationSettlementError::OwnerUnavailable)?
+        }).map_err(|error| at(RetirementSettlementStage::Candidate, error))?;
+        #[cfg(test)]
+        if let Some(probe) = &self.settlement_probe {
+            probe.wait();
+        }
+        original.reopen_with(|reopen| {
+            owner.with_live_source_settlement(|| {
+                let mut record = state.0.lock();
+                if !matches!(&record.availability, InstalledToolsAvailability::PublicationInProgress(issued) if Arc::ptr_eq(issued, &attempt)) {
+                    return Err(PublicationSettlementError::SelectionChanged);
+                }
+                let ActorRequestSnapshot::Generation(generation) = &attempt.expected else {
+                    return Err(PublicationSettlementError::SelectionChanged);
+                };
+                record.availability = InstalledToolsAvailability::Generation(generation.clone());
+                reopen.commit();
+                Ok(())
+            }).ok_or(PublicationSettlementError::OwnerUnavailable)?
+        }).map_err(|error| at(RetirementSettlementStage::Original, error))?;
+        self.settlement = ActorPublicationState::Settled;
+        Ok(())
+    }
+
     fn refused(mut self) -> Result<(), PublicationSettlementError> {
+        self.refuse_unstarted()
+    }
+
+    fn refuse_unstarted(&mut self) -> Result<(), PublicationSettlementError> {
         let restore = |reopen: tidepool_runtime::session::RuntimeSourceReopen<'_>| {
             self.owner.with_live_source_settlement(|| {
                 let mut record = self.state.0.lock();
@@ -2419,8 +2648,20 @@ where
         publication: Arc<tidepool_runtime::session::PublicationDecision>,
         publication_kind: ActorGenerationPublication,
     ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        match self.reserve(prepared, publication, publication_kind)? {
+            ActorGenerationReservation::Reserved(reserved) => self.publish_reserved(reserved).await,
+            ActorGenerationReservation::Refused(detail) => Ok(ActorGenerationCommit::Refused(detail)),
+        }
+    }
+
+    pub(crate) fn reserve(
+        &self,
+        prepared: PreparedActorGeneration,
+        publication: Arc<tidepool_runtime::session::PublicationDecision>,
+        publication_kind: ActorGenerationPublication,
+    ) -> Result<ActorGenerationReservation, ResidentActorWorkbenchError> {
         if !self.owner.matches_actor(prepared.checkout_context.actor) {
-            return Ok(ActorGenerationCommit::Refused(
+            return Ok(ActorGenerationReservation::Refused(
                 "publication owner belongs to another actor".into(),
             ));
         }
@@ -2429,7 +2670,7 @@ where
             Arc::downgrade(&owner)
         };
         if !prepared.machine_owner.ptr_eq(&machine_owner) {
-            return Ok(ActorGenerationCommit::Refused(
+            return Ok(ActorGenerationReservation::Refused(
                 "prepared generation belongs to a different machine owner".into(),
             ));
         }
@@ -2447,10 +2688,33 @@ where
             self.owner.clone(),
         )?
         else {
-            return Ok(ActorGenerationCommit::Refused(
+            return Ok(ActorGenerationReservation::Refused(
                 "actor generation changed during reload preparation".into(),
             ));
         };
+        Ok(ActorGenerationReservation::Reserved(ReservedActorGeneration {
+            prepared,
+            guard: owner,
+            publication_kind,
+        }))
+    }
+
+    pub(crate) async fn publish_reserved(
+        &self,
+        reserved: ReservedActorGeneration,
+    ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
+        let ReservedActorGeneration { prepared, guard: owner, publication_kind } = reserved;
+        if !matches!(&owner.settlement, ActorPublicationState::Armed(_)) {
+            return Ok(ActorGenerationCommit::Refused("publication reservation already settled".into()));
+        }
+        let machine_owner = {
+            let owner: Arc<dyn std::any::Any + Send + Sync> = self.access.machines.clone();
+            Arc::downgrade(&owner)
+        };
+        if !Arc::ptr_eq(&self.state, &owner.state) || !prepared.machine_owner.ptr_eq(&machine_owner) {
+            return owner.complete(Ok(ActorGenerationCommit::Refused("publication reservation belongs to another publisher".into())));
+        }
+        let publication = owner.decision.clone();
         let visibility = owner.visibility();
         // The affine phase/fence owner is outside checkout, including cancellation
         // and setup failure. The worker receives visibility rights only.
@@ -9434,14 +9698,34 @@ where
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 let view = actor_compile_view(session, context, &snapshot_source)?;
-                let provenance = structured_provenance(&view, &snapshot_source, query_scope);
+                let provenance =
+                    match snapshot_source.inspection_provenance(session, context, query_scope) {
+                        Ok(provenance) => provenance,
+                        Err(error) => {
+                            return Ok(Err(StructuredIntrospectionAnswer::QueryError(
+                                unobserved_inspection_source(error)?,
+                            )))
+                        }
+                    };
                 let inputs = session
                     .capture_inspection_inputs(view.session_view())
                     .map_err(|error| error.to_string());
-                Ok((view, provenance, inputs))
+                Ok(Ok((view, provenance, inputs)))
             })
             .await?;
-        let (compile_view, provenance, inputs) = snapshot;
+        let (compile_view, provenance, inputs) = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(answer) => {
+                return self
+                    .access
+                    .with_continuation_machine(context, move |session, _, _, settlement| {
+                        session
+                            .resume_classified(hole, answer, settlement)
+                            .map_err(classify_resumption)
+                    })
+                    .await
+            }
+        };
         let request_query = match kind {
             StructuredInspectionKind::Info => InspectionQuery::StructuredInfo {
                 query: query.clone(),
@@ -9519,9 +9803,15 @@ where
         cancel_on_drop.0 = None;
         self.access
             .with_continuation_machine(context, move |session, context, _, settlement| {
-                let current_view = actor_compile_view(session, context, &source)?;
-                let current = structured_provenance(&current_view, &source, query.scope.clone());
-                let answer = structured_introspection_answer(kind, inspected, provenance, current);
+                let answer =
+                    match source.inspection_provenance(session, context, query.scope.clone()) {
+                        Ok(current) => {
+                            structured_introspection_answer(kind, inspected, provenance, current)
+                        }
+                        Err(error) => StructuredIntrospectionAnswer::QueryError(
+                            unobserved_inspection_source(error)?,
+                        ),
+                    };
                 session
                     .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
@@ -9541,7 +9831,9 @@ where
             .map_err(|_| ActorCompileViewError::UnownedSourceLayer)?;
         let snapshot_source = source.clone();
         let snapshot_observation = observation.clone();
-        let admitted = self
+        let view_source = self.access.source.config.clone();
+        let query_scope = query.scope.clone();
+        let (admitted, observation_pin) = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 observe_inspection_work(snapshot_observation.as_ref(), || {
@@ -9551,7 +9843,9 @@ where
                         )
                     })?;
                     let original_source = context.source_dependency().source_lease()?;
-                    session
+                    let observation_pin =
+                        view_source.inspection_scope(session, context, query_scope)?;
+                    let admitted = session
                         .capture_inspection_world_in(
                             context.placement.lexical_scope,
                             &evidence.reference,
@@ -9559,7 +9853,8 @@ where
                         )
                         .map_err(|error| {
                             ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })
+                        })?;
+                    Ok((admitted, observation_pin))
                 })
             })
             .await?;
@@ -9598,7 +9893,7 @@ where
                                 crate::SourceInspectionError::Unavailable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnavailable(detail),
                                 crate::SourceInspectionError::Unreadable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnreadable(detail),
                             }),
-                            compiler_query, compiler_kind,
+                            compiler_query, observation_pin, compiler_kind,
                         )
                     },
                 ).map_err(ResidentActorWorkbenchError::from)?;
@@ -9622,6 +9917,8 @@ where
         source: crate::CheckpointSourceLayer,
         observation: Option<Arc<tidepool_toolchain::timing::HostWorkObservation>>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let query_scope = query.scope.clone();
+        let view_source = self.access.source.config.clone();
         let inspected = self
             .query_public_module_world(context.clone(), query, kind, observation.clone())
             .await;
@@ -9639,7 +9936,17 @@ where
                                 )
                             })?;
                             let original_source = context.source_dependency().source_lease()?;
-                            if session.install_inspection_world_if_current(
+                            match view_source.inspection_provenance(session, context, query_scope) {
+                                Err(error) => StructuredIntrospectionAnswer::QueryError(
+                                    unobserved_inspection_source(error)?,
+                                ),
+                                Ok(current) if !completed.provenance().same_view(&current) => {
+                                    StructuredIntrospectionAnswer::ScopeChanged {
+                                        before: completed.provenance().clone(),
+                                        after: current,
+                                    }
+                                }
+                                Ok(_) => if session.install_inspection_world_if_current(
                                 &completed,
                                 &evidence.reference,
                                 &original_source,
@@ -9649,8 +9956,11 @@ where
                                 StructuredIntrospectionAnswer::CompilerUnavailable(
                                     "inspection world base changed before resumption".into(),
                                 )
+                            },
                             }
                         }
+                        Err(error @ ResidentActorWorkbenchError::CompileView(ActorCompileViewError::UnobservedSourceIdentity)) =>
+                            StructuredIntrospectionAnswer::QueryError(unobserved_inspection_source(error)?),
                         Err(ResidentActorWorkbenchError::WorldInspection(tidepool_runtime::session::WorldInspectionError::UnsupportedSource)) => StructuredIntrospectionAnswer::QueryError(
                             tidepool_runtime::session::QueryError::Unsupported("source owner cannot represent this compiler source domain".into())
                         ),
@@ -15143,6 +15453,21 @@ fn inspect_compile_view(
     }
 }
 
+fn unobserved_inspection_source(
+    error: ResidentActorWorkbenchError,
+) -> Result<tidepool_runtime::session::QueryError, ResidentActorWorkbenchError> {
+    if matches!(
+        &error,
+        ResidentActorWorkbenchError::CompileView(ActorCompileViewError::UnobservedSourceIdentity)
+    ) {
+        Ok(tidepool_runtime::session::QueryError::Unsupported(
+            error.to_string(),
+        ))
+    } else {
+        Err(error)
+    }
+}
+
 fn public_module_query_source(
     roots: &crate::ActorSourceRoots,
 ) -> Result<crate::CheckpointSourceLayer, tidepool_runtime::session::QueryError> {
@@ -15225,36 +15550,6 @@ fn observe_inspection_work<T>(
     match observation {
         Some(observation) => observation.scope(work),
         None => work(),
-    }
-}
-
-fn structured_provenance(
-    compile_view: &crate::ActorCompileView,
-    source: &ActorWorkbenchSource,
-    scope: tidepool_runtime::session::NameScope,
-) -> tidepool_runtime::session::ScopeProvenance {
-    tidepool_toolchain::timing::record_host_work(
-        tidepool_toolchain::timing::HostWorkCounter::StructuredProvenance,
-        1,
-    );
-    let prepared = source.prepare(compile_view);
-    let generation = compile_view.next_value_generation().0;
-    let mut fingerprint = blake3::Hasher::new();
-    fingerprint.update(prepared.preamble.as_bytes());
-    fingerprint.update(prepared.imports.as_bytes());
-    fingerprint.update(&generation.to_le_bytes());
-    for path in &prepared.include {
-        fingerprint.update(path.as_os_str().as_encoded_bytes());
-        fingerprint.update(&[0]);
-    }
-    for module in &prepared.injected {
-        fingerprint.update(module.as_bytes());
-        fingerprint.update(&[0]);
-    }
-    tidepool_runtime::session::ScopeProvenance {
-        scope,
-        generation,
-        fingerprint: fingerprint.finalize().to_hex().to_string(),
     }
 }
 
@@ -17491,6 +17786,9 @@ pub(crate) mod request_tests {
         fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
             tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
         }
+        fn source_revision_identity(&self) -> Option<&str> {
+            self.identities.first().map(String::as_str)
+        }
         fn generation_evidence(&self) -> Option<&crate::SourceGenerationEvidence> {
             Some(&self.evidence)
         }
@@ -18138,7 +18436,7 @@ pub(crate) mod request_tests {
                     let mut calibration = context.clone();
                     calibration.placement.lexical_scope = session.mint_scope(context.placement.lexical_scope).unwrap();
                     let view = actor_compile_view(session, &calibration, source)?;
-                    let _ = structured_provenance(&view, source, tidepool_runtime::session::NameScope::Current);
+                    let _ = source.inspection_provenance(session, context, tidepool_runtime::session::NameScope::Current);
                     session.capture_inspection_inputs(view.session_view())
                         .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
                     Ok(())
@@ -18294,7 +18592,7 @@ pub(crate) mod request_tests {
                 namespace: tidepool_runtime::session::NameNamespace::Value, name: "known".into(),
             }, StructuredInspectionKind::Type, Some(unsupported_work.clone())).await;
             assert!(matches!(refused, Err(ResidentActorWorkbenchError::WorldInspection(tidepool_runtime::session::WorldInspectionError::UnsupportedSource))));
-            for counter in [HostWorkCounter::ActorCompileViewCapture, HostWorkCounter::StructuredProvenance,
+            for counter in [HostWorkCounter::ActorCompileViewCapture,
                 HostWorkCounter::InspectionInputCapture, HostWorkCounter::ColdWorldBuilderRowVisit,
                 HostWorkCounter::InputFdEnumeration, HostWorkCounter::CompileViewDigestInputByte, HostWorkCounter::SemanticDigestInputByte, HostWorkCounter::SemanticEncoding] {
                 assert_eq!(unsupported_work.snapshot().get(counter), 0, "unsupported source performed {counter:?}");

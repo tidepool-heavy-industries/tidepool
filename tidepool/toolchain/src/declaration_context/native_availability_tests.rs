@@ -10049,12 +10049,6 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     .unwrap();
     let view = inputs.artifacts().clone();
     let continuation = ContinuationNativeInputs::from_selection(&selection, &projection).unwrap();
-    assert!(matches!(
-        selection.complete_native_entries(&ArtifactInventory::default().empty_view()),
-        Err(crate::certified_products::CertificationError::Mismatch(
-            "complete native selection payload"
-        ))
-    ));
     let completed = continuation.complete_products(&view).unwrap();
     assert_eq!(completed.entries.len(), 1);
     let entry = Arc::clone(&completed.entries[0]);
@@ -10063,6 +10057,12 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     assert!(Arc::ptr_eq(
         &entry,
         &view.metadata_snapshot().artifacts[&id]
+    ));
+
+    assert!(matches!(
+        selection.complete_native_entries(&ArtifactInventory::default().empty_view()),
+        Err(crate::certified_products::CertificationError::MissingRetainedCustody { artifact })
+            if artifact == id
     ));
 
     // Equal payloads in a separately issued scope do not supply this request's binding.

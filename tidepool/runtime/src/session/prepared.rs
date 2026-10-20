@@ -7,7 +7,7 @@
 //! disposition, and retained-program reuse cross this boundary in that order.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{atomic::AtomicBool, Arc, OnceLock};
 
 use tidepool_bridge::{BridgeError, HaskellValue, HaskellVisitor};
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
@@ -1552,6 +1552,7 @@ struct SiteWitness {
 /// the requesting machine session, not the recipient's machine session.
 #[derive(Clone, Debug)]
 pub struct SiteTypeEvidence {
+    commitment: OnceLock<[u8; 32]>,
     types: Arc<TypeGraph>,
     constructors: Arc<[(ConstructorIdentity, DataConId)]>,
     input: TypeNodeId,
@@ -1701,6 +1702,7 @@ impl SiteTypeEvidence {
             tidepool_toolchain::declaration_join::ExactCompileContext::new(declarations.clone())
                 .with_request_types(Arc::new(signatures)),
         ));
+        self.commitment.take();
         Ok(self)
     }
 
@@ -1737,6 +1739,14 @@ impl SiteTypeEvidence {
     /// Commit to the complete canonical site type graph with explicit framing
     /// and a versioned domain. This is evidence identity, not a type renderer.
     pub(crate) fn commitment(&self) -> [u8; 32] {
+        *self.commitment.get_or_init(|| self.compute_commitment())
+    }
+
+    fn compute_commitment(&self) -> [u8; 32] {
+        tidepool_toolchain::timing::record_host_work(
+            tidepool_toolchain::timing::HostWorkCounter::SemanticEncoding,
+            1,
+        );
         fn frame(hash: &mut blake3::Hasher, bytes: &[u8]) {
             hash.update(&(bytes.len() as u64).to_le_bytes());
             hash.update(bytes);
@@ -3541,6 +3551,7 @@ impl PreparedEngine {
         let facts = self.programs.get(&witness.owner)?;
         let row = facts.sites.get(witness.row)?;
         Some(SiteTypeEvidence {
+            commitment: OnceLock::new(),
             types: Arc::clone(&facts.types),
             constructors: Arc::clone(&facts.constructors),
             input: *row.inputs.first()?,
@@ -12751,7 +12762,20 @@ pub(super) mod tests {
         let original_request = engine.request_site_type_evidence(101).unwrap();
         let new_request = engine.request_site_type_evidence(102).unwrap();
         assert_ne!(original_request, new_request);
-        assert_ne!(original_request.commitment(), new_request.commitment());
+        let observation = tidepool_toolchain::timing::HostWorkObservation::new();
+        let original_commitment = observation.scope(|| original_request.commitment());
+        observation.scope(|| {
+            assert_eq!(original_commitment, original_request.commitment());
+            assert_eq!(original_commitment, original_request.clone().commitment());
+        });
+        assert_eq!(
+            observation
+                .snapshot()
+                .get(tidepool_toolchain::timing::HostWorkCounter::SemanticEncoding),
+            1,
+            "immutable site evidence encodes once across repeated observations and clones"
+        );
+        assert_ne!(original_commitment, new_request.commitment());
         assert!(engine
             .request_scope_types_match(&original_request, 201)
             .unwrap());
@@ -12885,7 +12909,7 @@ pub(super) mod tests {
             // repetitions add equal/ABA comparisons and shrink independently.
             revisions.extend(0..4);
             let facts = revisions.iter().map(|revision| ProgramFacts::of(&versioned_reply_program(*revision, 1))).collect::<Vec<_>>();
-            let evidence = facts.iter().map(|facts| SiteTypeEvidence { types:facts.types.clone(),constructors:facts.constructors.clone(),input:TypeNodeId(0),answer:TypeNodeId(1),request_context:None }).collect::<Vec<_>>();
+            let evidence = facts.iter().map(|facts| SiteTypeEvidence { commitment:OnceLock::new(),types:facts.types.clone(),constructors:facts.constructors.clone(),input:TypeNodeId(0),answer:TypeNodeId(1),request_context:None }).collect::<Vec<_>>();
             // Logical revisions are the independent oracle; no hashes or
             // descriptor addresses enter the expected equality relation.
             for left in 0..revisions.len() { for right in 0..revisions.len() {
@@ -12966,6 +12990,7 @@ pub(super) mod tests {
         )
         .expect("canonical site graph fixture");
         let evidence = SiteTypeEvidence {
+            commitment: OnceLock::new(),
             types,
             constructors: vec![(constructor.identity.clone(), constructor.host_id)].into(),
             input: TypeNodeId(0),
@@ -12987,6 +13012,7 @@ pub(super) mod tests {
         );
 
         let mut renamed = evidence.clone();
+        renamed.commitment.take();
         let mut storage = renamed.types.graph().clone();
         let TypeNode::Root { rendered, .. } =
             &mut storage[tidepool_repr::type_graph::TypeNodeId::new(1)]
@@ -13009,11 +13035,13 @@ pub(super) mod tests {
         );
         assert_eq!(commitment, renamed.commitment());
         let mut relocated = evidence.clone();
+        relocated.commitment.take();
         Arc::make_mut(&mut relocated.constructors)[0].1 = DataConId(999);
         assert_eq!(evidence, relocated);
         assert_eq!(commitment, relocated.commitment());
 
         let mut changed_template = evidence.clone();
+        changed_template.commitment.take();
         let mut storage = changed_template.types.graph().clone();
         let field = tidepool_repr::type_graph::TypeNodeId::new(7);
         storage[field] = TypeNode::NominalApplication;
@@ -13037,6 +13065,7 @@ pub(super) mod tests {
         assert_ne!(evidence, changed_template);
         assert_ne!(commitment, changed_template.commitment());
         let mut changed_family = evidence.clone();
+        changed_family.commitment.take();
         let mut storage = changed_family.types.graph().clone();
         let mut renamed_constructor = constructor.clone();
         renamed_constructor.identity.family.symbol.occurrence = "OtherReply".into();
@@ -13046,6 +13075,12 @@ pub(super) mod tests {
             panic!("fixture nominal declaration");
         };
         *identity = renamed_constructor.identity.family.clone();
+        let TypeNode::ConstructorTemplate { identity, .. } =
+            &mut storage[tidepool_repr::type_graph::TypeNodeId::new(6)]
+        else {
+            panic!("fixture constructor template");
+        };
+        *identity = renamed_constructor.identity.clone();
         changed_family.types = Arc::new(
             TypeGraph::validate(
                 storage,
@@ -13059,10 +13094,12 @@ pub(super) mod tests {
         assert_ne!(commitment, changed_family.commitment());
 
         let mut changed_endpoint = evidence.clone();
+        changed_endpoint.commitment.take();
         changed_endpoint.answer = TypeNodeId(0);
         assert_ne!(commitment, changed_endpoint.commitment());
 
         let mut changed_constructor = evidence;
+        changed_constructor.commitment.take();
         Arc::make_mut(&mut changed_constructor.constructors)[0]
             .0
             .symbol

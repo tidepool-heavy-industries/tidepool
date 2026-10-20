@@ -132,6 +132,15 @@ fn publish_seed_world(
         namespace: NameNamespace::Value,
         name: "seed".into(),
     };
+    let observation = session
+        .capture_inspection_scope_in(
+            scope,
+            sources.seal(),
+            &tidepool_runtime::session::SourceImports::default(),
+            &tidepool_runtime::session::RuntimeCompileInputs::default(),
+            query.scope.clone(),
+        )
+        .map_err(|_| "seed scope observation is unavailable")?;
     let settled = original_source
         .with_source_compiler_transaction(
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
@@ -144,6 +153,7 @@ fn publish_seed_world(
                     admitted,
                     move || Ok(Some(sources)),
                     query,
+                    observation,
                     PublicModuleQuestionKind::StructuredInfo,
                 )
             },
