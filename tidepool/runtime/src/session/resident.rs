@@ -994,6 +994,44 @@ enum HostCarrierOrigin {
     },
 }
 
+#[derive(Clone, Copy)]
+enum HostBindingReservation<'a> {
+    Interface(&'a super::RuntimeBindingInterfaceReservation),
+    Carrier(&'a super::RuntimeCheckedItemAdmission),
+}
+
+impl HostBindingReservation<'_> {
+    fn matches(self, scope: ScopeId, generation: Generation, binder: &BoundBinder) -> bool {
+        match self {
+            Self::Interface(reservation) => {
+                reservation.scope == scope
+                    && reservation.generation() == generation
+                    && reservation.binding() == binder.name
+            }
+            Self::Carrier(admission) => {
+                admission.prefix().admission().lexical_scope() == scope
+                    && admission.generation() == generation
+                    && admission
+                        .prefix()
+                        .admission()
+                        .host_carrier()
+                        .is_some_and(|(binding, _)| binding == binder.name)
+            }
+        }
+    }
+}
+
+struct HostBindingInstall<'a> {
+    reservation: HostBindingReservation<'a>,
+    interface: super::persistent::StagedCheckedValueInterface,
+    private_input: Option<&'a Arc<super::PrivateExecutionAdmission>>,
+}
+
+enum PreparedBindingInstall<'a> {
+    Turn(Option<&'a CheckedTurnCompletion>),
+    Host(HostBindingInstall<'a>),
+}
+
 /// Fixed host representation and native type evidence retained with the
 /// original checked source owner. This grants no fresh binding by itself.
 pub struct HostBindingPrototype {
@@ -6109,6 +6147,8 @@ where
         }
         let binding = SessionVarId::from_extract(binder.var_id);
         self.state.validate_new_binding_ids([binding])?;
+        self.state
+            .validate_fresh_host_binding_in(scope, &binder.name)?;
         let raw = owner.input.custody.handle.ok_or_else(invalid)?;
         let handle = self
             .state
@@ -6149,6 +6189,7 @@ where
             scope,
             &binder,
             generation,
+            reservation,
             owner.input.custody,
             staged,
             settlement,
@@ -6365,8 +6406,11 @@ where
             binder,
             admission.generation,
             carrier.code(),
-            Some(staged),
-            private_input,
+            Some(HostBindingInstall {
+                reservation: HostBindingReservation::Interface(admission),
+                interface: staged,
+                private_input,
+            }),
             move |engine, realm, _| representation.build(engine, realm, payload),
             settlement,
         )?;
@@ -6547,8 +6591,11 @@ where
             binder,
             generation,
             carrier.code(),
-            Some(staged),
-            private_input,
+            Some(HostBindingInstall {
+                reservation: HostBindingReservation::Carrier(admission),
+                interface: staged,
+                private_input,
+            }),
             move |engine, realm, _| representation.build(engine, realm, payload),
             settlement,
         )?;
@@ -6908,6 +6955,8 @@ where
         }
         self.state
             .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])?;
+        self.state
+            .validate_fresh_host_binding_in(scope, &binder.name)?;
         if binder.module != SessionModule::val(generation).module_name() {
             return Err(host_mount_failure(
                 "host binder differs from its mount generation",
@@ -6947,9 +6996,7 @@ where
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
-        self.mount_host_value_with_interface_in(
-            scope, binder, gen, code, None, None, build, settlement,
-        )
+        self.mount_host_value_with_interface_in(scope, binder, gen, code, None, build, settlement)
     }
 
     fn mount_host_value_with_interface_in(
@@ -6958,8 +7005,7 @@ where
         binder: &BoundBinder,
         gen: Generation,
         code: TurnCode<'_>,
-        staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
-        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
+        install: Option<HostBindingInstall<'_>>,
         build: impl FnOnce(
             &mut super::prepared::PreparedEngine,
             RealmId,
@@ -7005,15 +7051,7 @@ where
                 let engine = self.state.require_prepared()?;
                 build(engine, realm, &table)?
             };
-            self.mount_host_handle_prepared(
-                scope,
-                binder,
-                gen,
-                handle,
-                staged_interface,
-                private_input,
-                settlement,
-            )
+            self.mount_host_handle_prepared(scope, binder, gen, handle, install, settlement)
         })();
         if let Some(engine) = self.state.prepared_mut() {
             engine.unpin(program);
@@ -7033,8 +7071,7 @@ where
         binder: &BoundBinder,
         gen: Generation,
         handle: PreparedHandle,
-        staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
-        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
+        install: Option<HostBindingInstall<'_>>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         let engine = self.state.require_prepared()?;
@@ -7049,9 +7086,10 @@ where
             scope,
             gen,
             &[(binder, handle)],
-            None,
-            staged_interface,
-            private_input,
+            match install {
+                Some(install) => PreparedBindingInstall::Host(install),
+                None => PreparedBindingInstall::Turn(None),
+            },
             settlement,
         )?;
         self.binding_provenance
@@ -7065,6 +7103,7 @@ where
         scope: ScopeId,
         binder: &BoundBinder,
         gen: Generation,
+        reservation: &super::RuntimeBindingInterfaceReservation,
         custody: RootCustody,
         staged_interface: super::persistent::StagedCheckedValueInterface,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
@@ -7089,9 +7128,11 @@ where
             scope,
             gen,
             &[(binder, handle)],
-            None,
-            Some(staged_interface),
-            None,
+            PreparedBindingInstall::Host(HostBindingInstall {
+                reservation: HostBindingReservation::Interface(reservation),
+                interface: staged_interface,
+                private_input: None,
+            }),
             settlement,
         )?;
         self.binding_provenance.insert(binder.var_id, provenance);
@@ -8216,9 +8257,7 @@ where
                             lexical_scope,
                             generation,
                             &[(binder, handle)],
-                            checked.as_deref(),
-                            None,
-                            None,
+                            PreparedBindingInstall::Turn(checked.as_deref()),
                             settlement,
                         )?;
                         self.binding_provenance
@@ -8263,9 +8302,7 @@ where
                     lexical_scope,
                     generation,
                     &bound,
-                    checked.as_deref(),
-                    None,
-                    None,
+                    PreparedBindingInstall::Turn(checked.as_deref()),
                     settlement,
                 )?;
                 for binder in binders {
@@ -8332,12 +8369,26 @@ where
         scope: ScopeId,
         generation: Generation,
         bound: &[(&BoundBinder, PreparedHandle)],
-        checked: Option<&CheckedTurnCompletion>,
-        staged_interface: Option<super::persistent::StagedCheckedValueInterface>,
-        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
+        install: PreparedBindingInstall<'_>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
-        if let Some(staged) = &staged_interface {
+        if let PreparedBindingInstall::Host(host) = &install {
+            let valid = bound.len() == 1 && host.reservation.matches(scope, generation, bound[0].0);
+            let fresh = if valid {
+                self.state
+                    .validate_fresh_host_binding_in(scope, &bound[0].0.name)
+            } else {
+                Err(SessionError::StaleStagedDeclaration)
+            };
+            if let Err(error) = fresh {
+                if let Some(engine) = self.state.prepared_mut() {
+                    engine.release_all(bound.iter().map(|(_, handle)| *handle));
+                }
+                return Err(error.into());
+            }
+        }
+        if let PreparedBindingInstall::Host(host) = &install {
+            let staged = &host.interface;
             let validated = self
                 .state
                 .validate_staged_value_interface(staged)
@@ -8360,11 +8411,11 @@ where
             }
         }
         let binders = bound.iter().map(|(binder, _)| *binder).collect::<Vec<_>>();
-        let overlay_validation = match checked {
-            Some(completion) => completion
+        let overlay_validation = match &install {
+            PreparedBindingInstall::Turn(Some(completion)) => completion
                 .validates_private_overlay(&self.state, scope, &binders)
                 .map(|private| private.then_some(completion)),
-            None => Ok(None),
+            _ => Ok(None),
         };
         let private_overlay = match overlay_validation {
             Ok(completion) => completion,
@@ -8381,7 +8432,7 @@ where
             engine.release_all(bound.iter().map(|(_, handle)| *handle));
             return Err(SessionError::DeadScope(scope).into());
         }
-        let unit = if checked.is_some() || staged_interface.is_some() {
+        let unit = if !matches!(&install, PreparedBindingInstall::Turn(None)) {
             "main".to_owned()
         } else {
             engine.entry_unit(program).unwrap_or_default()
@@ -8420,7 +8471,11 @@ where
             };
             entries.push(entry);
         }
-        if let Some(execution) = private_input {
+        if let PreparedBindingInstall::Host(HostBindingInstall {
+            private_input: Some(execution),
+            ..
+        }) = &install
+        {
             if execution.private_scope() != scope
                 || !Arc::ptr_eq(&execution.owner, self.state.admission_owner())
                 || execution.owner_epoch != self.state.admission_owner().epoch()
@@ -8449,14 +8504,23 @@ where
         } else if let Some(completion) = private_overlay {
             self.state
                 .bind_checked_private_values_in(completion, scope, entries, &binders)?;
+        } else if matches!(&install, PreparedBindingInstall::Host(_)) {
+            let entry = entries.pop().expect("one reserved host binding");
+            let handle = entry.value.handle;
+            if let Err(error) = self.state.bind_in(scope, entry) {
+                if let Some(engine) = self.state.prepared_mut() {
+                    engine.release(handle);
+                }
+                return Err(error.into());
+            }
         } else {
             self.state
                 .bind_replacing_decls_in(scope, entries, settlement)?;
         }
         // A checked native mount commits its sealed artifact with the binding;
         // every other install retains no in-memory value interface.
-        if let Some(staged) = staged_interface {
-            self.state.commit_staged_value_interface(staged);
+        if let PreparedBindingInstall::Host(host) = install {
+            self.state.commit_staged_value_interface(host.interface);
         }
         for _ in bound {
             self.advance_public_visibility(scope);

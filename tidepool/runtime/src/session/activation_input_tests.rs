@@ -894,10 +894,16 @@ fn mount_original(
     let roots = resident.persistent_roots_count();
     let custody = resident.outstanding_custody();
     let codegen = resident.codegen_totals();
+    let submissions = tidepool_extract_cmd::extract_spawn_count();
     let mounted = source_action(resident, |resident, settlement| {
         resident.mount_activation_input(owner, interface.clone(), settlement)
     })
     .expect("mount the original value under its thin type interface");
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        submissions,
+        "mounting an issued host interface cannot recompile a declaration projection"
+    );
     assert!(resident
         .binding_names_in(scope)
         .iter()
@@ -1020,13 +1026,13 @@ fn try_check_fixture_cell(
         Ok::<_, turn::CellCheckFailure>(resident.admit_planned_cell_for_execution(
             execution,
             plan,
+        .expect("admit checked fixture bindings with their selected interfaces"))
             specification.clone(),
             specification.specification_digest(),
             recipe.digest(),
             includes,
             None,
         )
-        .expect("admit checked fixture bindings with their selected interfaces"))
     })?;
     let (checked, program) = tidepool_testing::with_settlement(|settlement| {
         turn::compile_cell_program_admitted(admission.clone(), settlement)
@@ -5744,6 +5750,67 @@ fn activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservation
             "{error:?}"
         );
         assert_unpublished_input(&mut resident, ScopeId::ROOT, &visibility, handles, roots);
+    }
+}
+
+#[test]
+fn activation_input_reservation_refuses_visible_names_without_recompiling() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-function.hs"),
+        false,
+        SessionId(1743),
+    );
+    for materialized in [false, true] {
+        let mut resident = fixture.fresh();
+        if materialized {
+            let (owner, interface) = parked_input_owner(&fixture, &mut resident);
+            drop(mount_original(&mut resident, owner, interface));
+        } else {
+            publish_fixture_declaration(
+                &mut resident,
+                &fixture.recipe,
+                "sessionInput :: Int\nsessionInput = 13",
+                0,
+            );
+        }
+        let reservation = fixture.start(&mut resident);
+        let (_, hole) = fixture.deliver(&mut resident, reservation, 1);
+        let site = parked_site(&mut resident, &hole);
+        let realm = resident.parked_realm(&hole).unwrap();
+        let input = resident
+            .capture_activation_input(&hole, realm, site)
+            .unwrap();
+        let visibility = resident
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap();
+        let heads = resident.current_decl_heads_in(ScopeId::ROOT);
+        let generation = resident.val_gen();
+        let handles = resident.value_handle_count();
+        let roots = resident.persistent_roots_count();
+        let submissions = tidepool_extract_cmd::extract_spawn_count();
+        let requests = tidepool_toolchain::artifacts::host_binding_interface_request_count();
+        let result = source_action(&mut resident, |resident, _| {
+            resident.admit_activation_input_in(ScopeId::ROOT, input)
+        });
+        assert!(matches!(result, Err(ResidentError::Session(
+            SessionError::HostBindingNameCollision { scope: ScopeId::ROOT, ref binding }
+        )) if binding == "sessionInput"));
+        assert_eq!(
+            resident
+                .public_visibility_snapshot_in(ScopeId::ROOT)
+                .unwrap(),
+            visibility
+        );
+        assert_eq!(resident.current_decl_heads_in(ScopeId::ROOT), heads);
+        assert_eq!(resident.val_gen(), generation);
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions);
+        assert_eq!(
+            tidepool_toolchain::artifacts::host_binding_interface_request_count(),
+            requests
+        );
+        assert_eq!(resident.outstanding_custody(), 0);
+        assert_eq!(resident.value_handle_count(), handles - 1);
+        assert_eq!(resident.persistent_roots_count(), roots - 1);
     }
 }
 

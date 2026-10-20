@@ -426,6 +426,8 @@ pub enum SessionError {
     /// declaration — a stale or forged `ScopeId`.
     #[error("scope {0:?} is not live (never minted, or already retired)")]
     DeadScope(ScopeId),
+    #[error("host binding {binding} conflicts with a visible value in scope {scope:?}")]
+    HostBindingNameCollision { scope: ScopeId, binding: String },
     #[error("session has no persistent declaration library")]
     MissingDeclarationLibrary,
     #[error("scope {0:?} has no current published compiler world")]
