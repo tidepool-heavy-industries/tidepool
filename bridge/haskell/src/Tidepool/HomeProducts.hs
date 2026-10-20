@@ -79,7 +79,7 @@ import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeInterfaces, CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
   , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements
   , scopeModuleInterfaceProofs, canonicalOrigin, isSourceOriginal, canonicalCoreArtifact
-  , canonicalCoreSha256, canonicalCertificateSha256, canonicalRequirements, validateExactScopeEnvironment, admittedInterfaceCoreBytes, admittedInterfaceCoreBody
+  , canonicalCoreSha256, canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements, validateExactScopeEnvironment, admittedInterfaceCoreBytes, admittedInterfaceCoreBody
   , canonicalInterfaceInput, canonicalProofInterfaceBody, canonicalProofOriginalBody )
 import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore, decodeFinalizedCore, captureFinalizedCore)
 import Tidepool.FinalizedModule (FinalizedModule, finalizedHomeModInfo, captureFinalizedInterface)
@@ -96,6 +96,12 @@ data CandidateCoreFailure
   | CandidateCompilerViewUnsupportedProfile
   | CandidateOriginalOwnerMismatch
   | CandidateOriginalInterfaceMismatch
+      { candidateInterfaceOwner :: (String,String)
+      , candidateExpectedInterfaceSha256 :: String
+      , candidateActualInterfaceSha256 :: String
+      , candidateCanonicalCertificate :: (FilePath,String)
+      , candidateInterfaceInput :: FilePath
+      }
   | CandidateOriginalCoreMismatch
   | CandidateOriginalPackagesMismatch
   | CandidateOriginalAuthorityMissing String String
@@ -133,7 +139,13 @@ admitCompiledCanonicalOriginal env proof original packages = do
     (throwIO CandidateOriginalOwnerMismatch)
   interface <- captureFinalizedInterface original
   expectedInterface <- canonicalProofInterfaceBody proof artifact
-  unless (interface == expectedInterface) (throwIO CandidateOriginalInterfaceMismatch)
+  unless (interface == expectedInterface) $ throwIO CandidateOriginalInterfaceMismatch
+    { candidateInterfaceOwner=originalOwnerKey owner
+    , candidateExpectedInterfaceSha256=artifactSha256 expectedInterface
+    , candidateActualInterfaceSha256=artifactSha256 interface
+    , candidateCanonicalCertificate=(canonicalCertificatePath proof,canonicalCertificateSha256 proof)
+    , candidateInterfaceInput=exactPath artifact
+    }
   either throwIO pure (validateCandidateInterfaceRequirements proof (hm_iface (finalizedHomeModInfo original)))
   -- The compiler owns this current Core body. Its admitted canonical seal
   -- verifies identity without acquiring an old Core payload from metadata.

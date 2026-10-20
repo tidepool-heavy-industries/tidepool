@@ -365,6 +365,30 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   canonical <- admitCompiledCanonicalOriginal env proof finalized roots
   assert (admittedOriginalProof canonical == proof)
     "compiled canonical admission replaced its selected original proof"
+  let originalHome = finalizedHomeModInfo finalized
+      originalIface = hm_iface originalHome
+  assert (not (null (mi_usages originalIface)))
+    "interface refusal control has no actual imported usage to change"
+  changedInterface <- newFinalizedModule env
+    originalHome {hm_iface=set_mi_usages [] originalIface} guts
+  changedInterfaceBody <- captureFinalizedInterface changedInterface
+  rejectedInterface <- try (admitCompiledCanonicalOriginal env proof changedInterface roots)
+    :: IO (Either CandidateCoreFailure AdmittedFinalizedOriginal)
+  assert (case rejectedInterface of
+      Left CandidateOriginalInterfaceMismatch
+        { candidateInterfaceOwner=observedOwner
+        , candidateExpectedInterfaceSha256=expectedSha
+        , candidateActualInterfaceSha256=actualSha
+        , candidateCanonicalCertificate=certificate
+        , candidateInterfaceInput=input } ->
+          observedOwner == key
+            && expectedSha == exactSha256 artifact
+            && actualSha == artifactSha256 changedInterfaceBody
+            && actualSha /= expectedSha
+            && certificate == (canonicalCertificatePath proof,canonicalCertificateSha256 proof)
+            && input == exactPath artifact
+      _ -> False)
+    "interface refusal lost its actual owner, seals or selected proof location"
   changedCore <- newFinalizedModule env (finalizedHomeModInfo finalized) guts {cg_binds=[]}
   rejectedCore <- try (admitCompiledCanonicalOriginal env proof changedCore roots)
     :: IO (Either CandidateCoreFailure AdmittedFinalizedOriginal)
