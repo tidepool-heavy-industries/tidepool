@@ -15133,16 +15133,12 @@ pub(crate) mod tests {
                             .unwrap(),
                     )
                     .unwrap();
-                let physical = input
-                    .artifacts()
-                    .inventory()
-                    .admit_shared_with_demand(
-                        input.artifacts(),
-                        vec![output_entry.clone()],
-                        NativeArtifactDemand::ScopeInterfaces,
-                    )
-                    .unwrap();
-                let completed = OriginalCompilerInputs::from_selection(&selection, &physical);
+                let completed = OriginalCompilerInputs::issue_segment_native_availability(
+                    &mut selection,
+                    input.artifacts(),
+                    vec![output_entry.clone()],
+                )
+                .and_then(|physical| OriginalCompilerInputs::from_selection(&selection, &physical));
                 if !expected {
                     let outcome = match &completed {
                         Ok(completed) => {
@@ -15195,6 +15191,13 @@ pub(crate) mod tests {
                         .issued_artifacts()
                         .selected_native_groups()
                         .is_empty());
+                    let completed_offer = completed
+                        .native_offers()
+                        .iter()
+                        .find(|offer| offer.original() == output_entry.descriptor.id)
+                        .expect("actual completed C has its issued native offer")
+                        .clone();
+                    assert!(completed_offer.is_full());
                     let next = ExactCompileContext::new(context.clone())
                         .prepare_compilation_with_private_input(
                             &root.join("completed"),
@@ -15208,6 +15211,21 @@ pub(crate) mod tests {
                         .native_availability(support_entry.descriptor.id)
                         .unwrap()
                         .permits(required_ordinal));
+                    assert_eq!(
+                        next.compiler_inputs()
+                            .compiler_source_support()
+                            .native_availability()
+                            .snapshot_facts()
+                            .unwrap()[&output_entry.descriptor.id]
+                            .mode,
+                        NativeTransportMode::Full
+                    );
+                    assert!(next
+                        .compiler_inputs()
+                        .compiler_source_support()
+                        .native_offers()
+                        .iter()
+                        .any(|offer| offer.same_issuance(&completed_offer)));
                     assert!(next
                         .compiler_inputs()
                         .artifacts()
