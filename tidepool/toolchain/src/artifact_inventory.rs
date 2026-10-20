@@ -3322,6 +3322,8 @@ fn validate_existing_rows(
 pub(crate) struct BoundArtifactSelection {
     view: ArtifactView,
     physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
+    compiler_prefix: CompilerSourceSupport,
+    produced_prefix: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
     entries: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
     owners: Arc<SelectedOwners>,
     captured_facts: Arc<BTreeMap<ArtifactId, ArtifactFactsHandle>>,
@@ -3387,6 +3389,52 @@ impl BoundArtifactSelection {
 
     pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
         &self.native_source
+    }
+
+    pub(crate) fn advance_compiler_prefix(
+        &mut self,
+        physical: &Arc<crate::declaration_context::OriginalCompilerInputs>,
+        produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Arc<crate::declaration_context::OriginalCompilerInputs>, CompileError> {
+        if !Arc::ptr_eq(physical, &self.physical_inputs) {
+            return Err(failure(
+                "item compiler cursor belongs to another physical segment",
+            ));
+        }
+        match (&self.produced_prefix, produced) {
+            (None, None) => {}
+            (Some(previous), Some(item)) if item.follows(previous) => {}
+            _ => {
+                return Err(failure(
+                    "item compiler prefix is not the next checked output",
+                ))
+            }
+        }
+        let next = match produced {
+            Some(item) => {
+                operation
+                    .reserve::<Arc<crate::recovery_artifacts::CertifiedValueInterface>>(
+                        item.required().count(),
+                    )
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                let mut values = Vec::new();
+                for value in item.required() {
+                    operation
+                        .checkpoint()
+                        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                    values.push(Arc::clone(value));
+                }
+                self.compiler_prefix.admit_value_interfaces(&values)?
+            }
+            None => self.compiler_prefix.clone(),
+        };
+        let inputs = Arc::new(
+            crate::declaration_context::OriginalCompilerInputs::from_issued_support(&next),
+        );
+        self.compiler_prefix = next;
+        self.produced_prefix = produced.cloned();
+        Ok(inputs)
     }
 
     #[cfg(test)]
@@ -3666,9 +3714,22 @@ impl ArtifactInventory {
         drop(state);
         let mut materializations = Vec::new();
         view.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
+        let produced_prefix = selection
+            .produced_types()
+            .map(|outputs| outputs.before_segment());
+        let excluded = selection
+            .produced_types()
+            .into_iter()
+            .flat_map(|outputs| outputs.required())
+            .map(|output| output.artifact_id())
+            .collect();
+        let compiler_prefix = CompilerSourceSupport::close_complete_output(&physical_inputs)?
+            .segment_value_prefix(&excluded)?;
         Ok(BoundArtifactSelection {
             view,
             physical_inputs,
+            compiler_prefix,
+            produced_prefix,
             entries,
             owners: Arc::new(owners),
             captured_facts: Arc::new(captured_facts),

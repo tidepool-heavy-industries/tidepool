@@ -1547,6 +1547,20 @@ impl ProducedValueTypeInterfaces {
             && segment.selection.requires(self.selection.0.start)
     }
 
+    pub(crate) fn before_segment(&self) -> Self {
+        Self {
+            interfaces: Arc::clone(&self.interfaces),
+            lookup: Arc::clone(&self.lookup),
+            selection: ProducedValueTypeSelection(self.selection.0.start..self.selection.0.start),
+        }
+    }
+
+    pub(crate) fn follows(&self, previous: &Self) -> bool {
+        Arc::ptr_eq(&self.lookup, &previous.lookup)
+            && self.selection.0.start == previous.selection.0.end
+            && self.selection.0.start.checked_add(1) == Some(self.selection.0.end)
+    }
+
     pub(crate) fn matches_artifact(
         &self,
         entry: &crate::artifact_inventory::ArtifactEntry,
@@ -4428,13 +4442,6 @@ impl PreparedCheckedItemOutput {
                 || match proof {
                     Some(proof) => !issued.matches_receipt(proof)?,
                     None => false,
-                }
-                || {
-                    timing.advance("original_selected_membership");
-                    !original_execution
-                        .artifact_view()
-                        .selected_native_groups()
-                        .contains(&issued.native_group_key())
                 }
             {
                 return Err(typed_entry_failure());

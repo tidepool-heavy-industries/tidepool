@@ -398,6 +398,7 @@ pub(crate) struct CertifiedProducts {
     pub value_interfaces: Arc<[crate::recovery_artifacts::CertifiedValueInterface]>,
     pub retained_core_products: CertifiedRetainedCoreProducts,
     pub(crate) source_selection: CertifiedSourceSelection,
+    pub(crate) original_inputs: Option<Arc<crate::declaration_context::OriginalCompilerInputs>>,
 }
 
 /// Exact original facts admitted once by the physical segment owner. Captured
@@ -681,6 +682,7 @@ impl CertifiedSegmentOriginals {
 
     pub(crate) fn select_item(
         &self,
+        cursor: &mut crate::artifact_inventory::BoundArtifactSelection,
         item: SegmentItemReceipt,
         prepared: &PreparedProgram,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
@@ -811,7 +813,11 @@ impl CertifiedSegmentOriginals {
                 ));
             }
         }
+        let original_inputs = cursor
+            .advance_compiler_prefix(self.physical_inputs(), produced, &validation.inventory)
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let products = CertifiedProducts {
+            original_inputs: Some(original_inputs),
             groups: self.products.groups.clone(),
             recovery_products: self.products.recovery_products.clone(),
             module_interfaces: self.products.module_interfaces.clone(),
@@ -3026,6 +3032,12 @@ impl NativeGroupCandidates {
 }
 
 impl CertifiedSourceSelection {
+    pub(crate) fn produced_types(
+        &self,
+    ) -> Option<&crate::checked_cell::ProducedValueTypeInterfaces> {
+        self.produced_types.as_ref()
+    }
+
     /// Bind current membership to the actual output row and payload. Available
     /// originals and an absent continuation are not evidence of current output.
     pub(crate) fn current_product<'a>(
@@ -9976,6 +9988,7 @@ pub(crate) fn certify_products_with_validation(
     let groups = IssuedGroupCandidates::bind(groups.into(), &recovery_products)?;
     source_selection.bind_produced_originals(&groups)?;
     Ok(CertifiedProducts {
+        original_inputs: None,
         groups,
         recovery_products: recovery_products.into(),
         module_interfaces: module_interfaces.into(),
