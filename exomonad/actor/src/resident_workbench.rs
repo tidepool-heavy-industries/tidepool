@@ -7210,6 +7210,34 @@ where
         .await
     }
 
+    async fn with_original_source_compiler_machine<ResultValue>(
+        &self,
+        context: crate::ActorSessionContext,
+        original: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        operation: impl FnOnce(
+                &mut ResidentSession<H, O>,
+                &crate::ActorSessionContext,
+                &ActorWorkbenchSource,
+                &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+            ) -> Result<ResultValue, ResidentActorWorkbenchError>
+            + Send
+            + 'static,
+    ) -> Result<ResultValue, ResidentActorWorkbenchError>
+    where
+        ResultValue: Send + 'static,
+    {
+        let owner = crate::capabilities::CompilerOwnerScope::current()?;
+        self.with_machine(context, move |session, context, source| {
+            crate::termination::CompilerWorkTicket::run_original_source_transaction(
+                session,
+                owner.admit_continuation()?,
+                original,
+                |session, settlement| operation(session, context, source, settlement),
+            )?
+        })
+        .await
+    }
+
     async fn with_compiler_machine_for<ResultValue>(
         &self,
         context: crate::ActorSessionContext,
@@ -8735,9 +8763,10 @@ where
 
         #[cfg(test)]
         let preview_observer = self.activation_preview_observer.clone();
+        let original_source = input.original_source_lease();
         let (input_binding, admission, includes) = self
             .access
-            .with_compiler_machine(context.clone(), move |session, context, _, settlement| {
+            .with_original_source_compiler_machine(context.clone(), original_source, move |session, context, _, settlement| {
                 let _private_owner = private_owner;
                 session
                     .compile_view_for_execution(&_private_owner.admission)
@@ -8815,23 +8844,19 @@ where
                 tidepool_runtime::session::RendererAccess::Produce(mut producer) => {
                     let producer_waiter = producer.waiter();
                     let compiler_work = crate::capabilities::CompilerOwnerScope::current()
-                        .and_then(|scope| {
-                            scope
-                                .with_source_dependency(context.source_dependency())
-                                .admit_work()
-                        })
+                        .and_then(|scope| scope.admit_continuation())
                         .map_err(committed)?;
                     let mut cancel_on_drop =
                         CancelCompilerTransactionOnDrop(Some(compiler_work.control()));
                     let compiler_admission = admission.clone();
-                    let compiler_source = context.source_dependency().clone();
+                    let compiler_source = admission.original_source_lease();
                     let compiler_template = template.clone();
                     let compiler_includes = includes.clone();
                     #[cfg(test)]
                     let producer_observer = renderer_observer.clone();
                     let compiled =
                         crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                            let result = compiler_work.run_source_compiler_phase(&compiler_source, tidepool_toolchain::artifacts::CompileWorkload::Foreground, |source_owner, settlement| {
+                            let result = compiler_work.run_original_source_compiler_phase(compiler_source, tidepool_toolchain::artifacts::CompileWorkload::Foreground, |source_owner, settlement| {
                                 producer.begin_native().map_err(CompileError::from)?;
                                 #[cfg(test)]
                                 if let Some(observer) = &producer_observer {
@@ -8910,7 +8935,8 @@ where
                 .map_err(committed)?;
             }
         }
-        let preview = self.access.with_compiler_machine(context.clone(), move |session, _, _, settlement| {
+        let original_source = admission.original_source_lease();
+        let preview = self.access.with_original_source_compiler_machine(context.clone(), original_source, move |session, _, _, settlement| {
             session.validate_activation_preview_admission(&admission)
                 .map_err(|error| committed(ResidentActorWorkbenchError::Resident(error)))?;
             let compiled = match specialized {

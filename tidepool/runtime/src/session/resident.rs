@@ -1354,6 +1354,7 @@ static_assertions::assert_not_impl_any!(RequestReceiverEntry: Clone, Copy);
 #[derive(Debug)]
 pub struct RuntimeActivationInput {
     custody: RootCustody,
+    original_source: Arc<super::RuntimeLexicalScopeLease>,
     site: u64,
     input_type: String,
     type_evidence: Arc<super::prepared::SiteTypeEvidence>,
@@ -1368,6 +1369,10 @@ pub struct RuntimeActivationInput {
 static_assertions::assert_not_impl_any!(RuntimeActivationInput: Clone, Copy);
 
 impl RuntimeActivationInput {
+    pub fn original_source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
+        self.original_source.clone()
+    }
+
     pub fn input_type(&self) -> &str {
         &self.input_type
     }
@@ -1456,6 +1461,7 @@ static_assertions::assert_not_impl_any!(RuntimeActivationInputAdmission: Clone, 
 /// A committed original live binding. Type authority does not authorize preview
 /// code; that executable is admitted separately after this mount.
 pub struct MountedActivationInput {
+    original_source: Arc<super::RuntimeLexicalScopeLease>,
     interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
     original_execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
     original_execution_identity: [u8; 32],
@@ -1512,13 +1518,15 @@ impl BoundActivationPreview {
     /// Spend the bound admission exactly once.
     pub(super) fn try_consume(&self) -> Result<SpentActivationPreview, ResidentError> {
         self.admission
-            .phase
-            .compare_exchange(
-                PREVIEW_BOUND,
-                PREVIEW_CONSUMED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
+            .with_open_sources(|| {
+                self.admission.phase.compare_exchange(
+                    PREVIEW_BOUND,
+                    PREVIEW_CONSUMED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+            })
+            .map_err(SessionError::SourceAdmission)?
             .map_err(|_| ResidentError::ActivationPreviewRefused {
                 binding: self.admission.mounted.binding,
             })?;
@@ -1542,6 +1550,28 @@ impl SpentActivationPreview {
 }
 
 impl RuntimeActivationPreviewAdmission {
+    pub fn original_source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
+        self.mounted.original_source.clone()
+    }
+
+    pub(super) fn with_open_sources<T>(
+        &self,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, super::SourceAdmissionError> {
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            [
+                self.mounted.original_source.clone(),
+                self.scope_lease.clone(),
+            ],
+            |leases| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    leases.iter().map(|lease| lease.source_admission()),
+                    action,
+                )
+            },
+        )
+    }
+
     pub fn source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
         self.scope_lease.clone()
     }
@@ -1554,16 +1584,18 @@ impl RuntimeActivationPreviewAdmission {
     /// Claim the sole right to bind this admission. Concurrent binders race on
     /// this transition; exactly one observes the fresh phase.
     pub(super) fn try_bind(self: &Arc<Self>) -> Result<BoundActivationPreview, ResidentError> {
-        self.phase
-            .compare_exchange(
+        self.with_open_sources(|| {
+            self.phase.compare_exchange(
                 PREVIEW_FRESH,
                 PREVIEW_BOUND,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .map_err(|_| ResidentError::ActivationPreviewRefused {
-                binding: self.mounted.binding,
-            })?;
+        })
+        .map_err(SessionError::SourceAdmission)?
+        .map_err(|_| ResidentError::ActivationPreviewRefused {
+            binding: self.mounted.binding,
+        })?;
         Ok(BoundActivationPreview {
             admission: Arc::clone(self),
         })
@@ -4046,6 +4078,20 @@ where
         self.state.durable_public_readiness(owner, scope)
     }
 
+    fn admit_original_source_work_in(
+        &self,
+        original: &Arc<super::RuntimeLexicalScopeLease>,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        let target = self.state.source_lease_in(scope)?;
+        self.state
+            .source_transaction
+            .as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)?
+            .admit_original(original, Some(target))?;
+        Ok(())
+    }
+
     /// Reserve a fresh interface for one original input. No authored cell or
     /// prepared program is needed to bind the already rooted heap value.
     pub fn admit_activation_input_in(
@@ -4068,6 +4114,7 @@ where
         {
             return Err(invalid());
         }
+        self.admit_original_source_work_in(&input.original_source, scope)?;
         let mut digest = blake3::Hasher::new();
         digest.update(b"TidepoolOriginalLiveInput2");
         digest.update(&raw.0.to_le_bytes());
@@ -5261,6 +5308,7 @@ where
         if parked_site != site {
             return Err(invalid());
         }
+        let original_source = self.parked_site_original_source(hole, site)?;
         let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
         if !provenance.authenticated_inputs.contains_key(&site) {
             return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
@@ -5304,6 +5352,7 @@ where
             .ok_or_else(invalid)?;
         Ok(RuntimeActivationInput {
             custody,
+            original_source,
             site,
             input_type,
             type_evidence: Arc::new(type_evidence),
@@ -5877,8 +5926,15 @@ where
         if self.state.mount_cancelled(self.run_context.resource_scope) {
             return Err(PreparedRuntimeError::Cancelled.into());
         }
-        self.state
-            .consume_binding_interface(reservation, &interface)?;
+        self.admit_original_source_work_in(&owner.input.original_source, scope)?;
+        let target = self.state.source_lease_in(scope).map_err(SessionError::SourceAdmission)?;
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            [owner.input.original_source.clone(), target],
+            |leases| super::RuntimeSourceAdmission::with_open_admissions(
+                leases.iter().map(|lease| lease.source_admission()),
+                || self.state.consume_binding_interface(reservation, &interface),
+            ),
+        ).map_err(SessionError::SourceAdmission)??;
         self.mount_compiled_binding_prepared(
             scope,
             &binder,
@@ -5899,6 +5955,7 @@ where
                 source: Box::new(SessionError::DeadScope(scope).into()),
             })?;
         Ok(MountedActivationInput {
+            original_source: owner.input.original_source,
             interface,
             original_execution: owner.input.original_execution,
             original_execution_identity: owner.input.original_execution_identity,
@@ -7316,6 +7373,7 @@ where
         if self.state.mount_cancelled(self.run_context.resource_scope) {
             return Err(PreparedRuntimeError::Cancelled.into());
         }
+        admission.with_open_sources(|| ()).map_err(SessionError::SourceAdmission)?;
         Ok(())
     }
 
@@ -7379,12 +7437,12 @@ where
         drop(provenance_admission);
         self.state
             .validate_lexical_scope_lease(admission.scope_lease.scope(), &admission.scope_lease)?;
-        // The mounted original A is the source this preview renders. Bind its
-        // live lease to the active compiler transaction before the affine
-        // admission is spent, so a revoked original refuses while the
-        // admission is still intact.
-        self.state
-            .admit_source_work_in(mounted.scope)
+        self.state.source_transaction.as_ref()
+            .ok_or(super::SourceAdmissionError::MissingTransaction)
+            .and_then(|source| source.admit_original(
+                &mounted.original_source,
+                Some(admission.scope_lease.clone()),
+            ))
             .map_err(SessionError::SourceAdmission)?;
         // The authoritative spend follows every non-consuming admission and
         // lease check. A refusal after this point leaves the admission spent;
