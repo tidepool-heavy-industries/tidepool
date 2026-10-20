@@ -311,13 +311,26 @@ impl SourceInstanceAttachment {
 /// lexical/capture owner closes.
 #[derive(Clone, Debug)]
 pub struct SourceInstanceLease {
+    physical: PhysicalInstanceRoot,
+    evidence: HomeInstanceEvidence,
+}
+
+/// A machine-issued physical root, separate from the evidence authorizing its
+/// selection. Cloning a descriptor shares this root; scoped custody owns its
+/// release.
+#[derive(Clone, Debug)]
+struct PhysicalInstanceRoot {
     instance: GroupInstanceId,
-    owner: CachedHomeOwner,
-    original_ordinal: u32,
-    binder: SourceBinder,
     value: ValueId,
     handle: PreparedHandle,
     entry_signature: Option<Signature>,
+}
+
+#[derive(Clone, Debug)]
+struct HomeInstanceEvidence {
+    owner: CachedHomeOwner,
+    original_ordinal: u32,
+    binder: SourceBinder,
 }
 
 impl SourceInstanceLease {
@@ -331,49 +344,53 @@ impl SourceInstanceLease {
         entry_signature: Option<Signature>,
     ) -> Self {
         Self {
-            instance,
-            owner,
-            original_ordinal,
-            binder,
-            value,
-            handle,
-            entry_signature,
+            physical: PhysicalInstanceRoot {
+                instance,
+                value,
+                handle,
+                entry_signature,
+            },
+            evidence: HomeInstanceEvidence {
+                owner,
+                original_ordinal,
+                binder,
+            },
         }
     }
 
     #[must_use]
     pub fn instance(&self) -> GroupInstanceId {
-        self.instance
+        self.physical.instance
     }
 
     #[must_use]
     pub fn owner(&self) -> &CachedHomeOwner {
-        &self.owner
+        &self.evidence.owner
     }
 
     #[must_use]
     pub fn original_ordinal(&self) -> u32 {
-        self.original_ordinal
+        self.evidence.original_ordinal
     }
 
     #[must_use]
     pub fn binder(&self) -> &SourceBinder {
-        &self.binder
+        &self.evidence.binder
     }
 
     #[must_use]
     pub fn value(&self) -> ValueId {
-        self.value
+        self.physical.value
     }
 
     #[must_use]
     pub fn handle(&self) -> PreparedHandle {
-        self.handle
+        self.physical.handle
     }
 
     #[must_use]
     pub fn entry_signature(&self) -> Option<&Signature> {
-        self.entry_signature.as_ref()
+        self.physical.entry_signature.as_ref()
     }
 }
 
@@ -2005,7 +2022,7 @@ mod selection_tests {
             Err(Refusal::Conflict(_, _))
         ));
         let mut changed_handle = leases[0].clone();
-        changed_handle.handle = extra_handle;
+        changed_handle.physical.handle = extra_handle;
         assert!(matches!(
             compare(domains[0], &closed, &[first, (domains[0], changed_handle)]),
             Err(Refusal::Conflict(_, _))
@@ -2071,11 +2088,11 @@ mod selection_tests {
                 observe(compare(domains[current], &authored, &rows));
                 for (domain, instance, owner, ordinal, binder, alternate_handle) in history {
                     let mut lease = leases[instance].clone();
-                    lease.owner.module = format!("Owner{owner}");
-                    lease.original_ordinal = ordinal;
-                    lease.binder = super::tests::source(&format!("binder{binder}"));
+                    lease.evidence.owner.module = format!("Owner{owner}");
+                    lease.evidence.original_ordinal = ordinal;
+                    lease.evidence.binder = super::tests::source(&format!("binder{binder}"));
                     if alternate_handle {
-                        lease.handle = extra_handle;
+                        lease.physical.handle = extra_handle;
                     }
                     rows.push((domains[domain], lease));
                     // Every prefix is the current selection plus one incoming row.
@@ -2106,7 +2123,7 @@ mod selection_tests {
         let rows: Vec<_> = (0..128)
             .map(|index| {
                 let mut lease = leases[0].clone();
-                lease.binder = super::tests::source(&format!("selected{index}"));
+                lease.evidence.binder = super::tests::source(&format!("selected{index}"));
                 (current, lease)
             })
             .collect();
