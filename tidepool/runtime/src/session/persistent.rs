@@ -1800,26 +1800,40 @@ impl PersistentSession {
         source: &super::GenerationArtifactReference,
         original_source: &Arc<super::RuntimeLexicalScopeLease>,
     ) -> bool {
-        if cancellation.checkpoint().is_err() {
-            return false;
-        }
-        if !self.inspection_world_base_is_current(&association.base, source, original_source) {
-            return false;
-        }
-        tracing::debug!(
-            target: "exomonad_harness::timing",
-            logical_world = ?association.world.logical_id(),
-            source_sha256 = ?source.sha256(),
-            scope = ?association.base.scope,
-            "compiler world association installed"
-        );
-        let state = self
-            .lib_mut()
-            .tips
-            .entry(association.base.scope)
-            .or_default();
-        state.inspection_world = Some(association.clone());
-        true
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            [original_source.clone(), association.base.target.clone()],
+            |leases| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    leases.iter().map(|lease| lease.source_admission()),
+                    || {
+                        if cancellation.checkpoint().is_err()
+                            || !self.inspection_world_base_is_current(
+                                &association.base,
+                                source,
+                                original_source,
+                            )
+                        {
+                            return false;
+                        }
+                        tracing::debug!(
+                            target: "exomonad_harness::timing",
+                            logical_world = ?association.world.logical_id(),
+                            source_sha256 = ?source.sha256(),
+                            scope = ?association.base.scope,
+                            "compiler world association installed"
+                        );
+                        let state = self
+                            .lib_mut()
+                            .tips
+                            .entry(association.base.scope)
+                            .or_default();
+                        state.inspection_world = Some(association.clone());
+                        true
+                    },
+                )
+            },
+        )
+        .unwrap_or(false)
     }
 
     /// Read mutation-owner facts without constructing a view or its digest.
