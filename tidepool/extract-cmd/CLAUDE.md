@@ -211,6 +211,16 @@ the compiler CLI owns daemon process observability. Its wire formats are small,
 versioned, and implemented in-repo. Keep framing and field validation here;
 keep compiler interpretation in the Haskell worker.
 
+Daemon ingress parses one `ExtractRequest` and carries it through grant issuance,
+mode selection, diagnostic correlation and product placement. Encode only at the
+process transport boundary and for the grant-normalized correlation; do not
+round-trip the hex payload to recover already-owned facts. Correlation preserves
+the original cwd and field order and replaces only the grant with its default.
+Compute it before late product placement; emitted worker bytes retain the admitted
+grant and physical paths. Scalar preparation events account ingress decoding,
+grant issuance, correlation and worker encoding, including work before the physical
+request span. They retain no request bodies.
+
 Encoded request fields are transport data until operation admission. Admit one
 operation before its compiler or artifact I/O, and dispatch on that admitted sum
 rather than flag precedence. Activation preview refines a turn, inspection queries

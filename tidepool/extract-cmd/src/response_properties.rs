@@ -266,6 +266,7 @@ proptest! {
     fn accepted_partial_response_closes_without_replay_and_fresh_transaction_succeeds(
         failed in replies(), fresh in replies(), cut_selector in any::<usize>(),
     ) {
+        let request = crate::ExtractRequest::from_cli(&["Expr.hs".into()]).unwrap();
         let mut wire = vec![TRANSACTION_OUTPUT];
         wire.extend(reply_bytes(&failed));
         let cut = cut_selector % wire.len();
@@ -274,7 +275,7 @@ proptest! {
         peer.write_all(&wire[..cut]).unwrap();
         peer.shutdown(Shutdown::Write).unwrap();
         let mut transaction = DaemonTransaction::for_test(client);
-        let error = execute_transaction_request(&mut transaction, Path::new("/fixture"), &[]).unwrap_err();
+        let error = execute_transaction_request(&mut transaction, Path::new("/fixture"), &request).unwrap_err();
         prop_assert!(error.was_accepted());
         prop_assert!(!error.permits_rebind());
         prop_assert!(matches!(error, DaemonError::AfterAcceptance(inner)
@@ -284,12 +285,17 @@ proptest! {
         drop(transaction);
         let mut emitted = Vec::new();
         peer.read_to_end(&mut emitted).unwrap();
-        // One command and one independently framed cwd/empty argv list. This
-        // proves the client issued once and its owned stream closed on drop.
+        // One command and one independently framed typed request. The literal
+        // payload fixes Source/Expr.hs, foreground, default grant and field order;
+        // it does not use the production encoder to count submitted requests.
         let mut expected = vec![TRANSACTION_REQUEST];
         expected.extend_from_slice(&8u32.to_le_bytes());
         expected.extend_from_slice(b"/fixture");
-        expected.extend_from_slice(&0u32.to_le_bytes());
+        expected.extend_from_slice(&2u32.to_le_bytes());
+        for bytes in [b"--worker-request-v24".as_slice(), b"5450524551303234000100000001000000010000000107000000457870722e6873".as_slice()] {
+            expected.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            expected.extend_from_slice(bytes);
+        }
         prop_assert_eq!(&emitted, &expected);
 
         let (client, mut peer) = UnixStream::pair().unwrap();
@@ -298,7 +304,7 @@ proptest! {
         peer.write_all(&reply_bytes(&fresh)).unwrap();
         peer.shutdown(Shutdown::Write).unwrap();
         let mut transaction = DaemonTransaction::for_test(client);
-        let output = execute_transaction_request(&mut transaction, Path::new("/fixture"), &[]).unwrap();
+        let output = execute_transaction_request(&mut transaction, Path::new("/fixture"), &request).unwrap();
         prop_assert_eq!(output.status.code(), Some(i32::from(fresh.code as u8)));
         prop_assert_eq!(output.stdout, fresh.stdout);
         prop_assert_eq!(output.stderr, fresh.stderr);
