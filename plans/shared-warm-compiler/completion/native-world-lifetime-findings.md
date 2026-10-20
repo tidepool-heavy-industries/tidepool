@@ -64,7 +64,33 @@ same-product cold restoration; it does not reinterpret Unsupported as a miss,
 substitute a complete descriptor, or skip the cold gate. No cold restoration
 success is claimed.
 
-The initial field-growth finding was source-confirmed. The repaired owner
-frontier is physically observed above; an old-core physical counterfactual is
-still pending. The control's small cfg(test) directory getter lends an existing
-owner for weak observation and issues no compiler or runtime authority.
+## Discriminating old-core control
+
+At committed control `fd3c954538`, reversing only the reviewed core patch and
+running the same physical-lifetime command confirmed the original retention:
+after two shadows, old row owners were zero, but one old arena FD and two
+predecessor directory owners survived, leaving two physical owned arena FDs.
+The test failed the descriptor-owner release assertion before cold restoration.
+This distinguishes obsolete transport custody from historical row authority.
+Build `d17d8e36-a94b-4e61-b054-05f63dc92be3` executed exactly one failed test,
+exit 1; log and report root are
+`/srv/swarm/evidence/inanna/native-world-lifetime-old-core-20261020` (log adds
+`.log`). The inverse was confined to this experiment and was fully reapplied.
+
+The final clean `fd3c954538` run rebuilt the repaired code and reproduced the
+two/eight-item fixed metrics above. Build
+`5fb36473-3498-44b2-843a-fdc3478eb80c` compiled and executed exactly one test,
+then failed only at the required Haskell Unsupported cold gate, exit 1. Its log
+and report root are
+`/srv/swarm/evidence/inanna/native-world-lifetime-fixed-final-20261020`.
+Both owned compiler cleanups were confirmed. They used the same Haskell worker
+SHA-256 `62d6e018bf107b7401941eff72c5838bd8fe1f9ac75ed2a2b0bb72019af54045`.
+The old-core test executable SHA-256 was
+`971a98c18ff27e3fabb2ba0d906d4d92f2353d84cfe033e2caad1be37b98b909`;
+the repaired executable SHA-256 was
+`d60f232f5961ec6bf45bdfb9418866d3942ee982c235340a5711220e7d6ded74`.
+
+The control's small cfg(test) directory getter lends an existing owner for weak
+observation and issues no compiler or runtime authority. Successful cold
+restoration remains an explicit pending requirement, not a passing or skipped
+test.
