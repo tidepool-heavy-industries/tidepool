@@ -1785,13 +1785,34 @@ impl PersistentSession {
         source: &super::GenerationArtifactReference,
         original_source: &Arc<super::RuntimeLexicalScopeLease>,
     ) -> bool {
-        if completed.cancellation.checkpoint().is_err() {
+        self.install_compiler_world_association_if_current(
+            &completed.prepared.association,
+            &completed.cancellation,
+            source,
+            original_source,
+        )
+    }
+
+    pub(super) fn install_compiler_world_association_if_current(
+        &mut self,
+        association: &Arc<super::inspection::InspectionWorldAssociation>,
+        cancellation: &crate::HostAdmissionCancellation,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> bool {
+        if cancellation.checkpoint().is_err() {
             return false;
         }
-        let association = &completed.prepared.association;
         if !self.inspection_world_base_is_current(&association.base, source, original_source) {
             return false;
         }
+        tracing::debug!(
+            target: "exomonad_harness::timing",
+            logical_world = ?association.world.logical_id(),
+            source_sha256 = ?source.sha256(),
+            scope = ?association.base.scope,
+            "compiler world association installed"
+        );
         let state = self
             .lib_mut()
             .tips

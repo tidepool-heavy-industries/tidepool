@@ -4576,6 +4576,21 @@ where
             .install_inspection_world_if_current(completed, source, original_source)
     }
 
+    /// Install an acquired world only while its exact source/base is current.
+    pub fn install_compiler_world_if_current(
+        &mut self,
+        completed: &super::CompletedCompilerWorld,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> bool {
+        self.state.install_compiler_world_association_if_current(
+            &completed.association,
+            &completed.cancellation,
+            source,
+            original_source,
+        )
+    }
+
     /// Capture checked value inputs while the matching resident view is owned.
     pub fn capture_inspection_inputs(
         &self,
