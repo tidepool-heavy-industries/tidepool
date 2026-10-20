@@ -2228,6 +2228,7 @@ impl RuntimeCellAdmission {
     /// Issue cumulative lexical projections while the machine and prefix
     /// mutex are stowed. Only this admission's immutable checked items enter
     /// the prepared sequence consumed by declaration adoption.
+    #[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.declaration_projections", skip_all, fields(inclusive = true))]
     pub(super) fn prepare_declaration_projections(
         &self,
         cell: &Arc<tidepool_toolchain::checked_cell::ExactCheckedCell>,
@@ -2257,12 +2258,22 @@ impl RuntimeCellAdmission {
                     }
                 }
             }.ok_or(SessionError::StaleStagedDeclaration)?;
+            let _join = tracing::debug_span!(target: "exomonad_harness::timing",
+                "cell_program.authenticated_declaration_join", inclusive = true,
+                item_ordinal = index, generation = generation.0,
+                baseline_export_count = baseline.as_ref().map_or(0, |prior| prior.exports.len()),
+                introduced_export_count = evidence.introduced_exports().len(),
+            ).entered();
+            let includes = match &self.compiler_basis {
+                RuntimeCellCompilerBasis::Finite(finite) => finite.include_paths.as_slice(),
+                RuntimeCellCompilerBasis::World { .. } => item.include_paths(),
+            };
             let projection = super::lexical_projection::prepare_authored_projection(
                 baseline.as_ref(),
                 generation,
                 evidence.clone(),
                 &[],
-                item.include_paths(),
+                includes,
                 &self.declarations.root,
                 settlement,
             )?;
