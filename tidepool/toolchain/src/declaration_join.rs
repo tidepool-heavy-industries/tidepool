@@ -189,10 +189,80 @@ impl NativeAuthoredDeclarationAdmission {
         module: &SessionModule,
         source: &crate::declaration_context::ExactSourceAdmission,
     ) -> Result<Self, CompileError> {
+        if module.kind != SessionModuleKind::Lib || module.gen.0 == 0 {
+            return Err(contract(
+                "planned authored origin differs from its reserved source",
+            ));
+        }
         let owner = ExactModuleIdentity {
             unit: "main".into(),
             module: module.module_name(),
         };
+        Self::from_source(owner, module.gen.0, source)
+    }
+
+    pub(crate) fn from_world_stage(
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        stage: &Arc<crate::compiler_world::CheckedWorldCellStage>,
+        source: &crate::declaration_context::ExactSourceAdmission,
+        source_text: &str,
+    ) -> Result<Self, CompileError> {
+        use crate::checked_cell::CheckedPlannedCellSlot;
+        use crate::compiler_world::WorldCellStageIdentity;
+        let actual = program
+            .stages()
+            .get(stage.index())
+            .ok_or_else(|| contract("authored World stage is absent from its checked output"))?;
+        if !Arc::ptr_eq(actual, stage)
+            || !source.matches_world_stage(program, stage.index(), source_text)?
+        {
+            return Err(contract("authored World source belongs to another stage"));
+        }
+        let (ordinal, owner, declaration) = match stage.identity() {
+            WorldCellStageIdentity::Declaration { ordinal, owner } => (*ordinal, owner, true),
+            WorldCellStageIdentity::Prologue { ordinal, owner } => (*ordinal, owner, false),
+            WorldCellStageIdentity::Executable { .. } => {
+                return Err(contract(
+                    "executable World stage has no authored declaration origin",
+                ));
+            }
+        };
+        let ordinal = usize::try_from(ordinal)
+            .map_err(|_| contract("authored World ordinal is not representable"))?;
+        if source.generated_source_owner()? != *owner {
+            return Err(contract(
+                "authored World original differs from its admitted generated source",
+            ));
+        }
+        let generation = match program.reservation().slots().get(ordinal) {
+            Some(CheckedPlannedCellSlot::Declaration {
+                declaration: generation,
+            }) if declaration => *generation,
+            Some(CheckedPlannedCellSlot::Prologue {
+                declaration: generation,
+            }) if !declaration => *generation,
+            _ => {
+                return Err(contract(
+                    "authored World stage differs from its reserved slot",
+                ))
+            }
+        };
+        if generation == 0
+            || owner.module
+                != SessionModule::lib(tidepool_repr::Generation(generation)).module_name()
+        {
+            return Err(contract(
+                "authored World stage has another reserved Lib owner",
+            ));
+        }
+        Self::from_source(owner.clone(), generation, source)
+    }
+
+    fn from_source(
+        owner: ExactModuleIdentity,
+        generation: u64,
+        source: &crate::declaration_context::ExactSourceAdmission,
+    ) -> Result<Self, CompileError> {
         let mut matching = source
             .evidence()
             .modules
@@ -201,9 +271,7 @@ impl NativeAuthoredDeclarationAdmission {
         let selected = matching
             .next()
             .ok_or_else(|| contract("planned authored origin has no reserved source"))?;
-        if module.kind != SessionModuleKind::Lib
-            || module.gen.0 == 0
-            || matching.next().is_some()
+        if matching.next().is_some()
             || !selected.is_generated_source()
             || selected.product != ProductAvailability::Ready
         {
@@ -213,7 +281,7 @@ impl NativeAuthoredDeclarationAdmission {
         }
         Ok(Self {
             owner,
-            generation: module.gen.0,
+            generation,
             source_path: source.witness().source_path().to_owned(),
             source_sha256: *source.witness().source_sha256(),
         })

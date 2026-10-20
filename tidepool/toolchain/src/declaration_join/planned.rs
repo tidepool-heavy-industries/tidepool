@@ -682,26 +682,71 @@ pub(crate) fn certify_same_offer_planned_declaration(
     includes: &[PathBuf],
     inventory_json: &[u8],
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
-    let sealed_artifacts = output.artifacts();
-    let source_selection = output.source_selection();
-    let source_admission = admission.source();
-    let module_name = module.module_name();
-    let source_path = source_admission.witness().source_path();
-    let source_sha256: [u8; 32] = Sha256::digest(normalized_source.as_bytes()).into();
+    validate_planned_declaration_source(
+        &module,
+        normalized_source,
+        producer_identity,
+        admission,
+        includes,
+    )?;
+    let source_path = admission.source().witness().source_path();
+    if std::fs::read(source_path)? != normalized_source.as_bytes() {
+        return Err(contract(
+            "planned original source differs from its exact admission",
+        ));
+    }
+    certify_admitted_planned_declaration(
+        module,
+        normalized_source,
+        producer_identity,
+        originals,
+        output,
+        admission,
+        includes,
+        inventory_json,
+    )
+}
+
+fn validate_planned_declaration_source(
+    module: &SessionModule,
+    normalized_source: &str,
+    producer_identity: &[u8],
+    admission: &ExactProductAdmission<'_>,
+    includes: &[PathBuf],
+) -> Result<(), CompileError> {
+    let witness = admission.source().witness();
     if module.kind != SessionModuleKind::Lib
         || module.gen.0 == 0
         || producer_identity.is_empty()
         || includes.is_empty()
-        || !source_path.is_absolute()
-        || !source_admission
-            .witness()
-            .matches_source(source_path, normalized_source)
-        || std::fs::read(source_path)? != normalized_source.as_bytes()
+        || !witness.source_path().is_absolute()
+        || !witness.matches_source(witness.source_path(), normalized_source)
     {
         return Err(contract(
             "planned original source differs from its exact admission",
         ));
     }
+    Ok(())
+}
+
+/// Authenticate declaration facts against the same source/product admission.
+/// Physical source checks belong to the source owner before this shared step.
+#[allow(clippy::too_many_arguments)]
+fn certify_admitted_planned_declaration(
+    module: SessionModule,
+    normalized_source: &str,
+    producer_identity: &[u8],
+    originals: &crate::certified_products::SelectedOriginalClosure,
+    output: &crate::declaration_context::IssuedOriginalOutput,
+    admission: &ExactProductAdmission<'_>,
+    includes: &[PathBuf],
+    inventory_json: &[u8],
+) -> Result<CertifiedAuthoredDeclaration, CompileError> {
+    let sealed_artifacts = output.artifacts();
+    let source_selection = output.source_selection();
+    let source_admission = admission.source();
+    let module_name = module.module_name();
+    let source_sha256: [u8; 32] = Sha256::digest(normalized_source.as_bytes()).into();
     let toolchain_identity_sha256 =
         crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
             producer_identity,

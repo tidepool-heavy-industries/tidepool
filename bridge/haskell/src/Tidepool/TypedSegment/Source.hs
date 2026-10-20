@@ -3,6 +3,8 @@
 module Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences
   , ParsedSegmentDemand, prepareSegmentDemand, segmentDemandMatchesSource
+  , ParsedModuleDemand, prepareModuleDemand, moduleDemandMatchesSource
+  , moduleInputOccurrences, segmentModuleDemand
   , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope
   ) where
 
@@ -52,25 +54,44 @@ import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 -- The source issuer has already checked these bytes against its protected
 -- recipe. This parser result is also the no-quasiquote proof required before
 -- the demand renamer can load any imported interface.
-data ParsedSegmentDemand = ParsedSegmentDemand
+data ParsedModuleDemand = ParsedModuleDemand
   CapturedGeneratedScaffoldSource DynFlags (Located (HsModule GhcPs))
 
-segmentDemandMatchesSource :: ParsedSegmentDemand -> FilePath -> BS.ByteString -> Bool
-segmentDemandMatchesSource (ParsedSegmentDemand captured _ _) path bytes =
+-- Typed segments add their actual plan's unique root check to the same parsed
+-- module fact. A module fact alone grants no typed-item or declaration authority.
+newtype ParsedSegmentDemand = ParsedSegmentDemand ParsedModuleDemand
+
+segmentModuleDemand :: ParsedSegmentDemand -> ParsedModuleDemand
+segmentModuleDemand (ParsedSegmentDemand parsed) = parsed
+
+moduleDemandMatchesSource :: ParsedModuleDemand -> FilePath -> BS.ByteString -> Bool
+moduleDemandMatchesSource (ParsedModuleDemand captured _ _) path bytes =
   capturedGeneratedScaffoldPath captured == path && capturedGeneratedScaffoldBytes captured == bytes
 
-prepareSegmentDemand :: TypedSegmentPlan -> DynFlags -> CapturedGeneratedScaffoldSource
-  -> Either TypedSegmentFailure ParsedSegmentDemand
-prepareSegmentDemand plan flags captured = case unP Parser.parseModule parser of
+segmentDemandMatchesSource :: ParsedSegmentDemand -> FilePath -> BS.ByteString -> Bool
+segmentDemandMatchesSource = moduleDemandMatchesSource . segmentModuleDemand
+
+prepareModuleDemand :: DynFlags -> CapturedGeneratedScaffoldSource
+  -> Either TypedSegmentFailure ParsedModuleDemand
+prepareModuleDemand flags captured = case unP Parser.parseModule parser of
   PFailed _ -> Left UnprovedRootAbstraction
   POk _ parsed
-    | null (quasiQuoteOccurrences flags parsed), roots parsed == [()] ->
-        Right (ParsedSegmentDemand captured flags parsed)
+    | null (quasiQuoteOccurrences flags parsed) ->
+        Right (ParsedModuleDemand captured flags parsed)
     | otherwise -> Left UnprovedRootAbstraction
   where
     source = Text.unpack (TextEncoding.decodeUtf8 (capturedGeneratedScaffoldBytes captured))
     parser = initParserState (initParserOpts flags) (stringToStringBuffer source)
       (mkRealSrcLoc (mkFastString (capturedGeneratedScaffoldPath captured)) 1 1)
+
+prepareSegmentDemand :: TypedSegmentPlan -> DynFlags -> CapturedGeneratedScaffoldSource
+  -> Either TypedSegmentFailure ParsedSegmentDemand
+prepareSegmentDemand plan flags captured = do
+  parsedModule@(ParsedModuleDemand _ _ parsed) <- prepareModuleDemand flags captured
+  if roots parsed == [()]
+    then Right (ParsedSegmentDemand parsedModule)
+    else Left UnprovedRootAbstraction
+  where
     roots parsed =
       [ () | L _ (ValD _ FunBind {fun_id=identifier}) <- hsmodDecls (unLoc parsed)
       , occNameString (rdrNameOcc (unLoc identifier)) == typedSegmentPlanRoot plan ]
@@ -124,8 +145,13 @@ updateSegmentDemandScope environment changes initial = foldM update initial chan
 -- escapes the probe, and genuine renamer errors are never discarded.
 typedSegmentInputOccurrences :: HscEnv -> SegmentDemandScope binding -> ParsedSegmentDemand
   -> IO (Either TypedSegmentFailure [(String,binding)])
-typedSegmentInputOccurrences environment (SegmentDemandScope aliases bindings)
-    (ParsedSegmentDemand _ flags parsed) = do
+typedSegmentInputOccurrences environment scope =
+  moduleInputOccurrences environment scope . segmentModuleDemand
+
+moduleInputOccurrences :: HscEnv -> SegmentDemandScope binding -> ParsedModuleDemand
+  -> IO (Either TypedSegmentFailure [(String,binding)])
+moduleInputOccurrences environment (SegmentDemandScope aliases bindings)
+    (ParsedModuleDemand _ flags parsed) = do
   let probeFlags = gopt_set (gopt_unset flags Opt_HelpfulErrors) Opt_DeferOutOfScopeVariables
       probe = hscUpdateFlags (const probeFlags) environment
       syntax = unLoc parsed

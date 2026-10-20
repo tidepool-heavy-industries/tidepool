@@ -739,6 +739,11 @@ pub(crate) struct SelectedCompilerInterfaces<'a> {
     selected: &'a AdmittedCompilerRoles,
 }
 
+enum InterfaceProjectionPurpose {
+    PreserveCustody,
+    TypeNames,
+}
+
 impl SelectedCompilerInterfaces<'_> {
     pub(crate) fn get(&self, owner: &ExactModuleIdentity) -> Option<&Arc<ArtifactEntry>> {
         self.selected.get(owner).map(|row| &row.interface.1)
@@ -762,6 +767,23 @@ impl SelectedCompilerInterfaces<'_> {
         &self,
         owners: Vec<ExactModuleIdentity>,
     ) -> Result<CompilerSourceSupport, CompileError> {
+        self.project_interfaces(owners, InterfaceProjectionPurpose::PreserveCustody)
+    }
+
+    /// Only the signature/witness-authenticated type boundary requests this
+    /// projection. Its execution owner is retained separately by that caller.
+    pub(crate) fn type_interfaces_for_owners(
+        &self,
+        owners: Vec<ExactModuleIdentity>,
+    ) -> Result<CompilerSourceSupport, CompileError> {
+        self.project_interfaces(owners, InterfaceProjectionPurpose::TypeNames)
+    }
+
+    fn project_interfaces(
+        &self,
+        owners: Vec<ExactModuleIdentity>,
+        purpose: InterfaceProjectionPurpose,
+    ) -> Result<CompilerSourceSupport, CompileError> {
         let mut projection = CompilerInputProjection::default();
         let mut pending = owners;
         while let Some(owner) = pending.pop() {
@@ -779,7 +801,6 @@ impl SelectedCompilerInterfaces<'_> {
                 },
             )?;
         }
-        let artifacts = self.select_owners(projection.roles.keys().cloned().collect())?;
         let mut selected = projection
             .roles
             .keys()
@@ -796,6 +817,25 @@ impl SelectedCompilerInterfaces<'_> {
             .map(|row| (row.interface.0.artifact, Arc::clone(&row.interface.1)))
             .collect();
         projection.entries_from_artifacts(&entries)?;
+        let artifacts = match purpose {
+            InterfaceProjectionPurpose::PreserveCustody => {
+                self.select_owners(projection.roles.keys().cloned().collect())?
+            }
+            InterfaceProjectionPurpose::TypeNames => {
+                // The validated type closure already has exact admitted rows.
+                // Execution remains with the original source/checked-value owner.
+                let empty = self.artifacts.inventory().empty_view();
+                if selected.is_empty() {
+                    empty
+                } else {
+                    let additions = selected
+                        .values()
+                        .map(|row| (self.artifacts.clone(), row.clone()))
+                        .collect::<Vec<_>>();
+                    empty.append_type_interfaces(&additions)?
+                }
+            }
+        };
         for row in selected.values_mut() {
             row.retain_acquisitions(&artifacts)?;
         }
@@ -924,17 +964,17 @@ impl ArtifactView {
             }
             pending_scopes.extend(
                 proof
-                    .proof()
-                    .scope_dependencies()
-                    .into_iter()
+                    .direct_ancestors()
+                    .iter()
+                    .copied()
                     .map(|ancestor| (ancestor, source)),
             );
             selection.scopes.insert(scope, proof.clone());
-            scope_sources.insert(scope, Arc::clone(proof.proof()));
+            scope_sources.insert(scope, proof.clone());
         }
         {
             let mut state = self.lease.inventory.0.lock().expect("inventory lock");
-            let proofs = scope_proof::prepare_install(&state, scope_sources.into_values())?;
+            let proofs = scope_proof::prepare_issued_install(&state, scope_sources.into_values())?;
             scope_proof::install(&mut state, proofs);
             for (id, entry) in introduced {
                 state.intern(id, &entry);
@@ -5087,6 +5127,140 @@ mod tests {
             source.with_type_interfaces(&[&native], [2; 32]).is_err(),
             "type-only ingress must not import implementation roles"
         );
+    }
+
+    #[test]
+    fn type_projection_and_delta_do_not_rescan_a_broad_incoming_issuer() {
+        let mut semantic_work = None;
+        for groups in [1, 32, 128] {
+            scope_proof::take_ancestry_edge_visits();
+            let product = crate::certified_products::fixture_finalized_product(
+                crate::certified_products::tests::original_groups_fixture(
+                    "WideTypeIssuer",
+                    (0..groups).map(|ordinal| (ordinal, vec![])).collect(),
+                    1,
+                    &BTreeMap::new(),
+                ),
+                [2; 32],
+            );
+            let native = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+            let native_id = native.descriptor.id;
+            let required = Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    [2; 32],
+                    "types",
+                    "Required",
+                    BTreeMap::new(),
+                ),
+            ));
+            let added = Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    [2; 32],
+                    "types",
+                    "Added",
+                    BTreeMap::from([(
+                        ("types".into(), "Required".into()),
+                        required.descriptor.interface_sha256,
+                    )]),
+                ),
+            ));
+            let owner = added.descriptor.owner.clone();
+            let inventory = ArtifactInventory::default();
+            let entries = vec![native, required, added];
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .unwrap();
+            let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+            let execution = Arc::new(
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                    [2; 32],
+                    source.artifacts(),
+                    source.projection.clone(),
+                )
+                .unwrap(),
+            );
+            let original =
+                crate::declaration_context::ValidatedOriginalSource::inputs_from(&execution);
+            assert!(execution
+                .artifact_view()
+                .entries()
+                .iter()
+                .any(|entry| entry.descriptor.id == native_id && entry.is_native()));
+            let signature = type_signature(&owner.unit, &owner.module);
+            let birth_edges = scope_proof::take_ancestry_edge_visits();
+            assert!(
+                birth_edges >= groups as usize,
+                "the actual issuer contains the wide native graph"
+            );
+            let baseline_inventory = ArtifactInventory::default();
+            let baseline = CompilerSourceSupport::new(
+                Default::default(),
+                baseline_inventory.empty_view(),
+                [],
+                Default::default(),
+            )
+            .unwrap();
+            let metadata = baseline
+                .projection
+                .project_metadata(baseline.artifacts.metadata_snapshot())
+                .unwrap();
+            let before = inventory.metrics();
+            type_query_work::take();
+            scope_proof::take_ancestry_edge_visits();
+            let projected_context = original
+                .project_type_interfaces(&[], &[&signature])
+                .unwrap();
+            let projected = projected_context.compiler_source_support();
+            let (changed, owners) = baseline
+                .with_type_interfaces(&[projected], [2; 32])
+                .unwrap();
+            let maintained = changed.type_interface_metadata(&metadata, &owners).unwrap();
+            let work = type_query_work::take();
+            let warm_ancestry_edges = scope_proof::take_ancestry_edge_visits();
+            let after = inventory.metrics();
+            assert_eq!(
+                warm_ancestry_edges, 0,
+                "reuse the direct-ancestor index on the same issued proof owner"
+            );
+            assert_eq!(after.graph_visits, before.graph_visits);
+            assert_eq!(after.entry_handle_copies, before.entry_handle_copies);
+            assert_eq!(projected.selected.rows.len(), 2);
+            assert!(projected.native_offers.is_empty());
+            assert!(projected.native_availability.rows().next().is_none());
+            assert_eq!(changed.artifacts.retained_payload_handles(), 2);
+            assert!(Arc::ptr_eq(&original.execution_context(), &execution));
+            assert!(execution
+                .artifact_view()
+                .entries()
+                .iter()
+                .any(|entry| entry.descriptor.id == native_id && entry.is_native()));
+            if let Some(expected) = semantic_work {
+                assert_eq!(work, expected);
+            }
+            semantic_work = Some(work);
+            let complete = changed.artifacts.metadata_snapshot();
+            assert_eq!(complete.artifacts, maintained.retained.artifacts);
+            assert_eq!(complete.dependencies, maintained.retained.dependencies);
+            // Preserve the general native-custody projector as an independent
+            // result and sensitizing cost oracle, outside the measured path.
+            let mut oracle_source = source.clone();
+            oracle_source.artifacts =
+                ArtifactView::from_custody(Arc::clone(&source.artifacts.lease));
+            let oracle_before = inventory.metrics();
+            let general = oracle_source
+                .selected_interfaces()
+                .unwrap()
+                .select_owners(projected.projection.roles.keys().cloned().collect())
+                .unwrap();
+            let oracle_after = inventory.metrics();
+            assert!(oracle_after.graph_visits > oracle_before.graph_visits);
+            assert_eq!(
+                projected.artifacts.capture_graph_selection(),
+                general.capture_graph_selection()
+            );
+            eprintln!("type projection wide issuer: groups={groups}, cold_ancestor_edges={birth_edges}, warm_ancestor_edges={warm_ancestry_edges}, work={work:?}, old_projection_graph_visits={}", oracle_after.graph_visits - oracle_before.graph_visits);
+        }
     }
 
     #[test]

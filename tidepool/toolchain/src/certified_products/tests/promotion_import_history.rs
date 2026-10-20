@@ -787,6 +787,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         &producer,
         &include,
         None,
+        None,
         &crate::artifacts::SelectedSessionValueOwners::capture(std::iter::empty()).unwrap(),
         None,
         &mut validation,

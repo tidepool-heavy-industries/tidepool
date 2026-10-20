@@ -75,8 +75,8 @@ worldRequestBoundaries = do
   requirePhase CompilerTransactionReleased lateEnsure
   try lateQuery >>= requireCancellation
   let recipe = WorldCellRecipe "(this must not parse" "module CellCheck where" []
-      cellPlan = WorldCellPlanRequest root "foreign-worker-realization" recipe "/unavailable/cell-plan.cbor"
-      cellPrepare = WorldCellPrepareRequest root "foreign-worker-realization" recipe "untrusted-receipt" (BS.replicate 32 1)
+      cellPlan = WorldCellPlanRequest root "foreign-worker-realization" recipe Nothing "/unavailable/cell-plan.cbor"
+      cellPrepare = WorldCellPrepareRequest root "foreign-worker-realization" recipe Nothing "untrusted-receipt" (BS.replicate 32 1) 17
         [] "/unavailable/cell-operation" "/unavailable/cell-prepared.cbor"
       decode fields = case workerRequestFromArgv (workerArgv fields) of
         Right (Just request) -> pure request

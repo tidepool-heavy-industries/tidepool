@@ -1148,12 +1148,14 @@ where
         query: CompilerQuery,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         let source = self.access.source.config.clone();
+        let request_scope = self.request_scope.clone();
+        let snapshot_request_scope = request_scope.clone();
         if matches!(&query, CompilerQuery::CurrentScopeView) {
             return self
                 .access
                 .with_continuation_machine(context, move |session, context, _, settlement| {
                     let answer =
-                        match source.inspection_provenance(session, context, NameScope::Current) {
+                        match source.inspection_provenance(session, context, request_scope.as_ref(), NameScope::Current) {
                             Ok(provenance) => CompilerQueryAnswer::ScopeView(provenance),
                             Err(error) => {
                                 CompilerQueryAnswer::QueryError(unobserved_inspection_source(error)?)
@@ -1173,7 +1175,7 @@ where
                 let view = actor_compile_view(session, context, &snapshot_source)?;
                 let provenance = match snapshot_source.inspection_provenance(
                     session,
-                    context,
+                    context, snapshot_request_scope.as_ref(),
                     NameScope::Current,
                 ) {
                     Ok(provenance) => provenance,
@@ -1317,7 +1319,7 @@ where
         self.access
             .with_continuation_machine(context, move |session, context, _, settlement| {
                 let answer =
-                    match source.inspection_provenance(session, context, NameScope::Current) {
+                    match source.inspection_provenance(session, context, request_scope.as_ref(), NameScope::Current) {
                         Ok(current) => {
                             compiler_query_answer(&query, provenance, current, inspected)
                         }

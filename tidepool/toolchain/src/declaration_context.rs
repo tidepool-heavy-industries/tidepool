@@ -365,7 +365,7 @@ pub(crate) enum OriginalInstanceEnvironment {
     Complete {
         target: ExactModuleIdentity,
     },
-    MissingOriginalOwners(Vec<ExactModuleIdentity>),
+    MissingOriginalOwners(Arc<[ExactModuleIdentity]>),
 }
 
 /// Trusted source recipe associated with request-local native type custody.
@@ -598,7 +598,7 @@ impl OriginalCompilerInputs {
         )?;
         timing.advance("finish_new_products");
         selection
-            .finish_new_product_availability(&metadata.retained, &native.availability.0)
+            .finish_new_product_availability(&metadata.retained, &native.availability)
             .map_err(compiler_evidence_failure)?;
         timing.finish(true);
         // Return only physical custody. Continuation decisions belong to a
@@ -1326,7 +1326,7 @@ impl NativeAvailabilitySnapshotFacts {
 /// records those same rows for capture without a deferred row/contribution census.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RequestNativeAvailability(
-    Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
+    Arc<imbl::OrdMap<ArtifactId, Arc<NativeTransportAvailability>>>,
     imbl::OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>,
 );
 
@@ -1460,7 +1460,7 @@ impl RequestNativeAvailability {
     /// Cold construction owns the one row census. Successors carry both roots
     /// and update facts only for a changed mode or contribution membership.
     fn from_rows(
-        rows: Arc<BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>>,
+        rows: Arc<imbl::OrdMap<ArtifactId, Arc<NativeTransportAvailability>>>,
     ) -> Result<Self, CompileError> {
         let mut facts = imbl::OrdMap::new();
         for (id, row) in rows.iter() {
@@ -1568,7 +1568,7 @@ impl RequestNativeAvailability {
     pub(crate) fn from_issued_rows(
         rows: impl IntoIterator<Item = Arc<NativeTransportAvailability>>,
     ) -> Result<Self, CompileError> {
-        let mut result = BTreeMap::new();
+        let mut result = imbl::OrdMap::new();
         for row in rows {
             Self::merge_row(&mut result, row)?;
         }
@@ -1576,7 +1576,7 @@ impl RequestNativeAvailability {
     }
 
     fn merge_row(
-        rows: &mut BTreeMap<ArtifactId, Arc<NativeTransportAvailability>>,
+        rows: &mut imbl::OrdMap<ArtifactId, Arc<NativeTransportAvailability>>,
         row: Arc<NativeTransportAvailability>,
     ) -> Result<NativeAvailabilityRowMerge, CompileError> {
         let id = row.original.descriptor.id;
@@ -1620,8 +1620,8 @@ impl RequestNativeAvailability {
     }
 
     pub(crate) fn merge(&self, incoming: &Self) -> Result<NativeAvailabilityMerge, CompileError> {
-        // The existing row-map copy is separate from fact maintenance; snapshot
-        // capture never copies this map or enumerates its rows.
+        // Both roots share untouched structural nodes. An incoming row edits
+        // only its search path; retained permission rows keep their exact owner.
         let mut rows = (*self.0).clone();
         let mut facts = self.1.clone();
         let mut disposition = NativeAvailabilityRowMerge::Unchanged;
@@ -1774,7 +1774,7 @@ impl RequestNativeAvailability {
                 selected_ids.insert(*id);
             }
         }
-        let mut rows = BTreeMap::new();
+        let mut rows = imbl::OrdMap::new();
         // Every selected key is looked up in this same row owner below. Equal
         // cardinality therefore preserves its exact membership on success.
         let same_membership = selected_ids.len() == self.0.len();
@@ -1920,7 +1920,7 @@ impl RequestNativeAvailability {
         artifacts: &ArtifactView,
     ) -> Result<Self, CompileError> {
         let metadata = artifacts.metadata_snapshot();
-        let mut rows = BTreeMap::new();
+        let mut rows = imbl::OrdMap::new();
         for (id, fact) in facts {
             if *id != fact.original {
                 return Err(failure("normalized native row identity differs"));
@@ -2911,7 +2911,7 @@ impl NativeInputSelection {
                     }),
                 ))
             })
-            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+            .collect::<Result<imbl::OrdMap<_, _>, CompileError>>()?;
         Self::from_normalized_rows(
             roles,
             projection,
@@ -6629,7 +6629,7 @@ impl<'a> ExactRequestIdentity<'a> {
 #[derive(Clone, Debug)]
 pub(crate) struct WorldSourceCompilationBinding {
     reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
-    segment: Arc<crate::checked_cell::CheckedTypedSegmentPlan>,
+    stage: Arc<crate::compiler_world::CheckedWorldCellStage>,
     plan_receipt_sha256: [u8; 32],
     product_context_sha256: [u8; 32],
 }
@@ -6639,39 +6639,30 @@ impl WorldSourceCompilationBinding {
     /// checked program. Raw preparation completion is not accepted here.
     pub(crate) fn from_output(
         program: &crate::compiler_world::CheckedWorldCellProgram,
-        segment_index: usize,
+        stage_index: usize,
     ) -> Result<Self, CompileError> {
         use sha2::Digest;
-        let segment = program
-            .segments()
-            .get(segment_index)
-            .ok_or_else(|| failure("world source binding has no actual prepared segment"))?;
-        let segment_sha256 = crate::execution_source::parse_digest(segment.digest())?;
-        if hex(&segment_sha256) != segment.digest() {
-            return Err(failure("world source segment digest is not canonical"));
-        }
+        let stage = program
+            .stages()
+            .get(stage_index)
+            .ok_or_else(|| failure("world source binding has no actual prepared stage"))?;
         let plan = program.reservation().plan();
         program
             .validation()
             .inventory
-            .charge(
-                plan.receipt()
-                    .len()
-                    .checked_add(64)
-                    .ok_or_else(|| failure("world source binding accounting overflow"))?,
-            )
+            .charge(64)
             .map_err(|error| compiler_evidence_failure(error.into()))?;
-        let plan_receipt_sha256: [u8; 32] = sha2::Sha256::digest(plan.receipt()).into();
+        let plan_receipt_sha256 = program.plan_digest();
         let mut context = sha2::Sha256::new();
-        context.update(b"Tidepool world source compilation context v1\0");
+        context.update(b"Tidepool world source compilation context v2\0");
         context.update(plan.world().logical_id());
         context.update(plan_receipt_sha256);
         context.update(program.reservation().admission_digest());
-        context.update(segment_sha256);
+        context.update(stage.identity().identity_bytes());
         context.update(plan.producer_sha256());
         Ok(Self {
             reservation: Arc::clone(program.reservation()),
-            segment: Arc::clone(segment),
+            stage: Arc::clone(stage),
             plan_receipt_sha256,
             product_context_sha256: context.finalize().into(),
         })
@@ -6680,8 +6671,7 @@ impl WorldSourceCompilationBinding {
 
 impl PartialEq for WorldSourceCompilationBinding {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.reservation, &other.reservation)
-            && Arc::ptr_eq(&self.segment, &other.segment)
+        Arc::ptr_eq(&self.reservation, &other.reservation) && Arc::ptr_eq(&self.stage, &other.stage)
     }
 }
 
@@ -6694,7 +6684,7 @@ pub(crate) struct WorldCompilationIdentity {
     captured_source_domain: [u8; 32],
     plan_receipt_sha256: [u8; 32],
     product_context_sha256: [u8; 32],
-    segment_digest: String,
+    stage_identity: crate::compiler_world::WorldCellStageIdentity,
 }
 
 impl WorldCompilationIdentity {
@@ -6709,7 +6699,7 @@ impl WorldCompilationIdentity {
                 .captured_source_domain(),
             plan_receipt_sha256: binding.plan_receipt_sha256,
             product_context_sha256: binding.product_context_sha256,
-            segment_digest: binding.segment.digest().to_owned(),
+            stage_identity: binding.stage.identity().clone(),
         }
     }
 
@@ -6728,7 +6718,9 @@ impl WorldCompilationIdentity {
             captured_source_domain: product_context_sha256,
             plan_receipt_sha256,
             product_context_sha256,
-            segment_digest: segment_digest.into(),
+            stage_identity: crate::compiler_world::WorldCellStageIdentity::Executable {
+                typed_digest: segment_digest.into(),
+            },
         }
     }
 }
@@ -6752,7 +6744,15 @@ impl SourceCompilationBinding<'_> {
     fn retained_text_bytes(&self) -> usize {
         match self {
             Self::Exact(identity) => identity.request_sha256.len(),
-            Self::World(binding) => binding.segment.digest().len(),
+            Self::World(binding) => match binding.stage.identity() {
+                crate::compiler_world::WorldCellStageIdentity::Executable { typed_digest } => {
+                    typed_digest.len()
+                }
+                crate::compiler_world::WorldCellStageIdentity::Declaration { owner, .. }
+                | crate::compiler_world::WorldCellStageIdentity::Prologue { owner, .. } => {
+                    owner.unit.len() + owner.module.len()
+                }
+            },
         }
     }
 }
@@ -7299,6 +7299,25 @@ pub(crate) fn consumed_source_home_imports(
 }
 
 impl ExactSourceAdmission {
+    pub(crate) fn matches_world_stage(
+        &self,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        stage_index: usize,
+        source: &str,
+    ) -> Result<bool, CompileError> {
+        let stage = program
+            .stages()
+            .get(stage_index)
+            .ok_or_else(|| failure("world source binding has no actual prepared stage"))?;
+        Ok(
+            matches!(&self.compilation_binding, SourceCompilationBinding::World(binding)
+            if Arc::ptr_eq(&binding.reservation, program.reservation()) && Arc::ptr_eq(&binding.stage, stage))
+                && self
+                    .witness
+                    .matches_source(self.witness.source_path(), source),
+        )
+    }
+
     pub(crate) fn evidence_bytes(&self) -> &[u8] {
         &self.evidence_bytes
     }
@@ -8993,12 +9012,14 @@ impl WorldProgramSegment<'_> {
         &self,
         inputs: &OriginalCompilerInputs,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        self.product_admission().original_execution_context(inputs)
+    }
+    pub(crate) fn product_admission(&self) -> ExactProductAdmission<'_> {
         ExactProductAdmission {
             compilation_binding: ProductCompilationBinding::World(&self.binding),
             source: &self.source,
             facts: self.inputs.facts(),
         }
-        .original_execution_context(inputs)
     }
     pub(crate) fn admit_program_support(
         &mut self,
@@ -9156,6 +9177,18 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             Some(&source_domain),
             validation,
         )?;
+        let authored = match self.binding.stage.identity() {
+            crate::compiler_world::WorldCellStageIdentity::Executable { .. } => None,
+            crate::compiler_world::WorldCellStageIdentity::Declaration { .. }
+            | crate::compiler_world::WorldCellStageIdentity::Prologue { .. } => Some(
+                crate::declaration_join::NativeAuthoredDeclarationAdmission::from_world_stage(
+                    program,
+                    &self.binding.stage,
+                    &source,
+                    &target_source,
+                )?,
+            ),
+        };
         let admission = MatchedExactProductAdmission::world(
             &binding,
             &source,
@@ -9169,9 +9202,18 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             raw,
             receipt,
             admission,
-            program.directory().path(),
+            &program.directory().path().join(
+                self.binding
+                    .stage
+                    .outputs()
+                    .source_receipt()
+                    .relative()
+                    .parent()
+                    .ok_or_else(|| failure("World stage source output has no namespace"))?,
+            ),
             program.producer_identity_bytes(),
             &self.aliases,
+            authored.as_ref(),
             candidates,
             selected_values,
             produced,
@@ -9196,17 +9238,18 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
 
 pub(crate) fn decode_world_source_receipt<'a>(
     program: &'a crate::compiler_world::CheckedWorldCellProgram,
-    segment_index: usize,
-    receipt_relative: &Path,
+    stage_index: usize,
 ) -> Result<DecodedWorldSourceReceipt<'a>, CompileError> {
     let operation = program.validation().inventory.as_ref();
-    let binding = WorldSourceCompilationBinding::from_output(program, segment_index)?;
+    let binding = WorldSourceCompilationBinding::from_output(program, stage_index)?;
     let output_root = program.directory().path();
     let common_files = program.common_files();
     let captured_files = program.captured_files();
     if !output_root.is_absolute() {
         return Err(failure("world source output owner is not absolute"));
     }
+    let receipt_reference = binding.stage.outputs().source_receipt();
+    let receipt_relative = receipt_reference.relative();
     let receipt_name = receipt_relative
         .to_str()
         .ok_or_else(|| failure("world source receipt name is not UTF-8"))?;
@@ -9228,7 +9271,8 @@ pub(crate) fn decode_world_source_receipt<'a>(
     if world_source_digest(&header[1])? != *plan.world().logical_id()
         || world_source_digest(&header[2])? != binding.plan_receipt_sha256
         || world_source_digest(&header[3])? != *binding.reservation.admission_digest()
-        || string(&header[4])? != binding.segment.digest()
+        || crate::compiler_world::WorldCellStageIdentity::decode(&header[4])?
+            != *binding.stage.identity()
     {
         return Err(failure(
             "world source receipt belongs to another preparation",
@@ -9239,14 +9283,18 @@ pub(crate) fn decode_world_source_receipt<'a>(
         let reference = row(value, 2)?;
         let name = string(&reference[0])?;
         let digest = world_source_digest(&reference[1])?;
+        if !binding.stage.contains_output(Path::new(name)) {
+            return Err(failure("world source file belongs to another stage"));
+        }
         let bytes = captured_world_source_file(name, digest, common_files, captured_files)?;
         Ok((PathBuf::from(name), digest, bytes))
     };
     let (source_relative, source_sha256, source_bytes) = resolve(&header[5])?;
     let (dependencies_relative, _, evidence_bytes) = resolve(&header[6])?;
     let (packages_relative, _, package_imports) = resolve(&header[7])?;
-    if dependencies_relative != Path::new("dependencies.json")
-        || packages_relative != Path::new("module-package-imports.cbor")
+    let namespace = PathBuf::from(format!("stage-{}", binding.stage.ordinals()[0]));
+    if dependencies_relative != namespace.join("dependencies.json")
+        || packages_relative != namespace.join("module-package-imports.cbor")
         || source_relative == dependencies_relative
         || source_relative == packages_relative
     {
@@ -9279,7 +9327,7 @@ pub(crate) fn decode_world_source_receipt<'a>(
 
 fn world_source_header(value: &Value) -> Result<&[Value], CompileError> {
     let header = row(value, 11)?;
-    if string(&header[0])? != "TPCWSOURCE2" {
+    if string(&header[0])? != "TPCWSOURCE3" {
         return Err(failure("unsupported world source receipt version"));
     }
     Ok(header)
@@ -10119,7 +10167,7 @@ impl ExactDeclarationContext {
         }
         {
             let updated = if !missing.is_empty() {
-                OriginalInstanceEnvironment::MissingOriginalOwners(missing)
+                OriginalInstanceEnvironment::MissingOriginalOwners(missing.into())
             } else {
                 OriginalInstanceEnvironment::Complete { target }
             };
@@ -10237,7 +10285,7 @@ impl ExactDeclarationContext {
             }
         }
         Ok(Self::from_facts(DeclarationContextFacts {
-            compiler_support: selected.support_for_owners(owners.into_iter().collect())?,
+            compiler_support: selected.type_interfaces_for_owners(owners.into_iter().collect())?,
             producer,
             lexical: Default::default(),
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
@@ -13270,10 +13318,13 @@ mod tests {
         assert_context_observation_wire(&context);
         let before = context.clone();
         let digest = context.semantic_sha256();
-        context = context.rebuild(|facts| {
-            facts.original_instance_environment =
-                OriginalInstanceEnvironment::MissingOriginalOwners(vec![identity("u", "Missing")])
-        });
+        context =
+            context.rebuild(|facts| {
+                facts.original_instance_environment =
+                    OriginalInstanceEnvironment::MissingOriginalOwners(
+                        vec![identity("u", "Missing")].into(),
+                    )
+            });
         assert!(context.owner.observations.get().is_none());
         assert_ne!(context, before);
         assert_ne!(context.semantic_sha256(), digest);
@@ -13302,13 +13353,13 @@ mod tests {
             "095f07297f14b1bf77e3e1110364052f66a3200be55ec74f7381e2fcc3e9e3de"
         );
         let mut missing = base.clone();
-        missing = missing.rebuild(|facts| {
-            facts.original_instance_environment =
-                OriginalInstanceEnvironment::MissingOriginalOwners(vec![
-                    identity("unit", "Z"),
-                    identity("unit", "A"),
-                ])
-        });
+        missing =
+            missing.rebuild(|facts| {
+                facts.original_instance_environment =
+                    OriginalInstanceEnvironment::MissingOriginalOwners(
+                        vec![identity("unit", "Z"), identity("unit", "A")].into(),
+                    )
+            });
         assert_context_observation_wire(&missing);
         assert_eq!(
             hex(&missing.semantic_sha256()),
@@ -13320,7 +13371,7 @@ mod tests {
                 if let OriginalInstanceEnvironment::MissingOriginalOwners(owners) =
                     &mut facts.original_instance_environment
                 {
-                    owners.reverse();
+                    Arc::make_mut(owners).reverse();
                 }
             });
             context
@@ -15860,7 +15911,7 @@ mod tests {
                     target: target.clone(),
                 }
             } else {
-                OriginalInstanceEnvironment::MissingOriginalOwners(missing)
+                OriginalInstanceEnvironment::MissingOriginalOwners(missing.into())
             };
             assert_eq!(context.original_instance_environment(), &expected);
             assert_eq!(context.lexical_graph().len(), issued_entries.len());
@@ -19532,6 +19583,82 @@ mod tests {
     }
 
     #[test]
+    fn native_availability_delta_preserves_snapshot_and_untouched_row_owners() {
+        use crate::artifact_inventory::NativeArtifactDemand;
+        for unrelated in [1, 32, 128] {
+            let cold = demanded_native_fixture(unrelated, NativeArtifactDemand::AllGroups, false);
+            let incoming =
+                demanded_native_fixture(unrelated + 1, NativeArtifactDemand::AllGroups, false);
+            let previous = &cold.native_selection.availability;
+            let added = incoming
+                .native_selection
+                .availability
+                .rows()
+                .find(|row| previous.issued_row(row.original_artifact_id()).is_none())
+                .expect("one genuinely issued new row")
+                .clone();
+            let id = added.original_artifact_id();
+            let incoming = RequestNativeAvailability::from_issued_rows([added.clone()]).unwrap();
+            let before = previous.snapshot_facts().unwrap();
+            let mut expected = before
+                .iter()
+                .map(|(key, fact)| (*key, fact.clone()))
+                .collect::<BTreeMap<_, _>>();
+            expected.insert(
+                id,
+                RequestNativeAvailability::row_snapshot_facts(&added).unwrap(),
+            );
+            let retained = previous.rows().cloned().collect::<Vec<_>>();
+            let references = retained.iter().map(Arc::strong_count).collect::<Vec<_>>();
+            NATIVE_AVAILABILITY_FACT_WORK.with(|work| work.set((0, 0)));
+            let updated = match previous.merge(&incoming).unwrap() {
+                NativeAvailabilityMerge::Changed(updated) => updated,
+                NativeAvailabilityMerge::Unchanged(_) => {
+                    panic!("actual new row must change the owner")
+                }
+            };
+            let fact_work = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+            let path_references = retained
+                .iter()
+                .zip(&references)
+                .map(|(row, before)| Arc::strong_count(row) - before)
+                .sum::<usize>();
+            assert_eq!(
+                fact_work,
+                (0, 1),
+                "only the incoming row changes maintained facts"
+            );
+            assert_eq!(
+                previous.snapshot_facts().unwrap(),
+                before,
+                "retained pre-update snapshot is isolated"
+            );
+            assert_eq!(
+                updated
+                    .snapshot_facts()
+                    .unwrap()
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>(),
+                expected
+            );
+            assert!(Arc::ptr_eq(updated.issued_row(id).unwrap(), &added));
+            for row in &retained {
+                assert!(
+                    Arc::ptr_eq(updated.issued_row(row.original_artifact_id()).unwrap(), row),
+                    "unchanged rows retain exact contribution handles"
+                );
+            }
+            if unrelated == 128 {
+                assert!(
+                    path_references < unrelated,
+                    "persistent insertion must not clone every baseline row reference"
+                );
+            }
+            eprintln!("native_availability_delta unrelated={unrelated} changed_facts={} structural_row_reference_copies={path_references}", fact_work.1);
+        }
+    }
+
+    #[test]
     fn unchanged_native_availability_reuses_fact_root_across_histories() {
         use crate::artifact_inventory::NativeArtifactDemand;
         for unrelated in [0, 32, 128] {
@@ -19954,7 +20081,13 @@ mod tests {
         }
         Ok(ReferenceNativeCompilerTransport {
             metadata,
-            availability: normalized.0,
+            availability: Arc::new(
+                normalized
+                    .0
+                    .iter()
+                    .map(|(id, row)| (*id, Arc::clone(row)))
+                    .collect(),
+            ),
             advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
         })
     }
@@ -19992,7 +20125,15 @@ mod tests {
         );
         match (expected, actual) {
             (Ok(expected), Ok(actual)) => {
-                assert_eq!(actual.availability.0, expected.availability);
+                assert_eq!(
+                    actual
+                        .availability
+                        .0
+                        .iter()
+                        .map(|(id, row)| (*id, Arc::clone(row)))
+                        .collect::<BTreeMap<_, _>>(),
+                    *expected.availability
+                );
                 assert_eq!(actual.advertised.0, expected.advertised.0);
                 Some(expected)
             }
@@ -20078,8 +20219,15 @@ mod tests {
                 &expected.metadata.retained
             ));
             assert_eq!(
-                physical.inputs.native_selection.availability.0,
-                expected.availability
+                physical
+                    .inputs
+                    .native_selection
+                    .availability
+                    .0
+                    .iter()
+                    .map(|(id, row)| (*id, Arc::clone(row)))
+                    .collect::<BTreeMap<_, _>>(),
+                *expected.availability
             );
             assert_eq!(
                 physical.inputs.native_selection.advertised.0,
@@ -20103,7 +20251,8 @@ mod tests {
             );
 
             let mut invalid = source.native_availability().0.as_ref().clone();
-            let row = Arc::make_mut(invalid.values_mut().next().expect("native row"));
+            let id = *invalid.keys().next().expect("native row");
+            let row = Arc::make_mut(invalid.get_mut(&id).unwrap());
             row.mode = NativeTransportMode::Full;
             row.contributions = Arc::from([]);
             let invalid = RequestNativeAvailability::from_rows(Arc::new(invalid)).unwrap();
@@ -20152,8 +20301,8 @@ mod tests {
                 if remove { rows.remove(id); }
             }
             if change_canonical {
-                if let Some(row) = rows.values_mut().next() {
-                    let row = Arc::make_mut(row);
+                if let Some(id) = rows.keys().next().copied() {
+                    let row = Arc::make_mut(rows.get_mut(&id).unwrap());
                     row.canonical = row.original.descriptor.id;
                 }
             }
@@ -22663,17 +22812,17 @@ mod tests {
     }
 
     #[test]
-    fn world_source_v2_refuses_old_envelopes_and_bounds_ordered_alias_copies() {
+    fn world_source_v3_refuses_old_envelopes_and_bounds_ordered_alias_copies() {
         use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
 
         let mut header = vec![Value::Null; 11];
-        header[0] = text("TPCWSOURCE2");
+        header[0] = text("TPCWSOURCE3");
         assert!(world_source_header(&Value::Array(header.clone())).is_ok());
-        header[0] = text("TPCWSOURCE1");
+        header[0] = text("TPCWSOURCE2");
         assert!(world_source_header(&Value::Array(header.clone())).is_err());
         header.pop();
         assert!(world_source_header(&Value::Array(header.clone())).is_err());
-        header[0] = text("TPCWSOURCE2");
+        header[0] = text("TPCWSOURCE3");
         assert!(world_source_header(&Value::Array(header)).is_err());
 
         let aliases = Value::Array(vec![text("/held/second"), text("/held/first")]);

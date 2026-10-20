@@ -1738,6 +1738,7 @@ impl PersistentSession {
         source_revision: &[u8],
         selected_imports: &super::SourceImports,
         inputs: &super::RuntimeCompileInputs,
+        actor: Option<&super::InspectionActorObservation>,
         label: super::NameScope,
     ) -> Result<super::inspection::InspectionScopeSnapshot, SessionError> {
         if !self.scopes.is_live(scope) {
@@ -1759,6 +1760,7 @@ impl PersistentSession {
             source_revision: Arc::from(source_revision),
             selected_imports: selected_imports.clone(),
             inputs: inputs.clone(),
+            actor: actor.cloned(),
             scope: label,
         })
     }
@@ -5515,6 +5517,7 @@ mod checkpoint_scope_tests {
                 b"observation-only-source",
                 &imports,
                 &inputs,
+                None,
                 super::super::NameScope::Current,
             )
             .unwrap();
@@ -5527,6 +5530,7 @@ mod checkpoint_scope_tests {
                     b"observation-only-source",
                     &imports,
                     &inputs,
+                None,
                     super::super::NameScope::Current,
                 )
             })
@@ -5560,6 +5564,7 @@ mod checkpoint_scope_tests {
                     b"observation-only-source",
                     &imports,
                     &inputs,
+                None,
                     super::super::NameScope::Current,
                 )
             })
@@ -5578,13 +5583,15 @@ mod checkpoint_scope_tests {
                 b"observation-only-source",
                 &imports,
                 &inputs,
+                None,
                 super::super::NameScope::Current,
             )
             .unwrap();
         assert!(Arc::ptr_eq(&snapshot.base, &repeated.base));
         session.retire_scope(scope);
         assert!(matches!(session.capture_inspection_scope_in(
-            scope, b"observation-only-source", &imports, &inputs, super::super::NameScope::Current,
+            scope, b"observation-only-source", &imports, &inputs,
+                None, super::super::NameScope::Current,
         ), Err(SessionError::DeadScope(dead)) if dead == scope));
         let pin = snapshot.provenance();
         assert!(session.compile_view_bytes_hashed.load(Ordering::Relaxed) > 0);

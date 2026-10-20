@@ -1667,12 +1667,14 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
             let template = unlines
                   ["{-# LANGUAGE DataKinds, QuasiQuotes #-}","{{CELL_PRAGMAS}}","module CellCheck where"
                   ,"import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
+                  ,"__tidepoolInEffectRow :: Eff '[] value -> Eff '[] value"
+                  ,"__tidepoolInEffectRow = id"
                   ,"{{CELL_DECLS}}"
                   ,"__tidepool_cell_check :: Eff '[] ()"
                   ,"__tidepool_cell_check = do { {{CELL_BODY}} ; pure () }"]
                 recipe = WorldCellRecipe "let answer = (1 :: Int)" template []
                 planOut = work </> "cell-plan.cbor"
-                planRequest = WorldCellPlanRequest identity reference recipe planOut
+                planRequest = WorldCellPlanRequest identity reference recipe Nothing planOut
             planArgs <- decodeWorldArgs [WorldCellPlan planRequest]
             planBytes <- (withBoundCompilerRequest (const (pure ())) compiler planArgs >=> finishCompletion) $ \request ->
               runBoundWorldCellPlan request
@@ -1691,8 +1693,8 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                   ++ " segments=" ++ show (length (cellInferenceSegments plan))))
               liftIO (pure [(0, PlannedBind 1)])
             let directory = work </> "cell-admission"
-                prepareRequest = WorldCellPrepareRequest identity reference recipe planBytes
-                  (BS.replicate 32 7) slots directory (directory </> "prepared.cbor")
+                prepareRequest = WorldCellPrepareRequest identity reference recipe Nothing planBytes
+                  (BS.replicate 32 7) 17 slots directory (directory </> "prepared.cbor")
             createDirectoryIfMissing True directory
             prepareArgs <- decodeWorldArgs [WorldCellPrepare prepareRequest]
             validated <- (withBoundCompilerRequest (const (pure ())) compiler prepareArgs >=> finishCompletion) $ \request -> do
@@ -1704,7 +1706,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                   [value] -> pure value
                   _ -> fail "real world preparation did not emit exactly one compiler completion"
                 output <- BS.readFile (worldCellPrepareOutput prepareRequest)
-                certificate <- BS.readFile (directory </> "certified-products.cbor")
+                certificate <- BS.readFile (directory </> "stage-0" </> "certified-products.cbor")
                 case deserialiseFromBytes decodeTerm (BL.fromStrict certificate) of
                   Right (remaining,TList [TString "TPCERT",TInt 10,TList
                     [TString "segment-originals",_,_,_,_,TList
@@ -1713,16 +1715,36 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                     , domain == worldSourceDomainSha256 (worldInputsSources facts) -> pure ()
                   _ -> fail "World native certificate lost its actual base/source-domain recipe provenance"
                 itemSha <- case deserialiseFromBytes decodeTerm (BL.fromStrict output) of
-                  Right (remaining,TList [TString "TPCWPREP3",_,_,_
+                  Right (remaining,TList [TString "TPCWPREP4",_,_,_
                     ,TList [TString "prepared",TList [TList [TInt 0,TInt 1,TBytes sha]]]
-                    ,_,_,_,TList [_]]) | BL.null remaining -> pure sha
+                    ,_,_,TList common,TList [_]
+                    ,TList [TList [identity@(TList [TString "exec",TString _]),TList [TInt 0]
+                      ,TList refs]]]) | BL.null remaining -> do
+                        unless (map (\entry -> case entry of
+                            TList [TString name,TBytes _] -> T.unpack name
+                            _ -> "") refs == map ("stage-0/" ++)
+                              ["world-source.cbor","module-products.cbor","certified-products.cbor"])
+                          (fail "World stage omitted its exact closed output bundle")
+                        forM_ refs $ \entry -> do
+                          unless (entry `elem` common) (fail "World stage output leaves the common manifest")
+                          case entry of
+                            TList [TString name,TBytes expected] -> do
+                              bytes <- BS.readFile (directory </> T.unpack name)
+                              unless (SHA.hash bytes == expected) (fail "World stage output seal changed")
+                            _ -> fail "World stage omitted its file reference"
+                        source <- BS.readFile (directory </> "stage-0" </> "world-source.cbor")
+                        case deserialiseFromBytes decodeTerm (BL.fromStrict source) of
+                          Right (tailBytes,TList (TString "TPCWSOURCE3":_:_:_:actualIdentity:_))
+                            | BL.null tailBytes,actualIdentity == identity -> pure ()
+                          _ -> fail "World stage source receipt changed its issued identity"
+                        pure sha
                   _ -> fail "real world preparation omitted its exact item and typed segment manifest"
                 let itemDirectory = directory </> "item-0"
                 item <- BS.readFile (itemDirectory </> "world-item.cbor")
                 unless (SHA.hash item == itemSha)
                   (fail "real world item differs from its terminal output manifest")
                 case deserialiseFromBytes decodeTerm (BL.fromStrict item) of
-                  Right (remaining,TList fields) | BL.null remaining,length fields == 13 ->
+                  Right (remaining,TList fields@(TString "TPCWITEM2":_)) | BL.null remaining,length fields == 13 ->
                     case last fields of
                       TList files -> forM_ files $ \entry -> case entry of
                         TList [TString name,TBytes sha] -> do
@@ -1758,7 +1780,69 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                     fail "admission lost its actual parsed execution item"
                 | heldWorldCellSlots admitted /= slots ->
                     fail "admitted preparation lost its matched slot collection"
-                | otherwise -> pure admitted
+                | otherwise -> do
+                    -- These small native controls exercise the same admitted
+                    -- producer and its global stage ordinals. The shipped
+                    -- runtime-template tests remain the end-to-end oracle.
+                    forM_
+                      [("imports","import Data.Maybe (Maybe(..))",[(0,PlannedPrologue 11)],["prologue"])
+                      ,("declaration",unlines ["data OwnedStage = OwnedStage Int"
+                          ,"class OwnedStageClass value where ownedStageMethod :: value -> Int"
+                          ,"instance OwnedStageClass OwnedStage where ownedStageMethod (OwnedStage value) = value"]
+                        ,[(0,PlannedDeclaration 21)],["declaration"])
+                      ,("mixed",unlines ["let baseStage = (7 :: Int)"
+                          ,"data MixedStage = MixedStage Int"
+                          ,"readMixedStage :: MixedStage -> Int"
+                          ,"readMixedStage (MixedStage value) = value + baseStage"
+                          ,"let answerStage = MixedStage baseStage"
+                          ,"readMixedStage answerStage"]
+                        ,[(0,PlannedBind 31),(1,PlannedDeclaration 32),(2,PlannedBind 33)
+                          ,(3,PlannedExpression 34 "ownedStageObservation")]
+                        ,["exec","declaration","exec"])] $ \(label,source,caseSlots,kinds) -> do
+                      let ownRecipe = recipe {worldCellSource=source}
+                          ownDirectory = work </> ("world-stages-" ++ label)
+                          ownPlan = planRequest {worldCellPlanRecipe=ownRecipe
+                            ,worldCellPlanOutput=ownDirectory </> "plan.cbor"}
+                      createDirectoryIfMissing True ownDirectory
+                      ownPlanArgs <- decodeWorldArgs [WorldCellPlan ownPlan]
+                      ownPlanBytes <- (withBoundCompilerRequest (const (pure ())) compiler ownPlanArgs >=> finishCompletion)
+                        runBoundWorldCellPlan
+                      let ownPrepare = WorldCellPrepareRequest identity reference ownRecipe Nothing ownPlanBytes
+                            (BS.replicate 32 9) 17 caseSlots ownDirectory (ownDirectory </> "prepared.cbor")
+                      ownArgs <- decodeWorldArgs [WorldCellPrepare ownPrepare]
+                      (withBoundCompilerRequest (const (pure ())) compiler ownArgs >=> finishCompletion) $ \request -> do
+                        completions <- prepareWorldCell request >>= either
+                          (fail . (("ordered World " ++ label ++ " refused: ") ++) . show) pure
+                        unless (length completions == length kinds)
+                          (fail "ordered World lost an actual stage completion")
+                        bytes <- BS.readFile (worldCellPrepareOutput ownPrepare)
+                        case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
+                          Right (remaining,TList [TString "TPCWPREP4",_,_,_
+                            ,TList [TString "prepared",TList completed],_,_,_,TList typed,TList stages])
+                              | BL.null remaining -> do
+                                let stageKind entry = case entry of
+                                      TList [TList (TString kind:_),TList _,TList _] -> kind
+                                      _ -> "invalid"
+                                    stageOrdinals entry = case entry of
+                                      TList [_,TList ordinals,_] -> ordinals
+                                      _ -> []
+                                unless (map stageKind stages == kinds
+                                    && concatMap stageOrdinals stages == map (TInt . fromIntegral . fst) caseSlots
+                                    && length completed == length caseSlots
+                                    && length typed == length (filter (== "exec") kinds))
+                                  (fail "ordered World changed stage kind, global ordinal, or executable-plan coverage")
+                          _ -> fail "ordered World omitted its terminal stage table"
+                        forM_ caseSlots $ \(ordinal,slot) -> case slot of
+                          PlannedBind _ -> pure ()
+                          PlannedExpression _ _ -> pure ()
+                          _ -> do
+                            bytes <- BS.readFile (ownDirectory </> ("item-" ++ show ordinal) </> "world-item.cbor")
+                            case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
+                              Right (remaining,TList (TString "TPCWORIGINAL1":fields))
+                                | BL.null remaining,length fields == 7 -> pure ()
+                              _ -> fail "original stage emitted an executable item surrogate"
+                        mapM_ (commitPreparedWorldDependencies request) completions
+                    pure admitted
           runScope (pure ()) $ \compiler -> do
             let question = heldWorldCellQuestion admission
             ready <- scopedEnsureWorld compiler (ExactInputsRequest identity
@@ -1775,7 +1859,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
       outcome `seq` pure ()
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
-      unless (admissionParses == [1])
+      unless (admissionParses == replicate 4 1)
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 

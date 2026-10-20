@@ -3108,10 +3108,7 @@ mod normalized_dependency_tests {
         selection
             .finish_new_product_availability(
                 &parent.metadata_snapshot(),
-                &BTreeMap::from([(
-                    root_id,
-                    Arc::clone(complete.native_availability().issued_row(root_id).unwrap()),
-                )]),
+                complete.native_availability(),
             )
             .unwrap();
         let canonical = Arc::new(ArtifactEntry::canonical(
@@ -3398,13 +3395,11 @@ mod normalized_dependency_tests {
             artifacts.clone(),
         )
         .unwrap();
-        let issued = support
-            .native_availability()
-            .rows()
-            .map(|row| (row.original_artifact_id(), Arc::clone(row)))
-            .collect();
         selection
-            .finish_new_product_availability(&artifacts.metadata_snapshot(), &issued)
+            .finish_new_product_availability(
+                &artifacts.metadata_snapshot(),
+                support.native_availability(),
+            )
             .unwrap();
         (entry, selection)
     }

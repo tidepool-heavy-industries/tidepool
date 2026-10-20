@@ -4,6 +4,7 @@
 module Tidepool.PlannedDeclaration
   ( PlannedDeclaration, plannedModule, plannedSource, plannedCheckPlan
   , PlannedDeclarationRejection(..), preparePlannedDeclaration, replaceTemplateModuleHeader
+  , originalDeclarationWrapper
   , PlannedDeclarationInventory, plannedExports, plannedInstances
   , plannedOriginalOwner, plannedInterfaceFingerprint, plannedSourceMatches, plannedFamilyClosure
   , renderPlannedDeclarationInventory
@@ -60,7 +61,7 @@ data PlannedDeclaration = PlannedDeclaration
   , plannedSource :: String
   , plannedCheckPlan :: CellSourcePlan
   , authoredHeads :: [(DeclarationKind, String)]
-  }
+  } deriving (Eq, Show)
 
 data PlannedDeclarationRejection
   = InvalidOriginalReservation
@@ -70,6 +71,18 @@ data PlannedDeclarationRejection
   | InvalidOriginalHeader String
   | InvalidOriginalRendering String
   deriving (Eq, Show)
+
+-- The protected whole-cell template owns this boundary. Authored declaration
+-- syntax is rendered later by preparePlannedDeclaration, under its reservation.
+originalDeclarationWrapper :: String -> Either String String
+originalDeclarationWrapper template = do
+  let (prefix, remaining) = T.breakOn (T.pack "\n__tidepoolInEffectRow ::") (T.pack template)
+  unless (not (T.null remaining))
+    (Left "original declaration requires canonical whole-cell recipe")
+  let stripped = T.replace (T.pack "{{CELL_PRAGMAS}}") T.empty prefix
+  unless (not (T.pack "{{" `T.isInfixOf` T.replace (T.pack "{{CELL_IMPORTS}}") T.empty stripped))
+    (Left "original declaration wrapper has an unknown placeholder")
+  pure (T.unpack stripped ++ "\n{{TURN}}\n__result :: ()\n__result = ()\n")
 
 data PlannedDeclarationInventory = PlannedDeclarationInventory
   { plannedExports :: [DeclarationExport]

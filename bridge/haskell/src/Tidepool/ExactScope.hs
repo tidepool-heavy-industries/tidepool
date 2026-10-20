@@ -38,9 +38,9 @@ module Tidepool.ExactScope
   , WorldBinding, WorldBindingRow, worldInputsBindingScope, worldInputsBindings
   , WorldSourceClosureEntry(..)
   , WorldTypeClosureEntry, readWorldTypeInputs
-  , worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryEvidence
+  , worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryEvidence, worldTypeEntryInterfaceBody
   , VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs
-  , verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
+  , verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, verifiedWorldDeclarationTypeInputs
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow
   , worldBindingRowInterface, worldBindingCertifiedArtifact, worldBindingCompilerReceipt, worldBindingRowFactCID
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
@@ -2411,19 +2411,22 @@ readWorldBindingInputs owner env facts occurrences = do
 
 -- Artifact, decoded compiler identity, admitted role and package facts travel
 -- together. This is type availability, never source or native execution rights.
-data WorldTypeClosureEntry = WorldTypeClosureEntry ScopeInterfaceInput ModIface PackageImportEvidence
+data WorldTypeClosureEntry = WorldTypeClosureEntry ScopeInterfaceInput ModIface PackageImportEvidence ArtifactBytes
 
 worldTypeEntryArtifact :: WorldTypeClosureEntry -> ExactIfaceArtifact
-worldTypeEntryArtifact (WorldTypeClosureEntry (ScopeInterfaceInput (artifact,_,_) _) _ _) = artifact
+worldTypeEntryArtifact (WorldTypeClosureEntry (ScopeInterfaceInput (artifact,_,_) _) _ _ _) = artifact
 
 worldTypeEntryInterface :: WorldTypeClosureEntry -> ModIface
-worldTypeEntryInterface (WorldTypeClosureEntry _ iface _) = iface
+worldTypeEntryInterface (WorldTypeClosureEntry _ iface _ _) = iface
 
 worldTypeEntryPackages :: WorldTypeClosureEntry -> PackageImportEvidence
-worldTypeEntryPackages (WorldTypeClosureEntry _ _ packages) = packages
+worldTypeEntryPackages (WorldTypeClosureEntry _ _ packages _) = packages
 
 worldTypeEntryEvidence :: WorldTypeClosureEntry -> ExactInterfaceEvidence
-worldTypeEntryEvidence (WorldTypeClosureEntry (ScopeInterfaceInput _ evidence) _ _) = evidence
+worldTypeEntryEvidence (WorldTypeClosureEntry (ScopeInterfaceInput _ evidence) _ _ _) = evidence
+
+worldTypeEntryInterfaceBody :: WorldTypeClosureEntry -> ArtifactBytes
+worldTypeEntryInterfaceBody (WorldTypeClosureEntry _ _ _ body) = body
 
 -- Decode each selected sidecar once. Its immutable token authenticates the
 -- offered seal; the collective package owner checks installed bytes and the
@@ -2463,7 +2466,12 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
         let artifacts = [artifact | ScopeInterfaceInput (artifact,_,_) _ <- Map.elems rows]
             readInput artifact = capturedRequestInputToken (worldInputsCustody facts)
               (exactPath artifact) (exactSha256 artifact)
-        closure <- readCapturedExactIfaceClosureWithCheckedValues decoder readInput env artifacts []
+        bodies <- Map.fromList <$> mapM (\artifact -> do
+          body <- readInput artifact
+          pure (exactPath artifact,body)) artifacts
+        let selectedBody artifact = maybe (fail "world type closure lost its captured interface token") pure
+              (Map.lookup (exactPath artifact) bodies)
+        closure <- readCapturedExactIfaceClosureWithCheckedValues decoder selectedBody env artifacts []
         pure $ do
           verified <- closure
           interfaces <- selectVerifiedExactInterfaces verified artifacts
@@ -2475,7 +2483,9 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
             unless (artifact == selectedArtifact)
               (Left "world type interface differs from its selected artifact")
             evidence <- maybe (Left "world type closure lost its package proof") Right (Map.lookup key packageFacts)
-            pure (WorldTypeClosureEntry row iface evidence)) rows
+            body <- maybe (Left "world type closure lost its captured interface token") Right
+              (Map.lookup (exactPath artifact) bodies)
+            pure (WorldTypeClosureEntry row iface evidence body)) rows
   where
     validate rows = do
       let seals = Map.map (\(ScopeInterfaceInput (artifact,_,_) _) -> exactSha256 artifact) rows
@@ -2504,13 +2514,16 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
 
 -- An offered export vector is passive until it has been compared to GHC's
 -- normalized exports from the selected, hydrated exact interface.
-data VerifiedWorldDeclarationSurface = VerifiedWorldDeclarationSurface ExactIfaceArtifact [DeclarationExport]
+data VerifiedWorldDeclarationSurface = VerifiedWorldDeclarationSurface ExactIfaceArtifact [DeclarationExport] [WorldTypeClosureEntry]
 
 verifiedWorldDeclarationInterface :: VerifiedWorldDeclarationSurface -> ExactIfaceArtifact
-verifiedWorldDeclarationInterface (VerifiedWorldDeclarationSurface artifact _) = artifact
+verifiedWorldDeclarationInterface (VerifiedWorldDeclarationSurface artifact _ _) = artifact
 
 verifiedWorldDeclarationExports :: VerifiedWorldDeclarationSurface -> [DeclarationExport]
-verifiedWorldDeclarationExports (VerifiedWorldDeclarationSurface _ exports) = exports
+verifiedWorldDeclarationExports (VerifiedWorldDeclarationSurface _ exports _) = exports
+
+verifiedWorldDeclarationTypeInputs :: VerifiedWorldDeclarationSurface -> [WorldTypeClosureEntry]
+verifiedWorldDeclarationTypeInputs (VerifiedWorldDeclarationSurface _ _ entries) = entries
 
 hydrateWorldDeclarationInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts
   -> IO (Either String (HscEnv,Maybe VerifiedWorldDeclarationSurface))
@@ -2532,7 +2545,7 @@ hydrateWorldDeclarationInputs owner env facts = case worldLexicalDeclaration (wo
           actual <- interfaceExports hydrated (worldTypeEntryInterface entry)
           let exports = normalizeDeclarationExports actual
           pure $ if exports == normalizeDeclarationExports (worldDeclarationExports offered)
-            then Right (hydrated,Just (VerifiedWorldDeclarationSurface artifact exports))
+            then Right (hydrated,Just (VerifiedWorldDeclarationSurface artifact exports (Map.elems entries)))
             else Left "world declaration exports differ from its selected exact interface"
 
 -- The Context role and acquired binding jointly selected this row at cold
