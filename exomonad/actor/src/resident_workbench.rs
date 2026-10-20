@@ -2031,6 +2031,236 @@ pub(crate) struct ReservedActorGeneration {
     publication_kind: ActorGenerationPublication,
 }
 
+/// Serial publication custody. The executor never receives this owner.
+#[must_use]
+pub(crate) struct ActorGenerationPublicationOwner {
+    guard: ActorPublicationGuard,
+    prepared: Option<PreparedActorGeneration>,
+    publication_kind: ActorGenerationPublication,
+    body: Option<RecordedPublicationBody>,
+    settlement: PublicationOwnerSettlement,
+}
+
+/// One-use execution rights for the same reserved candidate. No source fence or
+/// unpublished-scope cleanup authority crosses the worker boundary.
+#[must_use]
+pub(crate) struct ActorGenerationPublicationBody {
+    prepared: PreparedActorGeneration,
+    visibility: ActorPublicationVisibility,
+    decision: Arc<tidepool_runtime::session::PublicationDecision>,
+    publication_kind: ActorGenerationPublication,
+}
+
+/// Body visibility is not confirmed publication. Only the retained serial owner
+/// may turn this observation into a settled publication and notify its caller.
+#[must_use]
+pub(crate) enum ActorGenerationPublicationBodyResult {
+    Observed {
+        outcome: Result<ActorGenerationBodyOutcome, ResidentActorWorkbenchError>,
+        obligations: PublicationBodyObligations,
+    },
+    Unobserved {
+        primary: ResidentActorWorkbenchError,
+    },
+}
+
+/// Visibility alone cannot be passed to a lifecycle notification.
+pub(crate) enum ActorGenerationBodyOutcome {
+    Visible {
+        generation: Arc<ActorGeneration>,
+        cancellation_pending: bool,
+    },
+    Refused(ActorGenerationPublicationIssue),
+    Unconfirmed(ActorGenerationPublicationIssue),
+}
+
+enum RecordedPublicationBody {
+    Visible {
+        generation: Arc<ActorGeneration>,
+        cancellation_pending: bool,
+    },
+    Failure {
+        outcome: Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>,
+        obligations: PublicationBodyObligations,
+    },
+    Unobserved {
+        primary: Arc<ResidentActorWorkbenchError>,
+    },
+}
+
+enum PublicationOwnerSettlement {
+    Pending,
+    Confirming,
+    Confirmed,
+    Restoring,
+    Restored,
+    Failed(PublicationSettlementError),
+}
+
+impl ActorGenerationPublicationOwner {
+    pub(crate) fn take_body(
+        &mut self,
+    ) -> Result<ActorGenerationPublicationBody, PublicationSettlementError> {
+        // Validate while both the guard and preparation are still in the core.
+        let visibility = self.guard.visibility()?;
+        let prepared = self
+            .prepared
+            .take()
+            .ok_or(PublicationSettlementError::ReopenAttempted)?;
+        Ok(ActorGenerationPublicationBody {
+            prepared,
+            visibility,
+            decision: self.guard.decision.clone(),
+            publication_kind: self.publication_kind,
+        })
+    }
+
+    pub(crate) fn record_body(&mut self, body: ActorGenerationPublicationBodyResult) {
+        assert!(self.body.is_none(), "publication body is delivered once");
+        self.body = Some(match body {
+            ActorGenerationPublicationBodyResult::Observed {
+                outcome:
+                    Ok(ActorGenerationBodyOutcome::Visible {
+                        generation,
+                        cancellation_pending,
+                    }),
+                ..
+            } => RecordedPublicationBody::Visible {
+                generation,
+                cancellation_pending,
+            },
+            ActorGenerationPublicationBodyResult::Observed {
+                outcome,
+                obligations,
+            } => {
+                let outcome = outcome.map(|outcome| match outcome {
+                    ActorGenerationBodyOutcome::Refused(issue) => {
+                        ActorGenerationCommit::Refused(issue)
+                    }
+                    ActorGenerationBodyOutcome::Unconfirmed(issue) => {
+                        ActorGenerationCommit::Unconfirmed(issue)
+                    }
+                    ActorGenerationBodyOutcome::Visible { .. } => unreachable!("handled above"),
+                });
+                RecordedPublicationBody::Failure {
+                    outcome: Arc::new(outcome),
+                    obligations,
+                }
+            }
+            ActorGenerationPublicationBodyResult::Unobserved { primary } => {
+                RecordedPublicationBody::Unobserved {
+                    primary: Arc::new(primary),
+                }
+            }
+        });
+    }
+
+    pub(crate) fn return_unstarted(
+        &mut self,
+        body: ActorGenerationPublicationBody,
+    ) -> Result<(), ActorGenerationPublicationBody> {
+        if self.prepared.is_some()
+            || self.body.is_some()
+            || !matches!(self.settlement, PublicationOwnerSettlement::Pending)
+            || !Arc::ptr_eq(&self.guard.attempt, &body.visibility.attempt)
+            || !Arc::ptr_eq(&self.guard.state, &body.visibility.state)
+        {
+            return Err(body);
+        }
+        self.prepared = Some(body.prepared);
+        Ok(())
+    }
+
+    pub(crate) fn source_restored(&self) -> bool {
+        matches!(self.settlement, PublicationOwnerSettlement::Restored)
+    }
+
+    pub(crate) fn settled_obligations(&self) -> bool {
+        self.source_restored()
+            && (self.prepared.is_some()
+                || matches!(
+                    self.body,
+                    Some(RecordedPublicationBody::Failure {
+                        obligations: PublicationBodyObligations::DiagnosticOnly,
+                        ..
+                    })
+                ))
+    }
+
+    pub(crate) fn diagnostic_outcome(
+        &self,
+    ) -> Option<(
+        &Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+        ActorGenerationPublicationRefusalObservation,
+    )> {
+        let RecordedPublicationBody::Failure { outcome, .. } = self.body.as_ref()? else {
+            return None;
+        };
+        publication_failure_observation(outcome).map(|observation| (outcome.as_ref(), observation))
+    }
+
+    pub(crate) fn confirm(&mut self) -> bool {
+        if !matches!(self.settlement, PublicationOwnerSettlement::Pending) {
+            return matches!(self.settlement, PublicationOwnerSettlement::Confirmed);
+        }
+        if !matches!(
+            self.body.as_ref(),
+            Some(RecordedPublicationBody::Visible { .. })
+        ) {
+            return false;
+        }
+        // Record before entering callbacks. Unwind leaves both the exact guard
+        // and its consumed fence phase in the original serial owner.
+        self.settlement = PublicationOwnerSettlement::Confirming;
+        self.settlement = match self.guard.confirmed() {
+            Ok(()) => PublicationOwnerSettlement::Confirmed,
+            Err(error) => PublicationOwnerSettlement::Failed(error),
+        };
+        matches!(self.settlement, PublicationOwnerSettlement::Confirmed)
+    }
+
+    pub(crate) fn confirmed_generation(&self) -> Option<(&Arc<ActorGeneration>, bool)> {
+        if !matches!(self.settlement, PublicationOwnerSettlement::Confirmed) {
+            return None;
+        }
+        match self.body.as_ref()? {
+            RecordedPublicationBody::Visible {
+                generation,
+                cancellation_pending,
+            } => Some((generation, *cancellation_pending)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn refuse_retirement(
+        &mut self,
+        original: &mut generation_admission::GenerationRetirementFence,
+    ) -> bool {
+        if !matches!(self.settlement, PublicationOwnerSettlement::Pending) {
+            return matches!(self.settlement, PublicationOwnerSettlement::Restored);
+        }
+        let known_unpublished = match &self.body {
+            Some(RecordedPublicationBody::Failure { outcome, .. }) => {
+                self.guard.known_unpublished(outcome)
+            }
+            Some(
+                RecordedPublicationBody::Visible { .. }
+                | RecordedPublicationBody::Unobserved { .. },
+            ) => false,
+            None => self.prepared.is_some(),
+        };
+        if !known_unpublished {
+            return false;
+        }
+        self.settlement = PublicationOwnerSettlement::Restoring;
+        self.settlement = match self.guard.refuse_retirement(original) {
+            Ok(()) => PublicationOwnerSettlement::Restored,
+            Err(error) => PublicationOwnerSettlement::Failed(error),
+        };
+        matches!(self.settlement, PublicationOwnerSettlement::Restored)
+    }
+}
+
 /// Witnesses this reservation's actual B-then-A refusal transition. It grants
 /// no authority and says nothing about compiler, storage, or physical cleanup.
 #[must_use]
@@ -2053,6 +2283,21 @@ pub(crate) enum ActorGenerationRetirementCutoff {
 }
 
 impl ReservedActorGeneration {
+    pub(crate) fn into_publication_owner(self) -> ActorGenerationPublicationOwner {
+        let Self {
+            prepared,
+            guard,
+            publication_kind,
+        } = self;
+        ActorGenerationPublicationOwner {
+            guard,
+            prepared: Some(prepared),
+            publication_kind,
+            body: None,
+            settlement: PublicationOwnerSettlement::Pending,
+        }
+    }
+
     pub(crate) fn candidate_custody(&self) -> ActorGenerationCandidateCustody {
         ActorGenerationCandidateCustody(self.prepared.candidate.clone())
     }
@@ -2435,7 +2680,7 @@ pub(crate) struct ActorGenerationPublicationRefusal {
 
 /// Issued by the observed body before any durable publication work starts.
 /// Source restoration and diagnostic recording do not settle unassessed work.
-enum PublicationBodyObligations {
+pub(crate) enum PublicationBodyObligations {
     DiagnosticOnly,
     Retained,
 }
@@ -2592,11 +2837,30 @@ impl ActorPublicationOwner {
             Self::Preparation(_) => true,
         }
     }
+    fn retained_liveness(&self) -> ActorPublicationLiveness {
+        match self {
+            Self::Actor(lifecycle) => {
+                ActorPublicationLiveness::Actor(lifecycle.retained_terminal().clone())
+            }
+            #[cfg(test)]
+            Self::Preparation(owner) => ActorPublicationLiveness::Preparation(owner.clone()),
+        }
+    }
+}
+
+/// Settlement retains terminal liveness, never the actor's client/notification
+/// graph. The broad lifecycle endpoint belongs to the disposable driver.
+#[derive(Clone)]
+enum ActorPublicationLiveness {
+    Actor(crate::RetainedActorExit),
+    #[cfg(test)]
+    Preparation(crate::CompilerPreparationClient),
+}
+
+impl ActorPublicationLiveness {
     fn with_live_source_settlement<R>(&self, settle: impl FnOnce() -> R) -> Option<R> {
         match self {
-            Self::Actor(lifecycle) => lifecycle
-                .retained_terminal()
-                .with_live_source_settlement(settle),
+            Self::Actor(terminal) => terminal.with_live_source_settlement(settle),
             #[cfg(test)]
             Self::Preparation(owner) => owner.with_live_source_settlement(settle),
         }
@@ -2639,7 +2903,7 @@ enum PublicationFence {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum PublicationSettlementError {
+pub(crate) enum PublicationSettlementError {
     #[error(transparent)]
     Source(#[from] tidepool_runtime::session::SourceAdmissionError),
     #[error("publication no longer owns its exact installation or world")]
@@ -2723,7 +2987,7 @@ struct ActorPublicationGuard {
     attempt: Arc<ActorPublicationAttempt>,
     settlement: ActorPublicationState,
     decision: Arc<tidepool_runtime::session::PublicationDecision>,
-    owner: ActorPublicationOwner,
+    owner: ActorPublicationLiveness,
     #[cfg(test)]
     settlement_probe: Option<Arc<PublicationSettlementProbe>>,
 }
@@ -2818,23 +3082,26 @@ impl ActorPublicationGuard {
             attempt,
             settlement: ActorPublicationState::Armed(authority),
             decision,
-            owner,
+            owner: owner.retained_liveness(),
             #[cfg(test)]
             settlement_probe: None,
         }))
+    }
+
+    fn has_no_commit_claim(&self) -> bool {
+        matches!(
+            self.decision.phase(),
+            tidepool_runtime::session::PublicationPhase::Running
+                | tidepool_runtime::session::PublicationPhase::CancellationRequested
+                | tidepool_runtime::session::PublicationPhase::Terminated
+        )
     }
 
     fn known_unpublished(
         &self,
         outcome: &Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
     ) -> bool {
-        let no_commit_claim = matches!(
-            self.decision.phase(),
-            tidepool_runtime::session::PublicationPhase::Running
-                | tidepool_runtime::session::PublicationPhase::CancellationRequested
-                | tidepool_runtime::session::PublicationPhase::Terminated
-        );
-        no_commit_claim
+        self.has_no_commit_claim()
             && !matches!(
                 outcome,
                 Ok(ActorGenerationCommit::Published { .. } | ActorGenerationCommit::Unconfirmed(_))
@@ -2842,7 +3109,7 @@ impl ActorPublicationGuard {
     }
 
     fn complete(
-        self,
+        mut self,
         outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
     ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
         let known_unpublished = self.known_unpublished(&outcome);
@@ -3039,7 +3306,7 @@ impl ActorPublicationGuard {
         Ok(())
     }
 
-    fn confirmed(mut self) -> Result<(), PublicationSettlementError> {
+    fn confirmed(&mut self) -> Result<(), PublicationSettlementError> {
         let promote = |reopen: tidepool_runtime::session::RuntimeSourceReopen<'_>| {
             self.owner
                 .with_live_source_settlement(|| {
@@ -3398,12 +3665,66 @@ where
                 ));
             }
         };
+        let body = ActorGenerationPublicationBody {
+            prepared,
+            visibility,
+            decision: publication,
+            publication_kind,
+        };
+        match self.run_publication_execution(body).await {
+            ActorGenerationPublicationBodyResult::Observed {
+                outcome,
+                obligations,
+            } => PublicationBodyCompletion::Observed {
+                guard: owner,
+                outcome: outcome.map(|outcome| match outcome {
+                    ActorGenerationBodyOutcome::Visible {
+                        generation,
+                        cancellation_pending,
+                    } => ActorGenerationCommit::Published {
+                        generation,
+                        cancellation_pending,
+                    },
+                    ActorGenerationBodyOutcome::Refused(issue) => {
+                        ActorGenerationCommit::Refused(issue)
+                    }
+                    ActorGenerationBodyOutcome::Unconfirmed(issue) => {
+                        ActorGenerationCommit::Unconfirmed(issue)
+                    }
+                }),
+                obligations,
+            },
+            ActorGenerationPublicationBodyResult::Unobserved { primary } => {
+                PublicationBodyCompletion::Unobserved {
+                    guard: owner,
+                    primary,
+                }
+            }
+        }
+    }
+
+    async fn run_publication_execution(
+        &self,
+        body: ActorGenerationPublicationBody,
+    ) -> ActorGenerationPublicationBodyResult {
+        let ActorGenerationPublicationBody {
+            prepared,
+            visibility,
+            decision: publication,
+            publication_kind,
+        } = body;
+        let obligations = match &prepared.commit {
+            PreparedGenerationCommit::Ephemeral { .. } => {
+                PublicationBodyObligations::DiagnosticOnly
+            }
+            _ => PublicationBodyObligations::Retained,
+        };
         // The affine phase/fence owner is outside checkout, including cancellation
         // and setup failure. The worker receives visibility rights only.
         let completed = self.access.with_machine_wait_mode(prepared.checkout_context.clone(), None, false, move |session, _, _| {
             let mut obligations = obligations;
             if !visibility.is_current() {
-                return Ok((Ok(ActorGenerationCommit::Refused("publication attempt is unavailable".into())), obligations));
+                return Ok((Ok(ActorGenerationBodyOutcome::Refused("publication attempt is unavailable".into())), obligations));
             }
             let outcome = (|| {
             session.validate_lexical_scope_lease(prepared.candidate.scope.scope(), &prepared.candidate.scope)?;
@@ -3421,16 +3742,16 @@ where
                     let canonical = selected.owner.for_notebook_generation(tidepool_runtime::session::NotebookGenerationId::INITIAL);
                     let observed = session.active_notebook_generation(&canonical).map_err(ResidentError::Session)?;
                     if observed.as_ref() != Some(&selected) || !readiness.is_current() {
-                        return Ok(ActorGenerationCommit::Refused("restored generation changed before adoption".into()));
+                        return Ok(ActorGenerationBodyOutcome::Refused("restored generation changed before adoption".into()));
                     }
                     installation.verify_recovered_generation(&selected.references).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
                     if prompts != selected.references.prompts {
-                        return Ok(ActorGenerationCommit::Refused("restored prompt snapshot changed before adoption".into()));
+                        return Ok(ActorGenerationBodyOutcome::Refused("restored prompt snapshot changed before adoption".into()));
                     }
                     let owner = public_owner.bind(Some(readiness));
                     let generation = Arc::new(ActorGeneration { id:selected.generation(),installation,prompts:selected.references.prompts.clone(),context,public_owner:owner,scope,configuration_digest,durable:Some(selected) });
                     if !session.with_current_compiler_world(&candidate.compiler_world, &visibility.source, || visibility.install(generation.clone())).map_err(ResidentError::Session)? {
-                        return Ok(ActorGenerationCommit::Unconfirmed("publication became unavailable at visibility".into()));
+                        return Ok(ActorGenerationBodyOutcome::Unconfirmed("publication became unavailable at visibility".into()));
                     }
                     visible=Some((generation, false));
                 },
@@ -3438,7 +3759,7 @@ where
                     let owner = public_owner.bind(None);
                     let generation = Arc::new(ActorGeneration { id,installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:None });
                     let settled = session.with_current_compiler_world(&candidate.compiler_world, &visibility.source, || {
-                        let Some(claim) = publication.claim_commit() else { return Err(ActorGenerationCommit::Refused("reload cancelled before commit".into())); };
+                        let Some(claim) = publication.claim_commit() else { return Err(ActorGenerationBodyOutcome::Refused("reload cancelled before commit".into())); };
                         obligations = PublicationBodyObligations::Retained;
                         visibility_live = visibility.install(generation.clone());
                         let cancellation_pending = match publication_kind {
@@ -3472,7 +3793,7 @@ where
                         Ok(result) => result,
                         Err(error) if matches!(publication.phase(),tidepool_runtime::session::PublicationPhase::Published | tidepool_runtime::session::PublicationPhase::CommitClaimed { .. }) => {
                             visibility.retain_unconfirmed(&mut candidate);
-                            return Ok(ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(Box::new(error))));
+                            return Ok(ActorGenerationBodyOutcome::Unconfirmed(ActorGenerationPublicationIssue::Durable(Box::new(error))));
                         },
                         Err(error) => return Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(error))),
                     };
@@ -3481,22 +3802,22 @@ where
                             visible = visible.map(|(generation, _)| (generation, cancellation_pending));
                         },
                         tidepool_runtime::session::DurablePublicOwnerPublication::Committed(_) => {},
-                        tidepool_runtime::session::DurablePublicOwnerPublication::Refused { error } => return Ok(ActorGenerationCommit::Refused(ActorGenerationPublicationIssue::Durable(error))),
+                        tidepool_runtime::session::DurablePublicOwnerPublication::Refused { error } => return Ok(ActorGenerationBodyOutcome::Refused(ActorGenerationPublicationIssue::Durable(error))),
                         tidepool_runtime::session::DurablePublicOwnerPublication::RecoveryRequired { error } => {
                             visibility.retain_unconfirmed(&mut candidate);
-                            return Ok(ActorGenerationCommit::Unconfirmed(ActorGenerationPublicationIssue::Durable(error)));
+                            return Ok(ActorGenerationBodyOutcome::Unconfirmed(ActorGenerationPublicationIssue::Durable(error)));
                         },
                     }
                 },
             }
             match visible {
-                Some((generation, cancellation_pending)) if visibility_live => Ok(ActorGenerationCommit::Published {
+                Some((generation, cancellation_pending)) if visibility_live => Ok(ActorGenerationBodyOutcome::Visible {
                     generation,
                     cancellation_pending,
                 }),
                 _ => {
                     visibility.retain_unconfirmed(&mut None);
-                    Ok(ActorGenerationCommit::Unconfirmed("native publication confirmed without its live generation; admission requires reconciliation".into()))
+                    Ok(ActorGenerationBodyOutcome::Unconfirmed("native publication confirmed without its live generation; admission requires reconciliation".into()))
                 },
             }
             })();
@@ -3507,18 +3828,14 @@ where
         let (outcome, obligations) = match completed {
             Ok(outcome) => outcome,
             Err(primary) => {
-                return PublicationBodyCompletion::Unobserved {
-                    guard: owner,
-                    primary,
-                };
+                return ActorGenerationPublicationBodyResult::Unobserved { primary };
             }
         };
         #[cfg(test)]
         if let Some(probe) = &self.settlement_probe {
             probe.wait();
         }
-        PublicationBodyCompletion::Observed {
-            guard: owner,
+        ActorGenerationPublicationBodyResult::Observed {
             outcome,
             obligations,
         }
