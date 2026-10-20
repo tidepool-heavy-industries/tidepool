@@ -122,10 +122,9 @@ fn publish_seed_world(
     reference: &GenerationArtifactReference,
     original_source: &Arc<RuntimeLexicalScopeLease>,
 ) -> SliceResult<PublishedSeedWorld> {
-    let sources =
-        capture_seed_sources(reference).map_err(|_| "seed source capture failed")?;
+    let sources = capture_seed_sources(reference).map_err(|_| "seed source capture failed")?;
     let admitted = session
-        .capture_inspection_world_in(scope, reference, original_source)
+        .capture_inspection_world_in(scope, reference, original_source.original_source())
         .map_err(|_| "the source owner refused a published-world capture")?;
     let query = NameQuery {
         scope: NameScope::PublicModule("Seed".into()),
@@ -161,11 +160,15 @@ fn publish_seed_world(
         .map_err(|_| "the source compiler transaction was refused")?;
     let completed =
         finish_admitted_world_inspection(settled).map_err(|error| named_world_error(&error))?;
-    if !session.install_inspection_world_if_current(&completed, reference, original_source) {
+    if !session.install_inspection_world_if_current(
+        &completed,
+        reference,
+        original_source.original_source(),
+    ) {
         return Err("the inspection world base changed before installation");
     }
     let borrowed = session
-        .capture_inspection_world_in(scope, reference, original_source)
+        .capture_inspection_world_in(scope, reference, original_source.original_source())
         .map_err(|_| "the published world was not retained on the scope")?;
     if borrowed.needs_source_capture() {
         return Err("the installed world still requires cold source capture");
@@ -305,25 +308,19 @@ fn service_cell_slice_imports_seed_bind_and_uses_it() {
         .expect("adopt initial notebook scope");
     let reference = GenerationArtifactReference::capture(SEED_ORIGIN.to_vec());
 
-    let published = publish_seed_world(&mut session, scope, &reference, &original_source).unwrap_or_else(
-        |gap| {
+    let published = publish_seed_world(&mut session, scope, &reference, &original_source)
+        .unwrap_or_else(|gap| {
             panic!(
                 "service cell slice failed while publishing the Seed world: {gap}\n\
                  named route gaps:\n- {GAP_WORLD_ADMISSION}\n- {GAP_WORLD_PROGRAM}\n\
                  - {GAP_CHECKED_PREFIX}\n- {GAP_SUCCESSOR}\n- {GAP_FINAL_PROMOTION}"
             )
-        },
-    );
+        });
 
     // The authored cell is ordinary workbench source: one bind imported
     // through the real module path, then a later use of that binding.
-    let template = resident_cell_check_template(
-        effects.preamble(),
-        effects.row(),
-        SEED_IMPORTS,
-    );
-    let templates =
-        resident_workbench_templates(effects.preamble(), effects.row(), SEED_IMPORTS);
+    let template = resident_cell_check_template(effects.preamble(), effects.row(), SEED_IMPORTS);
+    let templates = resident_workbench_templates(effects.preamble(), effects.row(), SEED_IMPORTS);
     let recipe = CellRecipe::new(
         SEED_CELL.to_string(),
         template,
@@ -343,15 +340,14 @@ fn service_cell_slice_imports_seed_bind_and_uses_it() {
     )
     .expect("authored Seed cell recipe");
 
-    let admitted = admit_authored_seed_cell(&mut session, &published, &recipe).unwrap_or_else(
-        |gap| {
+    let admitted =
+        admit_authored_seed_cell(&mut session, &published, &recipe).unwrap_or_else(|gap| {
             panic!(
                 "service cell slice blocked at admission: {gap}\n\
                  named route gaps:\n- {GAP_WORLD_ADMISSION}\n- {GAP_WORLD_PROGRAM}\n\
                  - {GAP_CHECKED_PREFIX}\n- {GAP_SUCCESSOR}\n- {GAP_FINAL_PROMOTION}"
             )
-        },
-    );
+        });
     let program = compile_admitted_seed_cell(&admitted)
         .unwrap_or_else(|gap| panic!("service cell slice blocked at compilation: {gap}"));
     let value = execute_seed_cell(&mut session, admitted, program)
