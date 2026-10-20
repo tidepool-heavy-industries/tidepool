@@ -107,12 +107,14 @@ drawing any second-cell conclusion.
   1 executed / 0 passed / 1 failed, exit 1
   (`final-join/logs/15-a1c-tip-fc73e0e652.log`). Earlier reds: `36827d80a7` and
   handlers `5eb2b3dbed`.
-- The workbench fails before any Haskell helper runs:
+- The test has two parts: the published example cell executes and displays, and
+  the following probe-script cell fails to compile:
   `ExactModuleIdentity { unit: "main", module: "Tidepool.Session.Lib.G4" }`
   requires unavailable
   `ExactModuleIdentity { unit: "main", module: "Tidepool.Effects.Core" }`
   through `NativeGroup { dependent_ordinal: 4, required_ordinal: 4174 }`.
-  The Haskell probe script has never been observed to execute.
+  The probe script has never been observed to execute; the example before it
+  does.
 - Ordinals are fixture-local and unstable across bases (earlier observation:
   4192 vs 4205); do not treat them as identity.
 - Do not use the concurrent scratch-tree trace: that investigation ran in
