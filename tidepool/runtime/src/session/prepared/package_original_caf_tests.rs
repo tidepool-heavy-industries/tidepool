@@ -26,7 +26,11 @@ fn package_original_owner(binder: &SymbolIdentity, digest: [u8; 32]) -> ImportOw
     }
 }
 
-fn package_original_group(owner: ImportOwner, entry: Option<Signature>) -> CertifiedGroup {
+fn package_original_group(
+    owner: ImportOwner,
+    rep: RuntimeRep,
+    entry: Option<Signature>,
+) -> CertifiedGroup {
     let ImportOwner::Package { binder, .. } = &owner else {
         panic!("the fixture forwards a package export")
     };
@@ -39,7 +43,7 @@ fn package_original_group(owner: ImportOwner, entry: Option<Signature>) -> Certi
     });
     wire.globals.push(GlobalDecl {
         identity: binder.clone(),
-        rep: RuntimeRep::LiftedRef,
+        rep,
         entry_signature,
         required_evaluated: false,
         required_generation: None,
@@ -133,11 +137,13 @@ fn immutable_package_only_original_image_keeps_fresh_machine_cafs_independent() 
     let digest = package.interface_digest.unwrap();
     assert_ne!(digest, [0; 32]);
     let signature = package.entry.clone();
+    let rep = package.handle.rep();
+    assert_eq!(rep, RuntimeRep::LiftedRef);
     let package_handle_a = package.handle;
     let package_handle_b = b.code_exports[&binder].handle;
     assert_eq!(b.code_exports[&binder].interface_digest, Some(digest));
     assert_eq!(b.code_exports[&binder].entry, signature);
-    let group = package_original_group(package_original_owner(&binder, digest), signature);
+    let group = package_original_group(package_original_owner(&binder, digest), rep, signature);
     assert!(group
         .imports()
         .iter()
@@ -261,6 +267,8 @@ fn immutable_package_only_original_refuses_missing_or_changed_proof_atomically()
     let package = package.clone();
     let digest = export.interface_digest.unwrap();
     let signature = export.entry.clone();
+    let rep = export.handle.rep();
+    assert_eq!(rep, RuntimeRep::LiftedRef);
     let mut changed = digest;
     changed[0] ^= 1;
     assert_ne!(digest, [0; 32]);
@@ -269,7 +277,7 @@ fn immutable_package_only_original_refuses_missing_or_changed_proof_atomically()
     let roots = engine.persistent_roots_count();
     let programs = engine.programs.len();
     let install = |engine: &mut PreparedEngine, requested, entry| {
-        let group = package_original_group(package_original_owner(&package, requested), entry);
+        let group = package_original_group(package_original_owner(&package, requested), rep, entry);
         engine.install_certified_turn(
             package_original_target(&group, &registry),
             &certified_source_evidence(std::slice::from_ref(&group)),
