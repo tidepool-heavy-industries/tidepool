@@ -23058,7 +23058,6 @@ pub(crate) mod request_tests {
         expected: &str,
     ) {
         let (mut session, context, _, _session_root) = host_mount_fixture();
-        session.set_image_registry(Arc::clone(prepared.prepared.entry.image_registry()));
         let (_installation, outcome) =
             run_closed_source_probe_startup(&mut session, &context, &prepared.prepared.entry);
         let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
@@ -23174,7 +23173,6 @@ pub(crate) mod request_tests {
         expected: &str,
     ) {
         let before = tidepool_extract_cmd::extract_spawn_count();
-        session.set_image_registry(Arc::clone(prepared.image_registry()));
         let (_installation, outcome) =
             run_closed_source_probe_startup(&mut session, &context, prepared);
         let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
