@@ -22021,6 +22021,189 @@ mod tests {
     }
 
     #[test]
+    fn retained_group_materialization_keeps_scope_aliases_on_cold_and_cache_hits() {
+        use crate::artifact_inventory::{
+            ArtifactBindingNode, ExactArtifactSelection, NativeArtifactDemand,
+        };
+        use crate::certified_products::PendingImportOwner;
+        let products = ["ScopedMaterialization", "OtherMaterialization"].map(|module| {
+            crate::certified_products::tests::recovered_witness_fixtures(&[
+                crate::certified_products::fixture_finalized_product(
+                    crate::certified_products::tests::original_groups_fixture(
+                        module,
+                        vec![(7, vec![])],
+                        7,
+                        &BTreeMap::new(),
+                    ),
+                    [2; 32],
+                ),
+            ])
+            .remove(0)
+            .product
+        });
+        let inputs = match support_offer(&products) {
+            CompilerSupportFixture::Complete(inputs) => inputs,
+            _ => unreachable!(),
+        };
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(inputs.compiler_source_support())
+            .unwrap();
+        let entries = products
+            .iter()
+            .map(|product| Arc::new(ArtifactEntry::original([2; 32], product.clone()).unwrap()))
+            .collect::<Vec<_>>();
+        let inventory = ArtifactInventory::default();
+        let available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let imports = products
+            .iter()
+            .map(|product| {
+                let definitions =
+                    crate::certified_products::original_native_group_definitions(product, 7)
+                        .unwrap();
+                let tidepool_repr::execution_schema::Group::Recursive(tops) =
+                    &definitions.bindings()[0]
+                else {
+                    panic!("fixture recursive group");
+                };
+                PendingImportOwner::Source {
+                    owner: product.owner().clone(),
+                    original_ordinal: 7,
+                    binder: tops[0].identity.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let admit = |imports: &[PendingImportOwner]| {
+            inventory
+                .admit_product_artifacts(
+                    &available,
+                    entries.clone(),
+                    NativeArtifactDemand::CertifiedTargetImports(imports),
+                    None,
+                )
+                .unwrap()
+                .into_target()
+                .unwrap()
+        };
+        let first = admit(&imports[..1]);
+        let broad = admit(&imports);
+        let artifact = entries[0].descriptor.id;
+        let first_bindings = first
+            .artifacts()
+            .selected_native_binding_rows()
+            .1
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut graph = broad.artifacts().capture_graph_selection();
+        graph
+            .native_groups
+            .retain(|binding| binding.binding.artifact() == artifact);
+        graph.roots.retain(|node| !matches!(node, ArtifactBindingNode::Group(binding) if binding.binding.artifact() != artifact));
+        let second = broad
+            .artifacts()
+            .select_issued(
+                vec![],
+                &ExactArtifactSelection::from_recovered_graph_selection(graph),
+            )
+            .unwrap();
+        let second_bindings = second
+            .selected_native_binding_rows()
+            .1
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_ne!(first_bindings, second_bindings);
+        assert_eq!(
+            first.artifacts().selected_native_groups(),
+            second.selected_native_groups()
+        );
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let first_metadata = projection
+            .project_metadata(first.artifacts().metadata_snapshot())
+            .unwrap();
+        let second_metadata = projection
+            .project_metadata(second.metadata_snapshot())
+            .unwrap();
+        assert_eq!(
+            first_metadata.materialization_key(),
+            second_metadata.materialization_key()
+        );
+        let materialize = |view: &ArtifactView, metadata: &CompilerArtifactMetadata| {
+            view.retain_materialization(metadata, |parents| {
+                context.materialize_retained_artifacts(
+                    view,
+                    metadata,
+                    parents,
+                    tempfile::tempdir().unwrap(),
+                    &RequestInputTransport::OwnedArena,
+                )
+            })
+            .unwrap()
+        };
+        let first_owner = materialize(first.artifacts(), &first_metadata);
+        let second_owner = materialize(&second, &second_metadata);
+        assert!(!Arc::ptr_eq(&first_owner, &second_owner));
+        for (view, metadata, expected, owner) in [
+            (
+                first.artifacts(),
+                &first_metadata,
+                &first_bindings,
+                &first_owner,
+            ),
+            (&second, &second_metadata, &second_bindings, &second_owner),
+        ] {
+            assert!(Arc::ptr_eq(owner, &materialize(view, metadata)));
+            let rows =
+                RetainedArtifactMaterialization::selected_group_refs([owner.as_ref()], expected);
+            assert_eq!(rows.keys().copied().collect::<BTreeSet<_>>(), *expected);
+            let rebound = CertifiedArtifactGroupBindings::from_issued_rows(view, &rows).unwrap();
+            assert!(rebound.matches_view(view));
+            assert!(CertifiedArtifactGroupBindings::from_issued_rows(
+                if expected == &first_bindings {
+                    &second
+                } else {
+                    first.artifacts()
+                },
+                &rows,
+            )
+            .is_err());
+        }
+        let joined = first.artifacts().merge_fixture_selections(&second).unwrap();
+        let joined_metadata = projection
+            .project_metadata(joined.metadata_snapshot())
+            .unwrap();
+        let aliases = joined
+            .selected_native_binding_rows()
+            .1
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let captured = RetainedArtifactMaterialization::capture_custody(
+            &[first_owner, second_owner],
+            &joined_metadata.retained.artifacts,
+            &aliases,
+        )
+        .unwrap();
+        assert!(captured._parents.is_empty());
+        assert_eq!(captured.groups.len(), 2);
+        let rows = captured.groups.values().collect::<Vec<_>>();
+        assert!(rows[0].same_issuance(rows[1]));
+        let detached_rows =
+            RetainedArtifactMaterialization::selected_group_refs([captured.as_ref()], &aliases);
+        let detached =
+            CertifiedArtifactGroupBindings::from_issued_rows(&joined, &detached_rows).unwrap();
+        assert_eq!(detached.bindings.len(), 2);
+        assert_eq!(detached.groups.len(), 1);
+        let mut missing = detached_rows;
+        missing.remove(aliases.first().unwrap());
+        assert!(CertifiedArtifactGroupBindings::from_issued_rows(&joined, &missing).is_err());
+    }
+
+    #[test]
     fn retained_materialization_survives_request_scratch_and_releases_with_owner() {
         let (context, producer) = metadata_fixture();
         let scratch = tempfile::tempdir().unwrap();
