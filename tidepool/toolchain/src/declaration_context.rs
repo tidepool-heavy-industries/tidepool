@@ -2178,6 +2178,17 @@ impl DemandCertifiedGroups {
         &self.groups
     }
 
+    fn bound_rows(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            crate::artifact_inventory::NativeGroupBinding,
+            &PendingCertifiedGroup,
+        ),
+    > {
+        self.bindings.values().copied().zip(&self.groups)
+    }
+
     pub(crate) fn bindings(
         &self,
     ) -> &BTreeMap<NativeGroupKey, crate::artifact_inventory::NativeGroupBinding> {
@@ -2483,44 +2494,23 @@ impl DemandNativeInputs {
         }
         // The empty slice is only an absent reuse memo. This existing issuer
         // returns every selected authenticated group as the final authority.
-        let groups = certify_selected_owned_products_in_context_with_validation(
-            &available,
-            &[],
-            &selected,
-            validation,
-        )
-        .map_err(compiler_evidence_failure)?;
-        // Certified rows are the authority for executable bindings. The
-        // closure map above only carries the exact issuing scope for each
-        // selected key, so it may neither add an unbacked binding nor lose a
-        // certified group.
-        let mut artifacts_by_owner = BTreeMap::new();
-        for (id, product) in &available {
-            artifacts_by_owner.insert(product.owner(), *id);
-        }
-        let mut certified_keys = BTreeSet::new();
-        for group in &groups {
-            budget.checkpoint()?;
-            let artifact = artifacts_by_owner
-                .get(group.owner())
-                .copied()
-                .ok_or_else(|| failure("certified receipt group lost its issued original"))?;
-            let key = NativeGroupKey {
-                artifact,
-                original_ordinal: group.group().original_ordinal(),
-            };
-            if !certified_keys.insert(key) {
-                return Err(failure("certified receipt group was issued twice"));
-            }
-        }
-        if certified_keys.len() != bindings.len()
-            || bindings.keys().any(|key| !certified_keys.contains(key))
+        let mut rows = crate::certified_products::certify_selected_owned_group_rows_in_context_with_validation(
+            &available, &[], &selected, validation,
+        ).map_err(compiler_evidence_failure)?;
+        // Both immutable slices use the same issued key order. No receiving
+        // consumer needs to rediscover an artifact from its rendered owner.
+        rows.sort_by_key(|(key, _)| *key);
+        if rows.len() != bindings.len()
+            || rows
+                .iter()
+                .zip(bindings.keys())
+                .any(|((key, _), binding_key)| key != binding_key)
         {
             return Err(failure(
                 "certified receipt groups and executable bindings disagree",
             ));
         }
-        bindings.retain(|key, _| certified_keys.contains(key));
+        let groups = rows.into_iter().map(|(_, group)| group).collect();
         Ok(DemandCertifiedGroups {
             basis: Arc::clone(&self.cold),
             groups,
@@ -9357,6 +9347,9 @@ impl WorldProgramSegment {
     pub(crate) fn groups(&self) -> &[PendingCertifiedGroup] {
         self.inputs.groups.groups()
     }
+    pub(crate) fn group_baseline(&self) -> CertifiedNativeGroupBaseline<'_> {
+        CertifiedNativeGroupBaseline::Demand(&self.inputs.groups)
+    }
     pub(crate) fn source_lexical(&self) -> &[ExactLexicalNode] {
         &self.continuation.program.program_source_lexical
     }
@@ -13467,6 +13460,31 @@ impl CertifiedArtifactGroupBindings {
     }
 }
 
+/// Keep a receiving item's already certified group rows with their exact
+/// issuing bindings. The finite initial request predates the first item.
+#[derive(Clone, Copy)]
+pub(crate) enum CertifiedNativeGroupBaseline<'a> {
+    Demand(&'a DemandCertifiedGroups),
+    Target(&'a CertifiedArtifactGroupBindings),
+    InitialRequest(&'a ProgramAdmissionContinuation),
+}
+
+pub(crate) fn certify_bound_artifact_view_groups_with_validation(
+    view: &ArtifactView,
+    candidates: &crate::certified_products::IssuedGroupCandidates,
+    baseline: CertifiedNativeGroupBaseline<'_>,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<CertifiedArtifactGroupBindings, CompileError> {
+    certify_artifact_view_groups(
+        view,
+        candidates,
+        Some(candidates),
+        &[],
+        Some(baseline),
+        validation,
+    )
+}
+
 /// Admit only the inventory's selected dependency closure. Original byte custody
 /// remains complete; previously admitted groups must survive unchanged.
 #[cfg(test)]
@@ -13476,7 +13494,7 @@ pub(crate) fn certify_artifact_view_groups_with_validation(
     baseline: &[PendingCertifiedGroup],
     validation: &mut PackageInterfaceValidation,
 ) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
-    certify_artifact_view_groups(view, candidates, None, baseline, validation)
+    certify_artifact_view_groups(view, candidates, None, baseline, None, validation)
         .map(|groups| groups.groups().to_vec())
 }
 
@@ -13486,7 +13504,14 @@ pub(crate) fn certify_issued_artifact_view_groups_with_validation(
     baseline: &[PendingCertifiedGroup],
     validation: &mut PackageInterfaceValidation,
 ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
-    certify_artifact_view_groups(view, candidates, Some(candidates), baseline, validation)
+    certify_artifact_view_groups(
+        view,
+        candidates,
+        Some(candidates),
+        baseline,
+        None,
+        validation,
+    )
 }
 
 fn certify_artifact_view_groups(
@@ -13494,17 +13519,38 @@ fn certify_artifact_view_groups(
     candidates: &[PendingCertifiedGroup],
     issued: Option<&crate::certified_products::IssuedGroupCandidates>,
     baseline: &[PendingCertifiedGroup],
+    bound_baseline: Option<CertifiedNativeGroupBaseline<'_>>,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
     let metadata = view.metadata_snapshot();
-    let entries = metadata.artifacts.values().cloned().collect::<Vec<_>>();
-    let available = original_products_by_id(&entries);
+    let available = metadata
+        .artifacts
+        .iter()
+        .filter_map(|(id, entry)| match &entry.payload {
+            ArtifactPayload::Original(product) => Some((*id, product)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let exact_baseline = matches!(
+        bound_baseline,
+        Some(CertifiedNativeGroupBaseline::Demand(_) | CertifiedNativeGroupBaseline::Target(_))
+    );
+    let (view_stamp, selected_bindings) = view.selected_native_binding_rows();
+    validation
+        .inventory
+        .reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(
+            selected_bindings.len(),
+        )
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    let selected = selected_bindings.iter().copied().collect::<BTreeSet<_>>();
     let mut original_ids = BTreeMap::new();
-    for (artifact, product) in &available {
-        original_ids
-            .entry(product.owner())
-            .or_insert_with(Vec::new)
-            .push(*artifact);
+    if !exact_baseline {
+        for (artifact, product) in &available {
+            original_ids
+                .entry(product.owner())
+                .or_insert_with(Vec::new)
+                .push(*artifact);
+        }
     }
     #[derive(Clone, Copy, Debug)]
     enum GroupAdmissionPhase {
@@ -13550,7 +13596,13 @@ fn certify_artifact_view_groups(
             None => selected_key(GroupAdmissionPhase::Candidate, group)?,
         };
         if metadata.selected_native_groups.contains(&key) {
-            if selected_key(GroupAdmissionPhase::Candidate, group)? != key {
+            if if exact_baseline {
+                available
+                    .get(&key.artifact)
+                    .is_none_or(|product| product.owner() != group.owner())
+            } else {
+                selected_key(GroupAdmissionPhase::Candidate, group)? != key
+            } {
                 return Err(failure(
                     "selected candidate differs from its original issuer",
                 ));
@@ -13562,22 +13614,70 @@ fn certify_artifact_view_groups(
         }
     }
     let mut baseline_keys = BTreeSet::new();
-    for group in baseline {
+    let mut inherit =
+        |key: NativeGroupKey, group: &PendingCertifiedGroup| -> Result<(), CompileError> {
+            crate::host_work::checkpoint()?;
+            if !metadata.selected_native_groups.contains(&key) {
+                return Err(failure("artifact view removed a previously selected group"));
+            }
+            if let Some(position) = current_positions.get(&key) {
+                let candidate: &PendingCertifiedGroup = &current[*position];
+                if candidate.group() != group.group()
+                    || candidate.imports() != group.imports()
+                    || candidate.owner() != group.owner()
+                {
+                    return Err(failure("artifact view changed a previously selected group"));
+                }
+            } else {
+                validation
+                    .inventory
+                    .reserve::<PendingCertifiedGroup>(1)
+                    .map_err(|error| compiler_evidence_failure(error.into()))?;
+                current_positions.insert(key, current.len());
+                current.push(group.clone());
+            }
+            Ok(())
+        };
+    let initial = match bound_baseline {
+        Some(CertifiedNativeGroupBaseline::InitialRequest(request)) => request.groups(),
+        None => baseline,
+        _ => &[],
+    };
+    for group in initial {
         let key = selected_key(GroupAdmissionPhase::Baseline, group)?;
-        if !baseline_keys.insert(key) || !metadata.selected_native_groups.contains(&key) {
+        if !baseline_keys.insert(key) {
             return Err(failure(
-                "artifact view removed or duplicated a previously selected group",
+                "artifact view duplicated a previously selected group",
             ));
         }
-        if let Some(position) = current_positions.get(&key) {
-            let candidate = &current[*position];
-            if candidate.group() != group.group() || candidate.imports() != group.imports() {
-                return Err(failure("artifact view changed a previously selected group"));
-            }
-        } else {
-            current_positions.insert(key, current.len());
-            current.push(group.clone());
+        inherit(key, group)?;
+    }
+    let mut inherit_binding = |binding: crate::artifact_inventory::NativeGroupBinding,
+                               group: &PendingCertifiedGroup|
+     -> Result<(), CompileError> {
+        if !selected.contains(&binding) {
+            return Err(failure("artifact view removed an issued native binding"));
         }
+        inherit(
+            NativeGroupKey {
+                artifact: binding.binding.artifact(),
+                original_ordinal: binding.original_ordinal,
+            },
+            group,
+        )
+    };
+    match bound_baseline {
+        Some(CertifiedNativeGroupBaseline::Demand(groups)) => {
+            for (binding, group) in groups.bound_rows() {
+                inherit_binding(binding, group)?;
+            }
+        }
+        Some(CertifiedNativeGroupBaseline::Target(groups)) => {
+            for (binding, index) in &groups.bindings {
+                inherit_binding(*binding, &groups.groups[*index])?;
+            }
+        }
+        _ => {}
     }
     let additional =
         crate::certified_products::certify_selected_owned_group_rows_in_context_with_validation(
@@ -13595,7 +13695,6 @@ fn certify_artifact_view_groups(
         }
         current.push(group);
     }
-    let (view, selected_bindings) = view.selected_native_binding_rows();
     let bindings = selected_bindings
         .into_iter()
         .map(|binding| {
@@ -13610,7 +13709,7 @@ fn certify_artifact_view_groups(
         })
         .collect::<Result<_, CompileError>>()?;
     Ok(CertifiedArtifactGroupBindings {
-        view,
+        view: view_stamp,
         groups: current.into(),
         bindings,
     })
@@ -20394,6 +20493,16 @@ mod tests {
             let binding = groups.bindings()[&key];
             assert_eq!(binding.binding.artifact(), key.artifact);
             assert_eq!(binding.original_ordinal, key.original_ordinal);
+        }
+
+        for (binding, group) in groups.bound_rows() {
+            let key = NativeGroupKey {
+                artifact: binding.binding.artifact(),
+                original_ordinal: binding.original_ordinal,
+            };
+            assert_eq!(artifacts_by_owner[group.owner()], key.artifact);
+            assert_eq!(group.group().original_ordinal(), key.original_ordinal);
+            assert_eq!(groups.bindings()[&key], binding);
         }
 
         // R8: `for_compiler_roots` restricts every dependency row to the

@@ -619,10 +619,18 @@ pub(crate) struct CertifiedTargetNativeInputs {
 
 impl std::ops::Deref for CertifiedTargetNativeInputs {
     type Target = TargetNativeInputs;
-    fn deref(&self) -> &TargetNativeInputs { &self.target }
+    fn deref(&self) -> &TargetNativeInputs {
+        &self.target
+    }
 }
 
 impl CertifiedTargetNativeInputs {
+    pub(crate) fn certified_groups(
+        &self,
+    ) -> &crate::declaration_context::CertifiedArtifactGroupBindings {
+        &self.groups
+    }
+
     pub(crate) fn resolve_sources(&self) -> Result<ResolvedNativeSourceTarget<'_>, CompileError> {
         Ok(ResolvedNativeSourceTarget {
             target: self.target.resolve()?,
