@@ -1340,57 +1340,49 @@ fn run_history_observed(
                                 physical.insert(carrier);
                             }
                         }
-                        // All bodies' source bytes retain available dependency
-                        // carriers; this adds no executable group demand.
+                        physical = rows.close(physical);
+                        // A byte obligation already supplied by the chosen exact
+                        // closure needs no additional peer carrier for that ID.
+                        // Missing byte obligations retain every prior issuer,
+                        // without replacing the chosen namespace or root set.
+                        let initial_ids =
+                            carrier_ids(&physical.iter().map(|row| row.fact).collect());
+                        let mut required_ids = initial_ids.clone();
                         loop {
-                            let prior = physical.clone();
-                            for row in &prior {
-                                if let Fact::Carrier(id) = row.fact {
-                                    if let Some(node) = catalog
-                                        .originals
-                                        .iter()
-                                        .position(|entry| entry.descriptor.id == id)
-                                    {
-                                        for ((source, _), targets) in &catalog.edges {
-                                            if *source == node {
-                                                for (target, _) in targets {
-                                                    let required =
-                                                        catalog.originals[*target].descriptor.id;
-                                                    // Byte custody preserves every already-issued
-                                                    // physical parent. The compiler namespace chooses
-                                                    // one input; it cannot replace these identities.
-                                                    physical.extend(
-                                                        view.physical
-                                                            .iter()
-                                                            .filter(|row| {
-                                                                row.fact == Fact::Carrier(required)
-                                                            })
-                                                            .copied(),
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
+                            let prior = required_ids.clone();
+                            for ((source, _), targets) in &catalog.edges {
+                                if prior.contains(&catalog.originals[*source].descriptor.id) {
+                                    required_ids.extend(targets.iter().map(|(target, _)| {
+                                        catalog.originals[*target].descriptor.id
+                                    }));
                                 }
                             }
-                            // An already issued body belongs to retained byte
-                            // custody whenever its exact carrier remains held.
-                            // This does not add it to the demand closure above.
-                            physical.extend(
-                                view.physical
-                                    .iter()
-                                    .filter(|row| {
-                                        matches!(row.fact, Fact::Group(_))
-                                            && physical.contains(&rows.carrier(**row))
-                                    })
-                                    .copied()
-                                    .collect::<Vec<_>>(),
-                            );
-                            physical = rows.close(physical);
-                            if physical == prior {
+                            if prior == required_ids {
                                 break;
                             }
                         }
+                        let missing_bytes = required_ids
+                            .difference(&initial_ids)
+                            .copied()
+                            .collect::<BTreeSet<_>>();
+                        physical.extend(view.physical.iter().filter(|row| {
+                            matches!(row.fact, Fact::Carrier(id) if missing_bytes.contains(&id))
+                        }).copied());
+                        physical = rows.close(physical);
+                        // Already-issued bodies follow only the exact carriers
+                        // justified above. Their immutable descendants add no
+                        // new publication or execution choice.
+                        physical.extend(
+                            view.physical
+                                .iter()
+                                .filter(|row| {
+                                    matches!(row.fact, Fact::Group(_))
+                                        && physical.contains(&rows.carrier(**row))
+                                })
+                                .copied()
+                                .collect::<Vec<_>>(),
+                        );
+                        physical = rows.close(physical);
                         let namespace = view
                             .namespace
                             .iter()
