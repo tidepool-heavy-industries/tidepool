@@ -143,6 +143,9 @@ resourceSummary resource = case resource of
   ReloadDisplayResource operation -> "display " <> operationSummary operation
   ReloadWatchResource address identity -> actor address <> " watch " <> number identity
   ReloadUnclassifiedPhysicalResource identity -> "unclassified physical resource " <> nativeSummary identity
+  ReloadActorCompilerResource address registration -> actor address <> " compiler registration=" <> registration
+  ReloadPreparationCompilerResource preparation registration -> "preparation " <> preparation
+    <> " compiler registration=" <> registration
   where
     actor (identity, incarnation) = "actor " <> number identity <> "/" <> number incarnation
 
