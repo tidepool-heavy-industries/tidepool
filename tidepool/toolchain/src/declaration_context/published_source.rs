@@ -12,6 +12,8 @@ pub struct PublishedSourceOriginalSelection {
 }
 
 impl PublishedSourceOriginalSelection {
+    /// Current compiler roles and demand. The published role independently
+    /// retains the immutable native support acquired at first publication.
     pub fn context(&self) -> &Arc<ExactDeclarationContext> {
         &self.context
     }
@@ -101,27 +103,14 @@ impl ExactDeclarationContext {
             .artifacts()
             .metadata_snapshot();
         let roles = self.owner.facts.compiler_support.projection().roles();
-        let issued = roles
-            .iter()
-            .find_map(|role| match role {
-                CompilerInputRole::PublishedSourceOriginal {
-                    original: selected,
-                    selection,
-                    ..
-                } if *selected == original => Some(selection.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| {
-                crate::artifact_inventory::ExactArtifactSelection::capture(
-                    &self.owner.facts.compiler_support.artifacts(),
-                )
-            });
-        let issuer = self
-            .owner
-            .facts
-            .compiler_support
-            .artifacts()
-            .select_issued(vec![original], &issued)?;
+        let issued = roles.iter().find_map(|role| match role {
+            CompilerInputRole::PublishedSourceOriginal {
+                original: selected,
+                selection,
+                ..
+            } if *selected == original => Some(selection.clone()),
+            _ => None,
+        });
         let mut roots = BTreeSet::from([original]);
         for node in self.published_lexical_closure(root)? {
             let role = roles
@@ -138,10 +127,19 @@ impl ExactDeclarationContext {
             roots.insert(role.interface());
             // Completed source selection follows the issuer's compiler namespace,
             // independently of the executable groups demanded so far.
-            if let Some(dependency) = role
-                .original()
-                .filter(|id| issuer.contains_namespace_artifact(*id))
-            {
+            if let Some(dependency) = role.original().filter(|id| match &issued {
+                Some(selection) => selection
+                    .graph_selection()
+                    .namespace
+                    .iter()
+                    .any(|binding| binding.artifact == *id),
+                None => self
+                    .owner
+                    .facts
+                    .compiler_support
+                    .artifacts()
+                    .contains_namespace_artifact(*id),
+            }) {
                 roots.insert(dependency);
             }
         }
@@ -541,11 +539,7 @@ impl ExactDeclarationContext {
         Self::from_facts(DeclarationContextFacts {
             producer: self.owner.facts.producer,
             compiler_support,
-            lexical: self
-                .owner
-                .facts
-                .lexical
-                .replace(self.published_lexical_closure(root)?)?,
+            lexical: self.owner.facts.lexical.replace(lexical)?,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             // Checked values retain their own template custody in the caller's
             // context. A source publication carries its selected source graph.
@@ -1127,6 +1121,92 @@ mod tests {
                         .snapshot_roles()[&root_owner]
                         .clone();
                     assert!(published_role.is_published_source_original());
+                    if !sparse && !changed_child && !reverse && selected == 0 {
+                        use fvm_ipld_blockstore::Blockstore;
+                        let foreign = views[1].capture_graph_selection();
+                        let mut substitutions = Vec::new();
+                        for (name, artifact) in [
+                            ("carrier", native.descriptor.id),
+                            ("child", children[selected].descriptor.id),
+                        ] {
+                            let replacement = *foreign
+                                .namespace
+                                .iter()
+                                .find(|binding| binding.artifact == artifact)
+                                .unwrap();
+                            let mut graph = publication_graph.clone();
+                            let current = graph
+                                .namespace
+                                .iter_mut()
+                                .find(|binding| binding.artifact == artifact)
+                                .unwrap();
+                            assert_ne!(*current, replacement);
+                            *current = replacement;
+                            graph.namespace.sort();
+                            substitutions.push((name, graph));
+                        }
+                        let mut graph = publication_graph.clone();
+                        let parent = graph
+                            .native_groups
+                            .iter_mut()
+                            .find(|group| group.binding.artifact() == native.descriptor.id)
+                            .unwrap();
+                        let previous = *parent;
+                        let replacement = *foreign
+                            .native_groups
+                            .iter()
+                            .find(|group| {
+                                group.binding.artifact() == native.descriptor.id
+                                    && group.original_ordinal == previous.original_ordinal
+                            })
+                            .unwrap();
+                        assert_ne!(previous, replacement);
+                        *parent = replacement;
+                        graph.native_groups.sort();
+                        for node in graph.roots.iter_mut().chain(&mut graph.custody_roots) {
+                            if *node == ArtifactBindingNode::Group(previous) {
+                                *node = ArtifactBindingNode::Group(replacement);
+                            }
+                        }
+                        graph.roots.sort();
+                        graph.custody_roots.sort();
+                        substitutions.push(("parent", graph));
+                        let (_scratch, inventory, _) =
+                            super::history_properties::restored_graph_roles(
+                                publication.context(),
+                                &publication.context().compiler_input_roles(),
+                            )
+                            .unwrap();
+                        for (name, graph) in substitutions {
+                            let mut role = published_role.clone();
+                            let CompilerInputRole::PublishedSourceOriginal { selection, .. } =
+                                &mut role
+                            else {
+                                unreachable!()
+                            };
+                            *selection = crate::artifact_inventory::ExactArtifactSelection::from_recovered_graph_selection(graph);
+                            let mut snapshot = publication.context().snapshot();
+                            snapshot.native_fact_owner = None;
+                            snapshot
+                                .roles
+                                .insert(root_owner.clone(), role.recorded_fact());
+                            let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+                            let mut writer = crate::exact_context::Materializer::new(&store);
+                            let written = writer.materialize_context(None, &snapshot).unwrap();
+                            for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+                                store.put_keyed(&cid, &bytes).unwrap();
+                            }
+                            let decoded =
+                                crate::exact_context::hydrate_context(&store, written.root())
+                                    .unwrap();
+                            assert!(
+                                inventory
+                                    .context_for_expected_snapshot(written.root(), &decoded)
+                                    .is_err(),
+                                "cold publication recovery must refuse a substituted {name} issuer"
+                            );
+                        }
+                    }
                     assert_eq!(
                         publication
                             .context()
@@ -1755,6 +1835,31 @@ mod tests {
                 .issue_published_source_original("revision", "input", &root.descriptor.owner)
                 .unwrap();
             let published = publication.context();
+            let published_role = published.compiler_input_projection().snapshot_roles()
+                [&root.descriptor.owner]
+                .clone();
+            let birth = published
+                .compiler_source_support()
+                .publication_birth_support(&root.descriptor.owner)
+                .unwrap();
+            let assert_birth = |context: &ExactDeclarationContext| {
+                assert_eq!(
+                    &context.compiler_input_projection().snapshot_roles()[&root.descriptor.owner],
+                    &published_role
+                );
+                let reopened_birth = context
+                    .compiler_source_support()
+                    .publication_birth_support(&root.descriptor.owner)
+                    .unwrap();
+                assert_eq!(
+                    reopened_birth.artifacts().capture_graph_selection(),
+                    birth.artifacts().capture_graph_selection()
+                );
+                assert_eq!(
+                    reopened_birth.native_availability().persistent_facts(),
+                    birth.native_availability().persistent_facts()
+                );
+            };
             assert!(published
                 .artifact_view()
                 .artifact_ids()
@@ -1859,10 +1964,14 @@ mod tests {
                 admitted.capture_graph_selection().native_groups
             );
             let reopened_after_demand = continued.published_source_original_selections().unwrap();
+            assert_birth(reopened_after_demand[0].context());
             assert_eq!(
-                reopened_after_demand[0].context().semantic_sha256(),
-                published.semantic_sha256(),
-                "publication keeps its original selection independently of later demand"
+                reopened_after_demand[0]
+                    .context()
+                    .artifact_view()
+                    .capture_graph_selection()
+                    .native_groups,
+                admitted.capture_graph_selection().native_groups
             );
             let ambient = admitted
                 .inventory()
@@ -1878,20 +1987,20 @@ mod tests {
                 ambient.selected_native_groups()
             );
             let frozen = with_ambient.published_source_original_selections().unwrap();
+            assert_birth(frozen[0].context());
             assert_eq!(
-                frozen[0].context().semantic_sha256(),
-                published.semantic_sha256()
+                frozen[0]
+                    .context()
+                    .artifact_view()
+                    .capture_graph_selection()
+                    .native_groups,
+                admitted.capture_graph_selection().native_groups
             );
             assert!(!frozen[0]
                 .context()
                 .artifact_view()
                 .artifact_ids()
                 .contains(&future.descriptor.id));
-            let published_role = published
-                .compiler_input_roles()
-                .into_iter()
-                .find(CompilerInputRole::is_published_source_original)
-                .unwrap();
             let canonical_binding = *published
                 .artifact_view()
                 .capture_graph_selection()
@@ -1976,20 +2085,26 @@ mod tests {
                     .any(|role| role.original() == Some(future.descriptor.id)));
                 let reopened = replacement.published_source_original_selections().unwrap();
                 let frozen = reopened[0].context();
-                assert!(frozen.compiler_input_roles().contains(&published_role));
+                assert_birth(frozen);
                 assert_eq!(
-                    frozen.artifact_view().selected_native_groups(),
-                    BTreeSet::from([early])
+                    frozen
+                        .artifact_view()
+                        .capture_graph_selection()
+                        .native_groups,
+                    replacement
+                        .artifact_view()
+                        .capture_graph_selection()
+                        .native_groups
                 );
                 assert!(frozen
                     .artifact_view()
                     .capture_graph_selection()
                     .namespace
                     .contains(&canonical_binding));
-                assert!(!frozen
+                assert!(frozen
                     .artifact_view()
                     .contains_namespace_artifact(future.descriptor.id));
-                assert!(!frozen
+                assert!(frozen
                     .compiler_input_roles()
                     .iter()
                     .any(|role| role.original() == Some(future.descriptor.id)));
@@ -2002,7 +2117,12 @@ mod tests {
                     .bindings
                     .iter()
                     .any(|binding| binding.artifact == future.descriptor.id));
-                let frozen_graph = frozen.artifact_view().capture_graph_selection();
+                let frozen_graph = frozen
+                    .compiler_source_support()
+                    .publication_birth_support(&root.descriptor.owner)
+                    .unwrap()
+                    .artifacts()
+                    .capture_graph_selection();
                 assert_eq!(frozen_graph.roots, selection.graph_selection().roots);
                 assert_eq!(
                     frozen_graph.namespace,
@@ -2025,8 +2145,8 @@ mod tests {
                         .iter()
                         .any(|offer| offer.same_issuance(&future_offer)));
                 }
-                // The genuine Future offer may retain private payload custody;
-                // it does not change the frozen publication's namespace or roots.
+                // Current Future selection does not alter the publication's
+                // retained exact native graph.
             }
             let recovery_scratch = tempfile::tempdir().unwrap();
             let (published_products, published_interfaces) = partition_native_recovery_references(
@@ -2194,12 +2314,18 @@ mod tests {
                     &OriginalInstanceEnvironment::Unknown,
                     "native recovery does not reconstruct a completed source-compilation proof"
                 );
+                let reopened = durable.published_source_original_selections().unwrap();
+                assert_birth(reopened[0].context());
                 assert_eq!(
-                    durable.published_source_original_selections().unwrap()[0]
+                    reopened[0]
                         .context()
-                        .semantic_sha256(),
-                    published.semantic_sha256(),
-                    "durable continuation retains the original publication selection",
+                        .artifact_view()
+                        .capture_graph_selection()
+                        .native_groups,
+                    snapshot
+                        .artifact_view()
+                        .capture_graph_selection()
+                        .native_groups
                 );
             }
             let mut missing = recovery_inventory;

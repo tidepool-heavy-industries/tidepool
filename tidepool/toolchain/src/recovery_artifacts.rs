@@ -815,6 +815,10 @@ pub enum RecoveryAdmissionFailure {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryArtifactError {
+    #[error("selected original {artifact:?} is outside retained custody")]
+    MissingRetainedCustody {
+        artifact: crate::artifact_inventory::ArtifactId,
+    },
     #[error("input native decision for {owner:?} refused: {reason:?}")]
     InputDecision {
         owner: crate::declaration_join::ExactModuleIdentity,
@@ -880,6 +884,9 @@ fn recovery_validation_error(
     use tidepool_repr::execution_schema::ParseError;
     match error {
         CertificationError::Interrupted(error) => RecoveryArtifactError::Io(error),
+        CertificationError::MissingRetainedCustody { artifact } => {
+            RecoveryArtifactError::MissingRetainedCustody { artifact }
+        }
         CertificationError::InputDecision { owner, reason } => {
             RecoveryArtifactError::InputDecision { owner, reason }
         }
@@ -3567,6 +3574,52 @@ mod tests {
                 RecoveryAdmissionFailure::Decode(ParseError::LimitExceeded(_))
             ))
         ));
+    }
+
+    #[test]
+    fn missing_retained_custody_survives_recovery_and_diagnostic_boundaries() {
+        let artifact = crate::artifact_inventory::ArtifactId([85; 32]);
+        let recovery = recovery_validation_error(
+            crate::certified_products::CertificationError::MissingRetainedCustody { artifact },
+            RecoveryArtifactError::InvalidReference,
+        );
+        assert!(matches!(recovery,
+            RecoveryArtifactError::MissingRetainedCustody { artifact: actual } if actual == artifact));
+        for error in [
+            crate::certified_products::CertificationError::MissingRetainedCustody { artifact },
+            crate::certified_products::CertificationError::CapturedModulePayload(recovery),
+        ] {
+            let classified = crate::failclass::classify_compile(
+                &crate::CompileError::CompilerEvidence(Box::new(error)),
+            );
+            assert_eq!(
+                classified.class,
+                crate::failclass::FailureClass::VersionSkew
+            );
+            assert_eq!(
+                classified.cause,
+                Some(crate::failclass::CompileFailureCause::CompilerEvidence {
+                    failure: crate::failclass::CompilerEvidenceFailure::MissingRetainedCustody {
+                        artifact
+                    },
+                })
+            );
+            let encoded = serde_json::to_value(&classified).unwrap();
+            assert_eq!(
+                encoded["cause"]["failure"]["kind"],
+                "missing_retained_custody"
+            );
+            assert_eq!(
+                encoded["cause"]["failure"]["artifact"],
+                serde_json::to_value(artifact).unwrap()
+            );
+            let decoded: crate::failclass::CompilerEvidenceFailure =
+                serde_json::from_value(encoded["cause"]["failure"].clone()).unwrap();
+            assert_eq!(
+                decoded,
+                crate::failclass::CompilerEvidenceFailure::MissingRetainedCustody { artifact }
+            );
+        }
     }
 
     #[test]

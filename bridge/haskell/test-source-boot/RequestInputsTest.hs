@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldRejectionDiagnosticBoundaries) where
 
 import Tidepool.RequestCompletion (finishCompletion)
 
@@ -19,9 +19,11 @@ import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef, writeIORef)
 import Data.Bits (xor)
 import Data.List (sortOn, isInfixOf, isPrefixOf, nub, permutations, stripPrefix, tails)
+import Data.Maybe (isNothing)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Directory (canonicalizePath, copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, getTemporaryDirectory, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
 import System.Posix.Files (createSymbolicLink)
@@ -42,7 +44,7 @@ import System.Timeout (timeout)
 import Test.QuickCheck
 import Test.QuickCheck.Random (mkQCGen)
 import GHC.Driver.Env (HscEnv(..))
-import GHC (getSession)
+import GHC (getSession, setSession, setContext, InteractiveImport(..), simpleImportDecl, exprType, TcRnExprMode(TM_Inst))
 import GHC.Data.ShortText qualified as PackageText
 import GHC.Unit.Env (ue_setUnits)
 import GHC.Unit.State (UnitState(..))
@@ -61,7 +63,8 @@ import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue, analyzeOrderedC
   , prepareTypedSegmentSource, preparedTypedSegmentPlan, preparedTypedSegmentSource, preparedTypedSegmentOperations)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..) )
-import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), hydrateExactScope)
+import Tidepool.DeclarationJoin (DeclarationExport(..), ExportIdentity(..), interfaceExports, encodeDeclarationExports, normalizeDeclarationExports)
 import Tidepool.ExactScope
   ( ExactScope, ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
   , scopeInterfaces, scopeModuleInterfaceProofs, scopeProducerSha256, scopeProducts, ExactProduct(..)
@@ -74,9 +77,15 @@ import Tidepool.ExactScope
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
   , exactInputRetentionLimits, commitWorldInputRetention
-  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), WorldInputsFailure(..), WorldInputsFailureCause(..) )
+  , worldInputsLexicalSurface, worldLexicalImports, worldLexicalDeclaration
+  , WorldObservationProfile(..), worldLexicalObservation, worldObservationProfile
+  , worldObservationFragment, worldObservationImports, worldObservationRequestTypes, worldObservationInputType
+  , worldInputsSources, worldSourceDomainSha256
+  , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
+  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
-import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldCellPlan, boundWorldCellPreparation)
+import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldCellPlan, boundWorldCellPreparation
+  , prepareWorldCell, commitPreparedWorldDependencies)
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..)
   , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
@@ -84,7 +93,7 @@ import Tidepool.ExtractRequest
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
   , scopedEnsureWorld, scopedCompileWorldCell, heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
-  , WorldCellRefusal(..)
+  , WorldCellRefusal(..), emitWorldAcquisitionRejection
   , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts
   , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents
   , withResidentCompilerScopes, scopedRunGhc )
@@ -405,9 +414,9 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
         _ -> fail "world fixture needs exact CID/body pairs"
       decodePairs _ = fail "world fixture omitted its block array"
       parcel bytes = decode bytes >>= \term -> case term of
-        TList [TBytes root,TBytes association,TList rows,acquisition,pairs] -> do
+        TList [TBytes root,TBytes association,TList rows,acquisition,pairs,TBytes lexical] -> do
           blocks <- decodePairs pairs
-          pure (root,association,rows,acquisition,blocks)
+          pure (root,association,rows,acquisition,blocks,lexical)
         _ -> fail "world fixture needs actual Context/association roots, rows, owned bytes and blocks"
       fixture operation arguments = do
         path <- issueCodecFixturePacket work (operation ++ ".cbor") (encode
@@ -439,7 +448,7 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
               Just body -> decode body >>= \term -> visit (Set.insert cid seen) (links term ++ rest)
         selected <- visit Set.empty roots
         pure (Map.toAscList (Map.restrictKeys available selected))
-  (primary,association,base,durable,contextBlocks) <- parcel contextParcel
+  (primary,association,base,durable,contextBlocks,lexical) <- parcel contextParcel
   case published of
     Nothing -> unless (length base == 2) (fail "genuine primary control needs both acquired owners")
     Just _ -> unless (not (null base)) (fail "genuine Published control needs acquired primary rows")
@@ -447,7 +456,8 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
   case published of
     Nothing -> worldContextCoverage primary contextBlocks
     Just names -> worldPublishedCoverage names primary contextBlocks
-  (emptyPrimary,emptyAssociation,emptyBase,emptyDurable,emptyBlocks) <- fixture "world-context-blocks" [TBytes producer] >>= parcel
+  (emptyPrimary,emptyAssociation,emptyBase,emptyDurable,emptyBlocks,emptyLexical) <- fixture "world-context-blocks" [TBytes producer] >>= parcel
+  unless (lexical == emptyLexical) (fail "empty lexical fixture changed across genuine context issuances")
   unless (null emptyBase) (fail "empty issuer unexpectedly published primary rows")
   emptyAcquisition <- sealed emptyDurable
   emptyBody <- maybe (fail "empty Context root is absent") pure (lookup emptyPrimary emptyBlocks)
@@ -457,7 +467,7 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
       Just (TTagged 42 (TBytes bytes)) | not (BS.null bytes),BS.head bytes == 0 -> pure (BS.tail bytes)
       _ -> fail "empty Materializer context omitted its empty map"
     _ -> fail "empty Materializer Context descriptor changed"
-  blockPairs <- reachable [primary,association,emptyBinding] (contextBlocks ++ emptyBlocks)
+  blockPairs <- reachable [primary,association,emptyBinding,lexical] (contextBlocks ++ emptyBlocks)
   stringBytes <- fixture "world-blocks" []
   (hamtRoot,hamtBlocks) <- decode stringBytes >>= \term -> case term of
     TList [TBytes root,pairs] -> (,) root <$> decodePairs pairs
@@ -469,14 +479,15 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
       text = TString . T.pack
       blocks pairs = TList [TList [TBytes cid,TBytes body] | (cid,body) <- pairs]
       visibility root = encode (TList [TString "TPCWBIND4",TInt 0,TBytes root])
-      restoration version root associations occurrences = encode (TList
+      restorationWithLexical version root associations occurrences surface = encode (TList
         [TString "TPCWREST",TInt version,TBytes root,TBytes (SHA.hash sources),TBytes producer
-        ,TBytes profile,TInt 0,TBytes associations,TBytes occurrences])
-      product = restoration 3 primary association emptyBinding
+        ,TBytes profile,TInt 0,TBytes associations,TBytes occurrences,TBytes surface])
+      restoration version root associations occurrences = restorationWithLexical version root associations occurrences lexical
+      product = restoration 4 primary association emptyBinding
       packet version receipt root pairs rows visible inputs occurrences = TList
         [TString "TPCWORLD",TInt version,TBytes receipt,text sourcePath,TBytes producer,TBytes profile
         ,TList [TList rows,TList visible],inputs,TBytes (visibility occurrences),TBytes root,blocks pairs]
-      originalPacket = packet 3 product primary blockPairs base [] acquisition emptyBinding
+      originalPacket = packet 4 product primary blockPairs base [] acquisition emptyBinding
       readPacket label term = do
         let path = work </> (label ++ ".world.cbor")
         BS.writeFile path (encode term)
@@ -498,36 +509,235 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
         TList [TList [u,n,path,sha,TList (TList [TString "other-unit",TString "Other.Module"]:requires),packages,packageSha,evidence],image]
       changeRequires _ = error "world requirement control requires a genuine row"
   BS.writeFile sourcePath sources
-  original <- readPacket "world-v3-valid" originalPacket
+  original <- readPacket "world-v4-valid" originalPacket
   unless (worldInputsIdentityBytes original == SHA.hash product
       && Map.null (worldInputsBindings original) && worldInputsBindingScope original == 0
       && not (worldInputsPrimaryIsEmpty original))
-    (fail "cold v3 reader lost actual primary selection or occurrence identity")
+    (fail "cold v4 reader lost actual primary selection or occurrence identity")
   selectedOwners <- forM base $ \entry -> case entry of
     TList [TList [TString unit,TString name,_,_,_,_,_,_],_] -> pure (T.unpack unit,T.unpack name)
     _ -> fail "genuine primary control lost its actual row owner"
   unless (all (worldHasSelectedSource original) selectedOwners)
     (fail "genuine Context source owners lost their exact acquired association")
+  unless (null (worldLexicalImports (worldInputsLexicalSurface original))
+      && isNothing (worldLexicalDeclaration (worldInputsLexicalSurface original)))
+    (fail "empty published lexical selection was inferred from other acquired interfaces")
+  let orderedImports = ["qualified Data.List as L","Data.Map ()","Data.Set hiding (map)"]
+      importsBody = encode (TList [TString "TPCWLEX2",TList (map text orderedImports),TNull,TNull])
+  importsRoot <- worldFixtureCID importsBody
+  importsPairs <- reachable [primary,association,emptyBinding,importsRoot]
+    ((importsRoot,importsBody):blockPairs)
+  imported <- readPacket "world-v4-ordered-lexical" (packet 4
+    (restorationWithLexical 4 primary association emptyBinding importsRoot)
+    primary importsPairs base [] acquisition emptyBinding)
+  unless (worldLexicalImports (worldInputsLexicalSurface imported) == orderedImports
+      && isNothing (worldLexicalDeclaration (worldInputsLexicalSurface imported))
+      && worldInputsIdentityBytes imported /= worldInputsIdentityBytes original)
+    (fail "world product lost ordered import qualification, explicit empty selection or lexical identity")
+  let observationFragment = "module WorldObservation where\nobservation = let value = value in value\n"
+      observationTerm profile native = TList [profile,text observationFragment,TList (map text orderedImports),native]
+      observationPacket value = do
+        let body = encode (TList [TString "TPCWLEX2",TList [],TNull,value])
+        root <- worldFixtureCID body
+        pairs <- reachable [primary,association,emptyBinding,root] ((root,body):blockPairs)
+        pure (packet 4 (restorationWithLexical 4 primary association emptyBinding root)
+          primary pairs base [] acquisition emptyBinding)
+  forM_ [(0,WorldWorkbenchObservation),(1,WorldHostCarrierObservation)] $ \(profile,expected) -> do
+    offered <- observationPacket (observationTerm (TInt profile) TNull)
+    observed <- readPacket ("world-observation-profile-" ++ show profile) offered
+    case worldLexicalObservation (worldInputsLexicalSurface observed) of
+      Just scaffold | worldObservationProfile scaffold == expected
+        , worldObservationFragment scaffold == observationFragment
+        , worldObservationImports scaffold == orderedImports
+        , isNothing (worldObservationRequestTypes scaffold)
+        , isNothing (worldObservationInputType scaffold) -> pure ()
+      _ -> fail "World observation decoder lost its issued profile/source/type correlation"
+  forM_ [("profile",observationTerm (TInt 2) TNull)
+        ,("annotations",observationTerm (TInt 0) (TList [TNull]))
+        ,("redundant-annotations",observationTerm (TInt 0) (TList [TNull,TNull]))
+        ,("helper-recipe",observationTerm (TInt 0) (TList [TList [TString "unknown",TNull],TNull]))] $ \(label,value) -> do
+    offered <- observationPacket value
+    requireCorrupt Nothing ("world-observation-invalid-" ++ label) offered
+  -- Use the same genuine cold facts as an independent full-read oracle. The
+  -- successor carries only its changed lexical block, then returns to the old
+  -- root without retaining either descriptor. Compatible alternate captures of
+  -- the same immutable predecessor remain valid reconstruction inputs.
+  let noInputs = TList [TString "continue-originals",TList [],TList []]
+      successor receipt changed = TList [TString "TPCWSUCC4",TBytes receipt,blocks changed,TList [],TList [],noInputs]
+      readSuccessor label before term = do
+        let path = work </> (label ++ ".successor.cbor")
+        BS.writeFile path (encode term)
+        owner <- newExactInputOwner
+        readWorldSuccessorWithOwner owner before path
+      importedProduct = restorationWithLexical 4 primary association emptyBinding importsRoot
+      requireSuccessorCorrupt label before term = do
+        outcome <- try (readSuccessor label before term)
+        case outcome of
+          Left (WorldInputsFailure WorldInputsCorrupt _) -> pure ()
+          Left failure -> throwIO failure
+          Right _ -> fail ("successor accepted malformed immutable facts: " ++ label)
+  next <- readSuccessor "lexical-delta" original (successor importedProduct [(importsRoot,importsBody)])
+  unless (worldInputsIdentityBytes (worldSuccessorFacts next) == worldInputsIdentityBytes imported
+      && worldInputsRetainedCharge (worldSuccessorFacts next) == worldInputsRetainedCharge imported
+      && worldLexicalImports (worldInputsLexicalSurface (worldSuccessorFacts next)) == orderedImports
+      && Set.null (worldSuccessorChangedAliases next))
+    (fail "successor lexical facts/charge differ from independent full cold admission")
+  reverted <- readSuccessor "lexical-revert" (worldSuccessorFacts next) (successor product [(lexical,maybe (error "genuine lexical block absent") id (lookup lexical blockPairs))])
+  unless (worldInputsRetainedCharge (worldSuccessorFacts reverted) == worldInputsRetainedCharge original
+      && worldInputsIdentityBytes (worldSuccessorFacts reverted) == worldInputsIdentityBytes original)
+    (fail "successor retained retired lexical blocks or predecessor envelopes")
+  compatible <- readPacket "compatible-predecessor" originalPacket
+  equivalent <- readSuccessor "compatible-frontier" compatible (successor importedProduct [(importsRoot,importsBody)])
+  unless (worldInputsIdentityBytes (worldSuccessorFacts equivalent) == worldInputsIdentityBytes imported)
+    (fail "compatible independently authenticated frontier changed the next immutable product")
+  requireSuccessorCorrupt "missing-changed-block" original (successor importedProduct [])
+  requireSuccessorCorrupt "corrupt-changed-block" original
+    (successor importedProduct [(importsRoot,importsBody <> BS.singleton 0)])
+  requireSuccessorCorrupt "extra-unreachable-block" original
+    (successor product [(importsRoot,importsBody)])
+  requireCorrupt (Just "compiler world block child is absent") "world-missing-lexical-root"
+    (packet 4 product primary (filter ((/= lexical) . fst) blockPairs) base [] acquisition emptyBinding)
+  let unselectedBody = encode (TList [TString "TPCWLEX2",TList [],TList
+        [TString "main",TString "NeverSelected",TBytes (BS.replicate 32 0),TBytes (BS.singleton 0x80)],TNull])
+  unselectedRoot <- worldFixtureCID unselectedBody
+  unselectedPairs <- reachable [primary,association,emptyBinding,unselectedRoot]
+    ((unselectedRoot,unselectedBody):blockPairs)
+  requireCorrupt (Just "world declaration facade has no primary selected role") "world-unselected-declaration-facade"
+    (packet 4 (restorationWithLexical 4 primary association emptyBinding unselectedRoot)
+      primary unselectedPairs base [] acquisition emptyBinding)
+  forM_ (take 1 selectedOwners) $ \(unit,name) -> do
+    let changed = encode (TList [TString "TPCWLEX2",TList [],TList
+          [text unit,text name,TBytes (BS.replicate 32 0),TBytes (BS.singleton 0x80)],TNull])
+    changedRoot <- worldFixtureCID changed
+    changedPairs <- reachable [primary,association,emptyBinding,changedRoot] ((changedRoot,changed):blockPairs)
+    requireCorrupt (Just "world declaration facade has another selected interface artifact") "world-crossed-declaration-interface"
+      (packet 4 (restorationWithLexical 4 primary association emptyBinding changedRoot)
+        primary changedPairs base [] acquisition emptyBinding)
   withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
     environment <- getSession
-    admitted <- liftIO (readWorldSourceInputs environment original selectedOwners) >>= either (liftIO . fail) pure
+    owner <- liftIO newExactInputOwner
+    (admitted,types) <- liftIO (readWorldSourceInputs owner environment original selectedOwners) >>= either (liftIO . fail) pure
     unless (Map.keysSet admitted == Set.fromList selectedOwners
+        && Map.keysSet types == Map.keysSet admitted
         && all (\(key,entry) -> (exactUnit (worldSourceEntryArtifact entry),exactModule (worldSourceEntryArtifact entry)) == key)
              (Map.toList admitted))
       (liftIO (fail "demanded primary source input lost its genuine canonical/interface/package owners"))
-    missing <- liftIO (readWorldSourceInputs environment original [("main","NeverSelectedInContext")])
+    missing <- liftIO (readWorldSourceInputs owner environment original [("main","NeverSelectedInContext")])
     case missing of
       Left _ -> pure ()
       Right _ -> liftIO (fail "demanded primary source input invented an unselected association")
-  -- Reordering physical rows/blocks does not change the three logical roots.
-  reordered <- readPacket "world-v3-reordered" (packet 3 product primary (reverse blockPairs) (reverse base) [] acquisition emptyBinding)
+  -- One genuine compiled cohort supplies retained home types and the exact
+  -- interface oracle for the untrusted lexical export vector.
+  exported <- withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
+    environment <- getSession
+    owner <- liftIO newExactInputOwner
+    types <- liftIO (readWorldTypeInputs owner environment original selectedOwners) >>= either (liftIO . fail) pure
+    (_,warm) <- liftIO (captureDiagnostics (readWorldTypeInputs owner environment original selectedOwners >>= either fail pure))
+    liftIO $ unless (sum [sum (counterValues ("exact_iface_decode_reuse." ++ snd key) warm)
+          | key <- selectedOwners] == toInteger (length selectedOwners))
+      (fail "World type closure allocated an independent decoder instead of reusing its owner")
+    let leaves = [(exactUnit artifact,exactModule artifact)
+          | (artifact,_,_) <- scopeInterfaces scope, null (exactRequirements artifact)
+          , (exactUnit artifact,exactModule artifact) `elem` selectedOwners]
+    liftIO $ unless (not (null leaves)) (fail "partial demand control needs an actual leaf type owner")
+    forM_ leaves $ \key -> do
+      partial <- liftIO (readWorldTypeInputs owner environment original [key]) >>= either (liftIO . fail) pure
+      liftIO $ unless (Map.keysSet partial == Set.singleton key)
+        (fail "one leaf type demand widened to unrelated selected primary rows")
+    empty <- liftIO (readWorldTypeInputs owner environment original []) >>= either (liftIO . fail) pure
+    liftIO $ unless (Map.null empty) (fail "empty type demand widened to available primary rows")
+    hydrated <- liftIO (hydrateExactScope environment
+      [(worldTypeEntryArtifact entry,worldTypeEntryInterface entry) | entry <- Map.elems types])
+    setSession hydrated
+    when (("main","CanonicalSource") `elem` selectedOwners) $ do
+      setContext [IIDecl (simpleImportDecl (mkModuleName "CanonicalSource"))]
+      _ <- exprType TM_Inst "(\\x -> x) :: CanonicalSource.Retained -> CanonicalSource.Retained"
+      pure ()
+    setSession environment
+    freshFinder <- liftIO initFinderCache
+    let unavailable unit = unit {unitImportDirs=[PackageText.pack (work </> "absent-package-root")]}
+        units = (hsc_units environment) {unitInfoMap=mapUniqMap unavailable (unitInfoMap (hsc_units environment))}
+        changed = environment {hsc_unit_env=ue_setUnits units (hsc_unit_env environment),hsc_FC=freshFinder}
+    liftIO $ unless (any (not . null . packageInterfaces . worldTypeEntryPackages) (Map.elems types))
+      (fail "World package mismatch control needs a genuine recorded package root")
+    mismatch <- liftIO (readWorldTypeInputs owner changed original selectedOwners)
+    case mismatch of
+      Left _ -> pure ()
+      Right _ -> liftIO (fail "World type closure accepted a different current package selection")
+    liftIO $ forM (Map.toAscList types) $ \(key,entry) -> do
+      exports <- interfaceExports hydrated (worldTypeEntryInterface entry)
+      pure (key,exports)
+  forM_ (take 1 exported) $ \(key@(unit,name),exports) -> do
+    context <- worldFixtureBlock blockPairs primary
+    roles <- worldFixtureFieldLink "roles" context >>= worldFixtureHamtRows blockPairs
+    interfaces <- fmap concat $ forM roles $ \(owner,reference) -> do
+      actualUnit <- worldFixtureField "unit" owner
+      actualModule <- worldFixtureField "module" owner
+      if (actualUnit,actualModule) /= (text unit,text name) then pure [] else do
+        role <- worldFixtureLink reference >>= worldFixtureBlock blockPairs
+        identity <- worldFixtureField "interface" role
+        case identity of
+          TList values -> pure [BS.pack [fromIntegral value | TInt value <- values]]
+          _ -> fail "actual compiler role omitted its interface artifact identity"
+    interface <- case interfaces of
+      [value] | BS.length value == 32 -> pure value
+      _ -> fail "lexical control needs one actual selected interface artifact"
+    let surface values = encode (TList [TString "TPCWLEX2",TList [],TList
+          [text unit,text name,TBytes interface,TBytes (encodeDeclarationExports values)],TNull])
+        changedExports = case exports of
+          first:rest -> first {exportHead=(exportHead first) {exportModule="Foreign.Declaration"}}:rest
+          [] -> error "lexical export refusal needs a genuine nonempty interface"
+    unless (not (null exports)) (fail "lexical export oracle must be nonempty")
+    forM_ [("exact",reverse exports,True),("omitted",[],False),("foreign",changedExports,False)
+          ,("duplicate",exports ++ take 1 exports,False)] $ \(label,offered,accept) -> do
+      let body = surface offered
+      root <- worldFixtureCID body
+      pairs <- reachable [primary,association,emptyBinding,root] ((root,body):blockPairs)
+      facts <- readPacket ("world-lexical-exports-" ++ label)
+        (packet 4 (restorationWithLexical 4 primary association emptyBinding root)
+          primary pairs base [] acquisition emptyBinding)
+      withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
+        environment <- getSession
+        owner <- liftIO newExactInputOwner
+        result <- liftIO (hydrateWorldDeclarationInputs owner environment facts)
+        liftIO $ case result of
+          Right (_,Just verified) | accept
+            , (exactUnit (verifiedWorldDeclarationInterface verified),exactModule (verifiedWorldDeclarationInterface verified)) == key
+            , verifiedWorldDeclarationExports verified == normalizeDeclarationExports exports -> pure ()
+          Left _ | not accept -> pure ()
+          _ -> fail ("World lexical export authentication disagreed with actual interface: " ++ label)
+  -- Reordering physical rows/blocks does not change the four logical roots.
+  reordered <- readPacket "world-v4-reordered" (packet 4 product primary (reverse blockPairs) (reverse base) [] acquisition emptyBinding)
   unless (worldInputsIdentityBytes reordered == worldInputsIdentityBytes original)
     (fail "physical cold order changed the fixed logical world identity")
-  emptyPairs <- reachable [emptyPrimary,emptyAssociation,emptyBinding] emptyBlocks
-  let emptyProduct = restoration 3 emptyPrimary emptyAssociation emptyBinding
-      emptyPacket = packet 3 emptyProduct emptyPrimary emptyPairs [] [] emptyAcquisition emptyBinding
-  emptyWorld <- readPacket "world-v3-empty" emptyPacket
+  emptyPairs <- reachable [emptyPrimary,emptyAssociation,emptyBinding,lexical] emptyBlocks
+  let emptyProduct = restoration 4 emptyPrimary emptyAssociation emptyBinding
+      emptyPacket = packet 4 emptyProduct emptyPrimary emptyPairs [] [] emptyAcquisition emptyBinding
+  emptyWorld <- readPacket "world-v4-empty" emptyPacket
   unless (worldInputsPrimaryIsEmpty emptyWorld) (fail "actual empty primary issuer became selected")
+  -- The genuine acquisition includes more available custody than this empty
+  -- Context selects. Closed endpoints prove passive images are never read,
+  -- and equal charges prove their bodies are not retained under the world.
+  let passiveAcquisition = case acquisition of
+        TList [tag,TList arenas,images] -> TList [tag,TList
+          [TList [TString (T.pack ("/proc/2147483647/fd/" ++ show index)),extent]
+          | (index,TList [_,extent]) <- zip [0 :: Int ..] arenas],images]
+        _ -> error "genuine world acquisition omitted its owned arenas"
+  passive <- readPacket "world-v4-empty-passive-custody"
+    (packet 4 emptyProduct emptyPrimary emptyPairs [] [] passiveAcquisition emptyBinding)
+  unless (worldInputsIdentityBytes passive == worldInputsIdentityBytes emptyWorld
+      && worldInputsRetainedCharge passive == worldInputsRetainedCharge emptyWorld
+      && worldInputsPrimaryIsEmpty passive && Map.null (worldInputsBindings passive))
+    (fail "passive available images changed empty selected world facts or custody")
+  requireCorrupt (Just "world interface row lacks one exact owned input image") "world-selected-image-missing"
+    (packet 4 product primary blockPairs base [] emptyAcquisition emptyBinding)
+  withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
+    environment <- getSession
+    owner <- liftIO newExactInputOwner
+    result <- liftIO (readWorldTypeInputs owner environment passive selectedOwners)
+    case result of
+      Left _ -> pure ()
+      Right _ -> liftIO (fail "World type closure widened from selected primary into broader custody")
   expectedPrimary <- worldPrimaryChargeOracle primary association blockPairs
   let TList [_,TList _,TList images] = acquisition
   parts <- concat <$> forM images (\image -> case image of
@@ -536,23 +746,52 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
       _ -> fail "world charge oracle needs exact image part lengths"
     _ -> fail "world charge oracle needs actual images")
   emptyNode <- maybe (fail "empty binding node is absent") pure (lookup emptyBinding blockPairs)
+  lexicalBody <- maybe (fail "actual lexical surface block is absent") pure (lookup lexical blockPairs)
   let uniqueParts = Map.fromList parts
       (primaryBytes,primaryEntries) = expectedPrimary
-      rawBytes = sum (Map.elems uniqueParts) + toInteger (BS.length sources) + toInteger (BS.length (encode originalPacket))
-      expectedCharge = (rawBytes + toInteger (BS.length emptyNode) + primaryBytes,Map.size uniqueParts + 3 + primaryEntries)
+      -- The receiver retains row parts, source bytes and the authenticated
+      -- graph, independently of the disposable transport envelope.
+      rawBytes = sum (Map.elems uniqueParts) + toInteger (BS.length sources)
+      rowMetadata (TList [TList [unit,name,path,sha,TList requirements,packages,packageSha,TList (role:proof)],image]) =
+        let extra = case proof of
+              [certificate,certificateSha,TNull,TNull] -> [certificate,certificateSha]
+              [certificate,certificateSha,core,coreSha] -> [certificate,certificateSha,core,coreSha]
+              [] -> []
+              _ -> error "row charge oracle needs one closed role"
+            paths = [path,sha,packages,packageSha] ++ extra
+            textBytes (TString value) = BS.length (TE.encodeUtf8 value)
+            textBytes _ = error "row charge oracle needs path/seal text"
+            order (TList [TString u,TString n]) = (u,n)
+            order _ = error "row charge oracle needs exact requirements"
+            semantic = TList [unit,name,TBytes producer,image,role,TList (sortOn order requirements)]
+        in toInteger (sum (map textBytes paths) + BS.length (encode semantic))
+      rowMetadata _ = error "row charge oracle needs genuine transport rows"
+      rowBytes = sum (map rowMetadata base)
+      frontierBytes = sum [toInteger (BS.length cid + BS.length body)
+        + 38 * toInteger (Set.size (Set.fromList (links term)))
+        | (cid,body) <- blockPairs,Right (remaining,term) <- [deserialiseFromBytes decodeTerm (BL.fromStrict body)]
+        ,BL.null remaining]
+      -- The retained demand scope reserves the encoded binding basis again.
+      expectedCharge = (rawBytes + 2 * toInteger (BS.length emptyNode) + primaryBytes
+          + toInteger (BS.length lexicalBody) + rowBytes + frontierBytes
+        ,Map.size uniqueParts + 2 + primaryEntries + length base + length blockPairs)
   unless (worldInputsRetainedCharge original == expectedCharge)
-    (fail ("three-root known backing/record charge differs from independent DATA census: "
+    (fail ("four-root known backing/record charge differs from independent DATA census: "
       ++ show (worldInputsRetainedCharge original,expectedCharge)))
   forM_ ([("drop",tail base),("retag",replaceFirst (retag (head base)) base)
          ,("requires",replaceFirst (changeRequires (head base)) base)]
          ++ [("valid-swap",replaceFirst (last base) base) | length base > 1]) $ \(label,changed) ->
-    requireCorrupt Nothing ("world-base-" ++ label) (packet 3 product primary blockPairs changed [] acquisition emptyBinding)
+    requireCorrupt Nothing ("world-base-" ++ label) (packet 4 product primary blockPairs changed [] acquisition emptyBinding)
   requireCorrupt (Just "compiler world visible input census differs from occurrence facts") "world-unreferenced-visible"
-    (packet 3 product primary blockPairs base base acquisition emptyBinding)
+    (packet 4 product primary blockPairs base base acquisition emptyBinding)
   requireCorrupt (Just "compiler world base input census differs from primary associations") "world-unreferenced-base"
-    (packet 3 emptyProduct emptyPrimary emptyPairs base [] acquisition emptyBinding)
+    (packet 4 emptyProduct emptyPrimary emptyPairs base [] acquisition emptyBinding)
   requireCorrupt Nothing "old-descriptor-v2" (packet 2 product primary blockPairs base [] acquisition emptyBinding)
-  requireCorrupt Nothing "old-restoration-v2" (packet 3 (restoration 2 primary association emptyBinding) primary blockPairs base [] acquisition emptyBinding)
+  requireCorrupt Nothing "old-descriptor-v3" (packet 3 product primary blockPairs base [] acquisition emptyBinding)
+  requireCorrupt Nothing "old-restoration-v2" (packet 4 (restoration 2 primary association emptyBinding) primary blockPairs base [] acquisition emptyBinding)
+  requireCorrupt Nothing "old-restoration-v3" (packet 4 (encode (TList
+    [TString "TPCWREST",TInt 3,TBytes primary,TBytes (SHA.hash sources),TBytes producer
+    ,TBytes profile,TInt 0,TBytes association,TBytes emptyBinding])) primary blockPairs base [] acquisition emptyBinding)
   let oldBindings = encode (TList [TString "TPCWBIND3",TInt 0,TBytes emptyBinding])
       oldBindingPacket = case originalPacket of
         TList fields -> TList (take 8 fields ++ [TBytes oldBindings] ++ drop 9 fields)
@@ -571,7 +810,7 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
         ,("trailing",primary <> BS.singleton 0,rootBody,"unsupported compiler world root CID")
         ,("truncated",BS.init primary,rootBody,"unsupported compiler world root CID")]
   forM_ malformed $ \(label,cid,body,reason) -> requireCorrupt (Just reason) ("world-block-" ++ label)
-    (packet 3 (restoration 3 cid association emptyBinding) cid (replaceBlock primary cid body blockPairs) base [] acquisition emptyBinding)
+    (packet 4 (restoration 4 cid association emptyBinding) cid (replaceBlock primary cid body blockPairs) base [] acquisition emptyBinding)
   rootTerm <- decode rootBody
   fields <- case rootTerm of
     TMap fields -> pure fields
@@ -587,16 +826,16 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
   forM_ contextMutations $ \(label,term,reason) -> do
     let body = encode term
     cid <- worldFixtureCID body
-    exact <- reachable [cid,association,emptyBinding] (replaceBlock primary cid body blockPairs)
+    exact <- reachable [cid,association,emptyBinding,lexical] (replaceBlock primary cid body blockPairs)
     requireCorrupt (Just reason) ("world-context-" ++ label)
-      (packet 3 (restoration 3 cid association emptyBinding) cid exact base [] acquisition emptyBinding)
+      (packet 4 (restoration 4 cid association emptyBinding) cid exact base [] acquisition emptyBinding)
   forM_ published $ \_ -> do
     let mutatePublished label target changed expected = do
-          (roots,updated) <- rewriteWorldFixtureBlock target changed [primary,association,emptyBinding] blockPairs
+          (roots,updated) <- rewriteWorldFixtureBlock target changed [primary,association,emptyBinding,lexical] blockPairs
           case roots of
-            [context,associations,occurrences] -> requireCorrupt expected label
-              (packet 3 (restoration 3 context associations occurrences) context updated base [] acquisition occurrences)
-            _ -> fail "Published mutation lost its exact three roots"
+            [context,associations,occurrences,lexicalRoot] | lexicalRoot == lexical -> requireCorrupt expected label
+              (packet 4 (restoration 4 context associations occurrences) context updated base [] acquisition occurrences)
+            _ -> fail "Published mutation lost its exact four roots"
     publications <- worldPublishedFacts primary blockPairs
     forM_ publications $ \(roleCID,role,authorityCID,authority) -> do
       let remove name (TMap fields) = TMap (filter ((/= TString name) . fst) fields)
@@ -615,9 +854,9 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
           (Just "invalid compiler world descriptor fields")
         root <- worldFixtureFieldLink name authority
         requireCorrupt (Just "compiler world block child is absent") ("world-published-absent-" ++ name)
-          (packet 3 product primary (filter ((/= root) . fst) blockPairs) base [] acquisition emptyBinding)
+          (packet 4 product primary (filter ((/= root) . fst) blockPairs) base [] acquisition emptyBinding)
       requireCorrupt (Just "compiler world block child is absent") "world-published-absent-authority"
-        (packet 3 product primary (filter ((/= authorityCID) . fst) blockPairs) base [] acquisition emptyBinding)
+        (packet 4 product primary (filter ((/= authorityCID) . fst) blockPairs) base [] acquisition emptyBinding)
     independent <- readPacket "world-published-second-acquisition" originalPacket
     unless (worldInputsIdentityBytes independent == worldInputsIdentityBytes original
         && worldInputsRetainedCharge independent == worldInputsRetainedCharge original)
@@ -626,26 +865,26 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
     (fail "extra/missing-root controls require an independent actual String HAMT")
   extraRoot <- maybe (fail "String HAMT fixture omitted root") pure (lookup hamtRoot hamtBlocks)
   requireCorrupt (Just "duplicate compiler world block CID") "world-duplicate-block"
-    (packet 3 product primary (head blockPairs:blockPairs) base [] acquisition emptyBinding)
+    (packet 4 product primary (head blockPairs:blockPairs) base [] acquisition emptyBinding)
   requireCorrupt (Just "compiler world frontier contains unreachable blocks") "world-extra-block"
-    (packet 3 product primary ((hamtRoot,extraRoot):blockPairs) base [] acquisition emptyBinding)
+    (packet 4 product primary ((hamtRoot,extraRoot):blockPairs) base [] acquisition emptyBinding)
   child <- case links rootTerm of
     value:_ | value /= primary -> pure value
     _ -> fail "genuine Context fixture needs an actual child"
   requireCorrupt (Just "compiler world block child is absent") "world-missing-context-child"
-    (packet 3 product primary (filter ((/= child) . fst) blockPairs) base [] acquisition emptyBinding)
+    (packet 4 product primary (filter ((/= child) . fst) blockPairs) base [] acquisition emptyBinding)
   -- Each raw root independently participates in frontier validation.
   forM_ [("primary-association",hamtRoot,emptyBinding),("occurrence",association,hamtRoot)] $ \(label,assoc,occurrence) -> do
-    let receipt = restoration 3 primary assoc occurrence
+    let receipt = restoration 4 primary assoc occurrence
     requireCorrupt (Just "compiler world block child is absent") ("world-missing-" ++ label ++ "-root")
-      (packet 3 receipt primary blockPairs base [] acquisition occurrence)
-    combined <- reachable [primary,assoc,occurrence] (blockPairs ++ hamtBlocks)
+      (packet 4 receipt primary blockPairs base [] acquisition occurrence)
+    combined <- reachable [primary,assoc,occurrence,lexical] (blockPairs ++ hamtBlocks)
     hamtBody <- maybe (fail "String HAMT root omitted") pure (lookup hamtRoot hamtBlocks)
     actualChild <- decode hamtBody >>= \term -> case links term of
       value:_ -> pure value
       _ -> fail "128-entry actual HAMT must provide a child before omission control"
     requireCorrupt (Just "compiler world block child is absent") ("world-missing-" ++ label ++ "-child")
-      (packet 3 receipt primary (filter ((/= actualChild) . fst) combined) base [] acquisition occurrence)
+      (packet 4 receipt primary (filter ((/= actualChild) . fst) combined) base [] acquisition occurrence)
   -- Rebind one actual association fact and its exact HAMT link. Equal row image
   -- bytes cannot hide another interface binding's scope.
   associationBody <- maybe (fail "primary association root omitted") pure (lookup association blockPairs)
@@ -660,15 +899,15 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
   let changedPairs = replaceBlock association changedAssociation changedAssociationBody
         (replaceBlock factCID changedCID (encode changedFact) blockPairs)
   requireCorrupt (Just "compiler world selected role differs from acquired binding scopes") "world-wrong-scope-equal-image"
-    (packet 3 (restoration 3 primary changedAssociation emptyBinding) primary changedPairs base [] acquisition emptyBinding)
+    (packet 4 (restoration 4 primary changedAssociation emptyBinding) primary changedPairs base [] acquisition emptyBinding)
   unless (not (BS.null factBody)) (fail "association mutation lacked actual input")
   let paths = Set.toAscList (Set.fromList [path | TList [_,_,_,_,TList values] <- images,TList [_,TString path,_,_,_,_] <- values])
       aliases = Map.fromList [(path,T.pack (work </> ("absent-world-alias-" ++ show i))) | (i,path) <- zip [0 :: Int ..] paths]
       relocate (TString value) = TString (Map.findWithDefault value value aliases)
       relocate (TList values) = TList (map relocate values)
       relocate other = other
-  aliased <- readPacket "world-v3-alias-stable"
-    (packet 3 product primary blockPairs (map relocate base) [] (relocate acquisition) emptyBinding)
+  aliased <- readPacket "world-v4-alias-stable"
+    (packet 4 product primary blockPairs (map relocate base) [] (relocate acquisition) emptyBinding)
   unless (worldInputsIdentityBytes aliased == worldInputsIdentityBytes original)
     (fail "physical receiving aliases changed logical world identity")
   forM_ (Map.elems aliases) $ \path -> do
@@ -676,10 +915,11 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
     unless (not exists) (fail "captured package control requires absent physical aliases")
   withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
     environment <- getSession
-    captured <- liftIO (readWorldSourceInputs environment aliased selectedOwners)
+    owner <- liftIO newExactInputOwner
+    captured <- liftIO (readWorldSourceInputs owner environment aliased selectedOwners)
     case captured of
       Left reason -> liftIO (fail ("captured package/owning-interface authentication failed for absent receiving aliases: " ++ reason))
-      Right closure -> unless
+      Right (closure,_) -> unless
         (Map.keysSet closure == Set.fromList selectedOwners
           && all (\(key,entry) -> (exactUnit (worldSourceEntryArtifact entry),exactModule (worldSourceEntryArtifact entry)) == key)
                (Map.toList closure))
@@ -1424,8 +1664,13 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
             reference <- case ready of
               ExactInputsReady _ realization -> pure realization
               other -> fail ("real preparation could not acquire its captured world: " ++ show other)
-            let recipe = WorldCellRecipe "(1 :: Int)"
-                  "module CellCheck where\n{{CELL_IMPORTS}}\n{{CELL_DECLS}}\n{{CELL_BODY}}" []
+            let template = unlines
+                  ["{-# LANGUAGE DataKinds, QuasiQuotes #-}","{{CELL_PRAGMAS}}","module CellCheck where"
+                  ,"import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
+                  ,"{{CELL_DECLS}}"
+                  ,"__tidepool_cell_check :: Eff '[] ()"
+                  ,"__tidepool_cell_check = do { {{CELL_BODY}} ; pure () }"]
+                recipe = WorldCellRecipe "let answer = (1 :: Int)" template []
                 planOut = work </> "cell-plan.cbor"
                 planRequest = WorldCellPlanRequest identity reference recipe planOut
             planArgs <- decodeWorldArgs [WorldCellPlan planRequest]
@@ -1437,14 +1682,14 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                 (worldCellTemplate recipe) (worldCellSource recipe)) >>= either (liftIO . fail . show) pure
               let items = cellPlanItems plan
               liftIO $ unless (length items == 1
-                  && sbKind (cellAnalysisVerdict (head items)) == KExpr
+                  && sbKind (cellAnalysisVerdict (head items)) == KBind
                   && length (cellInferenceSegments plan) == 1)
-                (fail ("admission fixture is not one executable expression item: items="
+                (fail ("admission fixture is not one executable bind item: items="
                   ++ show (length items)
                   ++ " kinds=" ++ show (map (sbKind . cellAnalysisVerdict) items)
                   ++ " sources=" ++ show (map cellAnalysisSource items)
                   ++ " segments=" ++ show (length (cellInferenceSegments plan))))
-              liftIO (pure [(0, PlannedExpression 1 "observation")])
+              liftIO (pure [(0, PlannedBind 1)])
             let directory = work </> "cell-admission"
                 prepareRequest = WorldCellPrepareRequest identity reference recipe planBytes
                   (BS.replicate 32 7) slots directory (directory </> "prepared.cbor")
@@ -1453,6 +1698,49 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
             validated <- (withBoundCompilerRequest (const (pure ())) compiler prepareArgs >=> finishCompletion) $ \request -> do
               validation <- boundWorldCellPreparation request
               forM_ validation $ \admitted -> do
+                completions <- prepareWorldCell request >>= either
+                  (fail . ("real world preparation refused: " ++) . show) pure
+                completion <- case completions of
+                  [value] -> pure value
+                  _ -> fail "real world preparation did not emit exactly one compiler completion"
+                output <- BS.readFile (worldCellPrepareOutput prepareRequest)
+                certificate <- BS.readFile (directory </> "certified-products.cbor")
+                case deserialiseFromBytes decodeTerm (BL.fromStrict certificate) of
+                  Right (remaining,TList [TString "TPCERT",TInt 10,TList
+                    [TString "segment-originals",_,_,_,_,TList
+                      [TString "world-unavailable",TBytes base,TBytes domain,TString "unsupported-source-recipe"],_]])
+                    | BL.null remaining,base == worldInputsIdentityBytes facts
+                    , domain == worldSourceDomainSha256 (worldInputsSources facts) -> pure ()
+                  _ -> fail "World native certificate lost its actual base/source-domain recipe provenance"
+                itemSha <- case deserialiseFromBytes decodeTerm (BL.fromStrict output) of
+                  Right (remaining,TList [TString "TPCWPREP3",_,_,_
+                    ,TList [TString "prepared",TList [TList [TInt 0,TInt 1,TBytes sha]]]
+                    ,_,_,_,TList [_]]) | BL.null remaining -> pure sha
+                  _ -> fail "real world preparation omitted its exact item and typed segment manifest"
+                let itemDirectory = directory </> "item-0"
+                item <- BS.readFile (itemDirectory </> "world-item.cbor")
+                unless (SHA.hash item == itemSha)
+                  (fail "real world item differs from its terminal output manifest")
+                case deserialiseFromBytes decodeTerm (BL.fromStrict item) of
+                  Right (remaining,TList fields) | BL.null remaining,length fields == 13 ->
+                    case last fields of
+                      TList files -> forM_ files $ \entry -> case entry of
+                        TList [TString name,TBytes sha] -> do
+                          bytes <- BS.readFile (itemDirectory </> T.unpack name)
+                          unless (SHA.hash bytes == sha) (fail "emitted world file differs from its item proof")
+                        _ -> fail "real world item omitted an exact file seal"
+                      _ -> fail "real world item omitted its captured files"
+                  _ -> fail "real world preparation omitted its actual item proof"
+                crossedCommit <- (withBoundCompilerRequest (const (pure ())) compiler planArgs >=> finishCompletion) $ \other ->
+                  try (commitPreparedWorldDependencies other completion) :: IO (Either InputRejection ())
+                unless (either (\failure -> case failure of CheckedPurposeMismatch -> True; _ -> False)
+                    (const False) crossedCommit)
+                  (fail "foreign request committed another preparation's pending dependencies")
+                commitPreparedWorldDependencies request completion
+                replay <- try (commitPreparedWorldDependencies request completion) :: IO (Either InputRejection ())
+                unless (either (\failure -> case failure of CheckedPurposeMismatch -> True; _ -> False)
+                    (const False) replay)
+                  (fail "world dependency commitment replayed after consumption")
                 -- Consumption enters the same scope while its phase is Running.
                 -- It must reach stage policy, not re-run a Ready-only guard.
                 unsupported <- try (void (scopedCompileWorldCell compiler admitted CheckedEnvironment
@@ -1498,9 +1786,9 @@ writeWorldCellAdmissionPacket
   :: IORef [Handle] -> FilePath -> BS.ByteString -> BS.ByteString -> BS.ByteString
   -> IO (FilePath,BS.ByteString)
 writeWorldCellAdmissionPacket handles work producer profile parcelBytes = do
-  (primary,association,base,durable,contextBlocks) <- worldParcel parcelBytes
+  (primary,association,base,durable,contextBlocks,lexical) <- worldParcel parcelBytes
   acquisition <- sealWorldParcel handles (TList durable)
-  (emptyPrimary,_,emptyBase,_,emptyBlocks) <- fixture "world-context-blocks" [TBytes producer] >>= worldParcel
+  (emptyPrimary,_,emptyBase,_,emptyBlocks,_) <- fixture "world-context-blocks" [TBytes producer] >>= worldParcel
   unless (null emptyBase) (fail "empty world context published primary rows")
   emptyBody <- maybe (fail "empty Context root is absent") pure (lookup emptyPrimary emptyBlocks)
   emptyTerm <- decode emptyBody
@@ -1509,15 +1797,15 @@ writeWorldCellAdmissionPacket handles work producer profile parcelBytes = do
       Just (TTagged 42 (TBytes bytes)) | not (BS.null bytes),BS.head bytes == 0 -> pure (BS.tail bytes)
       _ -> fail "empty Materializer context omitted its empty map"
     _ -> fail "empty Materializer Context descriptor changed"
-  pairs <- reachable [primary,association,emptyBinding] (contextBlocks ++ emptyBlocks)
+  pairs <- reachable [primary,association,emptyBinding,lexical] (contextBlocks ++ emptyBlocks)
   let sources = "TPCSRC01" <> BS.replicate 8 0
       sourcePath = work </> "world-admission-sources.bin"
       text = TString . T.pack
       blocks values = TList [TList [TBytes cid,TBytes body] | (cid,body) <- values]
       visibility root = encode (TList [TString "TPCWBIND4",TInt 0,TBytes root])
-      restoration = encode (TList [TString "TPCWREST",TInt 3,TBytes primary,TBytes (SHA.hash sources)
-        ,TBytes producer,TBytes profile,TInt 0,TBytes association,TBytes emptyBinding])
-      packet = TList [TString "TPCWORLD",TInt 3,TBytes restoration,text sourcePath,TBytes producer
+      restoration = encode (TList [TString "TPCWREST",TInt 4,TBytes primary,TBytes (SHA.hash sources)
+        ,TBytes producer,TBytes profile,TInt 0,TBytes association,TBytes emptyBinding,TBytes lexical])
+      packet = TList [TString "TPCWORLD",TInt 4,TBytes restoration,text sourcePath,TBytes producer
         ,TBytes profile,TList [TList base,TList []],acquisition,TBytes (visibility emptyBinding)
         ,TBytes primary,blocks pairs]
   BS.writeFile sourcePath sources
@@ -1530,12 +1818,12 @@ writeWorldCellAdmissionPacket handles work producer profile parcelBytes = do
         (TList [TString "TPCODECFIXTURE1",TString (T.pack operation),TList arguments]))
       BS.readFile path
     worldParcel bytes = case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
-      Right (remaining,TList [TBytes primary,TBytes association,TList rows,TList durable,TList pairs])
+      Right (remaining,TList [TBytes primary,TBytes association,TList rows,TList durable,TList pairs,TBytes lexical])
         | BL.null remaining -> do
             blocks <- forM pairs $ \entry -> case entry of
               TList [TBytes cid,TBytes body] -> pure (cid,body)
               _ -> fail "world fixture omitted its block array"
-            pure (primary,association,rows,durable,blocks)
+            pure (primary,association,rows,durable,blocks,lexical)
       _ -> fail "world fixture needs actual Context/association roots, rows, owned bytes and blocks"
     sealWorldParcel owners (TList [TString "TPCWORLDFIXTUREBYTES1",TList arenas,TList images]) = do
       live <- forM arenas $ \entry -> case entry of
@@ -1699,6 +1987,20 @@ validationTimingControl = do
 -- Feed actual owner-emitted diagnostics into the declared consumer. This
 -- fixture deliberately executes two cycles in one physical request history;
 -- parser controls derive from those events rather than copied wire examples.
+worldRejectionDiagnosticBoundaries :: IO ()
+worldRejectionDiagnosticBoundaries = do
+  let first = "first actual GHC error: could not load selected module\n"
+      detail = first ++ concat (replicate 20000 "界😀\n\"\\") ++ "UNRETAINED_FINAL_SENTINEL"
+  (_,diagnostics) <- captureDiagnostics
+    (emitWorldAcquisitionRejection "world cell demand" "<sealed scaffold>" detail)
+  unless (firstLine `isInfixOf` diagnostics
+      && "[diagnostic truncated]" `isInfixOf` diagnostics
+      && not ("UNRETAINED_FINAL_SENTINEL" `isInfixOf` diagnostics)
+      && not ('\xfffd' `elem` diagnostics)
+      && BS.length (TE.encodeUtf8 (T.pack diagnostics)) < 25 * 1024)
+    (fail "bounded World diagnostics lost their first error, truncation marker or UTF-8 boundary")
+  where firstLine = "first actual GHC error: could not load selected module"
+
 compilerTimingRoundtrip :: IO ()
 compilerTimingRoundtrip = withTiming $ withScratch $ \work -> do
   forM_ ["CanonicalSource.hs","CanonicalDependency.hs"] $ \name ->

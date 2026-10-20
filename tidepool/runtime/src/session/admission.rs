@@ -1814,6 +1814,8 @@ impl CheckedTurnCompletion {
         } else {
             None
         };
+        let predecessor_world = state.snapshot.world().map(|world| *world.logical_id());
+        let bound_binding_ids = native.bindings.iter().map(|binding| binding.id.raw()).collect::<Vec<_>>();
         settle_checked_snapshot(
             session,
             &mut state,
@@ -1826,6 +1828,19 @@ impl CheckedTurnCompletion {
         )?;
         if let Some((private, values)) = completed_values {
             private.completed_values.lock().extend(values);
+        }
+        if let (Some(predecessor_world), Some(successor),
+            tidepool_toolchain::checked_cell::CellProgramBasis::World(output)) =
+            (predecessor_world, state.snapshot.world(), self.prefix.program.basis())
+        {
+            tracing::debug!(target: "exomonad_harness::timing",
+                base_logical_world = ?output.logical().logical_id(),
+                predecessor_world = ?predecessor_world,
+                successor_world = ?successor.logical_id(),
+                output_certificate = ?output.certificate_sha256(),
+                item_ordinal = self.execution.item().index(),
+                bound_binding_ids = ?bound_binding_ids,
+                "checked World item successor installed");
         }
         state.in_flight = None;
         state.reservation = None;
@@ -2425,6 +2440,7 @@ impl PersistentSession {
     ) -> Result<(), SessionError> {
         let store = self.held_admission_store()?;
         let prefix = admission.prefix();
+        prefix.settled.checkpoint()?;
         let mut state = prefix.state.lock();
         let scope = prefix.admission.scope;
         if prefix.admission.host_carrier() != Some((binding, expected))
@@ -2616,6 +2632,7 @@ impl PersistentSession {
         // before any declaration can commit against that scope's old view.
         self.reap_admission_leases();
         let prefix = &admission.prefix;
+        prefix.settled.checkpoint()?;
         let mut state = prefix.state.lock();
         let scope = prefix.admission.scope;
         let item = &admission.item;

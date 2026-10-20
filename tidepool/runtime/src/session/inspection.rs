@@ -13,6 +13,62 @@ use crate::{timing, CompileError};
 
 use super::assemble_inspection_module;
 
+/// An immutable observational snapshot of one runtime base and the actor's
+/// exact import/projection membrane. It carries no admission authority. Its
+/// existing cached base digest is resolved only when an answer needs the pin.
+/// The base includes owner state hidden from authored imports, so observations
+/// may conservatively differ even when visible name lists are unchanged.
+pub struct InspectionScopeSnapshot {
+    pub(super) base: std::sync::Arc<super::persistent::CachedCompileView>,
+    pub(super) generation: u64,
+    pub(super) runtime_scope: tidepool_codegen::scope::ScopeId,
+    pub(super) source_revision: std::sync::Arc<[u8]>,
+    pub(super) selected_imports: super::SourceImports,
+    pub(super) inputs: super::RuntimeCompileInputs,
+    pub(super) scope: NameScope,
+}
+
+impl InspectionScopeSnapshot {
+    pub fn provenance(&self) -> ScopeProvenance {
+        inspection_provenance(
+            self.base.digest(),
+            self.generation,
+            &self.source_revision,
+            &self.selected_imports,
+            &self.inputs,
+            self.scope.clone(),
+        )
+    }
+}
+
+/// Correlate observations without granting admission authority. The base is
+/// the runtime owner's existing cached semantic commitment; the actor inputs
+/// describe the deterministic import/projection membrane applied to that base.
+pub(super) fn inspection_provenance(
+    base: [u8; 32],
+    generation: u64,
+    source_revision: &[u8],
+    selected_imports: &super::SourceImports,
+    inputs: &super::RuntimeCompileInputs,
+    scope: NameScope,
+) -> ScopeProvenance {
+    let mut fingerprint = blake3::Hasher::new();
+    let mut frame = |bytes: &[u8]| {
+        fingerprint.update(&(bytes.len() as u64).to_le_bytes());
+        fingerprint.update(bytes);
+    };
+    frame(b"runtime-inspection-view-v1");
+    frame(&base);
+    frame(source_revision);
+    frame(&serde_json::to_vec(selected_imports.specs()).expect("source imports serialize"));
+    inputs.frame_authorization(&mut frame);
+    ScopeProvenance {
+        scope,
+        generation,
+        fingerprint: fingerprint.finalize().to_hex().to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum InspectionQuery {
     TypeOf(String),
@@ -342,6 +398,7 @@ impl AdmittedInspectionInputs {
 pub struct AdmittedInspectionWorld {
     pub(super) base: InspectionWorldBase,
     pub(super) inputs: InspectionWorldInputs,
+    pub(super) observation: Option<std::sync::Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>>,
 }
 
 #[derive(Clone)]
@@ -452,7 +509,7 @@ pub fn run_admitted_compiler_world(
         CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
     )?;
     let cold = admitted.needs_source_capture();
-    let world = acquire_compiler_world(admitted.inputs, &admitted.base, capture_sources)?;
+    let world = acquire_compiler_world(admitted.inputs, &admitted.base, admitted.observation, capture_sources)?;
     tracing::debug!(
         target: "exomonad_harness::timing",
         cold,
@@ -517,6 +574,7 @@ pub(super) fn finish_world_operation<T>(
 fn acquire_compiler_world(
     inputs: InspectionWorldInputs,
     base: &InspectionWorldBase,
+    observation: Option<std::sync::Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>>,
     capture_sources: impl FnOnce() -> Result<
         Option<std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
         WorldInspectionError,
@@ -524,7 +582,10 @@ fn acquire_compiler_world(
 ) -> Result<std::sync::Arc<tidepool_toolchain::compiler_world::CompilerWorld>, WorldInspectionError>
 {
     match inputs {
-        InspectionWorldInputs::Published(world) => Ok(world),
+        InspectionWorldInputs::Published(world) => match observation {
+            None => Ok(world),
+            Some(observation) => Ok(world.with_observation_scaffold(Some(observation))?),
+        },
         InspectionWorldInputs::Cold {
             primary,
             bindings,
@@ -534,6 +595,10 @@ fn acquire_compiler_world(
             if sources.origin() != base.source.bytes() {
                 return Err(invalid("cold sources differ from the admitted source owner").into());
             }
+            let lexical = match observation {
+                None => lexical,
+                Some(observation) => lexical.with_observation(Some(observation))?,
+            };
             let cold = tidepool_toolchain::artifacts::ModuleCandidateOffer::compiler_world_inputs(
                 primary, bindings, sources, lexical,
             )?;
@@ -567,6 +632,15 @@ pub struct ScopeBindingsAnswer {
 }
 
 impl AdmittedInspectionWorld {
+    /// Attach source-issued compiler description before any World acquisition.
+    /// This does not change the captured runtime/source admission.
+    pub fn with_observation_scaffold(mut self,
+        observation: std::sync::Arc<tidepool_toolchain::compiler_world::WorldObservationScaffold>,
+    ) -> Self {
+        self.observation = Some(observation);
+        self
+    }
+
     pub fn needs_source_capture(&self) -> bool {
         matches!(self.inputs, InspectionWorldInputs::Cold { .. })
     }
@@ -686,6 +760,7 @@ pub fn run_admitted_world_inspection(
         WorldInspectionError,
     >,
     query: NameQuery,
+    observation: InspectionScopeSnapshot,
     kind: tidepool_toolchain::compiler_world::PublicModuleQuestionKind,
 ) -> Result<PreparedInspectionWorld, WorldInspectionError> {
     if !std::sync::Arc::ptr_eq(&owner.source, &admitted.base.original_source) {
@@ -696,7 +771,7 @@ pub fn run_admitted_world_inspection(
     owner
         .admit(Some(admitted.base.target.clone()))
         .map_err(crate::RuntimeError::from)?;
-    run_admitted_world_inspection_inner(admitted, capture_sources, query, kind)
+    run_admitted_world_inspection_inner(admitted, capture_sources, query, observation, kind)
 }
 
 fn run_admitted_world_inspection_inner(
@@ -706,6 +781,7 @@ fn run_admitted_world_inspection_inner(
         WorldInspectionError,
     >,
     query: NameQuery,
+    observation: InspectionScopeSnapshot,
     kind: tidepool_toolchain::compiler_world::PublicModuleQuestionKind,
 ) -> Result<PreparedInspectionWorld, WorldInspectionError> {
     use std::sync::Arc;
@@ -718,6 +794,13 @@ fn run_admitted_world_inspection_inner(
     let NameScope::PublicModule(module) = &query.scope else {
         return Err(invalid("world inspection requires a public module").into());
     };
+    if !observation.base.matches_key(&admitted.base.key)
+        || observation.runtime_scope != admitted.base.scope
+        || observation.generation != admitted.base.key.generation().0
+        || observation.scope != query.scope
+    {
+        return Err(invalid("inspection observation differs from its admitted base").into());
+    }
     let namespace = inspection_namespace(query.namespace);
     let question = match kind {
         PublicModuleQuestionKind::StructuredInfo => {
@@ -738,7 +821,7 @@ fn run_admitted_world_inspection_inner(
         InspectionWorldInputs::Published(world) => Some(*world.logical_id()),
         InspectionWorldInputs::Cold { .. } => None,
     };
-    let world = acquire_compiler_world(admitted.inputs, &admitted.base, capture_sources)?;
+    let world = acquire_compiler_world(admitted.inputs, &admitted.base, admitted.observation, capture_sources)?;
     let result = compiler_world::query_public_module(&endpoint()?, &world, question.clone())?;
     if expected_world.is_some_and(|expected| &expected != result.world().logical_id()) {
         return Err(invalid("world query returned a different logical world").into());
@@ -746,18 +829,7 @@ fn run_admitted_world_inspection_inner(
     if result.question() != &question {
         return Err(invalid("world result differs from its admitted question").into());
     }
-    let provenance = ScopeProvenance {
-        scope: query.scope.clone(),
-        generation: admitted.base.key.generation().0,
-        fingerprint: {
-            use std::fmt::Write;
-            let mut observation = String::from("compiler-world:");
-            for byte in result.world().logical_id() {
-                write!(&mut observation, "{byte:02x}").expect("String formatting");
-            }
-            observation
-        },
-    };
+    let provenance = observation.provenance();
     let world = Arc::clone(result.world());
     let mut answer = result.into_answer();
     match &mut answer {

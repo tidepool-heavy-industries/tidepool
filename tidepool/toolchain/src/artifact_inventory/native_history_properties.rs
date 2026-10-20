@@ -1861,7 +1861,7 @@ fn cold_native_history(
         expected_metadata
     );
     prop_assert_eq!(
-        &metadata.selected_native_groups,
+        metadata.selected_native_groups.as_ref(),
         &catalog.selection(&selected)
     );
     prop_assert_eq!(

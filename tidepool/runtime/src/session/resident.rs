@@ -729,6 +729,7 @@ enum HostCarrierOrigin {
     Checked {
         admission: Arc<super::RuntimeCheckedItemAdmission>,
         binder: BoundBinder,
+        type_owner: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
     },
     Interface {
         admission: Arc<super::RuntimeHostBindingAdmission>,
@@ -833,10 +834,12 @@ impl HostCarrier {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
         let (_, representation) = host_representation(&binder, &code, expected)?;
+        let type_owner = tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_checked(execution)
+            .map_err(SessionError::Compile)?;
         Ok(Self {
             code: Arc::new(code.into_owned()),
             representation,
-            origin: HostCarrierOrigin::Checked { admission, binder },
+            origin: HostCarrierOrigin::Checked { admission, binder, type_owner },
         })
     }
 
@@ -845,7 +848,7 @@ impl HostCarrier {
         &self,
     ) -> Result<(&Arc<super::RuntimeCheckedItemAdmission>, &BoundBinder), ResidentError> {
         match &self.origin {
-            HostCarrierOrigin::Checked { admission, binder } => Ok((admission, binder)),
+            HostCarrierOrigin::Checked { admission, binder, .. } => Ok((admission, binder)),
             HostCarrierOrigin::Reusable(_) | HostCarrierOrigin::Interface { .. } => {
                 Err(ResidentError::UnsupportedCheckedTurn)
             }
@@ -860,6 +863,31 @@ impl HostCarrier {
             | HostCarrierOrigin::Interface { binder, .. } => Ok(binder),
             HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
         }
+    }
+
+    fn type_owner(
+        &self,
+    ) -> Result<&Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>, ResidentError> {
+        match &self.origin {
+            HostCarrierOrigin::Checked { type_owner, .. } => Ok(type_owner),
+            HostCarrierOrigin::Interface { proof, .. } => Ok(proof.prototype()),
+            HostCarrierOrigin::Reusable(_) => Err(ResidentError::UnsupportedCheckedTurn),
+        }
+    }
+
+    /// Borrow the native type already retained by this exact checked carrier.
+    /// Generic representation-only embeddings do not supply this witness.
+    pub fn type_signature(
+        &self,
+    ) -> Result<&tidepool_toolchain::checked_cell::ExactCheckedSignature, ResidentError> {
+        Ok(self.type_owner()?.signature())
+    }
+
+    /// Retain the exact selected original type context, without execution custody.
+    pub fn type_context(
+        &self,
+    ) -> Result<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, ResidentError> {
+        Ok(self.type_owner()?.context())
     }
 
     pub fn session_root(&self) -> Result<&Path, ResidentError> {
@@ -1237,6 +1265,16 @@ pub struct RuntimeActivationInput {
 static_assertions::assert_not_impl_any!(RuntimeActivationInput: Clone, Copy);
 
 impl RuntimeActivationInput {
+    /// The binding issued by the original activation-input admission.
+    pub fn binding_name() -> &'static str {
+        "sessionInput"
+    }
+
+    /// Original checked TYPE metadata, without mounting or exposing the value.
+    pub fn type_prototype(&self) -> &Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype> {
+        &self.prototype
+    }
+
     pub fn input_type(&self) -> &str {
         &self.input_type
     }
@@ -3870,7 +3908,7 @@ where
         digest.update(&self.run_context.principal.incarnation.to_le_bytes());
         let reservation = self.state.admit_binding_interface(
             scope,
-            "sessionInput".into(),
+            RuntimeActivationInput::binding_name().into(),
             input.prototype.clone(),
             *digest.finalize().as_bytes(),
         )?;
@@ -3879,6 +3917,18 @@ where
             reservation,
             run_context: self.run_context,
         })
+    }
+
+    /// Admit one compiler-issued binder reserved for a native host payload.
+    pub fn admit_world_planned_host_carrier_cell_in(
+        &mut self,
+        scope: ScopeId,
+        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        binding: String,
+        expected: HostBindingType,
+    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
+        self.settle_dropped_custody();
+        self.state.admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
     }
 
     /// Admit one compiler-issued binder reserved for a native host payload.
@@ -4599,6 +4649,26 @@ where
         self.state
             .compile_view_in(scope)
             .map(|view| view.hide_value_names(&hidden))
+    }
+
+    /// Capture the runtime's immutable scope snapshot. A cold cache builds it;
+    /// warm captures reuse it without enumerating values. Capturing does not
+    /// force the digest. The result conveys observation, not admission authority.
+    pub fn capture_inspection_scope_in(
+        &self,
+        scope: ScopeId,
+        source_revision: &[u8],
+        selected_imports: &super::SourceImports,
+        inputs: &super::RuntimeCompileInputs,
+        label: super::NameScope,
+    ) -> Result<super::InspectionScopeSnapshot, SessionError> {
+        self.state.capture_inspection_scope_in(
+            scope,
+            source_revision,
+            selected_imports,
+            inputs,
+            label,
+        )
     }
 
     /// Capture a logical-world observation before constructing a compile view.
@@ -5778,16 +5848,7 @@ where
         if !admission.prefix().admission().belongs_to(&self.state) {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
-        let execution = carrier
-            .code
-            .certification
-            .as_ref()
-            .as_ref()
-            .and_then(|certification| certification.checked_execution())
-            .ok_or(ResidentError::UnsupportedCheckedTurn)?;
-        let compiler =
-            tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_checked(execution)
-                .map_err(SessionError::Compile)?;
+        let compiler = carrier.type_owner()?.clone();
         let code = carrier
             .code()
             .into_host_prototype()

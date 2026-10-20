@@ -2,6 +2,7 @@
 import argparse
 import concurrent.futures
 import errno
+from enum import Enum
 from concurrent.futures import FIRST_COMPLETED, wait
 import os
 import hashlib
@@ -705,6 +706,51 @@ def compiler_trace_context(row):
     return merged, request
 
 
+class CompilerTraceLayer(Enum):
+    PHYSICAL = 'physical'
+    ENDPOINT_SUBMISSION = 'endpoint_submission'
+    TRANSACTION_WRAPPER = 'transaction_wrapper'
+    REQUEST_PREPARATION = 'request_preparation'
+
+
+class CompilerPreparationStage(Enum):
+    INGRESS = 'ingress_and_correlation'
+    WORKER_ENCODING = 'worker_encoding'
+
+
+def compiler_request_owner(context):
+    """Exact daemon request coordinates, never inferred from a display token."""
+    epoch, admission, ordinal, correlation = (context.get(key) for key in
+        ('daemon_epoch', 'admission_id', 'request_ordinal', 'compile_request'))
+    if (bounded_trace_identity(epoch) and bounded_trace_identity(correlation)
+            and type(admission) is int and 0 < admission < 1 << 64
+            and type(ordinal) is int and 0 < ordinal < 1 << 64):
+        return epoch, admission, ordinal, correlation
+    return None
+
+
+def compiler_preparation_observation(context, fields):
+    """Decode one preparation stage; absent owner/metrics remain unknown."""
+    stage = CompilerPreparationStage(fields.get('stage'))
+    owner = compiler_request_owner(context)
+    if owner is None:
+        raise ValueError('preparation has no issued daemon request owner')
+    if stage is CompilerPreparationStage.INGRESS:
+        elapsed = ('decode_ns', 'grant_ns', 'correlation_ns')
+        counts = ('ingress_argument_bytes', 'typed_decodes', 'cli_parses',
+                  'correlation_encoded_bytes')
+    else:
+        elapsed = ('placement_ns', 'encoding_ns')
+        counts = ('worker_encoded_bytes',)
+    metrics = {key: fields.get(key) for key in (*elapsed, *counts)}
+    if any(type(value) is not int or not 0 <= value < 1 << 64
+           for value in metrics.values()):
+        raise ValueError('preparation metrics are missing or invalid')
+    return {'stage': stage.value, 'daemon_epoch': owner[0], 'admission_id': owner[1],
+            'request_ordinal': owner[2], 'compile_request': owner[3], 'metrics': metrics,
+            'elapsed_ns': sum(metrics[key] for key in elapsed)}, owner
+
+
 def compiler_job_grants(queue, requested):
     """Summarize exact dequeued admission grants; missing fields stay unknown."""
     admissions, invalid = [], 0
@@ -913,6 +959,11 @@ def diagnostic_summaries(artifact_root):
         physical, retained_bytes, total = [], 0, 0
         unknown, physical_requests, physical_jobs = 0, set(), set()
         requests_truncated = jobs_truncated = False
+        prepared, preparation_bytes, preparation_rows, preparation_unknown = [], 0, 0, 0
+        preparation_stages = {stage.value: {'record_count': 0, 'elapsed_ns': 0}
+                              for stage in CompilerPreparationStage}
+        preparation_owners, physical_owners = {}, set()
+        preparation_identities_truncated = preparation_records_truncated = False
         queued, queue_bytes, queue_rows, queue_unknown = {}, 0, 0, 0
         queue_truncated = False
         scan = {}
@@ -954,8 +1005,37 @@ def diagnostic_summaries(artifact_root):
                                 queue_bytes += line_bytes
                             else:
                                 queue_truncated = True
-                    layer = context.get('execution_layer')
-                    if layer == 'physical' and bounded_trace_identity(context.get('physical_execution')):
+                    try:
+                        layer = CompilerTraceLayer(context.get('execution_layer'))
+                    except ValueError:
+                        layer = None
+                    if layer is CompilerTraceLayer.REQUEST_PREPARATION:
+                        preparation_rows += 1
+                        try:
+                            observation, owner = compiler_preparation_observation(context, fields)
+                        except ValueError:
+                            preparation_unknown += 1
+                            unknown += 1
+                        else:
+                            if owner in preparation_owners or len(preparation_owners) < TRACE_IDENTITY_LIMIT:
+                                preparation_owners[owner] = preparation_owners.get(owner, 0) + 1
+                            else:
+                                preparation_identities_truncated = True
+                            stage = preparation_stages[observation['stage']]
+                            stage['record_count'] += 1
+                            stage['elapsed_ns'] += observation['elapsed_ns']
+                            if preparation_bytes + line_bytes <= TRACE_RECORD_BYTE_LIMIT and len(prepared) < TRACE_RECORD_LIMIT:
+                                prepared.append({**observation, 'row': row})
+                                preparation_bytes += line_bytes
+                            else:
+                                preparation_records_truncated = True
+                    elif layer is CompilerTraceLayer.PHYSICAL and bounded_trace_identity(context.get('physical_execution')):
+                        owner = compiler_request_owner(context)
+                        if owner is not None:
+                            if owner in physical_owners or len(physical_owners) < TRACE_IDENTITY_LIMIT:
+                                physical_owners.add(owner)
+                            else:
+                                preparation_identities_truncated = True
                         total += 1
                         identity = context['physical_execution']
                         if identity in physical_requests or len(physical_requests) < TRACE_IDENTITY_LIMIT:
@@ -975,7 +1055,8 @@ def diagnostic_summaries(artifact_root):
                         if retained_bytes + line_bytes <= TRACE_RECORD_BYTE_LIMIT and len(physical) < TRACE_RECORD_LIMIT:
                             physical.append({**row, 'physical_context': context})
                             retained_bytes += line_bytes
-                    elif request and layer not in ('endpoint_submission', 'transaction_wrapper'):
+                    elif request and layer not in (CompilerTraceLayer.ENDPOINT_SUBMISSION,
+                                                    CompilerTraceLayer.TRANSACTION_WRAPPER):
                         unknown += 1
                 except (ValueError, TypeError, AttributeError):
                     scan['malformed_lines'] += 1
@@ -990,6 +1071,25 @@ def diagnostic_summaries(artifact_root):
         result['trace_capture'] = {'applied_profiles': profile_receipts, 'compiler_boots': compiler_boots,
                                    'summary_lines': summary_lines, 'raw_detail_lines': raw_detail_lines,
                                    'complete': scanned}
+        unmatched_preparation_owners = preparation_owners.keys() - physical_owners
+        unmatched_preparation_records = sum(preparation_owners[owner] for owner in unmatched_preparation_owners)
+        unknown += unmatched_preparation_records
+        preparation_aggregate_complete = (scanned and not preparation_identities_truncated
+            and preparation_unknown == 0 and not unmatched_preparation_owners)
+        result['compiler_request_preparation'] = {
+            'records': prepared, 'record_count': preparation_rows,
+            'retained_record_count': len(prepared), 'stages': preparation_stages,
+            'unclassified_record_count': preparation_unknown,
+            'unmatched_request_count': len(unmatched_preparation_owners),
+            'request_identities_truncated': preparation_identities_truncated,
+            'records_truncated': preparation_records_truncated,
+            'aggregate_complete': preparation_aggregate_complete,
+            'complete': preparation_aggregate_complete and not preparation_records_truncated,
+            # Worker encoding is enclosed by service timing. These stage costs
+            # remain separate observations, never additional physical execution.
+            'timing_relationship': 'worker_encoding_included_in_compiler_service',
+            'data_status': 'observed' if preparation_rows else 'no_observed_preparation',
+        }
         result['physical_compiler_timing'] = {
             'records': physical, 'physical_record_count': total,
             'physical_request_count': len(physical_requests),
@@ -1232,8 +1332,10 @@ def case_artifact_evidence(artifact_root, compiler_mode, record):
         stderr += '\nowned compiler cleanup observation is incomplete'
     evidence_complete = (not summaries.get('issues')
                          and not summaries.get('transactions_truncated')
+                         and summaries.get('compiler_request_preparation', {}).get('complete', True)
                          and summaries.get('physical_compiler_timing', {}).get('complete', True)
                          and all(root.get('physical_compiler_timing', {}).get('complete', False)
+                                 and root.get('compiler_request_preparation', {}).get('complete', True)
                                  and root.get('owned_cleanup_status', 'not_required') in ('confirmed', 'not_required')
                                  and (not root.get('compiler_job_queue', {}).get('physical_job_count')
                                       or root['compiler_job_queue'].get('complete', False))

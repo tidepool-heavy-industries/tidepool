@@ -839,6 +839,7 @@ fn identify_request(
 ) {
     tracing::info!(
         target: "tidepool_extract_cmd::endpoint",
+        execution_layer = "endpoint_submission",
         daemon_epoch = %hex(&epoch.0),
         admission_id = admission.0,
         request_ordinal = ordinal.0,
@@ -1704,6 +1705,8 @@ fn service_transaction(
                 tracing::info!(
                     run_id,
                     %compile_request,
+                    execution_layer = "request_preparation",
+                    daemon_epoch = %hex(epoch),
                     admission_id = admission_id.0,
                     request_ordinal = request_ordinal.0,
                     phase = "compiler_request_preparation",
@@ -3939,6 +3942,7 @@ impl Worker {
         let encoding_started = Instant::now();
         let bytes = encode_request(cwd, &request.worker_argv());
         tracing::info!(
+            execution_layer = "request_preparation",
             phase = "compiler_request_preparation",
             stage = "worker_encoding",
             placement_ns,
@@ -5769,11 +5773,11 @@ mod tests {
         // new grant-normalized encoder. These cover query, plan, prepare and
         // resident-acquisition modes, including source/template/receipt bodies.
         let packets = [
-            "5450524551303234000100000001000000010000000107000000457870722e6873",
-            "5450524551303234000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e",
-            "5450524551303234000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72",
-            "5450524551303234000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72",
-            "54505245513032340001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564",
+            "5450524551303235000100000001000000010000000107000000457870722e6873",
+            "5450524551303235000100000001000000010000003a4000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161080000007265616c697a6564000109000000446174612e4c69737401030000006d617001000000000000000c000000646973706c61792d6f6e6c790a000000616e737765722e62696e",
+            "5450524551303235000100000001000000010000003b40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e6420776865726509000000706c616e2e63626f72",
+            "5450524551303235000100000001000000010000003c40000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610400000068656c640b00000078203c2d207075726520311e0000007b7b43454c4c5f494d504f5254537d7d0a7b7b43454c4c5f424f44597d7d010000000400000062696e64110000006d6f64756c652042696e642077686572650c000000706c616e2d7265636569707462626262626262626262626262626262626262626262626262626262626262620200000000000000000000000207000000000000000100000000000000030800000000000000020000006974090000006f7065726174696f6e0d00000070726570617265642e63626f72",
+            "54505245513032350001000000010000000100000039400000006161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100080000007265616c697a6564",
 ];
         for payload in packets.into_iter().flat_map(|payload| {
             [
@@ -5788,7 +5792,7 @@ mod tests {
                     old_frame.extend_from_slice(bytes);
                 }
                 old_frame.extend_from_slice(&2u32.to_le_bytes());
-                for bytes in [b"--worker-request-v24".as_slice(), payload.as_bytes()] {
+                for bytes in [b"--worker-request-v25".as_slice(), payload.as_bytes()] {
                     old_frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                     old_frame.extend_from_slice(bytes);
                 }
@@ -7020,6 +7024,7 @@ tidepool-reuse-error: witness failed\n";
             .collect();
         assert_eq!(identified.len(), finished.len());
         for (client, physical) in identified.iter().zip(&finished) {
+            assert_eq!(client["fields"]["execution_layer"], "endpoint_submission");
             for field in [
                 "compile_request",
                 "daemon_epoch",
@@ -7052,6 +7057,9 @@ tidepool-reuse-error: witness failed\n";
         for ((index, event), ordinal) in preparation.iter().zip([1, 2]) {
             let fields = &event["fields"];
             assert_eq!(fields["compile_request"], client_digest);
+            assert_eq!(fields["execution_layer"], "request_preparation");
+            assert_eq!(fields["daemon_epoch"], hex(&[9; 32]));
+            assert!(fields.get("physical_execution").is_none());
             assert_eq!(fields["admission_id"], 41);
             assert_eq!(fields["request_ordinal"], ordinal);
             assert_eq!(fields["typed_decodes"], 1);
@@ -7087,12 +7095,25 @@ tidepool-reuse-error: witness failed\n";
         assert_eq!(encodings.len(), 2);
         for event in encodings {
             assert_eq!(event["span"]["compile_request"], client_digest);
+            assert_eq!(event["span"]["execution_layer"], "physical");
+            assert_eq!(event["fields"]["execution_layer"], "request_preparation");
+            assert_eq!(event["span"]["daemon_epoch"], hex(&[9; 32]));
+            assert_eq!(event["span"]["admission_id"], 41);
             for key in ["placement_ns", "encoding_ns", "worker_encoded_bytes"] {
                 assert!(
                     event["fields"][key].as_u64().is_some(),
                     "missing bounded encoding metric {key}"
                 );
             }
+        }
+        if let Some(artifacts) = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
+            // The bounded emitted trace lets the reporting owner replay these
+            // actual request stages without another compiler or daemon run.
+            fs::write(
+                PathBuf::from(artifacts).join("request-preparation-trace.jsonl"),
+                trace.text(),
+            )
+            .unwrap();
         }
         assert_eq!(served, 2);
     }

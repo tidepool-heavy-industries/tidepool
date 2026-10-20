@@ -254,7 +254,7 @@ async fn response_publication_refuses_missing_wrong_and_duplicate_settlement() {
             };
             reply.publication = AcceptedReplyPublication::Published(snapshot.clone());
         }
-        let effect_owner = behavior.actor_effect_owner(context.actor);
+        let effect_owner = behavior.actor_effect_owner(context.actor).unwrap();
         let error = behavior
             .prepare_actor_effect(
                 &fixture.kernel,
