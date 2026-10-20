@@ -2442,6 +2442,7 @@ struct WorldCellOutputAdmission {
     pub(crate) items: Vec<ciborium::value::Value>,
     pub(crate) common_files: BTreeMap<PathBuf, [u8; 32]>,
     pub(crate) demanded_rows: Vec<Arc<CheckedValueArtifact>>,
+    demanded_session_bindings: Vec<tidepool_repr::SessionVarId>,
     pub(crate) captured_files: BTreeMap<PathBuf, WorldOutputFile>,
     pub(crate) validation: crate::recovery_artifacts::PackageInterfaceValidation,
     segments: Vec<Arc<crate::checked_cell::CheckedTypedSegmentPlan>>,
@@ -2732,6 +2733,17 @@ impl CheckedWorldCellProgram {
 
     pub fn items(&self) -> &[CheckedWorldCellItem] {
         &self.items
+    }
+
+    /// Runtime identities observed in the same admitted preparation demand.
+    /// These descriptions grant no value access; runtime leases remain owned
+    /// by the receiving session and its source admission.
+    pub fn demanded_session_bindings(&self) -> &[tidepool_repr::SessionVarId] {
+        &self.output.demanded_session_bindings
+    }
+
+    pub fn visible_binding_count(&self) -> usize {
+        self.output.reservation.plan().world().restoration.inputs.bindings.entries.len()
     }
 
     pub fn item(&self, ordinal: usize) -> Option<&CheckedWorldCellItem> {
@@ -3455,6 +3467,9 @@ fn admit_world_preparation_response(
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     let mut demanded = BTreeMap::<String, Arc<CheckedValueArtifact>>::new();
     let mut occurrences = std::collections::BTreeSet::new();
+    let mut demanded_session_bindings = std::collections::BTreeSet::new();
+    validation.inventory.reserve::<tidepool_repr::SessionVarId>(input_refs.len())
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     for input in input_refs {
         crate::host_work::checkpoint()?;
         let input = answer_array(input, 6)?;
@@ -3476,6 +3491,7 @@ fn admit_world_preparation_response(
         {
             return Err(world_response_error(true));
         }
+        demanded_session_bindings.insert(actual.session_var);
         // The service returns the exact root-bound row fact, not a caller's
         // module/image guess or a fresh certificate.
         let row =
@@ -3541,6 +3557,7 @@ fn admit_world_preparation_response(
         segments,
         item_proofs,
         demanded_rows: demanded.into_values().collect(),
+        demanded_session_bindings: demanded_session_bindings.into_iter().collect(),
     }))
 }
 

@@ -8920,6 +8920,17 @@ where
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
         cancel_on_drop.0 = None;
+        let tidepool_toolchain::checked_cell::CellProgramBasis::World(world_output) = program.basis() else {
+            return Err(ResidentActorWorkbenchError::ActorProtocol("resident cell preparation did not retain its checked World output".into()));
+        };
+        let demanded_bindings = world_output.demanded_session_bindings().iter()
+            .map(|id| tidepool_repr::VarId(id.raw())).collect::<Vec<_>>();
+        tracing::debug!(target: "exomonad_harness::timing",
+            logical_world = ?world_output.logical().logical_id(),
+            output_certificate = ?world_output.certificate_sha256(),
+            leased_bindings = demanded_bindings.len(),
+            visible_bindings = world_output.visible_binding_count(),
+            "checked World runtime binding demand");
         let item_capabilities = program
             .items()
             .iter()
@@ -8952,8 +8963,7 @@ where
         let bindings = self
             .access
             .with_machine(context, move |session, context, _| {
-                let visible = session.visible_binding_ids_in(context.placement.lexical_scope);
-                Ok(session.lease_bindings(&visible))
+                Ok(session.lease_bindings(&demanded_bindings))
             })
             .await?;
         Ok((
