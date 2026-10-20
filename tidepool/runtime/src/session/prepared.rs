@@ -10817,7 +10817,7 @@ pub(super) mod tests {
             NativeSourceCustody::default(),
             "actual producer contributes an unknown site"
         );
-        let handle = engine.retain_top(producer, ValueId(0)).unwrap();
+        let handle = engine.machine.retain_top(producer, ValueId(0)).unwrap();
         assert!(engine.adopt(handle));
         let binding = |id, generation, handle| BindingEntry {
             name: BindingName("producer".into()),
