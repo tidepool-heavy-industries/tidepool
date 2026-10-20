@@ -424,6 +424,32 @@ impl PreparedMachine<'_> {
             }
         }
 
+        let mut staged_interner = self.interner.clone();
+        for candidate in &batch {
+            staged_interner
+                .check_absorb(&candidate.image.interned_constructors)
+                .map_err(|conflict| match conflict {
+                    super::super::interner::AbsorbConflict::Identity { existing, incoming } => {
+                        ExecutionError::DescriptorShape {
+                            identity: Box::new(incoming.identity.clone()),
+                            existing_field_reps: existing.field_reps.clone(),
+                            incoming_field_reps: incoming.field_reps.clone(),
+                        }
+                    }
+                    super::super::interner::AbsorbConflict::HostId {
+                        host_id,
+                        identity,
+                        existing,
+                    } => ExecutionError::HostIdConflict {
+                        host_id,
+                        identity,
+                        existing,
+                    },
+                })?;
+            staged_interner.commit_absorb(&candidate.image.interned_constructors);
+            staged_interner.commit_externals(&candidate.image.externals);
+        }
+
         let mut candidates = Vec::with_capacity(batch.len());
         for item in batch {
             let instance = InstanceImage::new(&item.image)?;
@@ -490,32 +516,6 @@ impl PreparedMachine<'_> {
             if !changed {
                 break;
             }
-        }
-
-        let mut staged_interner = self.interner.clone();
-        for candidate in &candidates {
-            staged_interner
-                .check_absorb(&candidate.image.interned_constructors)
-                .map_err(|conflict| match conflict {
-                    super::super::interner::AbsorbConflict::Identity { existing, incoming } => {
-                        ExecutionError::DescriptorShape {
-                            identity: Box::new(incoming.identity.clone()),
-                            existing_field_reps: existing.field_reps.clone(),
-                            incoming_field_reps: incoming.field_reps.clone(),
-                        }
-                    }
-                    super::super::interner::AbsorbConflict::HostId {
-                        host_id,
-                        identity,
-                        existing,
-                    } => ExecutionError::HostIdConflict {
-                        host_id,
-                        identity,
-                        existing,
-                    },
-                })?;
-            staged_interner.commit_absorb(&candidate.image.interned_constructors);
-            staged_interner.commit_externals(&candidate.image.externals);
         }
 
         let heap_reserve = candidates.iter().try_fold(0usize, |total, candidate| {
