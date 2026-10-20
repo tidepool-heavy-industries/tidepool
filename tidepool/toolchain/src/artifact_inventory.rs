@@ -14646,11 +14646,17 @@ mod tests {
                 .unwrap();
             if !child_reusable {
                 let broader = retained.artifacts();
-                assert!(matches!(inventory.admit_certified_with_demand(
-                    &broader, vec![Arc::new(root.clone())], NativeArtifactDemand::ScopeInterfaces, &receipt,
-                ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
-                    ArtifactInventoryFailure::MissingDependency { ref required, dependency: ArtifactDependency::NativeGroup { dependent_ordinal: 12, required_ordinal: 7 }, .. }
-                    if required == &child.descriptor.owner)));
+                let missing_private = inventory.admit_certified_with_demand(
+                    &broader,
+                    vec![Arc::new(root.clone())],
+                    NativeArtifactDemand::ScopeInterfaces,
+                    &receipt,
+                );
+                assert!(matches!(&missing_private, Err(CompileError::ArtifactInventory(error))
+                    if matches!(&error.failure,
+                        ArtifactInventoryFailure::MissingDependency { required, dependency: ArtifactDependency::NativeGroup { dependent_ordinal: 12, required_ordinal: 7 }, .. }
+                        if required == &child.descriptor.owner)),
+                    "missing private proof returned {missing_private:?}");
             }
             receipt
                 .with_new_product_dependencies(&retained.artifacts().metadata_snapshot(), &facts)
