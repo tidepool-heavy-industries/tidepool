@@ -51,9 +51,7 @@ import Tidepool.CompilerProducts
   , preparedCurrentOriginalInventory, preparedProductInventory, currentOriginalBinders
   , currentOriginalBindingsExcept, currentReconciledOriginalProducts )
 import Tidepool.DiagJson (InputRejection(..), SourceRejection(..))
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), ExactInterfaceOperations, OriginalInterfaceArtifacts
-  , CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
-  , generatedTypedSegmentRecipeWithProtectedImports, generatedCheckingTemplateRecipeWithProtectedImports)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), ExactInterfaceOperations, OriginalInterfaceArtifacts)
 import Tidepool.ExactScope
 import Tidepool.ExecutionSchema (SymbolIdentity(..), WireProgram(..), SiteRow(..))
 import qualified Tidepool.ExecutionSchema as Execution
@@ -91,7 +89,7 @@ import Tidepool.RequestCompletion (Completion, CleanupStage(CapabilitiesRestore)
 
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.Text.Encoding as TE
-import Data.Char (digitToInt, intToDigit)
+import Data.Char (digitToInt)
 import Data.List (intercalate)
 import System.Directory (createDirectoryIfMissing, canonicalizePath)
 import System.FilePath ((</>), makeRelative, isAbsolute, splitDirectories)
@@ -106,22 +104,19 @@ import GHC.Driver.Ppr (showSDoc)
 import GHC.Utils.Outputable (ppr)
 import Tidepool.Binders
   ( BoundBinder(..), CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), ExpressionLiftPlan(..)
-  , PreparedTypedSegmentSource(..), prepareTypedSegmentSource, templateParserFlags, TurnOut(..), renderAskJson
-  , StmtBinders(..), TurnKind(..), SourcePrologue(..), LocatedPragma(..) )
+  , PreparedTypedSegmentSource(..), TurnOut(..), renderAskJson
+  , StmtBinders(..), TurnKind(..) )
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut, encodeBoundBinder, encodeTypedSegmentPlan)
 import Tidepool.ExecutionEncode (encodeSymbol)
 import Tidepool.Metadata (metadataForConstructors, targetBindingHasIO)
 import Tidepool.TypePolicy (nominalHeadsOfType)
 import Tidepool.ExtractUtil (shaHex, trySynchronous)
-import Tidepool.WorkerDiagnostics (throwCellSplitError)
 import Tidepool.DependencyEvidence (validateDependencyEvidence, renderDependencyQualifier)
 import Tidepool.PlannedDeclaration
-  ( replaceTemplateModuleHeader, originalDeclarationWrapper, preparePlannedDeclaration
-  , plannedModule, plannedSource, plannedOriginalOwner, renderPlannedDeclarationInventory
+  ( plannedModule, plannedSource, plannedOriginalOwner, renderPlannedDeclarationInventory
   , PlannedDeclaration, PlannedDeclarationInventory, admitLocalNativeDeclaration )
 import Tidepool.FinalizedModuleArtifacts
   ( finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface )
-import Tidepool.TurnSource (generatedScaffoldModuleName, renameScaffoldModuleHeader)
 import Tidepool.SessionArtifacts
   ( prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment, typedSegmentSessionGlobals
   , typedSegmentSessionInterfaces, typedSegmentSessionRetainedGlobals, typedSegmentSessionBindingRepresentations
@@ -284,10 +279,18 @@ compileBoundCompleted (BoundCompilerRequest scope args admitted grant executor c
       (requestIncludes args) (requestBuildProductsDir args)
     AdmittedHeldQueryOperation _ _ -> throwIO CheckedPurposeMismatch
     AdmittedHeldCellPlanOperation _ _ -> throwIO CheckedPurposeMismatch
-    AdmittedHeldCellPrepareOperation preparation -> case preparation of
-      HeldWorldCellRefused _ refusal -> throwIO refusal
-      HeldWorldCellAdmitted admission -> scopedCompileWorldCell scope admission
-        selection retained normalizedPurpose path
+    AdmittedHeldCellPrepareOperation _ -> throwIO CheckedPurposeMismatch
+
+-- World source and purpose are issued by the admitted stage. The ordinary
+-- request helper cannot supply substitutes for either through its raw inputs.
+compileBoundWorldCompleted :: BoundCompilerRequest -> PipelineSelection result -> IO (CompletedCompilerResult result)
+compileBoundWorldCompleted (BoundCompilerRequest scope _ admitted _ executor _) selection = do
+  requireCompilerExecutorOpen executor
+  case admitted of
+    AdmittedHeldCellPrepareOperation (HeldWorldCellRefused _ refusal) -> throwIO refusal
+    AdmittedHeldCellPrepareOperation (HeldWorldCellAdmitted admission) ->
+      scopedCompileWorldCell scope admission selection Set.empty
+    _ -> throwIO CheckedPurposeMismatch
 
 compileBoundRequest :: BoundCompilerRequest -> PipelineSelection result
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO result
@@ -374,12 +377,7 @@ compilePreparedRequest :: BoundCompilerRequest -> PipelineSelection PreparedPipe
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO PreparedCompilation
 compilePreparedRequest request@(BoundCompilerRequest _ args admitted _ executor _) selection retained purpose session path = do
   (completed,worklist) <- case (admitted,preparedOutputIntent args) of
-    -- World generations come from its actual completed input basis. The
-    -- ordinary early observer instead reads finite request arguments; World
-    -- projection uses the same captured-recovery fallback as typed segments.
-    (AdmittedHeldCellPrepareOperation _,_) -> do
-      completed <- compileBoundCompleted request selection retained purpose session path
-      pure (completed,Nothing)
+    (AdmittedHeldCellPrepareOperation _,_) -> throwIO CheckedPurposeMismatch
     (_,NativeOriginals) -> compileWithWorklist request selection retained purpose session path
     (_,PortableExecutable) -> do
       completed <- compileBoundCompleted request selection retained purpose session path
@@ -398,6 +396,22 @@ compilePreparedSegmentRequest request@(BoundCompilerRequest _ _ _ _ executor _) 
   route <- preparedCompletionFor completed
   pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) Nothing route,
     preparedSegmentCaptures result)
+
+compilePreparedWorldRequest :: BoundCompilerRequest -> PipelineSelection PreparedPipelineResult -> IO PreparedCompilation
+compilePreparedWorldRequest request@(BoundCompilerRequest _ _ _ _ executor _) selection = do
+  completed <- compileBoundWorldCompleted request selection
+  route <- preparedCompletionFor completed
+  pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed)
+    executor (completedCompilerGuard completed) Nothing route)
+
+compilePreparedWorldSegmentRequest :: BoundCompilerRequest -> PipelineSelection PreparedSegmentProductsResult
+  -> IO (PreparedCompilation,TypedSegment)
+compilePreparedWorldSegmentRequest request@(BoundCompilerRequest _ _ _ _ executor _) selection = do
+  completed <- compileBoundWorldCompleted request selection
+  let result = completedCompilerResult completed
+  route <- preparedCompletionFor completed
+  pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed)
+    executor (completedCompilerGuard completed) Nothing route,preparedSegmentCaptures result)
 
 runBoundGhc :: BoundCompilerRequest -> Ghc a -> IO a
 runBoundGhc (BoundCompilerRequest scope _ admitted _ executor _) operation = do
@@ -846,8 +860,7 @@ prepareWorldCellQuestion bound question = do
   where
     rejected refusal = writeResult (Left refusal) BS.empty [] [] [] [] >> pure (Left refusal)
     prepareStages preparation prior reversed = do
-      next <- case bound of
-        BoundCompilerRequest scope _ _ _ _ _ -> scopedPrepareWorldCellStage scope preparation
+      next <- nextStage preparation
       case next of
         Nothing -> pure (reverse reversed)
         Just stage -> do
@@ -857,19 +870,18 @@ prepareWorldCellQuestion bound question = do
               stageDirectory = directory </> "stage-" ++ show offset
           output <- case cellPlanItems initial of
             [item] | sbKind (cellAnalysisVerdict item) == KDecl ->
-              prepareDeclaration prior stageDirectory initial slots
-            _ -> prepareSegment prior stageDirectory offset initial slots
+              prepareDeclaration preparation prior stageDirectory initial slots
+            _ -> prepareSegment preparation prior stageDirectory offset initial
           prepareStages preparation (Just (preparedWorldStageNative output)) (output:reversed)
-    recipe = worldCellPrepareRecipe question
+    nextStage preparation = case bound of
+      BoundCompilerRequest scope _ _ _ _ _ -> scopedPrepareWorldCellStage scope preparation
+    requireStage preparation = nextStage preparation >>= maybe (throwIO WorldCellCorrupt) pure
     directory = worldCellPrepareDirectory question
-    parserFlags = boundParserFlags bound
     text = encodeString . T.pack
     digestText = SHA256.hash . TE.encodeUtf8 . T.pack
     base = rawWorldID (worldCellPrepareIdentity question)
     planDigest = SHA256.hash (worldCellPreparePlan question)
     admission = worldCellPrepareAdmission question
-    admissionHex = concatMap (\byte -> [intToDigit (fromIntegral byte `div` 16),intToDigit (fromIntegral byte `mod` 16)])
-      (BS.unpack admission)
     refusalTag WorldCellUnsupported = 0
     refusalTag WorldCellUnavailable = 1
     refusalTag WorldCellCorrupt = 2
@@ -889,51 +901,26 @@ prepareWorldCellQuestion bound question = do
         <> foldMap (\(path,sha) -> encodeListLen 2 <> text path <> encodeBytes sha) common
         <> encodeListLen (fromIntegral (length plans)) <> foldMap encodeTypedSegmentPlan plans
         <> encodeListLen (fromIntegral (length stages)) <> mconcat stages)
-    prepareSegment prior stageDirectory offset initial matchedSlots = do
+    prepareSegment preparation prior stageDirectory offset initial = do
       createDirectoryIfMissing True stageDirectory
       preparedBatch <- newIORef Nothing
       attempt <- newIORef (0 :: Int)
-      let template = worldCellTemplate recipe
-      checkingTemplate <- either (throwIO . InvalidCheckingWrapper) pure
-        (replaceTemplateModuleHeader "module CellCheck where" template)
-      let slots = [(fromIntegral ordinal,generation,observation) | (ordinal,slot) <- matchedSlots
-            , (generation,observation) <- case slot of
-                PlannedBind value -> [(value,Nothing)]
-                PlannedExpression value name -> [(value,Just name)]
-                _ -> []]
-          compile plan = do
+      let compile _ = do
+            issued <- requireStage preparation
+            authored <- maybe (throwIO WorldCellCorrupt) pure (heldWorldCellStageTypedSource issued)
             index <- readIORef attempt
             modifyIORef' attempt (+1)
             writeIORef preparedBatch Nothing
             let stagingRoot = stageDirectory </> "typed-session-" ++ show index
-            source <- either fail pure (prepareTypedSegmentSource checkingTemplate plan admissionHex slots)
-            let owner = generatedScaffoldModuleName ["held-world-cell-v1",worldCellPrepareIdentity question
-                  ,shaHex (worldCellPreparePlan question),shaHex admission,preparedTypedSegmentSource source]
-            effective <- templateParserFlags parserFlags (preparedTypedSegmentSource source) >>= either throwCellSplitError pure
-            named <- either fail pure (renameScaffoldModuleHeader effective owner checkingTemplate)
-            authored <- either fail pure (prepareTypedSegmentSource named plan admissionHex slots)
-            unless (preparedTypedSegmentPlan source == preparedTypedSegmentPlan authored)
-              (throwIO WorldCellCorrupt)
-            let protected = preparedTypedSegmentTemplate authored
-                rendered = preparedTypedSegmentSource authored
                 typedPlan = preparedTypedSegmentPlan authored
-                path = stageDirectory </> owner ++ ".hs"
-            imports <- either fail pure (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" parserFlags protected)
-            mapped <- either fail pure (renderProtectedTemplateImports (preparedTypedSegmentLineOffset authored) imports)
-            writeFile path rendered
-            scaffold <- generatedTypedSegmentRecipeWithProtectedImports (preparedTypedSegmentOperations authored) parserFlags
-              (CheckedTemplateImports [] []) mapped protected rendered path owner >>= either fail pure
-            let prepare environment admissions typed = do
+                prepare environment admissions typed = do
                   batch <- prepareTypedSegmentSessionBindings environment admissions typed stagingRoot
                   writeIORef preparedBatch (Just batch)
                   pure (typedSegmentSessionEnvironment batch,typedSegmentSessionGlobals batch,typedSegmentSessionInterfaces batch)
-                purpose = withSourceImportIntents (cellPlanPrologue plan) $
-                  GeneratedScaffoldCompile scaffold (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
-                    (TypedSegmentCompile typedPlan (preparedTypedSegmentOperations authored) (CheckedItemCompile [] Nothing [])))
-            completed <- compilePreparedSegmentRequest bound
-              (WithTypedSegmentPreparation prepare (PreparedSegmentProducts typedPlan Nothing)) Set.empty purpose Nothing path
-            pure (authored,completed)
-      (finalized,(authored,(completion,typed))) <- checkCellInstances compile initial
+            completed <- compilePreparedWorldSegmentRequest bound
+              (WithTypedSegmentPreparation prepare (PreparedSegmentProducts typedPlan Nothing))
+            pure (heldWorldCellStagePlan issued,authored,completed)
+      (_,(finalized,authored,(completion,typed))) <- checkCellInstances compile initial
       batch <- readIORef preparedBatch >>= maybe (fail "world cell has no actual typed batch") pure
       withPreparedCompilation completion $ \prepared _ _ _ -> do
         let result = pprPipelineResult prepared
@@ -1023,32 +1010,19 @@ prepareWorldCellQuestion bound question = do
         let identity = encodeListLen 2 <> text "exec" <> text (typedSegmentPlanDigest typedPlan)
         finishStage stageDirectory identity (map (plannedItemOrdinal . typedItemPlan) items)
           finalized rendered preparedItems [typedPlan] completion prepared staged
-    prepareDeclaration prior stageDirectory initial matchedSlots = do
+    prepareDeclaration preparation prior stageDirectory initial matchedSlots = do
       (ordinal,generation,kind,sourceItem) <- case (matchedSlots,cellPlanItems initial) of
         ([(ordinal,PlannedDeclaration generation)],[item]) -> pure (ordinal,generation,"declaration",item)
         ([(ordinal,PlannedPrologue generation)],[item]) -> pure (ordinal,generation,"prologue",item)
         _ -> throwIO WorldCellCorrupt
-      wrapper <- either fail pure (originalDeclarationWrapper (worldCellTemplate recipe))
       let reserved = sessionModuleString (SessionModule LibMod (Generation generation))
-          planned plan = either (fail . show) pure (preparePlannedDeclaration reserved wrapper plan)
-          sourcePath = stageDirectory </> reserved ++ ".hs"
-          compile plan = do
-            original <- planned plan
-            writeFile sourcePath (plannedSource original)
-            imports <- either fail pure (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" parserFlags wrapper)
-            let pragmaLines = sum [length (lines (locatedPragmaSource pragma))
-                  | pragma <- prologuePragmas (cellPlanPrologue plan)]
-            mapped <- either fail pure (renderProtectedTemplateImports pragmaLines imports)
-            scaffold <- generatedCheckingTemplateRecipeWithProtectedImports parserFlags
-              (CheckedTemplateImports [] []) mapped wrapper (plannedSource original) sourcePath reserved
-                >>= either fail pure
-            completion <- compilePreparedRequest bound (PreparedProducts Nothing) Set.empty
-              (withSourceImportIntents (cellPlanPrologue plan)
-                (GeneratedScaffoldCompile scaffold (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
-                  (WorldPlannedDeclarationCompile original)))) Nothing sourcePath
-            pure (original,completion)
+          compile _ = do
+            issued <- requireStage preparation
+            original <- maybe (throwIO WorldCellCorrupt) pure (heldWorldCellStageOriginal issued)
+            completion <- compilePreparedWorldRequest bound (PreparedProducts Nothing)
+            pure (heldWorldCellStagePlan issued,original,completion)
       createDirectoryIfMissing True stageDirectory
-      (finalized,(submitted,completion)) <- checkCellInstances compile initial
+      (_,(finalized,submitted,completion)) <- checkCellInstances compile initial
       withPreparedCompilation completion $ \prepared _ _ _ -> do
         let result = pprPipelineResult prepared
         (original,inventory) <- maybe (fail "world declaration lost its actual certified stage inventory") pure

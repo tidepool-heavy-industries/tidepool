@@ -1763,13 +1763,13 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                 unless (either (\failure -> case failure of CheckedPurposeMismatch -> True; _ -> False)
                     (const False) replay)
                   (fail "world dependency commitment replayed after consumption")
-                -- Consumption enters the same scope while its phase is Running.
-                -- It must reach stage policy, not re-run a Ready-only guard.
-                unsupported <- try (void (scopedCompileWorldCell compiler admitted CheckedEnvironment
-                  Set.empty GeneralCompile (directory </> "not-generated.hs")))
-                  :: IO (Either WorldCellRefusal ())
-                unless (either (== WorldCellUnsupported) (const False) unsupported)
-                  (fail "same-owner consumption did not reach its typed stage policy")
+                -- The completed cursor cannot compile a replay, even while
+                -- the request's own phase and executor remain open.
+                replayCompile <- try (void (scopedCompileWorldCell compiler admitted CheckedEnvironment Set.empty))
+                  :: IO (Either InputRejection ())
+                unless (either (\failure -> case failure of CheckedPurposeMismatch -> True; _ -> False)
+                    (const False) replayCompile)
+                  (fail "a completed World stage cursor compiled a replay")
               pure validation
             case validated of
               Left refusal -> fail ("admitted real preparation refused its plan: " ++ show refusal)
@@ -1850,8 +1850,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
             case ready of
               ExactInputsReady _ _ -> pure ()
               other -> fail ("scope substitution control lost the actual retained world: " ++ show other)
-            crossed <- try (void (scopedCompileWorldCell compiler admission CheckedEnvironment
-              Set.empty GeneralCompile (worldCellPrepareDirectory question </> "not-generated.hs")))
+            crossed <- try (void (scopedCompileWorldCell compiler admission CheckedEnvironment Set.empty))
               :: IO (Either InputRejection ())
             unless (either (\failure -> case failure of CheckedPurposeMismatch -> True; _ -> False)
                 (const False) crossed)
