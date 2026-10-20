@@ -1732,6 +1732,10 @@ impl RuntimeCheckedPrefixSnapshot {
 }
 
 impl RuntimeCheckedPrefix {
+    pub(super) fn captured_source_origin(&self) -> &super::resident::CapturedSourceOrigin {
+        self.settled.captured_source_origin()
+    }
+
     pub fn cell_program(&self) -> &Arc<tidepool_toolchain::checked_cell::CellProgram> {
         &self.program
     }

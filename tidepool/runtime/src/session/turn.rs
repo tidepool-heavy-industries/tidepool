@@ -3077,6 +3077,7 @@ fn compile_cell_program_admitted_work_controls(
 /// No endpoint or compiler lease survives in this host admission owner.
 pub struct PreparedRuntimeCell {
     origin: crate::CompilerTransactionOrigin,
+    source_origin: super::resident::CapturedSourceOrigin,
     admission: Arc<super::RuntimeCellAdmission>,
     checked: CellCheck,
     program: tidepool_toolchain::artifacts::PreparedCellProgram,
@@ -3088,12 +3089,16 @@ pub struct PreparedRuntimeCell {
 /// evidence alone cannot construct this inseparable pairing.
 #[derive(Clone, Debug)]
 pub struct SettledCellProgram {
+    source_origin: super::resident::CapturedSourceOrigin,
     admission: Arc<super::RuntimeCellAdmission>,
     program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
     cancellation: crate::HostAdmissionCancellation,
 }
 
 impl SettledCellProgram {
+    pub(super) fn captured_source_origin(&self) -> &super::resident::CapturedSourceOrigin {
+        &self.source_origin
+    }
     pub fn program(&self) -> &Arc<tidepool_toolchain::checked_cell::CellProgram> {
         &self.program
     }
@@ -3169,8 +3174,8 @@ pub fn prepare_cell_program_admitted(
     admission: Arc<super::RuntimeCellAdmission>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
-    admission.admit_compiler_preparation(source)?;
     prepare_cell_program_admitted_inner(
+        source,
         admission,
         #[cfg(test)]
         CellProgramAudit::None,
@@ -3272,6 +3277,7 @@ impl PreparedRuntimeCell {
                 }
             })?;
         Ok((self.checked, SettledCellProgram {
+            source_origin: self.source_origin,
             admission: self.admission,
             program,
             cancellation: cancellation.clone(),
@@ -3299,8 +3305,8 @@ fn compile_cell_program_admitted_inner(
         None,
         |close| settlement.borrow_mut()(close),
         |owner, _| {
-            owner.admit(None)?;
             prepare_cell_program_admitted_inner(
+                owner,
                 admission,
                 #[cfg(test)]
                 audit,
@@ -3358,10 +3364,13 @@ fn compile_cell_program_admitted_inner(
 
 #[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.prepare", level = "debug", skip_all, fields(inclusive = true, cell_bytes = tracing::field::Empty))]
 fn prepare_cell_program_admitted_inner(
+    source: &super::RuntimeSourceCompilerTransaction,
     admission: Arc<super::RuntimeCellAdmission>,
     #[cfg(test)] audit: CellProgramAudit<'_>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
+    admission.admit_compiler_preparation(source)?;
+    let source_origin = super::resident::CapturedSourceOrigin::capture(source)?;
     let origin = crate::CompilerTransactionOrigin::current().ok_or(
         CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
     )?;
@@ -3395,7 +3404,7 @@ fn prepare_cell_program_admitted_inner(
         checked.authority = Some(program.checked_cell().clone());
         checked.admission = Some(admission.clone());
         tracing::debug!(target: "exomonad_harness::timing", logical_world = ?output.logical().logical_id(), certificate = ?output.certificate_sha256(), origin = ?output.origin(), "world cell compiler output prepared");
-        return Ok(PreparedRuntimeCell { origin, admission, checked, program,
+        return Ok(PreparedRuntimeCell { origin, source_origin, admission, checked, program,
             evidence: PreparedRuntimeCellEvidence::World(output) });
     }
     let finite_failure =
@@ -3561,6 +3570,7 @@ fn prepare_cell_program_admitted_inner(
     checked.admission = Some(admission.clone());
     Ok(PreparedRuntimeCell {
         origin,
+        source_origin,
         admission,
         checked,
         program,
