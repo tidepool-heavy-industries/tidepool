@@ -5,7 +5,7 @@ module Tidepool.TypedSegment.Source
   , ParsedSegmentDemand, prepareSegmentDemand, segmentDemandMatchesSource
   , ParsedModuleDemand, prepareModuleDemand, moduleDemandMatchesSource
   , moduleInputOccurrences, segmentModuleDemand
-  , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope
+  , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope, associateSegmentDemandName
   ) where
 
 import Control.Exception (throwIO)
@@ -114,6 +114,16 @@ newSegmentDemandScope environment bindings = do
   pure (SegmentDemandScope
     (mkGlobalRdrEnv [mkLocalVanillaGRE NoParent name | (name,_) <- entries])
     (Map.fromList entries))
+
+-- An operation operand can occur through its actual qualified interface Name.
+-- This adds only the reverse association; GHC still owns import and local scope.
+-- The caller obtains the Name from its admitted interface, never an occurrence
+-- spelling or a fabricated GRE. Repeated associations are ambiguous input facts.
+associateSegmentDemandName :: Name -> String -> binding -> SegmentDemandScope binding
+  -> Either TypedSegmentFailure (SegmentDemandScope binding)
+associateSegmentDemandName name alias binding (SegmentDemandScope aliases bindings)
+  | null alias || Map.member name bindings = Left ConflictingDemandName
+  | otherwise = Right (SegmentDemandScope aliases (Map.insert name (alias,binding) bindings))
 
 -- The successor receiver supplies only authenticated changed aliases. The
 -- alias-only GRE and exact reverse associations share every untouched branch;
