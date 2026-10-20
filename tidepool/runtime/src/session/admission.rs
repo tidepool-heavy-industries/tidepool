@@ -182,21 +182,14 @@ pub struct PrivateExecutionAdmission {
     pub(super) host_retirements: parking_lot::Mutex<Vec<super::resident::PrivateHostRetirement>>,
 }
 
-enum PrivateExecutionCompilerBasis {
-    Finite {
-        view: SessionCompileView,
-        admitted: PublicVisibilitySnapshot,
-    },
-    World {
-        published: Arc<super::inspection::InspectionWorldAssociation>,
-        private_key: super::persistent::CompileViewKey,
-        source: Arc<super::GenerationArtifactReference>,
-        original_source: Arc<RuntimeLexicalScopeLease>,
-        public_target: Arc<RuntimeLexicalScopeLease>,
-        admitted: PublicVisibilitySnapshot,
-        admitted_context:
-            Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
-    },
+struct PrivateExecutionCompilerBasis {
+    published: Arc<super::inspection::InspectionWorldAssociation>,
+    private_key: super::persistent::CompileViewKey,
+    source: Arc<super::GenerationArtifactReference>,
+    original_source: Arc<RuntimeLexicalScopeLease>,
+    public_target: Arc<RuntimeLexicalScopeLease>,
+    admitted: PublicVisibilitySnapshot,
+    admitted_context: Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
 }
 
 /// Exact facts captured when a private execution borrows a published World.
@@ -651,10 +644,7 @@ impl PrivateExecutionAdmission {
     /// execution keeps the admitted visibility snapshot even though checking
     /// consumes the issued world key and binding tip instead of a rebuilt view.
     pub fn admitted_public(&self) -> Result<&PublicVisibilitySnapshot, SessionError> {
-        match &self.compiler_basis {
-            PrivateExecutionCompilerBasis::Finite { admitted, .. } => Ok(admitted),
-            PrivateExecutionCompilerBasis::World { admitted, .. } => Ok(admitted),
-        }
+        Ok(&self.compiler_basis.admitted)
     }
     pub fn public_scope(&self) -> ScopeId {
         self.public_scope
@@ -666,12 +656,7 @@ impl PrivateExecutionAdmission {
         self.session
     }
     pub fn view(&self) -> Result<&SessionCompileView, SessionError> {
-        match &self.compiler_basis {
-            PrivateExecutionCompilerBasis::Finite { view, .. } => Ok(view),
-            PrivateExecutionCompilerBasis::World { .. } => {
-                Err(SessionError::WorldCellRequiresServicePreparation)
-            }
-        }
+        Err(SessionError::WorldCellRequiresServicePreparation)
     }
     pub(super) fn world_basis(
         &self,
@@ -682,16 +667,10 @@ impl PrivateExecutionAdmission {
         ),
         SessionError,
     > {
-        match &self.compiler_basis {
-            PrivateExecutionCompilerBasis::World {
-                published,
-                private_key,
-                ..
-            } => Ok((&published.world, private_key)),
-            PrivateExecutionCompilerBasis::Finite { .. } => Err(
-                SessionError::MissingPublishedCompilerWorld(self.public_scope),
-            ),
-        }
+        Ok((
+            &self.compiler_basis.published.world,
+            &self.compiler_basis.private_key,
+        ))
     }
 
     // boundary: see CELL-PREPARATION-BOUNDARY.md
@@ -708,37 +687,20 @@ impl PrivateExecutionAdmission {
     /// placement's lease is target B and stays separately reachable through
     /// [`Self::retained_lexical_scope`].
     pub fn original_source(&self) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
-        match &self.compiler_basis {
-            PrivateExecutionCompilerBasis::World {
-                original_source, ..
-            } => Ok(original_source.clone()),
-            PrivateExecutionCompilerBasis::Finite { .. } => {
-                Err(SessionError::WorldCellRequiresServicePreparation)
-            }
-        }
+        Ok(self.compiler_basis.original_source.clone())
     }
 
-    /// The exact published association, source selection and admitted public
-    /// base for a World private execution. Finite execution has no World facts.
-    pub(super) fn world_execution_facts(&self) -> Option<WorldExecutionAdmissionFacts> {
-        match &self.compiler_basis {
-            PrivateExecutionCompilerBasis::World {
-                published,
-                source,
-                original_source,
-                public_target,
-                admitted,
-                admitted_context,
-                ..
-            } => Some(WorldExecutionAdmissionFacts {
-                published: published.clone(),
-                source: source.clone(),
-                original_source: original_source.clone(),
-                public_target: public_target.clone(),
-                admitted: admitted.clone(),
-                admitted_context: admitted_context.clone(),
-            }),
-            PrivateExecutionCompilerBasis::Finite { .. } => None,
+    /// The exact published association and actual source/public target custody
+    /// captured by this execution's sole World birth owner.
+    pub(super) fn world_execution_facts(&self) -> WorldExecutionAdmissionFacts {
+        let basis = &self.compiler_basis;
+        WorldExecutionAdmissionFacts {
+            published: basis.published.clone(),
+            source: basis.source.clone(),
+            original_source: basis.original_source.clone(),
+            public_target: basis.public_target.clone(),
+            admitted: basis.admitted.clone(),
+            admitted_context: basis.admitted_context.clone(),
         }
     }
     pub fn binding_tip(&self) -> BindingTipId {
@@ -3511,7 +3473,7 @@ impl PersistentSession {
             private_scope
         };
         let scope_lease = self.prepared_lexical_scope_lease(private_scope)?;
-        let compiler_basis = PrivateExecutionCompilerBasis::World {
+        let compiler_basis = PrivateExecutionCompilerBasis {
             published: world.published,
             private_key: self
                 .compile_view_key_in(private_scope)
@@ -3548,9 +3510,7 @@ impl PersistentSession {
         super::complete_native_transition(admission)?;
         // Detached runtime placement borrows the SAME published compiler World.
         // A different runtime scope does not invent a compiler product or ID.
-        let facts = prepared
-            .world_execution_facts()
-            .expect("World birth retains its issuer");
+        let facts = prepared.world_execution_facts();
         RuntimeLexicalScopeLease::with_source_leases(
             [
                 facts.original_source.clone(),
@@ -4501,16 +4461,8 @@ impl PersistentSession {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        let (original_source, source) = match &execution.compiler_basis {
-            PrivateExecutionCompilerBasis::World {
-                published,
-                original_source,
-                ..
-            } => (original_source.clone(), published.base.source.clone()),
-            PrivateExecutionCompilerBasis::Finite { .. } => {
-                return Err(SessionError::WorldCellRequiresServicePreparation)
-            }
-        };
+        let original_source = execution.compiler_basis.original_source.clone();
+        let source = execution.compiler_basis.source.clone();
         let (world, original_key) = execution.world_basis()?;
         let private_key = match input {
             Some(input) => input.private_hidden_mount_key(self, &execution)?,

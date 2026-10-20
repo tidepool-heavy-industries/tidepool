@@ -5137,6 +5137,147 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
+    #[ignore = "requires the dedicated rooted compiler-world lifetime group"]
+    fn completed_world_holds_exact_source_custody_until_install_and_abandonment() {
+        use super::super::inspection::{
+            finish_admitted_compiler_world, run_admitted_compiler_world,
+        };
+        use tidepool_toolchain::compiler_world::{
+            CapturedCompilerSourceRoot, CapturedCompilerSources,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 418);
+        let original = session.mint_notebook_scope_with_lease(None).unwrap();
+        let original_scope = original.scope();
+        let target_scope = session.mint_isolated_scope();
+        let target = session
+            .prepared_lexical_scope_lease_with_source(target_scope, Some(original.clone()))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&original, &target));
+        assert!(target
+            .prerequisites()
+            .iter()
+            .any(|lease| Arc::ptr_eq(lease, &original)));
+
+        let source_owner = Arc::new(tempfile::tempdir().unwrap());
+        let body = include_bytes!("fixtures/world-lifetime.hs");
+        let path = PathBuf::from("WorldLifetime.hs");
+        std::fs::write(source_owner.path().join(&path), body).unwrap();
+        let manifest = tidepool_toolchain::cache::SourceRootManifest::from_file_digests([(
+            path.clone(),
+            blake3::hash(body).to_hex().to_string(),
+        )])
+        .unwrap();
+        let revision = tidepool_toolchain::cache::source_manifests_identity(
+            b"runtime-world-lifetime-test",
+            &[manifest.clone()],
+        );
+        let reference = super::super::GenerationArtifactReference::capture(
+            serde_json::to_vec(&(source_owner.path(), revision)).unwrap(),
+        );
+        let sources = Arc::new(
+            CapturedCompilerSources::from_captured_roots(
+                vec![CapturedCompilerSourceRoot {
+                    manifest,
+                    bodies: [(path, Arc::<[u8]>::from(body.as_slice()))]
+                        .into_iter()
+                        .collect(),
+                }],
+                Arc::from(reference.bytes()),
+                source_owner,
+            )
+            .unwrap(),
+        );
+        let admitted = session
+            .capture_inspection_world_in(target_scope, &reference, &original, |_| false)
+            .unwrap();
+        let settled = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, _| run_admitted_compiler_world(owner, admitted, || Ok(Some(sources))),
+            )
+            .unwrap();
+        assert!(matches!(
+            settled.close(),
+            crate::CompilerTransactionClose::Clean
+        ));
+        let completed = finish_admitted_compiler_world(settled).unwrap();
+        let observation = completed.association.clone();
+        let world = completed.world().clone();
+        drop(original);
+        drop(target);
+        session.reap_admission_leases();
+        assert!(session.scope_tree().is_live(original_scope));
+        assert!(session.scope_tree().is_live(target_scope));
+        assert!(session.install_compiler_world_association_if_current(
+            &completed.association,
+            &completed.custody,
+            &completed.cancellation,
+            &reference,
+            &completed.custody.original_source
+        ));
+
+        // Observation is not fresh admission: earned custody can still be
+        // validated while its source is Fenced, and new work must refuse.
+        let fence = completed
+            .custody
+            .original_source
+            .source_admission()
+            .fence()
+            .unwrap();
+        assert!(observation.base.observed_custody().is_ok());
+        assert!(observation.base.acquire_custody().is_err());
+        fence.reopen(&completed.custody.original_source).unwrap();
+
+        // A real native root makes the final scope release observable. This
+        // owner-state fixture does not claim a checked notebook-cell success.
+        let original = completed.custody.original_source.clone();
+        let settled = session
+            .with_source_compiler_transaction(
+                original.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let entry = super::super::prepared::tests::rooted_publication_fixture(
+                        session, "held", 1408,
+                    );
+                    let id = entry.id;
+                    let handle = entry.value.handle;
+                    session.bind_in(target_scope, entry).unwrap();
+                    (id, handle)
+                },
+            )
+            .unwrap();
+        let (id, handle) = settled.into_outcome().action;
+        drop(original);
+        assert!(session.bindings().get(id).is_some());
+        assert!(session
+            .prepared()
+            .unwrap()
+            .prepared_handle_of(handle.raw())
+            .is_some());
+        drop(completed);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(target_scope));
+        assert!(!session.scope_tree().is_live(original_scope));
+        assert!(session.bindings().get(id).is_none());
+        assert!(session
+            .prepared()
+            .unwrap()
+            .prepared_handle_of(handle.raw())
+            .is_none());
+        assert!(observation.base.observed_custody().is_err());
+        assert!(observation.base.acquire_custody().is_err());
+        assert_eq!(world.logical_id(), observation.world.logical_id());
+    }
+
+    #[test]
     fn world_observation_refuses_changed_or_foreign_base() {
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());

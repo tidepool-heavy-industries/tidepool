@@ -1267,6 +1267,16 @@ def runtime_test_cases(binary):
         f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 30,",
         f"    test_rule_timeout_ms = {(len(tests) * 30 + 60) * 1000},", '    visibility = ["PUBLIC"],', ")", "",
     ])]
+    lifetime_test = "session::persistent::checkpoint_scope_tests::completed_world_holds_exact_source_custody_until_install_and_abandonment"
+    rules.append("\n".join([
+        "tidepool_rust_test_cases(", '    name = "runtime_world_lifetime_tests",',
+        f"    binary = {json.dumps(':' + binary)},",
+        f"    exact_tests = [{json.dumps(lifetime_test)}],",
+        "    expected_count = 1,", "    ignored = True,", "    jobs = 1,", "    timeout = 180,",
+        "    test_rule_timeout_ms = 240000,", compiler_arguments,
+        "    case_compiler_modes = {" + json.dumps(lifetime_test) + ': "owned-resident"},',
+        '    visibility = ["PUBLIC"],', ")", "",
+    ]))
     semantic_tests = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
         "signed_template_helpers_execute_recursion_and_polymorphism_once",
         "genuine_let_generalization_and_unused_inner_bottom_match_ghc",
