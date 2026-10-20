@@ -3400,7 +3400,7 @@ fn ensure_world(
     let run = world_execute(&cmd, endpoint, Vec::new())?;
     let response = O::decode(&run.output.stdout).map_err(|_| world_response_error(false))?;
     let realized = match response {
-        O::Ready { world, realization } if world == root => {
+        O::Ready { world, realization, .. } if world == root => {
             crate::host_work::record_host_work(
                 crate::host_work::HostWorkCounter::WorldEnsureResidentHit,
                 1,
@@ -3493,7 +3493,7 @@ fn ensure_world(
                 (response, _) => response,
             };
             match response {
-                O::Ready { world, realization } if world == root => {
+                O::Ready { world, realization, .. } if world == root => {
                     crate::host_work::record_host_work(
                         crate::host_work::HostWorkCounter::WorldEnsureCompleteReady,
                         1,

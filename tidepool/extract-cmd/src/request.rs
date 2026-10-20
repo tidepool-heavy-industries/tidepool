@@ -3661,11 +3661,12 @@ mod tests {
             ..ExtractRequest::default()
         };
         let frame = |tag: u8, root: &str, reference: Option<&str>| {
-            let mut bytes = b"TPEXO002".to_vec();
+            let mut bytes = b"TPEXO003".to_vec();
             bytes.push(tag);
             push_frame(&mut bytes, OsStr::new(root));
             if let Some(reference) = reference {
                 push_frame(&mut bytes, OsStr::new(reference));
+                bytes.push(0);
             }
             bytes
         };
@@ -3753,7 +3754,7 @@ mod tests {
             assert!(EnsureExactInputsOutcome::decode(&unhex(hex).unwrap()).is_err());
         }
         for reference in ["", "realized\0other"] {
-            let mut bytes = b"TPEXO002\0".to_vec();
+            let mut bytes = b"TPEXO003\0".to_vec();
             push_frame(&mut bytes, OsStr::new(&"a".repeat(64)));
             push_frame(&mut bytes, OsStr::new(reference));
             assert_eq!(
