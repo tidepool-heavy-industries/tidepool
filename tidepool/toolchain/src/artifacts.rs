@@ -565,7 +565,7 @@ impl YieldSites {
 /// target in the same [`CompiledArtifacts`] (one GHC session, one merged
 /// `meta.cbor`).
 pub struct TargetArtifact {
-    native_inputs: Option<crate::artifact_inventory::TargetNativeInputs>,
+    native_inputs: Option<crate::artifact_inventory::CertifiedTargetNativeInputs>,
     pub asks: YieldSites,
     /// Versioned execution program decoded under the exact host contract.
     pub prepared: PreparedArtifact,
@@ -589,7 +589,7 @@ pub struct CompiledArtifacts {
     /// transaction. These are raw products until graph evidence assigns
     /// exact module versions and every import owner.
     pub module_products: Vec<RawModuleProduct>,
-    pub certified_groups: Vec<certified_products::PendingCertifiedGroup>,
+    pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     pub(crate) source_selection: Option<certified_products::CertifiedSourceSelection>,
     /// Bound compiler producer identity for this exact invocation. `None`
@@ -3422,7 +3422,7 @@ impl NativeTurnOutput {
 pub struct SealedTurnProducts {
     prepared: Arc<PreparedProgram>,
     original: SealedOriginalEvidence,
-    target: crate::artifact_inventory::TargetNativeInputs,
+    target: crate::artifact_inventory::CertifiedTargetNativeInputs,
     pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub recovery_products: Arc<[crate::recovery_artifacts::CertifiedRecoveryProduct]>,
@@ -3490,7 +3490,7 @@ impl PhysicalCurrentNativeTarget<'_> {
 /// Borrowed rows from one exact target resolution and its physical output.
 /// A row cannot be supplied independently of that operation's selected issuer.
 pub struct ResolvedNativeSourceProducts<'a> {
-    _resolved: crate::artifact_inventory::ResolvedNativeTarget<'a>,
+    _resolved: crate::artifact_inventory::ResolvedNativeSourceTarget<'a>,
     prepared: &'a PreparedProgram,
     rows: Vec<ResolvedNativeSourceProduct<'a>>,
 }
@@ -3527,35 +3527,13 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
     }
 
     fn issue(
-        resolved: crate::artifact_inventory::ResolvedNativeTarget<'a>,
+        resolved: crate::artifact_inventory::ResolvedNativeSourceTarget<'a>,
         prepared: &'a PreparedProgram,
-        groups: &'a [certified_products::PendingCertifiedGroup],
-        selection: &certified_products::CertifiedSourceSelection,
     ) -> Result<Self, CompileError> {
-        let mut available = BTreeMap::new();
-        for group in groups {
-            let key = (group.owner(), group.group().original_ordinal());
-            if available.insert(key, group).is_some() {
-                return Err(CompileError::ExtractFailed(
-                    "native source group has competing output members".into(),
-                ));
-            }
-        }
         let mut rows = Vec::with_capacity(resolved.groups().len());
         for binding in resolved.groups().iter().copied() {
-            let owner = resolved.original_owner(binding)?;
-            let group = *available
-                .get(&(owner, binding.original_ordinal))
-                .ok_or_else(|| {
-                    CompileError::ExtractFailed(
-                        "resolved native source lacks its certified output member".into(),
-                    )
-                })?;
-            let physical_current = resolved.has_only_current_source(binding)
-                && selection
-                    .physical_current_original(owner)
-                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
-                    == Some(binding.binding.artifact());
+            let group = resolved.group(binding)?;
+            let physical_current = resolved.has_only_current_source(binding);
             rows.push(ResolvedNativeSourceProduct {
                 group,
                 binding,
@@ -3584,27 +3562,16 @@ impl CompiledArtifacts {
         let Some(inputs) = &target.native_inputs else {
             return Ok(None);
         };
-        let selection = self.source_selection.as_ref().ok_or_else(|| {
-            CompileError::ExtractFailed("issued native target lacks its source selection".into())
-        })?;
-        ResolvedNativeSourceProducts::issue(
-            inputs.resolve()?,
-            target.prepared.prepared(),
-            &self.certified_groups,
-            selection,
-        )
-        .map(Some)
+        ResolvedNativeSourceProducts::issue(inputs.resolve_sources()?, target.prepared.prepared())
+            .map(Some)
     }
 }
 
 impl SealedTurnProducts {
     pub fn native_source_products(&self) -> Result<ResolvedNativeSourceProducts<'_>, CompileError> {
-        ResolvedNativeSourceProducts::issue(
-            self.resolve_native_execution()?,
-            &self.prepared,
-            &self.certified_groups,
-            self.source_selection(),
-        )
+        let resolved = self.target.resolve_sources()?;
+        resolved.ensure_original_execution_custody(self.original_execution()?)?;
+        ResolvedNativeSourceProducts::issue(resolved, &self.prepared)
     }
 
     pub fn artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
@@ -4306,7 +4273,7 @@ fn seal_turn_outputs_with_validation(
 }
 
 struct AdmittedNativeTargetProducts {
-    target: crate::artifact_inventory::TargetNativeInputs,
+    target: crate::artifact_inventory::CertifiedTargetNativeInputs,
     certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
 }
@@ -4392,7 +4359,7 @@ fn admit_native_target_products(
         }
     };
     let artifact_view = admitted_target.artifacts();
-    let selected_groups =
+    let selected_groups = Arc::new(
         crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
             &artifact_view,
             &certified.groups,
@@ -4401,13 +4368,14 @@ fn admit_native_target_products(
                 .map(|cursor| cursor.groups)
                 .unwrap_or_else(|| inherited_groups),
             validation,
-        )?;
+        )?,
+    );
     let package_closure =
-        package_catalog.select(&selected_groups, &imports, &validation.inventory)?;
+        package_catalog.select(selected_groups.groups(), &imports, &validation.inventory)?;
     let pending_imports = certified_products::certify_target_owners_with_validation(
         prepared,
         accepted,
-        &selected_groups,
+        selected_groups.groups(),
         &certified.source_selection,
         &package_closure,
         validation,
@@ -4428,8 +4396,10 @@ fn admit_native_target_products(
         1,
     );
     Ok(AdmittedNativeTargetProducts {
-        target: admitted_target.bind_target(typed_entry, pending_imports),
-        certified_groups: selected_groups.into(),
+        target: admitted_target
+            .bind_target(typed_entry, pending_imports)
+            .with_certified_groups(Arc::clone(&selected_groups))?,
+        certified_groups: Arc::clone(selected_groups.groups()),
         package_interfaces,
     })
 }
@@ -6185,7 +6155,7 @@ fn compile_invocation_inner(
                 &certified.source_selection,
             )?;
         artifacts.artifact_view = admitted_targets.artifacts().clone();
-        let selected_groups =
+        let selected_groups = Arc::new(
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                 &artifacts.artifact_view,
                 &certified.groups,
@@ -6193,9 +6163,13 @@ fn compile_invocation_inner(
                     .as_ref()
                     .map_or(&[], |request| request.groups.as_ref()),
                 &mut validation,
-            )?;
-        let package_closure =
-            package_catalog.select(&selected_groups, &target_imports, &validation.inventory)?;
+            )?,
+        );
+        let package_closure = package_catalog.select(
+            selected_groups.groups(),
+            &target_imports,
+            &validation.inventory,
+        )?;
         for (name, target) in &mut artifacts.targets {
             let accepted = receipt.targets.get(name).ok_or_else(|| {
                 CompileError::ExtractFailed("target product receipt missing".into())
@@ -6204,7 +6178,7 @@ fn compile_invocation_inner(
                 target.pending_imports = certified_products::certify_target_owners_with_validation(
                     target.prepared.prepared(),
                     accepted,
-                    &selected_groups,
+                    selected_groups.groups(),
                     &certified.source_selection,
                     &package_closure,
                     &mut validation,
@@ -6217,8 +6191,11 @@ fn compile_invocation_inner(
                         &mut validation,
                     )
                     .map_err(compiler_evidence_failure)?;
-                target.native_inputs =
-                    Some(admitted_targets.for_ordinary_target(target.pending_imports.clone())?);
+                target.native_inputs = Some(
+                    admitted_targets
+                        .for_ordinary_target(target.pending_imports.clone())?
+                        .with_certified_groups(Arc::clone(&selected_groups))?,
+                );
             }
         }
         timing::record_stage_with_owners(
@@ -6231,7 +6208,7 @@ fn compile_invocation_inner(
         );
         invocation_timing.advance("candidate_publication");
         artifacts.source_selection = Some(certified.source_selection);
-        artifacts.certified_groups = selected_groups;
+        artifacts.certified_groups = Arc::clone(selected_groups.groups());
         artifacts.recovery_products = certified.recovery_products.to_vec();
         artifacts.completed_source_evidence = valid_evidence.cloned();
         artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {
@@ -6798,7 +6775,7 @@ pub(crate) fn assemble(
         warnings,
         targets,
         module_products: Vec::new(),
-        certified_groups: Vec::new(),
+        certified_groups: Arc::from([]),
         recovery_products: Vec::new(),
         source_selection: None,
         producer_identity: None,

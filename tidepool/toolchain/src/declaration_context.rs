@@ -7367,7 +7367,10 @@ impl DemandedWorldCompilerInputs {
         )
     }
 
-    fn program_facts<'a>(&'a self, program: &'a ProgramSourceSupportState) -> ProductInputFacts<'a> {
+    fn program_facts<'a>(
+        &'a self,
+        program: &'a ProgramSourceSupportState,
+    ) -> ProductInputFacts<'a> {
         let mut facts = self.facts();
         facts.source_lexical = &program.program_source_lexical;
         facts.program_support = program.program_support.as_ref();
@@ -13409,6 +13412,34 @@ pub(crate) fn validate_artifact_view_groups_with_validation(
     .map_err(failure)
 }
 
+/// Certified physical groups stay paired with the exact bindings selected by
+/// the same view. Independent scoped edges may share one physical group row.
+#[derive(Debug)]
+pub(crate) struct CertifiedArtifactGroupBindings {
+    view: crate::artifact_inventory::NativeGroupViewStamp,
+    groups: Arc<[PendingCertifiedGroup]>,
+    bindings: BTreeMap<crate::artifact_inventory::NativeGroupBinding, usize>,
+}
+
+impl CertifiedArtifactGroupBindings {
+    pub(crate) fn groups(&self) -> &Arc<[PendingCertifiedGroup]> {
+        &self.groups
+    }
+
+    pub(crate) fn get(
+        &self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<&PendingCertifiedGroup> {
+        self.bindings
+            .get(&binding)
+            .map(|index| &self.groups[*index])
+    }
+
+    pub(crate) fn matches_view(&self, view: &ArtifactView) -> bool {
+        self.view.matches_view(view)
+    }
+}
+
 /// Admit only the inventory's selected dependency closure. Original byte custody
 /// remains complete; previously admitted groups must survive unchanged.
 #[cfg(test)]
@@ -13419,6 +13450,7 @@ pub(crate) fn certify_artifact_view_groups_with_validation(
     validation: &mut PackageInterfaceValidation,
 ) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
     certify_artifact_view_groups(view, candidates, None, baseline, validation)
+        .map(|groups| groups.groups().to_vec())
 }
 
 pub(crate) fn certify_issued_artifact_view_groups_with_validation(
@@ -13426,7 +13458,7 @@ pub(crate) fn certify_issued_artifact_view_groups_with_validation(
     candidates: &crate::certified_products::IssuedGroupCandidates,
     baseline: &[PendingCertifiedGroup],
     validation: &mut PackageInterfaceValidation,
-) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
+) -> Result<CertifiedArtifactGroupBindings, CompileError> {
     certify_artifact_view_groups(view, candidates, Some(candidates), baseline, validation)
 }
 
@@ -13436,7 +13468,7 @@ fn certify_artifact_view_groups(
     issued: Option<&crate::certified_products::IssuedGroupCandidates>,
     baseline: &[PendingCertifiedGroup],
     validation: &mut PackageInterfaceValidation,
-) -> Result<Vec<PendingCertifiedGroup>, CompileError> {
+) -> Result<CertifiedArtifactGroupBindings, CompileError> {
     let metadata = view.metadata_snapshot();
     let entries = metadata.artifacts.values().cloned().collect::<Vec<_>>();
     let available = original_products_by_id(&entries);
@@ -13520,15 +13552,41 @@ fn certify_artifact_view_groups(
             current.push(group.clone());
         }
     }
-    let additional = certify_selected_owned_products_in_context_with_validation(
-        &available,
-        &current,
-        &metadata.selected_native_groups,
-        validation,
-    )
-    .map_err(failure)?;
-    current.extend(additional);
-    Ok(current)
+    let additional =
+        crate::certified_products::certify_selected_owned_group_rows_in_context_with_validation(
+            &available,
+            &current,
+            &metadata.selected_native_groups,
+            validation,
+        )
+        .map_err(failure)?;
+    for (key, group) in additional {
+        if current_positions.insert(key, current.len()).is_some() {
+            return Err(failure(
+                "certified artifact group duplicated an admitted key",
+            ));
+        }
+        current.push(group);
+    }
+    let (view, selected_bindings) = view.selected_native_binding_rows();
+    let bindings = selected_bindings
+        .into_iter()
+        .map(|binding| {
+            let key = crate::artifact_inventory::NativeGroupKey {
+                artifact: binding.binding.artifact(),
+                original_ordinal: binding.original_ordinal,
+            };
+            let index = current_positions.get(&key).copied().ok_or_else(|| {
+                failure("selected native binding lacks its certified physical group")
+            })?;
+            Ok((binding, index))
+        })
+        .collect::<Result<_, CompileError>>()?;
+    Ok(CertifiedArtifactGroupBindings {
+        view,
+        groups: current.into(),
+        bindings,
+    })
 }
 
 #[tracing::instrument(
