@@ -294,3 +294,18 @@ The exact diagnostic is retained under
 `/srv/swarm/evidence/inanna/world-stage-matched-promotion-diagnosis-20261020`.
 Independent oracle review is separate; no expected refusal or product
 permission was weakened here.
+
+
+The separately approved refusal oracle repair derives the exact required native
+group set from the current certified Original, asserts the fixture's groups
+are 7 and 11, and establishes that every actually issued binding for each is
+missing from the rebound view. It requires the typed refusal to name the exact
+current artifact and a member of that deliberately missing required set. The
+positive multiversion/selection and genuine ambiguity controls remain intact.
+This removes only the unsupported first-refusal ordering requirement.
+
+At parent `49e4fbb79e` plus this test delta, the exact rebound case and unchanged
+generated issue/retention property passed 2/2, exit 0, build
+`c63abe4d-156d-4aba-88f8-d2695cd0388b`. Executed Rust SHA:
+`bd6f938783feb7eb438d91f288a26533a68765c2a3581701378768fa90a10eca`.
+Command: `swarm-build just test-lib tidepool-toolchain --exact certified_products::tests::planned_original_history_tests::selected_planned_original_survives_multiversion_custody_at_consumer_boundary --exact certified_products::tests::planned_original_history_tests::selected_planned_original_matches_generated_issue_and_retention_history --expected-count 2 --output-dir /srv/swarm/evidence/inanna/world-stage-original-refusal-oracle-20261020 --retain-artifacts`.
