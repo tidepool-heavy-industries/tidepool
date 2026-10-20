@@ -834,12 +834,17 @@ impl HostCarrier {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
         let (_, representation) = host_representation(&binder, &code, expected)?;
-        let type_owner = tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_checked(execution)
-            .map_err(SessionError::Compile)?;
+        let type_owner =
+            tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_checked(execution)
+                .map_err(SessionError::Compile)?;
         Ok(Self {
             code: Arc::new(code.into_owned()),
             representation,
-            origin: HostCarrierOrigin::Checked { admission, binder, type_owner },
+            origin: HostCarrierOrigin::Checked {
+                admission,
+                binder,
+                type_owner,
+            },
         })
     }
 
@@ -848,7 +853,9 @@ impl HostCarrier {
         &self,
     ) -> Result<(&Arc<super::RuntimeCheckedItemAdmission>, &BoundBinder), ResidentError> {
         match &self.origin {
-            HostCarrierOrigin::Checked { admission, binder, .. } => Ok((admission, binder)),
+            HostCarrierOrigin::Checked {
+                admission, binder, ..
+            } => Ok((admission, binder)),
             HostCarrierOrigin::Reusable(_) | HostCarrierOrigin::Interface { .. } => {
                 Err(ResidentError::UnsupportedCheckedTurn)
             }
@@ -867,7 +874,8 @@ impl HostCarrier {
 
     fn type_owner(
         &self,
-    ) -> Result<&Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>, ResidentError> {
+    ) -> Result<&Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>, ResidentError>
+    {
         match &self.origin {
             HostCarrierOrigin::Checked { type_owner, .. } => Ok(type_owner),
             HostCarrierOrigin::Interface { proof, .. } => Ok(proof.prototype()),
@@ -886,7 +894,8 @@ impl HostCarrier {
     /// Retain the exact selected original type context, without execution custody.
     pub fn type_context(
         &self,
-    ) -> Result<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, ResidentError> {
+    ) -> Result<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, ResidentError>
+    {
         Ok(self.type_owner()?.context())
     }
 
@@ -1271,7 +1280,9 @@ impl RuntimeActivationInput {
     }
 
     /// Original checked TYPE metadata, without mounting or exposing the value.
-    pub fn type_prototype(&self) -> &Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype> {
+    pub fn type_prototype(
+        &self,
+    ) -> &Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype> {
         &self.prototype
     }
 
@@ -3935,7 +3946,8 @@ where
         expected: HostBindingType,
     ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
         self.settle_dropped_custody();
-        self.state.admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
+        self.state
+            .admit_world_planned_host_carrier_cell_in(scope, plan, binding, expected)
     }
 
     /// Admit one compiler-issued binder reserved for a native host payload.
@@ -4711,6 +4723,7 @@ where
     ) -> bool {
         self.state.install_compiler_world_association_if_current(
             &completed.association,
+            &completed.custody,
             &completed.cancellation,
             source,
             original_source,
@@ -6016,8 +6029,8 @@ where
             || !execution.host_retirements.lock().is_empty()
             || !Arc::ptr_eq(&before.world, execution.compiler_world()?)
             || !Arc::ptr_eq(&before.base.source, &facts.source)
-            || !Arc::ptr_eq(&before.base.original_source, &facts.original_source)
-            || !Arc::ptr_eq(&before.base.target, &target)
+            || !before.base.original_source.matches(&facts.original_source)
+            || !before.base.target.matches(&target)
             || !self.state.inspection_world_base_is_current(
                 &before.base,
                 &facts.source,
@@ -6411,11 +6424,11 @@ where
                                 .ok_or(SessionError::WorldCellPublicationBaseStale)?;
                         }
                         if expected != &before
-                            || !Arc::ptr_eq(
-                                &association.base.original_source,
-                                &facts.original_source,
-                            )
-                            || !Arc::ptr_eq(&association.base.target, &target)
+                            || !association
+                                .base
+                                .original_source
+                                .matches(&facts.original_source)
+                            || !association.base.target.matches(&target)
                             || !Arc::ptr_eq(&association.base.source, &facts.source)
                         {
                             return Err(SessionError::WorldCellPublicationBaseStale);

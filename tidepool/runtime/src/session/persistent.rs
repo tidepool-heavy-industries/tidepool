@@ -1742,6 +1742,7 @@ impl PersistentSession {
             );
             return Ok(AdmittedInspectionWorld {
                 base: association.base.clone(),
+                custody: association.base.acquire_custody()?,
                 inputs: InspectionWorldInputs::Published(association.world.clone()),
                 observation: None,
             });
@@ -1819,14 +1820,22 @@ impl PersistentSession {
             declaration,
         )?;
         Ok(AdmittedInspectionWorld {
+            custody: super::inspection::InspectionWorldCustody {
+                original_source: original_source.clone(),
+                target: self.source_lease_in(scope)?,
+            },
             base: InspectionWorldBase {
                 scope,
                 key,
                 owner: self.admission_owner().clone(),
                 epoch: self.admission_owner().epoch(),
                 source: Arc::new(source.clone()),
-                original_source: original_source.clone(),
-                target: self.source_lease_in(scope)?,
+                original_source: super::inspection::InspectionWorldLeaseObservation::new(
+                    original_source,
+                ),
+                target: super::inspection::InspectionWorldLeaseObservation::new(
+                    &self.source_lease_in(scope)?,
+                ),
             },
             inputs: InspectionWorldInputs::Cold {
                 primary: self.lib().current_exact_context_in(scope),
@@ -1846,10 +1855,10 @@ impl PersistentSession {
         Arc::ptr_eq(&base.owner, self.admission_owner())
             && base.epoch == self.admission_owner().epoch()
             && base.source.sha256() == source.sha256()
-            && Arc::ptr_eq(&base.original_source, original_source)
+            && base.original_source.matches(original_source)
             && self
                 .source_lease_in(base.scope)
-                .is_ok_and(|lease| Arc::ptr_eq(&lease, &base.target))
+                .is_ok_and(|lease| base.target.matches(&lease))
             && self.compile_view_key_in(base.scope).as_ref() == Some(&base.key)
     }
 
@@ -1861,6 +1870,7 @@ impl PersistentSession {
     ) -> bool {
         self.install_compiler_world_association_if_current(
             &completed.prepared.association,
+            &completed.prepared.custody,
             &completed.cancellation,
             source,
             original_source,
@@ -1870,17 +1880,24 @@ impl PersistentSession {
     pub(super) fn install_compiler_world_association_if_current(
         &mut self,
         association: &Arc<super::inspection::InspectionWorldAssociation>,
+        custody: &super::inspection::InspectionWorldCustody,
         cancellation: &crate::HostAdmissionCancellation,
         source: &super::GenerationArtifactReference,
         original_source: &Arc<super::RuntimeLexicalScopeLease>,
     ) -> bool {
         super::RuntimeLexicalScopeLease::with_source_leases(
-            [original_source.clone(), association.base.target.clone()],
+            [custody.original_source.clone(), custody.target.clone()],
             |leases| {
                 super::RuntimeSourceAdmission::with_open_admissions(
                     leases.iter().map(|lease| lease.source_admission()),
                     || {
-                        if cancellation.checkpoint().is_err()
+                        if !association
+                            .base
+                            .original_source
+                            .matches(&custody.original_source)
+                            || !association.base.target.matches(&custody.target)
+                            || !Arc::ptr_eq(original_source, &custody.original_source)
+                            || cancellation.checkpoint().is_err()
                             || !self.inspection_world_base_is_current(
                                 &association.base,
                                 source,
@@ -3617,10 +3634,11 @@ impl PersistentSession {
                 .get(&public_scope)
                 .and_then(|tip| tip.inspection_world.as_ref())
                 .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+            let public_custody = public.base.observed_custody()?;
             if !self.inspection_world_base_is_current(
                 &public.base,
                 &public.base.source,
-                &public.base.original_source,
+                &public_custody.original_source,
             ) || !self.inspection_world_base_is_current(
                 &world.private.base,
                 &world.source,
@@ -3827,7 +3845,10 @@ impl PersistentSession {
                 let mut roots = vec![
                     world.original_source.clone(),
                     world.target.clone(),
-                    world.private.base.target.clone(),
+                    intent
+                        .retained_private_scope()
+                        .ok_or(SessionError::WorldCellPublicationBaseStale)?
+                        .clone(),
                 ];
                 if let Some(public) = self
                     .lib
@@ -3835,8 +3856,9 @@ impl PersistentSession {
                     .and_then(|lib| lib.tips.get(&ticket.public_scope))
                     .and_then(|tip| tip.inspection_world.as_ref())
                 {
-                    roots.push(public.base.original_source.clone());
-                    roots.push(public.base.target.clone());
+                    let current = public.base.observed_custody()?;
+                    roots.push(current.original_source);
+                    roots.push(current.target);
                 }
                 return super::RuntimeLexicalScopeLease::with_source_leases(roots, |leases| {
                     super::RuntimeSourceAdmission::with_open_admissions(
@@ -3994,11 +4016,12 @@ impl PersistentSession {
                 .get(&ticket.public_scope)
                 .and_then(|tip| tip.inspection_world.as_ref())
                 .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+            let public_custody = public.base.observed_custody()?;
             if !self.inspection_world_base_is_current(
                 &public.base,
                 &public.base.source,
-                &public.base.original_source,
-            ) || !Arc::ptr_eq(&public.base.target, &world.target)
+                &public_custody.original_source,
+            ) || !public.base.target.matches(&world.target)
             {
                 return Err(SessionError::WorldCellPublicationBaseStale);
             }
@@ -4037,8 +4060,10 @@ impl PersistentSession {
                     owner: self.admission_owner().clone(),
                     epoch: self.admission_owner().epoch(),
                     source: world.source.clone(),
-                    original_source: world.original_source.clone(),
-                    target: world.target.clone(),
+                    original_source: super::inspection::InspectionWorldLeaseObservation::new(
+                        &world.original_source,
+                    ),
+                    target: super::inspection::InspectionWorldLeaseObservation::new(&world.target),
                 },
                 world: successor,
             }))
@@ -4086,13 +4111,27 @@ impl PersistentSession {
             public_visibility_epochs,
             ..
         } = self;
-        let world_promotion = promoted_world.as_ref().map(|published| (
-            *world_execution.as_ref().expect("World promotion has its original execution").world()
-                .expect("World execution was selected").private.world.logical_id(),
-            *lib.as_ref().expect("preflight library").tips.get(&public_scope)
-                .and_then(|tip| tip.inspection_world.as_ref()).expect("prepared public World").world.logical_id(),
-            *published.world.logical_id(),
-        ));
+        let world_promotion = promoted_world.as_ref().map(|published| {
+            (
+                *world_execution
+                    .as_ref()
+                    .expect("World promotion has its original execution")
+                    .world()
+                    .expect("World execution was selected")
+                    .private
+                    .world
+                    .logical_id(),
+                *lib.as_ref()
+                    .expect("preflight library")
+                    .tips
+                    .get(&public_scope)
+                    .and_then(|tip| tip.inspection_world.as_ref())
+                    .expect("prepared public World")
+                    .world
+                    .logical_id(),
+                *published.world.logical_id(),
+            )
+        });
         let outcome = lib
             .as_mut()
             .expect("preflight library")

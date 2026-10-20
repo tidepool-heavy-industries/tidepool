@@ -489,6 +489,10 @@ impl FinalExecutionIntent {
     pub(super) fn library(&self) -> uuid::Uuid {
         self.library
     }
+    pub(super) fn retained_private_scope(&self) -> Option<&Arc<super::RuntimeLexicalScopeLease>> {
+        self._private_scope_lease.as_ref()
+    }
+
     pub(super) fn world(&self) -> Option<&WorldExecutionIntent> {
         self.world.as_ref()
     }
@@ -548,7 +552,7 @@ impl PersistentSession {
                         !Arc::ptr_eq(&world.association, &facts.published)
                             || !Arc::ptr_eq(&world.source, &facts.source)
                             || !Arc::ptr_eq(&world.original_source, &facts.original_source)
-                            || !Arc::ptr_eq(&world.target, &facts.published.base.target)
+                            || !Arc::ptr_eq(&world.target, &facts.public_target)
                             || self
                                 .lib()
                                 .tips
@@ -612,7 +616,7 @@ impl PersistentSession {
                     &private.base,
                     &facts.source,
                     &facts.original_source,
-                ) || !Arc::ptr_eq(&private.base.target, &admission.scope_lease)
+                ) || !private.base.target.matches(&admission.scope_lease)
                 {
                     return Err(SessionError::WorldCellPublicationBaseStale);
                 }
@@ -620,7 +624,7 @@ impl PersistentSession {
                     association: facts.published.clone(),
                     source: facts.source.clone(),
                     original_source: facts.original_source.clone(),
-                    target: facts.published.base.target.clone(),
+                    target: facts.public_target.clone(),
                     private,
                 })
             })
@@ -677,8 +681,8 @@ impl PersistentSession {
                             .get(&admission.private_scope())
                             .and_then(|tip| tip.inspection_world.clone())
                             .ok_or(SessionError::WorldCellPublicationBaseStale)?;
-                        if !Arc::ptr_eq(&private.base.original_source, &facts.original_source)
-                            || !Arc::ptr_eq(&private.base.target, &target)
+                        if !private.base.original_source.matches(&facts.original_source)
+                            || !private.base.target.matches(&target)
                             || !Arc::ptr_eq(&private.base.owner, self.admission_owner())
                             || private.base.epoch != self.admission_owner().epoch()
                             || private.base.source.sha256() != facts.source.sha256()
