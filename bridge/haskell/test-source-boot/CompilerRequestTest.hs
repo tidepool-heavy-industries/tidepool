@@ -100,7 +100,7 @@ worldRequestBoundaries = do
         (fail "unheld plan parsed source or obtained a compiler world")
       pure (void (runBoundWorldCellPlan request))
     latePrepare <- (withBoundCompilerRequest (const (pure ())) scope prepareArgs >=> finishCompletion) $ \request -> do
-      absent <- validateBoundWorldCell request
+      absent <- boundWorldCellPreparation request
       unless (either (== WorldCellUnavailable) (const False) absent)
         (fail "unheld prepare parsed source or allocated compiler generation state")
       compiled <- try (compileBoundRequest request CheckedEnvironment Set.empty GeneralCompile Nothing "/unavailable/target.hs")
@@ -112,7 +112,7 @@ worldRequestBoundaries = do
         :: IO (Either CompilePurposeConflict CheckedEnvironmentResult)
       unless (either (== DuplicateCompilePurposeSetting "ParsedImportSelection") (const False) conflict)
         (fail "conflicting compile purpose was not refused before held-world work")
-      pure (void (validateBoundWorldCell request))
+      pure (void (boundWorldCellPreparation request))
     pure (latePlan,latePrepare)
   try latePlan >>= requireCancellation
   try latePrepare >>= requireCancellation

@@ -1240,6 +1240,7 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         self.assertNotIn("//web:dist", unit_rule["deps"])
         cases = {}
         for name in ("facade_process_tests", "facade_host_tests", "facade_host_raw_test",
+                     "facade_introspection_service_test",
                      "facade_late_output_test", "facade_browser_test", "exomonad_host_unit_tests_all"):
             cases[name] = self.rule("exomonad/host", name, "tidepool_rust_test_cases")
             self.assertEqual(cases[name]["binary"], ":exomonad_host_unit_tests")
@@ -1254,6 +1255,25 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
                                  "//build/testing/browser:driver_bundle"):
             self.assertNotIn(browser_resource, process["resources"])
         host = cases["facade_host_tests"]
+        service = cases["facade_introspection_service_test"]
+        self.assertEqual(service["exact_tests"], [
+            "actor_host::documentation_tests::published_introspection_example_returns_structured_declaration",
+        ])
+        self.assertEqual(service["expected_count"], 1)
+        self.assertFalse(service["ignored"])
+        self.assertEqual(service["case_compiler_modes"], {
+            name: "owned-resident" for name in service["exact_tests"]
+        })
+        self.assertEqual(service["resource_env"]["TIDEPOOL_COMPILER_DEPLOYMENT"],
+                         "$(location //build/package:compiler_service_deployment)/compiler-deployment.json")
+        self.assertEqual(service["resource_env"]["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"],
+                         "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin")
+        self.assertIn("//build/package:compiler_service_deployment", service["resources"])
+        self.assertNotIn("//build/package:compiler_deployment", service["resources"])
+        for generic_loader in ("LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES"):
+            self.assertNotIn(generic_loader, service["resource_env"])
+            self.assertNotIn(generic_loader, service["env"])
+        self.assertNotIn("TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256", service["env"])
         self.assertEqual(host["expected_count"], 3)
         self.assertIs(host["haskell_worker"], True)
         self.assertIn("TIDEPOOL_EXTRACT_WORKER", host["resource_env"])

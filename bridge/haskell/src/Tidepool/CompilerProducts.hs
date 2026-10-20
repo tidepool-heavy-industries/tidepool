@@ -104,7 +104,8 @@ import Tidepool.GhcPipeline
   ( PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules
   , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprAcceptedCandidates, prHscEnv, prCanonicalInterfaceAdmissions
   , prInjectedSessionInterfaces, prProducedSessionInterfaces, prTargetTcGblEnv, PreparedModuleObserver(..)
-  , PreparedModuleCompletionInputs(..), preparedFreshDependencies, preparedExactCompilation
+  , PreparedModuleCompletionInputs(..), PreparedSourceRoute(..), preparedSourceRoute
+  , preparedFreshDependencies, preparedExactCompilation
   , preparedHomeRequirements, preparedCandidateOriginal, preparedCandidateProof
   , revalidatePreparedCandidateInputs )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
@@ -753,16 +754,18 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
           }
         freshDependencies = dependencies
           { dependencyModules = map withAvailability (dependencyModules dependencies) }
-        finalDependencies = case preparedExactCompilation prepared of
-          Nothing -> freshDependencies
-          Just _ -> freshDependencies
+        finalDependencies = case preparedSourceRoute prepared of
+          PreparedOrdinarySource -> freshDependencies
+          _ -> freshDependencies
             { dependencyCacheSafe = False, dependencySelectionComplete = False }
     dependencyBytes <- timeDetailPhase timing "module_products" "dependency_evidence" $
       writeDependencyEvidence outDir finalDependencies
     let evidenceBytes = dependencyBytes
-    sourceRecipe <- case preparedExactCompilation prepared of
-      Nothing -> pure OrdinaryExecutionSource
-      Just compilation -> issueFreshExecutionSource includes prepared freshDependencies
+    sourceRecipe <- case preparedSourceRoute prepared of
+      PreparedOrdinarySource -> pure OrdinaryExecutionSource
+      PreparedWorldSource base domain -> pure
+        (WorldExecutionSourceUnavailable base domain UnsupportedSourceRecipe)
+      PreparedExactSource compilation -> issueFreshExecutionSource includes prepared freshDependencies
         [product | product <- freshProducts, let (unit,name,_,_) = moduleProductInput product
           , Map.notMember (T.unpack unit,T.unpack name) retainedProofs]
         productPackages (compilationScope compilation)
@@ -1093,6 +1096,7 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
         (extendExactExecutionSourcesWithinBudget [graph] references inherited)
       pure (fromMaybe inherited extended)
     ExactExecutionSourceUnavailable _ -> pure inherited
+    WorldExecutionSourceUnavailable _ _ _ -> fail "World products cannot extend a finite exact source scope"
     OrdinaryExecutionSource -> fail "exact program products lack exact source recipe outcome"
   revalidatePreparedCandidateInputs prepared
   retainedSeals <- either fail pure . freshOutputSealsFromWrites =<< readIORef outputWrites

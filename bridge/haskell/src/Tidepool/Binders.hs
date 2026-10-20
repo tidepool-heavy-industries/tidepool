@@ -45,7 +45,7 @@ module Tidepool.Binders
   , analyzeCellWithFlags
   , analyzeCell
   , analyzeOrderedCell, analyzeOrderedCellWithFlags
-  , defaultParserDynFlags, templateParserFlags
+  , defaultParserDynFlags, templateParserFlags, sourceModuleFlags
   , renderCellCheckSource, renderCellCheckSourceWithLineOffset
   , PreparedTypedSegmentSource(..), prepareTypedSegmentSource
   , CellExpressionPlan(..), ExpressionLiftPlan(..)
@@ -473,9 +473,16 @@ spanToCellSpan (RealSrcSpan sourceSpan _) = CellSourceSpan
 spanToCellSpan _ = CellSourceSpan 1 1 1 1
 
 cellEffectiveFlags :: DynFlags -> String -> String -> IO (Either CellSplitError DynFlags)
-cellEffectiveFlags initial template source = do
-  let defaults = foldl' xopt_set initial stmtExtensions
-      (templateMessages, templateOptions) =
+cellEffectiveFlags initial = cellHeaderFlags (foldl' xopt_set initial stmtExtensions)
+
+-- A generated module executes with its actual header options. Classification
+-- defaults only widen the parser and must not become execution-policy facts.
+sourceModuleFlags :: DynFlags -> String -> IO (Either CellSplitError DynFlags)
+sourceModuleFlags initial source = cellHeaderFlags initial source ""
+
+cellHeaderFlags :: DynFlags -> String -> String -> IO (Either CellSplitError DynFlags)
+cellHeaderFlags defaults template source = do
+  let (templateMessages, templateOptions) =
         getOptions (initParserOpts defaults) (stringToStringBuffer template) "<cell-template>"
   if errorsFound templateMessages
     then pure (Left (CellHeaderFailure "GHC could not read template options"))

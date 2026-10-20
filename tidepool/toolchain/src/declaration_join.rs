@@ -1313,6 +1313,12 @@ pub fn validate_declaration_join(
     decode_declaration_join_outcome(input, &execution.receipt)
 }
 
+pub(crate) fn encode_declaration_exports(exports: &[DeclarationExport]) -> Vec<u8> {
+    let mut writer = JoinEncoder(Vec::new());
+    writer.exports(exports);
+    writer.0
+}
+
 /// Canonical definite-length CBOR arrays shared with the worker. Keeping the
 /// ordered writes in this digest fences instance-only changes and retractions.
 pub fn encode_declaration_join(input: &DeclarationJoinInput) -> Result<Vec<u8>, CompileError> {

@@ -21,6 +21,7 @@ mod source_admission;
 pub use source_admission::{
     OwnSourceFenceReopened, RuntimeSourceAdmission, RuntimeSourceCompilerTransaction,
     RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim, RuntimeSourceReopen,
+    RuntimeSourcePublicationView,
     SourceAdmissionError, SourceFenceTransitionFailure,
     SourceAdmissionHook, SourceAdmissionPhase,
 };
@@ -82,11 +83,13 @@ pub use dialect::{
 };
 
 pub use inspection::{
-    finish_admitted_world_inspection, run_admitted_inspections, run_admitted_world_inspection,
-    run_inspections, AdmittedInspectionInputs, AdmittedInspectionWorld, ClassMethodInfo,
+    finish_admitted_compiler_world, finish_admitted_world_inspection, run_admitted_compiler_world,
+    run_admitted_inspections, run_admitted_world_inspection, run_inspections,
+    AdmittedInspectionInputs, AdmittedInspectionWorld, ClassMethodInfo, CompletedCompilerWorld,
     CompletedInspectionWorld, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,
     IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery,
-    InspectionRequest, InspectionResult, NameNamespace, NameQuery, NameScope, QueryError,
+    InspectionRequest, InspectionResult, InspectionScopeSnapshot, NameNamespace, NameQuery, NameScope,
+    QueryError,
     ScopeBindingsAnswer, ScopeProvenance, TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
     WorldInspectionError, SCOPE_BINDING_LIMIT,
 };
@@ -189,7 +192,7 @@ pub use turn::{
     CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckFailure, CellCheckRequest,
     CellSourceSpan, CheckedBinderPin, CheckedExpressionPlan, CompileRejection, CompiledTurn,
     DeclarationReceipt, DeclarationSource, ExpressionLift, HostBindingAuthority, LocatedImport,
-    LocatedPragma, PragmaKind, SourcePrologue, TemplateSelector, TurnClassification, TurnCode,
+    LocatedPragma, PragmaKind, SettledCellProgram, SourcePrologue, TemplateSelector, TurnClassification, TurnCode,
     TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier, AMBIGUOUS_TYPE_ADVICE,
     CELL_PURE_DISPATCH_ADVICE, DECL_TEMPLATE_SOURCE, PREAMBLE_DEFAULT_DECL, PREAMBLE_IMPORT_MARKER,
     PREPARED_SCAFFOLD_TARGET,
@@ -219,7 +222,7 @@ mod notebook_generation;
 pub use notebook_generation::{
     ActiveNotebookGeneration, ComposedPromptSnapshot, DurableGenerationReferences,
     GenerationArtifactReference, NotebookGenerationError, NotebookGenerationId,
-    PreparedNotebookGeneration,
+    PreparedNotebookGeneration, PreparedNotebookGenerationWithWorld,
 };
 
 use std::collections::{BTreeMap, HashMap};
@@ -428,6 +431,8 @@ pub enum SessionError {
     MissingDeclarationLibrary,
     #[error("scope {0:?} has no current published compiler world")]
     MissingPublishedCompilerWorld(ScopeId),
+    #[error("scope {0:?} has no certified selected declaration facade for its compiler world")]
+    UncertifiedCompilerWorldDeclaration(ScopeId),
     #[error("world-owned execution requires service cell preparation")]
     WorldCellRequiresServicePreparation,
     #[error("world cell item {ordinal} requires an observation-name reservation")]

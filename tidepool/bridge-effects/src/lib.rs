@@ -483,6 +483,285 @@ mod context_constructor_tests {
     }
 
     #[test]
+    fn reload_retirement_receipts_preserve_settlement_and_exact_coordinates() {
+        use super::{
+            RlBlocker, RlBlockerReason, RlCause, RlCauseKind, RlCleanupOutcome, RlLifetimeEdge,
+            RlNativeIdentity, RlOperation, RlReservation, RlResource, RlResourceOutcome,
+            RlRetirementReceipt, RlRetirementStage, RlRetirementState, RlStopOutcome,
+            RlSurfaceDiff, SrReloadOutcome, SrRevision,
+        };
+        let mut table = DataConTable::new();
+        let constructors = [
+            ("ReloadRetirement", 1),
+            ("ReloadRetirementReceipt", 9),
+            ("SourceRevision", 3),
+            ("ReloadOperation", 3),
+            ("ReloadSurfaceDiff", 3),
+            ("ReloadAReopened", 0),
+            ("ReloadRetirementFenced", 1),
+            ("ReloadBPublished", 2),
+            ("ReloadResourceOutcome", 3),
+            ("ReloadCause", 2),
+            ("ReloadResourceStop", 0),
+            ("ReloadResourceCleanup", 0),
+            ("ReloadAcknowledgementUnconfirmed", 0),
+            ("ReloadStopFailed", 0),
+            ("ReloadRetirementBlocked", 0),
+            ("ReloadContinuationFailed", 0),
+            ("ReloadStopConfirmed", 0),
+            ("ReloadStopRefused", 1),
+            ("ReloadStopPending", 0),
+            ("ReloadStopUnconfirmed", 1),
+            ("ReloadStopNotRequested", 0),
+            ("ReloadCleanupConfirmed", 0),
+            ("ReloadCleanupNotRequired", 0),
+            ("ReloadCleanupPending", 0),
+            ("ReloadCleanupRefused", 1),
+            ("ReloadCleanupUnknown", 1),
+            ("ReloadActorResource", 1),
+            ("ReloadNativeResource", 2),
+            ("ReloadNativeLocal", 1),
+            ("ReloadNativeRemote", 2),
+            ("ReloadPreparationResource", 1),
+            ("ReloadInvocationResource", 2),
+            ("ReloadCompilerResource", 3),
+            ("ReloadFormResource", 3),
+            ("ReloadDisplayResource", 1),
+            ("ReloadWatchResource", 2),
+            ("ReloadUnclassifiedPhysicalResource", 1),
+            ("ReloadWorkbenchReservation", 2),
+            ("ReloadRouteReservation", 1),
+            ("ReloadScopeReservation", 1),
+            ("ReloadResourceBlocker", 2),
+            ("ReloadCollateralBlocker", 3),
+            ("ReloadUnclassifiedSourceWork", 1),
+            ("ReloadStartingResource", 0),
+            ("ReloadPendingProducer", 0),
+            ("ReloadDisplayAcknowledgementPending", 0),
+            ("ReloadDisplayAcknowledgementUnconfirmed", 1),
+            ("ReloadPhysicalSupervision", 0),
+        ];
+        table
+            .extend_checked(
+                constructors
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (name, arity))| {
+                        row(index as u64 + 1, "Tidepool.Effects.Core", name, arity)
+                    }),
+            )
+            .unwrap();
+        table
+            .extend_checked([
+                row(100, "GHC.Types", "[]", 0),
+                row(101, "GHC.Types", ":", 2),
+                row(102, "Data.Text", "Text", 3),
+                row(103, "GHC.Types", "I#", 1),
+                row(104, "GHC.Tuple", "(,)", 2),
+                row(105, "GHC.Maybe", "Nothing", 0),
+                row(106, "GHC.Maybe", "Just", 1),
+            ])
+            .unwrap();
+        let operation = RlOperation {
+            execution: "exec-issued".into(),
+            input_unit_index: 2,
+            effect_ordinal: 3,
+        };
+        let reservation = RlReservation::ReloadWorkbenchReservation(
+            "exec-issued".into(),
+            "exact-attempt-a".into(),
+        );
+        let resource = RlResource::ReloadActorResource((42, 7));
+        let cause = RlCause {
+            kind: RlCauseKind::ReloadAcknowledgementUnconfirmed,
+            detail: "owner retained cleanup".into(),
+        };
+        let resources = vec![
+            resource.clone(),
+            RlResource::ReloadActorResource((42, 8)),
+            RlResource::ReloadNativeResource(
+                (42, 7),
+                RlNativeIdentity::ReloadNativeLocal(u64::MAX.to_string()),
+            ),
+            RlResource::ReloadNativeResource(
+                (42, 7),
+                RlNativeIdentity::ReloadNativeRemote("0".into(), u64::MAX.to_string()),
+            ),
+            RlResource::ReloadPreparationResource(99),
+            RlResource::ReloadInvocationResource((42, 7), reservation.clone()),
+            RlResource::ReloadInvocationResource(
+                (42, 7),
+                RlReservation::ReloadWorkbenchReservation(
+                    "exec-issued".into(),
+                    "exact-attempt-b".into(),
+                ),
+            ),
+            RlResource::ReloadCompilerResource((42, 7), reservation.clone(), 4),
+            RlResource::ReloadFormResource((42, 7), reservation, "issued-mount".into()),
+            RlResource::ReloadDisplayResource(operation.clone()),
+            RlResource::ReloadWatchResource((42, 7), 12),
+            RlResource::ReloadInvocationResource(
+                (42, 7),
+                RlReservation::ReloadRouteReservation(12),
+            ),
+            RlResource::ReloadInvocationResource((42, 7), RlReservation::ReloadScopeReservation(5)),
+            RlResource::ReloadUnclassifiedPhysicalResource(RlNativeIdentity::ReloadNativeLocal(
+                "11".into(),
+            )),
+        ];
+        let encoded_resources: Vec<_> = resources
+            .iter()
+            .map(|resource| {
+                let encoded = resource.to_value(&table).unwrap();
+                assert_eq!(RlResource::from_value(&encoded, &table).unwrap(), *resource);
+                encoded
+            })
+            .collect();
+        assert_ne!(
+            RlResource::from_value(&encoded_resources[0], &table).unwrap(),
+            RlResource::from_value(&encoded_resources[1], &table).unwrap(),
+            "incarnations were collapsed"
+        );
+        assert_ne!(
+            RlResource::from_value(&encoded_resources[2], &table).unwrap(),
+            RlResource::from_value(&encoded_resources[3], &table).unwrap(),
+            "local and remote native identity were collapsed"
+        );
+        assert_ne!(
+            RlResource::from_value(&encoded_resources[5], &table).unwrap(),
+            RlResource::from_value(&encoded_resources[6], &table).unwrap(),
+            "concrete reservation attempts were collapsed"
+        );
+        let mut receipt = RlRetirementReceipt {
+            previous: SrRevision {
+                identity: "frozen-A".into(),
+                generation: 0,
+                modules: vec![],
+            },
+            candidate: SrRevision {
+                identity: "frozen-B".into(),
+                generation: 0,
+                modules: vec![],
+            },
+            operation: Some(operation),
+            state: RlRetirementState::ReloadAReopened,
+            blockers: vec![
+                RlBlocker::ReloadResourceBlocker(
+                    resource.clone(),
+                    RlBlockerReason::ReloadStartingResource,
+                ),
+                RlBlocker::ReloadCollateralBlocker(
+                    resource.clone(),
+                    resources[1].clone(),
+                    RlLifetimeEdge::ReloadPhysicalSupervision,
+                ),
+                RlBlocker::ReloadUnclassifiedSourceWork(1),
+            ],
+            outcomes: vec![],
+            surface: RlSurfaceDiff {
+                added: vec![],
+                removed: vec![],
+                changed: vec![],
+            },
+            primary: None,
+            secondary: vec![],
+        };
+        let partial = vec![
+            RlResourceOutcome {
+                resource: resource.clone(),
+                stop: RlStopOutcome::ReloadStopConfirmed,
+                cleanup: RlCleanupOutcome::ReloadCleanupConfirmed,
+            },
+            RlResourceOutcome {
+                resource: resources[1].clone(),
+                stop: RlStopOutcome::ReloadStopRefused(RlCause {
+                    kind: RlCauseKind::ReloadStopFailed,
+                    detail: "still live".into(),
+                }),
+                cleanup: RlCleanupOutcome::ReloadCleanupNotRequired,
+            },
+        ];
+        let cases = [
+            (RlRetirementState::ReloadAReopened, vec![]),
+            (RlRetirementState::ReloadAReopened, partial.clone()),
+            (
+                RlRetirementState::ReloadRetirementFenced(RlRetirementStage::ReloadResourceStop),
+                vec![
+                    RlResourceOutcome {
+                        resource: resource.clone(),
+                        stop: RlStopOutcome::ReloadStopPending,
+                        cleanup: RlCleanupOutcome::ReloadCleanupPending,
+                    },
+                    RlResourceOutcome {
+                        resource: resources[1].clone(),
+                        stop: RlStopOutcome::ReloadStopUnconfirmed(cause.clone()),
+                        cleanup: RlCleanupOutcome::ReloadCleanupUnknown(cause.clone()),
+                    },
+                ],
+            ),
+            (
+                RlRetirementState::ReloadRetirementFenced(RlRetirementStage::ReloadResourceCleanup),
+                vec![RlResourceOutcome {
+                    resource,
+                    stop: RlStopOutcome::ReloadStopNotRequested,
+                    cleanup: RlCleanupOutcome::ReloadCleanupRefused(cause),
+                }],
+            ),
+            (
+                RlRetirementState::ReloadBPublished(
+                    vec!["Changed".into()],
+                    vec!["projection repair".into()],
+                ),
+                vec![partial[0].clone()],
+            ),
+        ];
+        let mut encoded_cases = vec![];
+        let mut decoded_cases = vec![];
+        for (state, outcomes) in cases {
+            receipt.state = state;
+            receipt.primary = Some(match &receipt.state {
+                RlRetirementState::ReloadAReopened => RlCause {
+                    kind: RlCauseKind::ReloadRetirementBlocked,
+                    detail: "known live blocker".into(),
+                },
+                RlRetirementState::ReloadRetirementFenced(_) => RlCause {
+                    kind: RlCauseKind::ReloadAcknowledgementUnconfirmed,
+                    detail: "cleanup owner retained".into(),
+                },
+                RlRetirementState::ReloadBPublished(_, _) => RlCause {
+                    kind: RlCauseKind::ReloadContinuationFailed,
+                    detail: "receipt display failed after commit".into(),
+                },
+            });
+            receipt.secondary = vec![RlCause {
+                kind: RlCauseKind::ReloadContinuationFailed,
+                detail: "secondary response delivery failed".into(),
+            }];
+            receipt.outcomes = outcomes;
+            let outcome = SrReloadOutcome::ReloadRetirement(receipt.clone());
+            let encoded = outcome.to_value(&table).unwrap();
+            assert_eq!(
+                SrReloadOutcome::from_value(&encoded, &table).unwrap(),
+                outcome
+            );
+            let decoded = SrReloadOutcome::from_value(&encoded, &table).unwrap();
+            assert!(
+                !decoded_cases.contains(&decoded),
+                "distinct settlement facts collapsed"
+            );
+            decoded_cases.push(decoded);
+            encoded_cases.push(encoded);
+        }
+        for mut encoded in encoded_cases {
+            let HaskellValue::Con(_, fields) = &mut encoded else {
+                panic!("receipt constructor missing")
+            };
+            fields.push(HaskellValue::Con(DataConId(100), vec![]));
+            assert!(SrReloadOutcome::from_value(&encoded, &table).is_err());
+        }
+    }
+
+    #[test]
     fn model_selectors_roundtrip_preserve_explicit_backend_identity() {
         let mut table = DataConTable::new();
         table

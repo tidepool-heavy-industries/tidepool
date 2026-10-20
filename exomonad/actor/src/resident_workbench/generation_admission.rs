@@ -286,6 +286,18 @@ impl WorldPublicationVisibility {
 }
 
 impl WorldPublication {
+    pub(super) fn source_publication_view(
+        &self,
+    ) -> Result<
+        tidepool_runtime::session::RuntimeSourcePublicationView,
+        super::PublicationSettlementError,
+    > {
+        match &self.settlement {
+            WorldPublicationSettlement::Armed { fence, .. } => fence.publication_view(),
+            _ => Err(super::PublicationSettlementError::ReopenAttempted),
+        }
+    }
+
     pub(super) fn visibility(&self) -> WorldPublicationVisibility {
         self.visibility.clone()
     }
@@ -1066,7 +1078,10 @@ mod tests {
         fn replacement(external: bool) -> Self {
             let mut fixture = Self::with_prerequisite(external);
             let initial = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
-            assert!(initial.visibility().install(fixture.generation.clone()));
+            assert!(initial
+                .visibility()
+                .unwrap()
+                .install(fixture.generation.clone()));
             initial.confirmed().unwrap();
             let predecessor = fixture.generation.clone();
             let dependency = generation(
@@ -1395,7 +1410,10 @@ mod tests {
                 let parent_fence = parent.runtime_admission().fence().unwrap();
                 assert_eq!(parent_fence.pending_claims(), 1);
                 if visible {
-                    assert!(owner.visibility().install(fixture.generation.clone()));
+                    assert!(owner
+                        .visibility()
+                        .unwrap()
+                        .install(fixture.generation.clone()));
                 }
                 drop(fixture.preparation.take());
                 let primary = if visible {
@@ -1470,7 +1488,10 @@ mod tests {
                 let parent_fence = parent.runtime_admission().fence().unwrap();
                 assert_eq!(parent_fence.pending_claims(), 1);
                 if visible {
-                    assert!(owner.visibility().install(fixture.generation.clone()));
+                    assert!(owner
+                        .visibility()
+                        .unwrap()
+                        .install(fixture.generation.clone()));
                     owner.confirmed().unwrap();
                 } else {
                     owner.refused().unwrap();
@@ -1499,7 +1520,10 @@ mod tests {
                 PublicationFixture::replacement(true)
             };
             let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
-            assert!(owner.visibility().install(fixture.generation.clone()));
+            assert!(owner
+                .visibility()
+                .unwrap()
+                .install(fixture.generation.clone()));
             let parent = fixture
                 .generation
                 .dependency()
@@ -1630,7 +1654,10 @@ mod tests {
                 PublicationFixture::after_confirmed_c()
             };
             let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
-            assert!(owner.visibility().install(fixture.generation.clone()));
+            assert!(owner
+                .visibility()
+                .unwrap()
+                .install(fixture.generation.clone()));
             drop(fixture.state.drain_retired());
             assert!(owner.confirmed().is_err());
             fixture.assert_candidate_unavailable();
@@ -1646,7 +1673,10 @@ mod tests {
                 PublicationFixture::after_confirmed_c()
             };
             let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
-            assert!(owner.visibility().install(fixture.generation.clone()));
+            assert!(owner
+                .visibility()
+                .unwrap()
+                .install(fixture.generation.clone()));
             let (entered, observed) = std::sync::mpsc::sync_channel(0);
             let (release, released) = std::sync::mpsc::channel();
             owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
@@ -1685,7 +1715,10 @@ mod tests {
         {
             let fixture = PublicationFixture::after_confirmed_c();
             let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
-            assert!(owner.visibility().install(fixture.generation.clone()));
+            assert!(owner
+                .visibility()
+                .unwrap()
+                .install(fixture.generation.clone()));
             let (entered, observed) = std::sync::mpsc::sync_channel(0);
             let (release, released) = std::sync::mpsc::channel();
             owner.settlement_probe = Some(Arc::new(super::super::PublicationSettlementProbe {
@@ -1727,7 +1760,7 @@ mod tests {
                 )
                 .unwrap();
                 if let Some(owner) = &owner {
-                    owner.visibility().install(generation);
+                    owner.visibility().unwrap().install(generation);
                 }
                 owner
             });
@@ -1775,7 +1808,10 @@ mod tests {
             let mut fixture = PublicationFixture::new();
             let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
             if confirmed {
-                assert!(owner.visibility().install(fixture.generation.clone()));
+                assert!(owner
+                    .visibility()
+                    .unwrap()
+                    .install(fixture.generation.clone()));
             }
             drop(fixture.preparation.take());
             if confirmed {
@@ -1840,7 +1876,10 @@ mod tests {
         drop(retained_d.claim().unwrap());
         let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
         fixture.assert_candidate_unavailable();
-        assert!(owner.visibility().install(fixture.generation.clone()));
+        assert!(owner
+            .visibility()
+            .unwrap()
+            .install(fixture.generation.clone()));
         // Visibility records actual D while the actual ACK owner has not completed.
         fixture.assert_candidate_unavailable();
         assert!(matches!(
@@ -1862,7 +1901,10 @@ mod tests {
         let fixture = PublicationFixture::after_confirmed_c();
         let retained_d = fixture.generation.installation.source_dependency().clone();
         let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
-        assert!(owner.visibility().install(fixture.generation.clone()));
+        assert!(owner
+            .visibility()
+            .unwrap()
+            .install(fixture.generation.clone()));
         fixture.assert_candidate_unavailable();
         assert!(matches!(
             owner.complete(Ok(super::super::ActorGenerationCommit::Unconfirmed(
@@ -1883,7 +1925,7 @@ mod tests {
         let fixture = PublicationFixture::new();
         let decision = tidepool_runtime::session::PublicationDecision::new();
         let owner = fixture.reserve(decision.clone());
-        let visibility = owner.visibility();
+        let visibility = owner.visibility().unwrap();
         let (checked, checked_rx) = std::sync::mpsc::sync_channel(0);
         let release = Arc::new(std::sync::Barrier::new(2));
         let callback_release = release.clone();
@@ -1911,7 +1953,7 @@ mod tests {
     fn publisher_cancel_after_visibility_retires_both_operational_views() {
         let fixture = PublicationFixture::new();
         let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
-        let visibility = owner.visibility();
+        let visibility = owner.visibility().unwrap();
         let generation = fixture.generation.clone();
         let (visible, visible_rx) = std::sync::mpsc::sync_channel(0);
         let callback = std::thread::spawn(move || {
@@ -1932,7 +1974,7 @@ mod tests {
     fn publisher_refusal_retry_rejects_stale_visibility_attempt() {
         let fixture = PublicationFixture::new();
         let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
-        let stale = owner.visibility();
+        let stale = owner.visibility().unwrap();
         assert!(matches!(
             owner.complete(Ok(super::super::ActorGenerationCommit::Refused(
                 "known precommit refusal".into()
@@ -1943,8 +1985,11 @@ mod tests {
         assert!(fixture.state.snapshot_for_call().is_ok());
         let retry = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
         assert!(!stale.install(fixture.generation.clone()));
-        assert!(retry.visibility().is_current());
-        assert!(retry.visibility().install(fixture.generation.clone()));
+        assert!(retry.visibility().unwrap().is_current());
+        assert!(retry
+            .visibility()
+            .unwrap()
+            .install(fixture.generation.clone()));
         retry.confirmed().unwrap();
         drop(fixture.source.claim().unwrap());
         assert!(Arc::ptr_eq(

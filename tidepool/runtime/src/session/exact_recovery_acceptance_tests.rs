@@ -115,7 +115,7 @@ fn adopt_recovery_declaration(
     let item = item.checked_item().clone();
     assert_eq!(item.kind(), CheckedItemKind::Declaration);
     let prefix = session
-        .begin_cell_program(admission, program)
+        .begin_cell_program(program)
         .unwrap()
         .unwrap();
     let reservation = session.admit_checked_item(prefix.clone(), item).unwrap();
@@ -1162,7 +1162,7 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
         assert_eq!(item.kind(), CheckedItemKind::Bind);
         assert_eq!(item.binders(), ["recoveredCellAnswer"]);
         let prefix = resident
-            .begin_cell_program(admission, program)
+            .begin_cell_program(program)
             .unwrap()
             .unwrap();
         let reservation = resident.admit_checked_item(prefix.clone(), item).unwrap();

@@ -128,7 +128,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
             .expect("expression owns its issued observation capture")
             .to_owned();
         let prefix = session
-            .begin_cell_program(admission, program.clone())
+            .begin_cell_program(program.clone())
             .unwrap()
             .expect("checked program starts with its first expression");
         let reservation = session
@@ -189,9 +189,17 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
                     && global.identity.occurrence == "describe"
             }));
         let durable = tempfile::tempdir().unwrap();
+        let producer = match program.basis() {
+            tidepool_toolchain::checked_cell::CellProgramBasis::Finite(plan) => {
+                plan.producer_sha256()
+            }
+            tidepool_toolchain::checked_cell::CellProgramBasis::World(output) => {
+                *output.producer_sha256()
+            }
+        };
         let references = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
             durable.path(),
-            program.parsed_plan().producer_sha256(),
+            producer,
             products,
         )
         .unwrap();
@@ -268,7 +276,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
         }
         assert_original_durability(
             durable.path(),
-            program.parsed_plan().producer_sha256(),
+            producer,
             original,
             &references,
             &module_interfaces,

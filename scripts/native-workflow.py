@@ -217,6 +217,8 @@ def main(argv=None):
             return snapshot_status
         test_labels.update("//bridge/haskell:corpus_" + cohort.replace("-", "_") + "_test" for cohort in COHORTS)
         test_labels.update((
+            "//tidepool/toolchain:compile_fail_checked_cell_request_digest_is_issued",
+            "//tidepool/toolchain:compile_fail_checked_cell_request_inventory_is_issued",
             "//tidepool/toolchain:compile_fail_native_group_issuer_is_not_artifact",
             "//tidepool/toolchain:compile_fail_native_group_issuer_fields_are_private",
             "//tidepool/runtime:compile_fail_compiler_cell_requires_settled",
