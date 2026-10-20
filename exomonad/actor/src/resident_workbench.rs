@@ -26093,11 +26093,18 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn compiler_query_verbs_decode_dispatch_and_resume() {
         with_test_compiler_owner(|preparation_client| async move {
-            let (session, context, source, _root) = host_mount_fixture_with_effects(
+            let (mut session, context, source, _root) = host_mount_fixture_with_effects(
                 |_| {},
                 &[tidepool_mcp::introspection_decl()],
                 "'[Introspection]",
             );
+            // Production adopts the world's final scope after the public owner
+            // publishes (`finish_committed_source_setup`). The fixture must do
+            // the same before a private cell can reserve a source generation.
+            context
+                .source_dependency()
+                .adopt_final_scope(&mut session, context.placement.lexical_scope)
+                .expect("adopt the fixture world's final scope");
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
             let workbench = ResidentActorWorkbench::new(
@@ -26188,6 +26195,38 @@ pub(crate) mod request_tests {
                     ResidentWorkbenchStep::CancellationAcknowledged { .. } => "cancellation ack",
                 }
             }
+        })
+        .await;
+    }
+
+    /// The adoption above is a production requirement, not a fixture
+    /// convenience: a world whose final scope was never adopted must refuse a
+    /// private cell at exactly the source-admission seam.
+    #[tokio::test]
+    async fn compiler_query_boundary_requires_an_adopted_world_scope() {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (session, context, source, _root) = host_mount_fixture_with_effects(
+                |_| {},
+                &[tidepool_mcp::introspection_decl()],
+                "'[Introspection]",
+            );
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client),
+                None,
+            );
+            let refused = match workbench.admit_private_cell_for_test(context).await {
+                Ok(_) => panic!("an unadopted world scope must refuse the private cell"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                refused,
+                ResidentActorWorkbenchError::SourceAdmission(
+                    generation_admission::GenerationAdmissionError::Unqualified
+                )
+            ));
         })
         .await;
     }
