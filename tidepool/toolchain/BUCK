@@ -1034,7 +1034,6 @@ tidepool_rust_test_cases(
     case_compiler_modes = {"artifacts::module_product_tests::real_world_output_seals_native_items_after_its_matching_compiler_end": "owned-resident"},
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
-        "TIDEPOOL_TEST_COMPILER_DIAGNOSTICS": "1",
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",

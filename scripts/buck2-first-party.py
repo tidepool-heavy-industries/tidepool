@@ -1742,7 +1742,6 @@ tidepool_buildscript_run(
             world_env, world_resources, world_worker = test_runtime_inputs(
                 package_name, "toolchain_world_native_seal_test", unit=True
             )
-            world_env["TIDEPOOL_TEST_COMPILER_DIAGNOSTICS"] = "1"
             world_env.pop("LD_LIBRARY_PATH", None)
             world_env.pop("TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES", None)
             deployment = "//build/package:compiler_service_deployment"

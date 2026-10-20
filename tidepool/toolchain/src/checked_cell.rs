@@ -5706,6 +5706,26 @@ mod tests {
             [1; 32],
         )
         .unwrap();
+        for (module, ordinal) in [("WrongOwner", 8), ("Authored", 12), ("Authored", 99)] {
+            let wrong_owner = crate::declaration_join::ExactModuleIdentity {
+                unit: "fixture".into(),
+                module: module.into(),
+            };
+            assert!(
+                CheckedTypedEntry::from_original_entry(
+                    plans[0].digest.clone(),
+                    entry.origin.clone(),
+                    entry.entry.clone(),
+                    ordinal,
+                    &target,
+                    &wrong_owner,
+                    &products,
+                    [1; 32],
+                )
+                .is_err(),
+                "native entry owner and exact original ordinal are independently authenticated"
+            );
+        }
         let accepted = vec![AcceptedGlobal {
             identity: wrapper_binder.clone(),
             rep: RuntimeRep::LiftedRef,
