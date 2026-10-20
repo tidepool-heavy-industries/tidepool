@@ -2364,7 +2364,7 @@ impl PersistentSession {
         &mut self,
         staged: super::StagedDeclaration,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
-        self.adopt_staged_declaration_prepared(staged, |_, _, _, _, _| {
+        self.adopt_staged_declaration_prepared(staged, None, |_, _, _, _, _| {
             Ok(|_: &mut super::SessionLib| {})
         })
     }
@@ -2384,6 +2384,7 @@ impl PersistentSession {
         let mut successor = None;
         let committed = self.adopt_staged_declaration_prepared(
             staged,
+            None,
             |session, staged, origin, changes, next_epoch| {
                 let origin = origin.ok_or(SessionError::StaleStagedDeclaration)?;
                 let (view, visibility, retained) =
@@ -2411,6 +2412,7 @@ impl PersistentSession {
         &mut self,
         staged: super::StagedDeclaration,
         prior: &super::PublicVisibilitySnapshot,
+        retained_ids: &[SessionVarId],
         prepare: impl FnOnce(
             CompileViewKey,
             super::PublicVisibilitySnapshot,
@@ -2419,6 +2421,7 @@ impl PersistentSession {
     ) -> Result<DeclarationPlaneCommit, SessionError> {
         self.adopt_staged_declaration_prepared(
             staged,
+            Some(retained_ids),
             |session, staged, origin, changes, next_epoch| {
                 let scope = staged.scope();
                 if prior.scope != scope
@@ -2491,6 +2494,7 @@ impl PersistentSession {
     fn adopt_staged_declaration_prepared<A: FnOnce(&mut super::SessionLib)>(
         &mut self,
         staged: super::StagedDeclaration,
+        retained_ids: Option<&[SessionVarId]>,
         prepare: impl FnOnce(
             &mut Self,
             &super::StagedDeclaration,
@@ -2525,7 +2529,7 @@ impl PersistentSession {
             .map(|(id, _)| id.var())
             .collect::<Vec<_>>();
         let items = staged.items().to_vec();
-        let source_origin = staged
+        let mut source_origin = staged
             .certified_authored
             .as_ref()
             .map(|certificate| {
@@ -2537,10 +2541,41 @@ impl PersistentSession {
             })
             .transpose()
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        let binding_changes = self
-            .bindings
-            .prepare_declaration_binding_changes_in(scope, &captured_values, &replaced_names)
-            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let legacy_retained;
+        let retained_ids = match retained_ids {
+            Some(ids) => ids,
+            None => {
+                legacy_retained = staged
+                    .certified_authored
+                    .as_ref()
+                    .map(|certificate| {
+                        let requirements = certificate
+                            .projection
+                            .receipt()
+                            .native_binding_custody_requirements()?;
+                        self.resolve_native_binding_custody(scope, &requirements)
+                    })
+                    .transpose()?;
+                legacy_retained.as_deref().unwrap_or(&[])
+            }
+        };
+        let binding_changes = match source_origin.as_mut() {
+            Some(origin) => self
+                .bindings
+                .prepare_declaration_binding_changes_with_custody_in(
+                    &self.scopes,
+                    scope,
+                    origin,
+                    &captured_values,
+                    &replaced_names,
+                    retained_ids,
+                ),
+            None if retained_ids.is_empty() => self
+                .bindings
+                .prepare_declaration_binding_changes_in(scope, &captured_values, &replaced_names),
+            None => return Err(SessionError::StaleStagedDeclaration),
+        }
+        .map_err(SessionError::InvalidPublicBindingPromotion)?;
         self.public_visibility_epochs
             .try_reserve(1)
             .map_err(|error| SessionError::RecoveryManifest {
@@ -2574,7 +2609,6 @@ impl PersistentSession {
                 }
             })
     }
-
     fn prepare_declaration_successor(
         &mut self,
         staged: &super::StagedDeclaration,

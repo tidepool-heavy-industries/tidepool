@@ -3125,9 +3125,36 @@ impl PersistentSession {
             let retained = prior._retained_scope.clone();
             let owner = self.admission_owner().clone();
             let epoch = owner.epoch();
+            let selected = item
+                .world_selected_runtime_inputs()
+                .ok_or(SessionError::StaleStagedDeclaration)?;
+            let mut retained_ids = std::collections::BTreeSet::new();
+            for input in selected.inputs() {
+                let entry = self
+                    .bindings
+                    .get(input.session_var())
+                    .filter(|entry| {
+                        entry.value.identity == *input.symbol()
+                            && entry.scope.0 == input.defining_scope()
+                            && entry.module
+                                == tidepool_repr::SessionModule::val(Generation(input.generation()))
+                    })
+                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                let handle = entry.value.handle;
+                if self
+                    .prepared()
+                    .and_then(|engine| engine.prepared_handle_of(handle.raw()))
+                    != Some(handle)
+                {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                retained_ids.insert(entry.id);
+            }
+            let retained_ids = retained_ids.into_iter().collect::<Vec<_>>();
             return self.adopt_staged_declaration_with_world_activation(
                 staged,
                 &prior.visibility,
+                &retained_ids,
                 |key, visibility, delta| {
                     let successor = prefix.program.declaration_item_successor(
                         &predecessor,
