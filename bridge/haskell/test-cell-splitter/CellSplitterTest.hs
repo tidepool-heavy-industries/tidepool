@@ -8,6 +8,7 @@ import HarnessSourceTest (harnessSourceChecks)
 import InspectionRunnerTest (inspectionRunnerChecks)
 import WorkerDiagnosticsTest (runWorkerDiagnosticsTests)
 import QuasiQuoteOccurrencesTest (quasiQuoteOccurrenceChecks)
+import DemandScopeTest (demandScopeChecks)
 import TypedSegmentCases
   ( typedSegmentNativePreparation, typedSegmentRecordMetadataProperty
   , typedSegmentRewriteSemantics
@@ -56,6 +57,7 @@ tests = testGroup "cell-splitter"
   , testCase "functionValueInterfaceCompilation" functionValueInterfaceCompilation
   , testCase "sigmaValueInterfaceCompilation" sigmaValueInterfaceCompilation
   , testCase "constructorEvidenceClassification" constructorEvidenceClassification
+  , testCase "demandScopeChecks" demandScopeChecks
   , testCase "typedSegmentNativePreparation" typedSegmentNativePreparation
   , testCase "typedSegmentRecordMetadataProperty" typedSegmentRecordMetadataProperty
   , testCase "typedSegmentRewriteSemantics" typedSegmentRewriteSemantics
