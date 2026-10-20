@@ -1100,6 +1100,28 @@ def compile_fail_cases(package, library):
     return "\n".join(rules)
 
 
+def codegen_publication_test_cases(binary):
+    tests = (
+        "exact_visibility_query_tracks_frozen_and_promoted_identities",
+        "prepared_projection_preserves_ancestor_after_local_removal",
+        "promotion_shadowing_keeps_hidden_dependency_custody_without_install_allocations",
+        "prepared_promotion_witness_matches_committed_history",
+        "prepared_promotion_histories_match_visible_model",
+        "prepared_promotion_witness_refuses_exhaustion_before_mutation",
+    )
+    return "\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "codegen_publication_preparation_tests",',
+        f"    binary = {json.dumps(binary)},",
+        "    exact_tests = [",
+        *(f"        {json.dumps('binding_table::publication_preparation_tests::' + test)}," for test in tests),
+        "    ],",
+        f"    expected_count = {len(tests)},",
+        "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+        '    visibility = ["PUBLIC"],', ")", "",
+    ])
+
+
 def toolchain_compiler_free_test_cases(binary):
     # These cases use synthetic artifact state, not the package-wide compiler worker.
     lines = [
@@ -1209,6 +1231,9 @@ def runtime_test_cases(binary):
         "initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes",
         "native_admission_uses_exact_scoped_roots_and_keeps_its_original_ledger",
         "native_admission_commits_the_live_machine_export_owner",
+        "selected_native_imports_keep_exact_scoped_roots_and_refuse_sibling_only_values",
+        "settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots",
+        "world_private_admission_requires_the_actual_transaction_original",
     )]
     compiler_env, compiler_resources, worker = test_runtime_inputs("tidepool-runtime", "")
     compiler_arguments = runtime_arguments(
@@ -1219,8 +1244,8 @@ def runtime_test_cases(binary):
         '    name = "runtime_admission_tests",',
         f"    binary = {json.dumps(':' + binary)},",
         "    exact_tests = [", render_strings(tests, 8), "    ],",
-        "    expected_count = 3,", "    jobs = 1,", "    timeout = 30,",
-        "    test_rule_timeout_ms = 150000,", '    visibility = ["PUBLIC"],', ")", "",
+        f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 30,",
+        f"    test_rule_timeout_ms = {(len(tests) * 30 + 60) * 1000},", '    visibility = ["PUBLIC"],', ")", "",
     ])]
     semantic_tests = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
         "signed_template_helpers_execute_recursion_and_polymorphism_once",
@@ -1554,7 +1579,7 @@ for package_name, package in local.items():
     if package_name == "tidepool-toolchain":
         rules.append('load("//build/rust:executable_resource.bzl", "runtime_executable")\n')
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
-    if package_name == "tidepool-runtime":
+    if package_name in ("tidepool-runtime", "tidepool-codegen"):
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
     if package_name in ("tidepool-runtime", "tidepool-toolchain"):
         rules.append('load("//build/rust:compile_fail.bzl", "rust_compile_fail")\n')
@@ -1847,6 +1872,8 @@ tidepool_buildscript_run(
     visibility = ["PUBLIC"],
 )
 ''')
+        if package_name == "tidepool-codegen":
+            rules.append(codegen_publication_test_cases(":" + unit_target["name"] + "_binary"))
         if package_name == "exomonad-host":
             rules.append(facade_test_cases(unit_target["name"]))
         if package_name == "tidepool-runtime":

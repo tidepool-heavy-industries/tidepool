@@ -932,8 +932,10 @@ impl crate::checked_cell::CellProgram {
             predecessor.logical_id() == program.logical().logical_id()
         } else {
             predecessor.position.as_ref().is_some_and(|position| {
-                position.certificate == *program.certificate_sha256()
+                position.original_base == *program.logical().logical_id()
+                    && position.certificate == *program.certificate_sha256()
                     && position.next_item == ordinal
+                    && position.total_items == program.items().len()
             })
         };
         if !ordered || predecessor.restoration.producer != *program.producer_sha256()
@@ -1067,7 +1069,8 @@ impl CompilerWorld {
                     inputs.bindings.row_users.remove(&owner);
                     inputs.visible_rows.remove(&owner);
                     row_roots.remove(&owner);
-                    visible_changes.insert((old.symbol.unit.clone(), old.symbol.module.clone()),
+                    let interface = old.row.certified_interface().interface();
+                    visible_changes.insert((interface.unit().to_owned(), interface.module().to_owned()),
                         ciborium::value::Value::Null);
                 } else {
                     inputs.bindings.row_users.insert(owner, users - 1);
@@ -1090,7 +1093,8 @@ impl CompilerWorld {
                 })?;
                 inputs.visible_rows.insert(owner.clone(), selected.clone());
                 row_roots.insert(owner.clone(), *root);
-                visible_changes.remove(&(fact.symbol.unit.clone(), fact.symbol.module.clone()));
+                let interface = fact.row.certified_interface().interface();
+                visible_changes.remove(&(interface.unit().to_owned(), interface.module().to_owned()));
             } else {
                 let (entry, parts) = fact.row.world_type_parts()?;
                 let transport = rows.row(&entry, parts)?.0;

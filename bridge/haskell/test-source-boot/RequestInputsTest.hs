@@ -1470,7 +1470,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
               ExactInputsReady _ realization -> pure realization
               other -> fail ("real preparation could not acquire its captured world: " ++ show other)
             let template = unlines
-                  ["{-# LANGUAGE DataKinds #-}","{{CELL_PRAGMAS}}","module CellCheck where"
+                  ["{-# LANGUAGE DataKinds, QuasiQuotes #-}","{{CELL_PRAGMAS}}","module CellCheck where"
                   ,"import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
                   ,"{{CELL_DECLS}}"
                   ,"__tidepool_cell_check :: Eff '[] ()"

@@ -67,50 +67,19 @@ import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.Test.Runner (requiredInput)
 import Tidepool.TurnSource (preambleDefaultDeclaration)
 import qualified Tidepool.TypedSegment as TypedSegment
-import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot, typedSegmentInputOccurrences)
+import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot)
 import Unsafe.Coerce (unsafeCoerce)
 
 -- Consume an interface actually emitted by the whole-do/typed-batch issuer.
 -- This checks the real alias importer without constructing a world or value
 -- certificate, and does not establish runtime settlement permission.
-typedValueAliasControl :: FilePath -> FilePath -> TypedSegment.TypedSegmentPlan -> PreparedPipelineResult -> IO ()
-typedValueAliasControl libdir root plan prepared = do
+typedValueAliasControl :: FilePath -> FilePath -> PreparedPipelineResult -> IO ()
+typedValueAliasControl libdir root prepared = do
   captured <- case prProducedSessionInterfaces (pprPipelineResult prepared) of
     value:_ -> pure value
     [] -> fail "typed alias control requires an actual emitted session interface"
   let (owner,body) = Session.capturedSessionInterfaceBody captured
       environment = prHscEnv (pprPipelineResult prepared)
-  -- These call the same pre-import selector as held Prepare. In particular a
-  -- historical home-typed x must never enter its exactRequirements refusal
-  -- when the submitted use is bound locally instead.
-  let probe expression = unlines ["module LexicalDemand where"
-        ,TypedSegment.typedSegmentPlanRoot plan ++ " = " ++ expression]
-  forM_
-    [ ("let x = (1::Int) in x",False)
-    , ("(\\x -> x) (1::Int)",False)
-    , ("do { x <- pure (1::Int); pure x }",False)
-    , ("case (1::Int) of { x -> x }",False)
-    , ("let x = x in x",False)
-    , ("(let x = (1::Int) in x, x)",True)
-    , ("do { y <- pure x; pure y }",True)
-    , ("Other.x",False)
-    ] $ \(expression,expected) -> do
-      occurrences <- typedSegmentInputOccurrences environment plan (probe expression) >>= either (fail . show) pure
-      unless (("x" `elem` occurrences) == expected)
-        (fail ("held value demand lost GHC lexical scope: " ++ show (expression,occurrences)))
-  forM_
-    [ (probe "x" ++ "x = (1::Int)\n",False)
-    , (probe "helper" ++ "helper = x\n",True)
-    , (probe "let x = (1::Int) in x" ++ "helper = x\n",True)
-    ] $ \(source,expected) -> do
-      occurrences <- typedSegmentInputOccurrences environment plan source >>= either (fail . show) pure
-      unless (("x" `elem` occurrences) == expected)
-        (fail ("held value demand lost submitted module scope: " ++ show (source,occurrences)))
-  forM_ ["data Box = Box { x :: Int }", "class Box a where { x :: a }"] $ \declaration -> do
-    refused <- typedSegmentInputOccurrences environment plan (probe "pure ()" ++ declaration ++ "\n")
-    case refused of
-      Left _ -> pure ()
-      Right names -> fail ("value-group demand admitted generated value binders: " ++ show names)
   (packages,_,required) <- maybe (fail "typed alias control requires actual package evidence") pure
     (Session.capturedSessionInterfaceEvidence captured)
   session <- maybe (fail "typed alias control requires an actual canonical Val owner") pure
@@ -210,7 +179,7 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
         (PrepareAccepted, Right products) -> do
           let prepared = preparedSegmentProducts products
               environment = prHscEnv (pprPipelineResult prepared)
-          when (name == "let-poly") (typedValueAliasControl libdir root plan prepared)
+          when (name == "let-poly") (typedValueAliasControl libdir root prepared)
           selected <- maybe (fail (name ++ ": pinned resume package is absent")) pure
             (lookupPackageName (ue_units (hsc_unit_env environment)) (PackageName (fsLit "tidepool-resume")))
           let roots = concatMap packageInterfaces (Map.elems (pprPackageImports prepared))

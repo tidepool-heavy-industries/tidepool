@@ -3590,6 +3590,7 @@ struct HostInputRetirement {
     input: MountedHostInput,
     _lease: tidepool_runtime::session::resident::BindingLease,
     background_retire: Box<dyn FnOnce() + Send>,
+    retire_private: Option<Box<dyn FnOnce() -> futures_util::future::BoxFuture<'static, Result<(), ResidentActorWorkbenchError>> + Send>>,
     write: Option<tidepool_runtime::session::PendingHostValueWrite>,
     private: Option<Arc<tidepool_runtime::session::PrivateExecutionAdmission>>,
 }
@@ -3632,10 +3633,25 @@ impl HostInputRetirement {
                 });
             })
         };
+        let retire_private = private.as_ref().map(|private| {
+            let access = access.sharing();
+            let context = context.clone();
+            let binder = input.binder.clone();
+            let private = private.clone();
+            Box::new(move || -> futures_util::future::BoxFuture<'static, Result<(), ResidentActorWorkbenchError>> {
+                Box::pin(async move {
+                    access.with_machine(context, move |session, _, _| {
+                        session.retire_private_host_binding_owner(&private, &binder)
+                            .map_err(ResidentActorWorkbenchError::Resident)
+                    }).await
+                })
+            }) as Box<dyn FnOnce() -> futures_util::future::BoxFuture<'static, Result<(), ResidentActorWorkbenchError>> + Send>
+        });
         Self {
             input,
             _lease: lease,
             background_retire,
+            retire_private,
             write: Some(write),
             private,
         }
@@ -3650,6 +3666,18 @@ impl HostInputRetirement {
                 .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))?;
         }
         self.background_retire = Box::new(|| {});
+        Ok(())
+    }
+
+    async fn retire_for_publication(mut self) -> Result<(), ResidentActorWorkbenchError> {
+        let retire = self.retire_private.take().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol("host input lacks its original private retirement owner".into())
+        })?;
+        retire().await?;
+        // The exact owner has completed retirement under its source gates.
+        // Abandonment continues to use generic cleanup through Drop.
+        self.background_retire = Box::new(|| {});
+        self.write.take();
         Ok(())
     }
 
@@ -8575,7 +8603,10 @@ where
                     OwnedHostPayload::Job(job) => {
                         session.tag_host_text_binding_in(scope, &binder, job.clone())
                     }
-                    _ if hidden => session.hide_host_binding_in(scope, &binder),
+                    _ if hidden => match private.as_ref() {
+                        Some(execution) => session.hide_private_host_binding_in(execution, &binder),
+                        None => session.hide_host_binding_in(scope, &binder),
+                    },
                     _ => Ok(()),
                 };
                 if let Err(error) = presentation {
@@ -13948,6 +13979,15 @@ pub(crate) struct PreparedCellItem {
 pub(crate) struct CellPreparationLease {
     _bindings: tidepool_runtime::session::resident::BindingLease,
     _input: Option<HostInputRetirement>,
+}
+
+impl CellPreparationLease {
+    pub(crate) async fn retire_input_for_publication(&mut self) -> Result<(), ResidentActorWorkbenchError> {
+        if let Some(input) = self._input.take() {
+            input.retire_for_publication().await?;
+        }
+        Ok(())
+    }
 }
 
 impl From<tidepool_runtime::session::resident::BindingLease> for CellPreparationLease {
