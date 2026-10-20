@@ -4,7 +4,7 @@ module Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences
   , ParsedSegmentDemand, prepareSegmentDemand, segmentDemandMatchesSource
   , ParsedModuleDemand, prepareModuleDemand, moduleDemandMatchesSource
-  , moduleInputOccurrences, segmentModuleDemand
+  , moduleInputOccurrences, segmentModuleDemand, annotateModuleDemand
   , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope, associateSegmentDemandName
   ) where
 
@@ -49,6 +49,7 @@ import GHC.Utils.Outputable (ppr, text, (<+>))
 import Tidepool.TypedSegment.Types
 import Tidepool.ExactHydration
   ( CapturedGeneratedScaffoldSource, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath )
+import Tidepool.CheckedCell (ResolvedNativeSlots, applyNativeAnnotations)
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 
 -- The source issuer has already checked these bytes against its protected
@@ -67,6 +68,13 @@ segmentModuleDemand (ParsedSegmentDemand parsed) = parsed
 moduleDemandMatchesSource :: ParsedModuleDemand -> FilePath -> BS.ByteString -> Bool
 moduleDemandMatchesSource (ParsedModuleDemand captured _ _) path bytes =
   capturedGeneratedScaffoldPath captured == path && capturedGeneratedScaffoldBytes captured == bytes
+
+-- Native type substitution preserves the source issuer and no-quasiquote proof.
+-- The same resolved annotation product must also feed final module checking.
+annotateModuleDemand :: ResolvedNativeSlots -> ParsedModuleDemand -> IO ParsedModuleDemand
+annotateModuleDemand annotations (ParsedModuleDemand captured flags parsed) = do
+  (annotated, _) <- applyNativeAnnotations annotations parsed
+  pure (ParsedModuleDemand captured flags annotated)
 
 segmentDemandMatchesSource :: ParsedSegmentDemand -> FilePath -> BS.ByteString -> Bool
 segmentDemandMatchesSource = moduleDemandMatchesSource . segmentModuleDemand
