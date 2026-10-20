@@ -70,14 +70,27 @@ historical roots, empty-interface zero new group roots, explicit later child
 without own proof, namespace preservation, identical-row reuse and changed-scope
 nonreuse. Stage-specific body refusals stay meaningful.
 
-## Remaining actual native refusal
+## Remaining native and source boundaries
 
-Root owns NativeRootOutsideView artifact354aaa09 at actual593. Add bounded
-failure-owner evidence at existing admission owner: refusal site, artifact
-owner/descriptor and selected/retained/offered membership. Replay actual case
-once and identify first incorrect owner transfer. Do not infer a shared cause
-with mixed import failure or planner bug. No broader inventory/guard weakening.
-A changed authority contract requires root review; independent work proceeds.
+Carry the same `IssuedOriginalOutput` exact binding through compiler-input roles,
+custody, availability and decisions at all five consumers. Matching canonical
+bytes do not establish equal issued bindings. Do not reconstruct a binding from
+broader inventory, union unrelated views or weaken the guard. W's five-consumer
+migration remains source-only with incomplete tests.
+
+Mixed reuse must preserve phase-correct same-World completion environment,
+demanded prior source bodies and the actual Original worklist. Fix the Rust
+same-program repeated-SourceOriginal guard without silently duplicating native
+issuance. SOURCE-cycle source-body restoration and ordinary mixed reuse remain
+separate boundaries. H/engine and R own those respective repairs.
+
+An initial authored runtime exception is an ordinary `Rejected` result;
+`Delivered` describes a result after an actual effect-response resume. Root's
+wrong-payload control must discriminate that boundary without accepting success
+or infrastructure failure. Host-binding fixture preparation must carry the same
+checked rendered-source observation, rather than compare authored bytes with a
+larger generated module. Current exact runs and pending qualification are in
+[the verification ledger](tests/verification-ledger.md).
 
 ## Reload core and public route
 
