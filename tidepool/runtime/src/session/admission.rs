@@ -812,6 +812,7 @@ pub(super) struct RuntimeAdmissionOwner {
 
 struct RuntimeLexicalScopeRecord {
     owner_epoch: u64,
+    lexical_live: bool,
     lease: Option<std::sync::Weak<RuntimeLexicalScopeLease>>,
     original_source: Option<std::sync::Weak<RuntimeOriginalSource>>,
     owns_source_admission: bool,
@@ -1099,7 +1100,8 @@ impl RuntimeLexicalScopeLease {
                 .lock()
                 .get(&self.scope)
                 .is_some_and(|record| {
-                    record.source_admission.same_owner(&self.source_admission)
+                    record.lexical_live
+                        && record.source_admission.same_owner(&self.source_admission)
                         && record
                             .lease
                             .as_ref()
@@ -3015,6 +3017,7 @@ impl PersistentSession {
             scope,
             RuntimeLexicalScopeRecord {
                 owner_epoch,
+                lexical_live: true,
                 lease: Some(Arc::downgrade(&lease)),
                 original_source: Some(Arc::downgrade(&lease.original_source)),
                 owns_source_admission,
@@ -3101,6 +3104,7 @@ impl PersistentSession {
                 target,
                 RuntimeLexicalScopeRecord {
                     owner_epoch: self.admission_owner().epoch(),
+                    lexical_live: true,
                     lease: None,
                     original_source: None,
                     owns_source_admission: false,
@@ -3154,6 +3158,12 @@ impl PersistentSession {
             if record.owns_source_admission {
                 record.source_admission.retire_scope(scope);
             }
+        }
+    }
+
+    pub(super) fn invalidate_lexical_scope_custody(&self, scope: ScopeId) {
+        if let Some(record) = self.admission_owner().lexical_leases.lock().get_mut(&scope) {
+            record.lexical_live = false;
         }
     }
     /// Validate a retained placement without minting another scope or changing
@@ -5091,6 +5101,27 @@ mod tests {
             .original_source()
             .with_open_target(&target, || ())
             .is_err());
+    }
+
+    #[test]
+    fn automatic_ancestor_reap_invalidates_child_target_but_keeps_its_source() {
+        let mut session = PersistentSession::new(None, 1024);
+        let parent = session.mint_isolated_scope();
+        let child = session.mint_scope(parent).unwrap();
+        let child_lease = session.adopt_initial_notebook_scope(child).unwrap();
+        assert!(child_lease.prerequisites().is_empty());
+        let child_source = child_lease.original_source().clone();
+        let parent_lease = session.adopt_initial_notebook_scope(parent).unwrap();
+        let target = session.mint_isolated_scope_with_lease().unwrap();
+        child_source.with_open_target(&child_lease, || ()).unwrap();
+        drop(parent_lease);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(parent));
+        assert!(!session.scope_tree().is_live(child));
+        assert!(child_lease.validate_source_issuer().is_err());
+        assert!(child_source.with_open_target(&child_lease, || ()).is_err());
+        child_source.with_open_target(&target, || ()).unwrap();
+        assert!(session.adopt_initial_notebook_scope(child).is_err());
     }
 
     #[test]
