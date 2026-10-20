@@ -726,7 +726,19 @@ pub struct RuntimeCellAdmission {
     reserved_generations: Vec<Generation>,
     initial_value_generation: Generation,
     compiler_basis: RuntimeCellCompilerBasis,
+    declarations: RuntimeCellDeclarations,
     digest: tidepool_toolchain::checked_cell::AdmissionDigest,
+}
+
+struct RuntimeCellDeclarations {
+    root: PathBuf,
+    declaration_baseline: Option<super::lexical_projection::DeclarationProjectionBaseline>,
+    prepared_declarations: std::sync::OnceLock<
+        Vec<(
+            tidepool_toolchain::checked_cell::ExactCheckedItem,
+            Arc<super::lexical_projection::PreparedAuthoredDeclaration>,
+        )>,
+    >,
 }
 
 enum RuntimeCellCompilerBasis {
@@ -746,13 +758,6 @@ enum RuntimeCellCompilerBasis {
 pub(super) struct RuntimeFiniteCellInputs {
     visibility: PublicVisibilitySnapshot,
     catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
-    declaration_baseline: Option<super::lexical_projection::DeclarationProjectionBaseline>,
-    prepared_declarations: std::sync::OnceLock<
-        Vec<(
-            tidepool_toolchain::checked_cell::ExactCheckedItem,
-            Arc<super::lexical_projection::PreparedAuthoredDeclaration>,
-        )>,
-    >,
     compile_inputs: super::prepared::RuntimeCompileInputs,
     view: SessionCompileView,
     view_digest: [u8; 32],
@@ -2228,8 +2233,7 @@ impl RuntimeCellAdmission {
         cell: &Arc<tidepool_toolchain::checked_cell::ExactCheckedCell>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), SessionError> {
-        let finite = self.finite_inputs()?;
-        let mut baseline = finite.declaration_baseline.clone();
+        let mut baseline = self.declarations.declaration_baseline.clone();
         let mut prepared = Vec::new();
         for index in 0..cell.item_count() {
             let item = cell.item(index)?;
@@ -2239,28 +2243,33 @@ impl RuntimeCellAdmission {
             let Some(evidence) = item.planned_declaration() else {
                 continue;
             };
-            let generation = match &finite.planned {
-                Some(plan) => plan
-                    .items()
-                    .get(index)
-                    .and_then(|row| row.declaration_generation()),
-                None if index == 0 => self.reserved_generations.first().copied(),
-                None => None,
-            }
-            .ok_or(SessionError::StaleStagedDeclaration)?;
+            let generation = match &self.compiler_basis {
+                RuntimeCellCompilerBasis::Finite(finite) => match &finite.planned {
+                    Some(plan) => plan.items().get(index).and_then(|row| row.declaration_generation()),
+                    None if index == 0 => self.reserved_generations.first().copied(),
+                    None => None,
+                },
+                RuntimeCellCompilerBasis::World { reservation, .. } => {
+                    use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
+                    match reservation.slots().get(index) {
+                        Some(Slot::Prologue { declaration } | Slot::Declaration { declaration }) => Some(Generation(*declaration)),
+                        _ => None,
+                    }
+                }
+            }.ok_or(SessionError::StaleStagedDeclaration)?;
             let projection = super::lexical_projection::prepare_authored_projection(
                 baseline.as_ref(),
                 generation,
                 evidence.clone(),
                 &[],
-                &finite.include_paths,
-                finite.view.session_root(),
+                item.include_paths(),
+                &self.declarations.root,
                 settlement,
             )?;
             baseline = Some(projection.next_baseline());
             prepared.push((item, projection));
         }
-        finite
+        self.declarations
             .prepared_declarations
             .set(prepared)
             .map_err(|_| SessionError::StaleStagedDeclaration)
@@ -2282,7 +2291,7 @@ impl RuntimeCellAdmission {
         &self,
         item: &tidepool_toolchain::checked_cell::ExactCheckedItem,
     ) -> Result<Arc<super::lexical_projection::PreparedAuthoredDeclaration>, SessionError> {
-        self.finite_inputs()?
+        self.declarations
             .prepared_declarations
             .get()
             .and_then(|rows| rows.iter().find(|(prepared_item, _)| prepared_item == item))
@@ -4052,11 +4061,14 @@ impl PersistentSession {
             scope,
             reserved_generations,
             initial_value_generation,
+            declarations: RuntimeCellDeclarations {
+                root: view.session_root().to_path_buf(),
+                declaration_baseline,
+                prepared_declarations: std::sync::OnceLock::new(),
+            },
             compiler_basis: RuntimeCellCompilerBasis::Finite(RuntimeFiniteCellInputs {
                 visibility,
                 catalog_selection: self.catalog_selection().clone(),
-                declaration_baseline,
-                prepared_declarations: std::sync::OnceLock::new(),
                 compile_inputs,
                 view,
                 view_digest,
@@ -4738,6 +4750,17 @@ impl PersistentSession {
             scope,
             reserved_generations,
             initial_value_generation,
+            declarations: RuntimeCellDeclarations {
+                root: self.lib().root.clone(),
+                declaration_baseline: if !reservation.slots().iter().any(|slot| matches!(slot,
+                    tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Prologue { .. } |
+                    tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Declaration { .. })) { None } else {
+                    super::lexical_projection::DeclarationProjectionBaseline::capture(
+                        self.lib(), self.lib().scope_tip(scope),
+                    )?
+                },
+                prepared_declarations: std::sync::OnceLock::new(),
+            },
             compiler_basis: RuntimeCellCompilerBasis::World {
                 reservation,
                 private_key,
