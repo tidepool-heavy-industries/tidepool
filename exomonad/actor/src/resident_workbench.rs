@@ -9303,7 +9303,7 @@ where
                                 &evidence.reference,
                                 &original_source,
                             ) {
-                                world_introspection_answer(kind, &completed)
+                                world_introspection_answer(&completed)
                             } else {
                                 StructuredIntrospectionAnswer::CompilerUnavailable(
                                     "inspection world base changed before resumption".into(),
@@ -14772,39 +14772,27 @@ fn public_module_query_source(
 }
 
 fn world_introspection_answer(
-    kind: StructuredInspectionKind,
     completed: &tidepool_runtime::session::CompletedInspectionWorld,
 ) -> StructuredIntrospectionAnswer {
-    // Runtime CAS has checked the exact private world base. The displayed
-    // world observation is not the checked-source compile-view fingerprint.
-    match (kind, completed.result()) {
-        (
-            StructuredInspectionKind::Info,
-            Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info))),
-        ) => StructuredIntrospectionAnswer::Info(info.clone()),
-        (
-            StructuredInspectionKind::Type,
-            Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))),
-        ) => StructuredIntrospectionAnswer::Type(info.clone()),
-        (
-            _,
-            Ok(
-                tidepool_runtime::session::InspectionResult::StructuredInfo(Err(error))
-                | tidepool_runtime::session::InspectionResult::StructuredType(Err(error)),
-            ),
-        ) => StructuredIntrospectionAnswer::QueryError(error.clone()),
-        (_, Err(tidepool_toolchain::compiler_world::WorldQueryRejection::Unsupported)) => {
+    use tidepool_toolchain::compiler_world::{WorldAnswer, WorldQueryRejection};
+    match completed.answer() {
+        WorldAnswer::Info { info, .. } => StructuredIntrospectionAnswer::Info(info.clone()),
+        WorldAnswer::Type { info, .. } => StructuredIntrospectionAnswer::Type(info.clone()),
+        WorldAnswer::NameRefused { refusal, .. } => {
+            StructuredIntrospectionAnswer::QueryError(refusal.clone().into())
+        }
+        WorldAnswer::Absent(absence) => StructuredIntrospectionAnswer::QueryError(
+            tidepool_runtime::session::QueryError::UnknownModule(absence.module.clone()),
+        ),
+        WorldAnswer::Rejected(WorldQueryRejection::Unsupported) => {
             StructuredIntrospectionAnswer::QueryError(
                 tidepool_runtime::session::QueryError::Unsupported(
                     "compiler world does not support this public-module query".into(),
                 ),
             )
         }
-        (_, Err(reason)) => StructuredIntrospectionAnswer::CompilerUnavailable(format!(
-            "compiler world refused the query: {reason:?}"
-        )),
-        (_, Ok(_)) => StructuredIntrospectionAnswer::CompilerUnavailable(
-            "world inspection returned the wrong structured answer".into(),
+        WorldAnswer::Rejected(reason) => StructuredIntrospectionAnswer::CompilerUnavailable(
+            format!("compiler world refused the query: {reason:?}"),
         ),
     }
 }
@@ -17586,7 +17574,7 @@ pub(crate) mod request_tests {
             workbench_runner_for_test(&workbench).adopt_final_source_scope(context.clone()).await.unwrap();
             let cold = HostWorkObservation::new();
             let first = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Info, cold.clone()).await;
-            assert!(matches!(first.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info))) if info.identifier.name == "known"));
+            assert!(matches!(first.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Info { info, .. } if info.identifier.name == "known"));
             assert_eq!(cold.snapshot().get(HostWorkCounter::ColdBootstrap), 1);
             assert!(cold.snapshot().get(HostWorkCounter::CompilerMetadataSnapshot) > 0);
             let fingerprint = first.provenance().fingerprint.clone();
@@ -17692,7 +17680,7 @@ pub(crate) mod request_tests {
                     let observation = HostWorkObservation::new();
                     let answer = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", kind, observation.clone()).await;
                     assert_eq!(answer.provenance().fingerprint, fingerprint);
-                    assert!(answer.result().is_ok());
+                    assert!(matches!(answer.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Info { .. } | tidepool_toolchain::compiler_world::WorldAnswer::Type { .. }));
                     assert_world_hot_work(&observation.snapshot(), WorldEnsureExpectation::ResidentHit);
                 }
             }
@@ -17701,7 +17689,7 @@ pub(crate) mod request_tests {
             transferred.placement = history_context.placement;
             let transferred_cold = HostWorkObservation::new();
             let transferred_answer = installed_world_query(&workbench, transferred.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Type, transferred_cold.clone()).await;
-            assert!(matches!(transferred_answer.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))) if info.expression.canonical == "Int"));
+            assert!(matches!(transferred_answer.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Int"));
             assert_eq!(transferred_cold.snapshot().get(HostWorkCounter::RetainedValueSupportMerge), 0);
             assert!(transferred_cold.snapshot().get(HostWorkCounter::ReachableValueVisit) >= 3);
             let original = context.source_dependency().source_lease().unwrap();
@@ -17769,7 +17757,7 @@ pub(crate) mod request_tests {
                 if !receipt.unit.is_empty() && receipt.module == "WorldQuestion"
                     && matches!(&receipt.origin, WorldModuleOrigin::Home { root: 4, path, source_sha256 }
                         if path == "WorldQuestion.hs" && source_sha256 == expected.sha256())));
-            assert!(matches!(first.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))) if info.expression.canonical == "Int"));
+            assert!(matches!(first.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Int"));
             let initially_absent = installed_world_query(&workbench, context.clone(), captured.clone(), "CreatedLater", StructuredInspectionKind::Info, HostWorkObservation::new()).await;
             assert!(matches!(initially_absent.resolution(), WorldModuleResolution::Absent(missing) if missing.module == "CreatedLater"));
             let mut reversed_bodies = bodies.clone();
@@ -17790,17 +17778,17 @@ pub(crate) mod request_tests {
                 if !receipt.unit.is_empty() && receipt.module == "WorldQuestion"
                     && matches!(&receipt.origin, WorldModuleOrigin::Home { root: 4, path, source_sha256 }
                         if path == "WorldQuestion.hs" && source_sha256 == expected_second.sha256())));
-            assert!(matches!(second.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))) if info.expression.canonical == "Bool"));
+            assert!(matches!(second.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Bool"));
             assert_ne!(first.provenance().fingerprint, second.provenance().fingerprint);
             std::fs::write(owner.paths[4].join("WorldQuestion.hs"), second_body).unwrap();
             std::fs::write(owner.paths[4].join("CreatedLater.hs"), "module CreatedLater where\nknown = True\n").unwrap();
             let hot = HostWorkObservation::new();
             let retained = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Type, hot.clone()).await;
-            assert!(matches!(retained.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))) if info.expression.canonical == "Int"));
+            assert!(matches!(retained.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Int"));
             assert_world_hot_work(&hot.snapshot(), WorldEnsureExpectation::ResidentHit);
             let absent = installed_world_query(&workbench, context.clone(), captured.clone(), "CreatedLater", StructuredInspectionKind::Info, HostWorkObservation::new()).await;
             assert!(matches!(absent.resolution(), WorldModuleResolution::Absent(missing) if missing.module == "CreatedLater"));
-            assert!(matches!(absent.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Err(tidepool_runtime::session::QueryError::UnknownModule(module)))) if module == "CreatedLater"));
+            assert!(matches!(absent.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Absent(absence) if absence.module == "CreatedLater"));
             let stale = workbench.query_public_module_world(context.clone(), tidepool_runtime::session::NameQuery {
                 scope: tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()),
                 namespace: tidepool_runtime::session::NameNamespace::Value, name: "known".into(),
@@ -17860,7 +17848,7 @@ pub(crate) mod request_tests {
             assert_eq!(defining.module, "GHC.Internal.Maybe");
             assert_ne!(defining.unit, facade_module.unit);
             assert!(matches!(&defining.origin, WorldModuleOrigin::Package { .. }));
-            assert!(matches!(facade.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info)))
+            assert!(matches!(facade.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Info { info, .. }
                 if info.identifier.module == "GHC.Internal.Maybe" && info.identifier.name == "Just"));
             let direct = installed_named_world_query(&workbench, reexport_context, reexports, constructor_query("GHC.Internal.Maybe"), StructuredInspectionKind::Info, HostWorkObservation::new()).await;
             let expected_home = tidepool_runtime::session::GenerationArtifactReference::capture(home_body.as_bytes().to_vec());
@@ -17870,7 +17858,7 @@ pub(crate) mod request_tests {
                 if path == "GHC/Internal/Maybe.hs" && source_sha256 == expected_home.sha256()));
             assert_eq!(direct.defining_module(), Some(&home_module));
             assert_ne!(defining.unit, home_module.unit);
-            assert!(matches!(direct.result(), Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info)))
+            assert!(matches!(direct.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Info { info, .. }
                 if info.identifier.name == "Just"));
             let (mismatched, _mismatched_owner) = world_query_test_source(&[Some("module Different where\nknown :: Int\nknown = 7\n")]);
             let mismatch_layer = mismatched.clone();

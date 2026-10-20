@@ -10,7 +10,9 @@ rust_filegroup(
     mapped_srcs = {
         "Cargo.toml": "tidepool/extract-report/Cargo.toml",
         "src/artifact_manifest.rs": "tidepool/extract-report/src/artifact_manifest.rs",
+        "src/inspection.rs": "tidepool/extract-report/src/inspection.rs",
         "src/lib.rs": "tidepool/extract-report/src/lib.rs",
+        "src/world_query.rs": "tidepool/extract-report/src/world_query.rs",
     },
     visibility = ["PUBLIC"],
 )
@@ -25,6 +27,7 @@ tidepool_rust_library(
     srcs_filegroup = ":tidepool_extract_report_sources",
     deps = [
         "//third-party/rust:blake3",
+        "//third-party/rust:ciborium",
         "//third-party/rust:serde",
         "//third-party/rust:serde_json",
         "//third-party/rust:thiserror",
@@ -38,7 +41,9 @@ rust_filegroup(
     mapped_srcs = {
         "Cargo.toml": "tidepool/extract-report/Cargo.toml",
         "src/artifact_manifest.rs": "tidepool/extract-report/src/artifact_manifest.rs",
+        "src/inspection.rs": "tidepool/extract-report/src/inspection.rs",
         "src/lib.rs": "tidepool/extract-report/src/lib.rs",
+        "src/world_query.rs": "tidepool/extract-report/src/world_query.rs",
     },
     visibility = ["PUBLIC"],
 )
@@ -53,6 +58,7 @@ tidepool_rust_isolated_test(
     srcs_filegroup = ":tidepool_extract_report_unit_tests_sources",
     deps = [
         "//third-party/rust:blake3",
+        "//third-party/rust:ciborium",
         "//third-party/rust:serde",
         "//third-party/rust:serde_json",
         "//third-party/rust:thiserror",
@@ -69,7 +75,9 @@ filegroup(
         "tidepool/extract-report/BUCK": "BUCK",
         "tidepool/extract-report/Cargo.toml": "Cargo.toml",
         "tidepool/extract-report/src/artifact_manifest.rs": "src/artifact_manifest.rs",
+        "tidepool/extract-report/src/inspection.rs": "src/inspection.rs",
         "tidepool/extract-report/src/lib.rs": "src/lib.rs",
+        "tidepool/extract-report/src/world_query.rs": "src/world_query.rs",
     },
     visibility = ["PUBLIC"],
 )
