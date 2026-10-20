@@ -13,7 +13,9 @@ use crate::artifact_inventory::{ArtifactBinding, CanonicalProducerIdentity};
 use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
 use crate::declaration_context::ExactDeclarationContext;
-use crate::exact_context::{ContextRoot, MaterializedMap, Materializer, ReachableBlocks};
+use crate::exact_context::{
+    ContextRoot, MaterializedMap, Materializer, ReachableBlocks, SemanticRoots,
+};
 use crate::CompileError;
 
 /// One closed captured source namespace. The capture owner decides its supported
@@ -1001,24 +1003,22 @@ fn world_digest(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn world_restoration_product(
-    primary_root: &cid::Cid,
+    roots: &SemanticRoots,
     source_seal: &[u8; 32],
     producer: &[u8; 32],
     profile: &[u8; 32],
     query_scope: u64,
-    association_root: &cid::Cid,
-    binding_root: &cid::Cid,
 ) -> Result<Vec<u8>, CompileError> {
     world_bytes(&world_array(vec![
         world_text("TPCWREST"),
         3u64.into(),
-        world_blob(primary_root.to_bytes()),
+        world_blob(roots.primary.to_bytes()),
         world_blob(source_seal),
         world_blob(producer),
         world_blob(profile),
         query_scope.into(),
-        world_blob(association_root.to_bytes()),
-        world_blob(binding_root.to_bytes()),
+        world_blob(roots.associations.to_bytes()),
+        world_blob(roots.bindings.to_bytes()),
     ]))
 }
 
@@ -1579,7 +1579,7 @@ impl CompilerWorldOpenInputs {
                 source_failure("compiler world requires a retained service package source")
             })?
             .profile_id();
-        let (primary_context, primary_root, mut primary_blocks) =
+        let (primary_context, primary_root, primary_blocks) =
             self.materialize_primary(endpoint)?;
         self.primary_context = primary_context;
         // This cold issuer preserves the actual primary selection and native
@@ -1673,14 +1673,14 @@ impl CompilerWorldOpenInputs {
         let staged = binding_materializer
             .finish()
             .map_err(|error| source_failure(error.to_string()))?;
-        primary_blocks = primary_blocks
-            .replace_roots(
+        let (semantic_roots, primary_blocks) = primary_blocks
+            .replace_semantic_roots(
                 &staged,
-                vec![
-                    *primary_root.cid(),
-                    *primary_associations.root().cid(),
-                    *bindings.root().cid(),
-                ],
+                SemanticRoots {
+                    primary: *primary_root.cid(),
+                    associations: *primary_associations.root().cid(),
+                    bindings: *bindings.root().cid(),
+                },
             )
             .map_err(|error| source_failure(error.to_string()))?;
         let work = primary_blocks.work();
@@ -1703,19 +1703,12 @@ impl CompilerWorldOpenInputs {
             .collect();
         // CID-validated roots bind logical facts. Cold transfer order and raw
         // image inventory are not part of a live successor's fixed identity.
-        let [primary_cid, association_cid, binding_cid] = primary_blocks.roots() else {
-            return Err(source_failure(
-                "world frontier does not retain its three semantic roots",
-            ));
-        };
         let product = world_restoration_product(
-            primary_cid,
+            &semantic_roots,
             self.sources.seal(),
             &producer,
             &profile,
             self.bindings.query_scope,
-            association_cid,
-            binding_cid,
         )?;
         let logical_id = world_digest(&product);
         let source_path = self.directory.path().join("sources.bin");
@@ -4065,13 +4058,15 @@ mod identity_tests {
         assert_eq!(roots.len(), 3);
         world_digest(
             &world_restoration_product(
-                &roots[0],
+                &SemanticRoots {
+                    primary: roots[0],
+                    associations: roots[1],
+                    bindings: roots[2],
+                },
                 sources.seal(),
                 producer,
                 profile,
                 query_scope,
-                &roots[1],
-                &roots[2],
             )
             .unwrap(),
         )

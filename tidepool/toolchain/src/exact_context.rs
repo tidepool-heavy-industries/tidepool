@@ -318,6 +318,14 @@ pub(crate) struct FrontierWork {
     pub(crate) decoded_bytes: u64,
 }
 
+/// The three named roots that define a compiler world's semantic frontier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SemanticRoots {
+    pub(crate) primary: Cid,
+    pub(crate) associations: Cid,
+    pub(crate) bindings: Cid,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 struct ReachableBlock {
     bytes: Arc<[u8]>,
@@ -365,6 +373,21 @@ impl ReachableBlocks {
         }
         next.roots = roots;
         Ok(next)
+    }
+
+    /// Replace the semantic frontier from its named roots. The three-root
+    /// shape is carried by `SemanticRoots` instead of re-checked after
+    /// publication.
+    pub(crate) fn replace_semantic_roots(
+        &self,
+        staged: &StagedBlocks,
+        roots: SemanticRoots,
+    ) -> Result<(SemanticRoots, Self), SnapshotError> {
+        let frontier = self.replace_roots(
+            staged,
+            vec![roots.primary, roots.associations, roots.bindings],
+        )?;
+        Ok((roots, frontier))
     }
 
     /// Build independent custody for selected roots, borrowing only cached block
