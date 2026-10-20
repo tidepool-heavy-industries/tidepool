@@ -698,9 +698,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 entries,
             )
             .unwrap();
-        let output =
-            crate::declaration_context::OriginalCompilerInputs::from_selection(&selection, &issued)
-                .unwrap();
+        let output = issued;
         let empty = CompilerSourceSupport::close_complete_output(&output)
             .unwrap()
             .close_request(
@@ -736,7 +734,9 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 }
             }
         }
-        let closure = selection.selected_original_closure(&issued).unwrap();
+        let closure = selection
+                    .selected_original_closure(output.issued_artifacts())
+                    .unwrap();
         let support = empty.certify_original_closure(&closure).unwrap();
         // The explicit selection consumes all three completed output bodies here;
         // the later target demand independently selects only its exact closure.
