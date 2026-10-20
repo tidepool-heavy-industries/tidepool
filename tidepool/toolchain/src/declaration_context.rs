@@ -17903,11 +17903,44 @@ mod tests {
             "the later current context really has the stronger Full row"
         );
         let selected = later.published_source_original_selections().unwrap();
-        assert_eq!(selected.as_slice(), std::slice::from_ref(&partial));
+        assert_eq!(selected.len(), 1);
         assert_eq!(
-            mode(&selected[0]),
+            selected[0]
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root],
+            partial
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root]
+        );
+        let birth = selected[0]
+            .context()
+            .compiler_source_support()
+            .publication_birth_support(&root)
+            .unwrap();
+        let expected_birth = partial
+            .context()
+            .compiler_source_support()
+            .publication_birth_support(&root)
+            .unwrap();
+        assert_eq!(
+            birth.artifacts().capture_graph_selection(),
+            expected_birth.artifacts().capture_graph_selection()
+        );
+        assert_eq!(
+            birth.native_availability().persistent_facts(),
+            expected_birth.native_availability().persistent_facts()
+        );
+        assert_eq!(
+            birth.native_availability().persistent_facts()[&original].mode,
             NativeTransportMode::IssuedGroups,
             "current Full cannot upgrade the recorded Partial birth"
+        );
+        assert_eq!(
+            mode(&selected[0]),
+            NativeTransportMode::Full,
+            "reopening preserves the actual current projection"
         );
     }
 
@@ -18102,7 +18135,37 @@ mod tests {
             .unwrap()
             .permits(7));
         let selected = later.published_source_original_selections().unwrap();
-        assert_eq!(selected.as_slice(), std::slice::from_ref(&published));
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0]
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root],
+            published
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root]
+        );
+        let selected_birth = selected[0]
+            .context()
+            .compiler_source_support()
+            .publication_birth_support(&root)
+            .unwrap();
+        assert_eq!(
+            selected_birth.artifacts().capture_graph_selection(),
+            born.artifacts().capture_graph_selection()
+        );
+        assert_eq!(
+            selected_birth.native_availability().persistent_facts(),
+            born.native_availability().persistent_facts()
+        );
+        let born_beta = selected_birth
+            .native_availability()
+            .rows()
+            .find(|row| row.original.descriptor.id == beta_original)
+            .unwrap();
+        assert_eq!(born_beta.mode, NativeTransportMode::IssuedGroups);
+        assert!(born_beta.issued_ordinals().is_empty());
         let selected_beta = selected[0]
             .context()
             .compiler_source_support()
@@ -18110,8 +18173,8 @@ mod tests {
             .rows()
             .find(|row| row.original.descriptor.id == beta_original)
             .unwrap();
-        assert_eq!(selected_beta.mode, NativeTransportMode::IssuedGroups);
-        assert!(selected_beta.issued_ordinals().is_empty());
+        assert_eq!(selected_beta.mode, NativeTransportMode::Full);
+        assert!(selected_beta.permits(7));
         let store = MemoryBlockstore::new();
         let mut writer = Materializer::new(&store);
         let receipt = writer.materialize_context(None, &later.snapshot()).unwrap();
@@ -18137,10 +18200,31 @@ mod tests {
             .context_for_expected_snapshot(receipt.root(), &decoded)
             .unwrap();
         let restored_birth = restored.published_source_original_selections().unwrap();
-        assert_eq!(restored_birth.as_slice(), std::slice::from_ref(&published));
-        assert!(restored_birth[0]
+        assert_eq!(restored_birth.len(), 1);
+        assert_eq!(
+            restored_birth[0]
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root],
+            published
+                .context()
+                .compiler_input_projection()
+                .snapshot_roles()[&root]
+        );
+        let restored_support = restored_birth[0]
             .context()
             .compiler_source_support()
+            .publication_birth_support(&root)
+            .unwrap();
+        assert_eq!(
+            restored_support.artifacts().capture_graph_selection(),
+            born.artifacts().capture_graph_selection()
+        );
+        assert_eq!(
+            restored_support.native_availability().persistent_facts(),
+            born.native_availability().persistent_facts()
+        );
+        assert!(restored_support
             .native_offers()
             .iter()
             .filter(|offer| offer.original() == beta_original)
@@ -18149,8 +18233,13 @@ mod tests {
                 NativeOfferSnapshotBody::Empty(_)
             )));
         assert_eq!(
-            restored_birth[0].context().semantic_sha256(),
-            published.context().semantic_sha256()
+            restored_birth[0]
+                .context()
+                .compiler_source_support()
+                .native_availability()
+                .persistent_facts()[&beta_original]
+                .mode,
+            NativeTransportMode::Full
         );
     }
 
