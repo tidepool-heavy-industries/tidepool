@@ -1558,7 +1558,9 @@ mod tests {
             let Err(primary_error) = primary.as_ref() else {
                 panic!("source restoration must preserve the actual primary failure");
             };
-            assert!(primary_error.to_string().contains("retained storage evidence"));
+            assert!(primary_error
+                .to_string()
+                .contains("retained storage evidence"));
         }
     }
 
@@ -1583,16 +1585,68 @@ mod tests {
             StoreErrorKind::RecoveryRequired,
         ] {
             let error = crate::ResidentActorWorkbenchError::Delivered(ResidentError::Run(
-                tidepool_runtime::RuntimeError::Session(SessionError::RecoveryStore(Box::new(StoreError {
-                    path: "nested-owner-boundary-control.db".into(),
-                    kind,
-                    detail: "nested storage evidence".into(),
-                }))),
+                tidepool_runtime::RuntimeError::Session(SessionError::RecoveryStore(Box::new(
+                    StoreError {
+                        path: "nested-owner-boundary-control.db".into(),
+                        kind,
+                        detail: "nested storage evidence".into(),
+                    },
+                ))),
             ));
             assert_eq!(
                 error.publication_failure_cause(),
                 Cause::RecoveryStore(kind)
             );
+        }
+    }
+
+    #[test]
+    fn publication_recovery_requirement_survives_owned_error_wrappers() {
+        use super::super::ActorPublicationFailureCause as Cause;
+        use tidepool_runtime::session::{
+            ResidentError, SessionError, StoreError, StoreErrorKind, StoreRefusal,
+        };
+        for kind in [StoreErrorKind::Storage, StoreErrorKind::RecoveryRequired] {
+            for wrapper in 0..6 {
+                let store = StoreError {
+                    path: "wrapped-owner-boundary-control.db".into(),
+                    kind,
+                    detail: "wrapped storage evidence".into(),
+                };
+                let session = if wrapper == 5 {
+                    SessionError::RecoveryStoreRefused(StoreRefusal::Storage(store))
+                } else {
+                    SessionError::RecoveryStore(Box::new(store))
+                };
+                let resident = match wrapper {
+                    0 | 5 => ResidentError::Session(session),
+                    1 => ResidentError::Run(tidepool_runtime::RuntimeError::Session(session)),
+                    2 => ResidentError::ActivationInputConsumed {
+                        binding: tidepool_repr::SessionVarId::from_extract(1),
+                        source: Box::new(ResidentError::Session(session)),
+                    },
+                    3 => ResidentError::ActivationMountCommitted {
+                        binding: tidepool_repr::SessionVarId::from_extract(1),
+                        source: Box::new(ResidentError::Session(session)),
+                    },
+                    4 => ResidentError::ActivationMountCommitted {
+                        binding: tidepool_repr::SessionVarId::from_extract(1),
+                        source: Box::new(ResidentError::Run(
+                            tidepool_runtime::RuntimeError::Session(session),
+                        )),
+                    },
+                    _ => unreachable!(),
+                };
+                let error = crate::ResidentActorWorkbenchError::Resident(resident);
+                assert_eq!(
+                    error.publication_failure_cause(),
+                    Cause::RecoveryStore(kind)
+                );
+                assert_eq!(
+                    error.requires_recovery(),
+                    kind == StoreErrorKind::RecoveryRequired
+                );
+            }
         }
     }
 
