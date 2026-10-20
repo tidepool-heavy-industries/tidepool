@@ -310,6 +310,29 @@ mod tests {
     }
 
     #[test]
+    fn form_custody_requires_an_issued_source_before_host_io() {
+        use crate::resident_workbench::generation_admission::{
+            BootstrapWorld, GenerationAdmissionError, SourceDependency,
+        };
+
+        let host = Arc::new(Host::default());
+        for source in [
+            SourceDependency::Unqualified,
+            SourceDependency::World(BootstrapWorld::new(None)),
+        ] {
+            assert!(matches!(
+                FormCleanup::new(actor(), "unissued".into(), host.clone(), source),
+                Err(GenerationAdmissionError::Unqualified)
+            ));
+        }
+        let (_session, source) = source();
+        let issued = FormCleanup::new(actor(), "issued".into(), host.clone(), source).unwrap();
+        assert!(!issued.is_closed());
+        assert_eq!(host.opens.load(Ordering::SeqCst), 0);
+        assert_eq!(host.closes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn dropping_one_continuation_form_closes_once_and_preserves_sibling() {
         let (_session, source) = source();
         let host = Arc::new(Host::default());
