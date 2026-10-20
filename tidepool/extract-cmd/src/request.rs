@@ -3,8 +3,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v24";
-const MAGIC: &[u8; 8] = b"TPREQ024";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v25";
+const MAGIC: &[u8; 8] = b"TPREQ025";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -25,6 +25,7 @@ pub enum ExactInputsAcquisition {
     Resident(String),
     /// Strict cold-world descriptor; input descriptors retain their existing owner.
     Complete(PathBuf),
+    Successor { predecessor: String, realization: String, descriptor: PathBuf },
 }
 
 impl ExactInputsRequest {
@@ -34,6 +35,7 @@ impl ExactInputsRequest {
             && match &self.acquisition {
                 ExactInputsAcquisition::Resident(reference) => valid(reference),
                 ExactInputsAcquisition::Complete(path) => path.to_str().is_some_and(valid),
+                ExactInputsAcquisition::Successor { predecessor, realization, descriptor } => valid_world_identity(predecessor) && valid(realization) && descriptor.to_str().is_some_and(valid),
             }
     }
 }
@@ -1012,6 +1014,7 @@ impl ExtractRequest {
                     let acquisition = match decoder.byte()? {
                         0 => ExactInputsAcquisition::Resident(decoder.string()?),
                         1 => ExactInputsAcquisition::Complete(PathBuf::from(decoder.os_string()?)),
+                        2 => ExactInputsAcquisition::Successor { predecessor: decoder.string()?, realization: decoder.string()?, descriptor: PathBuf::from(decoder.os_string()?) },
                         _ => return Err(ProtocolError::InvalidExactInputs),
                     };
                     Field::EnsureExactInputs(ExactInputsRequest { root, acquisition })
@@ -2041,6 +2044,12 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
                 ExactInputsAcquisition::Complete(path) => {
                     out.push(1);
                     push_frame(out, path.as_os_str());
+                }
+                ExactInputsAcquisition::Successor { predecessor, realization, descriptor } => {
+                    out.push(2);
+                    push_frame(out, OsStr::new(predecessor));
+                    push_frame(out, OsStr::new(realization));
+                    push_frame(out, descriptor.as_os_str());
                 }
             }
         }

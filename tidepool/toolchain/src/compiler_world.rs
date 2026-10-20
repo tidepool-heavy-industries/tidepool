@@ -368,10 +368,12 @@ struct WorldBindingFact {
 
 /// The current occurrence table, coupled to genuine checked rows by its
 /// publication owner. Aliases keep independent names and share their row.
+#[derive(Clone)]
 pub struct CompilerWorldBindings {
     query_scope: u64,
     entries: imbl::OrdMap<String, WorldBindingFact>,
     metadata_bytes: u64,
+    row_users: imbl::OrdMap<String, usize>,
 }
 
 // The occurrence is the existing SnapshotKey<String>. The row link names the
@@ -399,6 +401,7 @@ impl CompilerWorldBindings {
             return Err(binding_capture_refusal(reserved, allowance));
         }
         let mut entries = imbl::OrdMap::new();
+        let mut row_users = imbl::OrdMap::new();
         for input in bindings {
             crate::host_work::checkpoint()?;
             let symbol = input.symbol;
@@ -432,6 +435,9 @@ impl CompilerWorldBindings {
             if entries.contains_key(input.occurrence) {
                 return Err(source_failure("duplicate visible compiler occurrence"));
             }
+            let owner = input.row.owner().module_name();
+            let count = row_users.get(&owner).copied().unwrap_or(0);
+            row_users.insert(owner, count + 1);
             entries.insert(
                 input.occurrence.to_owned(),
                 WorldBindingFact {
@@ -446,6 +452,7 @@ impl CompilerWorldBindings {
             query_scope,
             entries,
             metadata_bytes: reserved,
+            row_users,
         })
     }
 
@@ -492,7 +499,7 @@ impl CompilerWorldBindings {
 
     fn cold_snapshot(
         &self,
-        rows: &BTreeMap<String, cid::Cid>,
+        rows: &imbl::OrdMap<String, cid::Cid>,
     ) -> Result<imbl::OrdMap<String, WorldBindingSnapshotFact>, CompileError> {
         let mut facts = imbl::OrdMap::new();
         for (occurrence, entry) in &self.entries {
@@ -672,9 +679,10 @@ impl CompilerWorldLexicalSurface {
     }
 }
 
+#[derive(Clone)]
 pub struct CompilerWorldOpenInputs {
     primary_context: Arc<ExactDeclarationContext>,
-    visible_rows: Vec<Arc<CheckedValueArtifact>>,
+    visible_rows: imbl::OrdMap<String, Arc<CheckedValueArtifact>>,
     bindings: CompilerWorldBindings,
     sources: Arc<CapturedCompilerSources>,
     lexical: CompilerWorldLexicalSurface,
@@ -692,7 +700,7 @@ impl CompilerWorldOpenInputs {
     ) -> Result<Self, CompileError> {
         Ok(Self {
             primary_context,
-            visible_rows,
+            visible_rows: visible_rows.into_iter().map(|row| (row.owner().module_name(), row)).collect(),
             bindings,
             sources,
             lexical,
@@ -710,11 +718,21 @@ pub struct CompilerWorldRestoration {
     primary_associations: MaterializedMap<ArtifactBinding, cid::Cid>,
     primary_compiler_inputs: Arc<crate::declaration_context::RequestCompilerInputs>,
     bindings: MaterializedMap<String, WorldBindingSnapshotFact>,
+    binding_rows: imbl::OrdMap<String, cid::Cid>,
     lexical_root: cid::Cid,
     producer: [u8; 32],
     profile: [u8; 32],
     descriptor: PathBuf,
-    input_files: Vec<Arc<std::fs::File>>,
+    input_files: imbl::Vector<Arc<std::fs::File>>,
+    inherited_directories: imbl::Vector<Arc<tempfile::TempDir>>,
+    successor: Option<WorldSuccessorAcquisition>,
+}
+
+struct WorldSuccessorAcquisition {
+    predecessor: [u8; 32],
+    realization: Arc<Mutex<Option<String>>>,
+    files: Vec<Arc<std::fs::File>>,
+    cold: Mutex<Option<Arc<CompilerWorldRestoration>>>,
 }
 
 impl fmt::Debug for CompilerWorldRestoration {
@@ -867,6 +885,13 @@ fn absolute_source_alias(path: &Path) -> bool {
 pub struct CompilerWorld {
     restoration: Arc<CompilerWorldRestoration>,
     realization: Arc<Mutex<Option<String>>>,
+    position: Option<WorldCellPosition>,
+}
+
+#[derive(Clone, Debug)]
+struct WorldCellPosition {
+    certificate: [u8; 32],
+    next_item: usize,
 }
 
 impl CompilerWorld {
@@ -875,6 +900,180 @@ impl CompilerWorld {
     }
     pub fn restoration(&self) -> &Arc<CompilerWorldRestoration> {
         &self.restoration
+    }
+}
+
+impl crate::checked_cell::CellProgram {
+    /// Issue the compiler facts of one successful runtime prefix. The caller
+    /// supplies descriptions of the actual installed delta; this owner checks
+    /// them against the same captured item and retains its type/native custody.
+    /// Runtime source admission and atomic installation remain runtime-owned.
+    pub fn item_successor<'a>(
+        self: &Arc<Self>,
+        predecessor: &Arc<CompilerWorld>,
+        item: &crate::checked_cell::ExactCheckedItem,
+        bindings: impl IntoIterator<Item = CompilerWorldBinding<'a>>,
+    ) -> Result<Arc<CompilerWorld>, CompileError> {
+        let crate::checked_cell::CellProgramBasis::World(program) = self.basis() else {
+            return Err(source_failure("finite cell has no compiler-world successor"));
+        };
+        let ordinal = item.index();
+        let issued = self.items().get(ordinal)
+            .filter(|issued| issued.checked_item() == item)
+            .ok_or_else(|| source_failure("successor item belongs to another checked output"))?;
+        let observed = program.item(ordinal)
+            .ok_or_else(|| source_failure("successor item has no captured World proof"))?;
+        let ordered = if ordinal == 0 {
+            predecessor.logical_id() == program.logical().logical_id()
+        } else {
+            predecessor.position.as_ref().is_some_and(|position| {
+                position.certificate == *program.certificate_sha256()
+                    && position.next_item == ordinal
+            })
+        };
+        if !ordered || predecessor.restoration.producer != *program.producer_sha256()
+            || predecessor.restoration.profile != program.logical.profile_sha256
+        {
+            return Err(source_failure("successor predecessor is not this item's checked prefix"));
+        }
+        let native = issued.native().ok_or_else(|| {
+            source_failure("declaration successor requires its checked lexical product")
+        })?;
+        let row = native.value_interface_certificate();
+        let additions = CompilerWorldBindings::from_published_bindings(
+            predecessor.restoration.inputs.bindings.query_scope, bindings,
+        )?;
+        if additions.entries.len() != observed.binders().len() {
+            return Err(source_failure("runtime delta does not cover this item's captured binders"));
+        }
+        for binder in observed.binders() {
+            let fact = additions.entries.get(binder.name()).ok_or_else(|| {
+                source_failure("runtime delta omits a captured binder")
+            })?;
+            if fact.session_var.raw() != binder.varid()
+                || fact.symbol.module != binder.module()
+                || fact.symbol.occurrence != binder.name()
+                || fact.symbol.namespace != "value"
+                || fact.symbol.record_parent.is_some()
+                || fact.row.owner().gen.0 != observed.generation()
+                || row.as_ref().is_none_or(|row| !row.same_world_type_row(&fact.row))
+            {
+                return Err(source_failure("runtime delta has another captured binder or row"));
+            }
+        }
+        let prior = &predecessor.restoration;
+        let mut inputs = prior.inputs.clone();
+        let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
+        inputs.directory = directory.clone();
+        let mut facts = prior.bindings.facts().clone();
+        let mut row_roots = prior.binding_rows.clone();
+        let mut visible_changes = Vec::new();
+        let mut rows = WorldColdRows {
+            producer: prior.producer, files: BTreeMap::new(), images: BTreeMap::new(),
+            rows: BTreeMap::new(), arenas: Default::default(), diagnostics: None,
+        };
+        let mut materializer = Materializer::new(&prior.primary_blocks);
+        let current_row = match row.as_ref().filter(|_| !additions.entries.is_empty()) {
+            Some(row) => {
+                let (entry, parts) = row.world_type_parts()?;
+                let transport = rows.row(&entry, parts)?.0;
+                let semantic = world_semantic_row(&transport, &prior.producer)?;
+                let (_, receipt) = row.world_issuer();
+                let root = materializer.materialize_value(&world_array(vec![
+                    semantic, world_blob(row.certified_interface().artifact_id().0), world_blob(receipt),
+                ])).map_err(|error| source_failure(error.to_string()))?;
+                let owner = row.owner().module_name();
+                row_roots.insert(owner.clone(), root);
+                inputs.visible_rows.insert(owner, row.clone());
+                visible_changes.push(world_array(vec![
+                    world_text(entry.descriptor.owner.unit.clone()),
+                    world_text(entry.descriptor.owner.module.clone()), transport,
+                ]));
+                Some(root)
+            }
+            None => None,
+        };
+        for (occurrence, fact) in additions.entries {
+            if let Some(old) = inputs.bindings.entries.get(&occurrence) {
+                inputs.bindings.metadata_bytes = inputs.bindings.metadata_bytes.saturating_sub(
+                    binding_metadata_bound([occurrence.len(), old.symbol.unit.len(), old.symbol.module.len(),
+                        old.symbol.namespace.len(), old.symbol.occurrence.len()],
+                        old.symbol.record_parent.as_ref().map_or(0, String::len))?);
+                let owner = old.row.owner().module_name();
+                let users = inputs.bindings.row_users.get(&owner).copied()
+                    .ok_or_else(|| source_failure("predecessor binding has no row custody count"))?;
+                if users == 1 {
+                    inputs.bindings.row_users.remove(&owner);
+                    inputs.visible_rows.remove(&owner);
+                    row_roots.remove(&owner);
+                    visible_changes.push(world_array(vec![
+                        world_text(old.symbol.unit.clone()), world_text(old.symbol.module.clone()),
+                        ciborium::value::Value::Null,
+                    ]));
+                } else {
+                    inputs.bindings.row_users.insert(owner, users - 1);
+                }
+            }
+            let owner = fact.row.owner().module_name();
+            let users = inputs.bindings.row_users.get(&owner).copied().unwrap_or(0);
+            inputs.bindings.row_users.insert(owner, users + 1);
+            let symbol = &fact.symbol;
+            inputs.bindings.metadata_bytes = inputs.bindings.metadata_bytes.checked_add(
+                binding_metadata_bound([occurrence.len(), symbol.unit.len(), symbol.module.len(),
+                    symbol.namespace.len(), symbol.occurrence.len()],
+                    symbol.record_parent.as_ref().map_or(0, String::len))?
+            ).ok_or_else(source_size_failure)?;
+            if inputs.bindings.metadata_bytes > capture_allowance()? {
+                return Err(binding_capture_refusal(inputs.bindings.metadata_bytes, capture_allowance()?));
+            }
+            facts.insert(occurrence.clone(), (
+                (symbol.unit.clone(), symbol.module.clone(), symbol.namespace.clone(),
+                 symbol.occurrence.clone(), symbol.record_parent.clone()),
+                fact.session_var.raw(), fact.defining_scope, fact.row.owner().gen.0,
+                current_row.ok_or_else(|| source_failure("captured binder lacks its row root"))?,
+            ));
+            inputs.bindings.entries.insert(occurrence, fact);
+        }
+        // Existing references share immutable HAMT paths; only this item's
+        // binding edits and row bytes are encoded and linked on settlement.
+        let bindings = materializer.materialize_map(Some(&prior.bindings), &facts)
+            .map_err(|error| source_failure(error.to_string()))?;
+        let staged = materializer.finish().map_err(|error| source_failure(error.to_string()))?;
+        let changed_blocks = staged.blocks().iter().map(|(cid, bytes)| {
+            world_array(vec![world_blob(cid.to_bytes()), world_blob(bytes)])
+        }).collect();
+        let (roots, primary_blocks) = prior.primary_blocks.replace_semantic_roots(&staged,
+            SemanticRoots { primary: *prior.primary_root.cid(),
+                associations: *prior.primary_associations.root().cid(),
+                bindings: *bindings.root().cid(), lexical: prior.lexical_root })
+            .map_err(|error| source_failure(error.to_string()))?;
+        let product = world_restoration_product(&roots, inputs.sources.seal(), &prior.producer,
+            &prior.profile, inputs.bindings.query_scope)?;
+        let logical_id = world_digest(&product);
+        let files: Vec<_> = rows.files.into_values().collect();
+        let acquisition = rows.arenas.acquisition(rows.images.into_values().collect())?;
+        let descriptor = directory.path().join("successor.cbor");
+        std::fs::write(&descriptor, world_bytes(&world_array(vec![
+            world_text("TPCWSUCC4"), world_blob(&product), world_array(changed_blocks),
+            world_array(Vec::new()), world_array(visible_changes), acquisition,
+        ]))?)?;
+        let mut input_files = prior.input_files.clone();
+        input_files.extend(files.iter().cloned());
+        let mut inherited_directories = prior.inherited_directories.clone();
+        inherited_directories.push_back(prior.inputs.directory.clone());
+        let restoration = Arc::new(CompilerWorldRestoration {
+            logical_id, inputs, product: product.into(), primary_root: prior.primary_root.clone(),
+            primary_blocks, primary_associations: prior.primary_associations.clone(),
+            primary_compiler_inputs: prior.primary_compiler_inputs.clone(), bindings,
+            binding_rows: row_roots, lexical_root: prior.lexical_root,
+            producer: prior.producer, profile: prior.profile, descriptor, input_files,
+            inherited_directories,
+            successor: Some(WorldSuccessorAcquisition { predecessor: *predecessor.logical_id(),
+                realization: predecessor.realization.clone(), files, cold: Mutex::new(None) }),
+        });
+        Ok(Arc::new(CompilerWorld { restoration, realization: Arc::new(Mutex::new(None)),
+            position: Some(WorldCellPosition { certificate: *program.certificate_sha256(),
+                next_item: ordinal + 1 }) }))
     }
 }
 
@@ -1690,9 +1889,8 @@ pub(crate) fn world_context_fixture(
 impl CompilerWorldOpenInputs {
     fn materialize_primary(
         &self,
-        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+        producer: [u8; 32],
     ) -> Result<(Arc<ExactDeclarationContext>, ContextRoot, ReachableBlocks), CompileError> {
-        let producer = CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256();
         let primary_context = Arc::new((*self.primary_context).clone().admit_producer(producer)?);
         let snapshot = primary_context.snapshot();
         let store = fvm_ipld_blockstore::MemoryBlockstore::new();
@@ -1720,7 +1918,7 @@ impl CompilerWorldOpenInputs {
     }
 
     fn prepare(
-        mut self,
+        self,
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
     ) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
         let identity = endpoint.identity();
@@ -1731,8 +1929,12 @@ impl CompilerWorldOpenInputs {
                 source_failure("compiler world requires a retained service package source")
             })?
             .profile_id();
+        self.prepare_for(producer, profile)
+    }
+
+    fn prepare_for(mut self, producer: [u8; 32], profile: [u8; 32]) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
         let (primary_context, primary_root, primary_blocks) =
-            self.materialize_primary(endpoint)?;
+            self.materialize_primary(producer)?;
         self.primary_context = primary_context;
         // This cold issuer preserves the actual primary selection and native
         // lineage. Visible checked rows keep their independent issuing support;
@@ -1783,9 +1985,9 @@ impl CompilerWorldOpenInputs {
             &mut binding_materializer,
             &mut remaining_raw,
         )?;
-        let mut binding_rows = BTreeMap::new();
+        let mut binding_rows = imbl::OrdMap::new();
         let mut visible = Vec::with_capacity(self.visible_rows.len());
-        for artifact in &self.visible_rows {
+        for artifact in self.visible_rows.values() {
             crate::host_work::checkpoint()?;
             let (entry, parts) = artifact.world_type_parts()?;
             remaining_raw = remaining_raw
@@ -1896,11 +2098,14 @@ impl CompilerWorldOpenInputs {
             primary_associations,
             primary_compiler_inputs,
             bindings,
+            binding_rows,
             lexical_root,
             producer,
             profile,
             descriptor,
             input_files: files,
+            inherited_directories: imbl::Vector::new(),
+            successor: None,
         }))
     }
 }
@@ -2001,14 +2206,22 @@ fn ensure_world(
                     "world acquisition requires its compiler scope",
                 ));
             }
+            let (acquisition, files) = match &restoration.successor {
+                Some(successor) => (A::Successor {
+                    predecessor: world_hex(&successor.predecessor),
+                    realization: successor.realization.lock()
+                        .map_err(|_| source_failure("predecessor realization lock poisoned"))?
+                        .clone().unwrap_or_else(|| "not-resident".into()),
+                    descriptor: restoration.descriptor.clone(),
+                }, successor.files.clone()),
+                None => (A::Complete(restoration.descriptor.clone()),
+                    restoration.input_files.iter().cloned().collect()),
+            };
             let (mut cmd, endpoint) = world_command(identity)?;
-            cmd.ensure_exact_inputs(ExactInputsRequest {
-                root: root.clone(),
-                acquisition: A::Complete(restoration.descriptor.clone()),
-            });
+            cmd.ensure_exact_inputs(ExactInputsRequest { root: root.clone(), acquisition });
             crate::host_work::record_host_work(
                 crate::host_work::HostWorkCounter::InputFdExport,
-                restoration.input_files.len() as u64,
+                files.len() as u64,
             );
             crate::host_work::record_host_work(
                 crate::host_work::HostWorkCounter::WorldEnsureComplete,
@@ -2018,7 +2231,7 @@ fn ensure_world(
                 restoration.inputs.directory.path(),
                 &cmd,
             );
-            let run = world_execute(&cmd, endpoint, restoration.input_files.clone())?;
+            let run = world_execute(&cmd, endpoint, files)?;
             diagnostics.completed(
                 restoration.inputs.directory.path(),
                 &cmd,
@@ -2026,7 +2239,32 @@ fn ensure_world(
                 &run.output.stderr,
             );
 
-            match O::decode(&run.output.stdout).map_err(|_| world_response_error(false))? {
+            let response = O::decode(&run.output.stdout).map_err(|_| world_response_error(false))?;
+            let response = match (response, &restoration.successor) {
+                (O::NeedsAcquisition(world), Some(successor)) if world == root => {
+                    // Missing exact predecessor backing is ordinary eviction.
+                    // Rehydrate the SAME retained immutable product; no cell
+                    // compilation or effect execution is retried here.
+                    let mut cached = successor.cold.lock()
+                        .map_err(|_| source_failure("successor recovery lock poisoned"))?;
+                    if cached.is_none() {
+                        let cold = restoration.inputs.clone().prepare_for(restoration.producer, restoration.profile)?;
+                        if cold.logical_id != restoration.logical_id {
+                            return Err(source_failure("successor cold restoration changed logical product"));
+                        }
+                        *cached = Some(cold);
+                    }
+                    let cold = cached.as_ref().expect("checked successor cold restoration");
+                    let (mut cmd, endpoint) = world_command(identity)?;
+                    cmd.ensure_exact_inputs(ExactInputsRequest {
+                        root: root.clone(), acquisition: A::Complete(cold.descriptor.clone()),
+                    });
+                    O::decode(&world_execute(&cmd, endpoint, cold.input_files.iter().cloned().collect())?.output.stdout)
+                        .map_err(|_| world_response_error(false))?
+                }
+                (response, _) => response,
+            };
+            match response {
                 O::Ready { world, realization } if world == root => {
                     crate::host_work::record_host_work(
                         crate::host_work::HostWorkCounter::WorldEnsureCompleteReady,
@@ -2067,6 +2305,7 @@ pub fn open_world(
         let world = Arc::new(CompilerWorld {
             restoration,
             realization: Arc::new(Mutex::new(None)),
+            position: None,
         });
         ensure_world(&world, endpoint.identity())?;
         Ok(world)
@@ -3731,6 +3970,7 @@ pub fn restore_world(
     let world = CompilerWorld {
         restoration: Arc::clone(restoration),
         realization: Arc::new(Mutex::new(None)),
+        position: None,
     };
     query_public_module(endpoint, &world, question)
 }
