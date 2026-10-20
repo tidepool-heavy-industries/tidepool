@@ -330,6 +330,10 @@ impl ReachableBlocks {
         self.work
     }
 
+    pub(crate) fn roots(&self) -> &[Cid] {
+        &self.roots
+    }
+
     pub(crate) fn blocks(&self) -> impl Iterator<Item = (&Cid, &Arc<[u8]>)> {
         self.blocks.iter().map(|(cid, block)| (cid, &block.bytes))
     }

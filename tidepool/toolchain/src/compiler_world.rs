@@ -999,6 +999,29 @@ fn world_digest(bytes: &[u8]) -> [u8; 32] {
     );
     Sha256::digest(bytes).into()
 }
+
+fn world_restoration_product(
+    primary_root: &cid::Cid,
+    source_seal: &[u8; 32],
+    producer: &[u8; 32],
+    profile: &[u8; 32],
+    query_scope: u64,
+    association_root: &cid::Cid,
+    binding_root: &cid::Cid,
+) -> Result<Vec<u8>, CompileError> {
+    world_bytes(&world_array(vec![
+        world_text("TPCWREST"),
+        3u64.into(),
+        world_blob(primary_root.to_bytes()),
+        world_blob(source_seal),
+        world_blob(producer),
+        world_blob(profile),
+        query_scope.into(),
+        world_blob(association_root.to_bytes()),
+        world_blob(binding_root.to_bytes()),
+    ]))
+}
+
 fn world_text(value: impl Into<String>) -> ciborium::value::Value {
     ciborium::value::Value::Text(value.into())
 }
@@ -1680,17 +1703,20 @@ impl CompilerWorldOpenInputs {
             .collect();
         // CID-validated roots bind logical facts. Cold transfer order and raw
         // image inventory are not part of a live successor's fixed identity.
-        let product = world_bytes(&world_array(vec![
-            world_text("TPCWREST"),
-            3u64.into(),
-            world_blob(primary_root.cid().to_bytes()),
-            world_blob(self.sources.seal()),
-            world_blob(producer),
-            world_blob(profile),
-            self.bindings.query_scope.into(),
-            world_blob(primary_associations.root().cid().to_bytes()),
-            world_blob(bindings.root().cid().to_bytes()),
-        ]))?;
+        let [primary_cid, association_cid, binding_cid] = primary_blocks.roots() else {
+            return Err(source_failure(
+                "world frontier does not retain its three semantic roots",
+            ));
+        };
+        let product = world_restoration_product(
+            primary_cid,
+            self.sources.seal(),
+            &producer,
+            &profile,
+            self.bindings.query_scope,
+            association_cid,
+            binding_cid,
+        )?;
         let logical_id = world_digest(&product);
         let source_path = self.directory.path().join("sources.bin");
         std::fs::write(&source_path, self.sources.encoded())?;
@@ -2128,11 +2154,10 @@ impl WorldSourceSelection {
     }
 }
 
-/// Exact logical world and restoration frontier issued with a checked cell.
+/// Exact logical world issued with a checked cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorldCellLogicalIdentity {
     logical_id: [u8; 32],
-    restoration_frontier: [u8; 32],
     producer_sha256: [u8; 32],
     profile_sha256: [u8; 32],
 }
@@ -2140,10 +2165,6 @@ pub struct WorldCellLogicalIdentity {
 impl WorldCellLogicalIdentity {
     pub fn logical_id(&self) -> &[u8; 32] {
         &self.logical_id
-    }
-
-    pub fn restoration_frontier(&self) -> &[u8; 32] {
-        &self.restoration_frontier
     }
 
     pub fn producer_sha256(&self) -> &[u8; 32] {
@@ -2211,10 +2232,9 @@ impl CheckedWorldCellItem {
 
 /// The SAME-certified checked World CellProgram. It can only be issued from
 /// one physical `WorldCellOutputAdmission`; a raw completion or a decoded
-/// receipt is not authority. It binds the reservation, logical world and
-/// restoration frontier, distinct original/target selections, producer and
-/// issuing transaction origin, per-item generations and the exact output
-/// certificate.
+/// receipt is not authority. It binds the reservation, logical world, distinct
+/// original/target selections, producer and issuing transaction origin,
+/// per-item generations and the exact output certificate.
 pub struct CheckedWorldCellProgram {
     output: WorldCellOutputAdmission,
     original: WorldSourceSelection,
@@ -2393,12 +2413,10 @@ impl CheckedWorldCellProgram {
                 signatures: proof.signatures().to_vec(),
             });
         }
-        let restoration = &plan.world().restoration;
         let logical = WorldCellLogicalIdentity {
             logical_id,
-            restoration_frontier: world_restoration_frontier(restoration),
             producer_sha256,
-            profile_sha256: restoration.profile,
+            profile_sha256: plan.world().restoration.profile,
         };
         let certificate_sha256 = world_cell_output_certificate(
             reservation,
@@ -2422,28 +2440,6 @@ impl CheckedWorldCellProgram {
     }
 }
 
-fn world_restoration_frontier(restoration: &CompilerWorldRestoration) -> [u8; 32] {
-    let mut digest = blake3::Hasher::new();
-    let mut frame = |bytes: &[u8]| {
-        digest.update(&(bytes.len() as u64).to_le_bytes());
-        digest.update(bytes);
-    };
-    frame(b"TidepoolWorldCellRestorationFrontier1");
-    frame(restoration.logical_id());
-    frame(&restoration.primary_root.cid().to_bytes());
-    frame(&restoration.primary_associations.root().cid().to_bytes());
-    frame(&restoration.bindings.root().cid().to_bytes());
-    frame(restoration.inputs.sources.seal());
-    frame(&restoration.producer);
-    frame(&restoration.profile);
-    let work = restoration.primary_blocks.work();
-    frame(&work.link_visits.to_le_bytes());
-    frame(&work.unlink_visits.to_le_bytes());
-    frame(&work.verified_bytes.to_le_bytes());
-    frame(&work.decoded_bytes.to_le_bytes());
-    *digest.finalize().as_bytes()
-}
-
 fn world_cell_output_certificate(
     reservation: &crate::cell_plan::CompilerWorldCellReservation,
     original: &WorldSourceSelection,
@@ -2457,11 +2453,10 @@ fn world_cell_output_certificate(
         digest.update(&(bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     };
-    frame(b"TidepoolCheckedWorldCellProgram1");
+    frame(b"TidepoolCheckedWorldCellProgram2");
     frame(reservation.admission_digest());
     frame(&world_digest(reservation.plan().receipt()));
     frame(logical.logical_id());
-    frame(logical.restoration_frontier());
     frame(logical.producer_sha256());
     frame(logical.profile_sha256());
     for selection in [original, target] {
@@ -4037,5 +4032,145 @@ mod answer_tests {
             &mut validation
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::exact_context::{FrontierWork, Materializer, ReachableBlocks};
+    use fvm_ipld_blockstore::MemoryBlockstore;
+
+    fn captured_sources(body: &[u8], origin: &[u8]) -> CapturedCompilerSources {
+        let root = CapturedCompilerSourceRoot {
+            manifest: SourceRootManifest::from_file_digests([(
+                PathBuf::from("Module.hs"),
+                blake3::hash(body).to_hex().to_string(),
+            )])
+            .unwrap(),
+            bodies: BTreeMap::from([(PathBuf::from("Module.hs"), Arc::<[u8]>::from(body))]),
+        };
+        CapturedCompilerSources::from_captured_roots(vec![root], Arc::from(origin), Arc::new(()))
+            .unwrap()
+    }
+
+    fn identity(
+        history: &ReachableBlocks,
+        sources: &CapturedCompilerSources,
+        producer: &[u8; 32],
+        profile: &[u8; 32],
+        query_scope: u64,
+    ) -> [u8; 32] {
+        let roots = history.roots();
+        assert_eq!(roots.len(), 3);
+        world_digest(
+            &world_restoration_product(
+                &roots[0],
+                sources.seal(),
+                producer,
+                profile,
+                query_scope,
+                &roots[1],
+                &roots[2],
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn semantic_world_identity_ignores_restoration_work_counters() {
+        let store = MemoryBlockstore::new();
+        let mut materializer = Materializer::new(&store);
+        let leaf = materializer.materialize_value(&("leaf", 0u64)).unwrap();
+        let context = materializer
+            .materialize_value(&("context", vec![leaf]))
+            .unwrap();
+        let associations = materializer
+            .materialize_value(&("associations", vec![leaf, leaf]))
+            .unwrap();
+        let bindings = materializer
+            .materialize_value(&("bindings", vec![leaf]))
+            .unwrap();
+        let extra = materializer.materialize_value(&("extra", 1u64)).unwrap();
+        let transient = materializer
+            .materialize_value(&("transient", vec![context, associations, bindings, extra]))
+            .unwrap();
+        let staged = materializer.finish().unwrap();
+        let roots = vec![context, associations, bindings];
+
+        // Same final semantic roots, three materially different restoration
+        // histories.
+        let cold = ReachableBlocks::default()
+            .replace_roots(&staged, roots.clone())
+            .unwrap();
+        // Identical roots on a no-op replacement reset the work counters.
+        let reused = cold.replace_roots(&staged, roots.clone()).unwrap();
+        // Linking a superset closure first means the final replacement verifies
+        // no bytes and unlinks the transient root.
+        let reordered = ReachableBlocks::default()
+            .replace_roots(&staged, vec![transient])
+            .unwrap()
+            .replace_roots(&staged, roots.clone())
+            .unwrap();
+
+        assert_eq!(cold.roots(), roots.as_slice());
+        assert_eq!(reused.roots(), roots.as_slice());
+        assert_eq!(reordered.roots(), roots.as_slice());
+
+        let cold_work = cold.work();
+        let reused_work = reused.work();
+        let reordered_work = reordered.work();
+        assert_eq!(reused_work, FrontierWork::default());
+        assert_eq!((cold_work.link_visits, cold_work.unlink_visits), (7, 0));
+        assert_eq!(
+            (reordered_work.link_visits, reordered_work.unlink_visits),
+            (3, 5)
+        );
+        assert!(cold_work.verified_bytes > 0 && cold_work.decoded_bytes > 0);
+        assert_eq!(
+            (reordered_work.verified_bytes, reordered_work.decoded_bytes),
+            (0, 0)
+        );
+        assert_ne!(cold_work, reused_work);
+        assert_ne!(cold_work, reordered_work);
+
+        let source = captured_sources(b"module Module where\nx = 1\n", b"origin-a");
+        let producer = [7; 32];
+        let profile = [8; 32];
+        let query_scope = 11;
+        let cold_identity = identity(&cold, &source, &producer, &profile, query_scope);
+        assert_eq!(
+            identity(&reused, &source, &producer, &profile, query_scope),
+            cold_identity
+        );
+        assert_eq!(
+            identity(&reordered, &source, &producer, &profile, query_scope),
+            cold_identity
+        );
+
+        let changed_root = cold
+            .replace_roots(&staged, vec![context, associations, extra])
+            .unwrap();
+        assert_ne!(
+            identity(&changed_root, &source, &producer, &profile, query_scope),
+            cold_identity
+        );
+        let changed_source = captured_sources(b"module Module where\nx = 2\n", b"origin-a");
+        assert_ne!(
+            identity(&cold, &changed_source, &producer, &profile, query_scope),
+            cold_identity
+        );
+        assert_ne!(
+            identity(&cold, &source, &producer, &[9; 32], query_scope),
+            cold_identity
+        );
+        assert_ne!(
+            identity(&cold, &source, &[10; 32], &profile, query_scope),
+            cold_identity
+        );
+        assert_ne!(
+            identity(&cold, &source, &producer, &profile, query_scope + 1),
+            cold_identity
+        );
     }
 }
