@@ -57,7 +57,13 @@ async fn fenced_source_preserves_admitted_callback_cleanup_and_refuses_new_activ
     fixture.cleanup(&work).await;
     assert!(work.cleanup_observation().unwrap().uncertainty().is_none());
     assert!(fixture.actor.terminal().get().is_none());
-    fence.reopen(&scope).unwrap();
+    fence
+        .reopen_with(&scope, |reopen| {
+            reopen.commit();
+            Ok::<_, ()>(())
+        })
+        .unwrap()
+        .unwrap();
     fixture.finish().await;
 }
 
@@ -94,7 +100,13 @@ fn callback_registration_racing_source_fence_is_captured_or_refused() {
             }
             Err(_) => assert!(captured.is_empty()),
         }
-        fence.reopen(&scope).unwrap();
+        fence
+            .reopen_with(&scope, |reopen| {
+                reopen.commit();
+                Ok::<_, ()>(())
+            })
+            .unwrap()
+            .unwrap();
     }
 }
 
