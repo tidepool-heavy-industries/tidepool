@@ -20,7 +20,7 @@ pub use compiler_projection::{
     CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority,
 };
 pub(crate) use compiler_projection::{
-    CompilerSourceSupport, DemandCompilerProjection, InputNativeDecision,
+    CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection, InputNativeDecision,
     IssuedInputNativeDecisions, RecordedCompilerRole, RecordedInputNativeDecision,
 };
 pub(crate) use native_availability::{

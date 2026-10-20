@@ -47,7 +47,7 @@ module Tidepool.ExactScope
   , WorldCellOperandInputs, WorldCellOperandExposure(..), readWorldCellOperandWithOwner
   , worldCellOperandExposure, worldCellOperandBinding, worldCellOperandInterface
   , worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes
-  , worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
+  , worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsProducer, worldInputsProfile, worldInputsSources
   , worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty
   , WorldLexicalSurface, WorldDeclarationSurface, worldInputsLexicalSurface
   , WorldObservationProfile(..), WorldObservationScaffold, worldLexicalObservation
@@ -2250,6 +2250,7 @@ decodeInterfaceRow = do
 data WorldInputFacts = WorldInputFacts
   { worldInputsIdentity :: !(String)
   , worldInputsIdentityBytes :: !(BS.ByteString)
+  , worldInputsCompilerIdentity :: !(String)
   , worldInputsProducer :: !(BS.ByteString)
   , worldInputsProfile :: !(BS.ByteString)
   , worldInputsSources :: !(CapturedWorldSources)
@@ -2263,7 +2264,6 @@ data WorldInputFacts = WorldInputFacts
   , worldInputsRowCharge :: !((Integer,Int))
   , worldInputsBindingRows :: !(Map.Map BS.ByteString (WorldBindingRow,BS.ByteString,Integer,Int))
   , worldInputsBindingSemanticUsers :: !(Map.Map BS.ByteString Int)
-  , worldInputsPrimaryRoot :: !(BS.ByteString)
   , worldInputsRuntimeVisibility :: !(BS.ByteString)
   , worldInputsBindingScope :: !(Word64)
   , worldInputsBindings :: !(Map.Map String WorldBinding)
@@ -2709,11 +2709,11 @@ newtype WorldSourceRoot = WorldSourceRoot { worldSourceFiles :: Map.Map FilePath
 -- Only a Context-selected acquired source row can prevent an absence result.
 -- The hint grants no HPT hydration or source replay; captured source/version
 -- resolution remains with the world module resolver.
--- Equal authenticated Context and association roots select the same primary
--- rows. Successors can borrow their source-name hint set without a row census.
+-- Equal owner-issued selected-primary roots select the same compiler rows.
+-- The opaque runtime commitment remains independent of this projection.
 worldInputsSamePrimary :: WorldInputFacts -> WorldInputFacts -> Bool
 worldInputsSamePrimary left right = case (worldInputsFrontier left,worldInputsFrontier right) of
-  (VerifiedWorldFrontier _ _ _ [a,b,_,_] _,VerifiedWorldFrontier _ _ _ [c,d,_,_] _) -> a == c && b == d
+  (VerifiedWorldFrontier _ _ _ [a,_,_] _,VerifiedWorldFrontier _ _ _ [b,_,_] _) -> a == b
   _ -> False
 
 worldInputsSourceModuleHints :: WorldInputFacts -> Set.Set String
@@ -2761,26 +2761,25 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
       WorldRestoration expectedPrimary domainSeal expectedProducer expectedProfile expectedScope associationRoot expectedBindings lexicalRoot <-
         decodeWorldBytes decodeWorldRestoration restoration
       (bindingScope,bindingRoot) <- decodeWorldBytes decodeWorldBindingRoot visibility
-      -- Fixed roots are Context, primary associations, occurrences and lexical
-      -- surface. The semantic product authenticates all four together.
-      frontier <- verifyWorldBlocks [primary,associationRoot,bindingRoot,lexicalRoot] blocks
-      context <- readWorldContext frontier primary producer
+      -- Rust derives this frontier from the actual acquired role owner. The
+      -- full runtime Context is an opaque commitment, not compiler input.
+      frontier <- verifyWorldBlocks [associationRoot,bindingRoot,lexicalRoot] blocks
       sources <- either worldCorrupt pure (decodeWorldSources sourceBytes)
-      let canonicalRestoration = toStrictByteString (E.encodeListLen 10 <> text "TPCWREST" <> E.encodeWord 4
+      let canonicalRestoration = toStrictByteString (E.encodeListLen 10 <> text "TPCWREST" <> E.encodeWord 5
             <> E.encodeBytes expectedPrimary <> E.encodeBytes domainSeal <> E.encodeBytes expectedProducer
             <> E.encodeBytes expectedProfile <> E.encodeWord64 expectedScope
             <> E.encodeBytes associationRoot <> E.encodeBytes expectedBindings <> E.encodeBytes lexicalRoot)
-      unless (restoration == canonicalRestoration && primary == expectedPrimary && producer == expectedProducer && profile == expectedProfile
+      unless (restoration == canonicalRestoration && primary == associationRoot && producer == expectedProducer && profile == expectedProfile
           && bindingScope == expectedScope && bindingRoot == expectedBindings && worldSourceDomainSha256 sources == domainSeal)
         (worldCorrupt "world restoration differs from captured source, profile, context or roots")
       (admitted,custody,users) <- admitWorldRows state producer acquisition (baseRows ++ visibleRows)
       base <- worldRowsByOwner (take (length baseRows) admitted)
       visible <- worldRowsByOwner (drop (length baseRows) admitted)
       let pairs rows = [(offered,input) | WorldAdmittedRow offered input _ _ <- Map.elems rows]
-      primaryFacts <- readWorldPrimary frontier associationRoot context producer (pairs base)
+      primaryFacts <- readWorldPrimary frontier associationRoot producer (pairs base)
       lexical <- readWorldLexicalSurface frontier lexicalRoot primaryFacts
       (bindings,bindingCharge) <- readWorldBindings frontier bindingRoot producer (pairs visible)
-      verified <- retainVerifiedWorldFrontier [primary,associationRoot,bindingRoot,lexicalRoot] frontier
+      verified <- retainVerifiedWorldFrontier [associationRoot,bindingRoot,lexicalRoot] frontier
       bindingRows <- retainWorldBindingRows frontier producer visible bindings
       rowCharge <- foldM (\charge (WorldAdmittedRow _ _ _ more) -> checkedWorldCharge charge more)
         (0,0) admitted
@@ -2788,11 +2787,12 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
           sourceEntries = toInteger (length (worldSourceRoots sources))
             + sum [toInteger (Map.size files) | WorldSourceRoot files <- worldSourceRoots sources]
       when (sourceEntries > toInteger (maxBound :: Int)) (worldCorrupt "compiler world source count exceeds host range")
-      let facts = WorldInputFacts (hexBytes identity) identity producer profile sources
+      let facts = WorldInputFacts (hexBytes identity) identity
+            (worldCompilerIdentity domainSeal producer profile bindingScope associationRoot bindingRoot lexicalRoot) producer profile sources
             base visible (worldVisibleSemantic visible) custody users verified
             (toInteger (BS.length sourceBytes),fromInteger sourceEntries) rowCharge bindingRows
             (Map.fromListWith (+) [(semantic,n) | (_,semantic,_,n) <- Map.elems bindingRows])
-            (BS.copy primary) (BS.copy visibility) bindingScope bindings bindingCharge primaryFacts lexical
+            (BS.copy visibility) bindingScope bindings bindingCharge primaryFacts lexical
       validateWorldRetainedCharge facts
       pure facts
 
@@ -2916,11 +2916,11 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
           && domainSeal == worldSourceDomainSha256 (worldInputsSources previous))
         (worldCorrupt "world successor differs from captured source, profile, producer or scope")
       let VerifiedWorldFrontier _ _ _ oldRoots _ = worldInputsFrontier previous
-      (oldPrimary,oldAssociations,oldBindings,oldLexical) <- case oldRoots of
-        [a,b,c,d] -> pure (a,b,c,d)
+      (oldAssociations,oldBindings,oldLexical) <- case oldRoots of
+        [a,b,c] -> pure (a,b,c)
         _ -> worldCorrupt "world predecessor lost its fixed semantic roots"
       verified <- advanceVerifiedWorldFrontier (worldInputsFrontier previous)
-        [primary,associations,bindings,lexicalRoot] blocks
+        [associations,bindings,lexicalRoot] blocks
       let frontier = worldFrontierBodies verified
           -- Old changed HAMT paths remain available only during comparison.
           comparison = foldl' (\allBlocks (cid,_) -> case Map.lookup cid frontier of
@@ -2947,7 +2947,7 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
         (worldInputsBindings previous) (worldInputsBindingRows previous) (worldInputsBindingSemanticUsers previous) (worldInputsBindingCharge previous)
         nodeCharge aliasChanges
       validateChangedVisibleRows nextSemantic (worldInputsBindingRows previous) nextRows semanticUsers removedVisible addedVisible aliasChanges
-      primaryFacts <- if primary == oldPrimary && associations == oldAssociations
+      primaryFacts <- if associations == oldAssociations
         then do
           unless (null removedBase && null addedBase)
             (worldCorrupt "world primary transport changed without its semantic roots")
@@ -2955,19 +2955,18 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
         else do
           timing <- readTimingEnabled
           emitCount timing "world.successor.primary_full_validation_rows" (toInteger (Map.size base))
-          context <- if primary == oldPrimary then pure (worldPrimaryContext (worldInputsPrimary previous))
-            else readWorldContext frontier primary producer
-          readWorldPrimary frontier associations context producer
+          readWorldPrimary frontier associations producer
             [(row,input) | WorldAdmittedRow row input _ _ <- Map.elems base]
-      lexical <- if lexicalRoot == oldLexical && primary == oldPrimary && associations == oldAssociations
+      lexical <- if lexicalRoot == oldLexical && associations == oldAssociations
         then pure (worldInputsLexicalSurface previous)
         else readWorldLexicalSurface frontier lexicalRoot primaryFacts
       let identity = SHA.hash restoration
           visibility = toStrictByteString (E.encodeListLen 3 <> E.encodeString "TPCWBIND4"
             <> E.encodeWord64 scope <> E.encodeBytes bindings)
-          facts = WorldInputFacts (hexBytes identity) identity producer profile (worldInputsSources previous)
+          facts = WorldInputFacts (hexBytes identity) identity
+            (worldCompilerIdentity domainSeal producer profile scope associations bindings lexicalRoot) producer profile (worldInputsSources previous)
             base visible nextSemantic custody users verified (worldInputsSourceCharge previous) rowCharge nextRows semanticUsers
-            primary visibility scope nextBindings bindingCharge primaryFacts lexical
+            visibility scope nextBindings bindingCharge primaryFacts lexical
       validateWorldRetainedCharge facts
       timing <- readTimingEnabled
       emitCount timing "world.successor.changed_aliases" (toInteger (Map.size aliasChanges))
@@ -2977,9 +2976,18 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
 encodeWorldRestoration :: BS.ByteString -> BS.ByteString -> BS.ByteString -> BS.ByteString
   -> Word64 -> BS.ByteString -> BS.ByteString -> BS.ByteString -> BS.ByteString
 encodeWorldRestoration primary domain producer profile scope associations bindings lexical =
-  toStrictByteString (E.encodeListLen 10 <> E.encodeString "TPCWREST" <> E.encodeWord 4
+  toStrictByteString (E.encodeListLen 10 <> E.encodeString "TPCWREST" <> E.encodeWord 5
     <> E.encodeBytes primary <> E.encodeBytes domain <> E.encodeBytes producer <> E.encodeBytes profile
     <> E.encodeWord64 scope <> E.encodeBytes associations <> E.encodeBytes bindings <> E.encodeBytes lexical)
+
+-- A semantic compiler identity deliberately excludes the opaque full runtime
+-- commitment. Every request, reservation and END still uses worldInputsIdentity.
+worldCompilerIdentity :: BS.ByteString -> BS.ByteString -> BS.ByteString -> Word64
+  -> BS.ByteString -> BS.ByteString -> BS.ByteString -> String
+worldCompilerIdentity domain producer profile scope primary bindings lexical =
+  hexBytes (SHA.hash (toStrictByteString (E.encodeListLen 8 <> E.encodeString "TPCWINPUT1"
+    <> E.encodeBytes domain <> E.encodeBytes producer <> E.encodeBytes profile
+    <> E.encodeWord64 scope <> E.encodeBytes primary <> E.encodeBytes bindings <> E.encodeBytes lexical)))
 
 data OfferedWorldSuccessor = OfferedWorldSuccessor BS.ByteString [(BS.ByteString,BS.ByteString)]
   [(InterfaceOwner,Maybe OfferedWorldRow)] [(InterfaceOwner,Maybe OfferedWorldRow)] InputAcquisition
@@ -2988,7 +2996,7 @@ decodeWorldSuccessor :: Int -> Decoder s OfferedWorldSuccessor
 decodeWorldSuccessor payloadBytes = do
   array 6
   magic <- string
-  unless (magic == "TPCWSUCC4") (fail "unsupported compiler world successor")
+  unless (magic == "TPCWSUCC5") (fail "unsupported compiler world successor")
   restoration <- decodeBytes
   blocks <- bounded payloadBytes (array 2 >> ((,) <$> decodeBytes <*> decodeBytes))
   primary <- changes
@@ -3428,81 +3436,30 @@ encodeWorldBinding (artifact,selection) = E.encodeMapLen 2
 -- only an exact selected association can identify an authenticated type row.
 type WorldArtifactBinding = (BS.ByteString,BS.ByteString)
 
-data WorldScopeDependency
-  = WorldInterfaceDependency
-  | WorldNativeGroupDependency Word32 Word32
-  | WorldNativeBindingDependency Word32 Word64 String String (Maybe String)
-  deriving (Eq,Ord)
-
-data WorldScopeProof = WorldScopeProof BS.ByteString (Set.Set WorldBindingNodeKey)
-  [(WorldBindingNodeKey,WorldBindingNodeKey,WorldScopeDependency)]
-
-data WorldSelection = WorldSelection
-  { worldSelectionScopes :: Map.Map BS.ByteString WorldScopeProof
-  , worldSelectionRoots :: Set.Set WorldBindingNodeKey
-  , worldSelectionNamespace :: Map.Map BS.ByteString WorldArtifactBinding
-  , worldSelectionCustody :: Set.Set WorldBindingNodeKey
-  , worldSelectionNodes :: Set.Set WorldBindingNodeKey
-  }
-
-data WorldCompilerRole
-  = WorldInterfaceRole BS.ByteString
-  | WorldReusableRole BS.ByteString BS.ByteString
-  | WorldPublishedRole BS.ByteString BS.ByteString String String BS.ByteString BS.ByteString BS.ByteString
-
-worldRoleInterface :: WorldCompilerRole -> BS.ByteString
-worldRoleInterface role = case role of
-  WorldInterfaceRole value -> value
-  WorldReusableRole value _ -> value
-  WorldPublishedRole value _ _ _ _ _ _ -> value
-
-worldRoleOriginal :: WorldCompilerRole -> Maybe BS.ByteString
-worldRoleOriginal role = case role of
-  WorldInterfaceRole _ -> Nothing
-  WorldReusableRole _ value -> Just value
-  WorldPublishedRole _ value _ _ _ _ _ -> Just value
-
--- Native-domain maps retain the Rust-issued birth provenance. Neither their
--- presence nor a CID grants native execution or selects a compiler original.
-type WorldNativeProvenance =
-  (Map.Map BS.ByteString BS.ByteString,Map.Map BS.ByteString BS.ByteString,Map.Map (String,String) BS.ByteString)
-
-data WorldNativeAuthority = WorldNativeAuthority
-  { worldAuthorityRoles :: Map.Map (String,String) (WorldCompilerRole,Maybe (WorldSelection,WorldNativeAuthority))
-  , worldAuthorityNative :: WorldNativeProvenance
-  }
-
-data WorldContextFacts = WorldContextFacts
-  { worldContextRoles :: Map.Map (String,String) (WorldCompilerRole,Maybe (WorldSelection,WorldNativeAuthority))
-  , worldContextLexical :: Map.Map (String,String) [(String,String)]
-  , worldContextSelection :: WorldSelection
-  , worldContextPassive :: WorldNativeProvenance
-  , worldContextCharge :: (Integer,Integer)
-  }
+-- This typed projection is issued by Rust from one acquired compiler role.
+-- Haskell authenticates its physical TYPE rows; it does not recheck the hidden
+-- runtime native graph and cannot turn these bindings into execution grants.
+data WorldPrimaryBinding
+  = WorldInterfaceOnly WorldArtifactBinding
+  | WorldOriginal WorldArtifactBinding WorldArtifactBinding
 
 data WorldPrimaryAssociation = WorldPrimaryAssociation
-  { worldPrimaryInterfaceBinding :: WorldArtifactBinding
-  , worldPrimaryOriginalBinding :: Maybe WorldArtifactBinding
+  { worldPrimaryBinding :: WorldPrimaryBinding
   , worldPrimaryRow :: ScopeInterfaceInput
   }
 
+worldPrimaryInterfaceBinding :: WorldPrimaryAssociation -> WorldArtifactBinding
+worldPrimaryInterfaceBinding association = case worldPrimaryBinding association of
+  WorldInterfaceOnly interface -> interface
+  WorldOriginal interface _ -> interface
+
 data WorldPrimaryFacts = WorldPrimaryFacts
-  { worldPrimaryContext :: WorldContextFacts
-  , worldPrimaryAssociations :: Map.Map WorldArtifactBinding WorldPrimaryAssociation
-  , worldPrimarySelected :: Map.Map (String,String) WorldPrimaryAssociation
+  { worldPrimarySelected :: Map.Map (String,String) WorldPrimaryAssociation
   , worldPrimaryRetainedCharge :: (Integer,Int)
   }
 
 worldInputsPrimaryIsEmpty :: WorldInputFacts -> Bool
-worldInputsPrimaryIsEmpty facts =
-  let context = worldPrimaryContext (worldInputsPrimary facts)
-      selected = worldContextSelection context
-      (offers,availability,decisions) = worldContextPassive context
-  in Map.null (worldContextRoles context) && Map.null (worldContextLexical context)
-    && Map.null offers && Map.null availability && Map.null decisions
-    && Map.null (worldSelectionScopes selected) && Map.null (worldSelectionNamespace selected)
-    && Set.null (worldSelectionRoots selected) && Set.null (worldSelectionCustody selected)
-    && Map.null (worldPrimaryAssociations (worldInputsPrimary facts))
+worldInputsPrimaryIsEmpty = Map.null . worldPrimarySelected . worldInputsPrimary
 
 readWorldLexicalSurface :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString
   -> WorldPrimaryFacts -> IO WorldLexicalSurface
@@ -3609,119 +3566,21 @@ worldFactList bytes item = do
 worldStrictlyOrdered :: Ord a => String -> [a] -> Decoder s ()
 worldStrictlyOrdered label values = unless (and (zipWith (<) values (drop 1 values))) (fail label)
 
-worldBindingNodeScope :: WorldBindingNodeKey -> BS.ByteString
-worldBindingNodeScope node = case node of
-  WorldArtifactBinding (_,scope) -> scope
-  WorldGroupBinding (_,scope) _ -> scope
-
-decodeWorldScopeDependency :: Decoder s WorldScopeDependency
-decodeWorldScopeDependency = do
-  token <- peekTokenType
-  case token of
-    TypeString -> do
-      label <- decodeStringCanonical
-      unless (label == "interface") (fail "unsupported compiler world scope dependency")
-      pure WorldInterfaceDependency
-    TypeMapLen -> do
-      worldFactMap 1
-      label <- decodeStringCanonical
-      case label of
-        "native_group" -> do
-          worldFactMap 2
-          worldFactField "required_ordinal"
-          required <- decodeWord32Canonical
-          worldFactField "dependent_ordinal"
-          dependent <- decodeWord32Canonical
-          pure (WorldNativeGroupDependency dependent required)
-        "native_binding" -> do
-          worldFactMap 5
-          worldFactField "namespace"
-          namespace <- T.unpack <$> worldBindingText
-          worldFactField "generation"
-          generation <- decodeWord64Canonical
-          worldFactField "occurrence"
-          occurrence <- T.unpack <$> worldBindingText
-          worldFactField "record_parent"
-          token <- peekTokenType
-          parent <- if token == TypeNull then decodeNull >> pure Nothing else Just . T.unpack <$> decodeStringCanonical
-          worldFactField "dependent_ordinal"
-          dependent <- decodeWord32Canonical
-          pure (WorldNativeBindingDependency dependent generation namespace occurrence parent)
-        _ -> fail "unsupported compiler world scope dependency"
-    _ -> fail "invalid compiler world scope dependency"
-
-decodeWorldScopeProof :: Int -> Decoder s WorldScopeProof
-decodeWorldScopeProof bytes = do
-  worldFactMap 3
-  worldFactField "nodes"
-  nodes <- worldFactList bytes decodeWorldBindingNode
-  worldStrictlyOrdered "noncanonical compiler world scope nodes" nodes
-  unless (not (null nodes)) (fail "empty compiler world scope proof")
-  worldFactField "selection"
-  scope <- worldArrayDigest
-  unless (all ((== scope) . worldBindingNodeScope) nodes)
-    (fail "compiler world scope node has another issuer")
-  worldFactField "dependencies"
-  dependencies <- worldFactList bytes (worldArray 3 >> ((,,) <$> decodeWorldBindingNode <*> decodeWorldBindingNode <*> decodeWorldScopeDependency))
-  worldStrictlyOrdered "noncanonical compiler world scope dependencies" dependencies
-  let owned = Set.fromDistinctAscList nodes
-  unless (all (\(source,_,_) -> Set.member source owned) dependencies)
-    (fail "compiler world scope dependency source is outside its issuer")
-  pure (WorldScopeProof scope owned dependencies)
-
-decodeWorldCompilerRole :: Decoder s WorldCompilerRole
-decodeWorldCompilerRole = do
-  count <- decodeMapLenCanonical
-  worldFactField "kind"
-  kind <- decodeStringCanonical
-  case (kind,count) of
-    ("interface_only",2) -> worldFactField "interface" >> WorldInterfaceRole <$> worldArrayDigest
-    ("reusable_original",3) -> do
-      worldFactField "original"
-      original <- worldArrayDigest
-      worldFactField "interface"
-      interface <- worldArrayDigest
-      pure (WorldReusableRole interface original)
-    ("published_source_original",8) -> do
-      worldFactField "original"
-      original <- worldArrayDigest
-      worldFactField "interface"
-      interface <- worldArrayDigest
-      worldFactField "selection"
-      selection <- worldCID
-      worldFactField "source_revision"
-      revision <- T.unpack <$> worldBindingText
-      worldFactField "native_authority"
-      authority <- worldCID
-      worldFactField "selection_sha256"
-      seal <- worldArrayDigest
-      worldFactField "original_input_identity"
-      identity <- T.unpack <$> worldBindingText
-      pure (WorldPublishedRole interface original revision identity selection seal authority)
-    _ -> fail "unsupported compiler world compiler role"
-
-decodeWorldLexicalFact :: Int -> Decoder s ((String,String),[(String,String)])
-decodeWorldLexicalFact bytes = do
-  worldFactMap 2
-  worldFactField "owner"
-  owner <- decodeWorldModuleKey
-  worldFactField "imports"
-  imports <- worldFactList bytes decodeWorldModuleKey
-  worldStrictlyOrdered "noncanonical compiler world lexical imports" imports
-  pure (owner,imports)
-
 -- The acquisition association preserves the actual scoped bindings from the
 -- admitted Rust role owner. Image equality cannot replace either binding.
-decodeWorldPrimaryAssociation :: Int -> Decoder s (WorldArtifactBinding,Maybe WorldArtifactBinding,BS.ByteString)
+decodeWorldPrimaryAssociation :: Int -> Decoder s (WorldPrimaryBinding,BS.ByteString)
 decodeWorldPrimaryAssociation bytes = do
-  worldArray 4
+  worldArray 3
   magic <- decodeStringCanonical
-  unless (magic == "TPCWPRIMARY1") (fail "unsupported compiler world primary association")
-  interface <- decodeWorldBinding
-  token <- peekTokenType
-  original <- if token == TypeNull then decodeNull >> pure Nothing else Just <$> decodeWorldBinding
+  unless (magic == "TPCWPRIMARY2") (fail "unsupported compiler world primary product")
+  count <- decodeListLenCanonical
+  tag <- decodeWordCanonical
+  selected <- case (tag,count) of
+    (0,2) -> WorldInterfaceOnly <$> decodeWorldBinding
+    (1,3) -> WorldOriginal <$> decodeWorldBinding <*> decodeWorldBinding
+    _ -> fail "unsupported compiler world primary binding role"
   semantic <- decodeWorldSemanticRow bytes
-  pure (interface,original,semantic)
+  pure (selected,semantic)
 
 decodeWorldSemanticRow :: Int -> Decoder s BS.ByteString
 decodeWorldSemanticRow bytes = do
@@ -3745,35 +3604,6 @@ rawWorldDigestCanonical = do
   bytes <- decodeBytesCanonical
   unless (BS.length bytes == 32) (fail "invalid compiler world provenance digest")
   pure bytes
-
-data WorldBindingNodeKey = WorldArtifactBinding (BS.ByteString,BS.ByteString)
-  | WorldGroupBinding (BS.ByteString,BS.ByteString) Word32 deriving (Eq,Ord)
-
-decodeWorldBindingNode :: Decoder s WorldBindingNodeKey
-decodeWorldBindingNode = do
-  count <- decodeMapLenCanonical
-  unless (count == 1) (fail "invalid compiler world binding node")
-  kind <- decodeStringCanonical
-  case kind of
-    "artifact" -> WorldArtifactBinding <$> decodeWorldBinding
-    "group" -> do
-      fields <- decodeMapLenCanonical
-      unless (fields == 2) (fail "invalid compiler world group binding")
-      bindingField <- decodeStringCanonical
-      binding <- decodeWorldBinding
-      ordinalField <- decodeStringCanonical
-      ordinal <- decodeWord32Canonical
-      unless (bindingField == "binding" && ordinalField == "original_ordinal")
-        (fail "invalid compiler world group binding fields")
-      pure (WorldGroupBinding binding ordinal)
-    _ -> fail "unsupported compiler world binding node"
-
-encodeWorldBindingNode :: WorldBindingNodeKey -> E.Encoding
-encodeWorldBindingNode node = E.encodeMapLen 1 <> case node of
-  WorldArtifactBinding binding -> E.encodeString "artifact" <> encodeWorldBinding binding
-  WorldGroupBinding binding ordinal -> E.encodeString "group" <> E.encodeMapLen 2
-    <> E.encodeString "binding" <> encodeWorldBinding binding
-    <> E.encodeString "original_ordinal" <> E.encodeWord32 ordinal
 
 -- TPCWBIND4 names the occurrence root; raw CID bytes in visibility do not
 -- become a Context DAG link by themselves. No legacy visibility is inferred.
@@ -3911,245 +3741,37 @@ readChangedWorldBinding frontier eligible (symbol,variable,scope,generation,cid)
     ,semantic,toInteger (BS.length body))
 
 
-data WorldDescriptorField = WorldDescriptorVersion Word64 | WorldDescriptorProducer BS.ByteString
-  | WorldDescriptorLink BS.ByteString
-
-worldDescriptor :: [String] -> Bool -> Decoder s (Map.Map String WorldDescriptorField)
-worldDescriptor roots producer = do
-  count <- decodeMapLenCanonical
-  let expected = Set.fromList ("version" : roots ++ ["producer" | producer])
-  unless (count == Set.size expected) (fail "invalid compiler world descriptor fields")
-  fields <- replicateM count $ do
-    name <- T.unpack <$> decodeStringCanonical
-    value <- case name of
-      "version" -> WorldDescriptorVersion <$> decodeWord64Canonical
-      "producer" | producer -> WorldDescriptorProducer <$> worldArrayDigest
-      _ | name `elem` roots -> WorldDescriptorLink <$> worldCID
-      _ -> fail "unsupported compiler world descriptor field"
-    pure (name,value)
-  let order name = let bytes = TE.encodeUtf8 (T.pack name) in (BS.length bytes,bytes)
-  unless (Set.fromList (map fst fields) == expected
-      && and (zipWith (<) (map (order . fst) fields) (drop 1 (map (order . fst) fields))))
-    (fail "noncanonical compiler world descriptor fields")
-  pure (Map.fromList fields)
-
-readWorldDescriptor :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString
-  -> (forall s. Decoder s a) -> IO (a,Integer)
-readWorldDescriptor frontier cid parser = do
-  body <- maybe (worldCorrupt "compiler world descriptor block is absent") pure (Map.lookup cid frontier)
-  value <- decodeWorldBytes parser body
-  pure (value,toInteger (BS.length body))
-
-worldDescriptorLink :: String -> Map.Map String WorldDescriptorField -> IO BS.ByteString
-worldDescriptorLink name fields = case Map.lookup name fields of
-  Just (WorldDescriptorLink cid) -> pure cid
-  _ -> worldCorrupt "compiler world descriptor link is absent"
-
-requireWorldDescriptorVersion :: Word64 -> Map.Map String WorldDescriptorField -> IO ()
-requireWorldDescriptorVersion expected fields = case Map.lookup "version" fields of
-  Just (WorldDescriptorVersion actual) | actual == expected -> pure ()
-  _ -> worldCorrupt "unsupported compiler world descriptor version"
-
 addWorldCharge :: (Integer,Integer) -> (Integer,Integer) -> (Integer,Integer)
 addWorldCharge (bytes,entries) (more,count) = (bytes+more,entries+count)
 
 worldMapCharge :: Map.Map key value -> (Integer,Int) -> (Integer,Integer)
 worldMapCharge values (bytes,nodes) = (bytes,toInteger nodes + toInteger (Map.size values))
 
--- Scope digest issuance remains Rust inventory provenance. This receiver
--- checks the exact decoded cohort/edge/namespace correspondence before using
--- any association; a claimed digest cannot replace a missing proof body.
-readWorldSelection :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString -> IO (WorldSelection,(Integer,Integer))
-readWorldSelection frontier root = do
-  (descriptor,descriptorBytes) <- readWorldDescriptor frontier root
-    (worldDescriptor ["scopes","roots","namespace","custody_roots"] False)
-  requireWorldDescriptorVersion 2 descriptor
-  scopeRoot <- worldDescriptorLink "scopes" descriptor
-  (scopeLinks,scopeMapCharge) <- worldHamtMapWithCharge frontier scopeRoot worldArrayDigest encodeWorldArrayDigest worldCID
-  decoded <- forM (Map.toAscList scopeLinks) $ \(identity,cid) -> do
-    body <- maybe (worldCorrupt "compiler world scope proof is absent") pure (Map.lookup cid frontier)
-    proof@(WorldScopeProof actual nodes dependencies) <- decodeWorldBytes (decodeWorldScopeProof (BS.length body)) body
-    unless (identity == actual) (worldCorrupt "compiler world scope proof has another binding identity")
-    pure (identity,(proof,(toInteger (BS.length body),toInteger (Set.size nodes) + toInteger (length dependencies) + 1)))
-  let proofs = Map.fromDistinctAscList [(identity,proof) | (identity,(proof,_)) <- decoded]
-      proofHas node = case Map.lookup (worldBindingNodeScope node) proofs of
-        Just (WorldScopeProof _ nodes _) -> Set.member node nodes
-        Nothing -> False
-      ancestors = Map.map (\(WorldScopeProof own _ dependencies) -> Set.fromList
-        [worldBindingNodeScope target | (_,target,_) <- dependencies,worldBindingNodeScope target /= own]) proofs
-  forM_ (Map.elems proofs) $ \(WorldScopeProof _ _ dependencies) ->
-    unless (all (\(_,target,_) -> proofHas target) dependencies)
-      (worldCorrupt "compiler world scope target is absent from its exact issuer")
-  let pending = [(scope,Set.size required) | (scope,required) <- Map.toAscList ancestors]
-      counts = Map.fromDistinctAscList pending
-      dependents = Map.fromListWith (++) [(ancestor,[scope]) | (scope,required) <- Map.toAscList ancestors,ancestor <- Set.toAscList required]
-      settle count _ [] = unless (count == Map.size proofs) (worldCorrupt "compiler world binding scope ancestry cycle")
-      settle count remaining (scope:rest) = do
-        let (next,newlyReady) = foldl' (\(current,ready) child ->
-              let waiting = current Map.! child - 1
-              in (Map.insert child waiting current,if waiting == 0 then child:ready else ready))
-              (remaining,[]) (Map.findWithDefault [] scope dependents)
-        settle (count+1) next (newlyReady ++ rest)
-  settle 0 counts [scope | (scope,0) <- pending]
-  rootsCID <- worldDescriptorLink "roots" descriptor
-  (roots,rootsCharge) <- worldHamtMapWithCharge frontier rootsCID decodeWorldBindingNode encodeWorldBindingNode decodeNull
-  custodyCID <- worldDescriptorLink "custody_roots" descriptor
-  (custody,custodyCharge) <- worldHamtMapWithCharge frontier custodyCID decodeWorldBindingNode encodeWorldBindingNode decodeNull
-  namespaceCID <- worldDescriptorLink "namespace" descriptor
-  (namespace,namespaceCharge) <- worldHamtMapWithCharge frontier namespaceCID worldArrayDigest encodeWorldArrayDigest decodeWorldBinding
-  let outgoing = Map.fromListWith (++) [(source,[target])
-        | WorldScopeProof _ _ dependencies <- Map.elems proofs,(source,target,_) <- dependencies]
-      visit seen [] = pure seen
-      visit seen (node:rest)
-        | Set.member node seen = visit seen rest
-        | not (proofHas node) = worldCorrupt "compiler world selected node is outside its scope proof"
-        | otherwise = visit (Set.insert node seen) (Map.findWithDefault [] node outgoing ++ rest)
-  selected <- visit Set.empty (Map.keys roots ++ Map.keys custody)
-  unless (all (\(artifact,binding@(actual,_)) -> artifact == actual && Set.member (WorldArtifactBinding binding) selected)
-      (Map.toAscList namespace))
-    (worldCorrupt "compiler world namespace differs from selected scope nodes")
-  let charge = foldl' addWorldCharge (descriptorBytes,1 + toInteger (Set.size selected))
-        ([worldMapCharge scopeLinks scopeMapCharge,worldMapCharge roots rootsCharge
-         ,worldMapCharge custody custodyCharge,worldMapCharge namespace namespaceCharge]
-         ++ [cost | (_,(_,cost)) <- decoded])
-  pure (WorldSelection proofs (Map.keysSet roots) namespace (Map.keysSet custody) selected,charge)
-
--- Retain current role, lexical and scope facts under the same world owner.
--- Offer/native decision links are passive custody; no native payload or group
--- inventory is loaded merely to open a type/query world.
-readWorldNativeMaps :: Map.Map BS.ByteString BS.ByteString -> Map.Map String WorldDescriptorField
-  -> IO (WorldNativeProvenance,(Integer,Integer))
-readWorldNativeMaps frontier descriptor = do
-  offersCID <- worldDescriptorLink "offers" descriptor
-  (offers,offersCharge) <- worldHamtMapWithCharge frontier offersCID worldArrayDigest encodeWorldArrayDigest worldCID
-  availabilityCID <- worldDescriptorLink "native_availability" descriptor
-  (availability,availabilityCharge) <- worldHamtMapWithCharge frontier availabilityCID worldArrayDigest encodeWorldArrayDigest worldCID
-  decisionsCID <- worldDescriptorLink "input_decisions" descriptor
-  (decisions,decisionsCharge) <- worldHamtMapWithCharge frontier decisionsCID decodeWorldModuleKey encodeWorldModuleKey worldCID
-  pure ((offers,availability,decisions),foldl' addWorldCharge (0,0)
-    [worldMapCharge offers offersCharge,worldMapCharge availability availabilityCharge,worldMapCharge decisions decisionsCharge])
-
-type WorldAuthorityMemo = IORef (Map.Map BS.ByteString (Maybe WorldNativeAuthority))
-
-readWorldNativeAuthority :: WorldAuthorityMemo -> Map.Map BS.ByteString BS.ByteString -> BS.ByteString
-  -> IO (WorldNativeAuthority,(Integer,Integer))
-readWorldNativeAuthority memo frontier root = do
-  decoded <- readIORef memo
-  case Map.lookup root decoded of
-    Just Nothing -> worldCorrupt "cyclic compiler world publication authority"
-    Just (Just authority) -> pure (authority,(0,1))
-    Nothing -> do
-      modifyIORef' memo (Map.insert root Nothing)
-      (descriptor,descriptorBytes) <- readWorldDescriptor frontier root
-        (worldDescriptor ["roles","offers","native_availability","input_decisions"] False)
-      requireWorldDescriptorVersion 2 descriptor
-      rolesCID <- worldDescriptorLink "roles" descriptor
-      (roles,roleCharge) <- readWorldRoles memo frontier rolesCID
-      (facts,charge) <- readWorldNativeMaps frontier descriptor
-      let authority = WorldNativeAuthority roles facts
-      modifyIORef' memo (Map.insert root (Just authority))
-      -- One immutable decode per authority CID plus each retained reference.
-      pure (authority,foldl' addWorldCharge (descriptorBytes,2) [roleCharge,charge])
-
--- Current and publication-birth domains share the same strict role decoder.
--- A born role's own publication owner remains independent and is retained too.
-readWorldRoles :: WorldAuthorityMemo -> Map.Map BS.ByteString BS.ByteString -> BS.ByteString
-  -> IO (Map.Map (String,String) (WorldCompilerRole,Maybe (WorldSelection,WorldNativeAuthority)),(Integer,Integer))
-readWorldRoles memo frontier root = do
-  (links,hamtCharge) <- worldHamtMapWithCharge frontier root decodeWorldModuleKey encodeWorldModuleKey worldCID
-  roles <- forM links $ \cid -> do
-    (role,bytes) <- readWorldDescriptor frontier cid decodeWorldCompilerRole
-    (selection,charge) <- case role of
-      WorldPublishedRole _ _ _ _ selectedRoot _ authorityRoot -> do
-        (selected,selectedCharge) <- readWorldSelection frontier selectedRoot
-        (authority,authorityCharge) <- readWorldNativeAuthority memo frontier authorityRoot
-        pure (Just (selected,authority),addWorldCharge selectedCharge authorityCharge)
-      _ -> pure (Nothing,(0,0))
-    pure ((role,selection),addWorldCharge (bytes,1) charge)
-  pure (fmap fst roles,foldl' addWorldCharge (worldMapCharge links hamtCharge) (map snd (Map.elems roles)))
-
-readWorldContext :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString -> BS.ByteString -> IO WorldContextFacts
-readWorldContext frontier root producer = do
-  (descriptor,descriptorBytes) <- readWorldDescriptor frontier root (worldDescriptor
-    ["selection","roles","lexical","offers","native_availability","input_decisions"] True)
-  requireWorldDescriptorVersion 6 descriptor
-  case Map.lookup "producer" descriptor of
-    Just (WorldDescriptorProducer actual) | actual == producer -> pure ()
-    _ -> worldCorrupt "compiler world context producer differs"
-  rolesCID <- worldDescriptorLink "roles" descriptor
-  authorityMemo <- newIORef Map.empty
-  (roles,roleCharge) <- readWorldRoles authorityMemo frontier rolesCID
-  lexicalCID <- worldDescriptorLink "lexical" descriptor
-  (lexicalLinks,lexicalCharge) <- worldHamtMapWithCharge frontier lexicalCID decodeWorldModuleKey encodeWorldModuleKey worldCID
-  lexical <- forM (Map.toAscList lexicalLinks) $ \(owner,cid) -> do
-    body <- maybe (worldCorrupt "compiler world lexical fact is absent") pure (Map.lookup cid frontier)
-    (actual,imports) <- decodeWorldBytes (decodeWorldLexicalFact (BS.length body)) body
-    unless (actual == owner) (worldCorrupt "compiler world lexical fact has another owner")
-    pure (owner,(imports,(toInteger (BS.length body),1+toInteger (length imports))))
-  let lexicalFacts = Map.fromDistinctAscList [(owner,imports) | (owner,(imports,_)) <- lexical]
-  unless (all (\(owner,imports) -> Map.member owner roles && all (`Map.member` lexicalFacts) imports)
-      (Map.toAscList lexicalFacts))
-    (worldCorrupt "compiler world lexical graph leaves selected roles or lexical facts")
-  selectionCID <- worldDescriptorLink "selection" descriptor
-  (selection,selectionCharge) <- readWorldSelection frontier selectionCID
-  (passive,passiveCharge) <- readWorldNativeMaps frontier descriptor
-  let charge = foldl' addWorldCharge (descriptorBytes,1)
-        ([roleCharge,worldMapCharge lexicalLinks lexicalCharge,selectionCharge,passiveCharge]
-         ++ [cost | (_,(_,cost)) <- lexical])
-  pure (WorldContextFacts roles lexicalFacts selection passive charge)
-
-readWorldPrimary :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString -> WorldContextFacts -> BS.ByteString
+-- This reader checks the complete projected product and admitted TYPE bytes.
+-- Exact pair derivation is the trusted Rust issuer's responsibility, committed
+-- alongside the opaque full runtime Context; hash equality is not authority.
+readWorldPrimary :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString -> BS.ByteString
   -> [(OfferedWorldRow,ScopeInterfaceInput)] -> IO WorldPrimaryFacts
-readWorldPrimary frontier root context producer base = do
-  (links,hamtCharge) <- worldHamtMapWithCharge frontier root decodeWorldBinding encodeWorldBinding worldCID
-  eligible <- forM base $ \(offered,input) -> do
+readWorldPrimary frontier root producer base = do
+  (links,hamtCharge) <- worldHamtMapWithCharge frontier root decodeWorldModuleKey encodeWorldModuleKey worldCID
+  eligible <- forM base $ \(offered,input@(ScopeInterfaceInput row _)) -> do
     semantic <- toStrictByteString <$> worldSemanticRowEncoding producer offered
-    pure (semantic,input)
+    pure (rowOwner row,(semantic,input))
   let rows = Map.fromList eligible
-      facts = Set.fromList (Map.elems links)
-  decoded <- forM (Set.toAscList facts) $ \cid -> do
-    body <- maybe (worldCorrupt "compiler world primary association is absent") pure (Map.lookup cid frontier)
-    (interface,original,semantic) <- decodeWorldBytes (decodeWorldPrimaryAssociation (BS.length body)) body
-    input <- maybe (worldCorrupt "compiler world primary association differs from admitted base inputs") pure (Map.lookup semantic rows)
-    pure (cid,(WorldPrimaryAssociation interface original input,semantic,toInteger (BS.length body)))
-  let records = Map.fromDistinctAscList decoded
-      referenced = Set.fromList [semantic | (_,(_,semantic,_)) <- decoded]
-  unless (referenced == Map.keysSet rows)
-    (worldCorrupt "compiler world base input census differs from primary associations")
-  associations <- forM (Map.toAscList links) $ \(binding,cid) -> case Map.lookup cid records of
-    Just (association,_,_) | binding == maybe (worldPrimaryInterfaceBinding association) id (worldPrimaryOriginalBinding association) ->
-      pure (binding,association)
-    _ -> worldCorrupt "compiler world primary association key differs from acquired transport binding"
-  let indexed = Map.fromDistinctAscList associations
-      selection = worldContextSelection context
-      namespace = worldSelectionNamespace selection
-      requiredBinding artifact = case Map.lookup artifact namespace of
-        Just binding | Set.member (WorldArtifactBinding binding) (worldSelectionNodes selection) -> pure binding
-        _ -> worldCorrupt "compiler world role has no exact selected namespace binding"
-  selected <- forM (worldContextRoles context) $ \(role,_) -> do
-    interface <- requiredBinding (worldRoleInterface role)
-    original <- traverse requiredBinding (worldRoleOriginal role)
-    let transport = maybe interface id original
-    association <- maybe (worldCorrupt "compiler world selected role lacks its acquired association") pure (Map.lookup transport indexed)
-    unless (interface == worldPrimaryInterfaceBinding association && original == worldPrimaryOriginalBinding association)
-      (worldCorrupt "compiler world selected role differs from acquired binding scopes")
-    forM_ original $ \binding -> case Map.lookup (snd binding) (worldSelectionScopes selection) of
-      Just (WorldScopeProof _ _ dependencies)
-        | (WorldArtifactBinding binding,WorldArtifactBinding interface,WorldInterfaceDependency) `elem` dependencies -> pure ()
-      _ -> worldCorrupt "compiler world original lacks its exact canonical interface edge"
-    pure association
-  forM_ (Map.toAscList selected) $ \(owner,association) -> case worldPrimaryRow association of
-    ScopeInterfaceInput row _ -> unless (owner == rowOwner row)
-      (worldCorrupt "compiler world selected role has another authenticated row owner")
-  let selectedKeys = Set.fromList [maybe (worldPrimaryInterfaceBinding value) id (worldPrimaryOriginalBinding value) | value <- Map.elems selected]
-  unless (selectedKeys == Map.keysSet indexed)
-    (worldCorrupt "compiler world primary association has no selected role")
-  let (bytes,entries) = foldl' addWorldCharge (worldContextCharge context)
-        [worldMapCharge links hamtCharge
-        ,(sum [size | (_,(_,_,size)) <- decoded],toInteger (Set.size facts) + toInteger (Map.size selected))]
+  unless (Map.size rows == length eligible && Map.keysSet links == Map.keysSet rows)
+    (worldCorrupt "compiler world primary census differs from admitted base inputs")
+  selected <- forM (Map.toAscList links) $ \(owner,cid) -> do
+    body <- maybe (worldCorrupt "compiler world primary product is absent") pure (Map.lookup cid frontier)
+    (binding,semantic) <- decodeWorldBytes (decodeWorldPrimaryAssociation (BS.length body)) body
+    case Map.lookup owner rows of
+      Just (expected,input) | semantic == expected ->
+        pure (owner,(WorldPrimaryAssociation binding input,toInteger (BS.length body)))
+      _ -> worldCorrupt "compiler world primary product differs from admitted owner or TYPE facts"
+  let facts = Map.fromDistinctAscList [(owner,association) | (owner,(association,_)) <- selected]
+      (bytes,entries) = addWorldCharge (worldMapCharge links hamtCharge)
+        (sum [size | (_,(_,size)) <- selected],2 * toInteger (Map.size facts))
   when (entries > toInteger (maxBound :: Int)) (worldCorrupt "compiler world primary retention count exceeds host range")
-  _ <- evaluate (bytes + entries)
-  pure (WorldPrimaryFacts context indexed selected (bytes,fromInteger entries))
+  pure (WorldPrimaryFacts facts (bytes,fromInteger entries))
 
 -- Scan the fixed DAG-CBOR block envelope for CID links before schema-specific
 -- decoding. Counting pending values avoids an unbounded recursive term tree;
@@ -4234,7 +3856,7 @@ decodeWorldInputs payloadBytes = do
   array 11
   magic <- string
   version <- decodeWord
-  unless (magic == "TPCWORLD" && version == 4) (fail "unsupported compiler world descriptor")
+  unless (magic == "TPCWORLD" && version == 5) (fail "unsupported compiler world descriptor")
   restoration <- decodeBytes
   source <- absolute
   producer <- rawWorldDigest
@@ -4256,7 +3878,7 @@ decodeWorldRestoration = do
   worldArray 10
   magic <- decodeStringCanonical
   version <- decodeWordCanonical
-  unless (magic == "TPCWREST" && version == 4) (fail "unsupported compiler world restoration")
+  unless (magic == "TPCWREST" && version == 5) (fail "unsupported compiler world restoration")
   WorldRestoration <$> worldRawCID <*> rawWorldDigestCanonical <*> rawWorldDigestCanonical <*> rawWorldDigestCanonical
     <*> decodeWord64Canonical <*> worldRawCID <*> worldRawCID <*> worldRawCID
 

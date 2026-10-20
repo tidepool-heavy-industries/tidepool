@@ -309,7 +309,7 @@ import Tidepool.ExactScope
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
   , exactInputRetentionLimits, commitWorldInputRetention
   , WorldInputFacts, WorldBinding, CapturedWorldSources, WorldSourceClosureEntry(..), readWorldInputsWithOwner, readWorldSuccessorWithOwner, WorldSuccessorInputs, worldSuccessorFacts, worldSuccessorChangedAliases, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
-  , worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsBindings, worldInputsBindingScope
+  , worldInputsCompilerIdentity, worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsBindings, worldInputsBindingScope
   , worldInputsLexicalSurface, worldLexicalImports, worldLexicalDeclaration, worldDeclarationInterface
   , worldLexicalObservation, WorldObservationScaffold, worldObservationRequestTypes, worldObservationInputType
   , worldObservationFragment, worldObservationImports
@@ -2141,7 +2141,7 @@ prepareWorldObservationStage universe baseEnv timing
     world@(HeldCompilerWorld facts _ (WorldMaterialization realization _ roots _ _ _ _ _ _) _) query = do
   scaffold <- maybe (throwIO WorldQueryUnsupported) pure
     (worldLexicalObservation (worldInputsLexicalSurface facts))
-  let owner = generatedScaffoldModuleName ["held-world-observation-v1",worldInputsIdentity facts]
+  let owner = generatedScaffoldModuleName ["held-world-observation-v1",worldInputsCompilerIdentity facts]
       directory = realization </> "observation"
       path = directory </> owner ++ ".hs"
       flags = heldWorldCellFlags baseEnv directory roots

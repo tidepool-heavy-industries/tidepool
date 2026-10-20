@@ -54,7 +54,7 @@ pub use endpoint::{
 };
 use exec_check::is_readable_executable_file;
 pub use request::{
-    CompileWorkload, EnsureExactInputsOutcome, ExactInputsAcquisition, ExactInputsRejection,
+    CompileWorkload, EnsureExactInputsOutcome, WorldResidency, WorldNonRetentionReason, ExactInputsAcquisition, ExactInputsRejection,
     ExactInputsRequest, ExtractRequest, InspectionNamespace, InspectionScope, PlannedCellSlot,
     PlannedCellSlotRef, ProtocolError, StructuredInspection, SymbolIdentity,
     WorldCellOperandRequest, WorldCellPlanRequest, WorldCellPrepareRequest, WorldCellRecipe,

@@ -898,6 +898,35 @@ pub(crate) struct WorldPrimaryTypeRow<'a> {
     pub(crate) entry: &'a Arc<ArtifactEntry>,
 }
 
+/// A compiler-only observation issued from this support's acquired selected row.
+/// It cannot restore a runtime selection or qualify executable availability.
+pub(crate) enum CompilerPrimaryInput<'a> {
+    InterfaceOnly(CompilerPrimaryRow<'a>),
+    Original(CompilerPrimaryRow<'a>),
+}
+
+pub(crate) struct CompilerPrimaryRow<'a> {
+    owner: &'a ExactModuleIdentity,
+    row: &'a ResolvedCompilerRole,
+}
+
+impl<'a> CompilerPrimaryInput<'a> {
+    fn row(&self) -> &CompilerPrimaryRow<'a> {
+        match self {
+            Self::InterfaceOnly(row) | Self::Original(row) => row,
+        }
+    }
+    pub(crate) fn owner(&self) -> &'a ExactModuleIdentity { self.row().owner }
+    pub(crate) fn interface(&self) -> ArtifactBinding { self.row().row.interface.0 }
+    pub(crate) fn original(&self) -> Option<ArtifactBinding> {
+        self.row().row.original.as_ref().map(|(binding, _)| *binding)
+    }
+    pub(crate) fn entry(&self) -> &'a Arc<ArtifactEntry> {
+        let row = self.row().row;
+        &row.original.as_ref().unwrap_or(&row.interface).1
+    }
+}
+
 /// Borrowed selected interface observations and the same issuing view that
 /// resolves their scoped bindings. Historical custody cannot choose a row.
 pub(crate) struct SelectedCompilerInterfaces<'a> {
@@ -1811,19 +1840,43 @@ impl CompilerSourceSupport {
         )
     }
 
-    /// Borrow successful role admission's actual acquired binding pairs. This
-    /// is a cold export/delta issuer view, not an inventory namespace search.
-    pub(crate) fn world_primary_type_rows(&self) -> impl Iterator<Item = WorldPrimaryTypeRow<'_>> {
-        self.selected.iter().map(|(owner, row)| {
-            let transport = row.original.as_ref().unwrap_or(&row.interface);
-            WorldPrimaryTypeRow {
-                owner,
-                interface_binding: &row.interface.0,
-                original_binding: row.original.as_ref().map(|(binding, _)| binding),
-                transport_binding: &transport.0,
-                entry: &transport.1,
+    pub(crate) fn compiler_primary_inputs(
+        &self,
+    ) -> impl Iterator<Item = Result<CompilerPrimaryInput<'_>, CompileError>> {
+        self.selected.iter().map(|(owner, row)| self.issue_compiler_primary_input(owner, row))
+    }
+
+    pub(crate) fn compiler_primary_input(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Result<Option<CompilerPrimaryInput<'_>>, CompileError> {
+        self.selected.rows.get_key_value(owner)
+            .map(|(owner, row)| self.issue_compiler_primary_input(owner, row)).transpose()
+    }
+
+    fn issue_compiler_primary_input<'a>(
+        &'a self,
+        owner: &'a ExactModuleIdentity,
+        row: &'a ResolvedCompilerRole,
+    ) -> Result<CompilerPrimaryInput<'a>, CompileError> {
+        for (binding, entry) in std::iter::once(&row.interface).chain(row.original.iter()) {
+            if &entry.descriptor.owner != owner
+                || self.artifacts.lease.selection.namespace.get(&binding.artifact) != Some(binding)
+                || self.artifacts.lease.payloads.get(&binding.artifact)
+                    .is_none_or(|held| !Arc::ptr_eq(held, entry))
+                || self.artifacts.lease.selection.scopes.get(&binding.selection)
+                    .is_none_or(|proof| proof.proof().nodes.binary_search(&ArtifactBindingNode::Artifact(*binding)).is_err())
+            {
+                return Err(failure("compiler primary row differs from its acquired owner"));
             }
-        })
+        }
+        if let Some((original, _)) = row.original.as_ref() {
+            let state = self.artifacts.lease.inventory.0.lock().expect("inventory lock");
+            ResolvedCompilerRole::validate_original_pair(&state, row.interface.0, *original)?;
+            Ok(CompilerPrimaryInput::Original(CompilerPrimaryRow { owner, row }))
+        } else {
+            Ok(CompilerPrimaryInput::InterfaceOnly(CompilerPrimaryRow { owner, row }))
+        }
     }
 
     pub(crate) fn world_primary_type_row(
@@ -4274,6 +4327,38 @@ mod tests {
             &catalog,
         )?;
         source.rebuild(projection, artifacts, source.native_offers.iter().cloned())
+    }
+
+    #[test]
+    fn compiler_primary_issuer_rejects_crossed_acquisitions_and_canonical_pairs() {
+        let entries = decision_affinity_entries();
+        let inventory = ArtifactInventory::default();
+        let issue = |marker: &str| {
+            let mut issued = entries.clone();
+            issued.push(Arc::new(crate::artifact_inventory::tests::entry(marker, &[])));
+            let view = inventory.admit_shared_with_demand(
+                &inventory.empty_view(), issued, NativeArtifactDemand::AllGroups,
+            ).unwrap();
+            CompilerSourceSupport::from_selected_issuance(
+                CompilerInputProjection::from_issued_entries(&entries).unwrap(), view,
+            ).unwrap()
+        };
+        let first = issue("PrimaryFirst");
+        let second = issue("PrimarySecond");
+        let owner = &entries[1].descriptor.owner;
+        let row = &first.selected[owner];
+        let foreign = &second.selected[owner];
+        assert_ne!(row.original.as_ref().unwrap().0, foreign.original.as_ref().unwrap().0);
+        let primary = first.compiler_primary_input(owner).unwrap().unwrap();
+        assert_eq!(primary.original(), Some(row.original.as_ref().unwrap().0));
+        assert!(Arc::ptr_eq(primary.entry(), &row.original.as_ref().unwrap().1));
+        assert!(first.issue_compiler_primary_input(owner, foreign).is_err());
+        assert!(second.issue_compiler_primary_input(owner, row).is_err());
+        let mut wrong_canonical = row.clone();
+        wrong_canonical.interface = first.selected[&entries[2].descriptor.owner].interface.clone();
+        assert!(first.issue_compiler_primary_input(owner, &wrong_canonical).is_err());
+        assert!(first.issue_compiler_primary_input(&entries[2].descriptor.owner, row).is_err());
+        assert_eq!(first.compiler_primary_inputs().count(), first.selected.len());
     }
 
     #[test]
