@@ -3544,13 +3544,16 @@ impl<'a> ResolvedNativeSourceProduct<'a> {
         self.binding
     }
     pub fn physical_current(&self) -> Option<PhysicalCurrentNativeGroup<'a>> {
-        self.physical_current.then_some(PhysicalCurrentNativeGroup { group: self.group })
+        self.physical_current
+            .then_some(PhysicalCurrentNativeGroup { group: self.group })
     }
 }
 
 impl<'a> ResolvedNativeSourceProducts<'a> {
     pub fn target(&self) -> PhysicalCurrentNativeTarget<'a> {
-        PhysicalCurrentNativeTarget { prepared: self.prepared }
+        PhysicalCurrentNativeTarget {
+            prepared: self.prepared,
+        }
     }
 
     pub fn groups(&self) -> impl Iterator<Item = &ResolvedNativeSourceProduct<'a>> {
@@ -3567,32 +3570,64 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         for group in groups {
             let key = (group.owner(), group.group().original_ordinal());
             if available.insert(key, group).is_some() {
-                return Err(CompileError::ExtractFailed("native source group has competing output members".into()));
+                return Err(CompileError::ExtractFailed(
+                    "native source group has competing output members".into(),
+                ));
             }
         }
         let mut rows = Vec::with_capacity(resolved.groups().len());
         for binding in resolved.groups().iter().copied() {
             let owner = resolved.original_owner(binding)?;
-            let group = *available.get(&(owner, binding.original_ordinal)).ok_or_else(|| {
-                CompileError::ExtractFailed("resolved native source lacks its certified output member".into())
-            })?;
-            let physical_current = selection.physical_current_original(owner)
-                .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
-                == Some(binding.binding.artifact());
-            rows.push(ResolvedNativeSourceProduct { group, binding, physical_current });
+            let group = *available
+                .get(&(owner, binding.original_ordinal))
+                .ok_or_else(|| {
+                    CompileError::ExtractFailed(
+                        "resolved native source lacks its certified output member".into(),
+                    )
+                })?;
+            let physical_current = resolved.has_only_current_source(binding)
+                && selection
+                    .physical_current_original(owner)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
+                    == Some(binding.binding.artifact());
+            rows.push(ResolvedNativeSourceProduct {
+                group,
+                binding,
+                physical_current,
+            });
         }
-        Ok(Self { _resolved: resolved, prepared, rows })
+        Ok(Self {
+            _resolved: resolved,
+            prepared,
+            rows,
+        })
     }
 }
 
 impl CompiledArtifacts {
     /// Resolve only the target issued in this bundle, preserving its exact roots.
     /// Raw decoded programs have no selecting owner and return no source proof.
-    pub fn native_source_products(&self, name: &str) -> Result<Option<ResolvedNativeSourceProducts<'_>>, CompileError> {
-        let target = self.targets.get(name).ok_or_else(|| CompileError::ExtractFailed("native source target is absent".into()))?;
-        let Some(inputs) = &target.native_inputs else { return Ok(None); };
-        let selection = self.source_selection.as_ref().ok_or_else(|| CompileError::ExtractFailed("issued native target lacks its source selection".into()))?;
-        ResolvedNativeSourceProducts::issue(inputs.resolve()?, target.prepared.prepared(), &self.certified_groups, selection).map(Some)
+    pub fn native_source_products(
+        &self,
+        name: &str,
+    ) -> Result<Option<ResolvedNativeSourceProducts<'_>>, CompileError> {
+        let target = self
+            .targets
+            .get(name)
+            .ok_or_else(|| CompileError::ExtractFailed("native source target is absent".into()))?;
+        let Some(inputs) = &target.native_inputs else {
+            return Ok(None);
+        };
+        let selection = self.source_selection.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed("issued native target lacks its source selection".into())
+        })?;
+        ResolvedNativeSourceProducts::issue(
+            inputs.resolve()?,
+            target.prepared.prepared(),
+            &self.certified_groups,
+            selection,
+        )
+        .map(Some)
     }
 }
 
@@ -6216,9 +6251,8 @@ fn compile_invocation_inner(
                         &mut validation,
                     )
                     .map_err(compiler_evidence_failure)?;
-                target.native_inputs = Some(admitted_targets.for_ordinary_target(
-                    target.pending_imports.clone(),
-                )?);
+                target.native_inputs =
+                    Some(admitted_targets.for_ordinary_target(target.pending_imports.clone())?);
             }
         }
         timing::record_stage_with_owners(
