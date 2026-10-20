@@ -610,6 +610,14 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
     liftIO $ unless (sum [sum (counterValues ("exact_iface_decode_reuse." ++ snd key) warm)
           | key <- selectedOwners] == toInteger (length selectedOwners))
       (fail "World type closure allocated an independent decoder instead of reusing its owner")
+    let leaves = [(exactUnit artifact,exactModule artifact)
+          | (artifact,_,_) <- scopeInterfaces scope, null (exactRequirements artifact)
+          , (exactUnit artifact,exactModule artifact) `elem` selectedOwners]
+    liftIO $ unless (not (null leaves)) (fail "partial demand control needs an actual leaf type owner")
+    forM_ leaves $ \key -> do
+      partial <- liftIO (readWorldTypeInputs owner environment original [key]) >>= either (liftIO . fail) pure
+      liftIO $ unless (Map.keysSet partial == Set.singleton key)
+        (fail "one leaf type demand widened to unrelated selected primary rows")
     empty <- liftIO (readWorldTypeInputs owner environment original []) >>= either (liftIO . fail) pure
     liftIO $ unless (Map.null empty) (fail "empty type demand widened to available primary rows")
     hydrated <- liftIO (hydrateExactScope environment
@@ -654,7 +662,8 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
           first:rest -> first {exportHead=(exportHead first) {exportModule="Foreign.Declaration"}}:rest
           [] -> error "lexical export refusal needs a genuine nonempty interface"
     unless (not (null exports)) (fail "lexical export oracle must be nonempty")
-    forM_ [("exact",reverse exports,True),("omitted",[],False),("foreign",changedExports,False)] $ \(label,offered,accept) -> do
+    forM_ [("exact",reverse exports,True),("omitted",[],False),("foreign",changedExports,False)
+          ,("duplicate",exports ++ take 1 exports,False)] $ \(label,offered,accept) -> do
       let body = surface offered
       root <- worldFixtureCID body
       pairs <- reachable [primary,association,emptyBinding,root] ((root,body):blockPairs)
