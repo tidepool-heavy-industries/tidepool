@@ -976,6 +976,17 @@ tidepool_rust_test_cases(
 )
 
 rust_compile_fail(
+    name = "compile_fail_compiler_cell_program_requires_runtime_settlement",
+    source = "tests/compile_fail/compiler_cell_program_requires_runtime_settlement.rs",
+    control = "tests/compile_pass/compiler_cell_program_requires_runtime_settlement.rs",
+    expected = "tests/compile_fail/compiler_cell_program_requires_runtime_settlement.stderr",
+    dependencies = {
+        "tidepool_runtime": ":tidepool_runtime",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
     name = "compile_fail_compiler_cell_requires_settled",
     source = "tests/compile_fail/compiler_cell_requires_settled.rs",
     control = "tests/compile_pass/compiler_cell_requires_settled.rs",
@@ -1432,6 +1443,8 @@ filegroup(
         "tidepool/runtime/tests/prepared_residency.rs": "tests/prepared_residency.rs",
         "tidepool/runtime/tests/prepared_resident_composite.rs": "tests/prepared_resident_composite.rs",
         "tidepool/runtime/tests/prepared_unit_codegen_cost.rs": "tests/prepared_unit_codegen_cost.rs",
+        "tidepool/runtime/tests/service_cell_slice.rs": "tests/service_cell_slice.rs",
+        "tidepool/runtime/tests/service_cell_warm_timing.rs": "tests/service_cell_warm_timing.rs",
         "tidepool/runtime/tests/suites/session.rs": "tests/suites/session.rs",
     },
     visibility = ["PUBLIC"],

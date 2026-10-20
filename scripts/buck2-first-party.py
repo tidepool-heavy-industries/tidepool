@@ -1064,6 +1064,7 @@ def compile_fail_cases(package, library):
         "native_group_issuer_is_not_artifact": (),
         "native_group_issuer_fields_are_private": (),
         "compiler_cell_requires_settled": (),
+        "compiler_cell_program_requires_runtime_settlement": (),
         "compiler_renderer_requires_settled": (),
         "compiler_settled_consumed_once": (),
         "compiler_settled_no_reassociation": (),
