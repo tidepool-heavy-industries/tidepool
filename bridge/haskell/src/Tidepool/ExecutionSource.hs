@@ -125,6 +125,7 @@ data WorkerExecutionSource
   = OrdinaryExecutionSource
   | ExactExecutionSourceUnavailable SourceRecipeUnavailable
   | ExactExecutionSourceAvailable ExecutionSourceGraph
+  | WorldExecutionSourceUnavailable BS.ByteString BS.ByteString SourceRecipeUnavailable
 
 data SourceRecipeUnavailable
   = NoFreshOriginals
@@ -139,7 +140,15 @@ encodeWorkerExecutionSource (ExactExecutionSourceAvailable graph) =
   encodeListLen 2 <> encodeString "exact-available"
     <> encodeString (T.pack (executionGraphSha256 graph))
 encodeWorkerExecutionSource (ExactExecutionSourceUnavailable reason) =
-  encodeListLen 2 <> encodeString "exact-unavailable" <> encodeString (case reason of
+  encodeListLen 2 <> encodeString "exact-unavailable" <> encodeUnavailableReason reason
+-- TPCERT10 keeps existing tags unchanged. This distinct nested tag requires
+-- the paired World reader; an older reader refuses it as an unknown recipe.
+encodeWorkerExecutionSource (WorldExecutionSourceUnavailable base domain reason) =
+  encodeListLen 4 <> encodeString "world-unavailable" <> encodeBytes base
+    <> encodeBytes domain <> encodeUnavailableReason reason
+
+encodeUnavailableReason :: SourceRecipeUnavailable -> Encoding
+encodeUnavailableReason reason = encodeString (case reason of
     NoFreshOriginals -> "no-fresh-originals"
     IncompleteSourceEvidence -> "incomplete-source-evidence"
     UnsupportedSourceRecipe -> "unsupported-source-recipe"

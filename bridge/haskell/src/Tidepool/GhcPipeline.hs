@@ -9,7 +9,8 @@ module Tidepool.GhcPipeline
   , WorldModulePolicyFailure(..), WorldModulePolicy(..)
   , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprReuseContext
   , AdmittedSourceCandidate, pprAcceptedCandidates, preparedCandidateOriginal, preparedCandidateProof, revalidatePreparedCandidateInputs, PreparedSegmentProductsResult(..), TypedSegmentPreparation, CheckedEnvironmentResult(..)
-  , PreparedDependencies, preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
+  , PreparedDependencies, PreparedSourceRoute(..), preparedSourceRoute
+  , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , ProgramSourceImports, retainProgramSourceImports, withProgramSourceImports
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
@@ -471,17 +472,36 @@ revalidatePreparedCandidateInputs prepared =
 data PreparedDependencies
   = SourceOnly DependencyEvidence
   | ExactScoped DependencyEvidence ExactCompilation CompletedSourceImports
+  | WorldScoped DependencyEvidence BS.ByteString BS.ByteString
+
+-- A read-only projection of the actual compiler route. Absence of a finite
+-- scope cannot classify a held World completion as ordinary source.
+data PreparedSourceRoute
+  = PreparedOrdinarySource
+  | PreparedExactSource ExactCompilation
+  | PreparedWorldSource BS.ByteString BS.ByteString
+
+preparedSourceRoute :: PreparedPipelineResult -> PreparedSourceRoute
+preparedSourceRoute prepared = case ownedPprDependencies prepared of
+  SourceOnly _ -> PreparedOrdinarySource
+  ExactScoped _ exact _ -> PreparedExactSource exact
+  WorldScoped _ base domain -> PreparedWorldSource base domain
 
 -- Only the completed compiler pass captures which original authored requests
 -- actually resolved to fresh home roots. Generated imports cannot issue one.
 newtype CompletedSourceImports = CompletedSourceImports [(ImportIntent,(String,String))]
 
 preparedDependencies
-  :: HscEnv -> [ImportIntent] -> DependencyEvidence -> Maybe ExactCompilation
+  :: HscEnv -> PipelineVariant -> DependencyEvidence -> Maybe ExactCompilation
   -> IO PreparedDependencies
+preparedDependencies _ variant fresh exact
+  | Just (WorldSourceInputBasis facts _ _) <- pvWorldSources variant = case exact of
+      Nothing -> pure (WorldScoped fresh (worldInputsIdentityBytes facts)
+        (worldSourceDomainSha256 (worldInputsSources facts)))
+      Just _ -> throwIO CheckedPurposeMismatch
 preparedDependencies _ _ fresh Nothing = pure (SourceOnly fresh)
-preparedDependencies env intents fresh (Just exact) = do
-  roots <- fmap catMaybes $ forM intents $ \intent -> case intent of
+preparedDependencies env variant fresh (Just exact) = do
+  roots <- fmap catMaybes $ forM (pvSourceImportIntents variant) $ \intent -> case intent of
     RetainedGeneratedImport -> pure Nothing
     AuthoredSourceImport owner rawQualifier -> do
       let qualifier = renameRawPkgQual (hsc_unit_env env) owner rawQualifier
@@ -505,12 +525,13 @@ preparedFreshDependencies :: PreparedPipelineResult -> DependencyEvidence
 preparedFreshDependencies prepared = case ownedPprDependencies prepared of
   SourceOnly fresh -> fresh
   ExactScoped fresh _ _ -> fresh
+  WorldScoped fresh _ _ -> fresh
 
 -- | Exact-scope evidence only; fresh source imports remain in their own view.
 preparedExactCompilation :: PreparedPipelineResult -> Maybe ExactCompilation
-preparedExactCompilation prepared = case ownedPprDependencies prepared of
-  SourceOnly _ -> Nothing
-  ExactScoped _ exact _ -> Just exact
+preparedExactCompilation prepared = case preparedSourceRoute prepared of
+  PreparedExactSource exact -> Just exact
+  _ -> Nothing
 
 -- Private, request-local reuse of completed authored import decisions. The
 -- retained original rows grant neither current-source selection nor purity.
@@ -571,6 +592,7 @@ retainProgramSourceImports previous prepared captured retained = do
   forM_ previous (either fail pure . validateProgramSourceImports retained)
   case ownedPprDependencies prepared of
     SourceOnly _ -> pure previous
+    WorldScoped _ _ _ -> throwIO CheckedPurposeMismatch
     ExactScoped _ _ (CompletedSourceImports []) -> pure previous
     ExactScoped fresh compilation (CompletedSourceImports roots) -> do
       let admitted = compilationScope compilation
@@ -5061,7 +5083,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           PreparedStg -> do
             (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
             capturedDependencies <- liftIO (preparedDependencies (ownedPrHscEnv result)
-              (pvSourceImportIntents variant) dependencies exactCompilation)
+              variant dependencies exactCompilation)
             pure PreparedPipelineResult
               { ownedPprPipelineResult = result
               , ownedPprModules = modules
@@ -5080,7 +5102,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               "accepted module candidate changed before artifact publication"
             originalBindings <- liftIO (availableOriginalBindings (ownedPrHscEnv result))
             capturedDependencies <- liftIO (preparedDependencies (ownedPrHscEnv result)
-              (pvSourceImportIntents variant) dependencies exactCompilation)
+              variant dependencies exactCompilation)
             pure PreparedPipelineResult
               { ownedPprPipelineResult = result
               , ownedPprModules = modules

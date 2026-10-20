@@ -6622,18 +6622,31 @@ impl PartialEq for WorldSourceCompilationBinding {
 /// with the checked program that issued the binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorldCompilationIdentity {
+    base_world_identity: [u8; 32],
+    captured_source_domain: [u8; 32],
     plan_receipt_sha256: [u8; 32],
     product_context_sha256: [u8; 32],
     segment_digest: String,
 }
 
 impl WorldCompilationIdentity {
-    fn from_binding(binding: &WorldSourceCompilationBinding) -> Self {
+    pub(crate) fn from_binding(binding: &WorldSourceCompilationBinding) -> Self {
         Self {
+            base_world_identity: *binding.reservation.plan().world().logical_id(),
+            captured_source_domain: *binding
+                .reservation
+                .plan()
+                .world()
+                .restoration()
+                .captured_source_domain(),
             plan_receipt_sha256: binding.plan_receipt_sha256,
             product_context_sha256: binding.product_context_sha256,
             segment_digest: binding.segment.digest().to_owned(),
         }
+    }
+
+    pub(crate) fn matches_source_recipe(&self, base: &[u8; 32], domain: &[u8; 32]) -> bool {
+        self.base_world_identity == *base && self.captured_source_domain == *domain
     }
 
     #[cfg(test)]
@@ -6643,6 +6656,8 @@ impl WorldCompilationIdentity {
         segment_digest: impl Into<String>,
     ) -> Self {
         Self {
+            base_world_identity: plan_receipt_sha256,
+            captured_source_domain: product_context_sha256,
             plan_receipt_sha256,
             product_context_sha256,
             segment_digest: segment_digest.into(),
@@ -6971,12 +6986,8 @@ impl<'a> ProductInputFacts<'a> {
     }
 }
 
-/// Toolchain-local World input owner produced by the demand chain
-/// (`demand_primary_inputs` -> `certify_receipt_groups` ->
-/// `semantic_source_support` -> `select_acquired_compiler_bindings`).
-///
-/// Constructed, unadopted: the Host admission that supplies a certified
-/// receipt and consumes the resulting product is not yet in this tree.
+/// Projected World input facts retained by the actual segment source issuer.
+/// Certification and item native selection borrow this same demanded owner.
 pub(crate) struct DemandedWorldCompilerInputs<'a> {
     demand: DemandNativeInputs,
     groups: DemandCertifiedGroups,
@@ -7366,6 +7377,10 @@ impl ExactSourceAdmission {
 }
 
 impl<'a> ExactProductAdmission<'a> {
+    pub(crate) fn compilation_binding(&self) -> ProductCompilationBinding<'a> {
+        self.compilation_binding
+    }
+
     pub(crate) fn program_source_lexical(&self) -> &'a [ExactLexicalNode] {
         self.facts.source_lexical
     }
@@ -8503,6 +8518,7 @@ impl<'a> ExactReceiptAdmission<'a> {
                 decoded,
                 planned,
                 context,
+                None,
                 validation,
             )
     }
@@ -8515,6 +8531,7 @@ impl ProductInputFacts<'_> {
         decoded: DecodedExactCompilationReceipt,
         planned: Option<&ExactModuleIdentity>,
         context: &ExactDeclarationContext,
+        world_sources: Option<&crate::compiler_world::WorldSourcePathDomain<'_>>,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<ExactSourceAdmission, CompileError> {
         let DecodedExactCompilationReceipt {
@@ -8629,9 +8646,12 @@ impl ProductInputFacts<'_> {
         let selected_originals = if claims.is_empty() {
             BTreeMap::new()
         } else {
-            let include = self.source_search_include.ok_or_else(|| {
-                failure("source-selected originals lack trusted current import roots")
-            })?;
+            let include = match world_sources {
+                Some(domain) => domain.aliases(),
+                None => self.source_search_include.ok_or_else(|| {
+                    failure("source-selected originals lack trusted current import roots")
+                })?,
+            };
             let selection_evidence = selection_evidence
                 .as_ref()
                 .ok_or_else(|| failure("selected originals lack source evidence"))?;
@@ -8708,21 +8728,24 @@ impl ProductInputFacts<'_> {
                 })
                 .map(|entry| entry.descriptor.owner.clone())
                 .collect();
-            crate::execution_source::validate_source_selected_originals_with_validation(
-                claims,
-                selection_evidence,
-                crate::execution_source::SourceSelectionContext {
-                    producer: self.producer,
-                    interfaces: &canonical,
-                    exact_interfaces: &exact_interfaces,
-                    include,
-                    fresh: &evidence,
-                    roots: &source_selection_roots,
-                    independent: &independent,
-                    source_less: &source_less,
-                },
-                validation,
-            )?
+            let selection_context = crate::execution_source::SourceSelectionContext {
+                producer: self.producer,
+                interfaces: &canonical,
+                exact_interfaces: &exact_interfaces,
+                include,
+                fresh: &evidence,
+                roots: &source_selection_roots,
+                independent: &independent,
+                source_less: &source_less,
+            };
+            match world_sources {
+                Some(domain) => crate::execution_source::validate_world_source_selected_originals_with_validation(
+                    claims, selection_evidence, selection_context, domain, validation,
+                ),
+                None => crate::execution_source::validate_source_selected_originals_with_validation(
+                    claims, selection_evidence, selection_context, validation,
+                ),
+            }?
         };
         let mut seen = BTreeSet::new();
         let mut exact_imports = BTreeMap::new();
@@ -9056,11 +9079,13 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         let source_path = self.source.source_path.clone();
         let target_source = self.source.source.clone();
         let evidence_bytes = self.source.evidence_bytes.clone();
+        let source_domain = program.source_path_domain(&self.aliases)?;
         let source = facts.admit_source_facts(
             SourceCompilationBinding::World(self.binding.clone()),
             self.source,
             None,
             context,
+            Some(&source_domain),
             validation,
         )?;
         let admission = MatchedExactProductAdmission::world(
@@ -9094,41 +9119,6 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             aliases: self.aliases,
             program: ProgramSourceSupportState::default(),
         })
-    }
-
-    pub(crate) fn source_path_domain(
-        &self,
-    ) -> Result<crate::compiler_world::WorldSourcePathDomain<'_>, CompileError> {
-        self.program.source_path_domain(&self.aliases)
-    }
-
-    /// Run the demanded-input chain for this world source and retain the
-    /// toolchain-local product inputs. Cold custody is never bound as
-    /// semantic support: roles, native rows, home census and artifacts come
-    /// from the projected demand owner.
-    ///
-    /// Constructed, unadopted: the Host admission that supplies the certified
-    /// receipt and consumes the product is not yet in this tree.
-    pub(crate) fn demanded_product_inputs(
-        &'a self,
-        receipt: &crate::certified_products::CertifiedReceipt,
-        validation: &mut PackageInterfaceValidation,
-    ) -> Result<DemandedWorldCompilerInputs<'a>, CompileError> {
-        let operation = self.program.validation().inventory.as_ref();
-        let demand = self.demand_primary_inputs()?;
-        let groups = demand.certify_receipt_groups(receipt, validation)?;
-        let support = demand.semantic_source_support(&groups, operation)?;
-        let checked_values =
-            crate::checked_cell::CheckedValueImportAuthority::from_world_output(self.program)?;
-        let context = self.program.primary_context();
-        Ok(DemandedWorldCompilerInputs::from_demand(
-            demand,
-            groups,
-            support,
-            WorldCompilationIdentity::from_binding(&self.binding),
-            context,
-            checked_values,
-        ))
     }
 
     pub(crate) fn package_imports(&self) -> (&Path, &Arc<[u8]>) {

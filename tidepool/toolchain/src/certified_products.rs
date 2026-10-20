@@ -157,7 +157,14 @@ pub struct CertifiedReceipt {
 pub enum WorkerExecutionSource {
     Ordinary,
     ExactUnavailable(SourceRecipeUnavailable),
-    ExactAvailable { digest: [u8; 32], bytes: Arc<[u8]> },
+    ExactAvailable {
+        digest: [u8; 32],
+        bytes: Arc<[u8]>,
+    },
+    WorldUnavailable {
+        base_world_identity: [u8; 32],
+        captured_source_domain: [u8; 32],
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1398,6 +1405,17 @@ fn digest(value: &Value) -> CertResult<[u8; 32]> {
     Ok(decoded)
 }
 
+fn world_recipe_identity(value: &Value) -> CertResult<[u8; 32]> {
+    match value {
+        Value::Bytes(bytes) => bytes.as_slice().try_into().map_err(|_| {
+            CertificationError::Receipt("world source recipe identity is not 32 bytes")
+        }),
+        _ => Err(CertificationError::Receipt(
+            "world source recipe identity is not bytes",
+        )),
+    }
+}
+
 fn optional_version(value: &Value) -> CertResult<Option<ModuleVersion>> {
     match value {
         Value::Null => Ok(None),
@@ -1857,6 +1875,17 @@ fn decode_receipt_value_in(
     let recipe = array(recipe_value)?;
     let source_recipe = match recipe.first().map(string).transpose()? {
         Some("ordinary") if recipe.len() == 1 => WorkerExecutionSource::Ordinary,
+        Some("world-unavailable") if recipe.len() == 4 => {
+            if string(&recipe[3])? != "unsupported-source-recipe" {
+                return Err(CertificationError::Receipt(
+                    "world source recipe unavailable reason",
+                ));
+            }
+            WorkerExecutionSource::WorldUnavailable {
+                base_world_identity: world_recipe_identity(&recipe[1])?,
+                captured_source_domain: world_recipe_identity(&recipe[2])?,
+            }
+        }
         Some("exact-unavailable") if recipe.len() == 2 => {
             let reason = match string(&recipe[1])? {
                 "no-fresh-originals" => SourceRecipeUnavailable::NoFreshOriginals,
@@ -9443,14 +9472,33 @@ pub(crate) fn certify_products_with_validation(
             bytes: &'a Arc<[u8]>,
         },
     }
-    let source_recipe = match (&receipt.source_recipe, exact) {
+    use crate::declaration_context::ProductCompilationBinding;
+    let source_recipe = match (
+        &receipt.source_recipe,
+        exact.map(|exact| exact.compilation_binding()),
+    ) {
         (WorkerExecutionSource::Ordinary, None) => Some(SourceRecipeAdmission::Ordinary),
-        (WorkerExecutionSource::ExactUnavailable(_), Some(_)) => None,
-        (WorkerExecutionSource::ExactAvailable { digest, bytes }, Some(_)) => {
-            Some(SourceRecipeAdmission::Issued {
-                digest: *digest,
-                bytes,
-            })
+        (WorkerExecutionSource::ExactUnavailable(_), Some(ProductCompilationBinding::Exact(_))) => {
+            None
+        }
+        (
+            WorkerExecutionSource::ExactAvailable { digest, bytes },
+            Some(ProductCompilationBinding::Exact(_)),
+        ) => Some(SourceRecipeAdmission::Issued {
+            digest: *digest,
+            bytes,
+        }),
+        (
+            WorkerExecutionSource::WorldUnavailable {
+                base_world_identity,
+                captured_source_domain,
+            },
+            Some(ProductCompilationBinding::World(binding)),
+        ) => {
+            if !binding.matches_source_recipe(base_world_identity, captured_source_domain) {
+                return Err(CertificationError::Mismatch("world source recipe owner"));
+            }
+            None
         }
         _ => {
             return Err(CertificationError::Mismatch(
@@ -25035,6 +25083,45 @@ None,
                 .unwrap(),
             vec![global]
         );
+    }
+
+    #[test]
+    fn world_recipe_receipt_preserves_exact_identity_and_refuses_invalid_framing() {
+        let recipe = value_array([
+            value_text("world-unavailable"),
+            Value::Bytes(vec![7; 32]),
+            Value::Bytes(vec![9; 32]),
+            value_text("unsupported-source-recipe"),
+        ]);
+        let decode = |recipe: Value| {
+            let mut value = dictionary_receipt(&empty_product_facts());
+            receipt_payload_mut(&mut value)[6] = recipe;
+            decode_receipt(&receipt_bytes(&value))
+        };
+        assert_eq!(
+            decode(recipe.clone()).unwrap().source_recipe,
+            WorkerExecutionSource::WorldUnavailable {
+                base_world_identity: [7; 32],
+                captured_source_domain: [9; 32],
+            }
+        );
+        for (field, invalid) in [
+            (1, Value::Bytes(vec![7; 31])),
+            (2, Value::Bytes(vec![9; 33])),
+            (1, value_text(hex(&[7; 32]))),
+            (2, value_text(hex(&[9; 32]))),
+            (3, value_text("no-fresh-originals")),
+        ] {
+            let mut invalid_recipe = recipe.clone();
+            invalid_recipe.as_array_mut().unwrap()[field] = invalid;
+            assert!(decode(invalid_recipe).is_err());
+        }
+        let mut missing = recipe.clone();
+        missing.as_array_mut().unwrap().pop();
+        assert!(decode(missing).is_err());
+        let mut extra = recipe;
+        extra.as_array_mut().unwrap().push(Value::Null);
+        assert!(decode(extra).is_err());
     }
 
     #[test]
