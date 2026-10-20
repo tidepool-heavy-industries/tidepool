@@ -1488,7 +1488,38 @@ fn introspection_probe_script() -> &'static str {
 
 #[tokio::test]
 async fn published_introspection_example_returns_structured_declaration() {
-    let campaign = TestCampaign::start().await;
+    let campaign = TestCampaign::start_with_config(
+        |admission| admission,
+        |config| {
+            let authored = config.workspace.join(".exomonad");
+            std::fs::create_dir_all(&authored).unwrap();
+            std::fs::write(
+                authored.join("IntrospectionFrontDoor.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/haskell/test-prepared-stg/IntrospectionFrontDoor.hs",
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                config.workspace.join("query-input.txt"),
+                "query-runtime-read",
+            )
+            .unwrap();
+            crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.modules = vec!["IntrospectionFrontDoor".into()];
+            });
+            super::test_campaign::commit_workspace(&config.workspace);
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_directory.path(),
+                )
+                .unwrap(),
+            );
+        },
+    )
+    .await;
     campaign
         .run_scenario(|campaign| {
             Box::pin(async move {
@@ -1523,6 +1554,71 @@ async fn published_introspection_example_returns_structured_declaration() {
                     ],
                     "{probed}"
                 );
+
+                // Publish an actual binding before discovery. Its returned
+                // canonical IdentifierRef must survive enumeration and search;
+                // the source-defined nominal type excludes unrelated Int -> Int
+                // matches without assuming that search enumerates every match.
+                committed(
+                    root.as_ref(),
+                    concat!(
+                        "import qualified IntrospectionFrontDoor\n",
+                        "queryEcho :: IntrospectionFrontDoor.ProbeToken -> IntrospectionFrontDoor.ProbeToken\n",
+                        "queryEcho = IntrospectionFrontDoor.echoToken\n",
+                    ),
+                )
+                .await;
+                let input = campaign.config.workspace.join("query-input.txt");
+                let source = format!(
+                    "report <- IntrospectionFrontDoor.frontDoor {}\ndisplay report",
+                    serde_json::to_string(input.to_str().unwrap()).unwrap(),
+                );
+                let composed = displayed(campaign, root.as_ref(), &source).await;
+                let texts = explicit_display_texts(&composed);
+                assert_eq!(texts.len(), 1, "{composed}");
+                let rows: Vec<Vec<&str>> = texts[0]
+                    .lines()
+                    .map(|line| line.split('|').collect())
+                    .collect();
+                assert_eq!(rows.len(), 7, "{composed}");
+                assert_eq!(rows[0].len(), 4, "{composed}");
+                assert_eq!(&rows[0][..2], ["scope", "CurrentScope"], "{composed}");
+                assert!(rows[0][2].parse::<u64>().is_ok(), "{composed}");
+                let pin = rows[0][3];
+                assert_eq!(pin.len(), 64, "{composed}");
+                assert!(pin.bytes().all(|byte| byte.is_ascii_hexdigit()), "{composed}");
+                assert_eq!(rows[1].len(), 6, "{composed}");
+                assert_eq!(rows[1][0], "bindings", "{composed}");
+                assert!(!rows[1][1].is_empty(), "{composed}");
+                assert_eq!(rows[1][2], "queryEcho", "{composed}");
+                assert!(rows[1][3].parse::<usize>().is_ok_and(|count| count > 0), "{composed}");
+                assert!(rows[1][4].parse::<usize>().is_ok_and(|limit| limit > 0), "{composed}");
+                assert_eq!(rows[1][5], pin, "{composed}");
+                assert_eq!(rows[2], ["operation", "Tidepool.Effects.Core", "readFile", "ValueIdentifier",
+                    "forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError Text)"], "{composed}");
+                assert_eq!(rows[3], ["fit", "Tidepool.Effects.Core", "readFile", "FitAvailable", pin], "{composed}");
+                assert_eq!(rows[4], ["expression", "queryEcho", "ProbeToken -> ProbeToken", "FitAvailable", pin], "{composed}");
+                assert_eq!(rows[5], ["search", "queryEcho", "ProbeToken -> ProbeToken", "TypeMatchExact", "FitAvailable", pin], "{composed}");
+                assert_eq!(rows[6], ["read", "query-runtime-read"], "{composed}");
+
+                // The saved value is an actual query receipt, and the next cell
+                // changes the public view. Consume it through the effect instead
+                // of constructing a fingerprint or calling a decoder directly.
+                committed(root.as_ref(), "queryPriorView <- either (error . show) pure =<< currentScopeView").await;
+                committed(root.as_ref(), "queryPublication = IntrospectionFrontDoor.ProbeToken 19").await;
+                let stale = displayed(
+                    campaign,
+                    root.as_ref(),
+                    "staleReport <- IntrospectionFrontDoor.expectStale queryPriorView\ndisplay staleReport",
+                )
+                .await;
+                let stale_texts = explicit_display_texts(&stale);
+                assert_eq!(stale_texts.len(), 1, "{stale}");
+                let stale_fields: Vec<_> = stale_texts[0].split('|').collect();
+                assert_eq!(stale_fields.len(), 4, "{stale}");
+                assert_eq!(&stale_fields[..2], ["stale", "ScopeChanged"], "{stale}");
+                assert_ne!(stale_fields[2], stale_fields[3], "{stale}");
+                assert!(stale_fields[2..].iter().all(|value| value.len() == 64), "{stale}");
             })
         })
         .await;

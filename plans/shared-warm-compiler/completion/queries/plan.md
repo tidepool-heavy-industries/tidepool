@@ -33,7 +33,7 @@ query framework, certifier, dispatcher, inventory or test harness.
 | Runtime-publication, with query review | `tidepool/runtime/src/session/inspection.rs`, `session/mod.rs`, actor `resident_workbench.rs` and `mount.rs`: semantic view observations, admitted binding enumeration and source/continuation admission. Runtime owns semantic identity; the query leaf does not invent a parallel world ID. |
 | Compiler/service owner, with query tests | `bridge/haskell/src/Tidepool/Introspection.hs`, `InspectionRunner.hs`, `CompilerRequest.hs`, `bridge/haskell/app/Main.hs`: real GHC inspection, typed probe results, availability and search. `tidepool/runtime/src/session/inspection.rs` and `tidepool/extract-cmd/src/{lib,request}.rs`: the existing admitted transport. |
 | Query/docs leaf | `bridge/protocol/src/effects/introspection.rs`, generated mirrors through their generator, `bridge/haskell/lib/Tidepool/Introspection.hs`: typed public contract. `exomonad/prompts/api-guide.md`, `exomonad/host/src/actor_host/fixtures/api-guide/introspection.hs`, `documentation_tests.rs`: matching published source and executed consumer. |
-| Hosted acceptance | `exomonad/host/src/actor_host/startup_persona_acceptance_tests.rs`, its adjacent authored fixtures and existing hosted campaign helpers: actual installed Persona/tool/output path. `bridge/haskell/test-prepared-stg/IntrospectionFrontDoor.hs`, `tidepool/toolchain/tests/prepared_fixture.rs`: distinguish prepared artifact checks from resident effect execution. |
+| Hosted acceptance | `exomonad/host/src/actor_host/startup_persona_acceptance_tests.rs`, its adjacent authored fixtures and existing hosted campaign helpers: actual installed Persona/tool/output path. `bridge/haskell/test-prepared-stg/IntrospectionFrontDoor.hs` and its `bridge/haskell/BUCK` compile-only target share the authored module with `exomonad/host/src/actor_host/documentation_tests.rs`; compilation does not establish resident effect execution. |
 
 Read each nearest contributor guide before editing. Changes to declared Haskell
 fixtures must update their existing Buck input owner/generator. Do not edit
@@ -185,10 +185,13 @@ has no specialized declaration rendering; it cannot teach usable discovery alone
 If a helper module owns the example, declare and execute that exact source through
 the existing fixture machinery rather than suggesting a nonexistent import.
 
-`IntrospectionFrontDoor.frontDoor` is compiled but never invoked by its prepared
-test: `result = pure 43` is artifact execution only. Retain a useful portable
-artifact test if warranted, but the public all-five acceptance must invoke the
-composition in the resident effect loop. The actor dispatch fixture currently
+`IntrospectionFrontDoor.frontDoor` is shared by the declared compile-only
+prepared fixture and the hosted documentation campaign. Its effectful `result`
+specialization is no longer a constant execution test. Acceptance requires the
+hosted campaign to consume the actual symbol, type, availability and scope
+fields for all five verbs, invoke the discovered ordinary operation through its
+runtime interpreter, and refuse a real prior pin after publication. Building
+the shared source is compilation evidence only. The actor dispatch fixture currently
 checks four `Right` envelopes, including absent-binding `FitUnknown`; improve its
 semantic assertions or clearly retain it as dispatch-only coverage.
 

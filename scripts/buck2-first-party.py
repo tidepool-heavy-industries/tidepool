@@ -840,11 +840,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         resources.extend(["toolchains//:ghc", "//bridge/haskell:declaration_join_consumer"])
     if package_name == "tidepool-toolchain" and target_name == "prepared_fixture":
         env["TIDEPOOL_PREPARED_FIXTURE_COMPILER"] = "$(exe //tidepool/toolchain:prepared-fixture)"
-        env["TIDEPOOL_INTROSPECTION_FRONT_DOOR_FIXTURE_DIR"] = "$(location //bridge/haskell:introspection_front_door_prepared)"
-        resources.extend([
-            "//tidepool/toolchain:prepared-fixture",
-            "//bridge/haskell:introspection_front_door_prepared",
-        ])
+        resources.append("//tidepool/toolchain:prepared-fixture")
     if package_name == "tidepool-toolchain" and unit:
         env["TIDEPOOL_CATALOG_TEST_PYTHON"] = "$(exe toolchains//:python)"
         env["TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT"] = "$(location //build/package:qualification_script)"
