@@ -1790,7 +1790,7 @@ impl CompilerEndpoint {
         };
         let span = tracing::info_span!(
             "compile_request",
-            compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request.worker_argv()),
+            compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request),
             request_mode = %cmd.request.mode(),
             execution_layer = match self.transport { Transport::Scoped => "transaction_wrapper", Transport::Direct(_) => "physical", Transport::Daemon { .. } => "endpoint_submission" },
             physical_execution = physical_execution.as_deref(),
@@ -1822,7 +1822,7 @@ impl CompilerEndpoint {
                 })?
             }
             Transport::Daemon { socket, epoch } => {
-                match daemon::execute(socket, epoch, &cwd, &cmd.request.worker_argv()) {
+                match daemon::execute(socket, epoch, &cwd, &cmd.request) {
                     Ok(output) => {
                         crate::EXTRACT_SPAWNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         output
@@ -2431,7 +2431,7 @@ impl CompilerTransaction {
         })?;
         let span = tracing::info_span!(
             "compile_request",
-            compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request.worker_argv()),
+            compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request),
             request_mode = %cmd.request.mode(),
             execution_layer = if matches!(transport, TransactionTransport::Direct(_)) { "physical" } else { "endpoint_submission" },
             physical_execution = if matches!(transport, TransactionTransport::Direct(_)) { Some(format!("{}:{}", std::process::id(), PHYSICAL_REQUEST_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed))) } else { None }.as_deref(),
@@ -2467,10 +2467,9 @@ impl CompilerTransaction {
             TransactionTransport::Daemon {
                 transaction,
                 socket,
-            } => daemon::execute_transaction_request(transaction, &cwd, &cmd.request.worker_argv())
-                .map_err(|error| {
-                    SpawnError::indeterminate(socket.as_os_str(), io::Error::other(error))
-                })?,
+            } => daemon::execute_transaction_request(transaction, &cwd, &cmd.request).map_err(
+                |error| SpawnError::indeterminate(socket.as_os_str(), io::Error::other(error)),
+            )?,
         };
         Ok(ExtractRun {
             output,

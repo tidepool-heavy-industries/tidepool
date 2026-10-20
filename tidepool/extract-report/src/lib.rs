@@ -7,6 +7,8 @@
 //! consumer.
 
 pub mod artifact_manifest;
+pub mod inspection;
+pub mod world_query;
 
 /// The diagnostics report version understood by this build.
 pub const REPORT_VERSION: u32 = 2;

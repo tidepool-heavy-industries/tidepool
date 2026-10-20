@@ -1,8 +1,7 @@
 # Complete the shared compiler service and remove the old cell path
 
-Status: implementation partially folded and reviewed at code
-`de12466597312787e7eda3230d67857c60df2997`; the service-only execution path is not
-complete or qualified. The controlling branch is
+Status: owner scaffolds and bounded repairs are being implemented and folded;
+the service-only execution path is not complete or qualified. The controlling branch is
 `integration/compiler-query-warm-final`. Read the
 [current checkpoint review](review-de12466597.md) and
 [next-wave assignments](next-wave.md) before dispatch. Use this branch's latest
@@ -37,33 +36,65 @@ a reason to preserve the finite engine while building another abstraction layer.
 - The compiler-query handlers reach real GHC. A persistent compiler universe and
   bounded worker infrastructure already exist. Do not describe the baseline as a
   new GHC process for every cell.
-- Ordinary actor preparation still uses finite admission, compiler-view
-  reconstruction and all-value preparation, while private runtime admission now
-  requires a published world. Its synchronous cold helper has no production
-  caller. The new checked output is not executable; world item settlement and
-  final publication still refuse missing capabilities. A finite hosted pass
-  cannot establish this migration.
+- The engine area's candidate now connects actor preparation to source-bound
+  World capture, off-checkout acquisition, matched settlement and installation.
+  Native World outputs can be sealed through the existing issuing owners. The
+  actual actor history still fails during compiler preparation; component
+  assembly and consumer compilation do not establish a working hosted notebook.
+  This area candidate is being reviewed before root integration.
 - World preparation currently excludes declarations/multiple inference segments,
   source-dependent retained value types and ordinary expression reservations.
   These are required completion work, not unsupported Persona profiles to retain.
-- The 32-failure sweep now has a first-failure triage, not completed dispositions.
-  The residency fixture stops before measurements because it omits real source
-  admission. Its pre-existing failure does not clear later code. Q10's four
-  passes exercise synthetic observer histories, not a running service cell.
-- Native N1 still infers current production from availability and loses exact
-  parent issuance. Repair A1c's demanded native custody without adopting the
-  temporary effective compiler projection; that would widen semantic roles.
-- Q2/Q3/Q6/Q7/Q8/Q9 contain useful owner and representation improvements, but
-  several migrations stop before their real consumer. The publication guard has
-  a new failed-settlement regression; off-checkout native preparation was lost.
-  The current review assigns bounded repairs and the necessary replacement tests.
+- The 32-case sweep has a first-failure triage, not completed dispositions.
+  The repaired residency fixture enters real source admission. Native completion
+  previously stopped it before measurements; the owner-derived current-product
+  scaffold now allows the bounded-residency and original-source gate controls
+  to execute successfully. Broader collection histories remain receiving work.
+  Q10's earlier four passes still concern synthetic observer histories.
+- Native current membership comes from its actual certified source row.
+  Integrated repairs preserve original publication custody separately from
+  current compiler roles, traverse exact issued historical dependencies, and
+  retain distinct owned payloads without selecting them. Both planners retain
+  genuine ambiguity refusals. The test-only alternative historical issuer is
+  deleted. The genuine hosted A1c target now declares the compiler-service
+  deployment; its execution awaits the joined engine/Haskell producer.
+- The settled-cell review found that separately public admission and raw program
+  values allowed execution to bypass matched END. The engine area's opaque
+  `SettledCellProgram` repair closes that construction route. Remaining
+  declaration/host mutation checkpoints and same-bundle refusal controls must
+  pass review before accepting the joined repair.
+- Query pins now share one observed compiler snapshot across verbs. Full
+  lexical queries still need the active effect row and exact input/request type
+  witnesses carried from their existing issuers; names or displayed types are
+  not substitutes. Recovered lexical facades must retain the exact issuing
+  artifact, even when another artifact has equal interface bytes.
+- The original-generation cutoff and retirement inventory are integrated.
+  Reservation-owned A fencing and B-before-A refusal settlement have focused
+  execution evidence. Linked publication, actual endpoint cutover, frozen B's
+  World and durable force/recovery remain lifecycle work.
+- Successor transport retention has a discriminating execution control: shadowed
+  rows and predecessor transport handles are released by the engine repair.
+  Required cold restoration still returns `Unsupported`; it remains a failed
+  gate. The Haskell reader must reconstruct the exact next product from owned
+  immutable facts without restoring the old whole-inventory path.
 
-The current review ran no new builds or tests. The incoming handoff reports
+The initial review ran no new builds or tests. The incoming handoff reports
 runtime/toolchain compilation, Q9 1/1, Q10 4/4 and residency 0/1 at `de12466597`;
 Haskell selectors and the full `session` target were not rerun there. Retained
 evidence is under `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`,
 especially `completion/` and `post-de124-review/`. Findings in other revisions
-or dirty instrumentation checkouts retain their own scope.
+or dirty instrumentation checkouts retain their own scope. Subsequent receiving
+evidence is in `root-native-scaffold/`, `verification-scaffold/`, `haskell-h/`,
+and the area owners' handoffs. Component passes are not joined World execution
+or release qualification.
+
+Root checkpoint `a94a140dc2` compiled `tidepool-extract-cmd`,
+`tidepool-toolchain`, `tidepool-runtime`, `exomonad-actor` and `exomonad-host`
+successfully (build `abd924b6-5152-42d3-9bf7-b4b25cb76846`, launcher exit 0).
+The subsequent native custody, lifecycle cutoff and hosted-test registration
+folds require their own joined checks. Retain exact execution evidence per
+checkpoint; neither this compile nor an area's passing controls qualify the
+combined bundle.
 
 ## Delivery tree and ownership
 

@@ -1325,6 +1325,133 @@ class IsolatedLibtestTests(unittest.TestCase):
                 self.assertEqual(timing['aggregate_complete'], bool(physical))
                 self.assertEqual(timing['records_truncated'], len(physical) > 1)
 
+    def test_actual_preparation_emission_is_classified_by_the_collector(self):
+        # Five unmodified records emitted by the real service_transaction and
+        # Worker control transaction_queue_and_repeated_requests_have_exact_identities.
+        # The fixture retains submission, ingress, start, worker encoding and
+        # finish for one request, without relabeling or reconstructing a row.
+        root = Path(self.tmp.name) / 'actual-preparation-emission'
+        compiler = root / 'compiler'
+        compiler.mkdir(parents=True)
+        fixture = Path(__file__).with_name('fixtures') / 'compiler-preparation-trace.jsonl'
+        (compiler / 'compiler.jsonl').write_bytes(fixture.read_bytes())
+        summary = runner.diagnostic_summaries(root)
+        timing, preparation = summary['physical_compiler_timing'], summary['compiler_request_preparation']
+        self.assertTrue(timing['complete'])
+        self.assertEqual(timing['physical_request_count'], 1)
+        self.assertEqual(timing['physical_record_count'], 2)
+        self.assertEqual(timing['unclassified_request_records'], 0)
+        self.assertTrue(preparation['complete'])
+        self.assertEqual(preparation['record_count'], 2)
+        self.assertEqual(preparation['unmatched_request_count'], 0)
+        for stage in ('ingress_and_correlation', 'worker_encoding'):
+            self.assertEqual(preparation['stages'][stage]['record_count'], 1)
+            self.assertGreaterEqual(preparation['stages'][stage]['elapsed_ns'], 0)
+
+    def test_request_preparation_retains_cost_without_counting_execution(self):
+        root = Path(self.tmp.name) / 'request-preparation'
+        compiler = root / 'compiler'
+        compiler.mkdir(parents=True)
+        owner = {'daemon_epoch': 'issued-epoch', 'admission_id': 7,
+                 'request_ordinal': 2, 'compile_request': 'logical-request'}
+        physical = {**owner, 'name': 'compile_request', 'execution_layer': 'physical',
+                    'physical_execution': 'issued-epoch:7:2'}
+        ingress = {**owner, 'execution_layer': 'request_preparation',
+                   'stage': 'ingress_and_correlation', 'decode_ns': 10, 'grant_ns': 20,
+                   'correlation_ns': 30, 'ingress_argument_bytes': 40, 'typed_decodes': 1,
+                   'cli_parses': 0, 'correlation_encoded_bytes': 50}
+        encoding = {'execution_layer': 'request_preparation', 'stage': 'worker_encoding',
+                    'placement_ns': 40, 'encoding_ns': 50, 'worker_encoded_bytes': 60}
+        rows = [
+            {'fields': ingress},
+            {'fields': {'message': 'started'}, 'span': physical},
+            # Preparation overrides the enclosing physical layer. Neither the
+            # arbitrary message label nor a service duration classifies it.
+            {'fields': {**encoding, 'message': 'arbitrary observation'}, 'span': physical},
+            {'fields': {'message': 'finished', 'elapsed_ns': 1000}, 'span': physical},
+        ]
+        (compiler / 'compiler.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        summary = runner.diagnostic_summaries(root)
+        timing, preparation = summary['physical_compiler_timing'], summary['compiler_request_preparation']
+        self.assertTrue(timing['complete'])
+        self.assertEqual(timing['physical_request_count'], 1)
+        self.assertEqual(timing['physical_record_count'], 2)
+        self.assertEqual(timing['unclassified_request_records'], 0)
+        self.assertEqual(preparation['record_count'], 2)
+        self.assertEqual(preparation['stages'], {
+            'ingress_and_correlation': {'record_count': 1, 'elapsed_ns': 60},
+            'worker_encoding': {'record_count': 1, 'elapsed_ns': 90}})
+        self.assertEqual(preparation['records'][1]['metrics']['worker_encoded_bytes'], 60)
+        self.assertEqual(preparation['timing_relationship'], 'worker_encoding_included_in_compiler_service')
+        self.assertTrue(preparation['complete'])
+
+    def test_unknown_or_unowned_preparation_remains_incomplete(self):
+        root = Path(self.tmp.name) / 'unclassified-preparation'
+        compiler = root / 'compiler'
+        compiler.mkdir(parents=True)
+        owner = {'daemon_epoch': 'issued-epoch', 'admission_id': 7,
+                 'request_ordinal': 2, 'compile_request': 'logical-request'}
+        physical = {**owner, 'execution_layer': 'physical', 'physical_execution': 'issued-epoch:7:2'}
+        preparation = {**owner, 'execution_layer': 'request_preparation', 'stage': 'worker_encoding',
+                       'placement_ns': 40, 'encoding_ns': 50, 'worker_encoded_bytes': 60}
+        variants = [
+            {**preparation, 'execution_layer': 'future-layer'},
+            {**preparation, 'stage': 'future-stage'},
+            {**preparation, 'daemon_epoch': None},
+            {**preparation, 'admission_id': 0},
+            {**preparation, 'request_ordinal': 0},
+            {**preparation, 'request_ordinal': True},
+            {**preparation, 'encoding_ns': -1},
+            {**preparation, 'encoding_ns': None},
+            {**preparation, 'daemon_epoch': 'crossed-epoch'},
+            {**preparation, 'admission_id': 8},
+            {**preparation, 'request_ordinal': 3},
+            {**preparation, 'compile_request': 'crossed-request'},
+            # The actual old ingress shape remains unclassified even though
+            # its display message and phase are familiar to the reader.
+            {**owner, 'message': 'compiler request prepared',
+             'phase': 'compiler_request_preparation', 'stage': 'ingress_and_correlation'},
+        ]
+        for fields in variants:
+            with self.subTest(fields=fields):
+                rows = [{'fields': physical}, {'fields': fields}]
+                (compiler / 'compiler.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+                summary = runner.diagnostic_summaries(root)
+                timing = summary['physical_compiler_timing']
+                self.assertEqual(timing['physical_request_count'], 1)
+                self.assertEqual(timing['unclassified_request_records'], 1)
+                self.assertFalse(timing['aggregate_complete'])
+                self.assertFalse(timing['complete'])
+                self.assertFalse(summary['compiler_request_preparation']['records_truncated'])
+
+    def test_preparation_sample_omission_is_independent_of_classification(self):
+        root = Path(self.tmp.name) / 'sampled-preparation'
+        compiler = root / 'compiler'
+        compiler.mkdir(parents=True)
+        owner = {'daemon_epoch': 'issued-epoch', 'admission_id': 7,
+                 'request_ordinal': 2, 'compile_request': 'logical-request'}
+        physical = {**owner, 'execution_layer': 'physical', 'physical_execution': 'issued-epoch:7:2'}
+        preparation = {**owner, 'execution_layer': 'request_preparation', 'stage': 'worker_encoding',
+                       'placement_ns': 40, 'encoding_ns': 50, 'worker_encoded_bytes': 60}
+        rows = [{'fields': {'phase': 'compiler_queue', 'daemon_epoch': owner['daemon_epoch'], 'admission_id': owner['admission_id'], 'queue_ms': 0, 'compiler_workload': 'foreground', 'compiler_jobs': 2, 'compiler_capabilities': 2}}, {'fields': physical}, {'fields': preparation}, {'fields': preparation}]
+        (compiler / 'compiler.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
+        (compiler / 'lifecycle.json').write_text(json.dumps({'pid': 73, 'cleanup_confirmed': True}))
+        with patch.object(runner, 'TRACE_RECORD_LIMIT', 1):
+            summary = runner.diagnostic_summaries(root)
+            record = {}
+            _, _, evidence_complete, _ = runner.case_artifact_evidence(root, 'direct', record)
+        self.assertTrue(summary['physical_compiler_timing']['complete'])
+        preparation = summary['compiler_request_preparation']
+        self.assertEqual(preparation['unclassified_record_count'], 0)
+        self.assertTrue(preparation['aggregate_complete'])
+        self.assertTrue(preparation['records_truncated'])
+        self.assertEqual(preparation['record_count'], 2)
+        self.assertEqual(preparation['retained_record_count'], 1)
+        self.assertFalse(preparation['complete'])
+        self.assertFalse(evidence_complete)
+        self.assertFalse(record['diagnostic_evidence_complete'])
+
     def test_actual_older_compiler_span_trace_is_explicitly_unclassified(self):
         # Four unmodified queue/start/timing/close rows from the retained 2026-10-05
         # lookup-owned-daemon/compiler.jsonl; this producer predates layer tags.

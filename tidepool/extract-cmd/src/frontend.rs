@@ -103,22 +103,18 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok().as_deref(),
         std::env::var("TIDEPOOL_TIMING").ok().as_deref(),
     )?;
-    let worker_args = match worker_payload(&args)? {
-        Some(payload) => vec![WORKER_REQUEST_FLAG.into(), payload],
-        None => {
-            let request = ExtractRequest::from_cli(&args)?;
-            request.worker_argv()
-        }
-    };
+    let mut request = daemon::prepare_worker_request(args)?.request;
     let mut build_products = daemon::BuildProductsNamespace::direct()?;
     let cwd = std::env::current_dir().map_err(FrontendError::Io)?;
-    let (worker_args, diagnostics) = build_products.place(&cwd, &worker_args)?;
+    let diagnostics = build_products.place(&cwd, &mut request);
     io::stderr()
         .write_all(&diagnostics)
         .map_err(FrontendError::Io)?;
     let worker = prepare_worker()?;
     let mut command = worker.command()?;
-    command.envs(profile.environment()).args(worker_args);
+    command
+        .envs(profile.environment())
+        .args(request.worker_argv());
     let status = command.status().map_err(FrontendError::Io)?;
     build_products.cleanup();
     Ok(exit_code(status))
@@ -621,7 +617,7 @@ fn connect(args: &[OsString]) -> Result<u8, FrontendError> {
     let socket = PathBuf::from(socket);
     let binding =
         daemon::preflight(&socket).map_err(|error| FrontendError::Daemon(error.to_string()))?;
-    let output = daemon::execute(&socket, &binding.epoch, &cwd, &request.worker_argv())
+    let output = daemon::execute(&socket, &binding.epoch, &cwd, &request)
         .map_err(|error| FrontendError::Daemon(error.to_string()))?;
     io::stdout()
         .write_all(&output.stdout)
@@ -658,24 +654,6 @@ fn stop_daemon(args: &[OsString]) -> Result<u8, FrontendError> {
         socket.ok_or_else(|| FrontendError::Usage("--stop-daemon requires --socket".to_owned()))?;
     daemon::request_stop(&socket).map_err(|error| FrontendError::Daemon(error.to_string()))?;
     Ok(0)
-}
-
-fn worker_payload(args: &[OsString]) -> Result<Option<OsString>, FrontendError> {
-    if args.first().is_none_or(|arg| arg != WORKER_REQUEST_FLAG) {
-        return Ok(None);
-    }
-    match args {
-        [_, payload] => {
-            ExtractRequest::decode_worker_argv(args)?;
-            Ok(Some(payload.clone()))
-        }
-        [_] => Err(FrontendError::Usage(format!(
-            "{WORKER_REQUEST_FLAG} requires a payload"
-        ))),
-        _ => Err(FrontendError::Usage(format!(
-            "{WORKER_REQUEST_FLAG} accepts exactly one payload"
-        ))),
-    }
 }
 
 /// Resolve the worker paired with a selected frontend before relocating it.
@@ -938,8 +916,9 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
                     daemon::TRANSACTION_END => break,
                     daemon::TRANSACTION_REQUEST => {
                         let (cwd, argv) = daemon::read_request(&mut stdin)?;
-                        let worker_argv = daemon::normalize_worker_argv(argv)?;
-                        let (code, out, err) = worker.request(&cwd, &worker_argv)?;
+                        let mut prepared_request = daemon::prepare_worker_request(argv)?;
+                        let (code, out, err) =
+                            worker.request(&cwd, &mut prepared_request.request)?;
                         daemon::write_response(io::stdout().lock(), code, &out, &err)?;
                         io::stdout().flush().map_err(FrontendError::Io)?;
                     }
@@ -972,12 +951,12 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
     }
     let mut request = io::Cursor::new(prefix).chain(stdin);
     let (cwd, argv) = daemon::read_request(&mut request)?;
-    let worker_argv = daemon::normalize_worker_argv(argv)?;
+    let mut prepared_request = daemon::prepare_worker_request(argv)?;
     let mut worker = daemon::Worker::spawn(&prepared)?;
     let mut received_before_failed_end = None;
     let result: Result<_, FrontendError> = (|| {
         worker.begin_transaction()?;
-        let (code, stdout, stderr) = worker.request(&cwd, &worker_argv)?;
+        let (code, stdout, stderr) = worker.request(&cwd, &mut prepared_request.request)?;
         if let Err(error) = worker.end_transaction() {
             received_before_failed_end = Some((code, stdout, stderr));
             return Err(error);
@@ -1325,7 +1304,12 @@ mod tests {
                 let dir = dir.clone();
                 let epoch = binding.epoch;
                 std::thread::spawn(move || {
-                    crate::daemon::execute(&socket, &epoch, &dir, &["Expr.hs".into()])
+                    crate::daemon::execute(
+                        &socket,
+                        &epoch,
+                        &dir,
+                        &ExtractRequest::from_cli(&["Expr.hs".into()]).unwrap(),
+                    )
                 })
             })
             .collect();
@@ -1387,8 +1371,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         };
         for _ in 0..2 {
-            let error = crate::daemon::execute(&socket, &binding.epoch, &dir, &["Expr.hs".into()])
-                .unwrap_err();
+            let error = crate::daemon::execute(
+                &socket,
+                &binding.epoch,
+                &dir,
+                &ExtractRequest::from_cli(&["Expr.hs".into()]).unwrap(),
+            )
+            .unwrap_err();
             assert!(error.was_accepted());
             assert!(!error.is_not_accepted());
             let next = crate::daemon::preflight(&socket).unwrap();
@@ -1753,7 +1742,7 @@ mod tests {
 
     #[test]
     fn typed_worker_payload_must_decode() {
-        assert!(worker_payload(&[
+        assert!(daemon::prepare_worker_request(vec![
             WORKER_REQUEST_FLAG.into(),
             "54505245513031320100000009".into(),
         ])

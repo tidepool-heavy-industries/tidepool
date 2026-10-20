@@ -13,6 +13,62 @@ use crate::{timing, CompileError};
 
 use super::assemble_inspection_module;
 
+/// An immutable observational snapshot of one runtime base and the actor's
+/// exact import/projection membrane. It carries no admission authority. Its
+/// existing cached base digest is resolved only when an answer needs the pin.
+/// The base includes owner state hidden from authored imports, so observations
+/// may conservatively differ even when visible name lists are unchanged.
+pub struct InspectionScopeSnapshot {
+    pub(super) base: std::sync::Arc<super::persistent::CachedCompileView>,
+    pub(super) generation: u64,
+    pub(super) runtime_scope: tidepool_codegen::scope::ScopeId,
+    pub(super) source_revision: std::sync::Arc<[u8]>,
+    pub(super) selected_imports: super::SourceImports,
+    pub(super) inputs: super::RuntimeCompileInputs,
+    pub(super) scope: NameScope,
+}
+
+impl InspectionScopeSnapshot {
+    pub fn provenance(&self) -> ScopeProvenance {
+        inspection_provenance(
+            self.base.digest(),
+            self.generation,
+            &self.source_revision,
+            &self.selected_imports,
+            &self.inputs,
+            self.scope.clone(),
+        )
+    }
+}
+
+/// Correlate observations without granting admission authority. The base is
+/// the runtime owner's existing cached semantic commitment; the actor inputs
+/// describe the deterministic import/projection membrane applied to that base.
+pub(super) fn inspection_provenance(
+    base: [u8; 32],
+    generation: u64,
+    source_revision: &[u8],
+    selected_imports: &super::SourceImports,
+    inputs: &super::RuntimeCompileInputs,
+    scope: NameScope,
+) -> ScopeProvenance {
+    let mut fingerprint = blake3::Hasher::new();
+    let mut frame = |bytes: &[u8]| {
+        fingerprint.update(&(bytes.len() as u64).to_le_bytes());
+        fingerprint.update(bytes);
+    };
+    frame(b"runtime-inspection-view-v1");
+    frame(&base);
+    frame(source_revision);
+    frame(&serde_json::to_vec(selected_imports.specs()).expect("source imports serialize"));
+    inputs.frame_authorization(&mut frame);
+    ScopeProvenance {
+        scope,
+        generation,
+        fingerprint: fingerprint.finalize().to_hex().to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum InspectionQuery {
     TypeOf(String),
@@ -100,160 +156,14 @@ impl PartialEq for InspectionQuery {
 
 impl Eq for InspectionQuery {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NameScope {
-    Current,
-    PublicModule(String),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NameNamespace {
-    Any,
-    Value,
-    Type,
-    Constructor,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NameQuery {
-    pub scope: NameScope,
-    pub namespace: NameNamespace,
-    pub name: String,
-}
-
-/// Full provenance for diagnostics and wire answers. Deliberately not
-/// `PartialEq`: staleness is decided by `same_view`, and a structural
-/// comparison would silently reintroduce the scope-label bug.
-#[derive(Clone, Debug)]
-pub struct ScopeProvenance {
-    pub scope: NameScope,
-    pub generation: u64,
-    pub fingerprint: String,
-}
-
-impl ScopeProvenance {
-    /// Staleness compares only the view identity. Keep the full provenance for
-    /// diagnostics such as `ScopeChanged { before, after }`.
-    pub fn same_view(&self, other: &Self) -> bool {
-        self.generation == other.generation && self.fingerprint == other.fingerprint
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IdentifierNamespace {
-    Value,
-    Type,
-    Constructor,
-    Field,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IdentifierRef {
-    pub module: String,
-    pub name: String,
-    pub namespace: IdentifierNamespace,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TypeExpression {
-    pub canonical: String,
-    pub variables: Vec<String>,
-    pub constraints: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct TypeInfo {
-    pub identifier: IdentifierRef,
-    pub expression: TypeExpression,
-    pub provenance: ScopeProvenance,
-}
-
-impl PartialEq for TypeInfo {
-    fn eq(&self, other: &Self) -> bool {
-        self.identifier == other.identifier
-            && self.expression == other.expression
-            && self.provenance.same_view(&other.provenance)
-    }
-}
-
-impl Eq for TypeInfo {}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FieldInfo {
-    pub name: String,
-    pub ty: TypeExpression,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConstructorInfo {
-    pub identifier: IdentifierRef,
-    pub ty: TypeExpression,
-    pub arguments: Vec<TypeExpression>,
-    pub fields: Vec<FieldInfo>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClassMethodInfo {
-    pub identifier: IdentifierRef,
-    pub ty: TypeExpression,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DeclarationInfo {
-    Value(TypeExpression),
-    Data {
-        parameters: Vec<String>,
-        constructors: Vec<ConstructorInfo>,
-    },
-    Newtype {
-        parameters: Vec<String>,
-        constructor: ConstructorInfo,
-    },
-    TypeSynonym {
-        parameters: Vec<String>,
-        body: TypeExpression,
-    },
-    Class {
-        parameters: Vec<String>,
-        superclasses: Vec<TypeExpression>,
-        methods: Vec<ClassMethodInfo>,
-    },
-    Constructor {
-        parent: IdentifierRef,
-        constructor: ConstructorInfo,
-    },
-    RecordSelector {
-        parent: IdentifierRef,
-        ty: TypeExpression,
-    },
-}
-
-#[derive(Clone, Debug)]
-pub struct IdentifierInfo {
-    pub identifier: IdentifierRef,
-    pub declaration: DeclarationInfo,
-    pub parent: Option<IdentifierRef>,
-    pub provenance: ScopeProvenance,
-}
-
-impl PartialEq for IdentifierInfo {
-    fn eq(&self, other: &Self) -> bool {
-        self.identifier == other.identifier
-            && self.declaration == other.declaration
-            && self.parent == other.parent
-            && self.provenance.same_view(&other.provenance)
-    }
-}
-
-impl Eq for IdentifierInfo {}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum QueryError {
-    Unknown(NameQuery),
-    Ambiguous(NameQuery, Vec<IdentifierRef>),
-    UnknownModule(String),
-    Unsupported(String),
-}
+use tidepool_toolchain::inspection::{
+    decode_identifier_ref, decode_scope, decode_structured_result, StructuredReply,
+};
+pub use tidepool_toolchain::inspection::{
+    ClassMethodInfo, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,
+    IdentifierNamespace, IdentifierRef, NameNamespace, NameQuery, NameScope, QueryError,
+    ScopeProvenance, TypeExpression, TypeInfo,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InfoEntry {
@@ -543,80 +453,12 @@ impl From<CompileError> for WorldInspectionError {
     }
 }
 
-/// The one typed admission of a public-module world answer.
-///
-/// The envelope decoder in `tidepool-toolchain` authenticates the world,
-/// question echo, resolution and payload shape. This sum is the runtime's
-/// single control-flow representation of the admitted answer: a resolved
-/// structured value, a resolved structured refusal, a proved module absence or
-/// a service rejection. The raw payload is retained beside it only as
-/// evidence.
-pub(super) enum InspectionWorldAnswer {
-    /// The service resolved the module and produced a structured value.
-    Resolved {
-        result: InspectionResult,
-        receipt: tidepool_toolchain::compiler_world::WorldModuleReceipt,
-        defining: Option<tidepool_toolchain::compiler_world::WorldModuleReceipt>,
-    },
-    /// The service resolved the module and refused the question with a typed
-    /// structured error (`Unknown`, `Ambiguous` or `Unsupported`).
-    StructuredError {
-        result: InspectionResult,
-        receipt: tidepool_toolchain::compiler_world::WorldModuleReceipt,
-    },
-    /// The service proved the module is absent from the admitted source
-    /// domain. The paired structured payload is the proved `UnknownModule`
-    /// answer; an `Unsupported` payload must not reach this variant.
-    Absent {
-        result: InspectionResult,
-        absence: tidepool_toolchain::compiler_world::ClosedModuleAbsence,
-    },
-    /// The service refused the question without a module answer.
-    Rejected(tidepool_toolchain::compiler_world::WorldQueryRejection),
-}
-
-impl InspectionWorldAnswer {
-    fn result(
-        &self,
-    ) -> Result<&InspectionResult, tidepool_toolchain::compiler_world::WorldQueryRejection> {
-        match self {
-            Self::Resolved { result, .. }
-            | Self::StructuredError { result, .. }
-            | Self::Absent { result, .. } => Ok(result),
-            Self::Rejected(reason) => Err(*reason),
-        }
-    }
-
-    fn resolution(&self) -> tidepool_toolchain::compiler_world::WorldModuleResolution {
-        use tidepool_toolchain::compiler_world::WorldModuleResolution;
-        match self {
-            Self::Resolved { receipt, .. } | Self::StructuredError { receipt, .. } => {
-                WorldModuleResolution::Resolved(receipt.clone())
-            }
-            Self::Absent { absence, .. } => WorldModuleResolution::Absent(absence.clone()),
-            Self::Rejected(reason) => WorldModuleResolution::Rejected(*reason),
-        }
-    }
-
-    fn defining_module(
-        &self,
-    ) -> Option<&tidepool_toolchain::compiler_world::WorldModuleReceipt> {
-        match self {
-            Self::Resolved { defining, .. } => defining.as_ref(),
-            Self::StructuredError { .. } | Self::Absent { .. } | Self::Rejected(_) => None,
-        }
-    }
-}
-
 /// Only the admitted runner constructs this pairing of a runtime base and a
 /// compiler-issued world. Callers cannot attach an unrelated service result.
 pub struct PreparedInspectionWorld {
     pub(super) association: std::sync::Arc<InspectionWorldAssociation>,
     origin: crate::CompilerTransactionOrigin,
-    answer: InspectionWorldAnswer,
-    /// The exact admitted payload, retained for diagnosis. It is never read to
-    /// decide control flow after this point.
-    evidence: Vec<u8>,
+    answer: tidepool_toolchain::compiler_world::WorldAnswer,
     provenance: ScopeProvenance,
 }
 
@@ -624,6 +466,115 @@ pub struct PreparedInspectionWorld {
 pub struct CompletedInspectionWorld {
     pub(super) prepared: PreparedInspectionWorld,
     pub(super) cancellation: crate::HostAdmissionCancellation,
+}
+
+/// A compiler world acquired for one captured runtime base, without a query.
+/// Its source relationship stays owned by the runtime throughout compiler END.
+pub struct PreparedCompilerWorld {
+    association: std::sync::Arc<InspectionWorldAssociation>,
+    origin: crate::CompilerTransactionOrigin,
+}
+
+/// Only the matching settled compiler owner can issue an installable world.
+pub struct CompletedCompilerWorld {
+    pub(super) association: std::sync::Arc<InspectionWorldAssociation>,
+    pub(super) cancellation: crate::HostAdmissionCancellation,
+}
+
+pub fn run_admitted_compiler_world(
+    owner: &super::RuntimeSourceCompilerTransaction,
+    admitted: AdmittedInspectionWorld,
+    capture_sources: impl FnOnce() -> Result<
+        Option<std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+        WorldInspectionError,
+    >,
+) -> Result<PreparedCompilerWorld, WorldInspectionError> {
+    if !std::sync::Arc::ptr_eq(&owner.source, &admitted.base.original_source) {
+        return Err(
+            crate::RuntimeError::from(super::SourceAdmissionError::ForeignTransaction).into(),
+        );
+    }
+    owner
+        .admit(Some(admitted.base.target.clone()))
+        .map_err(crate::RuntimeError::from)?;
+    let origin = crate::CompilerTransactionOrigin::current().ok_or(
+        CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
+    )?;
+    let cold = admitted.needs_source_capture();
+    let world = acquire_compiler_world(admitted.inputs, &admitted.base, capture_sources)?;
+    tracing::debug!(
+        target: "exomonad_harness::timing",
+        cold,
+        logical_world = ?world.logical_id(),
+        source_sha256 = ?admitted.base.source.sha256(),
+        scope = ?admitted.base.scope,
+        operation = ?origin,
+        "compiler world acquired for private execution"
+    );
+    Ok(PreparedCompilerWorld {
+        association: std::sync::Arc::new(InspectionWorldAssociation {
+            base: admitted.base,
+            world,
+        }),
+        origin,
+    })
+}
+
+pub fn finish_admitted_compiler_world(
+    settled: crate::CompilerTransactionSettled<Result<PreparedCompilerWorld, WorldInspectionError>>,
+) -> Result<CompletedCompilerWorld, WorldInspectionError> {
+    let (prepared, cancellation) = finish_world_operation(settled, |prepared| &prepared.origin)?;
+    Ok(CompletedCompilerWorld { association: prepared.association, cancellation })
+}
+
+fn finish_world_operation<T>(
+    settled: crate::CompilerTransactionSettled<Result<T, WorldInspectionError>>,
+    origin: impl Fn(&T) -> &crate::CompilerTransactionOrigin,
+) -> Result<(T, crate::HostAdmissionCancellation), WorldInspectionError> {
+    let same_owner = settled.action().as_ref().is_ok_and(|prepared| settled.belongs_to(origin(prepared)));
+    let cancellation = settled.host_admission_cancellation().cloned();
+    let outcome = settled.into_outcome();
+    if !matches!(outcome.close, crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted) {
+        return Err(WorldInspectionError::CompilerClose { primary: outcome.action.err().map(Box::new), close: outcome.close });
+    }
+    let prepared = outcome.action?;
+    if !same_owner {
+        return Err(CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::DifferentOwner).into());
+    }
+    let cancellation = cancellation.ok_or(CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner))?;
+    cancellation.checkpoint().map_err(CompileError::from)?;
+    Ok((prepared, cancellation))
+}
+
+fn acquire_compiler_world(
+    inputs: InspectionWorldInputs,
+    base: &InspectionWorldBase,
+    capture_sources: impl FnOnce() -> Result<
+        Option<std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+        WorldInspectionError,
+    >,
+) -> Result<std::sync::Arc<tidepool_toolchain::compiler_world::CompilerWorld>, WorldInspectionError>
+{
+    match inputs {
+        InspectionWorldInputs::Published(world) => Ok(world),
+        InspectionWorldInputs::Cold { primary, bindings } => {
+            let sources = capture_sources()?.ok_or(WorldInspectionError::UnsupportedSource)?;
+            if sources.origin() != base.source.bytes() {
+                return Err(invalid("cold sources differ from the admitted source owner").into());
+            }
+            let cold = tidepool_toolchain::artifacts::ModuleCandidateOffer::compiler_world_inputs(
+                primary, bindings, sources,
+            )?;
+            let command = ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
+            let endpoint = tidepool_toolchain::toolchain::AdmittedCompilerEndpoint::from_bound(
+                command.bind().map_err(map_spawn)?,
+            )
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+            Ok(tidepool_toolchain::compiler_world::open_world(
+                cold, &endpoint,
+            )?)
+        }
+    }
 }
 
 /// One enumeration answer is emitted as a single guest value. Keep the
@@ -723,10 +674,8 @@ fn binding_namespace(namespace: &str) -> Result<IdentifierNamespace, WorldInspec
 }
 
 impl CompletedInspectionWorld {
-    pub fn result(
-        &self,
-    ) -> Result<&InspectionResult, tidepool_toolchain::compiler_world::WorldQueryRejection> {
-        self.prepared.answer.result()
+    pub fn answer(&self) -> &tidepool_toolchain::compiler_world::WorldAnswer {
+        &self.prepared.answer
     }
 
     pub fn resolution(&self) -> tidepool_toolchain::compiler_world::WorldModuleResolution {
@@ -742,11 +691,6 @@ impl CompletedInspectionWorld {
     pub fn provenance(&self) -> &ScopeProvenance {
         &self.prepared.provenance
     }
-
-    /// The admitted payload bytes, kept as evidence for diagnostics.
-    pub fn evidence(&self) -> &[u8] {
-        &self.prepared.evidence
-    }
 }
 
 /// Accept only the completed action from its own clean, uncancelled compiler
@@ -756,36 +700,8 @@ pub fn finish_admitted_world_inspection(
         Result<PreparedInspectionWorld, WorldInspectionError>,
     >,
 ) -> Result<CompletedInspectionWorld, WorldInspectionError> {
-    let same_owner = settled
-        .action()
-        .as_ref()
-        .is_ok_and(|completed| settled.belongs_to(&completed.origin));
-    let cancellation = settled.host_admission_cancellation().cloned();
-    let outcome = settled.into_outcome();
-    if !matches!(
-        outcome.close,
-        crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted
-    ) {
-        return Err(WorldInspectionError::CompilerClose {
-            primary: outcome.action.err().map(Box::new),
-            close: outcome.close,
-        });
-    }
-    let prepared = outcome.action?;
-    if !same_owner {
-        return Err(CompileError::CompilerPublication(
-            crate::CompilerTransactionPublicationError::DifferentOwner,
-        )
-        .into());
-    }
-    let cancellation = cancellation.ok_or(CompileError::CompilerPublication(
-        crate::CompilerTransactionPublicationError::MissingOwner,
-    ))?;
-    cancellation.checkpoint().map_err(CompileError::from)?;
-    Ok(CompletedInspectionWorld {
-        prepared,
-        cancellation,
-    })
+    let (prepared, cancellation) = finish_world_operation(settled, |prepared| &prepared.origin)?;
+    Ok(CompletedInspectionWorld { prepared, cancellation })
 }
 
 /// Run one public-module observation without constructing query source or
@@ -798,6 +714,7 @@ pub fn run_admitted_world_inspection(
         WorldInspectionError,
     >,
     query: NameQuery,
+    observation: InspectionScopeSnapshot,
     kind: tidepool_toolchain::compiler_world::PublicModuleQuestionKind,
 ) -> Result<PreparedInspectionWorld, WorldInspectionError> {
     if !std::sync::Arc::ptr_eq(&owner.source, &admitted.base.original_source) {
@@ -808,7 +725,7 @@ pub fn run_admitted_world_inspection(
     owner
         .admit(Some(admitted.base.target.clone()))
         .map_err(crate::RuntimeError::from)?;
-    run_admitted_world_inspection_inner(admitted, capture_sources, query, kind)
+    run_admitted_world_inspection_inner(admitted, capture_sources, query, observation, kind)
 }
 
 fn run_admitted_world_inspection_inner(
@@ -818,6 +735,7 @@ fn run_admitted_world_inspection_inner(
         WorldInspectionError,
     >,
     query: NameQuery,
+    observation: InspectionScopeSnapshot,
     kind: tidepool_toolchain::compiler_world::PublicModuleQuestionKind,
 ) -> Result<PreparedInspectionWorld, WorldInspectionError> {
     use std::sync::Arc;
@@ -830,18 +748,21 @@ fn run_admitted_world_inspection_inner(
     let NameScope::PublicModule(module) = &query.scope else {
         return Err(invalid("world inspection requires a public module").into());
     };
+    if !observation.base.matches_key(&admitted.base.key)
+        || observation.runtime_scope != admitted.base.scope
+        || observation.generation != admitted.base.key.generation().0
+        || observation.scope != query.scope
+    {
+        return Err(invalid("inspection observation differs from its admitted base").into());
+    }
     let namespace = inspection_namespace(query.namespace);
     let question = match kind {
-        PublicModuleQuestionKind::StructuredInfo => PublicModuleQuestion::structured_info(
-            module.clone(),
-            namespace,
-            query.name.clone(),
-        ),
-        PublicModuleQuestionKind::StructuredType => PublicModuleQuestion::structured_type(
-            module.clone(),
-            namespace,
-            query.name.clone(),
-        ),
+        PublicModuleQuestionKind::StructuredInfo => {
+            PublicModuleQuestion::structured_info(module.clone(), namespace, query.name.clone())
+        }
+        PublicModuleQuestionKind::StructuredType => {
+            PublicModuleQuestion::structured_type(module.clone(), namespace, query.name.clone())
+        }
     };
     let endpoint = || -> Result<_, CompileError> {
         let command = ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
@@ -854,195 +775,31 @@ fn run_admitted_world_inspection_inner(
         InspectionWorldInputs::Published(world) => Some(*world.logical_id()),
         InspectionWorldInputs::Cold { .. } => None,
     };
-    let result = match admitted.inputs {
-        InspectionWorldInputs::Published(world) => {
-            compiler_world::query_public_module(&endpoint()?, &world, question.clone())?
-        }
-        InspectionWorldInputs::Cold { primary, bindings } => {
-            let sources = capture_sources()?.ok_or(WorldInspectionError::UnsupportedSource)?;
-            if sources.origin() != admitted.base.source.bytes() {
-                return Err(invalid("cold sources differ from the admitted source owner").into());
-            }
-            let cold = tidepool_toolchain::artifacts::ModuleCandidateOffer::compiler_world_inputs(
-                primary, bindings, sources,
-            )?;
-            let endpoint = endpoint()?;
-            let world = compiler_world::open_world(cold, &endpoint)?;
-            compiler_world::query_public_module(&endpoint, &world, question.clone())?
-        }
-    };
+    let world = acquire_compiler_world(admitted.inputs, &admitted.base, capture_sources)?;
+    let result = compiler_world::query_public_module(&endpoint()?, &world, question.clone())?;
     if expected_world.is_some_and(|expected| &expected != result.world().logical_id()) {
         return Err(invalid("world query returned a different logical world").into());
     }
     if result.question() != &question {
         return Err(invalid("world result differs from its admitted question").into());
     }
-    let provenance = ScopeProvenance {
-        scope: query.scope.clone(),
-        generation: admitted.base.key.generation().0,
-        fingerprint: {
-            use std::fmt::Write;
-            let mut observation = String::from("compiler-world:");
-            for byte in result.world().logical_id() {
-                write!(&mut observation, "{byte:02x}").expect("String formatting");
-            }
-            observation
-        },
-    };
-    let evidence = result.inspection_payload().to_vec();
-    let answer = match result.resolution() {
-        compiler_world::WorldModuleResolution::Rejected(reason) => {
-            if !evidence.is_empty() {
-                return Err(invalid("rejected world question retained a payload").into());
-            }
-            InspectionWorldAnswer::Rejected(*reason)
-        }
-        resolution => {
-            let mut decoded = decode_inspections(&evidence)?;
-            if decoded.len() != 1 {
-                return Err(invalid("world inspection must return exactly one result").into());
-            }
-            admit_world_answer(
-                decoded.remove(0),
-                resolution.clone(),
-                result.defining_module().cloned(),
-                &query,
-                question.module(),
-                kind,
-                &provenance,
-            )?
-        }
-    };
+    let provenance = observation.provenance();
+    let world = Arc::clone(result.world());
+    let mut answer = result.into_answer();
+    match &mut answer {
+        compiler_world::WorldAnswer::Info { info, .. } => info.provenance = provenance.clone(),
+        compiler_world::WorldAnswer::Type { info, .. } => info.provenance = provenance.clone(),
+        _ => {}
+    }
     Ok(PreparedInspectionWorld {
         association: Arc::new(InspectionWorldAssociation {
             base: admitted.base,
-            world: Arc::clone(result.world()),
+            world,
         }),
         origin,
         answer,
-        evidence,
         provenance,
     })
-}
-
-/// The runtime's one typed admission of an already envelope-authenticated
-/// world payload, and the single place the resolution/payload agreement is
-/// decided.
-///
-/// `Absent + Unsupported` is refused. The producing service proves absence
-/// only together with `UnknownModule`; `Unsupported` says the question itself
-/// was not evaluated, so pairing it with a proof of absence would claim a
-/// fact the service never issued. `Unknown`/`Ambiguous` likewise require a
-/// resolved module.
-fn admit_world_answer(
-    mut decoded: InspectionResult,
-    resolution: tidepool_toolchain::compiler_world::WorldModuleResolution,
-    defining: Option<tidepool_toolchain::compiler_world::WorldModuleReceipt>,
-    query: &NameQuery,
-    module: &str,
-    kind: tidepool_toolchain::compiler_world::PublicModuleQuestionKind,
-    provenance: &ScopeProvenance,
-) -> Result<InspectionWorldAnswer, CompileError> {
-    use tidepool_toolchain::compiler_world::PublicModuleQuestionKind;
-    match kind {
-        PublicModuleQuestionKind::StructuredInfo => match &mut decoded {
-            InspectionResult::StructuredInfo(Ok(info)) => {
-                verify_world_provenance(&info.provenance, query)?;
-                info.provenance = provenance.clone();
-                admit_resolved(decoded, resolution, defining, module)
-            }
-            InspectionResult::StructuredInfo(Err(error)) => {
-                let error = error.clone();
-                admit_structured_error(decoded, &error, resolution, defining, module)
-            }
-            _ => Err(invalid("world payload has the wrong inspection kind").into()),
-        },
-        PublicModuleQuestionKind::StructuredType => match &mut decoded {
-            InspectionResult::StructuredType(Ok(info)) => {
-                verify_world_provenance(&info.provenance, query)?;
-                info.provenance = provenance.clone();
-                admit_resolved(decoded, resolution, defining, module)
-            }
-            InspectionResult::StructuredType(Err(error)) => {
-                let error = error.clone();
-                admit_structured_error(decoded, &error, resolution, defining, module)
-            }
-            _ => Err(invalid("world payload has the wrong inspection kind").into()),
-        },
-    }
-}
-
-fn admit_resolved(
-    result: InspectionResult,
-    resolution: tidepool_toolchain::compiler_world::WorldModuleResolution,
-    defining: Option<tidepool_toolchain::compiler_world::WorldModuleReceipt>,
-    module: &str,
-) -> Result<InspectionWorldAnswer, CompileError> {
-    use tidepool_toolchain::compiler_world::WorldModuleResolution;
-    let WorldModuleResolution::Resolved(receipt) = resolution else {
-        return Err(invalid("resolved payload lacks a resolved module").into());
-    };
-    if receipt.module != module {
-        return Err(invalid("resolved payload names a different module").into());
-    }
-    let Some(defining) = defining else {
-        return Err(invalid("resolved payload lacks its defining module").into());
-    };
-    Ok(InspectionWorldAnswer::Resolved {
-        result,
-        receipt,
-        defining: Some(defining),
-    })
-}
-
-fn admit_structured_error(
-    result: InspectionResult,
-    error: &QueryError,
-    resolution: tidepool_toolchain::compiler_world::WorldModuleResolution,
-    defining: Option<tidepool_toolchain::compiler_world::WorldModuleReceipt>,
-    module: &str,
-) -> Result<InspectionWorldAnswer, CompileError> {
-    use tidepool_toolchain::compiler_world::WorldModuleResolution;
-    if defining.is_some() {
-        return Err(invalid("structured error retained a defining module").into());
-    }
-    match (&resolution, error) {
-        (WorldModuleResolution::Absent(absence), QueryError::UnknownModule(unknown))
-            if unknown == &absence.module && unknown == module =>
-        {
-            Ok(InspectionWorldAnswer::Absent {
-                result,
-                absence: absence.clone(),
-            })
-        }
-        (
-            WorldModuleResolution::Resolved(receipt),
-            QueryError::Unknown(_) | QueryError::Ambiguous(_, _) | QueryError::Unsupported(_),
-        ) if receipt.module == module => Ok(InspectionWorldAnswer::StructuredError {
-            result,
-            receipt: receipt.clone(),
-        }),
-        (WorldModuleResolution::Absent(_), QueryError::Unsupported(_)) => Err(invalid(
-            "module absence cannot be paired with an unsupported question",
-        )
-        .into()),
-        _ => Err(invalid("world module resolution differs from its structured payload").into()),
-    }
-}
-
-fn verify_world_provenance(
-    provenance: &ScopeProvenance,
-    query: &NameQuery,
-) -> Result<(), CompileError> {
-    if provenance.scope != query.scope
-        || provenance.generation != 0
-        || !provenance.fingerprint.is_empty()
-    {
-        return Err(invalid(
-            "world payload differs from requested presentation provenance",
-        ));
-    }
-    Ok(())
 }
 
 pub struct InspectionRequest<'a> {
@@ -1646,271 +1403,14 @@ fn decode_inspection_result(value: &CborValue) -> Result<InspectionResult, Compi
                 matches,
             })
         }
-        "StructuredInfoOk" => {
-            let body = array_len(value, 2, "StructuredInfoOk result")?;
-            Ok(InspectionResult::StructuredInfo(Ok(Box::new(
-                decode_identifier_info(&body[1])?,
-            ))))
-        }
-        "StructuredTypeOk" => {
-            let body = array_len(value, 2, "StructuredTypeOk result")?;
-            Ok(InspectionResult::StructuredType(Ok(decode_type_info(
-                &body[1],
-            )?)))
-        }
-        "StructuredError" => {
-            let body = array_len(value, 2, "StructuredError result")?;
-            Ok(InspectionResult::StructuredInfo(Err(decode_query_error(
-                &body[1],
-            )?)))
+        "StructuredInfoOk" | "StructuredTypeOk" | "StructuredError" => {
+            Ok(match decode_structured_result(value)? {
+                StructuredReply::Info(info) => InspectionResult::StructuredInfo(Ok(info)),
+                StructuredReply::Type(info) => InspectionResult::StructuredType(Ok(info)),
+                StructuredReply::Error(error) => InspectionResult::StructuredInfo(Err(error)),
+            })
         }
         other => Err(invalid(format!("unknown result tag {other:?}"))),
-    }
-}
-
-fn decode_identifier_info(value: &CborValue) -> Result<IdentifierInfo, CompileError> {
-    let fields = array_len(value, 4, "IdentifierInfo")?;
-    Ok(IdentifierInfo {
-        identifier: decode_identifier_ref(&fields[0])?,
-        declaration: decode_declaration(&fields[1])?,
-        parent: match &fields[2] {
-            CborValue::Null => None,
-            value => Some(decode_identifier_ref(value)?),
-        },
-        provenance: decode_provenance(&fields[3])?,
-    })
-}
-
-fn decode_type_info(value: &CborValue) -> Result<TypeInfo, CompileError> {
-    let fields = array_len(value, 3, "TypeInfo")?;
-    Ok(TypeInfo {
-        identifier: decode_identifier_ref(&fields[0])?,
-        expression: decode_type_expression(&fields[1])?,
-        provenance: decode_provenance(&fields[2])?,
-    })
-}
-
-fn decode_identifier_ref(value: &CborValue) -> Result<IdentifierRef, CompileError> {
-    let fields = array_len(value, 3, "IdentifierRef")?;
-    let namespace = match text(&fields[2], "IdentifierRef namespace")? {
-        "Value" => IdentifierNamespace::Value,
-        "Type" => IdentifierNamespace::Type,
-        "Constructor" => IdentifierNamespace::Constructor,
-        "Field" => IdentifierNamespace::Field,
-        other => {
-            return Err(invalid(format!(
-                "unknown IdentifierRef namespace {other:?}"
-            )));
-        }
-    };
-    Ok(IdentifierRef {
-        module: text(&fields[0], "IdentifierRef module")?.into(),
-        name: text(&fields[1], "IdentifierRef name")?.into(),
-        namespace,
-    })
-}
-
-fn decode_type_expression(value: &CborValue) -> Result<TypeExpression, CompileError> {
-    let fields = array_len(value, 3, "TypeExpression")?;
-    Ok(TypeExpression {
-        canonical: text(&fields[0], "TypeExpression canonical")?.into(),
-        variables: decode_texts(&fields[1], "TypeExpression variables")?,
-        constraints: decode_texts(&fields[2], "TypeExpression constraints")?,
-    })
-}
-
-fn decode_provenance(value: &CborValue) -> Result<ScopeProvenance, CompileError> {
-    let fields = array_len(value, 3, "ScopeProvenance")?;
-    Ok(ScopeProvenance {
-        scope: decode_scope(&fields[0])?,
-        generation: unsigned(&fields[1], "ScopeProvenance generation")?,
-        fingerprint: text(&fields[2], "ScopeProvenance fingerprint")?.into(),
-    })
-}
-
-fn decode_query_error(value: &CborValue) -> Result<QueryError, CompileError> {
-    let fields = array(value, "StructuredError")?;
-    let tag = fields
-        .first()
-        .ok_or_else(|| invalid("empty StructuredError"))
-        .and_then(|value| text(value, "StructuredError tag"))?;
-    match tag {
-        "Unknown" => {
-            let fields = array_len(value, 2, "Unknown error")?;
-            Ok(QueryError::Unknown(decode_query(&fields[1])?))
-        }
-        "Ambiguous" => {
-            let fields = array_len(value, 3, "Ambiguous error")?;
-            Ok(QueryError::Ambiguous(
-                decode_query(&fields[1])?,
-                array(&fields[2], "Ambiguous candidates")?
-                    .iter()
-                    .map(decode_identifier_ref)
-                    .collect::<Result<_, _>>()?,
-            ))
-        }
-        "UnknownModule" => {
-            let fields = array_len(value, 2, "UnknownModule error")?;
-            Ok(QueryError::UnknownModule(
-                text(&fields[1], "UnknownModule module")?.into(),
-            ))
-        }
-        "Unsupported" => {
-            let fields = array_len(value, 2, "Unsupported error")?;
-            Ok(QueryError::Unsupported(
-                text(&fields[1], "Unsupported detail")?.into(),
-            ))
-        }
-        other => Err(invalid(format!("unknown StructuredError tag {other:?}"))),
-    }
-}
-
-fn decode_query(value: &CborValue) -> Result<NameQuery, CompileError> {
-    let fields = array_len(value, 3, "Structured query")?;
-    let namespace = match text(&fields[1], "Structured query namespace")? {
-        "Any" => NameNamespace::Any,
-        "Value" => NameNamespace::Value,
-        "Type" => NameNamespace::Type,
-        "Constructor" => NameNamespace::Constructor,
-        other => {
-            return Err(invalid(format!(
-                "unknown structured query namespace {other:?}"
-            )));
-        }
-    };
-    Ok(NameQuery {
-        scope: decode_scope(&fields[0])?,
-        namespace,
-        name: text(&fields[2], "Structured query name")?.into(),
-    })
-}
-
-fn decode_scope(value: &CborValue) -> Result<NameScope, CompileError> {
-    let fields = array(value, "scope")?;
-    match fields
-        .first()
-        .and_then(|value| text(value, "scope tag").ok())
-    {
-        Some("Current") if fields.len() == 1 => Ok(NameScope::Current),
-        Some("PublicModule") if fields.len() == 2 => Ok(NameScope::PublicModule(
-            text(&fields[1], "PublicModule name")?.into(),
-        )),
-        Some(tag) => Err(invalid(format!("invalid scope {tag:?}"))),
-        None => Err(invalid("scope tag must be text")),
-    }
-}
-
-fn decode_declaration(value: &CborValue) -> Result<DeclarationInfo, CompileError> {
-    let fields = array(value, "DeclarationInfo")?;
-    let tag = fields
-        .first()
-        .ok_or_else(|| invalid("empty DeclarationInfo"))
-        .and_then(|value| text(value, "DeclarationInfo tag"))?;
-    match tag {
-        "Value" => Ok(DeclarationInfo::Value(decode_type_expression(
-            &array_len(value, 2, "Value declaration")?[1],
-        )?)),
-        "Data" => {
-            let f = array_len(value, 3, "Data declaration")?;
-            Ok(DeclarationInfo::Data {
-                parameters: decode_texts(&f[1], "Data parameters")?,
-                constructors: array(&f[2], "Data constructors")?
-                    .iter()
-                    .map(decode_constructor)
-                    .collect::<Result<_, _>>()?,
-            })
-        }
-        "Newtype" => {
-            let f = array_len(value, 3, "Newtype declaration")?;
-            Ok(DeclarationInfo::Newtype {
-                parameters: decode_texts(&f[1], "Newtype parameters")?,
-                constructor: decode_constructor(&f[2])?,
-            })
-        }
-        "TypeSynonym" => {
-            let f = array_len(value, 3, "TypeSynonym declaration")?;
-            Ok(DeclarationInfo::TypeSynonym {
-                parameters: decode_texts(&f[1], "TypeSynonym parameters")?,
-                body: decode_type_expression(&f[2])?,
-            })
-        }
-        "Class" => {
-            let f = array_len(value, 4, "Class declaration")?;
-            Ok(DeclarationInfo::Class {
-                parameters: decode_texts(&f[1], "Class parameters")?,
-                superclasses: array(&f[2], "Class superclasses")?
-                    .iter()
-                    .map(decode_type_expression)
-                    .collect::<Result<_, _>>()?,
-                methods: array(&f[3], "Class methods")?
-                    .iter()
-                    .map(decode_class_method)
-                    .collect::<Result<_, _>>()?,
-            })
-        }
-        "Constructor" => {
-            let f = array_len(value, 3, "Constructor declaration")?;
-            Ok(DeclarationInfo::Constructor {
-                parent: decode_identifier_ref(&f[1])?,
-                constructor: decode_constructor(&f[2])?,
-            })
-        }
-        "RecordSelector" => {
-            let f = array_len(value, 3, "RecordSelector declaration")?;
-            Ok(DeclarationInfo::RecordSelector {
-                parent: decode_identifier_ref(&f[1])?,
-                ty: decode_type_expression(&f[2])?,
-            })
-        }
-        other => Err(invalid(format!("unknown DeclarationInfo tag {other:?}"))),
-    }
-}
-
-fn decode_constructor(value: &CborValue) -> Result<ConstructorInfo, CompileError> {
-    let fields = array_len(value, 4, "ConstructorInfo")?;
-    Ok(ConstructorInfo {
-        identifier: decode_identifier_ref(&fields[0])?,
-        ty: decode_type_expression(&fields[1])?,
-        arguments: array(&fields[2], "ConstructorInfo arguments")?
-            .iter()
-            .map(decode_type_expression)
-            .collect::<Result<_, _>>()?,
-        fields: array(&fields[3], "ConstructorInfo fields")?
-            .iter()
-            .map(decode_field)
-            .collect::<Result<_, _>>()?,
-    })
-}
-
-fn decode_field(value: &CborValue) -> Result<FieldInfo, CompileError> {
-    let fields = array_len(value, 2, "FieldInfo")?;
-    Ok(FieldInfo {
-        name: text(&fields[0], "FieldInfo name")?.into(),
-        ty: decode_type_expression(&fields[1])?,
-    })
-}
-
-fn decode_class_method(value: &CborValue) -> Result<ClassMethodInfo, CompileError> {
-    let fields = array_len(value, 2, "ClassMethodInfo")?;
-    Ok(ClassMethodInfo {
-        identifier: decode_identifier_ref(&fields[0])?,
-        ty: decode_type_expression(&fields[1])?,
-    })
-}
-
-fn decode_texts(value: &CborValue, what: &str) -> Result<Vec<String>, CompileError> {
-    array(value, what)?
-        .iter()
-        .map(|value| Ok(text(value, what)?.into()))
-        .collect()
-}
-
-fn unsigned(value: &CborValue, what: &str) -> Result<u64, CompileError> {
-    match value {
-        CborValue::Integer(value) => {
-            u64::try_from(*value).map_err(|_| invalid(format!("{what} must be u64")))
-        }
-        _ => Err(invalid(format!("{what} must be u64"))),
     }
 }
 
@@ -3008,138 +2508,4 @@ mod tests {
             } if expression == "id" && display.contains("->")
         )));
     }
-    fn structured_info(provenance: ScopeProvenance) -> InspectionResult {
-        InspectionResult::StructuredInfo(Ok(Box::new(IdentifierInfo {
-            identifier: IdentifierRef {
-                module: "M".into(),
-                name: "x".into(),
-                namespace: IdentifierNamespace::Value,
-            },
-            declaration: DeclarationInfo::Value(TypeExpression {
-                canonical: "Int".into(),
-                variables: Vec::new(),
-                constraints: Vec::new(),
-            }),
-            parent: None,
-            provenance,
-        })))
-    }
-
-    fn question() -> tidepool_toolchain::compiler_world::PublicModuleQuestion {
-        tidepool_toolchain::compiler_world::PublicModuleQuestion::structured_info(
-            "M".into(),
-            tidepool_extract_cmd::InspectionNamespace::Value,
-            "x".into(),
-        )
-    }
-
-    fn query() -> NameQuery {
-        NameQuery {
-            scope: NameScope::PublicModule("M".into()),
-            namespace: NameNamespace::Value,
-            name: "x".into(),
-        }
-    }
-
-    fn receipt() -> tidepool_toolchain::compiler_world::WorldModuleReceipt {
-        tidepool_toolchain::compiler_world::WorldModuleReceipt {
-            unit: "main".into(),
-            module: "M".into(),
-            origin: tidepool_toolchain::compiler_world::WorldModuleOrigin::Package {
-                profile: [0; 32],
-            },
-        }
-    }
-
-    fn absence() -> tidepool_toolchain::compiler_world::ClosedModuleAbsence {
-        tidepool_toolchain::compiler_world::ClosedModuleAbsence {
-            module: "M".into(),
-            source_domain: [1; 32],
-            package_profile: [2; 32],
-        }
-    }
-
-    #[test]
-    fn world_answer_admission_distinguishes_answer_error_absence_and_rejection() {
-        use tidepool_toolchain::compiler_world::{WorldModuleResolution, WorldQueryRejection};
-        let wire_provenance = ScopeProvenance {
-            scope: NameScope::PublicModule("M".into()),
-            generation: 0,
-            fingerprint: String::new(),
-        };
-        let runtime_provenance = ScopeProvenance {
-            scope: NameScope::PublicModule("M".into()),
-            generation: 7,
-            fingerprint: "compiler-world:aa".into(),
-        };
-        let resolved = admit_world_answer(
-            structured_info(wire_provenance.clone()),
-            WorldModuleResolution::Resolved(receipt()),
-            Some(receipt()),
-            &query(),
-            "M",
-            tidepool_toolchain::compiler_world::PublicModuleQuestionKind::StructuredInfo,
-            &runtime_provenance,
-        )
-        .expect("resolved answer admits");
-        assert!(matches!(
-            resolved,
-            InspectionWorldAnswer::Resolved { .. }
-        ));
-        assert!(matches!(resolved.result(), Ok(InspectionResult::StructuredInfo(Ok(_)))));
-        assert!(matches!(
-            resolved.resolution(),
-            WorldModuleResolution::Resolved(_)
-        ));
-
-        let error = admit_world_answer(
-            InspectionResult::StructuredInfo(Err(QueryError::Unsupported("no".into()))),
-            WorldModuleResolution::Resolved(receipt()),
-            None,
-            &query(),
-            "M",
-            tidepool_toolchain::compiler_world::PublicModuleQuestionKind::StructuredInfo,
-            &runtime_provenance,
-        )
-        .expect("resolved structured error admits");
-        assert!(matches!(
-            error,
-            InspectionWorldAnswer::StructuredError { .. }
-        ));
-
-        let absent = admit_world_answer(
-            InspectionResult::StructuredInfo(Err(QueryError::UnknownModule("M".into()))),
-            WorldModuleResolution::Absent(absence()),
-            None,
-            &query(),
-            "M",
-            tidepool_toolchain::compiler_world::PublicModuleQuestionKind::StructuredInfo,
-            &runtime_provenance,
-        )
-        .expect("proved absence admits with its UnknownModule payload");
-        assert!(matches!(absent, InspectionWorldAnswer::Absent { .. }));
-        assert!(matches!(
-            absent.resolution(),
-            WorldModuleResolution::Absent(_)
-        ));
-
-        // The producing service proves absence only with `UnknownModule`.
-        // `Unsupported` says the question was never evaluated, so the pair is
-        // refused rather than allowed to claim an absence proof.
-        assert!(admit_world_answer(
-            InspectionResult::StructuredInfo(Err(QueryError::Unsupported("no".into()))),
-            WorldModuleResolution::Absent(absence()),
-            None,
-            &query(),
-            "M",
-            tidepool_toolchain::compiler_world::PublicModuleQuestionKind::StructuredInfo,
-            &runtime_provenance,
-        )
-        .is_err());
-        assert!(matches!(
-            InspectionWorldAnswer::Rejected(WorldQueryRejection::Unavailable).result(),
-            Err(WorldQueryRejection::Unavailable)
-        ));
-    }
-
 }

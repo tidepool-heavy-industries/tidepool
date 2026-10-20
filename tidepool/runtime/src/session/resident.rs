@@ -4552,6 +4552,26 @@ where
             .map(|view| view.hide_value_names(&hidden))
     }
 
+    /// Capture the runtime's immutable scope snapshot. A cold cache builds it;
+    /// warm captures reuse it without enumerating values. Capturing does not
+    /// force the digest. The result conveys observation, not admission authority.
+    pub fn capture_inspection_scope_in(
+        &self,
+        scope: ScopeId,
+        source_revision: &[u8],
+        selected_imports: &super::SourceImports,
+        inputs: &super::RuntimeCompileInputs,
+        label: super::NameScope,
+    ) -> Result<super::InspectionScopeSnapshot, SessionError> {
+        self.state.capture_inspection_scope_in(
+            scope,
+            source_revision,
+            selected_imports,
+            inputs,
+            label,
+        )
+    }
+
     /// Capture a logical-world observation before constructing a compile view.
     pub fn capture_inspection_world_in(
         &self,
@@ -4574,6 +4594,21 @@ where
     ) -> bool {
         self.state
             .install_inspection_world_if_current(completed, source, original_source)
+    }
+
+    /// Install an acquired world only while its exact source/base is current.
+    pub fn install_compiler_world_if_current(
+        &mut self,
+        completed: &super::CompletedCompilerWorld,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> bool {
+        self.state.install_compiler_world_association_if_current(
+            &completed.association,
+            &completed.cancellation,
+            source,
+            original_source,
+        )
     }
 
     /// Capture checked value inputs while the matching resident view is owned.
@@ -10852,13 +10887,16 @@ mod authored_publication_tests {
             RuntimeRep, Signature, SignatureId, UpdatePolicy, ValueRef,
         };
         let mut source = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let source_lease = source.mint_isolated_scope_with_lease().unwrap();
         let mut identities = Vec::new();
         for (generation, name) in [(481, "first"), (482, "second")] {
-            let mut entry = crate::session::prepared::tests::rooted_publication_fixture(
-                &mut source.state,
-                name,
-                generation,
-            );
+            let mut entry = source_action(&mut source, &source_lease, |source, _| {
+                crate::session::prepared::tests::rooted_publication_fixture(
+                    &mut source.state,
+                    name,
+                    generation,
+                )
+            });
             entry.module = SessionModule::lib(Generation(generation));
             entry.value.identity = testing::identity(&entry.module.module_name(), name);
             entry.value.identity.unit = unit.into();
@@ -10867,7 +10905,10 @@ mod authored_publication_tests {
                 &entry.value.identity.occurrence,
             ));
             identities.push(entry.value.identity.clone());
-            source.state.bind(entry).unwrap();
+            source_action(&mut source, &source_lease, |source, _| {
+                source.state.bind(entry)
+            })
+            .unwrap();
         }
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
@@ -10898,14 +10939,19 @@ mod authored_publication_tests {
             captures: Vec::new(),
             body: 0,
         };
-        let entry = crate::session::prepared::tests::rooted_program_fixture(
-            &mut source.state,
-            "payload",
-            483,
-            testing::prepare(wire).unwrap(),
-        );
+        let entry = source_action(&mut source, &source_lease, |source, _| {
+            crate::session::prepared::tests::rooted_program_fixture(
+                &mut source.state,
+                "payload",
+                483,
+                testing::prepare(wire).unwrap(),
+            )
+        });
         let handle = entry.value.handle;
-        source.state.bind(entry).unwrap();
+        source_action(&mut source, &source_lease, |source, _| {
+            source.state.bind(entry)
+        })
+        .unwrap();
         let custody = source.retain_binding_custody("payload").unwrap().unwrap();
         let parcel = source.export_shared(&custody).unwrap();
         (source, parcel, handle, identities)
@@ -10916,11 +10962,14 @@ mod authored_publication_tests {
         let (_source, parcel, _payload, identities) =
             parcel_source_fixture_in_unit("parcel-package");
         let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
-        let mut home = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut destination.state,
-            "first",
-            481,
-        );
+        let destination_lease = destination.mint_isolated_scope_with_lease().unwrap();
+        let mut home = source_action(&mut destination, &destination_lease, |destination, _| {
+            crate::session::prepared::tests::rooted_publication_fixture(
+                &mut destination.state,
+                "first",
+                481,
+            )
+        });
         home.module = SessionModule::lib(Generation(481));
         home.value.identity = identities[0].clone();
         home.value.identity.unit = HOME_UNIT.into();
@@ -10931,7 +10980,10 @@ mod authored_publication_tests {
         let home_id = home.id;
         let home_identity = home.value.identity.clone();
         let home_handle = home.value.handle;
-        destination.state.bind(home).unwrap();
+        source_action(&mut destination, &destination_lease, |destination, _| {
+            destination.state.bind(home)
+        })
+        .unwrap();
         assert_eq!(
             destination
                 .state
@@ -10945,7 +10997,10 @@ mod authored_publication_tests {
         let provenance = Arc::clone(&parcel.provenance);
         // The package and home symbols have the same module/occurrence and
         // therefore the same legacy VarId, but only the home unit owns a row.
-        let custody = destination.import_parcel(parcel, RealmId(481)).unwrap();
+        let custody = source_action(&mut destination, &destination_lease, |destination, _| {
+            destination.import_parcel(parcel, RealmId(481))
+        })
+        .unwrap();
         assert_eq!(destination.state.bindings().mutation_revision(), revision);
         assert_eq!(destination.state.live_val_modules(), modules);
         let home = destination.state.bindings().get(home_id).unwrap();
@@ -10976,15 +11031,21 @@ mod authored_publication_tests {
     fn parcel_binding_conflict_refuses_before_native_import_and_partial_visibility() {
         let (_source, parcel, _payload, identities) = parcel_source_fixture();
         let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
-        let mut existing = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut destination.state,
-            "occupied",
-            484,
-        );
+        let destination_lease = destination.mint_isolated_scope_with_lease().unwrap();
+        let mut existing = source_action(&mut destination, &destination_lease, |destination, _| {
+            crate::session::prepared::tests::rooted_publication_fixture(
+                &mut destination.state,
+                "occupied",
+                484,
+            )
+        });
         let id = parcel_library_binding(&identities[1]).unwrap().id;
         existing.id = id;
         let handle = existing.value.handle;
-        destination.state.bind(existing).unwrap();
+        source_action(&mut destination, &destination_lease, |destination, _| {
+            destination.state.bind(existing)
+        })
+        .unwrap();
         assert_eq!(
             destination
                 .state
@@ -10996,7 +11057,10 @@ mod authored_publication_tests {
         let residency = destination.residency();
         let revision = destination.state.bindings().mutation_revision();
         let modules = destination.state.live_val_modules();
-        assert!(matches!(destination.import_parcel(parcel, RealmId(481)),
+        let imported = source_action(&mut destination, &destination_lease, |destination, _| {
+            destination.import_parcel(parcel, RealmId(481))
+        });
+        assert!(matches!(imported,
             Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == id));
         assert_eq!(destination.residency(), residency);
         assert_eq!(destination.state.bindings().mutation_revision(), revision);
@@ -11020,15 +11084,24 @@ mod authored_publication_tests {
     fn parcel_imported_binding_handles_survive_caller_realm_and_repeat_import() {
         let (mut source, parcel, _payload, identities) = parcel_source_fixture();
         let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
-        let bootstrap = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut destination.state,
-            "bootstrap",
-            485,
-        );
-        destination.state.bind(bootstrap).unwrap();
+        let destination_lease = destination.mint_isolated_scope_with_lease().unwrap();
+        let bootstrap = source_action(&mut destination, &destination_lease, |destination, _| {
+            crate::session::prepared::tests::rooted_publication_fixture(
+                &mut destination.state,
+                "bootstrap",
+                485,
+            )
+        });
+        source_action(&mut destination, &destination_lease, |destination, _| {
+            destination.state.bind(bootstrap)
+        })
+        .unwrap();
         let owner = RealmId(481);
         let provenance = Arc::clone(&parcel.provenance);
-        let custody = destination.import_parcel(parcel, owner).unwrap();
+        let custody = source_action(&mut destination, &destination_lease, |destination, _| {
+            destination.import_parcel(parcel, owner)
+        })
+        .unwrap();
         let revision = destination.state.bindings().mutation_revision();
         let source_custody = source.retain_binding_custody("payload").unwrap().unwrap();
         let repeated = source.export_shared(&source_custody).unwrap();
@@ -11038,7 +11111,11 @@ mod authored_publication_tests {
             .unwrap()
             .pending_parcel_import_identities(&repeated.native)
             .is_empty());
-        let repeated_custody = destination.import_parcel(repeated, owner).unwrap();
+        let repeated_custody =
+            source_action(&mut destination, &destination_lease, |destination, _| {
+                destination.import_parcel(repeated, owner)
+            })
+            .unwrap();
         assert_eq!(destination.state.bindings().mutation_revision(), revision);
         destination.close_realm(owner);
         for identity in &identities {
@@ -11059,13 +11136,22 @@ mod authored_publication_tests {
             );
             let exported = destination.export_shared(&binding).unwrap();
             let mut third = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
-            let bootstrap = crate::session::prepared::tests::rooted_publication_fixture(
-                &mut third.state,
-                "bootstrap",
-                486,
-            );
-            third.state.bind(bootstrap).unwrap();
-            let arrived = third.import_parcel(exported, RealmId::ROOT).unwrap();
+            let third_lease = third.mint_isolated_scope_with_lease().unwrap();
+            let bootstrap = source_action(&mut third, &third_lease, |third, _| {
+                crate::session::prepared::tests::rooted_publication_fixture(
+                    &mut third.state,
+                    "bootstrap",
+                    486,
+                )
+            });
+            source_action(&mut third, &third_lease, |third, _| {
+                third.state.bind(bootstrap)
+            })
+            .unwrap();
+            let arrived = source_action(&mut third, &third_lease, |third, _| {
+                third.import_parcel(exported, RealmId::ROOT)
+            })
+            .unwrap();
             assert!(
                 Arc::ptr_eq(&arrived.provenance, &provenance),
                 "binding re-export to a third machine cannot replace its provenance"

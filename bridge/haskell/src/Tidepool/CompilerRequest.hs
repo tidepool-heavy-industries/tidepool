@@ -9,7 +9,7 @@ module Tidepool.CompilerRequest
   , boundRequestOperation, boundRequestExactScope, boundParserFlags
   , compileBoundRequest, compilePreparedRequest, compilePreparedSegmentRequest
   , runBoundGhc, withBoundExactInterfaceTransaction, cellSegmentRequest
-  , runBoundWorldQuery, runBoundWorldCellPlan, validateBoundWorldCell, boundWorldCellSlots, commitPreparedWorldDependencies
+  , runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation, commitPreparedWorldDependencies
   , PreparedCompilation, preparedCompilationResult, preparedCompilationWorldInputs, prepareCompilationOriginals
   , PreparedArtifact(..), PreparedArtifactOutput(..), PreparedOutputIntent(..), preparedOutputIntent, prepareArtifacts, prepareArtifactsWithIntent
   , prepareArtifactsWithProjection, PreviewOriginalDependenciesUnavailable, requirePreviewProjection
@@ -17,7 +17,7 @@ module Tidepool.CompilerRequest
 
 import Control.Exception (Exception, evaluate, throw, throwIO)
 import Control.Monad (forM, forM_, unless, when)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef, modifyIORef')
+import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Maybe (isJust, isNothing, mapMaybe)
@@ -32,7 +32,6 @@ import GHC (Ghc)
 import GHC.Conc (getNumCapabilities, setNumCapabilities)
 import GHC.Driver.Session (DynFlags)
 import Tidepool.CellProgramState
-import Tidepool.Binders (CellSourcePlan)
 import Tidepool.CheckedPrefixImports (CompletedValueImport)
 import Tidepool.CheckedAdmission (matchesInspectionAdmission)
 import Tidepool.CompilerExecution
@@ -96,13 +95,6 @@ data HeldWorldCellPreparation
   = HeldWorldCellRefused WorldCellPrepareRequest WorldCellRefusal
   | HeldWorldCellAdmitted HeldWorldCellAdmission
 
-data HeldWorldCellAdmission = HeldWorldCellAdmission
-  { heldCellQuestion :: WorldCellPrepareRequest
-  , heldCellBinding :: HeldWorldQueryBinding
-  , heldCellPlan :: CellSourcePlan
-  , heldCellSlots :: [(Word64,PlannedCellSlot)]
-  }
-
 boundWorkerRequest :: BoundCompilerRequest -> WorkerRequest
 boundWorkerRequest (BoundCompilerRequest _ args _ _ _ _) = args
 
@@ -115,7 +107,7 @@ boundRequestOperation (BoundCompilerRequest _ _ admitted _ _ _) = admittedTag ad
     admittedTag (AdmittedHeldCellPrepareOperation preparation) =
       WorldCellPrepareOperation (heldPreparationQuestion preparation)
     heldPreparationQuestion (HeldWorldCellRefused question _) = question
-    heldPreparationQuestion (HeldWorldCellAdmitted admission) = heldCellQuestion admission
+    heldPreparationQuestion (HeldWorldCellAdmitted admission) = heldWorldCellQuestion admission
 
 boundRequestExactScope :: BoundCompilerRequest -> Maybe ExactScope
 boundRequestExactScope (BoundCompilerRequest _ _ admitted _ _ _) = case admitted of
@@ -186,20 +178,10 @@ withBoundCompilerRequest sink compilerScope parsed use = do
           scopedReadHeldWorld compilerScope (worldCellPlanIdentity question) (worldCellPlanRealization question)
           <*> pure question
         WorldCellPrepareOperation question -> do
-          binding <- scopedReadHeldWorld compilerScope
-            (worldCellPrepareIdentity question) (worldCellPrepareRealization question)
-          preparation <- case binding of
-            Nothing -> pure (HeldWorldCellRefused question WorldCellUnavailable)
-            Just held -> do
-              validation <- scopedValidateWorldCell compilerScope (Just held) grant executor question
-              pure $ case validation of
+          validation <- scopedValidateWorldCell compilerScope grant executor question
+          let preparation = case validation of
                 Left refusal -> HeldWorldCellRefused question refusal
-                Right plan -> HeldWorldCellAdmitted HeldWorldCellAdmission
-                  { heldCellQuestion = question
-                  , heldCellBinding = held
-                  , heldCellPlan = plan
-                  , heldCellSlots = worldCellPrepareSlots question
-                  }
+                Right admission -> HeldWorldCellAdmitted admission
           pure (AdmittedHeldCellPrepareOperation preparation)
         _ -> pure (AdmittedExactOperation exact operation)
       emitPhase sink BodyStarted
@@ -251,8 +233,8 @@ compileBoundCompleted (BoundCompilerRequest scope args admitted grant executor c
     AdmittedHeldCellPlanOperation _ _ -> throwIO CheckedPurposeMismatch
     AdmittedHeldCellPrepareOperation preparation -> case preparation of
       HeldWorldCellRefused _ refusal -> throwIO refusal
-      HeldWorldCellAdmitted admission -> scopedCompileWorldCell scope (Just (heldCellBinding admission))
-        grant executor (heldCellQuestion admission) selection retained normalizedPurpose path
+      HeldWorldCellAdmitted admission -> scopedCompileWorldCell scope admission
+        selection retained normalizedPurpose path
 
 compileBoundRequest :: BoundCompilerRequest -> PipelineSelection result
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO result
@@ -268,7 +250,7 @@ compileBoundRequest request selection retained purpose session path =
 -- completion and no independent pending state.
 data PreparedCompletion
   = PreparedOrdinaryCompletion
-  | PreparedWorldCompletion WorldCellInputs (IORef (Maybe PendingWorldDependencies))
+  | PreparedWorldCompletion WorldCellInputs PendingWorldDependencies
 
 data PreparedCompilation = PreparedCompilation PreparedPipelineResult CompilerRecoveryCaches
   CompilerExecutor (IO ()) (Maybe OriginalProductWorklist) PreparedCompletion
@@ -358,21 +340,13 @@ runBoundGhc (BoundCompilerRequest scope _ admitted _ executor _) operation = do
   case admitted of AdmittedExactOperation _ _ -> pure (); _ -> throwIO CheckedPurposeMismatch
   scopedRunGhc scope operation
 
-validateBoundWorldCell :: BoundCompilerRequest -> IO (Either WorldCellRefusal CellSourcePlan)
-validateBoundWorldCell (BoundCompilerRequest _ _ admitted _ executor _) = do
+boundWorldCellPreparation :: BoundCompilerRequest -> IO (Either WorldCellRefusal HeldWorldCellAdmission)
+boundWorldCellPreparation (BoundCompilerRequest _ _ admitted _ executor _) = do
   requireCompilerExecutorOpen executor
   case admitted of
     AdmittedHeldCellPrepareOperation (HeldWorldCellRefused _ refusal) -> pure (Left refusal)
-    AdmittedHeldCellPrepareOperation (HeldWorldCellAdmitted admission) -> pure (Right (heldCellPlan admission))
+    AdmittedHeldCellPrepareOperation (HeldWorldCellAdmitted admission) -> pure (Right admission)
     _ -> throwIO CheckedPurposeMismatch
-
--- The admitted preparation owns the slots already matched against its plan.
--- Consumers use this collection rather than re-inspecting the wire question.
-boundWorldCellSlots :: BoundCompilerRequest -> Maybe [(Word64,PlannedCellSlot)]
-boundWorldCellSlots (BoundCompilerRequest _ _ admitted _ _ _) = case admitted of
-  AdmittedHeldCellPrepareOperation (HeldWorldCellAdmitted admission) ->
-    Just (heldCellSlots admission)
-  _ -> Nothing
 
 -- Terminal output success reborrows the actual held owner. Pending completion
 -- facts carry no source tree or usable compiler capability beyond scope END.
@@ -387,23 +361,18 @@ commitPreparedWorldDependencies (BoundCompilerRequest scope _ admitted _ executo
     AdmittedHeldCellPrepareOperation preparation -> case preparation of
       HeldWorldCellRefused _ refusal -> throwIO refusal
       HeldWorldCellAdmitted admission -> do
-      -- Consume before the guarded commit; cancellation cannot replay a pending
-      -- publication through another invocation or replacement request owner.
+      -- The scope's pending owner validates preflight and consumes before any
+      -- mutation. Request orchestration cannot reissue or restore that state.
         case route of
           PreparedOrdinaryCompletion -> throwIO CheckedPurposeMismatch
-          PreparedWorldCompletion _ pendingRef -> do
-            pending <- atomicModifyIORef' pendingRef (\value -> (Nothing,value))
-            selected <- maybe (throwIO CheckedPurposeMismatch) pure pending
-            scopedCommitWorldDependencies scope (Just (heldCellBinding admission)) issuing
-              (heldCellQuestion admission) selected
+          PreparedWorldCompletion _ pending -> scopedCommitWorldDependencies scope admission pending
     _ -> throwIO CheckedPurposeMismatch
 
 preparedCompletionFor :: CompletedCompilerResult result -> IO PreparedCompletion
 preparedCompletionFor completed = case completedCompilerWorldCompletion completed of
   Nothing -> pure PreparedOrdinaryCompletion
-  Just world -> do
-    pending <- newIORef (Just (worldCompilerCompletionDependencies world))
-    pure (PreparedWorldCompletion (worldCompilerCompletionInputs world) pending)
+  Just world -> pure (PreparedWorldCompletion (worldCompilerCompletionInputs world)
+    (worldCompilerCompletionDependencies world))
 
 runBoundWorldCellPlan :: BoundCompilerRequest -> IO BS.ByteString
 runBoundWorldCellPlan (BoundCompilerRequest scope _ admitted grant executor _) = do

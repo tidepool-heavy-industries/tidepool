@@ -256,7 +256,7 @@ pub struct PersistentSession {
     // Zero permanently disables cached witnesses after counter exhaustion.
     compiler_input_revision: u64,
     #[cfg(test)]
-    compile_view_bytes_hashed: std::sync::atomic::AtomicUsize,
+    compile_view_bytes_hashed: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     certified_resolution_work: [std::sync::atomic::AtomicUsize; 2],
     /// Incremental indexes over `bindings`' live set (prepared-import
@@ -321,10 +321,29 @@ impl CompileViewKey {
     }
 }
 
-struct CachedCompileView {
+pub(super) struct CachedCompileView {
     key: Option<CompileViewKey>,
     view: SessionCompileView,
-    digest: [u8; 32],
+    digest: std::sync::OnceLock<[u8; 32]>,
+    #[cfg(test)]
+    bytes_hashed: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl CachedCompileView {
+    pub(super) fn matches_key(&self, key: &CompileViewKey) -> bool {
+        self.key.as_ref() == Some(key)
+    }
+
+    pub(super) fn digest(&self) -> [u8; 32] {
+        *self.digest.get_or_init(|| {
+            let (digest, bytes_hashed) = self.view.admission_commitment();
+            #[cfg(test)]
+            self.bytes_hashed.fetch_add(bytes_hashed, Ordering::Relaxed);
+            #[cfg(not(test))]
+            let _ = bytes_hashed;
+            digest
+        })
+    }
 }
 
 struct RecoveryInitialization {
@@ -432,7 +451,7 @@ impl PersistentSession {
             compile_views: parking_lot::Mutex::new(HashMap::new()),
             compiler_input_revision: 1,
             #[cfg(test)]
-            compile_view_bytes_hashed: std::sync::atomic::AtomicUsize::new(0),
+            compile_view_bytes_hashed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             certified_resolution_work: [const { std::sync::atomic::AtomicUsize::new(0) }; 2],
             binding_index: BindingIndex::new(),
@@ -1641,6 +1660,7 @@ impl PersistentSession {
             1,
         );
         let cached = self.scoped_compile_view_in(scope)?;
+        cached.digest();
         let injected_values = self
             .bindings
             .live_modules()
@@ -1660,7 +1680,38 @@ impl PersistentSession {
     }
 
     pub(super) fn compile_view_digest_in(&self, scope: ScopeId) -> Option<[u8; 32]> {
-        self.scoped_compile_view_in(scope).map(|view| view.digest)
+        self.scoped_compile_view_in(scope).map(|view| view.digest())
+    }
+
+    pub(super) fn capture_inspection_scope_in(
+        &self,
+        scope: ScopeId,
+        source_revision: &[u8],
+        selected_imports: &super::SourceImports,
+        inputs: &super::RuntimeCompileInputs,
+        label: super::NameScope,
+    ) -> Result<super::inspection::InspectionScopeSnapshot, SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        let base = self
+            .scoped_compile_view_in(scope)
+            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let generation = base
+            .key
+            .as_ref()
+            .ok_or(SessionError::StaleStagedDeclaration)?
+            .generation()
+            .0;
+        Ok(super::inspection::InspectionScopeSnapshot {
+            base,
+            generation,
+            runtime_scope: scope,
+            source_revision: Arc::from(source_revision),
+            selected_imports: selected_imports.clone(),
+            inputs: inputs.clone(),
+            scope: label,
+        })
     }
 
     pub(super) fn capture_inspection_world_in(
@@ -1785,20 +1836,55 @@ impl PersistentSession {
         source: &super::GenerationArtifactReference,
         original_source: &Arc<super::RuntimeLexicalScopeLease>,
     ) -> bool {
-        if completed.cancellation.checkpoint().is_err() {
-            return false;
-        }
-        let association = &completed.prepared.association;
-        if !self.inspection_world_base_is_current(&association.base, source, original_source) {
-            return false;
-        }
-        let state = self
-            .lib_mut()
-            .tips
-            .entry(association.base.scope)
-            .or_default();
-        state.inspection_world = Some(association.clone());
-        true
+        self.install_compiler_world_association_if_current(
+            &completed.prepared.association,
+            &completed.cancellation,
+            source,
+            original_source,
+        )
+    }
+
+    pub(super) fn install_compiler_world_association_if_current(
+        &mut self,
+        association: &Arc<super::inspection::InspectionWorldAssociation>,
+        cancellation: &crate::HostAdmissionCancellation,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> bool {
+        super::RuntimeLexicalScopeLease::with_source_leases(
+            [original_source.clone(), association.base.target.clone()],
+            |leases| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    leases.iter().map(|lease| lease.source_admission()),
+                    || {
+                        if cancellation.checkpoint().is_err()
+                            || !self.inspection_world_base_is_current(
+                                &association.base,
+                                source,
+                                original_source,
+                            )
+                        {
+                            return false;
+                        }
+                        tracing::debug!(
+                            target: "exomonad_harness::timing",
+                            logical_world = ?association.world.logical_id(),
+                            source_sha256 = ?source.sha256(),
+                            scope = ?association.base.scope,
+                            "compiler world association installed"
+                        );
+                        let state = self
+                            .lib_mut()
+                            .tips
+                            .entry(association.base.scope)
+                            .or_default();
+                        state.inspection_world = Some(association.clone());
+                        true
+                    },
+                )
+            },
+        )
+        .unwrap_or(false)
     }
 
     /// Read mutation-owner facts without constructing a view or its digest.
@@ -1843,13 +1929,13 @@ impl PersistentSession {
             }
         }
         let view = self.build_scoped_compile_view(scope, lib);
-        let (digest, bytes_hashed) = view.admission_commitment();
-        #[cfg(test)]
-        self.compile_view_bytes_hashed
-            .fetch_add(bytes_hashed, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(not(test))]
-        let _ = bytes_hashed;
-        let cached = Arc::new(CachedCompileView { digest, view, key });
+        let cached = Arc::new(CachedCompileView {
+            view,
+            key,
+            digest: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            bytes_hashed: self.compile_view_bytes_hashed.clone(),
+        });
         if cached.key.is_some() {
             self.compile_views.lock().insert(scope, cached.clone());
         }
@@ -4774,6 +4860,49 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
+    fn cold_world_acquisition_checks_original_before_capturing_source() {
+        use super::super::inspection::{
+            finish_admitted_compiler_world, run_admitted_compiler_world, WorldInspectionError,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 419);
+        let scope = session.mint_isolated_scope();
+        let original = session.adopt_initial_notebook_scope(scope).unwrap();
+        let other_scope = session.mint_isolated_scope();
+        let foreign = session.adopt_initial_notebook_scope(other_scope).unwrap();
+        let source = super::super::GenerationArtifactReference::capture(b"captured source".to_vec());
+        let admitted = session.capture_inspection_world_in(scope, &source, &original, |_| false).unwrap();
+        let captured = std::cell::Cell::new(false);
+        let settled = foreign.with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(), None, |_| {},
+            |owner, _| run_admitted_compiler_world(owner, admitted, || {
+                captured.set(true);
+                Ok(None)
+            }),
+        ).unwrap();
+        assert!(!captured.get(), "foreign source must refuse before source capture");
+        assert!(matches!(finish_admitted_compiler_world(settled),
+            Err(WorldInspectionError::Runtime(crate::RuntimeError::SourceAdmission(
+                super::super::SourceAdmissionError::ForeignTransaction
+            )))
+        ));
+        let admitted = session.capture_inspection_world_in(scope, &source, &original, |_| false).unwrap();
+        let settled = original.with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(), None, |_| {},
+            |owner, _| run_admitted_compiler_world(owner, admitted, || {
+                captured.set(true);
+                Ok(None)
+            }),
+        ).unwrap();
+        assert!(captured.get(), "the rightful owner reaches its source capture");
+        assert!(matches!(finish_admitted_compiler_world(settled), Err(WorldInspectionError::UnsupportedSource)));
+        assert!(session.lib().tips.get(&scope).is_none_or(|tip| tip.inspection_world.is_none()));
+    }
+
+    #[test]
     fn world_observation_refuses_changed_or_foreign_base() {
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
@@ -4838,7 +4967,7 @@ mod checkpoint_scope_tests {
         use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        let session = publication_session(&recovery, root.path(), 419);
+        let mut session = publication_session(&recovery, root.path(), 419);
         let observation = HostWorkObservation::new();
         assert!(session.compile_views.lock().is_empty());
         let digest = observation.scope(|| session.compile_view_digest_in(ScopeId::ROOT).unwrap());
@@ -4860,6 +4989,100 @@ mod checkpoint_scope_tests {
                 .snapshot()
                 .get(HostWorkCounter::CompileViewDigestInputByte),
             first.get(HostWorkCounter::CompileViewDigestInputByte)
+        );
+        let imports = super::super::SourceImports::default();
+        let inputs = super::super::RuntimeCompileInputs::default();
+        let before = session
+            .capture_inspection_scope_in(
+                ScopeId::ROOT,
+                b"observation-only-source",
+                &imports,
+                &inputs,
+                super::super::NameScope::Current,
+            )
+            .unwrap();
+        session.reserve_value_generations(3).unwrap();
+        let work = HostWorkObservation::new();
+        let after = work
+            .scope(|| {
+                session.capture_inspection_scope_in(
+                    ScopeId::ROOT,
+                    b"observation-only-source",
+                    &imports,
+                    &inputs,
+                    super::super::NameScope::Current,
+                )
+            })
+            .unwrap();
+        assert!(
+            before.provenance().same_view(&after.provenance()),
+            "allocation alone cannot move the observed scope"
+        );
+        assert_eq!(work.snapshot().get(HostWorkCounter::CompileViewBuild), 0);
+        assert_eq!(
+            work.snapshot()
+                .get(HostWorkCounter::CompileViewDigestInputByte),
+            0
+        );
+    }
+
+    #[test]
+    fn inspection_scope_snapshot_defers_digest_and_retains_immutable_base() {
+        use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 420);
+        let scope = session.mint_isolated_scope();
+        let imports = super::super::SourceImports::default();
+        let inputs = super::super::RuntimeCompileInputs::default();
+        let observed = HostWorkObservation::new();
+        let snapshot = observed
+            .scope(|| {
+                session.capture_inspection_scope_in(
+                    scope,
+                    b"observation-only-source",
+                    &imports,
+                    &inputs,
+                    super::super::NameScope::Current,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            observed
+                .snapshot()
+                .get(HostWorkCounter::CompileViewDigestInputByte),
+            0
+        );
+        assert_eq!(session.compile_view_bytes_hashed.load(Ordering::Relaxed), 0);
+        session.reserve_value_generations(3).unwrap();
+        let repeated = session
+            .capture_inspection_scope_in(
+                scope,
+                b"observation-only-source",
+                &imports,
+                &inputs,
+                super::super::NameScope::Current,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&snapshot.base, &repeated.base));
+        session.retire_scope(scope);
+        assert!(matches!(session.capture_inspection_scope_in(
+            scope, b"observation-only-source", &imports, &inputs, super::super::NameScope::Current,
+        ), Err(SessionError::DeadScope(dead)) if dead == scope));
+        let pin = snapshot.provenance();
+        assert!(session.compile_view_bytes_hashed.load(Ordering::Relaxed) > 0);
+        let resolved = HostWorkObservation::new();
+        let repeated_pin = resolved.scope(|| repeated.provenance());
+        assert!(pin.same_view(&repeated_pin));
+        assert_eq!(
+            resolved
+                .snapshot()
+                .get(HostWorkCounter::CompileViewDigestInputByte),
+            0
+        );
+        assert_eq!(
+            resolved.snapshot().get(HostWorkCounter::CompileViewBuild),
+            0
         );
     }
 
@@ -5063,6 +5286,28 @@ mod checkpoint_scope_tests {
         assert_eq!(session.lib().scope_tip(scope), tip);
     }
 
+    fn source_action<T>(
+        session: &mut PersistentSession,
+        source: &Arc<super::super::RuntimeLexicalScopeLease>,
+        action: impl FnOnce(&mut PersistentSession) -> T,
+    ) -> T {
+        let settled = session
+            .with_source_compiler_transaction(
+                source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| action(session),
+            )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &crate::CompilerTransactionClose::NotStarted
+        );
+        settled.into_outcome().action
+    }
+
     #[test]
     fn scoped_view_commitment_reuses_unchanged_binding_owner_witness() {
         use std::sync::atomic::Ordering;
@@ -5073,18 +5318,22 @@ mod checkpoint_scope_tests {
             let mut session = publication_session(&recovery, dir.path(), 410);
             let public = session.mint_isolated_scope();
             let scope = session.mint_detached_scope(public).unwrap();
-            for index in 0..count {
-                let entry = super::super::prepared::tests::rooted_publication_fixture(
-                    &mut session,
-                    &format!("value{index}"),
-                    410 + index,
-                );
-                session.bind_in(scope, entry).unwrap();
-            }
+            let source = session.adopt_initial_notebook_scope(scope).unwrap();
+            source_action(&mut session, &source, |session| {
+                for index in 0..count {
+                    let entry = super::super::prepared::tests::rooted_publication_fixture(
+                        session,
+                        &format!("value{index}"),
+                        410 + index,
+                    );
+                    session.bind_in(scope, entry).unwrap();
+                }
+            });
             let cached = session.scoped_compile_view_in(scope).unwrap();
+            cached.digest();
             let hashed = session.compile_view_bytes_hashed.load(Ordering::Relaxed);
             for _ in 0..100 {
-                assert_eq!(session.compile_view_digest_in(scope), Some(cached.digest));
+                assert_eq!(session.compile_view_digest_in(scope), Some(cached.digest()));
                 let reader = session.compile_view_in(scope).unwrap();
                 assert!(Arc::ptr_eq(&reader.projection, &cached.view.projection));
             }
@@ -5096,7 +5345,9 @@ mod checkpoint_scope_tests {
                 &session.scoped_compile_view_in(scope).unwrap(),
                 &cached
             ));
-            eprintln!("scoped view bindings={count} initial_hashed_bytes={hashed} repeated_checks=100 additional_hashed_bytes=0");
+            eprintln!(
+                "scoped view bindings={count} initial_hashed_bytes={hashed} repeated_checks=100 additional_hashed_bytes=0"
+            );
             session.retire_scope(scope);
             assert!(!session.compile_views.lock().contains_key(&scope));
         }
@@ -5108,9 +5359,12 @@ mod checkpoint_scope_tests {
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
         let mut session = publication_session(&recovery, dir.path(), 417);
         let scope = session.mint_isolated_scope();
-        let original =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "answer", 417);
-        session.bind_in(scope, original).unwrap();
+        let source = session.adopt_initial_notebook_scope(scope).unwrap();
+        source_action(&mut session, &source, |session| {
+            let original =
+                super::super::prepared::tests::rooted_publication_fixture(session, "answer", 417);
+            session.bind_in(scope, original).unwrap();
+        });
         let reader = session.compile_view_in(scope).unwrap();
         let last_reader = reader.clone();
         let weak = Arc::downgrade(&reader.projection);
@@ -5122,9 +5376,11 @@ mod checkpoint_scope_tests {
         assert!(!Arc::ptr_eq(&reader.projection, &staged.projection));
         assert_eq!(reader.turn_imports(&SourceImports::new()), original_imports);
         assert!(!staged.is_current_for(&reader));
-        let replacement =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "answer", 419);
-        session.bind_in(scope, replacement).unwrap();
+        source_action(&mut session, &source, |session| {
+            let replacement =
+                super::super::prepared::tests::rooted_publication_fixture(session, "answer", 419);
+            session.bind_in(scope, replacement).unwrap();
+        });
         let latest = session.compile_view_in(scope).unwrap();
         assert!(!Arc::ptr_eq(&reader.projection, &latest.projection));
         assert!(!latest.is_current_for(&reader));
@@ -5153,10 +5409,14 @@ mod checkpoint_scope_tests {
         let cached = session.scoped_compile_view_in(private).unwrap();
         let initial = session.compile_view_in(private).unwrap();
         let sibling = session.mint_isolated_scope();
-        let entry =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "sibling", 411);
-        let module = entry.module;
-        session.bind_in(sibling, entry).unwrap();
+        let source = session.adopt_initial_notebook_scope(sibling).unwrap();
+        let module = source_action(&mut session, &source, |session| {
+            let entry =
+                super::super::prepared::tests::rooted_publication_fixture(session, "sibling", 411);
+            let module = entry.module;
+            session.bind_in(sibling, entry).unwrap();
+            module
+        });
         session.set_val_gen(Generation(500));
         let view = session.compile_view_in(private).unwrap();
         assert_eq!(view.next_value_generation(), Generation(501));
@@ -5167,7 +5427,7 @@ mod checkpoint_scope_tests {
         assert!(view.injected_values().contains(&module));
         assert!(view.visible_values().is_empty());
         assert!(!view.reachable_values().contains(&module));
-        assert_eq!(view.admission_digest(), cached.digest);
+        assert_eq!(view.admission_digest(), cached.digest());
         assert!(Arc::ptr_eq(
             &session.scoped_compile_view_in(private).unwrap(),
             &cached
@@ -5179,17 +5439,22 @@ mod checkpoint_scope_tests {
         let dir = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
         let mut session = publication_session(&recovery, dir.path(), 412);
-        let entry =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 412);
-        session.bind(entry).unwrap();
-        let scope = ScopeId::ROOT;
+        let scope = session.mint_isolated_scope();
+        let source = session.adopt_initial_notebook_scope(scope).unwrap();
+        source_action(&mut session, &source, |session| {
+            let entry =
+                super::super::prepared::tests::rooted_publication_fixture(session, "value", 412);
+            session.bind_in(scope, entry).unwrap();
+        });
         let before = session.scoped_compile_view_in(scope).unwrap();
-        let replacement =
-            super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 414);
-        session.bind(replacement).unwrap();
+        source_action(&mut session, &source, |session| {
+            let replacement =
+                super::super::prepared::tests::rooted_publication_fixture(session, "value", 414);
+            session.bind_in(scope, replacement).unwrap();
+        });
         let rebound = session.scoped_compile_view_in(scope).unwrap();
         assert!(!Arc::ptr_eq(&before, &rebound));
-        assert_ne!(before.digest, rebound.digest);
+        assert_ne!(before.digest(), rebound.digest());
         let turn = super::super::render::DeclTurn {
             normalized: Default::default(),
             external_imports: SourceImports::new(),
@@ -5203,7 +5468,7 @@ mod checkpoint_scope_tests {
         let generation = session.lib_mut().log.push(turn);
         session.lib_mut().set_scope_tip_in(scope, generation);
         let declared = session.scoped_compile_view_in(scope).unwrap();
-        assert_ne!(declared.digest, rebound.digest);
+        assert_ne!(declared.digest(), rebound.digest());
         // Same session/path/tip counters cannot reuse another library's cache.
         let mut replacement = SessionLib::open(
             session.lib().session_id(),
@@ -5225,7 +5490,7 @@ mod checkpoint_scope_tests {
         *session.lib_mut() = replacement;
         let replaced = session.scoped_compile_view_in(scope).unwrap();
         assert!(!Arc::ptr_eq(&declared, &replaced));
-        assert_ne!(declared.digest, replaced.digest);
+        assert_ne!(declared.digest(), replaced.digest());
     }
 
     #[test]
