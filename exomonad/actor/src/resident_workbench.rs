@@ -25118,15 +25118,15 @@ pub(crate) mod request_tests {
                 .with_machine(context.clone(), {
                     let owner = owner.clone();
                     move |session, context, _| {
+                        let bootstrap = session
+                            .begin_durable_public_bootstrap(owner, context.placement.lexical_scope)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })?;
                         let snapshot = session
                             .public_visibility_snapshot_in(context.placement.lexical_scope)
                             .expect("the bootstrap owner holds its actual public scope");
-                        session
-                            .begin_durable_public_bootstrap(owner, context.placement.lexical_scope)
-                            .map(|bootstrap| (bootstrap, snapshot))
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                            })
+                        Ok((bootstrap, snapshot))
                     }
                 })
                 .await
