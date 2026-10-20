@@ -1110,7 +1110,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(durable['resources'], rooted['resources'])
         self.assertTrue(durable['haskell_worker'])
 
-    def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):
+    def test_actor_notebook_cohort_declares_rooted_world_resources_for_all_four_cases(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [
             ('exomonad_actor', 'lib', 'src/lib.rs'),
             ('actor', 'test', 'tests/suites/actor.rs'),
@@ -1125,14 +1125,19 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.write('exomonad/actor/tests/suites/actor.rs', '#[test] fn integration() {}\n')
         result = self.generate('--package', 'exomonad-actor')
         self.assertEqual(result.returncode, 0, result.stderr)
-        broad = self.rule('exomonad/actor', 'actor', 'tidepool_rust_isolated_test')
         cohort = self.rule('exomonad/actor', 'actor_notebook_contract_tests',
                            'tidepool_rust_test_cases')
         self.assertEqual(cohort['binary'], ':actor_binary')
         self.assertEqual(cohort['expected_count'], 4)
         self.assertEqual(len(set(cohort['exact_tests'])), 4)
+        rooted = self.rule('exomonad/actor', 'actor_world_cell_input_test',
+                           'tidepool_rust_test_cases')
+        self.assertTrue(cohort['ignored'])
+        self.assertEqual(cohort['case_compiler_modes'], {
+            name: 'owned-resident' for name in cohort['exact_tests']
+        })
         for field in ('env', 'resource_env', 'resources', 'haskell_worker'):
-            self.assertEqual(cohort[field], broad[field], field)
+            self.assertEqual(cohort[field], rooted[field], field)
         self.assertIs(cohort['haskell_worker'], True)
         self.assertEqual(cohort['jobs'], 1)
         self.assertEqual(cohort['timeout'], 600)

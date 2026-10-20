@@ -34,7 +34,7 @@ acknowledgement, cancellation, reload refusal, uncertainty, and cleanup through
 the real actor. Unit-only checks cannot exercise dynamic Haskell preparation or
 the installed tool surface.
 
-The named notebook cohort already supplies its exact selectors. To investigate
-one case, use `just test-target exomonad-actor actor --exact FULL_TEST_NAME
---expected-count 1`; do not append another selector to the cohort command.
-Runner argument rejection is zero executed tests, not a test failure.
+The named notebook cohort owns the Rooted compiler service resources and selects
+its four ignored cases explicitly. The ordinary actor integration target does not
+supply those World resources. Run the named cohort without appending selectors;
+runner argument rejection is zero executed tests, not a test failure.

@@ -1217,7 +1217,7 @@ def actor_observation_test_cases(binary):
     return "\n".join(rules)
 
 
-def actor_notebook_contract_test_cases(binary, env, resources, worker):
+def actor_notebook_contract_test_cases(binary):
     """Exercise installed notebook policy, settlement, reload refusal and cleanup."""
     tests = ["resident_local_actor::" + name for name in (
         "completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control",
@@ -1225,13 +1225,17 @@ def actor_notebook_contract_test_cases(binary, env, resources, worker):
         "reload_progress::unavailable_reload_leaves_parked_cells_and_control_independent",
         "reload_uncertainty::unavailable_generation_does_not_recapture_source_or_discard_bindings",
     )]
+    env, resources, worker = compiler_service_test_inputs("exomonad-actor", "actor_notebook_contract_tests")
     return "\n".join([
         "tidepool_rust_test_cases(",
         '    name = "actor_notebook_contract_tests",',
         f"    binary = {json.dumps(':' + binary)},",
         "    exact_tests = [", render_strings(tests, 8), "    ],",
-        f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 600,",
+        f"    expected_count = {len(tests)},", "    ignored = True,", "    jobs = 1,", "    timeout = 600,",
         f"    test_rule_timeout_ms = {(len(tests) * 600 + 60) * 1000},",
+        '    case_compiler_modes = {' + ", ".join(
+            json.dumps(test) + ': "owned-resident"' for test in tests
+        ) + "},",
         runtime_arguments(env, resources, worker),
         '    visibility = ["PUBLIC"],', ")", "",
     ])
@@ -2015,7 +2019,7 @@ tidepool_buildscript_run(
         if package_name == "tidepool-extract-cmd" and target["name"] == "retained_fingerprint":
             NATIVE_TARGETS[package_name]["integration"][target["name"]]["execution_disposition"] = "manual_measurement"
         if package_name == "exomonad-actor" and target["name"] == "actor":
-            rules.append(actor_notebook_contract_test_cases(target["name"] + "_binary", env, resources, worker))
+            rules.append(actor_notebook_contract_test_cases(target["name"] + "_binary"))
     if package_name == "tidepool-extract-cmd":
         rules.append('filegroup(\n    name = "retained_fingerprint_fixtures",\n    srcs = {path[len("tests/fixtures/retained_fingerprint/"):]: path for path in glob(["tests/fixtures/retained_fingerprint/*.hs"])},\n    visibility = ["PUBLIC"],\n)\n')
     if package_name == "tidepool-bignum":

@@ -6,41 +6,25 @@ use std::sync::{
 };
 
 #[derive(Default)]
-struct SourceObservation {
+pub(super) struct SourceObservation {
     failed: AtomicBool,
     freezes: AtomicUsize,
 }
 impl exomonad_actor::SourceInspection for SourceObservation {}
 
-impl exomonad_actor::ActorSourceLayers for SourceObservation {
-    fn inspection_services(self: std::sync::Arc<Self>) -> exomonad_actor::SourceInspectionServices {
-        exomonad_actor::SourceInspectionServices::new(self)
-    }
-    fn stage_reload(
-        self: Arc<Self>,
-        _: tidepool_repr::PrincipalId,
-        _: &exomonad_actor::CheckpointSourceLayer,
-        _: &[String],
-    ) -> Result<Box<dyn exomonad_actor::StagedActorSourceReload>, exomonad_actor::SourceLayerReload>
-    {
-        Err(exomonad_actor::SourceLayerReload::Unavailable(
-            "generic fixture has no editable configuration".into(),
-        ))
-    }
-    fn freeze_checkpoint_layer(
-        &self,
-        _: tidepool_repr::PrincipalId,
-    ) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
+impl SourceObservation {
+    pub(super) fn observe_freeze(&self) -> Result<(), String> {
         self.freezes.fetch_add(1, Ordering::AcqRel);
         if self.failed.load(Ordering::Acquire) {
             Err("mutable observation failed".into())
         } else {
-            Ok(exomonad_actor::CheckpointSourceLayer::default())
+            Ok(())
         }
     }
 }
 
 #[tokio::test]
+#[ignore = "requires the dedicated rooted notebook contract execution group"]
 async fn unavailable_generation_does_not_recapture_source_or_discard_bindings() {
     let source = Arc::new(SourceObservation::default());
     let fixture = ConcurrentResident::new_with_source(193, &[], Some(source.clone())).await;

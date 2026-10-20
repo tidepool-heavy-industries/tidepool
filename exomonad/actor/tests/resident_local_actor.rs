@@ -518,6 +518,201 @@ struct ConcurrentResident {
     _root: tempfile::TempDir,
 }
 
+struct NotebookSourceSnapshot {
+    _root: std::sync::Arc<tempfile::TempDir>,
+    paths: Vec<std::path::PathBuf>,
+    identities: Vec<String>,
+    evidence: exomonad_actor::SourceGenerationEvidence,
+    entries: exomonad_actor::SourceEntryStorage,
+    sources: std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>,
+}
+
+impl exomonad_actor::RetainedSourceLayer for NotebookSourceSnapshot {
+    fn identities(&self) -> &[String] {
+        &self.identities
+    }
+    fn include_paths(&self) -> &[std::path::PathBuf] {
+        &self.paths
+    }
+    fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
+        tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
+    }
+    fn generation_evidence(&self) -> Option<&exomonad_actor::SourceGenerationEvidence> {
+        Some(&self.evidence)
+    }
+    fn prepared_entries(&self) -> Option<&exomonad_actor::SourceEntryStorage> {
+        Some(&self.entries)
+    }
+    fn capture_compiler_sources(
+        &self,
+    ) -> Result<
+        Option<std::sync::Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+        exomonad_actor::SourceInspectionError,
+    > {
+        Ok(Some(self.sources.clone()))
+    }
+}
+
+struct NotebookSourceOwner {
+    issuer: exomonad_actor::SourceLayerIssuer,
+    snapshot: std::sync::Arc<NotebookSourceSnapshot>,
+    source: exomonad_actor::CheckpointSourceLayer,
+    observation: std::sync::Arc<reload_uncertainty::SourceObservation>,
+}
+
+impl NotebookSourceOwner {
+    fn capture(
+        include: &[std::path::PathBuf],
+        observation: std::sync::Arc<reload_uncertainty::SourceObservation>,
+    ) -> std::sync::Arc<Self> {
+        use std::io::Read;
+        use tidepool_toolchain::compiler_world::{
+            CapturedCompilerSourceRoot, CapturedCompilerSources,
+        };
+        let root = std::sync::Arc::new(tempfile::tempdir().expect("retained notebook source root"));
+        let mut paths = Vec::new();
+        let mut roots = Vec::new();
+        let mut remaining = CapturedCompilerSources::capture_byte_allowance().unwrap();
+        for (ordinal, input) in include.iter().enumerate() {
+            remaining = remaining
+                .checked_sub(4)
+                .expect("source root framing fits capture allowance");
+            let manifest = tidepool_toolchain::cache::source_root_manifest(input)
+                .expect("capture the declared notebook include root");
+            let destination = root.path().join(format!("root-{ordinal}"));
+            std::fs::create_dir_all(&destination).unwrap();
+            let mut bodies = std::collections::BTreeMap::new();
+            for (relative, expected) in &manifest {
+                let path = input.join(relative);
+                let length = std::fs::metadata(&path).unwrap().len();
+                let framed = 8u64
+                    .checked_add(u64::try_from(relative.as_os_str().len()).unwrap())
+                    .and_then(|size| size.checked_add(length))
+                    .expect("notebook source frame length fits u64");
+                remaining = remaining
+                    .checked_sub(framed)
+                    .expect("notebook source capture fits the compiler allowance before retention");
+                let mut bytes = Vec::new();
+                std::fs::File::open(&path)
+                    .unwrap()
+                    .take(length.checked_add(1).unwrap())
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                assert_eq!(
+                    bytes.len() as u64,
+                    length,
+                    "source changed during notebook capture"
+                );
+                assert_eq!(
+                    blake3::hash(&bytes).to_hex().as_str(),
+                    expected.as_str(),
+                    "source changed after its manifest was captured"
+                );
+                let target = destination.join(relative);
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(target, &bytes).unwrap();
+                bodies.insert(relative.clone(), std::sync::Arc::<[u8]>::from(bytes));
+            }
+            roots.push(CapturedCompilerSourceRoot {
+                manifest: tidepool_toolchain::cache::SourceRootManifest::from_file_digests(
+                    manifest,
+                )
+                .unwrap(),
+                bodies,
+            });
+            paths.push(destination);
+        }
+        let policy = include_str!("resident_local_actor/notebook_policy.hs").as_bytes();
+        let reference =
+            tidepool_runtime::session::GenerationArtifactReference::capture(policy.to_vec());
+        let sources = std::sync::Arc::new(
+            CapturedCompilerSources::from_captured_roots(
+                roots,
+                std::sync::Arc::from(reference.bytes()),
+                root.clone(),
+            )
+            .unwrap(),
+        );
+        let entry_directory = root.path().join("entries");
+        std::fs::create_dir_all(&entry_directory).unwrap();
+        let snapshot = std::sync::Arc::new(NotebookSourceSnapshot {
+            _root: root,
+            paths,
+            identities: vec!["notebook policy source".into()],
+            evidence: exomonad_actor::SourceGenerationEvidence {
+                reference,
+                configuration_digest: *blake3::hash(policy).as_bytes(),
+            },
+            entries: exomonad_actor::SourceEntryStorage::FreshCompilation {
+                directory: entry_directory,
+                preparation: uuid::Uuid::new_v4(),
+            },
+            sources,
+        });
+        let issuer = exomonad_actor::SourceLayerIssuer::default();
+        let source = issuer.issue(snapshot.clone());
+        std::sync::Arc::new(Self {
+            issuer,
+            snapshot,
+            source,
+            observation,
+        })
+    }
+}
+
+impl exomonad_actor::ActorSourceLayers for NotebookSourceOwner {
+    fn inspection_services(self: std::sync::Arc<Self>) -> exomonad_actor::SourceInspectionServices {
+        exomonad_actor::SourceInspectionServices::new(self.observation.clone())
+    }
+    fn validate_source_authority(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> Result<(), String> {
+        if !self.issuer.owns(source)
+            || source.include_paths() != self.snapshot.paths
+            || source.identities() != self.snapshot.identities
+            || !source
+                .generation_evidence()
+                .is_some_and(|evidence| std::ptr::eq(evidence, &self.snapshot.evidence))
+        {
+            return Err("source is not the retained notebook policy selection".into());
+        }
+        if !source
+            .capture_compiler_sources()
+            .map_err(|error| error.to_string())?
+            .is_some_and(|sources| std::sync::Arc::ptr_eq(&sources, &self.snapshot.sources))
+        {
+            return Err("source differs from the captured notebook compiler bytes".into());
+        }
+        Ok(())
+    }
+    fn freeze_checkpoint_layer(
+        &self,
+        _: tidepool_repr::PrincipalId,
+    ) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
+        self.observation.observe_freeze()?;
+        Ok(self.source.clone())
+    }
+    fn toolset_layer_from(
+        &self,
+        source: &exomonad_actor::CheckpointSourceLayer,
+    ) -> Result<exomonad_actor::CheckpointSourceLayer, String> {
+        self.validate_source_authority(source)?;
+        Ok(self.source.clone())
+    }
+    fn stage_reload(
+        self: std::sync::Arc<Self>,
+        _: tidepool_repr::PrincipalId,
+        _: &exomonad_actor::CheckpointSourceLayer,
+        _: &[String],
+    ) -> Result<Box<dyn exomonad_actor::StagedActorSourceReload>, exomonad_actor::SourceLayerReload>
+    {
+        Err(exomonad_actor::SourceLayerReload::Unavailable(
+            "the notebook source snapshot has no editable reload configuration".into(),
+        ))
+    }
+}
+
 fn compile_notebook_entry(
     machine: &ResidentSession<NoHandlers, TestSink>,
     preamble: &str,
@@ -566,7 +761,7 @@ impl ConcurrentResident {
     async fn new_with_source(
         bucket: u32,
         markers: &[&str],
-        layers: Option<exomonad_actor::ActorSourceLayerResolver>,
+        observation: Option<std::sync::Arc<reload_uncertainty::SourceObservation>>,
     ) -> Self {
         if std::env::var_os("TIDEPOOL_ACTOR_TEST_TRACE").is_some() {
             tracing_subscriber::fmt()
@@ -594,6 +789,11 @@ impl ConcurrentResident {
         let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
         let mut include = effects.include_paths().to_vec();
         include.push(eval_harness::prelude_path());
+        let layers = NotebookSourceOwner::capture(&include, observation.unwrap_or_default());
+        assert!(exomonad_actor::ActorSourceLayers::validate_source_authority(
+            layers.as_ref(), &exomonad_actor::CheckpointSourceLayer::default(),
+        ).is_err(), "an empty capsule cannot authorize the captured notebook inputs");
+        let include = layers.snapshot.paths.clone();
         let preamble = insert_preamble_imports(
             &tidepool_mcp::build_preamble(&declarations, false),
             "Tidepool.Agent.Contract",
@@ -635,12 +835,11 @@ impl ConcurrentResident {
         assert!(!forest
             .installed_intrinsic_effect_support()
             .contains(&source_effect));
-        if let Some(layers) = layers {
-            forest.set_source_layers(layers);
-            assert!(forest
-                .installed_intrinsic_effect_support()
-                .contains(&source_effect));
-        }
+        // Immutable compiler input ownership is available even though this
+        // snapshot cannot publish reloads or grant authored Source operations.
+        forest.set_source_layers(layers);
+        assert!(forest.installed_intrinsic_effect_support().contains(&source_effect));
+        assert!(!actor_effects.contains(&exomonad_actor::ActorEffectKey::Source));
         let mut preparation = exomonad_actor::CompilerPreparationOwner::new();
         let prepared = preparation
             .scope(forest.new_program_root(
