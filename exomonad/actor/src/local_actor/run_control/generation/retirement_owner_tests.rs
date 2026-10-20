@@ -27,10 +27,11 @@ impl RunControlClient {
             .await
             .unwrap()
             .unwrap();
-        let Some(RunControlNativeExit::OwnerLost { attempts, .. }) = retained.terminal.get() else {
+        let Some(RunControlNativeExit::OwnerLost { custody }) = retained.terminal.get() else {
             panic!("lost native owner must retain its terminal observation");
         };
-        assert!(attempts.is_empty());
+        let custody = custody.lock();
+        assert!(custody.as_ref().unwrap().attempts.is_empty());
     }
 
     pub(crate) async fn assert_generation_retirement_owner_control(
@@ -163,13 +164,17 @@ impl RunControlClient {
             })
             .await
             .unwrap();
-            let Some(RunControlNativeExit::OwnerLost { attempts, .. }) = retained.terminal.get()
-            else {
+            let Some(RunControlNativeExit::OwnerLost { custody }) = retained.terminal.get() else {
                 panic!("actual products must be retained before publisher disposal");
             };
+            let custody = custody.lock();
+            let attempts = &custody.as_ref().unwrap().attempts;
             assert_eq!(attempts.len(), 1);
-            assert!(candidate.same_candidate(&attempts[0].candidate));
-            assert!(Arc::ptr_eq(&attempts[0].expected, &expected));
+            assert!(candidate.same_candidate(&attempts[0].active_for_test().candidate));
+            assert!(Arc::ptr_eq(
+                &attempts[0].active_for_test().expected,
+                &expected
+            ));
         }
         let joined = tokio::time::timeout(Duration::from_secs(10), owner_task)
             .await
@@ -181,9 +186,11 @@ impl RunControlClient {
         }
         drop(pause_release);
         drop(waiter);
-        let Some(RunControlNativeExit::OwnerLost { attempts, .. }) = retained.terminal.get() else {
+        let Some(RunControlNativeExit::OwnerLost { custody }) = retained.terminal.get() else {
             panic!("lost native owner must retain its terminal product")
         };
+        let custody = custody.lock();
+        let attempts = &custody.as_ref().unwrap().attempts;
         if before_reserve {
             assert!(attempts.is_empty());
             assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
@@ -198,7 +205,7 @@ impl RunControlClient {
             );
         } else {
             assert_eq!(attempts.len(), 1);
-            let attempt = &attempts[0];
+            let attempt = attempts[0].active_for_test();
             assert_eq!(attempt.actor, actor);
             assert!(candidate.same_candidate(&attempt.candidate));
             assert!(Arc::ptr_eq(&attempt.expected, &expected));
@@ -277,6 +284,7 @@ impl RunControlClient {
             compiler_calls,
             "native loss never replays preparation or publication"
         );
+        drop(custody);
         assert!(matches!(
             self.settle_run_preparations(Duration::from_millis(10))
                 .await,
