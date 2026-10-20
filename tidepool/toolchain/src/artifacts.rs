@@ -1029,11 +1029,14 @@ pub fn prepare_world_cell_program(
                 let output = crate::declaration_context::IssuedOriginalOutput::from_segment_item(
                     &certified,
                 )?;
-                let execution = segment.original_execution_context(output.compiler_inputs())?;
-                segment.retain_private_output(&output);
+                let original = SealedOriginalEvidence::issue_exact(
+                    &segment.product_admission(),
+                    output,
+                    &admitted.target,
+                )?;
                 let products = Arc::new(SealedTurnProducts {
                     prepared: target.clone(),
-                    original: SealedOriginalEvidence::Exact { output, execution },
+                    original,
                     target: admitted.target,
                     original_compile_input: None,
                     checked: None,
@@ -1042,6 +1045,7 @@ pub fn prepare_world_cell_program(
                     retained_core_products: certified.retained_core_products,
                     package_interfaces: admitted.package_interfaces,
                 });
+                segment.retain_private_output(products.planned_original_output()?);
                 let output = ProgramNativeOutput {
                     directory,
                     target,
@@ -3437,6 +3441,19 @@ enum SealedOriginalEvidence {
 }
 
 impl SealedOriginalEvidence {
+    fn issue_exact(
+        admission: &crate::declaration_context::ExactProductAdmission<'_>,
+        output: crate::declaration_context::IssuedOriginalOutput,
+        target: &crate::artifact_inventory::CertifiedTargetNativeInputs,
+    ) -> Result<Self, CompileError> {
+        let context = admission.original_execution_context(output.compiler_inputs())?;
+        let execution = Arc::new(
+            Arc::unwrap_or_clone(context).retain_native_target_custody(target)?,
+        );
+        target.resolve()?.ensure_original_execution_custody(&execution)?;
+        Ok(Self::Exact { output, execution })
+    }
+
     fn execution(&self) -> Option<&Arc<crate::declaration_context::ExactDeclarationContext>> {
         match self {
             Self::Exact { execution, .. } | Self::Ordinary { execution, .. } => Some(execution),
@@ -4186,8 +4203,7 @@ fn seal_turn_outputs_with_validation(
                     )
                 }
             })?;
-            let execution = admission.original_execution_context(output.compiler_inputs())?;
-            SealedOriginalEvidence::Exact { output, execution }
+            SealedOriginalEvidence::issue_exact(admission, output, &target_native)?
         }
         None => original_compile_input
             .as_ref()

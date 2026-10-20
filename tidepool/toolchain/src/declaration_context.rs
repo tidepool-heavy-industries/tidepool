@@ -9372,12 +9372,6 @@ impl WorldProgramSegment {
     pub(crate) fn source_lexical(&self) -> &[ExactLexicalNode] {
         &self.continuation.program.program_source_lexical
     }
-    pub(crate) fn original_execution_context(
-        &self,
-        inputs: &OriginalCompilerInputs,
-    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-        self.product_admission().original_execution_context(inputs)
-    }
     pub(crate) fn product_admission(&self) -> ExactProductAdmission<'_> {
         ExactProductAdmission {
             compilation_binding: ProductCompilationBinding::World(&self.binding),
@@ -10511,6 +10505,17 @@ impl ExactDeclarationContext {
         &self,
     ) -> &crate::artifact_inventory::CompilerSourceSupport {
         &self.owner.facts.compiler_support
+    }
+    /// The target's issued graph is executable custody, not additional compiler
+    /// roles or source visibility. Keep the output's compiler owner unchanged.
+    pub(crate) fn retain_native_target_custody(
+        self,
+        target: &crate::artifact_inventory::CertifiedTargetNativeInputs,
+    ) -> Result<Self, CompileError> {
+        let support = self
+            .compiler_source_support()
+            .retain_custody(target.artifacts())?;
+        Ok(self.rebuild(|facts| facts.compiler_support = support))
     }
     pub(crate) fn retain_issued_native_inputs(
         self,
