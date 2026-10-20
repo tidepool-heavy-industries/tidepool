@@ -29,13 +29,13 @@ pub enum InspectionQuery {
         budget: usize,
     },
     ScopeBrowse,
-    /// Scope enumeration whose rendered entry list stops at `budget` names.
-    ScopeBrowseBounded(usize),
     Browse {
         module: String,
         expanded: bool,
     },
     /// Module enumeration whose rendered entry list stops at `budget` names.
+    /// No query plan constructs this in the current delivery; it is retained
+    /// for the pending non-compiling public-module export route.
     BrowseBounded {
         module: String,
         expanded: bool,
@@ -71,7 +71,6 @@ impl PartialEq for InspectionQuery {
                 },
             ) => left == right && left_budget == right_budget,
             (Self::ScopeBrowse, Self::ScopeBrowse) => true,
-            (Self::ScopeBrowseBounded(left), Self::ScopeBrowseBounded(right)) => left == right,
             (
                 Self::Browse {
                     module: left,
@@ -571,6 +570,8 @@ pub enum WorldInspectionError {
         primary: Option<Box<WorldInspectionError>>,
         close: crate::CompilerTransactionClose,
     },
+    #[error("compiler world binding has an unrecognized namespace: {0}")]
+    UnknownBindingNamespace(String),
 }
 
 impl From<CompileError> for WorldInspectionError {
@@ -595,9 +596,99 @@ pub struct CompletedInspectionWorld {
     pub(super) cancellation: crate::HostAdmissionCancellation,
 }
 
+/// One enumeration answer is emitted as a single guest value. Keep the
+/// returned identifiers bounded and report the observed count beside the
+/// applied limit so truncation is visible rather than mistaken for the scope.
+pub const SCOPE_BINDING_LIMIT: usize = 256;
+
+/// The identifiers bound in one admitted scope, in a stable order.
+///
+/// This carries identity only. Presentation and row availability need a
+/// compiler, so they stay with `info`; claiming them here would be evidence
+/// the world does not hold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopeBindingsAnswer {
+    pub refs: Vec<IdentifierRef>,
+    pub observed: usize,
+    pub limit: usize,
+}
+
 impl AdmittedInspectionWorld {
     pub fn needs_source_capture(&self) -> bool {
         matches!(self.inputs, InspectionWorldInputs::Cold { .. })
+    }
+
+    /// Enumerate the admitted scope's published occurrences without compiling
+    /// anything and without admitting a compiler transaction. The binding
+    /// table is materialized by the publication that owns this world, so a
+    /// cold world reads it directly and a borrowed world reads its restored
+    /// snapshot facts.
+    pub fn scope_bindings(&self) -> Result<ScopeBindingsAnswer, WorldInspectionError> {
+        let mut identifiers = match &self.inputs {
+            InspectionWorldInputs::Cold { bindings, .. } => bindings
+                .names()
+                .map(binding_identifier)
+                .collect::<Result<Vec<_>, _>>()?,
+            InspectionWorldInputs::Published(world) => world
+                .restoration()
+                .binding_names()
+                .map(binding_identifier)
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        identifiers.sort_by(|left, right| {
+            (
+                left.module.as_str(),
+                left.name.as_str(),
+                namespace_rank(left.namespace),
+            )
+                .cmp(&(
+                    right.module.as_str(),
+                    right.name.as_str(),
+                    namespace_rank(right.namespace),
+                ))
+        });
+        identifiers.dedup();
+        let observed = identifiers.len();
+        identifiers.truncate(SCOPE_BINDING_LIMIT);
+        Ok(ScopeBindingsAnswer {
+            refs: identifiers,
+            observed,
+            limit: SCOPE_BINDING_LIMIT,
+        })
+    }
+}
+
+fn binding_identifier(
+    name: tidepool_toolchain::compiler_world::WorldBindingName,
+) -> Result<IdentifierRef, WorldInspectionError> {
+    Ok(IdentifierRef {
+        module: name.module,
+        name: name.occurrence,
+        namespace: binding_namespace(&name.namespace)?,
+    })
+}
+
+/// `SymbolIdentity::namespace` is the compiler's own wire vocabulary
+/// (`value`/`type`/`constructor`/`field`). An unknown spelling is a refusal,
+/// never a guessed value namespace.
+fn namespace_rank(namespace: IdentifierNamespace) -> u8 {
+    match namespace {
+        IdentifierNamespace::Value => 0,
+        IdentifierNamespace::Type => 1,
+        IdentifierNamespace::Constructor => 2,
+        IdentifierNamespace::Field => 3,
+    }
+}
+
+fn binding_namespace(namespace: &str) -> Result<IdentifierNamespace, WorldInspectionError> {
+    match namespace {
+        "value" => Ok(IdentifierNamespace::Value),
+        "type" => Ok(IdentifierNamespace::Type),
+        "constructor" => Ok(IdentifierNamespace::Constructor),
+        "field" => Ok(IdentifierNamespace::Field),
+        other => Err(WorldInspectionError::UnknownBindingNamespace(
+            other.to_owned(),
+        )),
     }
 }
 
@@ -987,7 +1078,6 @@ fn run_inspection_batch(
             query,
             InspectionQuery::Info(_)
                 | InspectionQuery::ScopeBrowse
-                | InspectionQuery::ScopeBrowseBounded(_)
                 | InspectionQuery::Browse { .. }
                 | InspectionQuery::BrowseBounded { .. }
                 | InspectionQuery::StructuredInfo { .. }
@@ -1006,7 +1096,6 @@ fn run_inspection_batch(
             | InspectionQuery::TypeSearch(_)
             | InspectionQuery::TypeSearchBounded { .. }
             | InspectionQuery::ScopeBrowse
-            | InspectionQuery::ScopeBrowseBounded(_)
             | InspectionQuery::Browse { .. }
             | InspectionQuery::BrowseBounded { .. }
             | InspectionQuery::StructuredInfo { .. }
@@ -1047,9 +1136,6 @@ fn run_inspection_batch(
                 }
                 InspectionQuery::ScopeBrowse => {
                     command.inspect_scope_browse();
-                }
-                InspectionQuery::ScopeBrowseBounded(budget) => {
-                    command.inspect_scope_browse_bounded(budget_u32(*budget)?);
                 }
                 InspectionQuery::Browse { module, expanded } => {
                     command.inspect_browse(module, *expanded);

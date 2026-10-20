@@ -280,12 +280,16 @@ When the admitted notebook lists `Introspection`, use qualified
 name's structured declaration or canonical type. A `NameQuery` carries a scope
 (`CurrentScope` or `PublicModule "Project.Work"`), a namespace (`AnyName`,
 `ValueName`, `TypeName`, or `ConstructorName`), and the name. Use
-`currentScopeView` and `scopeBindings` to enumerate the current view,
-`moduleExports` to enumerate a public module's exports, `rowFit` to observe an
-identifier's fit against the executing actor's row, and `typeOfExpression` or
-`typeSearch` for compiled probes. A no-match result covers the attempted query;
-it does not establish that the capability is absent. Inspect close candidates,
-qualify the name, or browse its owning module.
+`currentScopeView` and `scopeBindings` to enumerate the current view, `rowFit`
+to observe an identifier's fit against the executing actor's row, and
+`typeOfExpression` or `typeSearch` for compiled probes. `scopeBindings` reports
+the exact binding count in `refsObserved` and may truncate `refs` at
+`refsLimit`; `typeSearch` stops at its limit, so a count equal to the limit is
+a lower bound. Enumerating a public module's exports is deliberately absent
+from this surface until the non-compiling world query is wired. A no-match
+result covers the attempted query; it does not establish that the capability
+is absent. Inspect close candidates, qualify the name, or browse its owning
+module.
 
 ```haskell source=introspection
 import qualified Tidepool.Introspection as Introspection

@@ -838,12 +838,6 @@ impl ExtractCmd {
         self
     }
 
-    /// Enumerate the inspection scope, stopping the compiler at `budget` names.
-    pub fn inspect_scope_browse_bounded(&mut self, budget: u32) -> &mut Self {
-        self.request.inspect_scope_browse_bounded(budget);
-        self
-    }
-
     pub fn inspect_browse(&mut self, module: &str, expanded: bool) -> &mut Self {
         self.request.inspect_browse(module, expanded);
         self

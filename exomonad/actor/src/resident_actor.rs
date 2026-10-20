@@ -6496,6 +6496,16 @@ where
                     .resume_compiler_query(context.clone(), continuation, query)
                     .await
             }),
+            ResidentActorBoundary::WorldScopeBindings {
+                continuation,
+                expected,
+            } => Box::pin(async move {
+                environment
+                    .runner
+                    .application_workbench()
+                    .resume_world_scope_bindings(context.clone(), continuation, expected)
+                    .await
+            }),
             ResidentActorBoundary::InspectResult {
                 continuation,
                 reference,

@@ -86,8 +86,8 @@ pub use inspection::{
     CompletedInspectionWorld, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,
     IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery,
     InspectionRequest, InspectionResult, NameNamespace, NameQuery, NameScope, QueryError,
-    ScopeProvenance, TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality, ViewIdentity,
-    WorldInspectionError,
+    ScopeBindingsAnswer, ScopeProvenance, TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
+    ViewIdentity, WorldInspectionError, SCOPE_BINDING_LIMIT,
 };
 
 pub use persistent::{

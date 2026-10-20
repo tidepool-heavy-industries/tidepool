@@ -601,17 +601,6 @@ runInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionProbes r
         entries <- browseEntries context True names
         pure (typeIndex, InspectionBrowse "" True
           (sortOn (\entry -> (infoModule entry, infoName entry, infoKind entry)) entries) : results)
-      InspectScopeBounded budget -> do
-        -- Stop gathering distinct visible names at the caller's budget. The
-        -- retained subset follows `globalRdrEnvElts` order; the sort below
-        -- orders only those names, so a truncated answer is deterministic but
-        -- not ranked.
-        let names = take budget
-              (nub [name | gre <- globalRdrEnvElts rdrEnv, let name = greName gre,
-                visibleInspectionName name])
-        entries <- browseEntries context True names
-        pure (typeIndex, InspectionBrowse "" True
-          (sortOn (\entry -> (infoModule entry, infoName entry, infoKind entry)) entries) : results)
       InspectModule moduleName expanded -> do
         result <- inspectModule context moduleName expanded Nothing
         pure (typeIndex, result : results)

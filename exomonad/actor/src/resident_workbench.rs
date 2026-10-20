@@ -35,6 +35,7 @@ mod replacement_input_tests;
 pub(crate) mod compiler_query;
 pub(crate) mod request;
 mod structured_introspection;
+pub(crate) mod world_enumeration;
 pub(crate) mod to_haskell;
 
 use structured_introspection::StructuredIntrospectionAnswer;
@@ -4589,6 +4590,11 @@ pub(crate) enum ResidentActorBoundary {
         continuation: ResidentHole,
         query: compiler_query::CompilerQuery,
     },
+    /// Enumeration over the admitted world; constructs no inspection request.
+    WorldScopeBindings {
+        continuation: ResidentHole,
+        expected: Option<tidepool_runtime::session::ScopeProvenance>,
+    },
     AgentInspect(AgentInspectionBoundary),
     AgentList(ResidentHole),
     /// The caller's own recent conversation. It carries no actor argument:
@@ -4840,6 +4846,7 @@ impl ResidentActorBoundary {
                 StructuredInspectionKind::Type => "structured type",
             },
             Self::CompilerQuery { query, .. } => query.operation(),
+            Self::WorldScopeBindings { .. } => "scopeBindings",
             Self::AgentInspect(_) => "observeAgent",
             Self::AgentList(_) => "listAgents",
             Self::ToolResultPublication { .. } => "tool semantic result publication",
@@ -5047,7 +5054,6 @@ fn introspection_operation(
         IntrospectionReq::IntrospectionTypeOfWith(..) => "structured type",
         IntrospectionReq::CurrentScopeView => "currentScopeView",
         IntrospectionReq::ScopeBindings(_) => "scopeBindings",
-        IntrospectionReq::ModuleExports(_, _) => "moduleExports",
         IntrospectionReq::RowFit(_, _) => "rowFit",
         IntrospectionReq::TypeOfExpression(_, _) => "typeOfExpression",
         IntrospectionReq::TypeSearch(_, _) => "typeSearch",
@@ -10869,29 +10875,12 @@ where
                         crate::generated::introspection::IntrospectionReq::ScopeBindings(
                             expected_scope,
                         ),
-                    ) => Ok(ResidentActorBoundary::CompilerQuery {
+                    ) => Ok(ResidentActorBoundary::WorldScopeBindings {
                         continuation: hole,
-                        query: compiler_query::CompilerQuery::ScopeBindings {
-                            expected_scope: compiler_query::expected_scope_from_value(
-                                &expected_scope,
-                                session.data_con_table(),
-                            )?,
-                        },
-                    }),
-                    ResidentRequest::Introspection(
-                        crate::generated::introspection::IntrospectionReq::ModuleExports(
-                            expected_scope,
-                            module,
-                        ),
-                    ) => Ok(ResidentActorBoundary::CompilerQuery {
-                        continuation: hole,
-                        query: compiler_query::CompilerQuery::ModuleExports {
-                            expected_scope: compiler_query::expected_scope_from_value(
-                                &expected_scope,
-                                session.data_con_table(),
-                            )?,
-                            module,
-                        },
+                        expected: compiler_query::expected_scope_from_value(
+                            &expected_scope,
+                            session.data_con_table(),
+                        )?,
                     }),
                     ResidentRequest::Introspection(
                         crate::generated::introspection::IntrospectionReq::RowFit(
@@ -17209,6 +17198,153 @@ pub(crate) mod request_tests {
                 })
                 .await
                 .unwrap();
+        })
+        .await;
+    }
+
+    /// The claim under test is process-level: enumerating the admitted scope
+    /// spawns no extract worker at all. `extract_spawn_count` increments on a
+    /// launch that ran, so the assertion covers a launch whose failure was
+    /// swallowed. The counter is process-wide; run this case focused.
+    #[tokio::test]
+    async fn scope_bindings_reads_the_admitted_world_without_an_extract_worker() {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (machines, mut context, source, _root) = actor_registry_fixture();
+            let (captured, owner) = world_query_test_source_files_with_support(
+                &[vec![(
+                    "WorldScope.hs",
+                    "module WorldScope where\nworldA :: Int\nworldA = 7\n",
+                )]],
+                &source.base_include,
+            );
+            // The production route refuses without a retained captured source
+            // owner (`public_module_query_source`). The fixture must satisfy
+            // that precondition or this test would pass against a route it
+            // never admitted.
+            context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            assert!(
+                public_module_query_source(&context.source_layer).is_ok(),
+                "fixture must satisfy the production admission precondition"
+            );
+            assert!(
+                public_module_query_source(&crate::ActorSourceRoots::Deployment(Vec::new().into()))
+                    .is_err(),
+                "an incomplete source layer must not satisfy admission"
+            );
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                source.bind_preparation(preparation_client),
+                None,
+            );
+            workbench_runner_for_test(&workbench)
+                .adopt_final_source_scope(context.clone())
+                .await
+                .unwrap();
+            // A private cell compiled under a test-only authority rejects a
+            // complete source layer ("nonempty actor helper source requires an
+            // owned source capsule"). Borrow the captured owner explicitly so
+            // the fixture context is the same admitted shape production sees.
+            let descriptor = crate::ActorDescriptor::new("private-cell-test", context.placement);
+            let public_owner =
+                crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
+                    .unwrap();
+            let private = Arc::new(
+                workbench_runner_for_test(&workbench)
+                    .begin_private_execution(
+                        context.clone(),
+                        public_owner,
+                        tidepool_runtime::session::PublicationDecision::new(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            let mut private_context = context.clone();
+            private_context.placement.lexical_scope = private.private_scope;
+            let layers: crate::ActorSourceLayerResolver = owner.clone();
+            let (frontend_context, authority) =
+                crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                    private_context,
+                    captured.clone(),
+                    None,
+                    Some(&layers),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("the captured owner must admit its retained source: {error:?}")
+                });
+            let frontend = workbench
+                .shared_view()
+                .with_compilation_authority(authority)
+                .with_private_execution(private);
+            frontend
+                .execute_cell_for_test(
+                    frontend_context.clone(),
+                    "let (worldA, worldB) = ((7 :: Int), (8 :: Int))",
+                )
+                .await
+                .unwrap();
+            // Independent oracle: the resident machine's own occurrence table
+            // for this scope. The old `ScopeBrowse` path enumerated the
+            // generated probe module instead, so equality here is the
+            // correctness claim, not just a smoke test.
+            let mut expected = frontend
+                .access
+                .with_machine(frontend_context.clone(), |session, context, _| {
+                    Ok(session.binding_names_in(context.placement.lexical_scope))
+                })
+                .await
+                .unwrap();
+            expected.sort();
+            expected.dedup();
+            let reference = captured
+                .generation_evidence()
+                .expect("the captured source owner carries generation evidence")
+                .reference
+                .clone();
+            // The core claim: enumerating the admitted world is not compiler
+            // work. The process-wide counter increments on a spawn that ran,
+            // whatever its exit status, so a regression cannot hide behind a
+            // swallowed launch error.
+            let spawns_before = tidepool_extract_cmd::extract_spawn_count();
+            let answer = frontend
+                .access
+                .with_machine(frontend_context.clone(), move |session, context, _| {
+                    let original = context.source_dependency().source_lease()?;
+                    let admitted = session
+                        .capture_inspection_world_in(
+                            context.placement.lexical_scope,
+                            &reference,
+                            &original,
+                        )
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })?;
+                    assert!(admitted.needs_source_capture());
+                    admitted.scope_bindings().map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "scope enumeration failed: {error}"
+                        ))
+                    })
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                spawns_before,
+                "scopeBindings must not spawn an extract worker"
+            );
+            let mut enumerated = answer
+                .refs
+                .iter()
+                .map(|reference| reference.name.clone())
+                .collect::<Vec<_>>();
+            enumerated.sort();
+            enumerated.dedup();
+            assert_eq!(enumerated, expected);
+            assert!(answer
+                .refs
+                .iter()
+                .all(|reference| !reference.module.is_empty()));
+            assert_eq!(answer.observed, answer.refs.len());
         })
         .await;
     }
@@ -26086,10 +26222,11 @@ pub(crate) mod request_tests {
         );
     }
 
-    /// Every compiler-query verb must cross the real decode → dispatch →
-    /// resume path: the fixture suspends once per verb through the generated
-    /// request schema, and each suspension is captured as a boundary and
-    /// answered by `resume_compiler_query`, never by a helper called directly.
+    /// Every compile-path verb must cross the real decode → dispatch → resume
+    /// path: the fixture suspends once per verb through the generated request
+    /// schema and each suspension is answered by `resume_compiler_query`,
+    /// never by a helper called directly. `scopeBindings` is world-owned and
+    /// has its own boundary test below.
     #[tokio::test]
     async fn compiler_query_verbs_decode_dispatch_and_resume() {
         with_test_compiler_owner(|preparation_client| async move {
@@ -26150,21 +26287,24 @@ pub(crate) mod request_tests {
                             )
                             .await
                             .expect("capture the query boundary");
-                        let (continuation, query) = match boundary {
+                        let (operation, resumed) = match boundary {
                             ResidentActorBoundary::CompilerQuery {
                                 continuation,
                                 query,
-                            } => (continuation, query),
+                            } => {
+                                let operation = query.operation();
+                                let resumed = workbench
+                                    .resume_compiler_query(context.clone(), continuation, query)
+                                    .await
+                                    .expect("resume the compiler query");
+                                (operation, resumed)
+                            }
                             other => panic!(
-                                "fixture suspended on a non-compiler boundary: {}",
+                                "fixture suspended on an unknown boundary: {}",
                                 other.operation()
                             ),
                         };
-                        operations.push(query.operation());
-                        let resumed = workbench
-                            .resume_compiler_query(context.clone(), continuation, query)
-                            .await
-                            .expect("resume the compiler query");
+                        operations.push(operation);
                         step = workbench
                             .settle_item(context.clone(), *fragment, resumed)
                             .await
@@ -26178,8 +26318,6 @@ pub(crate) mod request_tests {
                 operations,
                 [
                     "currentScopeView",
-                    "scopeBindings",
-                    "moduleExports",
                     "rowFit",
                     "typeOfExpression",
                     "typeSearch",
@@ -26195,6 +26333,142 @@ pub(crate) mod request_tests {
                     ResidentWorkbenchStep::CancellationAcknowledged { .. } => "cancellation ack",
                 }
             }
+        })
+        .await;
+    }
+
+    /// `scopeBindings` is world-owned. Its decode must produce
+    /// `WorldScopeBindings`, and resuming that boundary must read the admitted
+    /// world without entering `resume_compiler_query`.
+    #[tokio::test]
+    async fn scope_bindings_decode_dispatch_and_resume() {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (session, context, source, _root) = host_mount_fixture_with_effects(
+                |_| {},
+                &[tidepool_mcp::introspection_decl()],
+                "'[Introspection]",
+            );
+            let machines = Arc::new(ActorMachineRegistry::new());
+            let session_id = context.placement.session;
+            machines.insert_idle(session_id, Box::new(session));
+            let (captured, owner) = world_query_test_source_files_with_support(
+                &[vec![(
+                    "WorldScope.hs",
+                    "module WorldScope where\nworldA :: Int\nworldA = 7\n",
+                )]],
+                &source.base_include,
+            );
+            // Production reads only a retained captured source owner; an
+            // incomplete layer must not admit this route.
+            let mut context = context;
+            context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            assert!(public_module_query_source(&context.source_layer).is_ok());
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client),
+                None,
+            );
+            workbench_runner_for_test(&workbench)
+                .adopt_final_source_scope(context.clone())
+                .await
+                .expect("adopt the fixture world's final source scope");
+            let descriptor =
+                crate::ActorDescriptor::new("private-cell-test", context.placement);
+            let public_owner =
+                crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
+                    .unwrap();
+            let private = Arc::new(
+                workbench_runner_for_test(&workbench)
+                    .begin_private_execution(
+                        context.clone(),
+                        public_owner,
+                        tidepool_runtime::session::PublicationDecision::new(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            let mut private_context = context.clone();
+            private_context.placement.lexical_scope = private.private_scope;
+            let layers: crate::ActorSourceLayerResolver = owner.clone();
+            let (frontend_context, authority) =
+                crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                    private_context,
+                    captured.clone(),
+                    None,
+                    Some(&layers),
+                )
+                .expect("the captured owner must admit its retained source");
+            let frontend = workbench
+                .shared_view()
+                .with_compilation_authority(authority)
+                .with_private_execution(private);
+            // Short enough to stay inline; a fixture here would need its own
+            // BUCK source declaration for no additional evidence.
+            let code = concat!(
+                "do\n",
+                "  bindings <- scopeBindings Nothing\n",
+                "  case bindings of\n",
+                "    Right _ -> pure ()\n",
+                "    Left _ -> error \"scopeBindings was refused\"\n",
+            );
+            let (_checked, prepared) = frontend
+                .prepare_cell(frontend_context.clone(), code.into())
+                .await
+                .expect("compile the scopeBindings cell");
+            let PreparedCell { mut items, .. } = prepared;
+            let mut step = frontend
+                .begin_prepared_cell_item(
+                    frontend_context.clone(),
+                    ParsedBlock {
+                        ordinal: 1,
+                        total: 1,
+                        source: code.into(),
+                    },
+                    items.remove(0),
+                )
+                .await
+                .expect("start the scopeBindings cell");
+            let mut resumed_once = false;
+            loop {
+                match step {
+                    ResidentWorkbenchStep::Running { fragment, outcome } => {
+                        let boundary = workbench_runner_for_test(&workbench)
+                            .capture_boundary(
+                                frontend_context.clone(),
+                                (*outcome).into(),
+                                frontend_context.placement.resource_scope,
+                            )
+                            .await
+                            .expect("capture the query boundary");
+                        let (continuation, expected) = match boundary {
+                            ResidentActorBoundary::WorldScopeBindings {
+                                continuation,
+                                expected,
+                            } => (continuation, expected),
+                            other => panic!(
+                                "scopeBindings suspended on {} instead of WorldScopeBindings",
+                                other.operation()
+                            ),
+                        };
+                        let resumed = frontend
+                            .resume_world_scope_bindings(
+                                frontend_context.clone(),
+                                continuation,
+                                expected,
+                            )
+                            .await
+                            .expect("resume world scope bindings");
+                        resumed_once = true;
+                        step = frontend
+                            .settle_item(frontend_context.clone(), *fragment, resumed)
+                            .await
+                            .expect("settle the world scope bindings");
+                    }
+                    ResidentWorkbenchStep::Committed { .. } => break,
+                    _ => panic!("unexpected scopeBindings workbench step"),
+                }
+            }
+            assert!(resumed_once, "the fixture never suspended on scopeBindings");
         })
         .await;
     }

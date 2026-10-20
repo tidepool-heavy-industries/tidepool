@@ -1,9 +1,9 @@
 //! Compiler-query verbs over the actor's current compile view.
 //!
-//! Translation and projection for the six `Introspection` verbs added beside
-//! `info`/`typeOf`. Every answer is relative to one immutable view: the view is
-//! captured before the compiler runs and compared again before resumption, and
-//! a moved view is refused with `ScopeChanged` rather than reinterpreted.
+//! Translation and projection for the `Introspection` verbs that need the
+//! resident compiler. Every answer is relative to one immutable view: the view
+//! is captured before the compiler runs and compared again before resumption,
+//! and a moved view is refused with `ScopeChanged` rather than reinterpreted.
 //!
 //! Provenance is that compile view's own triple: scope, publication generation
 //! and content fingerprint. It is the only view identity this layer can
@@ -15,10 +15,11 @@
 //! longer current. Every answer is also rechecked before the reply, so a view
 //! that moves during a query is refused whether or not the request was pinned.
 //!
-//! Enumeration maps to the existing browse queries. `currentScopeView` never
-//! enters the compiler path; the remaining verbs reuse the admitted inspection
-//! batch already owned by the structured-introspection path instead of
-//! starting a second compiler attempt.
+//! `scopeBindings` is answered by the admitted world (`WorldScopeBindings`,
+//! `world_enumeration.rs`) and is not a compiler query. `currentScopeView`
+//! never enters the compiler path; the remaining verbs reuse the admitted
+//! inspection batch already owned by the structured-introspection path
+//! instead of starting a second compiler attempt.
 //!
 //! `rowFit` is the one verb whose plan depends on the held session: a local
 //! binder (empty defining module) and a reference into a session module this
@@ -34,7 +35,7 @@ use tidepool_bridge::FromHaskell;
 use tidepool_bridge_derive::FromHaskell as DeriveFromHaskell;
 use tidepool_runtime::session::{
     IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionResult,
-    NameNamespace, NameQuery, NameScope, QueryError, ScopeProvenance,
+    NameNamespace, NameQuery, NameScope, QueryError, ScopeProvenance, SCOPE_BINDING_LIMIT,
     TypeMatch as RuntimeTypeMatch, TypeMatchQuality as RuntimeTypeMatchQuality,
 };
 
@@ -45,22 +46,18 @@ use super::structured_introspection::{
 use super::to_haskell::{actor_haskell_int, visit_core, visit_named};
 use super::*;
 
-/// One effect result crosses into the guest heap as a single value, so an
-/// enumeration answer carries a fixed budget instead of growing with the
-/// installed API. The same budget is handed to the extraction request
-/// (`ScopeBrowseBounded`/`BrowseBounded`/`TypeSearchBounded`), so the worker
-/// stops rendering at the cap rather than shipping an unbounded list that the
-/// handler trims after transit.
+/// One enumeration answer crosses into the guest heap as a single value, so it
+/// carries a fixed budget instead of growing with the installed API. The
+/// runtime owns that budget ([`SCOPE_BINDING_LIMIT`]): `scopeBindings` applies
+/// it to the admitted world, and this module hands the same value to the
+/// extraction request (`BrowseBounded`/`TypeSearchBounded`) so the worker stops
+/// rendering at the cap rather than shipping an unbounded list that the handler
+/// trims after transit.
 ///
-/// Basis: 256 is a presentation/transport budget for one notebook answer, not
-/// a measured scope statistic. It is the boundary the provisional limit already
-/// used; what was missing is enforcement, which now happens in the worker. The
-/// handler tests assert that a 16x-budget scope still projects exactly `limit`
-/// entries, so the encoded value cannot grow with the installed API. Calibrate
-/// from retained query evidence if the boundary budget moves. The handler still
-/// trims defensively so a decoder that ignores the request budget cannot hand
-/// an unbounded list to the guest encoder.
-pub(super) const QUERY_RESULT_LIMIT: usize = 256;
+/// Basis: 256 is a presentation/transport budget for one notebook answer, not a
+/// measured scope statistic. It is the boundary the provisional limit already
+/// used; what was missing is enforcement, which now happens in the worker.
+pub(super) const QUERY_RESULT_LIMIT: usize = SCOPE_BINDING_LIMIT;
 
 /// A decoded compiler question. The wire enum lives in
 /// `generated::introspection`; this type is the actor's own closed set so
@@ -68,13 +65,6 @@ pub(super) const QUERY_RESULT_LIMIT: usize = 256;
 #[derive(Clone, Debug)]
 pub(crate) enum CompilerQuery {
     CurrentScopeView,
-    ScopeBindings {
-        expected_scope: Option<ScopeProvenance>,
-    },
-    ModuleExports {
-        expected_scope: Option<ScopeProvenance>,
-        module: String,
-    },
     RowFit {
         expected_scope: Option<ScopeProvenance>,
         identifier: IdentifierRef,
@@ -107,24 +97,6 @@ impl PartialEq for CompilerQuery {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::CurrentScopeView, Self::CurrentScopeView) => true,
-            (
-                Self::ScopeBindings {
-                    expected_scope: left,
-                },
-                Self::ScopeBindings {
-                    expected_scope: right,
-                },
-            ) => same_expected_scope(left, right),
-            (
-                Self::ModuleExports {
-                    expected_scope: left_scope,
-                    module: left_module,
-                },
-                Self::ModuleExports {
-                    expected_scope: right_scope,
-                    module: right_module,
-                },
-            ) => same_expected_scope(left_scope, right_scope) && left_module == right_module,
             (
                 Self::RowFit {
                     expected_scope: left_scope,
@@ -186,8 +158,6 @@ impl CompilerQuery {
     pub(super) fn operation(&self) -> &'static str {
         match self {
             Self::CurrentScopeView => "currentScopeView",
-            Self::ScopeBindings { .. } => "scopeBindings",
-            Self::ModuleExports { .. } => "moduleExports",
             Self::RowFit { .. } => "rowFit",
             Self::TypeOfExpression { .. } => "typeOfExpression",
             Self::TypeSearch { .. } => "typeSearch",
@@ -199,25 +169,9 @@ impl CompilerQuery {
     pub(super) fn expected_scope(&self) -> Option<&ScopeProvenance> {
         match self {
             Self::CurrentScopeView => None,
-            Self::ScopeBindings { expected_scope }
-            | Self::ModuleExports { expected_scope, .. }
-            | Self::RowFit { expected_scope, .. }
+            Self::RowFit { expected_scope, .. }
             | Self::TypeOfExpression { expected_scope, .. }
             | Self::TypeSearch { expected_scope, .. } => expected_scope.as_ref(),
-        }
-    }
-
-    /// Whether this verb still has a question for the compiler. A `rowFit`
-    /// reference into a session module this view no longer carries is
-    /// answered `Fit::Unknown` from held state; submitting it to an enumerated
-    /// browse would read whatever binding now holds the same spelling.
-    pub(super) fn plans_compiler_work(&self, live: &LiveSessionModules) -> bool {
-        match self {
-            Self::CurrentScopeView => false,
-            Self::RowFit { module, .. } => {
-                !matches!(row_fit_target(module, live), RowFitTarget::StaleSessionModule)
-            }
-            _ => true,
         }
     }
 
@@ -235,24 +189,11 @@ impl CompilerQuery {
     /// compiler's source, so a verb answered from held state can never start a
     /// compiler attempt.
     ///
-    /// Enumeration and `rowFit` currently reuse the admitted inspection batch
-    /// (`ScopeBrowse`, `Browse`), which compiles its inspection module.
-    ///
-    /// Ownership split after the held-world enumeration spike
-    /// (`compiler-query/handlers/ENUMERATION-SPIKE.md`):
-    /// - `scopeBindings` becomes a runtime-owned, in-process read of the
-    ///   admitted world's published bindings (no extract call) on
-    ///   `feature/compiler-query/world-enum-20261019`. Keep this compile-path
-    ///   arm working until that handoff lands.
-    /// - `moduleExports` moves to a world query once the compiler service
-    ///   exposes exports without a target compile; its answer shape then
-    ///   narrows to `NameRef` (no display, availability, or references).
-    /// - `rowFit` is NO-GO world-side: availability needs the executing
-    ///   actor's effect row, which is not retained, so it stays on the
-    ///   solver/compile path.
-    ///
-    /// `rowFit` reads availability from the browsed entries because the Lookup
-    /// excision removes the keyed `ExactName` query.
+    /// `currentScopeView` is answered by the held view. `rowFit`,
+    /// `typeOfExpression` and `typeSearch` reuse the admitted inspection batch.
+    /// No verb on this surface enumerates module exports. `rowFit` reads
+    /// availability from the browsed entries because the Lookup excision
+    /// removes the keyed `ExactName` query.
     pub(super) fn plan(
         &self,
         live: &LiveSessionModules,
@@ -262,18 +203,6 @@ impl CompilerQuery {
             Self::CurrentScopeView => {
                 CompilerPlan::Answered(CompilerQueryAnswer::ScopeView(provenance.clone()))
             }
-            Self::ScopeBindings { .. } => {
-                CompilerPlan::Queries(vec![InspectionQuery::ScopeBrowseBounded(
-                    QUERY_RESULT_LIMIT,
-                )])
-            }
-            Self::ModuleExports { module, .. } => CompilerPlan::Queries(vec![
-                InspectionQuery::BrowseBounded {
-                    module: module.clone(),
-                    expanded: false,
-                    budget: QUERY_RESULT_LIMIT,
-                },
-            ]),
             Self::RowFit { identifier, module, .. } => match row_fit_target(module, live) {
                 RowFitTarget::CurrentScope => {
                     CompilerPlan::Queries(vec![InspectionQuery::ScopeBrowse])
@@ -821,10 +750,6 @@ pub(super) fn compiler_query_answer(
         BatchOutcome::Answer(Ok(result)) => result,
     };
     match (query, result) {
-        (CompilerQuery::ScopeBindings { .. }, InspectionResult::Browse { entries, .. })
-        | (CompilerQuery::ModuleExports { .. }, InspectionResult::Browse { entries, .. }) => {
-            enumerated_names(entries, before)
-        }
         (CompilerQuery::RowFit { identifier, .. }, InspectionResult::Browse { entries, .. }) => {
             CompilerQueryAnswer::Fit(Fit {
                 availability: fit_from_entries(identifier, &entries),
@@ -863,7 +788,7 @@ pub(super) fn compiler_query_answer(
             ))
         }
         (
-            CompilerQuery::ModuleExports { .. } | CompilerQuery::RowFit { .. },
+            CompilerQuery::RowFit { .. },
             InspectionResult::ModuleNotFound { module, .. },
         ) => {
             CompilerQueryAnswer::QueryError(QueryError::UnknownModule(module))
@@ -878,16 +803,8 @@ pub(super) fn compiler_query_answer(
 /// The identity of the question an `Unknown`/`Ambiguous` refusal answers. The
 /// enumeration and probe queries do not carry a `NameQuery`, so reconstruct
 /// only the fields the error payload needs from the request itself.
-/// The single construction site for an enumeration answer. `moduleExports`
-/// narrows to `NameRef` once the world-query path lands; only this function
-/// and the wire type change then, not each verb arm or its tests.
-fn enumerated_names(entries: Vec<InfoEntry>, provenance: ScopeProvenance) -> CompilerQueryAnswer {
-    CompilerQueryAnswer::Names(NameList::from_entries(entries, provenance))
-}
-
 fn refusal_query(query: &CompilerQuery, before: &ScopeProvenance, name: &str) -> NameQuery {
     let scope = match query {
-        CompilerQuery::ModuleExports { module, .. } => NameScope::PublicModule(module.clone()),
         // An empty module is a local binder, and a reserved session module is
         // private: neither is a public module scope to name in the refusal.
         CompilerQuery::RowFit { module, .. } => match module.public_module() {
@@ -1561,7 +1478,7 @@ mod tests {
         }
 
         fn compiler_work_planned(&self) -> bool {
-            CompilerQuery::plans_compiler_work(self, &live())
+            matches!(planned(self), CompilerPlan::Queries(_))
         }
     }
 
@@ -1611,13 +1528,6 @@ mod tests {
 
     fn compiler_verbs_with(expected: Option<ScopeProvenance>) -> Vec<CompilerQuery> {
         vec![
-            CompilerQuery::ScopeBindings {
-                expected_scope: expected.clone(),
-            },
-            CompilerQuery::ModuleExports {
-                expected_scope: expected.clone(),
-                module: "Data.Thing".into(),
-            },
             CompilerQuery::row_fit(expected.clone(), identifier("Data.Thing", "thing")),
             CompilerQuery::TypeOfExpression {
                 expected_scope: expected.clone(),
@@ -1637,9 +1547,7 @@ mod tests {
     fn successful_result(query: &CompilerQuery) -> InspectionResult {
         match query {
             CompilerQuery::CurrentScopeView => unreachable!("no compiler result"),
-            CompilerQuery::ScopeBindings { .. }
-            | CompilerQuery::ModuleExports { .. }
-            | CompilerQuery::RowFit { .. } => browse(vec![entry(
+            CompilerQuery::RowFit { .. } => browse(vec![entry(
                 "thing",
                 "Data.Thing",
                 InspectionAvailability::Available,
@@ -1669,25 +1577,6 @@ mod tests {
         assert!(CompilerQuery::CurrentScopeView
             .inspection_queries()
             .is_empty());
-        assert_eq!(
-            CompilerQuery::ScopeBindings {
-                expected_scope: None
-            }
-            .inspection_queries(),
-            vec![InspectionQuery::ScopeBrowseBounded(QUERY_RESULT_LIMIT)]
-        );
-        assert_eq!(
-            CompilerQuery::ModuleExports {
-                expected_scope: None,
-                module: "Data.Thing".into()
-            }
-            .inspection_queries(),
-            vec![InspectionQuery::BrowseBounded {
-                module: "Data.Thing".into(),
-                expanded: false,
-                budget: QUERY_RESULT_LIMIT,
-            }]
-        );
         assert_eq!(
             CompilerQuery::row_fit(None, identifier("Data.Thing", "thing"))
             .inspection_queries(),
@@ -1723,28 +1612,9 @@ mod tests {
     }
 
     #[test]
-    fn enumeration_verbs_request_the_extraction_budget() {
+    fn type_search_requests_the_extraction_budget() {
         // The cap has to reach the worker: the handler asks for the bounded
         // question instead of trimming an unbounded answer after transit.
-        assert_eq!(
-            CompilerQuery::ScopeBindings {
-                expected_scope: None
-            }
-            .inspection_queries(),
-            vec![InspectionQuery::ScopeBrowseBounded(QUERY_RESULT_LIMIT)]
-        );
-        assert_eq!(
-            CompilerQuery::ModuleExports {
-                expected_scope: None,
-                module: "Data.Thing".into()
-            }
-            .inspection_queries(),
-            vec![InspectionQuery::BrowseBounded {
-                module: "Data.Thing".into(),
-                expanded: false,
-                budget: QUERY_RESULT_LIMIT,
-            }]
-        );
         assert_eq!(
             CompilerQuery::TypeSearch {
                 expected_scope: None,
@@ -1823,7 +1693,7 @@ mod tests {
         ] {
             let query = CompilerQuery::row_fit(None, identifier(stale, "local"));
             assert!(
-                !query.plans_compiler_work(&live()),
+                !query.compiler_work_planned(),
                 "{stale}: a stale reference must not enumerate the current scope"
             );
             match query.plan(&live(), &view) {
@@ -1847,7 +1717,7 @@ mod tests {
                 module: "Tidepool.Session.Lib.G3".into(),
                 ..asked
             });
-        assert!(!query.plans_compiler_work(&live()));
+        assert!(!query.compiler_work_planned());
     }
 
     #[test]
@@ -1931,40 +1801,11 @@ mod tests {
     }
 
     #[test]
-    fn a_large_scope_cannot_encode_more_than_the_budget() {
-        // `visit_name_list` iterates exactly `NameList::entries`, so bounding
-        // the retained entries is what bounds the encoded effect result. A
+    fn type_search_cannot_encode_more_than_the_budget() {
+        // `visit_type_match_list` iterates exactly the retained matches, so a
         // decoder that ignores the worker budget must still not hand the guest
         // an unbounded list.
         let view = provenance(1, "world");
-        let entries = (0..QUERY_RESULT_LIMIT * 16)
-            .map(|index| {
-                entry(
-                    &format!("thing{index}"),
-                    "Data.Thing",
-                    InspectionAvailability::Available,
-                )
-            })
-            .collect::<Vec<_>>();
-        let answer = compiler_query_answer(
-            &CompilerQuery::ScopeBindings {
-                expected_scope: None,
-            },
-            view.clone(),
-            view.clone(),
-            BatchOutcome::Answer(Ok(browse(entries))),
-        );
-        match answer {
-            CompilerQueryAnswer::Names(names) => {
-                assert_eq!(names.entries.len(), QUERY_RESULT_LIMIT);
-                assert_eq!(names.limit, QUERY_RESULT_LIMIT);
-                // An over-long decode reads as "at least limit", never as a
-                // total the actor cannot observe.
-                assert_eq!(names.observed, names.limit);
-            }
-            other => panic!("expected a name list, got {}", answer_name(&other)),
-        }
-
         let matches = (0..QUERY_RESULT_LIMIT * 16)
             .map(|index| RuntimeTypeMatch {
                 name: format!("match{index}"),
@@ -1992,6 +1833,8 @@ mod tests {
             CompilerQueryAnswer::Matches(found) => {
                 assert_eq!(found.matches.len(), QUERY_RESULT_LIMIT);
                 assert_eq!(found.limit, QUERY_RESULT_LIMIT);
+                // An over-long decode reads as "at least limit", never as a
+                // total the actor cannot observe.
                 assert_eq!(found.observed, found.limit);
             }
             other => panic!("expected type matches, got {}", answer_name(&other)),
@@ -1999,43 +1842,66 @@ mod tests {
     }
 
     #[test]
-    fn enumeration_never_plans_a_probe_compile() {
-        // The handler never plans `TypeOf`/`TypeSearch` for an enumeration.
-        // Runtime-level `inspection.compile_attempts == 0` remains pending:
-        // the admitted batch still compiles its inspection module today.
+    fn compiler_verbs_plan_their_owner_query_and_no_verb_enumerates() {
+        // Membership, not just absence: each compile-path verb names the
+        // question its answer projects. `rowFit` reads availability through the
+        // browse machinery but answers one identifier, so no verb on this
+        // surface enumerates names; `scopeBindings` is world-owned and never
+        // reaches this module.
+        assert_eq!(
+            compiler_verbs()
+                .iter()
+                .map(CompilerQuery::operation)
+                .collect::<Vec<_>>(),
+            ["rowFit", "typeOfExpression", "typeSearch"]
+        );
         assert!(!CompilerQuery::CurrentScopeView.compiler_work_planned());
         assert!(CompilerQuery::CurrentScopeView
             .inspection_queries()
             .is_empty());
-        for query in compiler_verbs() {
-            assert!(query.compiler_work_planned(), "{query:?}");
-            if !query.compiles_probe() {
-                let planned = query.inspection_queries();
-                assert!(
-                    planned.iter().all(|planned| matches!(
-                        planned,
-                        InspectionQuery::ScopeBrowse
-                            | InspectionQuery::ScopeBrowseBounded(_)
-                            | InspectionQuery::Browse { .. }
-                            | InspectionQuery::BrowseBounded { .. }
-                    )),
-                    "enumeration planned a probe or walk: {query:?} -> {planned:?}"
-                );
-            } else {
-                assert!(
-                    query
-                        .inspection_queries()
-                        .iter()
-                        .any(|planned| matches!(
-                            planned,
-                            InspectionQuery::TypeOf(_)
-                                | InspectionQuery::TypeSearch(_)
-                                | InspectionQuery::TypeSearchBounded { .. }
-                        )),
-                    "probe verb planned no probe query: {query:?}"
-                );
-            }
-        }
+
+        assert!(matches!(
+            planned(&CompilerQuery::row_fit(None, identifier("Data.Thing", "thing"))),
+            CompilerPlan::Queries(ref queries)
+                if matches!(
+                    queries.as_slice(),
+                    [InspectionQuery::Browse { .. } | InspectionQuery::ScopeBrowse]
+                )
+        ));
+        assert!(matches!(
+            planned(&CompilerQuery::TypeOfExpression {
+                expected_scope: None,
+                expression: "1 + 1".into(),
+            }),
+            CompilerPlan::Queries(ref queries)
+                if matches!(queries.as_slice(), [InspectionQuery::TypeOf(_)])
+        ));
+        assert!(matches!(
+            planned(&CompilerQuery::TypeSearch {
+                expected_scope: None,
+                pattern: "Int -> Int".into(),
+            }),
+            CompilerPlan::Queries(ref queries)
+                if matches!(queries.as_slice(), [InspectionQuery::TypeSearchBounded { .. }])
+        ));
+
+        let enumerating = compiler_verbs()
+            .into_iter()
+            .filter(|query| {
+                matches!(
+                    planned(query),
+                    CompilerPlan::Queries(ref queries)
+                        if queries
+                            .iter()
+                            .any(|planned| matches!(planned, InspectionQuery::BrowseBounded { .. }))
+                )
+            })
+            .map(|query| query.operation())
+            .collect::<Vec<_>>();
+        assert!(
+            enumerating.is_empty(),
+            "{enumerating:?} still plans an enumerating browse"
+        );
     }
 
     #[test]
@@ -2169,9 +2035,10 @@ mod tests {
             generation: 7,
             fingerprint: "world-a".into(),
         };
-        let query = CompilerQuery::ScopeBindings {
-            expected_scope: Some(pinned.clone()),
-        };
+        let query = CompilerQuery::row_fit(
+            Some(pinned.clone()),
+            identifier("Data.Thing", "thing"),
+        );
         assert!(entry_scope_refusal(&query, &relabelled).is_none());
         let answer = compiler_query_answer(
             &query,
@@ -2184,7 +2051,7 @@ mod tests {
             )]))),
         );
         assert!(
-            matches!(answer, CompilerQueryAnswer::Names(_)),
+            matches!(answer, CompilerQueryAnswer::Fit(_)),
             "a relabelled view was refused: {}", answer_name(&answer)
         );
         // A real identity change is still refused, with the full provenance.
@@ -2467,10 +2334,7 @@ mod tests {
     #[test]
     fn module_not_found_is_a_typed_refusal() {
         let answer = compiler_query_answer(
-            &CompilerQuery::ModuleExports {
-                expected_scope: None,
-                module: "Data.Missing".into(),
-            },
+            &CompilerQuery::row_fit(None, identifier("Data.Missing", "thing")),
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(InspectionResult::ModuleNotFound {
@@ -2488,10 +2352,7 @@ mod tests {
     #[test]
     fn not_found_is_a_typed_unknown_not_infrastructure() {
         let answer = compiler_query_answer(
-            &CompilerQuery::ModuleExports {
-                expected_scope: None,
-                module: "Data.Thing".into(),
-            },
+            &CompilerQuery::row_fit(None, identifier("Data.Thing", "thing")),
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(InspectionResult::NotFound {
@@ -2501,7 +2362,7 @@ mod tests {
         match answer {
             CompilerQueryAnswer::QueryError(QueryError::Unknown(search)) => {
                 assert_eq!(search.scope, NameScope::PublicModule("Data.Thing".into()));
-                assert_eq!(search.namespace, NameNamespace::Any);
+                assert_eq!(search.namespace, NameNamespace::Value);
                 assert_eq!(search.name, "thing");
             }
             other => panic!("expected a typed unknown, got {}", answer_name(&other)),
@@ -2511,9 +2372,7 @@ mod tests {
     #[test]
     fn ambiguous_is_a_typed_refusal_not_infrastructure() {
         let answer = compiler_query_answer(
-            &CompilerQuery::ScopeBindings {
-                expected_scope: None,
-            },
+            &CompilerQuery::row_fit(None, identifier("Data.Thing", "thing")),
             provenance(1, "world"),
             provenance(1, "world"),
             BatchOutcome::Answer(Ok(InspectionResult::Ambiguous {
@@ -2526,7 +2385,7 @@ mod tests {
         );
         match answer {
             CompilerQueryAnswer::QueryError(QueryError::Ambiguous(search, candidates)) => {
-                assert_eq!(search.scope, NameScope::Current);
+                assert_eq!(search.scope, NameScope::PublicModule("Data.Thing".into()));
                 assert_eq!(search.name, "thing");
                 assert_eq!(candidates.len(), 2);
                 assert_eq!(candidates[0].module, "Data.A");
@@ -2599,66 +2458,6 @@ mod tests {
             answer,
             CompilerQueryAnswer::CompilerUnavailable(ref detail) if detail == "worker exited"
         ));
-    }
-
-    #[test]
-    fn an_over_long_enumeration_reads_as_at_least_the_budget() {
-        let entry_view = provenance(1, "world");
-        let entries = (0..QUERY_RESULT_LIMIT + 3)
-            .map(|index| {
-                entry(
-                    &format!("thing{index}"),
-                    "Data.Thing",
-                    InspectionAvailability::Available,
-                )
-            })
-            .collect::<Vec<_>>();
-        let answer = compiler_query_answer(
-            &CompilerQuery::ScopeBindings {
-                expected_scope: None,
-            },
-            entry_view.clone(),
-            entry_view.clone(),
-            BatchOutcome::Answer(Ok(browse(entries))),
-        );
-        match answer {
-            CompilerQueryAnswer::Names(names) => {
-                assert_eq!(names.entries.len(), QUERY_RESULT_LIMIT);
-                // A conforming worker stops at the budget, so a longer list
-                // means the worker ignored it. The wire still reports no more
-                // than the budget: "at least limit", never an unjustified total.
-                assert_eq!(names.observed, names.limit);
-                assert_eq!(names.limit, QUERY_RESULT_LIMIT);
-                assert!(names.provenance.same_view(&entry_view));
-            }
-            other => panic!("expected a name list, got {}", answer_name(&other)),
-        }
-    }
-
-    #[test]
-    fn module_exports_projects_browse_entries() {
-        let entry_view = provenance(2, "world");
-        let listed = entry("thing", "Data.Thing", InspectionAvailability::Unknown);
-        let identity = listed.identity.clone();
-        let answer = compiler_query_answer(
-            &CompilerQuery::ModuleExports {
-                expected_scope: None,
-                module: "Data.Thing".into(),
-            },
-            entry_view.clone(),
-            entry_view.clone(),
-            BatchOutcome::Answer(Ok(browse(vec![listed]))),
-        );
-        match answer {
-            CompilerQueryAnswer::Names(names) => {
-                assert_eq!(names.entries.len(), 1);
-                assert_eq!(names.entries[0].reference, identity);
-                assert_eq!(names.observed, 1);
-                assert_eq!(names.limit, QUERY_RESULT_LIMIT);
-                assert!(names.provenance.same_view(&entry_view));
-            }
-            other => panic!("expected a name list, got {}", answer_name(&other)),
-        }
     }
 
     #[test]
