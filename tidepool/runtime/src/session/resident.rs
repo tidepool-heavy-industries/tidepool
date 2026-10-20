@@ -12917,7 +12917,7 @@ mod authored_publication_tests {
         let effects = TestEffectSurface::minimal(&[tidepool_mcp::agent_tools_decl()]).unwrap();
         let preamble = crate::session::insert_preamble_imports(
             effects.preamble(),
-            "Tidepool.Effects.Core (AgentTools (..))",
+            "Tidepool.Actors.Internal.Agent (installRequestReceiver)",
         );
         let templates = vec![TurnTemplate {
             kind: TemplateSelector::Expr,
@@ -12931,6 +12931,7 @@ mod authored_publication_tests {
         }];
         let root = tempfile::tempdir().unwrap();
         let mut includes = effects.include_paths().to_vec();
+        includes.push(tidepool_testing::eval_harness::actor_sources_path());
         includes.push(root.path().to_path_buf());
         let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let TurnResult::Expr { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
@@ -12938,7 +12939,7 @@ mod authored_publication_tests {
                 TurnRequest {
                     exact_context: None,
                     session_id: None,
-                    turn_text: "send (AgentToolsPublishResultWith (T.pack \"closed\")) >> pure (42 :: Int)",
+                    turn_text: "installRequestReceiver >> pure (42 :: Int)",
                     templates: &templates,
                     include: &includes,
                     session_root: root.path(),
