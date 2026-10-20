@@ -5834,15 +5834,7 @@ fn activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservation
         let (owner, interface) = parked_input_owner(&fixture, &mut resident);
         let reservation = owner.reservation().clone();
         match fence {
-            Fence::OwnerEpoch => {
-                let next = resident
-                    .state
-                    .prepare_execution_admission_epoch_advance()
-                    .unwrap();
-                resident
-                    .state
-                    .invalidate_execution_admissions_after_owner_transfer(next);
-            }
+            Fence::OwnerEpoch => {}
             Fence::Visibility => resident
                 .resident
                 .advance_public_visibility(resident.public_source.scope()),
@@ -5887,6 +5879,15 @@ fn activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservation
         let handles = resident.value_handle_count();
         let roots = resident.persistent_roots_count();
         let error = source_action(&mut resident, |resident, settlement| {
+            if matches!(fence, Fence::OwnerEpoch) {
+                let next = resident
+                    .state
+                    .prepare_execution_admission_epoch_advance()
+                    .unwrap();
+                resident
+                    .state
+                    .invalidate_execution_admissions_after_owner_transfer(next);
+            }
             resident.mount_activation_input(owner, interface, settlement)
         })
         .err()
