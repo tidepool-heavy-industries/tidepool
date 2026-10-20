@@ -161,7 +161,9 @@ pub(super) fn reload_disposition(
         Ok(SrReloadOutcome::ReloadRetirement(receipt)) => {
             use tidepool_bridge_effects::{RlCleanupOutcome, RlRetirementState, RlStopOutcome};
             match &receipt.state {
-                RlRetirementState::ReloadRetirementFenced(_) => WorkbenchOperationDisposition::Unknown,
+                RlRetirementState::ReloadRetirementFenced(_) => {
+                    WorkbenchOperationDisposition::Unknown
+                }
                 RlRetirementState::ReloadBPublished(..) => WorkbenchOperationDisposition::Committed,
                 RlRetirementState::ReloadAReopened => {
                     if receipt.outcomes.iter().any(|outcome| {
@@ -255,6 +257,7 @@ where
         continuation: ResidentHole,
         request: crate::generated::reload::ReloadReq,
         authorized: bool,
+        diagnostic: Option<WorkbenchOperationDiagnosticOwner>,
     ) -> futures_util::future::BoxFuture<'static, commands::CommandResolution> {
         use crate::generated::reload::{ReloadError, ReloadReq};
         let runner = self.environment.runner.clone();
@@ -268,22 +271,31 @@ where
                 "forced generation retirement is not supported".into(),
             ))
         } else {
-            issued
-                .as_ref()
-                .and_then(ActorRequestSnapshot::generation)
-                .cloned()
+            diagnostic
                 .ok_or_else(|| {
                     SourceError::SourceUnavailable(
-                        "reload requires an initialized notebook generation".into(),
+                        "reload has no actual admitted operation diagnostic owner".into(),
                     )
                 })
-                .and_then(|generation| {
-                    self.coherent_reload_operation(
-                        generation,
-                        control,
-                        options.also_check,
-                        options.policy,
-                    )
+                .and_then(|diagnostic| {
+                    issued
+                        .as_ref()
+                        .and_then(ActorRequestSnapshot::generation)
+                        .cloned()
+                        .ok_or_else(|| {
+                            SourceError::SourceUnavailable(
+                                "reload requires an initialized notebook generation".into(),
+                            )
+                        })
+                        .and_then(|generation| {
+                            self.coherent_reload_operation(
+                                generation,
+                                control,
+                                options.also_check,
+                                options.policy,
+                                diagnostic,
+                            )
+                        })
                 })
         };
         Box::pin(async move {

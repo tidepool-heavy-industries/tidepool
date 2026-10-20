@@ -27,7 +27,105 @@ pub(super) enum GenerationRetirementCompletion {
     AReopened {
         outcome: ActorGenerationPublicationRefusalObservation,
         nonstart: Option<preparation::PublicationNonStartKind>,
+        diagnostic: Option<crate::resident_actor::RecordedRetirementDiagnosticObservation>,
+        diagnostic_refusals: Vec<crate::resident_actor::WorkbenchDiagnosticRefusal>,
     },
+}
+
+pub(super) enum GenerationRetirementDiagnostic {
+    #[cfg(test)]
+    CancelledComponent,
+    Operation {
+        owner: crate::resident_actor::WorkbenchOperationDiagnosticOwner,
+        handoff: RetirementDiagnosticHandoff,
+    },
+}
+
+pub(super) enum RetirementDiagnosticHandoff {
+    Unprojected,
+    Projected {
+        evidence: Arc<crate::resident_actor::RetirementDiagnosticEvidence>,
+        refusals: Vec<crate::resident_actor::WorkbenchDiagnosticRefusal>,
+    },
+    Recorded {
+        observation: crate::resident_actor::RecordedRetirementDiagnosticObservation,
+        refusals: Vec<crate::resident_actor::WorkbenchDiagnosticRefusal>,
+    },
+}
+
+impl GenerationRetirementDiagnostic {
+    pub(super) fn operation(
+        owner: crate::resident_actor::WorkbenchOperationDiagnosticOwner,
+    ) -> Self {
+        Self::Operation {
+            owner,
+            handoff: RetirementDiagnosticHandoff::Unprojected,
+        }
+    }
+
+    fn is_cancelled_component(&self) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::CancelledComponent => true,
+            Self::Operation { .. } => false,
+        }
+    }
+
+    fn record_refusal(
+        &mut self,
+        refusal: &ActorGenerationPublicationRefusal,
+    ) -> Option<(
+        crate::resident_actor::RecordedRetirementDiagnosticObservation,
+        Vec<crate::resident_actor::WorkbenchDiagnosticRefusal>,
+    )> {
+        let (owner, handoff) = match self {
+            Self::Operation { owner, handoff } => (owner, handoff),
+            #[cfg(test)]
+            Self::CancelledComponent => return None,
+        };
+        if matches!(handoff, RetirementDiagnosticHandoff::Unprojected) {
+            // Retain the SAME immutable projection before the first write: a
+            // lost receipt must never force reconstruction or text matching.
+            *handoff = RetirementDiagnosticHandoff::Projected {
+                evidence: Arc::new(
+                    crate::resident_actor::RetirementDiagnosticEvidence::from_refusal(refusal),
+                ),
+                refusals: Vec::new(),
+            };
+        }
+        if let RetirementDiagnosticHandoff::Projected { evidence, refusals } = handoff {
+            match owner.record(evidence.clone()) {
+                Ok(receipt) => match owner.acknowledge(receipt) {
+                    Ok(observation) => {
+                        let prior = std::mem::take(refusals);
+                        *handoff = RetirementDiagnosticHandoff::Recorded {
+                            observation,
+                            refusals: prior,
+                        };
+                    }
+                    Err(_) => {
+                        let refusal =
+                            crate::resident_actor::WorkbenchDiagnosticRefusal::DifferentEvidence;
+                        if !refusals.contains(&refusal) {
+                            refusals.push(refusal);
+                        }
+                    }
+                },
+                Err(refusal) => {
+                    if !refusals.contains(&refusal) {
+                        refusals.push(refusal);
+                    }
+                }
+            }
+        }
+        match handoff {
+            RetirementDiagnosticHandoff::Recorded {
+                observation,
+                refusals,
+            } => Some((observation.clone(), refusals.clone())),
+            _ => None,
+        }
+    }
 }
 
 impl GenerationRetirementRecord {
@@ -54,6 +152,7 @@ pub(super) struct GenerationRetirementAttempt {
     actor: ActorRef,
     candidate: ActorGenerationCandidateCustody,
     expected: Arc<ActorGeneration>,
+    diagnostic: GenerationRetirementDiagnostic,
     phase: GenerationRetirementPhase,
     inventory: GenerationRetirementInventory,
 }
@@ -198,6 +297,7 @@ pub(super) struct RetainedGenerationRetirement {
     actor: ActorRef,
     candidate: ActorGenerationCandidateCustody,
     expected: Arc<ActorGeneration>,
+    diagnostic: GenerationRetirementDiagnostic,
     phase: RetainedGenerationRetirementPhase,
 }
 
@@ -223,6 +323,7 @@ impl GenerationRetirementAttempt {
             actor,
             candidate,
             expected,
+            diagnostic,
             phase,
             inventory,
         } = self;
@@ -274,6 +375,7 @@ impl GenerationRetirementAttempt {
                 actor,
                 candidate,
                 expected,
+                diagnostic,
                 phase,
             },
             GenerationRetirementDiscard {
@@ -320,13 +422,14 @@ impl GenerationPublicationCustody {
     fn reconcile(
         &mut self,
         cutoff: &mut GenerationRetirementCutoffPhase,
+        diagnostic: &mut GenerationRetirementDiagnostic,
     ) -> Option<GenerationRetirementCompletion> {
         self.observe();
         let fence = match cutoff {
             GenerationRetirementCutoffPhase::Captured { fence, .. } => fence,
             _ => return None,
         };
-        match self {
+        let completion = match self {
             Self::NotStarted {
                 reserved,
                 reason,
@@ -334,7 +437,8 @@ impl GenerationPublicationCustody {
             } if settlement_error.is_none() => {
                 match reserved.refuse_retirement(fence, "publication worker did not execute") {
                     Ok(())
-                        if matches!(reason, preparation::PublicationNonStart::SpawnFailed(_)) =>
+                        if matches!(reason, preparation::PublicationNonStart::SpawnFailed(_))
+                            || !diagnostic.is_cancelled_component() =>
                     {
                         let old = std::mem::replace(self, Self::ProducerLostAfterExecute);
                         let Self::NotStarted {
@@ -351,6 +455,8 @@ impl GenerationPublicationCustody {
                     Ok(()) => Some(GenerationRetirementCompletion::AReopened {
                         outcome: ActorGenerationPublicationRefusalObservation::Refused,
                         nonstart: Some(reason.kind()),
+                        diagnostic: None,
+                        diagnostic_refusals: Vec::new(),
                     }),
                     Err(error) => {
                         *settlement_error = Some(Arc::new(error));
@@ -368,7 +474,7 @@ impl GenerationPublicationCustody {
                         if matches!(
                             observation,
                             ActorGenerationPublicationRefusalObservation::Failed { .. }
-                        ) =>
+                        ) || !diagnostic.is_cancelled_component() =>
                     {
                         // The original diagnostic must reach its real journal
                         // consumer; source restoration alone cannot erase it or
@@ -388,12 +494,41 @@ impl GenerationPublicationCustody {
                     Ok(()) => Some(GenerationRetirementCompletion::AReopened {
                         outcome: observation,
                         nonstart: None,
+                        diagnostic: None,
+                        diagnostic_refusals: Vec::new(),
                     }),
                     Err(error) => {
                         *settlement_error = Some(Arc::new(error));
                         None
                     }
                 }
+            }
+            _ => None,
+        };
+        completion.or_else(|| self.record_source_restored(diagnostic))
+    }
+
+    fn record_source_restored(
+        &mut self,
+        diagnostic: &mut GenerationRetirementDiagnostic,
+    ) -> Option<GenerationRetirementCompletion> {
+        match self {
+            Self::SourceRestoredPending(PublicationSourceRestoredPending::Unpublished {
+                refusal,
+                observation,
+            }) => {
+                let (recorded, refusals) = diagnostic.record_refusal(refusal)?;
+                if observation.requires_recovery() {
+                    // A successful diagnostic write cannot settle an independent
+                    // recovery obligation or release its full primary/candidate.
+                    return None;
+                }
+                Some(GenerationRetirementCompletion::AReopened {
+                    outcome: observation.clone(),
+                    nonstart: None,
+                    diagnostic: Some(recorded),
+                    diagnostic_refusals: refusals,
+                })
             }
             _ => None,
         }
@@ -415,7 +550,7 @@ impl RunControlNativeRecovery<'_> {
             else {
                 continue;
             };
-            if let Some(completion) = custody.reconcile(cutoff) {
+            if let Some(completion) = custody.reconcile(cutoff, &mut attempt.diagnostic) {
                 let actor = attempt.actor;
                 // Unlike live RunState, this terminal parcel is now the
                 // retained owner of its capture's actual cleanup callbacks.
@@ -432,6 +567,7 @@ impl RunControlNativeRecovery<'_> {
                         actor,
                         candidate,
                         expected,
+                        diagnostic,
                         phase:
                             RetainedGenerationRetirementPhase::Publication {
                                 observer,
@@ -444,7 +580,7 @@ impl RunControlNativeRecovery<'_> {
                             completion,
                             cutoff,
                         };
-                        drop((candidate, expected, observer, custody));
+                        drop((candidate, expected, diagnostic, observer, custody));
                     }
                     other => *record = other,
                 }
@@ -507,6 +643,7 @@ impl RunState {
         myself: &RactorRef<RunControlMessage>,
         preparation: ActorGenerationRetirementPreparation,
         inventory: GenerationRetirementInventory,
+        diagnostic: GenerationRetirementDiagnostic,
     ) -> Result<ActorPublicationAttemptObserver, GenerationRetirementBeginFailure> {
         let actor = preparation.actor();
         let failure = |error| GenerationRetirementBeginFailure::Directory(error);
@@ -536,6 +673,7 @@ impl RunState {
             candidate,
             expected,
             inventory,
+            diagnostic,
             phase: GenerationRetirementPhase::Preparation(preparation),
         });
         let attempt = record
@@ -707,7 +845,7 @@ impl RunState {
         if !issued.same_attempt(&observer) {
             return;
         }
-        if let Some(completion) = custody.reconcile(cutoff) {
+        if let Some(completion) = custody.reconcile(cutoff, &mut attempt.diagnostic) {
             // No source/terminal locks are held. Publish the compact completed
             // fact before releasing the displaced candidate and full causes.
             let displaced = std::mem::replace(

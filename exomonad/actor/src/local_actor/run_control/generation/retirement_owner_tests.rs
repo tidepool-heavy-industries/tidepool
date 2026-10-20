@@ -245,6 +245,7 @@ impl RunControlClient {
             .send_message(RunControlMessage::BeginGenerationRetirement {
                 preparation,
                 inventory: GenerationRetirementInventory::Unavailable,
+                diagnostic: GenerationRetirementDiagnostic::CancelledComponent,
                 reply,
             })
             .unwrap();
@@ -560,6 +561,7 @@ impl RunControlClient {
                 .send_message(RunControlMessage::BeginGenerationRetirement {
                     preparation,
                     inventory: GenerationRetirementInventory::Unavailable,
+                    diagnostic: GenerationRetirementDiagnostic::CancelledComponent,
                     reply,
                 })
                 .unwrap();
