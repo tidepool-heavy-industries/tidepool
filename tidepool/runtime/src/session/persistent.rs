@@ -6510,6 +6510,7 @@ mod checkpoint_scope_tests {
             .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_isolated_scope();
+        let source = session.adopt_initial_notebook_scope(public).unwrap();
         let owner = public_owner("root/lazy-bootstrap");
         assert!(matches!(
             session
@@ -6547,12 +6548,28 @@ mod checkpoint_scope_tests {
         assert_eq!(second.initial.machine_incarnation, incarnation);
         assert!(session.prepared_mut().is_none());
 
-        let binding = super::super::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "firstInstallation",
-            929,
+        let installed = session
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let binding = super::super::prepared::tests::rooted_publication_fixture(
+                        session,
+                        "firstInstallation",
+                        929,
+                    );
+                    session.bind_in(public, binding)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            installed.close(),
+            &crate::CompilerTransactionClose::NotStarted
         );
-        session.bind_in(public, binding).unwrap();
+        installed.into_outcome().action.unwrap();
         session.advance_public_visibility(public);
         assert_eq!(
             session
@@ -6569,6 +6586,8 @@ mod checkpoint_scope_tests {
             session.publish_durable_public_bootstrap(second),
             Err(SessionError::WrongPublicManifestTicket)
         ));
+        drop(session);
+        drop(source);
     }
 
     #[test]
