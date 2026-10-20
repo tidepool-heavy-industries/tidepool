@@ -34,6 +34,8 @@ use transfers::{ResourceTransfer, TransferPhase, WorkerTransfer};
 pub(crate) use transfers::{
     ResourceTransferReservation, WorkerTransferError, WorkerTransferReservation,
 };
+#[cfg(test)]
+pub(in crate::local_actor) use transfers::ResourceTransferTestFailure;
 
 pub(super) struct ActorAuthority {
     creator: Option<ActorRef>,
@@ -647,6 +649,12 @@ impl RunState {
 
 pub(super) enum RunControlMessage {
     #[cfg(test)]
+    ResourceTransferTestFailure {
+        id: u64,
+        failure: ResourceTransferTestFailure,
+        reply: oneshot::Sender<()>,
+    },
+    #[cfg(test)]
     PanicForNativeRetention,
     #[cfg(test)]
     ObserveActorPreparations {
@@ -1111,6 +1119,12 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            #[cfg(test)]
+            RunControlMessage::ResourceTransferTestFailure { id, failure, reply } => {
+                state.resource_transfers.get_mut(&id).expect("issued transfer")
+                    .test_failure = Some(failure);
+                let _ = reply.send(());
+            }
             #[cfg(test)]
             RunControlMessage::PanicForNativeRetention => {
                 panic!("run-control native retention test");
@@ -1866,7 +1880,10 @@ impl Actor for RunControl {
                         }
                         let terminal = Arc::new(std::sync::OnceLock::new());
                         state.resource_transfers.insert(id, ResourceTransfer { source, destination, resources,
-                            phase: TransferPhase::Armed, terminal: terminal.clone() });
+                            phase: TransferPhase::Armed, terminal: terminal.clone(),
+                            #[cfg(test)]
+                            test_failure: None,
+                        });
                         Ok(ResourceTransferReservation { id, owner: myself.clone(), armed: true, parent_lease: None, terminal })
                     };
                 let _ = reply.send(result);
@@ -1925,6 +1942,10 @@ impl Actor for RunControl {
                                 }
                                 resource.owner = ResourceOwner::Owned(transfer.destination);
                             }
+                            #[cfg(test)]
+                            if matches!(transfer.test_failure, Some(ResourceTransferTestFailure::PanicAfterMutation)) {
+                                panic!("resource transfer interrupted after actual ownership mutation");
+                            }
                             Ok(())
                         }
                         Ok(_) => Err(DirectoryError::LifetimeSettlementUnconfirmed { id }),
@@ -1939,11 +1960,17 @@ impl Actor for RunControl {
                 if let Some(transfer) = state.resource_transfers.get(&id) {
                     let _ = transfer.terminal.set(result.clone());
                 }
+                #[cfg(test)]
+                let lose_reply = state.resource_transfers.get(&id).is_some_and(|transfer|
+                    matches!(transfer.test_failure, Some(ResourceTransferTestFailure::LoseReply)));
                 // A mismatched owned resource is unresolved custody, not a
                 // successful empty transfer. Preserve the original record.
                 if result.is_ok() {
                     state.resource_transfers.remove(&id);
                 }
+                #[cfg(test)]
+                if lose_reply { drop(reply); } else { let _ = reply.send(result); }
+                #[cfg(not(test))]
                 let _ = reply.send(result);
                 state.settle_preparation_waiters();
                 state.start_resource_retirement();
@@ -2554,6 +2581,20 @@ impl RunControlClient {
     pub(crate) async fn stop_owner_for_test(&self) {
         self.owner.stop(None);
         let _ = self.owner.get_cell().wait(Some(SHUTDOWN_BUDGET)).await;
+    }
+    #[cfg(test)]
+    pub(in crate::local_actor) fn assert_unsettled_resource_transfer_for_test(
+        &self,
+        terminal: &Arc<std::sync::OnceLock<Result<(), DirectoryError>>>,
+    ) {
+        let Some(RunControlNativeExit::OwnerLost { resource_transfers, .. }) =
+            self.native_cleanup.terminal.get() else {
+                panic!("native transfer owner loss must be retained");
+            };
+        let transfer = resource_transfers.values().find(|transfer|
+            Arc::ptr_eq(&transfer.terminal, terminal)).expect("same issued transfer retained");
+        assert!(matches!(transfer.phase, TransferPhase::Settling { .. }));
+        assert!(terminal.get().is_none());
     }
     pub async fn start() -> Result<(Self, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         let native_cleanup = Arc::new(RunControlNativeCleanup::default());

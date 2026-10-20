@@ -67,6 +67,26 @@ pub(crate) struct ResourceTransferReservation {
     pub(super) terminal: Arc<std::sync::OnceLock<Result<(), DirectoryError>>>,
 }
 impl ResourceTransferReservation {
+    #[cfg(test)]
+    pub(in crate::local_actor) fn terminal_observation(
+        &self,
+    ) -> Arc<std::sync::OnceLock<Result<(), DirectoryError>>> {
+        self.terminal.clone()
+    }
+
+    #[cfg(test)]
+    pub(in crate::local_actor) async fn test_failure(&self, failure: ResourceTransferTestFailure) {
+        let (reply, receiver) = oneshot::channel();
+        self.owner
+            .send_message(RunControlMessage::ResourceTransferTestFailure {
+                id: self.id,
+                failure,
+                reply,
+            })
+            .unwrap();
+        receiver.await.unwrap();
+    }
+
     pub(crate) fn try_commit(
         mut self,
     ) -> Result<futures_util::future::BoxFuture<'static, Result<(), DirectoryError>>, DirectoryError>
@@ -125,6 +145,15 @@ pub(super) struct ResourceTransfer {
     pub(super) resources: Vec<ractor::ActorId>,
     pub(super) phase: TransferPhase,
     pub(super) terminal: Arc<std::sync::OnceLock<Result<(), DirectoryError>>>,
+    #[cfg(test)]
+    pub(super) test_failure: Option<ResourceTransferTestFailure>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(in crate::local_actor) enum ResourceTransferTestFailure {
+    LoseReply,
+    PanicAfterMutation,
 }
 
 pub(super) enum TransferPhase {
