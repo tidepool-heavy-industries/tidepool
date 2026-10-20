@@ -1858,8 +1858,12 @@ impl RuntimeCellAdmission {
         &self,
     ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
         match &self.compiler_basis {
-            RuntimeCellCompilerBasis::World { original_source, .. } => Ok(original_source.clone()),
-            RuntimeCellCompilerBasis::Finite(_) => Err(SessionError::WorldCellRequiresServicePreparation),
+            RuntimeCellCompilerBasis::World {
+                original_source, ..
+            } => Ok(original_source.clone()),
+            RuntimeCellCompilerBasis::Finite(_) => {
+                Err(SessionError::WorldCellRequiresServicePreparation)
+            }
         }
     }
 
@@ -1867,7 +1871,10 @@ impl RuntimeCellAdmission {
         &self,
         source: &super::RuntimeSourceCompilerTransaction,
     ) -> Result<(), super::SourceAdmissionError> {
-        if let RuntimeCellCompilerBasis::World { original_source, .. } = &self.compiler_basis {
+        if let RuntimeCellCompilerBasis::World {
+            original_source, ..
+        } = &self.compiler_basis
+        {
             let actual = source.admitted_original_source()?;
             if !Arc::ptr_eq(&actual, original_source) {
                 return Err(super::SourceAdmissionError::ForeignTransaction);
@@ -2690,11 +2697,17 @@ impl PersistentSession {
         let planned = admission
             .plan_reservation()?
             .ok_or(SessionError::StaleStagedDeclaration)?;
+        let program_plan = match program.basis() {
+            tidepool_toolchain::checked_cell::CellProgramBasis::Finite(plan) => plan,
+            tidepool_toolchain::checked_cell::CellProgramBasis::World(_) => {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+        };
         program
             .validate_typed_entries()
             .map_err(SessionError::Compile)?;
         if program.admission_digest() != admission.digest()
-            || !Arc::ptr_eq(program.parsed_plan(), planned.plan())
+            || !Arc::ptr_eq(program_plan, planned.plan())
             || program.slots() != planned.compiler_specification().slots.as_slice()
             || program.items().len() != planned.items().len()
             || program
