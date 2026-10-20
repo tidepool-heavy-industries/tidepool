@@ -3420,9 +3420,7 @@ impl BoundArtifactSelection {
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
                 let mut values = Vec::new();
                 for value in item.required() {
-                    operation
-                        .checkpoint()
-                        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                    crate::host_work::checkpoint()?;
                     values.push(Arc::clone(value));
                 }
                 self.compiler_prefix.admit_value_interfaces(&values)?
