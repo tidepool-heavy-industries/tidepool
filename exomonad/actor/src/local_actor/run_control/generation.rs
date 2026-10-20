@@ -13,6 +13,7 @@ use crate::resident_workbench::{
     ActorGenerationPublicationSettlement, ActorGenerationRetirementCutoff,
     ActorGenerationRetirementPreparation, ActorGenerationRetirementPreparationOutcome,
     ActorPublicationAttemptObserver, PreparedActorGeneration, ReservedActorGeneration,
+    UnstartedRetirementSourceSettlement,
 };
 
 pub(super) enum GenerationRetirementRecord {
@@ -231,6 +232,7 @@ enum GenerationDefaultRefusalProgress {
     SourcesRestored {
         receipt: tidepool_bridge_effects::RlRetirementReceipt,
         evidence: Arc<crate::resident_actor::RetirementDiagnosticEvidence>,
+        source_settlement: UnstartedRetirementSourceSettlement,
     },
     SettlementFailed {
         receipt: tidepool_bridge_effects::RlRetirementReceipt,
@@ -265,6 +267,7 @@ enum PublicationSourceRestoredPending {
     NotStarted {
         reserved: ReservedActorGeneration,
         reason: preparation::PublicationNonStart,
+        source_settlement: UnstartedRetirementSourceSettlement,
     },
 }
 
@@ -771,10 +774,7 @@ impl GenerationPublicationCustody {
                 settlement_error,
             } if settlement_error.is_none() => {
                 match reserved.refuse_retirement(fence, "publication worker did not execute") {
-                    Ok(())
-                        if matches!(reason, preparation::PublicationNonStart::SpawnFailed(_))
-                            || !diagnostic.is_cancelled_component() =>
-                    {
+                    Ok(source_settlement) => {
                         let old = std::mem::replace(self, Self::ProducerLostAfterExecute);
                         let Self::NotStarted {
                             reserved, reason, ..
@@ -783,16 +783,14 @@ impl GenerationPublicationCustody {
                             return None;
                         };
                         *self = Self::SourceRestoredPending(
-                            PublicationSourceRestoredPending::NotStarted { reserved, reason },
+                            PublicationSourceRestoredPending::NotStarted {
+                                reserved,
+                                reason,
+                                source_settlement,
+                            },
                         );
                         None
                     }
-                    Ok(()) => Some(GenerationRetirementCompletion::AReopened {
-                        outcome: ActorGenerationPublicationRefusalObservation::Refused,
-                        nonstart: Some(reason.kind()),
-                        diagnostic: None,
-                        diagnostic_refusals: Vec::new(),
-                    }),
                     Err(error) => {
                         *settlement_error = Some(Arc::new(error));
                         None
@@ -835,6 +833,39 @@ impl GenerationPublicationCustody {
         &mut self,
         diagnostic: &mut GenerationRetirementDiagnostic,
     ) -> Option<GenerationRetirementCompletion> {
+        if diagnostic.is_cancelled_component()
+            && matches!(self, Self::SourceRestoredPending(
+                PublicationSourceRestoredPending::NotStarted { reason, .. }
+            ) if !matches!(reason, preparation::PublicationNonStart::SpawnFailed(_)))
+        {
+            let old = std::mem::replace(self, Self::ProducerLostAfterExecute);
+            let Self::SourceRestoredPending(PublicationSourceRestoredPending::NotStarted {
+                reserved,
+                reason,
+                source_settlement,
+            }) = old
+            else {
+                *self = old;
+                return None;
+            };
+            return match reserved.into_settled_unstarted(source_settlement) {
+                Ok(()) => Some(GenerationRetirementCompletion::AReopened {
+                    outcome: ActorGenerationPublicationRefusalObservation::Refused,
+                    nonstart: Some(reason.kind()),
+                    diagnostic: None,
+                    diagnostic_refusals: Vec::new(),
+                }),
+                Err((reserved, source_settlement)) => {
+                    *self =
+                        Self::SourceRestoredPending(PublicationSourceRestoredPending::NotStarted {
+                            reserved,
+                            reason,
+                            source_settlement,
+                        });
+                    None
+                }
+            };
+        }
         let Self::SourceRestoredPending(PublicationSourceRestoredPending::Unpublished {
             refusal,
             ..
@@ -1446,7 +1477,7 @@ impl RunState {
                 fence,
                 "generation retirement refused because admitted dependent work remains",
             ) {
-                Ok(()) => {
+                Ok(source_settlement) => {
                     receipt.state = RlRetirementState::ReloadAReopened;
                     let receipt = receipt.clone();
                     let evidence = Arc::new(
@@ -1454,8 +1485,11 @@ impl RunState {
                             &receipt,
                         ),
                     );
-                    *progress =
-                        GenerationDefaultRefusalProgress::SourcesRestored { receipt, evidence };
+                    *progress = GenerationDefaultRefusalProgress::SourcesRestored {
+                        receipt,
+                        evidence,
+                        source_settlement,
+                    };
                 }
                 Err(error) => {
                     *progress = GenerationDefaultRefusalProgress::SettlementFailed {
