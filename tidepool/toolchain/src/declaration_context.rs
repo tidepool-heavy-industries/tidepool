@@ -7168,16 +7168,16 @@ impl<'a> ProductInputFacts<'a> {
 
 /// Projected World input facts retained by the actual segment source issuer.
 /// Certification and item native selection borrow this same demanded owner.
-pub(crate) struct DemandedWorldCompilerInputs<'a> {
+pub(crate) struct DemandedWorldCompilerInputs {
     demand: DemandNativeInputs,
     groups: DemandCertifiedGroups,
     support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     binding: WorldCompilationIdentity,
-    context: &'a Arc<ExactDeclarationContext>,
+    context: Arc<ExactDeclarationContext>,
     checked_values: crate::checked_cell::CheckedValueImportAuthority,
 }
 
-impl<'a> DemandedWorldCompilerInputs<'a> {
+impl DemandedWorldCompilerInputs {
     /// Assemble the world product from the exact demand owner, its certified
     /// groups and the semantic support it projected. The binding is content
     /// identity only; the checked program remains the source of authority.
@@ -7186,7 +7186,7 @@ impl<'a> DemandedWorldCompilerInputs<'a> {
         groups: DemandCertifiedGroups,
         support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
         binding: WorldCompilationIdentity,
-        context: &'a Arc<ExactDeclarationContext>,
+        context: Arc<ExactDeclarationContext>,
         checked_values: crate::checked_cell::CheckedValueImportAuthority,
     ) -> Self {
         Self {
@@ -7211,8 +7211,8 @@ impl<'a> DemandedWorldCompilerInputs<'a> {
         ProductCompilationBinding::World(&self.binding)
     }
 
-    pub(crate) fn context(&self) -> &'a Arc<ExactDeclarationContext> {
-        self.context
+    pub(crate) fn context(&self) -> &Arc<ExactDeclarationContext> {
+        &self.context
     }
 
     pub(crate) fn checked_values(&self) -> &crate::checked_cell::CheckedValueImportAuthority {
@@ -7238,12 +7238,20 @@ impl<'a> DemandedWorldCompilerInputs<'a> {
     /// and the projected support are the only executable input authority.
     fn facts(&self) -> ProductInputFacts<'_> {
         ProductInputFacts::from_demand(
-            self.context,
+            &self.context,
             &self.demand,
             &self.groups,
             Arc::clone(&self.support),
             &self.checked_values,
         )
+    }
+
+    fn program_facts<'a>(&'a self, program: &'a ProgramSourceSupportState) -> ProductInputFacts<'a> {
+        let mut facts = self.facts();
+        facts.source_lexical = &program.program_source_lexical;
+        facts.program_support = program.program_support.as_ref();
+        facts.source_selected_support = &program.source_selected_support;
+        facts
     }
 
     pub(crate) fn certified_selection(
@@ -9091,17 +9099,37 @@ pub(crate) struct DecodedWorldSourceReceipt<'a> {
 
 /// One actual World segment's admitted source and original products. Its
 /// prefix state reuses the same source-support owner as finite compilation.
-pub(crate) struct WorldProgramSegment<'a> {
+/// One move-only compiler prefix. Runtime settlement authority remains outside
+/// this owner; it carries only actual input and source-output evidence.
+pub(crate) struct WorldProgramContinuation {
+    context: Arc<ExactDeclarationContext>,
+    inputs: Arc<RequestCompilerInputs>,
+    program: ProgramSourceSupportState,
+    private_input: Option<Arc<OriginalCompilerInputs>>,
+}
+
+impl WorldProgramContinuation {
+    pub(crate) fn begin(program: &crate::compiler_world::CheckedWorldCellProgram) -> Self {
+        Self {
+            context: Arc::clone(program.primary_context()),
+            inputs: Arc::clone(program.primary_compiler_inputs()),
+            program: ProgramSourceSupportState::default(),
+            private_input: None,
+        }
+    }
+}
+
+pub(crate) struct WorldProgramSegment {
     pub(crate) originals: crate::certified_products::CertifiedSegmentOriginals,
-    inputs: DemandedWorldCompilerInputs<'a>,
+    inputs: DemandedWorldCompilerInputs,
     binding: WorldCompilationIdentity,
     source: ExactSourceAdmission,
     source_text: String,
     aliases: Vec<PathBuf>,
-    program: ProgramSourceSupportState,
+    continuation: WorldProgramContinuation,
 }
 
-impl WorldProgramSegment<'_> {
+impl WorldProgramSegment {
     pub(crate) fn planned_declaration(
         &self,
         program: &crate::compiler_world::CheckedWorldCellProgram,
@@ -9153,7 +9181,7 @@ impl WorldProgramSegment<'_> {
         self.inputs.groups.groups()
     }
     pub(crate) fn source_lexical(&self) -> &[ExactLexicalNode] {
-        &self.program.program_source_lexical
+        &self.continuation.program.program_source_lexical
     }
     pub(crate) fn original_execution_context(
         &self,
@@ -9165,7 +9193,7 @@ impl WorldProgramSegment<'_> {
         ExactProductAdmission {
             compilation_binding: ProductCompilationBinding::World(&self.binding),
             source: &self.source,
-            facts: self.inputs.facts(),
+            facts: self.inputs.program_facts(&self.continuation.program),
         }
     }
     pub(crate) fn admit_program_support(
@@ -9175,27 +9203,28 @@ impl WorldProgramSegment<'_> {
         produced: &crate::checked_cell::ProducedValueTypeInterfaces,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-        self.program.admit_program_support_inner(
+        let context = self.continuation.program.admit_program_support_inner(
             self.inputs.facts().producer,
             context,
             support,
             std::slice::from_ref(&self.source),
             Some(produced),
-            Some(self.inputs.context),
+            Some(&self.inputs.context),
             selection,
-        )
+        )?;
+        self.continuation.context = Arc::clone(&context);
+        Ok(context)
     }
 }
 
 impl<'a> DecodedWorldSourceReceipt<'a> {
     /// Clamp untrusted completed-source demand to this preparation's cold
     /// primary issuer. This is not source, group or instance admission.
-    pub(crate) fn demand_primary_inputs(&self) -> Result<DemandNativeInputs, CompileError> {
+    fn demand_inputs(&self, cold: &Arc<RequestCompilerInputs>) -> Result<DemandNativeInputs, CompileError> {
         let operation = self.program.validation().inventory.as_ref();
         let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
             result.map_err(|error| compiler_evidence_failure(error.into()))
         };
-        let cold = self.program.primary_compiler_inputs();
         let roles = cold.source_support.projection().snapshot_roles();
         let mut roots = BTreeSet::new();
         let mut native_roots = BTreeSet::new();
@@ -9291,25 +9320,26 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
-    ) -> Result<WorldProgramSegment<'a>, CompileError> {
+        continuation: WorldProgramContinuation,
+    ) -> Result<WorldProgramSegment, CompileError> {
         let program = self.program;
         let operation = program.validation().inventory.as_ref();
-        let demand = self.demand_primary_inputs()?;
+        let demand = self.demand_inputs(&continuation.inputs)?;
         let groups = demand.certify_receipt_groups(&receipt, validation)?;
         let support = demand.semantic_source_support(&groups, operation)?;
         let checked_values =
             crate::checked_cell::CheckedValueImportAuthority::from_world_output(program)?;
-        let context = program.primary_context();
+        let context = &continuation.context;
         let binding = WorldCompilationIdentity::from_binding(&self.binding);
         let inputs = DemandedWorldCompilerInputs::from_demand(
             demand,
             groups,
             support,
             binding.clone(),
-            context,
+            Arc::clone(context),
             checked_values,
         );
-        let facts = inputs.facts();
+        let facts = inputs.program_facts(&continuation.program);
         // The physical evidence stays owned by the decoded receipt; retain
         // the exact bytes the receipt already carries for product admission.
         let source_path = self.source.source_path.clone();
@@ -9374,7 +9404,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             source,
             source_text: target_source,
             aliases: self.aliases,
-            program: ProgramSourceSupportState::default(),
+            continuation,
         })
     }
 
@@ -19830,7 +19860,7 @@ mod tests {
             groups,
             support,
             binding,
-            &context,
+            Arc::clone(&context),
             crate::checked_cell::CheckedValueImportAuthority::default(),
         );
         assert!(world.is_world_compilation());

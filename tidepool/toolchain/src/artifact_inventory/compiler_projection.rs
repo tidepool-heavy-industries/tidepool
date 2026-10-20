@@ -2678,6 +2678,63 @@ impl CompilerSourceSupport {
             .and_then(|support| support.with_additional_decisions(output.issued_input_decisions()))
     }
 
+    /// Issue only the role fragment named by this actual checked stage/source
+    /// selection. The receiving prefix validates the same exact rows on append.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn world_stage_fragment(
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        stage: &Arc<crate::compiler_world::CheckedWorldCellStage>,
+        source: &crate::declaration_context::ExactSourceAdmission,
+        source_text: &str,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+        artifacts: &ArtifactView,
+    ) -> Result<Self, CompileError> {
+        if !source.matches_world_stage(program, stage.index(), source_text)? {
+            return Err(failure("program source fragment belongs to another World stage"));
+        }
+        let generated = source.generated_source_owner()?;
+        let mut owners = source.home_imports()?.into_keys().collect::<BTreeSet<_>>();
+        let executable = matches!(stage.identity(), crate::compiler_world::WorldCellStageIdentity::Executable { .. });
+        let mut projection = selection.compiler_support_projection(artifacts, std::slice::from_ref(source))
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        if executable {
+            owners.remove(&generated);
+            projection = projection.project_roles(|owner, role| {
+                (owner != &generated).then(|| role.clone())
+            });
+        }
+        projection = projection.for_source_owners(&owners);
+        let selected = projection.resolve_source_associations(artifacts)?;
+        projection.validate_requirements(
+            selected.values().flat_map(|row| std::iter::once(&row.interface)
+                .chain(row.original.iter()).map(|(_, entry)| entry.as_ref())),
+            |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
+        )?;
+        let input_decisions = IssuedInputNativeDecisions::from_certified_continuation(selection, &projection)?;
+        let native_availability = crate::declaration_context::RequestNativeAvailability::from_issued_rows(
+            selection.issued_native_availability().cloned(),
+        )?.for_compiler_roles(&projection, artifacts)?;
+        if executable && native_availability.rows().any(|row| {
+            row.original_owner().unit == generated.unit && row.original_owner().module == generated.module
+        }) {
+            return Err(failure("program support depends on its generated scaffold"));
+        }
+        let mut offers = Vec::new();
+        let mut native_offer_facts = imbl::OrdMap::new();
+        for offer in native_availability.rows().flat_map(|row| row.offers()) {
+            let identity = offer.snapshot_identity()?;
+            if !native_offer_facts.contains_key(&identity) {
+                native_offer_facts.insert(identity, offer.snapshot_facts());
+                offers.push(offer.clone());
+            }
+        }
+        Self {
+            projection, artifacts: artifacts.clone(), native_fact_owner: None,
+            native_offers: offers.into(), native_offer_facts, native_availability,
+            selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)), input_decisions,
+        }.refreshed_native_facts()
+    }
+
     pub(crate) fn extend_program_source(
         &self,
         selection: &crate::certified_products::CertifiedSourceSelection,
@@ -4017,16 +4074,42 @@ impl CompilerInputProjection {
         view: &ArtifactView,
     ) -> Result<BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>, CompileError> {
         let artifacts = CompilerRolePayloads::Retained(view.retained_payloads());
-        let entries = self.associated_entries(&artifacts)?;
         let state = view.lease.inventory.0.lock().expect("inventory lock");
         let owned = &view.read_projection(&state).nodes;
+        self.resolve_associations_from(&artifacts, &state, |id| view.resolve_binding(id, owned))
+    }
+
+    /// The checked source issuer supplies exact role IDs. Its authenticated
+    /// namespace already owns those bindings; absent namespace entries keep
+    /// the existing unique-acquisition fallback and ambiguity refusal.
+    fn resolve_source_associations(
+        &self,
+        view: &ArtifactView,
+    ) -> Result<BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>, CompileError> {
+        let artifacts = CompilerRolePayloads::PersistentMetadata(&view.lease.payloads);
+        let state = view.lease.inventory.0.lock().expect("inventory lock");
+        self.resolve_associations_from(&artifacts, &state, |id| {
+            match view.lease.selection.namespace.get(&id) {
+                Some(binding) => Ok(*binding),
+                None => view.resolve_binding(id, &view.read_projection(&state).nodes),
+            }
+        })
+    }
+
+    fn resolve_associations_from(
+        &self,
+        artifacts: &CompilerRolePayloads<'_>,
+        state: &InventoryState,
+        resolve: impl Fn(ArtifactId) -> Result<ArtifactBinding, CompileError>,
+    ) -> Result<BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>, CompileError> {
+        let entries = self.associated_entries(artifacts)?;
         let mut selected = BTreeMap::new();
         for (owner, role) in &self.roles {
             #[cfg(test)]
             type_query_work::resolved_row();
-            let canonical = view.resolve_binding(role.interface(), owned)?;
+            let canonical = resolve(role.interface())?;
             let original = if let Some(original) = role.original() {
-                let carrier = view.resolve_binding(original, owned)?;
+                let carrier = resolve(original)?;
                 ResolvedCompilerRole::validate_original_pair(&state, canonical, carrier)?;
                 Some((carrier, Arc::clone(&entries[owner])))
             } else {

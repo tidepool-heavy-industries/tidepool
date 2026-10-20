@@ -922,6 +922,7 @@ pub fn prepare_world_cell_program(
         &selected_values,
         Some(&produced_outputs),
         &mut validation,
+        crate::declaration_context::WorldProgramContinuation::begin(&program),
     )?;
     let checked = checked_cell::admit_world_cell(
         program.clone(),
