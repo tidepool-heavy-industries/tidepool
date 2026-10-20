@@ -1726,3 +1726,48 @@ fn production_main_reports_once_after_direct_and_framed_completion() {
         }
     }
 }
+
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "actual direct CLI compiles explicit portable source with the declared GHC worker"
+)]
+fn direct_cli_explicit_portable_compiles_real_source_closure() {
+    let frontend = compiler_inputs::require_compiler_executables();
+    let scratch = tempfile::tempdir().unwrap();
+    let source = scratch.path().join("PortableMain.hs");
+    fs::write(
+        scratch.path().join("PortableSupport.hs"),
+        "module PortableSupport where\nanswer :: Int\nanswer = 41\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "module PortableMain where\nimport PortableSupport\nresult :: Int\nresult = answer\n",
+    )
+    .unwrap();
+    let products = scratch.path().join("portable");
+    let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&frontend));
+    command
+        .input(&source)
+        .include(scratch.path())
+        .output_dir(&products)
+        .target("result")
+        .portable_output();
+    let output = Command::new(&frontend)
+        .args(command.worker_argv())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["outcome"], "success");
+    for artifact in ["result.prepared.cbor", "meta.cbor"] {
+        assert!(fs::metadata(products.join(artifact)).unwrap().len() > 0);
+    }
+    assert!(!products.join("module-products.cbor").exists());
+}
