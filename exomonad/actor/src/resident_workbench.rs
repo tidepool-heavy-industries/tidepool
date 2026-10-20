@@ -2237,11 +2237,13 @@ impl ActorGenerationPublicationOperation {
 
 /// The observed outcome carries no settlement authority. Only `Unpublished`
 /// retains the original armed guard needed to restore a held retirement fence.
+#[must_use]
 pub(crate) enum ActorGenerationPublicationSettlement {
     Unpublished(ActorGenerationPublicationRefusal),
     Settled(Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>),
 }
 
+#[must_use]
 pub(crate) struct ActorGenerationPublicationRefusal {
     guard: ActorPublicationGuard,
     outcome: Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>,
