@@ -2383,10 +2383,7 @@ impl RuntimeCellAdmission {
             original_source, ..
         } = &self.compiler_basis
         {
-            let actual = source.admitted_original_source()?;
-            if !Arc::ptr_eq(&actual, original_source) {
-                return Err(super::SourceAdmissionError::ForeignTransaction);
-            }
+            return source.admit_original(original_source, Some(self.source_lease()));
         }
         source.admit(Some(self.source_lease()))
     }
@@ -3730,9 +3727,7 @@ impl PersistentSession {
             .source_transaction
             .as_ref()
             .ok_or(super::SourceAdmissionError::MissingTransaction)?;
-        if !Arc::ptr_eq(&transaction.source, original_source) {
-            return Err(super::SourceAdmissionError::ForeignTransaction.into());
-        }
+        transaction.admit_original(original_source, None)?;
         if !self.has_lib() {
             return Err(SessionError::MissingDeclarationLibrary);
         }
@@ -5391,7 +5386,7 @@ mod tests {
         assert!(matches!(
             settled.action.0,
             Err(SessionError::SourceAdmission(
-                super::super::SourceAdmissionError::ForeignTransaction
+                super::super::SourceAdmissionError::DifferentOriginalSource
             ))
         ));
         assert!(
