@@ -2262,9 +2262,11 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
       sourceText = Text.unpack (TextEncoding.decodeUtf8 source)
   effective <- liftIO (sourceModuleFlags flags sourceText >>= either (throwIO . SourceRejection . renderCellSplitError) pure)
   liftIO (requireWorldHeaderPolicy WorldAuthoredHeader path flags effective)
-  parsedDemand <- either (\_ -> liftIO $ case operation of
+  parsedDemand <- either (\reason -> liftIO $ case operation of
     WorldCellSource {} -> throwIO WorldCellUnsupported
-    WorldObservationSource {} -> throwIO (SourceRejection "observation source failed parser or no-quasiquote policy")) pure $
+    WorldObservationSource {} -> do
+      emitWorldObservationSourceRejection effective path source reason
+      throwIO (SourceRejection (boundedDiagnosticText 4096 (moduleDemandFailureDetail reason)))) pure $
     case typedPurposePlan purpose of
       Just plan -> segmentModuleDemand <$> prepareSegmentDemand plan effective capturedSource
       Nothing | isJust (worldPlannedDeclaration purpose) || originalPurpose purpose == WorldObservationCompile -> prepareModuleDemand effective capturedSource
@@ -6677,24 +6679,54 @@ scopedReadExactScope = ownedScopedReadExactScope
 emitWorldAcquisitionRejection :: String -> FilePath -> String -> IO ()
 emitWorldAcquisitionRejection reason manifest detail = do
   _ <- trySynchronous $ do
-    let bounded value = case boundedUtf8 4096 value of
-          Just bytes -> Text.unpack (TextEncoding.decodeUtf8 bytes)
-          Nothing -> prefix (4096 - length truncated) value ++ truncated
-        truncated = "\n[diagnostic truncated]"
-        prefix _ [] = []
-        prefix remaining (character:rest)
-          | width > remaining = []
-          | otherwise = character : prefix (remaining-width) rest
-          where
-            point = ord character
-            width | point <= 0x7f = 1
-                  | point <= 0x7ff = 2
-                  | point <= 0xffff = 3
-                  | otherwise = 4
+    let bounded = boundedDiagnosticText 4096
         message = "world input acquisition rejected: " ++ bounded reason
           ++ "\nmanifest: " ++ bounded manifest ++ "\ndetail: " ++ bounded detail
     hPutStrLn stderr (renderDiag (Diag Nothing DiagError message))
   pure ()
+
+-- Failure evidence uses the existing bounded diagnostic channel so temporary
+-- World retirement cannot erase the actual rejected source. The 64 KiB source
+-- allowance bounds reporting only; it does not restrict accepted source size.
+-- Even worst-case JSON escaping stays below the 16 MiB response allowance.
+emitWorldObservationSourceRejection :: DynFlags -> FilePath -> BS.ByteString
+  -> TypedSegmentFailure -> IO ()
+emitWorldObservationSourceRejection flags path source reason = do
+  _ <- trySynchronous $ do
+    let extensions = [show extension | extension <- [minBound .. maxBound], xopt extension flags]
+        message = "world observation source rejected: " ++ boundedDiagnosticText 4096 (moduleDemandFailureDetail reason)
+          ++ "\nsource path: " ++ boundedDiagnosticText 4096 path
+          ++ "\nsource bytes: " ++ show (BS.length source)
+          ++ "\nsource sha256: " ++ hexBytes (SHA256.hash source)
+          ++ "\neffective extensions: " ++ boundedDiagnosticText 16384 (unwords extensions)
+          ++ "\ncaptured source:\n" ++ boundedDiagnosticText 65536
+            (Text.unpack (TextEncoding.decodeUtf8 source))
+    hPutStrLn stderr (renderDiag (Diag Nothing DiagError message))
+  pure ()
+
+moduleDemandFailureDetail :: TypedSegmentFailure -> String
+moduleDemandFailureDetail failure = case failure of
+  ModuleDemandParseRejected path detail -> "module parser rejected " ++ path ++ ":\n" ++ detail
+  ModuleDemandQuasiQuoteRejected path names ->
+    "module quasiquote policy rejected " ++ path ++ ": " ++ intercalate ", " names
+  other -> show other
+
+boundedDiagnosticText :: Int -> String -> String
+boundedDiagnosticText limit value = case boundedUtf8 (toInteger limit) value of
+  Just bytes -> Text.unpack (TextEncoding.decodeUtf8 bytes)
+  Nothing -> prefix (limit - length truncated) value ++ truncated
+  where
+    truncated = "\n[diagnostic truncated]"
+    prefix _ [] = []
+    prefix remaining (character:rest)
+      | width > remaining = []
+      | otherwise = character : prefix (remaining-width) rest
+      where
+        point = ord character
+        width | point <= 0x7f = 1
+              | point <= 0x7ff = 2
+              | point <= 0xffff = 3
+              | otherwise = 4
 
 scopedEnsureWorld :: CompilerScope -> ExactInputsRequest -> IO EnsureExactInputsOutcome
 scopedEnsureWorld = ownedScopedEnsureWorld
