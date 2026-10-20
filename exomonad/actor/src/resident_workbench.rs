@@ -1981,6 +1981,10 @@ impl ReservedActorGeneration {
         ActorGenerationCandidateCustody(self.prepared.candidate.clone())
     }
 
+    pub(crate) fn attempt_observer(&self) -> ActorPublicationAttemptObserver {
+        ActorPublicationAttemptObserver(self.guard.attempt.clone())
+    }
+
     pub(crate) fn expected_generation(&self) -> Option<&Arc<ActorGeneration>> {
         self.guard.attempt.expected.generation()
     }
@@ -2127,6 +2131,16 @@ struct ActorPublicationAttempt {
     // replacement drops only shared clones, never its last tools/source custody.
     expected: ActorRequestSnapshot,
     target: generation_admission::GenerationDependency,
+}
+
+/// Identifies the actual reserved operation without granting settlement authority.
+#[derive(Clone)]
+pub(crate) struct ActorPublicationAttemptObserver(Arc<ActorPublicationAttempt>);
+
+impl ActorPublicationAttemptObserver {
+    pub(crate) fn same_attempt(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// The one exclusive authority reserved for a publication attempt. A bootstrap
