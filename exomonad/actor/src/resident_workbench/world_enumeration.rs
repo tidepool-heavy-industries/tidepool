@@ -114,8 +114,18 @@ where
         let snapshot = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                let view = actor_compile_view(session, context, &snapshot_source)?;
-                let current = structured_provenance(&view, &snapshot_source, NameScope::Current);
+                let current = match snapshot_source.inspection_provenance(
+                    session,
+                    context,
+                    NameScope::Current,
+                ) {
+                    Ok(current) => current,
+                    Err(error) => {
+                        return Ok(ScopeBindingsSnapshot::Refused(QueryError::Unsupported(
+                            error.to_string(),
+                        )))
+                    }
+                };
                 if let Some(expected) = pinned_scope_moved(expected, &current) {
                     return Ok(ScopeBindingsSnapshot::Stale { expected, current });
                 }
@@ -163,15 +173,17 @@ where
                     ScopeBindingsSnapshot::Ready { current, answer } => {
                         // Validate and resume under the same machine checkout so
                         // publication cannot move between the check and delivery.
-                        let view = actor_compile_view(session, context, &source)?;
-                        let observed = structured_provenance(&view, &source, NameScope::Current);
-                        if !observed.same_view(&current) {
-                            ScopeBindingsOutcome::ScopeChanged {
-                                before: current,
-                                after: observed,
+                        match source.inspection_provenance(session, context, NameScope::Current) {
+                            Ok(observed) if !observed.same_view(&current) => {
+                                ScopeBindingsOutcome::ScopeChanged {
+                                    before: current,
+                                    after: observed,
+                                }
                             }
-                        } else {
-                            ScopeBindingsOutcome::Names(answer, current)
+                            Ok(_) => ScopeBindingsOutcome::Names(answer, current),
+                            Err(error) => ScopeBindingsOutcome::Error(QueryError::Unsupported(
+                                error.to_string(),
+                            )),
                         }
                     }
                 };

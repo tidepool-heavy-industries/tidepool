@@ -99,7 +99,7 @@ pub trait RetainedSourceLayer: Send + Sync {
     }
 
     /// Capture immutable compiler source bytes from this retained owner.
-    /// Unsupported owners keep the checked finite compiler path.
+    /// An unsupported owner cannot provide a compiler world.
     fn capture_compiler_sources(
         &self,
     ) -> Result<
@@ -952,6 +952,8 @@ pub enum ActorCompileViewError {
     ReleasedDeclarationCapture,
     #[error(transparent)]
     CompileInputs(#[from] tidepool_runtime::CompileError),
+    #[error("inspection source identity is unobserved for this actor view")]
+    UnobservedSourceIdentity,
     #[error("nonempty actor helper source requires an owned source capsule")]
     UnownedSourceLayer,
     #[error("actor source view belongs to session {actual:?}, expected {expected:?}")]
@@ -1030,6 +1032,11 @@ impl ActorSessionContext {
         self.compile_view_with_inputs(session, inputs)
     }
 
+    pub(crate) fn selected_source_imports(&self) -> SourceImports {
+        self.haskell_effects_alias
+            .source_imports(&self.source_imports.imports)
+    }
+
     pub(crate) fn compile_view_with_inputs(
         &self,
         session: SessionCompileView,
@@ -1050,9 +1057,7 @@ impl ActorSessionContext {
         let session = session.with_compile_inputs(&inputs)?;
         Ok(ActorCompileView {
             session,
-            external: self
-                .haskell_effects_alias
-                .source_imports(&self.source_imports.imports),
+            external: self.selected_source_imports(),
             source_layer: self.source_layer.clone(),
             compile_inputs: inputs,
         })

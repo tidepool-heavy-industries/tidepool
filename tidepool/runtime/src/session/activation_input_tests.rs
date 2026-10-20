@@ -1756,6 +1756,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         "request authority commitment includes original compiler authentication"
     );
     let repeated_evidence = observations
+        .clone()
         .authenticate_request_types(
             original.sites[&site]
                 .request_type_signatures
@@ -1764,6 +1765,8 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
             retained_context,
         )
         .unwrap();
+    assert_ne!(observations.commitment(), repeated_evidence.commitment(),
+        "reauthenticating a clone replaces its initialized commitment without changing the original");
     assert_eq!(&repeated_evidence, input.type_evidence().as_ref());
     assert_eq!(
         repeated_evidence.commitment(),

@@ -249,6 +249,50 @@ impl ActorWorkbenchSource {
         .map_err(ResidentActorWorkbenchError::Compile)
     }
 
+    fn inspection_scope<H, O>(
+        &self,
+        session: &ResidentSession<H, O>,
+        context: &crate::ActorSessionContext,
+        label: tidepool_runtime::session::NameScope,
+    ) -> Result<tidepool_runtime::session::InspectionScopeSnapshot, ResidentActorWorkbenchError>
+    where
+        H: DispatchEffect<O> + Send,
+        O: OutputSink + Sync,
+    {
+        let source_revision = match &context.source_layer {
+            crate::ActorSourceRoots::Complete(source) => source.source_revision_identity(),
+            crate::ActorSourceRoots::Deployment(_) => None,
+        }
+        .filter(|revision| !revision.is_empty())
+        .ok_or(ActorCompileViewError::UnobservedSourceIdentity)?;
+        let inputs = self.compile_inputs(context)?;
+        let mut imports = context.selected_source_imports();
+        imports.extend(&self.workbench_imports);
+        session
+            .capture_inspection_scope_in(
+                context.placement.lexical_scope,
+                source_revision.as_bytes(),
+                &imports,
+                &inputs,
+                label,
+            )
+            .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))
+    }
+
+    fn inspection_provenance<H, O>(
+        &self,
+        session: &ResidentSession<H, O>,
+        context: &crate::ActorSessionContext,
+        label: tidepool_runtime::session::NameScope,
+    ) -> Result<tidepool_runtime::session::ScopeProvenance, ResidentActorWorkbenchError>
+    where
+        H: DispatchEffect<O> + Send,
+        O: OutputSink + Sync,
+    {
+        self.inspection_scope(session, context, label)
+            .map(|snapshot| snapshot.provenance())
+    }
+
     fn request_annotations(
         &self,
     ) -> Result<Option<tidepool_runtime::session::RequestCompileAnnotations>, CompileError> {
@@ -9212,14 +9256,34 @@ where
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 let view = actor_compile_view(session, context, &snapshot_source)?;
-                let provenance = structured_provenance(&view, &snapshot_source, query_scope);
+                let provenance =
+                    match snapshot_source.inspection_provenance(session, context, query_scope) {
+                        Ok(provenance) => provenance,
+                        Err(error) => {
+                            return Ok(Err(StructuredIntrospectionAnswer::QueryError(
+                                unobserved_inspection_source(error)?,
+                            )))
+                        }
+                    };
                 let inputs = session
                     .capture_inspection_inputs(view.session_view())
                     .map_err(|error| error.to_string());
-                Ok((view, provenance, inputs))
+                Ok(Ok((view, provenance, inputs)))
             })
             .await?;
-        let (compile_view, provenance, inputs) = snapshot;
+        let (compile_view, provenance, inputs) = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(answer) => {
+                return self
+                    .access
+                    .with_continuation_machine(context, move |session, _, _, settlement| {
+                        session
+                            .resume_classified(hole, answer, settlement)
+                            .map_err(classify_resumption)
+                    })
+                    .await
+            }
+        };
         let request_query = match kind {
             StructuredInspectionKind::Info => InspectionQuery::StructuredInfo {
                 query: query.clone(),
@@ -9297,9 +9361,15 @@ where
         cancel_on_drop.0 = None;
         self.access
             .with_continuation_machine(context, move |session, context, _, settlement| {
-                let current_view = actor_compile_view(session, context, &source)?;
-                let current = structured_provenance(&current_view, &source, query.scope.clone());
-                let answer = structured_introspection_answer(kind, inspected, provenance, current);
+                let answer =
+                    match source.inspection_provenance(session, context, query.scope.clone()) {
+                        Ok(current) => {
+                            structured_introspection_answer(kind, inspected, provenance, current)
+                        }
+                        Err(error) => StructuredIntrospectionAnswer::QueryError(
+                            unobserved_inspection_source(error)?,
+                        ),
+                    };
                 session
                     .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
@@ -9319,7 +9389,9 @@ where
             .map_err(|_| ActorCompileViewError::UnownedSourceLayer)?;
         let snapshot_source = source.clone();
         let snapshot_observation = observation.clone();
-        let admitted = self
+        let view_source = self.access.source.config.clone();
+        let query_scope = query.scope.clone();
+        let (admitted, observation_pin) = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 observe_inspection_work(snapshot_observation.as_ref(), || {
@@ -9329,7 +9401,9 @@ where
                         )
                     })?;
                     let original_source = context.source_dependency().source_lease()?;
-                    session
+                    let observation_pin =
+                        view_source.inspection_scope(session, context, query_scope)?;
+                    let admitted = session
                         .capture_inspection_world_in(
                             context.placement.lexical_scope,
                             &evidence.reference,
@@ -9337,7 +9411,8 @@ where
                         )
                         .map_err(|error| {
                             ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })
+                        })?;
+                    Ok((admitted, observation_pin))
                 })
             })
             .await?;
@@ -9376,7 +9451,7 @@ where
                                 crate::SourceInspectionError::Unavailable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnavailable(detail),
                                 crate::SourceInspectionError::Unreadable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnreadable(detail),
                             }),
-                            compiler_query, compiler_kind,
+                            compiler_query, observation_pin, compiler_kind,
                         )
                     },
                 ).map_err(ResidentActorWorkbenchError::from)?;
@@ -9400,6 +9475,8 @@ where
         source: crate::CheckpointSourceLayer,
         observation: Option<Arc<tidepool_toolchain::timing::HostWorkObservation>>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let query_scope = query.scope.clone();
+        let view_source = self.access.source.config.clone();
         let inspected = self
             .query_public_module_world(context.clone(), query, kind, observation.clone())
             .await;
@@ -9417,7 +9494,17 @@ where
                                 )
                             })?;
                             let original_source = context.source_dependency().source_lease()?;
-                            if session.install_inspection_world_if_current(
+                            match view_source.inspection_provenance(session, context, query_scope) {
+                                Err(error) => StructuredIntrospectionAnswer::QueryError(
+                                    unobserved_inspection_source(error)?,
+                                ),
+                                Ok(current) if !completed.provenance().same_view(&current) => {
+                                    StructuredIntrospectionAnswer::ScopeChanged {
+                                        before: completed.provenance().clone(),
+                                        after: current,
+                                    }
+                                }
+                                Ok(_) => if session.install_inspection_world_if_current(
                                 &completed,
                                 &evidence.reference,
                                 &original_source,
@@ -9427,8 +9514,11 @@ where
                                 StructuredIntrospectionAnswer::CompilerUnavailable(
                                     "inspection world base changed before resumption".into(),
                                 )
+                            },
                             }
                         }
+                        Err(error @ ResidentActorWorkbenchError::CompileView(ActorCompileViewError::UnobservedSourceIdentity)) =>
+                            StructuredIntrospectionAnswer::QueryError(unobserved_inspection_source(error)?),
                         Err(ResidentActorWorkbenchError::WorldInspection(tidepool_runtime::session::WorldInspectionError::UnsupportedSource)) => StructuredIntrospectionAnswer::QueryError(
                             tidepool_runtime::session::QueryError::Unsupported("source owner cannot represent this compiler source domain".into())
                         ),
@@ -14877,6 +14967,21 @@ fn inspect_compile_view(
     }
 }
 
+fn unobserved_inspection_source(
+    error: ResidentActorWorkbenchError,
+) -> Result<tidepool_runtime::session::QueryError, ResidentActorWorkbenchError> {
+    if matches!(
+        &error,
+        ResidentActorWorkbenchError::CompileView(ActorCompileViewError::UnobservedSourceIdentity)
+    ) {
+        Ok(tidepool_runtime::session::QueryError::Unsupported(
+            error.to_string(),
+        ))
+    } else {
+        Err(error)
+    }
+}
+
 fn public_module_query_source(
     roots: &crate::ActorSourceRoots,
 ) -> Result<crate::CheckpointSourceLayer, tidepool_runtime::session::QueryError> {
@@ -14959,36 +15064,6 @@ fn observe_inspection_work<T>(
     match observation {
         Some(observation) => observation.scope(work),
         None => work(),
-    }
-}
-
-fn structured_provenance(
-    compile_view: &crate::ActorCompileView,
-    source: &ActorWorkbenchSource,
-    scope: tidepool_runtime::session::NameScope,
-) -> tidepool_runtime::session::ScopeProvenance {
-    tidepool_toolchain::timing::record_host_work(
-        tidepool_toolchain::timing::HostWorkCounter::StructuredProvenance,
-        1,
-    );
-    let prepared = source.prepare(compile_view);
-    let generation = compile_view.next_value_generation().0;
-    let mut fingerprint = blake3::Hasher::new();
-    fingerprint.update(prepared.preamble.as_bytes());
-    fingerprint.update(prepared.imports.as_bytes());
-    fingerprint.update(&generation.to_le_bytes());
-    for path in &prepared.include {
-        fingerprint.update(path.as_os_str().as_encoded_bytes());
-        fingerprint.update(&[0]);
-    }
-    for module in &prepared.injected {
-        fingerprint.update(module.as_bytes());
-        fingerprint.update(&[0]);
-    }
-    tidepool_runtime::session::ScopeProvenance {
-        scope,
-        generation,
-        fingerprint: fingerprint.finalize().to_hex().to_string(),
     }
 }
 
@@ -17199,6 +17274,9 @@ pub(crate) mod request_tests {
         fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
             tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
         }
+        fn source_revision_identity(&self) -> Option<&str> {
+            self.identities.first().map(String::as_str)
+        }
         fn generation_evidence(&self) -> Option<&crate::SourceGenerationEvidence> {
             Some(&self.evidence)
         }
@@ -17844,7 +17922,7 @@ pub(crate) mod request_tests {
                     let mut calibration = context.clone();
                     calibration.placement.lexical_scope = session.mint_scope(context.placement.lexical_scope).unwrap();
                     let view = actor_compile_view(session, &calibration, source)?;
-                    let _ = structured_provenance(&view, source, tidepool_runtime::session::NameScope::Current);
+                    let _ = source.inspection_provenance(session, context, tidepool_runtime::session::NameScope::Current);
                     session.capture_inspection_inputs(view.session_view())
                         .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
                     Ok(())
@@ -18000,7 +18078,7 @@ pub(crate) mod request_tests {
                 namespace: tidepool_runtime::session::NameNamespace::Value, name: "known".into(),
             }, StructuredInspectionKind::Type, Some(unsupported_work.clone())).await;
             assert!(matches!(refused, Err(ResidentActorWorkbenchError::WorldInspection(tidepool_runtime::session::WorldInspectionError::UnsupportedSource))));
-            for counter in [HostWorkCounter::ActorCompileViewCapture, HostWorkCounter::StructuredProvenance,
+            for counter in [HostWorkCounter::ActorCompileViewCapture,
                 HostWorkCounter::InspectionInputCapture, HostWorkCounter::ColdWorldBuilderRowVisit,
                 HostWorkCounter::InputFdEnumeration, HostWorkCounter::CompileViewDigestInputByte, HostWorkCounter::SemanticDigestInputByte, HostWorkCounter::SemanticEncoding] {
                 assert_eq!(unsupported_work.snapshot().get(counter), 0, "unsupported source performed {counter:?}");
