@@ -1305,7 +1305,7 @@ impl Actor for RunControl {
                         .get(&actor)
                         .and_then(|record| match &record.retirement {
                             generation::GenerationRetirementRecord::Completed(completion) => {
-                                Some(completion.clone())
+                                Some(completion.outcome.clone())
                             }
                             _ => None,
                         });

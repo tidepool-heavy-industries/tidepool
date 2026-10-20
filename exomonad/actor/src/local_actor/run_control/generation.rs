@@ -7,8 +7,8 @@ use crate::resident_workbench::generation_admission::{
     GenerationRetirementFence, GenerationRetirementFenceError,
 };
 use crate::resident_workbench::{
-    ActorGeneration, ActorGenerationCandidateCustody, ActorGenerationCommit,
-    ActorGenerationPublicationDiscard, ActorGenerationPublicationOperation,
+    ActorGeneration, ActorGenerationCandidateCustody, ActorGenerationCandidateObserver,
+    ActorGenerationCommit, ActorGenerationPublicationDiscard, ActorGenerationPublicationOperation,
     ActorGenerationPublicationRefusal, ActorGenerationPublicationRefusalObservation,
     ActorGenerationPublicationSettlement, ActorGenerationRetirementCutoff,
     ActorGenerationRetirementPreparation, ActorGenerationRetirementPreparationOutcome,
@@ -19,7 +19,12 @@ use crate::resident_workbench::{
 pub(super) enum GenerationRetirementRecord {
     Idle,
     Active(GenerationRetirementAttempt),
-    Completed(GenerationRetirementCompletion),
+    Completed(GenerationRetirementCompleted),
+}
+
+pub(super) struct GenerationRetirementCompleted {
+    pub(super) outcome: GenerationRetirementCompletion,
+    candidate: ActorGenerationCandidateObserver,
 }
 
 #[derive(Clone, Debug)]
@@ -271,8 +276,9 @@ enum GenerationDefaultRefusalProgress {
     ProjectionRefused(GenerationRetirementProjectionRefusal),
     PublicationNotQualified(Arc<tidepool_bridge_effects::RlRetirementReceipt>),
     Refusing {
-        receipt: Arc<tidepool_bridge_effects::RlRetirementReceipt>,
+        receipt: tidepool_bridge_effects::RlRetirementReceipt,
     },
+    SourceSettlementInProgress,
     SourcesRestored {
         receipt: Arc<tidepool_bridge_effects::RlRetirementReceipt>,
         evidence: Arc<crate::resident_actor::RetirementDiagnosticEvidence>,
@@ -373,7 +379,6 @@ enum GenerationRetirementProjectionRefusal {
     OperationCoordinate,
     PendingClaims,
     FrozenReloadReportMissing,
-    ReceiptAlreadyObserved,
     OperationMissing,
 }
 
@@ -648,11 +653,13 @@ pub(super) enum RetainedGenerationRetirementRecord {
     Active(RetainedGenerationRetirement),
     SourcesSettled {
         actor: ActorRef,
+        candidate: ActorGenerationCandidateObserver,
         completion: GenerationRetirementCompletion,
         cutoff: GenerationRetirementCutoffPhase,
     },
     Completed {
         actor: ActorRef,
+        candidate: ActorGenerationCandidateObserver,
         completion: GenerationRetirementCompletion,
     },
 }
@@ -1047,6 +1054,7 @@ impl RunControlNativeRecovery<'_> {
             };
             if let Some(completion) = completion {
                 let actor = attempt.actor;
+                let candidate_identity = attempt.candidate.identity_observer();
                 // Unlike live RunState, this terminal parcel is now the
                 // retained owner of its capture's actual cleanup callbacks.
                 // Move that capture into SourcesSettled before releasing B.
@@ -1054,6 +1062,7 @@ impl RunControlNativeRecovery<'_> {
                     record,
                     RetainedGenerationRetirementRecord::Completed {
                         actor,
+                        candidate: candidate_identity.clone(),
                         completion: GenerationRetirementCompletion::UnreservedRefused,
                     },
                 );
@@ -1072,6 +1081,7 @@ impl RunControlNativeRecovery<'_> {
                     }) => {
                         *record = RetainedGenerationRetirementRecord::SourcesSettled {
                             actor,
+                            candidate: candidate_identity.clone(),
                             completion,
                             cutoff,
                         };
@@ -1092,6 +1102,7 @@ impl RunControlNativeRecovery<'_> {
                     }) => {
                         *record = RetainedGenerationRetirementRecord::SourcesSettled {
                             actor,
+                            candidate: candidate_identity.clone(),
                             completion,
                             cutoff,
                         };
@@ -1219,9 +1230,11 @@ impl RunState {
         let operation = match preparation.reserve() {
             Ok(ActorGenerationRetirementPreparationOutcome::Reserved(operation)) => operation,
             Ok(ActorGenerationRetirementPreparationOutcome::Refused(reason)) => {
-                record.retirement = GenerationRetirementRecord::Completed(
-                    GenerationRetirementCompletion::UnreservedRefused,
-                );
+                record.retirement =
+                    GenerationRetirementRecord::Completed(GenerationRetirementCompleted {
+                        candidate: attempt.candidate.identity_observer(),
+                        outcome: GenerationRetirementCompletion::UnreservedRefused,
+                    });
                 return Err(GenerationRetirementBeginFailure::Refused(reason));
             }
             Err(error) => {
@@ -1377,11 +1390,15 @@ impl RunState {
             return;
         }
         if let Some(completion) = custody.reconcile(cutoff, &mut attempt.diagnostic) {
+            let candidate_identity = attempt.candidate.identity_observer();
             // No source/terminal locks are held. Publish the compact completed
             // fact before releasing the displaced candidate and full causes.
             let displaced = std::mem::replace(
                 &mut record.retirement,
-                GenerationRetirementRecord::Completed(completion),
+                GenerationRetirementRecord::Completed(GenerationRetirementCompleted {
+                    candidate: candidate_identity,
+                    outcome: completion,
+                }),
             );
             drop(displaced);
         }
@@ -1596,9 +1613,7 @@ impl RunState {
                 });
                 GenerationDefaultRefusalProgress::PublicationNotQualified(Arc::new(receipt))
             }
-            Ok(receipt) => GenerationDefaultRefusalProgress::Refusing {
-                receipt: Arc::new(receipt),
-            },
+            Ok(receipt) => GenerationDefaultRefusalProgress::Refusing { receipt },
         };
         let old = std::mem::replace(&mut attempt.phase, GenerationRetirementPhase::Reserving);
         let GenerationRetirementPhase::Reserved {
@@ -1625,27 +1640,28 @@ impl RunState {
         else {
             return;
         };
-        if let GenerationDefaultRefusalProgress::Refusing { receipt } = progress {
-            // This phase has not published its receipt. Refuse before source
-            // mutation if an unexpected observer already shares the projection.
-            let Some(actual) = Arc::get_mut(receipt) else {
-                *progress = GenerationDefaultRefusalProgress::ProjectionRefused(
-                    GenerationRetirementProjectionRefusal::ReceiptAlreadyObserved,
-                );
-                return;
-            };
-            // The actual affine operation and its capture remain in the record
-            // across the borrowed B-then-A transition and any panic.
+        if matches!(progress, GenerationDefaultRefusalProgress::Refusing { .. }) {
             let Some(reserved) = publication.reserved_mut() else {
                 return;
             };
+            let old = std::mem::replace(
+                progress,
+                GenerationDefaultRefusalProgress::SourceSettlementInProgress,
+            );
+            let GenerationDefaultRefusalProgress::Refusing { mut receipt } = old else {
+                *progress = old;
+                return;
+            };
+            // The actual affine operation, fence and capture remain in the
+            // record across this borrowed transition. An interrupted transition
+            // retains uncertainty; it never replays a source restoration.
             match reserved.refuse_retirement(
                 fence,
                 "generation retirement refused because admitted dependent work remains",
             ) {
                 Ok(source_settlement) => {
-                    actual.state = RlRetirementState::ReloadAReopened;
-                    let receipt = receipt.clone();
+                    receipt.state = RlRetirementState::ReloadAReopened;
+                    let receipt = Arc::new(receipt);
                     let evidence = Arc::new(
                         crate::resident_actor::RetirementDiagnosticEvidence::default_refusal(
                             &receipt,
@@ -1659,7 +1675,7 @@ impl RunState {
                 }
                 Err(error) => {
                     *progress = GenerationDefaultRefusalProgress::SettlementFailed {
-                        receipt: receipt.clone(),
+                        receipt: Arc::new(receipt),
                         error: Arc::new(error),
                     };
                 }
@@ -1693,13 +1709,17 @@ impl RunState {
             Ok(completion) => {
                 // Canonical live directory owners retain their resource cleanup.
                 // Record the compact fact before releasing the heavy product.
+                let candidate_identity = attempt.candidate.identity_observer();
                 let record = self
                     .reservations
                     .get_mut(&actor)
                     .expect("the exclusive owner retains its reservation");
                 let displaced = std::mem::replace(
                     &mut record.retirement,
-                    GenerationRetirementRecord::Completed(completion),
+                    GenerationRetirementRecord::Completed(GenerationRetirementCompleted {
+                        candidate: candidate_identity,
+                        outcome: completion,
+                    }),
                 );
                 drop(displaced);
             }
@@ -1732,13 +1752,16 @@ impl RunState {
                         .push(RetainedGenerationRetirementRecord::Active(retained));
                     self.retirement_discards.push(discard);
                 }
-                GenerationRetirementRecord::Completed(completion) => {
-                    self.lost_retirements
-                        .push(RetainedGenerationRetirementRecord::Completed {
-                            actor: *actor,
-                            completion,
-                        })
-                }
+                GenerationRetirementRecord::Completed(GenerationRetirementCompleted {
+                    outcome,
+                    candidate,
+                }) => self
+                    .lost_retirements
+                    .push(RetainedGenerationRetirementRecord::Completed {
+                        actor: *actor,
+                        candidate,
+                        completion: outcome,
+                    }),
                 GenerationRetirementRecord::Idle => {}
             }
         }
