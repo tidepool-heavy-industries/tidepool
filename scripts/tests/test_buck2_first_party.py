@@ -1054,6 +1054,19 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertIn('LD_LIBRARY_PATH', group['resource_env'])
         self.assertIn('//build/package:tidepool_extract_runtime_libraries', group['resources'])
         self.assertNotIn('TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256', rooted['env'])
+        retirement = self.rule('exomonad/actor', 'actor_generation_retirement_owner_tests',
+                               'tidepool_rust_test_cases')
+        self.assertEqual(retirement['binary'], group['binary'])
+        self.assertEqual(retirement['exact_tests'], [
+            'resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate',
+        ])
+        self.assertEqual(retirement['expected_count'], 1)
+        self.assertTrue(retirement['ignored'])
+        self.assertEqual(retirement['case_compiler_modes'], {
+            name: 'owned-resident' for name in retirement['exact_tests']
+        })
+        self.assertEqual(retirement['resource_env'], rooted['resource_env'])
+        self.assertEqual(retirement['resources'], rooted['resources'])
 
     def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [

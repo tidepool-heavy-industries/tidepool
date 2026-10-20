@@ -1751,6 +1751,22 @@ tidepool_buildscript_run(
                     runtime_arguments(world_env, world_resources, world_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
+                retirement_tests = [
+                    "resident_workbench::request_tests::actual_retirement_owner_loss_after_reservation_retains_frozen_candidate",
+                ]
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "actor_generation_retirement_owner_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings(retirement_tests, 8), "    ],",
+                    f"    expected_count = {len(retirement_tests)},", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + ", ".join(
+                        json.dumps(test) + ': "owned-resident"' for test in retirement_tests
+                    ) + "},",
+                    runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
                 renderer_controls = ["resident_workbench::request_tests::" + name for name in (
                     "renderer_producer_loss_preserves_shared_terminal_cause_for_current_and_later_observers",
                     "renderer_producer_and_waiter_release_machine_checkout",
