@@ -161,7 +161,8 @@ pub(super) fn reload_disposition(
         Ok(SrReloadOutcome::ReloadRetirement(receipt)) => {
             use tidepool_bridge_effects::{RlCleanupOutcome, RlRetirementState, RlStopOutcome};
             match &receipt.state {
-                RlRetirementState::ReloadRetirementFenced(_) => {
+                RlRetirementState::ReloadRetirementFenced(_)
+                | RlRetirementState::ReloadBPublishedAUnsettled(..) => {
                     WorkbenchOperationDisposition::Unknown
                 }
                 RlRetirementState::ReloadBPublished(..) => WorkbenchOperationDisposition::Committed,
