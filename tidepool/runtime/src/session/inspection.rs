@@ -507,6 +507,7 @@ pub(super) enum InspectionWorldInputs {
         primary:
             Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
         bindings: tidepool_toolchain::compiler_world::CompilerWorldBindings,
+        lexical: tidepool_toolchain::compiler_world::CompilerWorldLexicalSurface,
     },
 }
 
@@ -682,24 +683,41 @@ pub fn finish_admitted_compiler_world(
     settled: crate::CompilerTransactionSettled<Result<PreparedCompilerWorld, WorldInspectionError>>,
 ) -> Result<CompletedCompilerWorld, WorldInspectionError> {
     let (prepared, cancellation) = finish_world_operation(settled, |prepared| &prepared.origin)?;
-    Ok(CompletedCompilerWorld { association: prepared.association, cancellation })
+    Ok(CompletedCompilerWorld {
+        association: prepared.association,
+        cancellation,
+    })
 }
 
 fn finish_world_operation<T>(
     settled: crate::CompilerTransactionSettled<Result<T, WorldInspectionError>>,
     origin: impl Fn(&T) -> &crate::CompilerTransactionOrigin,
 ) -> Result<(T, crate::HostAdmissionCancellation), WorldInspectionError> {
-    let same_owner = settled.action().as_ref().is_ok_and(|prepared| settled.belongs_to(origin(prepared)));
+    let same_owner = settled
+        .action()
+        .as_ref()
+        .is_ok_and(|prepared| settled.belongs_to(origin(prepared)));
     let cancellation = settled.host_admission_cancellation().cloned();
     let outcome = settled.into_outcome();
-    if !matches!(outcome.close, crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted) {
-        return Err(WorldInspectionError::CompilerClose { primary: outcome.action.err().map(Box::new), close: outcome.close });
+    if !matches!(
+        outcome.close,
+        crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted
+    ) {
+        return Err(WorldInspectionError::CompilerClose {
+            primary: outcome.action.err().map(Box::new),
+            close: outcome.close,
+        });
     }
     let prepared = outcome.action?;
     if !same_owner {
-        return Err(CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::DifferentOwner).into());
+        return Err(CompileError::CompilerPublication(
+            crate::CompilerTransactionPublicationError::DifferentOwner,
+        )
+        .into());
     }
-    let cancellation = cancellation.ok_or(CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner))?;
+    let cancellation = cancellation.ok_or(CompileError::CompilerPublication(
+        crate::CompilerTransactionPublicationError::MissingOwner,
+    ))?;
     cancellation.checkpoint().map_err(CompileError::from)?;
     Ok((prepared, cancellation))
 }
@@ -715,13 +733,17 @@ fn acquire_compiler_world(
 {
     match inputs {
         InspectionWorldInputs::Published(world) => Ok(world),
-        InspectionWorldInputs::Cold { primary, bindings } => {
+        InspectionWorldInputs::Cold {
+            primary,
+            bindings,
+            lexical,
+        } => {
             let sources = capture_sources()?.ok_or(WorldInspectionError::UnsupportedSource)?;
             if sources.origin() != base.source.bytes() {
                 return Err(invalid("cold sources differ from the admitted source owner").into());
             }
             let cold = tidepool_toolchain::artifacts::ModuleCandidateOffer::compiler_world_inputs(
-                primary, bindings, sources,
+                primary, bindings, sources, lexical,
             )?;
             let command = ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
             let endpoint = tidepool_toolchain::toolchain::AdmittedCompilerEndpoint::from_bound(

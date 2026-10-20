@@ -532,11 +532,152 @@ pub struct WorldBindingName {
     pub namespace: String,
 }
 
+/// The selected declaration facade remains with its issuing publication owner.
+/// Availability of another interface does not select it for source imports.
+#[derive(Clone, Debug)]
+pub enum WorldDeclarationSelection {
+    Joined(Arc<crate::declaration_join::AcceptedJoin>),
+    Recovered(Arc<crate::declaration_join::RecoveredDeclarationTip>),
+}
+
+/// Source syntax selected by the runtime's captured publication. Runtime grants
+/// remain in the admission that owns this description.
+#[derive(Clone, Debug)]
+pub struct CompilerWorldLexicalSurface {
+    import_specs: Arc<[String]>,
+    declaration: Option<WorldDeclarationSelection>,
+    metadata_bytes: u64,
+}
+
+impl CompilerWorldLexicalSurface {
+    pub fn from_publication(
+        import_specs: Vec<String>,
+        declaration: Option<WorldDeclarationSelection>,
+    ) -> Result<Self, CompileError> {
+        let mut bytes = import_specs.iter().try_fold(128u64, |bytes, spec| {
+            if spec.is_empty() || spec.contains('\0') || spec.contains('\n') {
+                return Err(source_failure(
+                    "invalid published compiler import specification",
+                ));
+            }
+            bytes
+                .checked_add(spec.len() as u64 + 32)
+                .ok_or_else(source_size_failure)
+        })?;
+        let exports = match &declaration {
+            Some(WorldDeclarationSelection::Joined(join)) => join.exports(),
+            Some(WorldDeclarationSelection::Recovered(tip)) => tip.exports(),
+            None => &[],
+        };
+        for export in exports {
+            crate::host_work::checkpoint()?;
+            bytes = bytes.checked_add(64).ok_or_else(source_size_failure)?;
+            for name in std::iter::once(&export.head).chain(&export.children) {
+                let text = name
+                    .unit
+                    .len()
+                    .saturating_add(name.module.len())
+                    .saturating_add(name.occurrence.len())
+                    .saturating_add(name.record_parent.as_ref().map_or(0, String::len));
+                bytes = bytes
+                    .checked_add(text as u64 + 128)
+                    .ok_or_else(source_size_failure)?;
+            }
+        }
+        let allowance = capture_allowance()?;
+        if bytes > allowance {
+            return Err(binding_capture_refusal(bytes, allowance));
+        }
+        Ok(Self {
+            import_specs: import_specs.into(),
+            declaration,
+            metadata_bytes: bytes,
+        })
+    }
+
+    fn materialize<BS: fvm_ipld_blockstore::Blockstore>(
+        &self,
+        primary: &ExactDeclarationContext,
+        materializer: &mut Materializer<'_, BS>,
+    ) -> Result<cid::Cid, CompileError> {
+        let declaration = match &self.declaration {
+            None => ciborium::value::Value::Null,
+            Some(selected) => {
+                let (owner, expected_artifact, expected_interface, exports) = match selected {
+                    WorldDeclarationSelection::Joined(join) => (
+                        crate::declaration_join::ExactModuleIdentity {
+                            unit: join.reserved().unit.clone(),
+                            module: join.reserved().module.clone(),
+                        },
+                        Some(join.artifact_id()),
+                        crate::checked_cell::hash(join.interface_bytes()),
+                        join.exports(),
+                    ),
+                    WorldDeclarationSelection::Recovered(tip) => (
+                        tip.root().clone(),
+                        None,
+                        tip.interface_sha256().to_owned(),
+                        tip.exports(),
+                    ),
+                };
+                let roles = primary
+                    .compiler_source_support()
+                    .projection()
+                    .snapshot_roles();
+                let interface = roles
+                    .get(&owner)
+                    .ok_or_else(|| {
+                        source_failure("selected declaration facade has no primary compiler role")
+                    })?
+                    .interface();
+                if expected_artifact.is_some_and(|expected| expected != interface) {
+                    return Err(source_failure(
+                        "selected declaration facade has another primary interface",
+                    ));
+                }
+                let payloads = primary
+                    .compiler_source_support()
+                    .artifacts()
+                    .retained_payloads();
+                let artifact = payloads.get(&interface).ok_or_else(|| {
+                    source_failure(
+                        "selected declaration facade lacks its primary interface custody",
+                    )
+                })?;
+                if artifact.descriptor.owner != owner
+                    || world_hex(&artifact.descriptor.interface_sha256) != expected_interface
+                {
+                    return Err(source_failure(
+                        "selected declaration facade differs from its published interface",
+                    ));
+                }
+                let encoded_exports = crate::declaration_join::encode_declaration_exports(exports);
+                world_array(vec![
+                    world_text(owner.unit),
+                    world_text(owner.module),
+                    world_blob(interface.0),
+                    world_blob(encoded_exports),
+                ])
+            }
+        };
+        let lexical = world_array(vec![
+            world_text("TPCWLEX1"),
+            world_array(self.import_specs.iter().map(world_text).collect()),
+            declaration,
+        ]);
+        let root = materializer
+            .materialize_value(&lexical)
+            .map_err(|error| source_failure(error.to_string()))?;
+        Ok(root)
+    }
+}
+
 pub struct CompilerWorldOpenInputs {
     primary_context: Arc<ExactDeclarationContext>,
     visible_rows: Vec<Arc<CheckedValueArtifact>>,
     bindings: CompilerWorldBindings,
     sources: Arc<CapturedCompilerSources>,
+    lexical: CompilerWorldLexicalSurface,
     directory: Arc<tempfile::TempDir>,
 }
 
@@ -546,6 +687,7 @@ impl CompilerWorldOpenInputs {
         visible_rows: Vec<Arc<CheckedValueArtifact>>,
         bindings: CompilerWorldBindings,
         sources: Arc<CapturedCompilerSources>,
+        lexical: CompilerWorldLexicalSurface,
         directory: Arc<tempfile::TempDir>,
     ) -> Result<Self, CompileError> {
         Ok(Self {
@@ -553,6 +695,7 @@ impl CompilerWorldOpenInputs {
             visible_rows,
             bindings,
             sources,
+            lexical,
             directory,
         })
     }
@@ -567,6 +710,7 @@ pub struct CompilerWorldRestoration {
     primary_associations: MaterializedMap<ArtifactBinding, cid::Cid>,
     primary_compiler_inputs: Arc<crate::declaration_context::RequestCompilerInputs>,
     bindings: MaterializedMap<String, WorldBindingSnapshotFact>,
+    lexical_root: cid::Cid,
     producer: [u8; 32],
     profile: [u8; 32],
     descriptor: PathBuf,
@@ -588,6 +732,10 @@ impl fmt::Debug for CompilerWorldRestoration {
 impl CompilerWorldRestoration {
     pub fn logical_id(&self) -> &[u8; 32] {
         &self.logical_id
+    }
+
+    pub fn lexical_root(&self) -> &cid::Cid {
+        &self.lexical_root
     }
 
     /// Occurrence identities of the restored binding table. A restored world
@@ -1011,7 +1159,7 @@ fn world_restoration_product(
 ) -> Result<Vec<u8>, CompileError> {
     world_bytes(&world_array(vec![
         world_text("TPCWREST"),
-        3u64.into(),
+        4u64.into(),
         world_blob(roots.primary.to_bytes()),
         world_blob(source_seal),
         world_blob(producer),
@@ -1019,6 +1167,7 @@ fn world_restoration_product(
         query_scope.into(),
         world_blob(roots.associations.to_bytes()),
         world_blob(roots.bindings.to_bytes()),
+        world_blob(roots.lexical.to_bytes()),
     ]))
 }
 
@@ -1476,6 +1625,8 @@ pub(crate) fn world_context_fixture(
         &mut materializer,
         &mut remaining,
     )?;
+    let lexical = CompilerWorldLexicalSurface::from_publication(Vec::new(), None)?
+        .materialize(context, &mut materializer)?;
     let mut acquisition = rows
         .arenas
         .acquisition(rows.images.into_values().collect())?;
@@ -1532,6 +1683,7 @@ pub(crate) fn world_context_fixture(
                 .map(|(cid, body)| world_array(vec![world_blob(cid.to_bytes()), world_blob(body)]))
                 .collect(),
         ),
+        world_blob(lexical.to_bytes()),
     ]))
 }
 
@@ -1617,6 +1769,7 @@ impl CompilerWorldOpenInputs {
         let envelope_bytes = block_bytes
             .checked_add(self.sources.encoded().len() as u64)
             .and_then(|n| n.checked_add(self.bindings.metadata_bytes))
+            .and_then(|n| n.checked_add(self.lexical.metadata_bytes))
             .ok_or_else(source_size_failure)?;
         let mut remaining_raw = capture_allowance()?
             .checked_sub(envelope_bytes)
@@ -1670,6 +1823,7 @@ impl CompilerWorldOpenInputs {
         let bindings = binding_materializer
             .materialize_map(None, &binding_facts)
             .map_err(|error| source_failure(error.to_string()))?;
+        let lexical_root = self.lexical.materialize(&self.primary_context, &mut binding_materializer)?;
         let staged = binding_materializer
             .finish()
             .map_err(|error| source_failure(error.to_string()))?;
@@ -1680,6 +1834,7 @@ impl CompilerWorldOpenInputs {
                     primary: *primary_root.cid(),
                     associations: *primary_associations.root().cid(),
                     bindings: *bindings.root().cid(),
+                    lexical: lexical_root,
                 },
             )
             .map_err(|error| source_failure(error.to_string()))?;
@@ -1720,7 +1875,7 @@ impl CompilerWorldOpenInputs {
         let descriptor = self.directory.path().join("world.cbor");
         let encoded = world_bytes(&world_array(vec![
             world_text("TPCWORLD"),
-            3u64.into(),
+            4u64.into(),
             world_blob(&product),
             world_path(&source_path)?,
             world_blob(producer),
@@ -1741,6 +1896,7 @@ impl CompilerWorldOpenInputs {
             primary_associations,
             primary_compiler_inputs,
             bindings,
+            lexical_root,
             producer,
             profile,
             descriptor,
@@ -2110,28 +2266,23 @@ impl WorldItemProof {
 pub struct WorldSourceSelection {
     sha256: [u8; 32],
     revision: String,
-    public_root: crate::declaration_join::ExactModuleIdentity,
 }
 
 impl WorldSourceSelection {
     pub fn new(
         sha256: [u8; 32],
         revision: impl Into<String>,
-        public_root: crate::declaration_join::ExactModuleIdentity,
     ) -> Result<Self, CompileError> {
         let revision = revision.into();
         if sha256 == [0; 32]
             || revision.is_empty()
             || revision.len() > 65536
-            || public_root.unit.is_empty()
-            || public_root.module.is_empty()
         {
             return Err(source_failure("world source selection is incomplete"));
         }
         Ok(Self {
             sha256,
             revision,
-            public_root,
         })
     }
 
@@ -2143,9 +2294,6 @@ impl WorldSourceSelection {
         &self.revision
     }
 
-    pub fn public_root(&self) -> &crate::declaration_join::ExactModuleIdentity {
-        &self.public_root
-    }
 }
 
 /// Exact logical world issued with a checked cell.
@@ -2485,7 +2633,7 @@ fn world_cell_output_certificate(
         digest.update(&(bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     };
-    frame(b"TidepoolCheckedWorldCellProgram2");
+    frame(b"TidepoolCheckedWorldCellProgram3");
     frame(reservation.admission_digest());
     frame(&world_digest(reservation.plan().receipt()));
     frame(logical.logical_id());
@@ -2494,8 +2642,6 @@ fn world_cell_output_certificate(
     for selection in [original, target] {
         frame(selection.sha256());
         frame(selection.revision().as_bytes());
-        frame(selection.public_root().unit.as_bytes());
-        frame(selection.public_root().module.as_bytes());
     }
     for item in items {
         frame(&(item.ordinal as u64).to_le_bytes());
@@ -3816,6 +3962,7 @@ mod answer_tests {
             None,
             CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             Arc::clone(&sources),
+            CompilerWorldLexicalSurface::from_publication(Vec::new(), None).unwrap(),
         )
         .unwrap();
         assert_eq!(cold.primary_context.snapshot().producer_sha256(), [0; 32]);
@@ -3834,6 +3981,7 @@ mod answer_tests {
             Some(bound),
             CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             Arc::clone(&sources),
+            CompilerWorldLexicalSurface::from_publication(Vec::new(), None).unwrap(),
         )
         .unwrap();
         assert_eq!(issued.materialize_primary(&endpoint).unwrap().1, root);
@@ -3843,6 +3991,7 @@ mod answer_tests {
             )),
             CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             sources,
+            CompilerWorldLexicalSurface::from_publication(Vec::new(), None).unwrap(),
         )
         .unwrap();
         assert!(wrong.materialize_primary(&endpoint).is_err());
@@ -3992,10 +4141,10 @@ mod answer_tests {
         let encoded = world_context_fixture(&context, directory.path()).unwrap();
         let parcel: ciborium::value::Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
         let fields = parcel.as_array().unwrap();
-        assert_eq!(fields.len(), 5);
+        assert_eq!(fields.len(), 6);
         assert!(fields[2].as_array().unwrap().is_empty());
         let blocks = fields[4].as_array().unwrap();
-        for root in &fields[..2] {
+        for root in [&fields[0], &fields[1], &fields[5]] {
             assert!(blocks
                 .iter()
                 .any(|block| &block.as_array().unwrap()[0] == root));
@@ -4081,6 +4230,33 @@ mod identity_tests {
     use crate::exact_context::{FrontierWork, Materializer, ReachableBlocks};
     use fvm_ipld_blockstore::MemoryBlockstore;
 
+    #[test]
+    fn source_selection_names_the_captured_namespace_and_refuses_missing_identity() {
+        let original = WorldSourceSelection::new([7; 32], "captured-source").unwrap();
+        let target = WorldSourceSelection::new([7; 32], "captured-source").unwrap();
+        assert_eq!(original, target);
+        assert!(WorldSourceSelection::new([0; 32], "captured-source").is_err());
+        assert!(WorldSourceSelection::new([7; 32], "").is_err());
+        assert!(WorldSourceSelection::new([7; 32], "x".repeat(65537)).is_err());
+    }
+
+    #[test]
+    fn lexical_surface_preserves_order_qualification_and_explicit_empty_imports() {
+        let primary = ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap();
+        let root = |imports: &[&str]| {
+            let store = MemoryBlockstore::new();
+            let mut materializer = Materializer::new(&store);
+            CompilerWorldLexicalSurface::from_publication(
+                imports.iter().map(|spec| (*spec).to_owned()).collect(), None,
+            ).unwrap().materialize(&primary, &mut materializer).unwrap()
+        };
+        assert_eq!(root(&["Data.List ()"]), root(&["Data.List ()"]));
+        assert_ne!(root(&[]), root(&["Data.List ()"]));
+        assert_ne!(root(&["Data.List"]), root(&["qualified Data.List as L"]));
+        assert_ne!(root(&["Data.List hiding (map)"]), root(&["Data.List"]));
+        assert_ne!(root(&["Data.List", "Data.Maybe"]), root(&["Data.Maybe", "Data.List"]));
+    }
+
     fn captured_sources(body: &[u8], origin: &[u8]) -> CapturedCompilerSources {
         let root = CapturedCompilerSourceRoot {
             manifest: SourceRootManifest::from_file_digests([(
@@ -4102,13 +4278,14 @@ mod identity_tests {
         query_scope: u64,
     ) -> [u8; 32] {
         let roots = history.roots();
-        assert_eq!(roots.len(), 3);
+        assert_eq!(roots.len(), 4);
         world_digest(
             &world_restoration_product(
                 &SemanticRoots {
                     primary: roots[0],
                     associations: roots[1],
                     bindings: roots[2],
+                    lexical: roots[3],
                 },
                 sources.seal(),
                 producer,
@@ -4133,12 +4310,13 @@ mod identity_tests {
         let bindings = materializer
             .materialize_value(&("bindings", vec![leaf]))
             .unwrap();
+        let lexical = materializer.materialize_value(&("lexical", vec![leaf])).unwrap();
         let extra = materializer.materialize_value(&("extra", 1u64)).unwrap();
         let transient = materializer
-            .materialize_value(&("transient", vec![context, associations, bindings, extra]))
+            .materialize_value(&("transient", vec![context, associations, bindings, lexical, extra]))
             .unwrap();
         let staged = materializer.finish().unwrap();
-        let roots = vec![context, associations, bindings];
+        let roots = vec![context, associations, bindings, lexical];
 
         // Same final semantic roots, three materially different restoration
         // histories.
@@ -4163,10 +4341,10 @@ mod identity_tests {
         let reused_work = reused.work();
         let reordered_work = reordered.work();
         assert_eq!(reused_work, FrontierWork::default());
-        assert_eq!((cold_work.link_visits, cold_work.unlink_visits), (7, 0));
+        assert_eq!((cold_work.link_visits, cold_work.unlink_visits), (9, 0));
         assert_eq!(
             (reordered_work.link_visits, reordered_work.unlink_visits),
-            (3, 5)
+            (4, 6)
         );
         assert!(cold_work.verified_bytes > 0 && cold_work.decoded_bytes > 0);
         assert_eq!(
@@ -4191,10 +4369,17 @@ mod identity_tests {
         );
 
         let changed_root = cold
-            .replace_roots(&staged, vec![context, associations, extra])
+            .replace_roots(&staged, vec![context, associations, extra, lexical])
             .unwrap();
         assert_ne!(
             identity(&changed_root, &source, &producer, &profile, query_scope),
+            cold_identity
+        );
+        let changed_lexical = cold
+            .replace_roots(&staged, vec![context, associations, bindings, extra])
+            .unwrap();
+        assert_ne!(
+            identity(&changed_lexical, &source, &producer, &profile, query_scope),
             cold_identity
         );
         let changed_source = captured_sources(b"module Module where\nx = 2\n", b"origin-a");
