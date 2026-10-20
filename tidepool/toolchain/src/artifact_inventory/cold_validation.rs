@@ -91,7 +91,7 @@ fn validate_artifact_row(
                 .ok_or_else(|| failure("native canonical carrier missing"))?,
         ),
         ArtifactPayload::Canonical(interface) => Some(interface),
-        ArtifactPayload::Interface(_, _) => None,
+        ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
     };
     if let Some(canonical) = canonical {
         let sealed = canonical

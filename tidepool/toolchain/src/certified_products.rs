@@ -9417,7 +9417,7 @@ pub(crate) fn certify_products_with_validation(
                         crate::artifact_inventory::ArtifactPayload::Original(product) => {
                             product.module_interface().cloned()
                         }
-                        crate::artifact_inventory::ArtifactPayload::Interface(_, _) => None,
+                        crate::artifact_inventory::ArtifactPayload::Interface(_, _) | crate::artifact_inventory::ArtifactPayload::PackageCode(_) => None,
                     })
                     .collect()
             });
