@@ -9620,7 +9620,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            !resident.prepared_machine_ready(),
+            !resident.is_bootstrapped(),
             "edited binder metadata reached native install"
         );
         assert_eq!(binding_prefix.snapshot().compiler_prefix().next_item(), 0);
