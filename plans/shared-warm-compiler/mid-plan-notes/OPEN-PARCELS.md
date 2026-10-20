@@ -110,9 +110,17 @@ drawing any second-cell conclusion.
 - Ordinals are fixture-local and unstable across bases (earlier observation:
   4192 vs 4205); do not treat them as identity.
 - Do not use the concurrent scratch-tree trace: that investigation ran in
-  `tidepool-front-door-rebase-20261019` with local `native_availability.rs`
-  edits and fails as `InputNoCompatibleCandidate { candidate_count: 0 }`
-  instead. Different base, different refusal.
+  `tidepool-front-door-rebase-20261019` (a 20-commit front-door stack, not one
+  commit) with local `artifact_inventory.rs` and `native_availability.rs` edits,
+  and fails as `InputNoCompatibleCandidate { candidate_count: 0 }` instead.
+  Its tree-local finding is that the catalog does return one permitted support
+  for `(G4, 4)`, which is then removed by the `IssuedChoices` exact-binding
+  retain — pointing at an `ArtifactSelectionId` mismatch rather than a missing
+  row. That hypothesis is **unmeasured on the join**; the tree's uncommitted
+  edits change the failure shape. Notes:
+  `reviews/A1C-INSTRUMENTED-TREE.md`. Its first next observation
+  (`input_demand_decision`: `chosen` vs supported binding) is instrumented but
+  was never run to completion.
 - Open question: why `Tidepool.Effects.Core` is absent from the inventory.
   A link to the Batch A #8 capability gap (`aee5881d9c` removed the candidate
   native authority issuer) is plausible and unproven.
