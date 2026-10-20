@@ -16,6 +16,8 @@ use tidepool_repr::execution_schema::{
     ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature, SymbolIdentity,
 };
 
+mod native_demand;
+pub(crate) use native_demand::NativeDemandPacket;
 mod entry_dependencies;
 mod finalized_module;
 pub(crate) use entry_dependencies::EntryDependencySelection;
@@ -4776,6 +4778,10 @@ impl ResolvedOriginalBindings {
         operation: &Arc<InventoryOperation>,
     ) -> bool {
         Arc::ptr_eq(&self.basis, source) && Arc::ptr_eq(&self.operation, operation)
+    }
+
+    pub(crate) fn sources(&self) -> impl Iterator<Item = &(CachedHomeOwner, u32)> {
+        self.uses.values()
     }
 
     pub(crate) fn get(&self, import: &ReceiptImportOwner) -> Option<&(CachedHomeOwner, u32)> {

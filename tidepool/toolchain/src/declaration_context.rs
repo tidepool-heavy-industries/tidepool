@@ -2780,7 +2780,75 @@ impl DemandNativeInputs {
     }
 }
 
+/// Exact closure selected by one in-flight request. Package obligations are
+/// unresolved code demand until the package producer completes this owner.
+/// Broader body availability cannot construct an executable-ready result.
+pub(crate) struct ResolvedNativeDemand {
+    demand: DemandNativeInputs,
+    groups: DemandCertifiedGroups,
+}
+
+impl ResolvedNativeDemand {
+    pub(crate) fn groups(&self) -> &DemandCertifiedGroups {
+        &self.groups
+    }
+
+    pub(crate) fn belongs_to(&self, inputs: &Arc<RequestCompilerInputs>) -> bool {
+        Arc::ptr_eq(self.demand.cold(), inputs)
+    }
+}
+
 impl RequestCompilerInputs {
+    /// Resolve reached Original references through this same actual input owner.
+    /// The daemon can relay the packet but cannot call this without its owner.
+    pub(crate) fn resolve_native_demand(
+        self: &Arc<Self>,
+        packet: &crate::certified_products::NativeDemandPacket,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<ResolvedNativeDemand, CompileError> {
+        let resolved = crate::certified_products::ResolvedOriginalBindings::issue(
+            Arc::clone(&self.source_support),
+            Arc::clone(&validation.inventory),
+            packet.originals(),
+        )
+        .map_err(compiler_evidence_failure)?;
+        let budget = NativeDemandBudget(Some(&validation.inventory));
+        let mut roots = BTreeSet::new();
+        let mut sources = Vec::new();
+        for (owner, ordinal) in resolved.sources() {
+            budget.checkpoint()?;
+            budget.strings(
+                owner
+                    .unit
+                    .len()
+                    .saturating_add(owner.module.len())
+                    .saturating_mul(2),
+            )?;
+            budget.reserve::<ExternalSourceGlobal<'_>>(1)?;
+            budget.reserve::<(ExactModuleIdentity, [usize; 4])>(1)?;
+            roots.insert(identity(&owner.unit, &owner.module));
+            sources.push(ExternalSourceGlobal {
+                unit: Cow::Owned(owner.unit.clone()),
+                module: Cow::Owned(owner.module.clone()),
+                module_version: Some(Cow::Owned(owner.module_version.clone())),
+                original_ordinal: *ordinal,
+            });
+        }
+        let inputs = ReceiptNativeInputDemand {
+            sources,
+            resolved_originals: Some(resolved),
+        };
+        let projection = self.demanded_compiler_projection(&roots, &validation.inventory)?;
+        let demand = self
+            .demanded_native_inputs(projection, &roots, &validation.inventory)
+            .map_err(|error| match error {
+                DemandNativeInputsError::Compiler(error) => error,
+                other => failure(format!("native demand refused: {other}")),
+            })?;
+        let groups = demand.certify_receipt_groups(&inputs, validation)?;
+        Ok(ResolvedNativeDemand { demand, groups })
+    }
+
     /// Consume a closed role/interface demand from this exact cold owner. The
     /// caller supplies additional native roots from its source/instance proof;
     /// custody alone cannot supply a new direct body choice.
@@ -20678,9 +20746,49 @@ mod tests {
                 },
                 source_recipe: WorkerExecutionSource::Ordinary,
             };
+            let primary = cold
+                .compiler_source_support()
+                .compiler_primary_input(&root)
+                .unwrap()
+                .unwrap();
+            let pair = |binding: ArtifactBinding| {
+                Value::Array(vec![
+                    Value::Bytes(binding.artifact.0.to_vec()),
+                    Value::Bytes(binding.selection.0.to_vec()),
+                ])
+            };
+            let symbol = &receipt.targets["target"][0].identity;
+            let wire = Value::Array(vec![
+                text("TPNATIVEDEMAND1"),
+                Value::Array(vec![Value::Array(vec![
+                    text(&root.unit),
+                    text(&root.module),
+                    pair(primary.interface()),
+                    pair(primary.original().unwrap()),
+                    Value::Array(vec![
+                        text(&symbol.unit),
+                        text(&symbol.module),
+                        text(&symbol.namespace),
+                        text(&symbol.occurrence),
+                        symbol.record_parent.as_ref().map_or(Value::Null, text),
+                    ]),
+                ])]),
+            ]);
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&wire, &mut bytes).unwrap();
+            let packet = crate::certified_products::NativeDemandPacket::decode(
+                &bytes,
+                &validation.inventory,
+            )
+            .unwrap();
+            let resolved = cold.resolve_native_demand(&packet, &mut validation);
             let result = selected
                 .certify_receipt_groups(&receipt_input_demand_fixture(&receipt), &mut validation);
             if matches!(mode, NativeArtifactDemand::ScopeInterfaces) {
+                assert!(
+                    resolved.is_err(),
+                    "native exchange cannot expand an empty issued offer"
+                );
                 assert!(
                     result.is_err(),
                     "type custody cannot select an executable group"
@@ -20688,6 +20796,11 @@ mod tests {
                 continue;
             }
             let groups = result.unwrap();
+            let resolved = resolved.unwrap();
+            assert!(resolved.belongs_to(&cold));
+            assert_eq!(resolved.groups().bindings(), groups.bindings());
+            assert!(resolved.groups().retained_bindings().is_empty());
+            assert!(resolved.groups().package_obligations().is_empty());
             assert_eq!(
                 groups
                     .groups()
