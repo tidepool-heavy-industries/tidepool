@@ -186,20 +186,21 @@ fn renderer_production_keeps_action_and_unconfirmed_close_together() {
         ),
     );
     let error = ResidentActorWorkbenchError::RendererProduction {
-        failure: RendererProductionFailure::CloseUnconfirmed {
+        failure: Arc::new(RendererProductionFailure::CloseUnconfirmed {
             close: close.clone(),
             action_error: Some(ActivationRendererFailure::from(
                 CompileError::ExtractFailed("primary renderer action".into()),
             )),
-        },
+        }),
+        producer_join: None,
     };
-    let ResidentActorWorkbenchError::RendererProduction {
-        failure:
-            RendererProductionFailure::CloseUnconfirmed {
-                close: retained_close,
-                action_error: Some(ActivationRendererFailure::Frontend(primary)),
-            },
-    } = &error
+    let ResidentActorWorkbenchError::RendererProduction { failure, .. } = &error else {
+        panic!("renderer failure")
+    };
+    let RendererProductionFailure::CloseUnconfirmed {
+        close: retained_close,
+        action_error: Some(ActivationRendererFailure::Frontend(primary)),
+    } = failure.as_ref()
     else {
         panic!("compound renderer failure lost its typed action and close facts")
     };
@@ -229,13 +230,14 @@ fn renderer_production_keeps_action_and_publication_refusal_together() {
     use tidepool_runtime::session::RendererProductionFailure;
 
     let error = ResidentActorWorkbenchError::RendererProduction {
-        failure: RendererProductionFailure::Publication {
+        failure: Arc::new(RendererProductionFailure::Publication {
             error: tidepool_runtime::CompilerTransactionPublicationError::DifferentOwner,
             close: tidepool_runtime::CompilerTransactionClose::NotStarted,
             action_error: Some(ActivationRendererFailure::from(
                 CompileError::ExtractFailed("primary renderer action".into()),
             )),
-        },
+        }),
+        producer_join: None,
     };
     let diagnostic = error
         .failure_diagnostic()
@@ -246,4 +248,34 @@ fn renderer_production_keeps_action_and_publication_refusal_together() {
     assert!(error.to_string().contains("primary renderer action"));
     assert!(!error.is_tool_presentation_failure());
     assert!(error.requires_recovery());
+}
+
+#[test]
+fn renderer_clean_admission_failure_preserves_the_resident_recovery_requirement() {
+    use tidepool_runtime::session::turn::ActivationRendererFailure;
+    use tidepool_runtime::session::{
+        RendererProductionFailure, SessionError, StoreError, StoreErrorKind,
+    };
+    for kind in [StoreErrorKind::RecoveryRequired, StoreErrorKind::Storage] {
+        let cause = || {
+            ResidentError::Session(SessionError::RecoveryStore(Box::new(StoreError {
+                path: "renderer-recovery".into(),
+                kind,
+                detail: "typed resident failure".into(),
+            })))
+        };
+        let original = ResidentActorWorkbenchError::Resident(cause());
+        let renderer = ResidentActorWorkbenchError::RendererProduction {
+            failure: Arc::new(RendererProductionFailure::Compile(
+                ActivationRendererFailure::Admission(cause()),
+            )),
+            producer_join: None,
+        };
+        assert_eq!(renderer.requires_recovery(), original.requires_recovery());
+        assert_eq!(
+            renderer.requires_recovery(),
+            kind == StoreErrorKind::RecoveryRequired
+        );
+        assert_eq!(renderer.failure_diagnostic(), original.failure_diagnostic());
+    }
 }
