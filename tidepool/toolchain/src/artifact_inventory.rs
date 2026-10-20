@@ -11394,6 +11394,163 @@ mod tests {
         }
     }
 
+    #[test]
+    fn two_selected_roots_preserve_distinct_private_binding_histories() {
+        let inventory = ArtifactInventory::default();
+        let (left, old_values, new_values) = native_scope_fixture();
+        let right = issued_native_groups(
+            "PeerRoot",
+            vec![(
+                11,
+                vec![crate::certified_products::PendingImportOwner::Retained {
+                    identity: tidepool_repr::execution_schema::testing::identity("Values", "value"),
+                    generation: 4,
+                }],
+            )],
+            &[],
+            &BTreeMap::new(),
+        );
+        let values_owner = old_values.descriptor.owner.clone();
+        assert_eq!(values_owner, new_values.descriptor.owner);
+        assert_ne!(old_values.descriptor.id, new_values.descriptor.id);
+        let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut roots = Vec::new();
+        let mut value_sources = Vec::new();
+        for (native, values) in [(left, old_values), (right, new_values)] {
+            let native = Arc::new(native);
+            let values = Arc::new(values);
+            let physical = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    vec![native.clone(), values.clone()],
+                    NativeArtifactDemand::AllGroups,
+                )
+                .unwrap();
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap();
+            let requirements =
+                NativeOriginalRequirement::for_projection(&projection, &physical, &[]).unwrap();
+            assert_eq!(requirements.len(), 1);
+            let mut selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &physical.metadata_snapshot(),
+                    &validation.inventory,
+                )
+                .unwrap();
+            selection
+                .with_new_product_dependencies(&physical.metadata_snapshot(), &requirements)
+                .unwrap();
+            let issued =
+                crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                    &mut selection,
+                    &physical,
+                    vec![native.clone()],
+                )
+                .unwrap();
+            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &selection, &issued,
+            )
+            .unwrap();
+            let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
+            let closure = selection.selected_original_closure(&issued).unwrap();
+            let selected = completed.certify_original_closure(&closure).unwrap();
+            let groups = selected.artifacts().capture_graph_selection().native_groups;
+            assert_eq!(groups.len(), 1);
+            let group = groups[0];
+            assert_eq!(group.binding.artifact(), native.descriptor.id);
+            let (_, dependency) = scoped_group_child(selected.artifacts(), group);
+            assert_eq!(dependency.artifact, values.descriptor.id);
+            assert!(!selected
+                .projection()
+                .snapshot_roles()
+                .contains_key(&values_owner));
+            roots.push((native, selected, group, dependency));
+
+            // Selecting these same bytes as current source is a separate policy:
+            // two different canonical artifacts for Values cannot both win.
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[values.clone()]).unwrap();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &physical.metadata_snapshot(),
+                    &validation.inventory,
+                )
+                .unwrap();
+            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &selection, &physical,
+            )
+            .unwrap();
+            value_sources.push(CompilerSourceSupport::close_complete_output(&output).unwrap());
+        }
+        assert!(matches!(value_sources[0].merge(&value_sources[1]),
+            Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { owner }
+                    if owner == values_owner)));
+        let expected = roots
+            .iter()
+            .map(|(_, _, group, _)| *group)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected.len(), 2);
+        for joined in [
+            roots[0].1.merge(&roots[1].1).unwrap(),
+            roots[1].1.merge(&roots[0].1).unwrap(),
+        ] {
+            assert!(!joined
+                .projection()
+                .snapshot_roles()
+                .contains_key(&values_owner));
+            let context =
+                crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
+                    .unwrap()
+                    .extend_issued_compiler_support(&joined)
+                    .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs(roots[0].0.descriptor.producer_sha256)
+                .unwrap();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    &inputs,
+                    &validation.inventory,
+                )
+                .unwrap();
+            let inventory = inputs.artifacts().inventory();
+            let mut fixed = inventory
+                .bind_segment(inputs.artifacts(), vec![], &selection)
+                .unwrap();
+            let imports = [
+                issued_source(&roots[0].0, 7),
+                issued_source(&roots[1].0, 11),
+            ];
+            let target = inventory
+                .admit_bound_target(
+                    &mut fixed,
+                    &inventory.empty_view(),
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &selection,
+                )
+                .unwrap()
+                .artifacts;
+            assert_eq!(
+                target
+                    .capture_graph_selection()
+                    .native_groups
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                expected,
+            );
+            for (native, _, group, dependency) in &roots {
+                assert_eq!(scoped_group_child(&target, *group).1, *dependency);
+                assert!(target.roots().contains(&InventoryNodeKey::Group(*group)));
+                assert!(target.namespace().contains_key(&native.descriptor.id));
+                assert!(!target.namespace().contains_key(&dependency.artifact));
+                assert!(target.artifact_ids().contains(&dependency.artifact));
+            }
+        }
+    }
+
     fn assert_bound_segment_exact_carrier(complete: bool) {
         {
             let inventory = ArtifactInventory::default();
