@@ -9292,8 +9292,10 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         let demand = self.demand_primary_inputs()?;
         let groups = demand.certify_receipt_groups(&receipt, validation)?;
         let support = demand.semantic_source_support(&groups, operation)?;
-        let checked_values =
-            crate::checked_cell::CheckedValueImportAuthority::from_world_output(program)?;
+        let checked_values = crate::checked_cell::CheckedValueImportAuthority::from_world_stage(
+            program,
+            &self.binding.stage,
+        )?;
         let context = program.primary_context();
         let binding = WorldCompilationIdentity::from_binding(&self.binding);
         let inputs = DemandedWorldCompilerInputs::from_demand(
