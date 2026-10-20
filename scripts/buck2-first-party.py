@@ -1411,6 +1411,9 @@ def facade_test_cases(binary):
         ("facade_reload_default_publication_test", [
             "actor_host::coherent_reload_acceptance_tests::standard_reload_retains_complete_large_source_receipts_after_publication",
         ], host_env, service_host_paths, service_host_resources, True, False, 900),
+        ("facade_reload_frozen_source_test", [
+            "actor_host::coherent_reload_acceptance_tests::staged_reload_publishes_frozen_b_and_executes_it_after_disk_moves_to_c",
+        ], host_env, service_host_paths, service_host_resources, True, False, 900),
         ("facade_reload_force_refusal_test", [
             "actor_host::coherent_reload_acceptance_tests::unsupported_force_preserves_the_original_generation_for_a_later_default_reload",
         ], host_env, service_host_paths, service_host_resources, True, False, 900),
