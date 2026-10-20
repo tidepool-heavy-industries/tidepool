@@ -3941,8 +3941,12 @@ pub struct WorldCellBindingDemand {
     prior_stage: Vec<tidepool_repr::SessionVarId>,
 }
 impl WorldCellBindingDemand {
-    pub fn existing(&self) -> &[tidepool_repr::SessionVarId] { &self.existing }
-    pub fn prior_stage(&self) -> &[tidepool_repr::SessionVarId] { &self.prior_stage }
+    pub fn existing(&self) -> &[tidepool_repr::SessionVarId] {
+        &self.existing
+    }
+    pub fn prior_stage(&self) -> &[tidepool_repr::SessionVarId] {
+        &self.prior_stage
+    }
 }
 
 /// A borrowed view of one authenticated stage's selected runtime inputs.
@@ -4296,7 +4300,8 @@ impl CheckedWorldCellProgram {
         for stage in &self.output.stages {
             for input in &stage.selected_inputs {
                 match input.origin() {
-                    WorldCellRuntimeInputOrigin::BaseWorld | WorldCellRuntimeInputOrigin::CellOperand => {
+                    WorldCellRuntimeInputOrigin::BaseWorld
+                    | WorldCellRuntimeInputOrigin::CellOperand => {
                         existing.insert(input.session_var().raw());
                     }
                     WorldCellRuntimeInputOrigin::PriorStage { .. } => {
@@ -4306,11 +4311,16 @@ impl CheckedWorldCellProgram {
             }
         }
         WorldCellBindingDemand {
-            existing: existing.into_iter().map(tidepool_repr::SessionVarId::from_extract).collect(),
-            prior_stage: prior_stage.into_iter().map(tidepool_repr::SessionVarId::from_extract).collect(),
+            existing: existing
+                .into_iter()
+                .map(tidepool_repr::SessionVarId::from_extract)
+                .collect(),
+            prior_stage: prior_stage
+                .into_iter()
+                .map(tidepool_repr::SessionVarId::from_extract)
+                .collect(),
         }
     }
-
 
     pub fn item(&self, ordinal: usize) -> Option<&CheckedWorldCellItem> {
         self.items.get(ordinal)

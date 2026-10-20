@@ -10412,13 +10412,22 @@ where
                 "resident cell preparation did not retain its checked World output".into(),
             ));
         };
-        let compiler_binding_ids = world_output.demanded_session_bindings()
-            .iter().map(|id| id.raw()).collect::<Vec<_>>();
+        let compiler_binding_ids = world_output
+            .demanded_session_bindings()
+            .iter()
+            .map(|id| id.raw())
+            .collect::<Vec<_>>();
         let runtime_demand = world_output.runtime_binding_demand();
-        let demanded_bindings = runtime_demand.existing().iter()
-            .map(|id| tidepool_repr::VarId(id.raw())).collect::<Vec<_>>();
-        let prior_stage_binding_ids = runtime_demand.prior_stage().iter()
-            .map(|id| id.raw()).collect::<Vec<_>>();
+        let demanded_bindings = runtime_demand
+            .existing()
+            .iter()
+            .map(|id| tidepool_repr::VarId(id.raw()))
+            .collect::<Vec<_>>();
+        let prior_stage_binding_ids = runtime_demand
+            .prior_stage()
+            .iter()
+            .map(|id| id.raw())
+            .collect::<Vec<_>>();
         let logical_world = *world_output.logical().logical_id();
         let output_certificate = *world_output.certificate_sha256();
         let item_capabilities = program
@@ -10452,9 +10461,16 @@ where
             .access
             .with_machine(context, move |session, _, _| {
                 let bindings = session.lease_bindings(&demanded_bindings);
-                let mut retained = bindings.retained_bindings().iter().map(|id| id.raw()).collect::<Vec<_>>();
+                let mut retained = bindings
+                    .retained_bindings()
+                    .iter()
+                    .map(|id| id.raw())
+                    .collect::<Vec<_>>();
                 retained.sort_unstable();
-                if demanded_bindings.iter().any(|expected| retained.binary_search(&expected.0).is_err()) {
+                if demanded_bindings
+                    .iter()
+                    .any(|expected| retained.binary_search(&expected.0).is_err())
+                {
                     return Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(
                         tidepool_runtime::session::SessionError::StaleStagedDeclaration,
                     )));

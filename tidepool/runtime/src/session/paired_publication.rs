@@ -994,6 +994,12 @@ impl PersistentSession {
         self.admit_source_work_in(public.semantic.expected_public.scope)?;
         let reserved = self.lib_mut().reserve_join_for_publication(&mut public)?;
         let expected_public_version = paired_version(&public);
+        // World joins resolve only their owned interfaces and declared packages.
+        let includes = if intent.world().is_some() {
+            Vec::new()
+        } else {
+            self.lib().extra_include.clone()
+        };
         Ok(DeclarationPublicationBase {
             reservation: JoinReservation {
                 generation: reserved,
@@ -1003,7 +1009,7 @@ impl PersistentSession {
             current_public,
             public_context,
             surface,
-            includes: self.lib().extra_include.clone(),
+            includes,
             session_root: self.lib().root.clone(),
             expected_public_version,
         })

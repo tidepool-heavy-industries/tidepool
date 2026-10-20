@@ -440,8 +440,6 @@ pub enum SessionError {
     WorldCellCheckedProgramCapabilityMissing,
     #[error("world cell item {ordinal} requires a SAME-certified per-item successor capability")]
     WorldCellSuccessorCapabilityMissing { ordinal: usize },
-    #[error("world declaration publication requires its checked lexical promotion product")]
-    WorldCellDeclarationPublicationCapabilityMissing,
     #[error("world execution public semantic base changed before atomic installation")]
     WorldCellPublicationBaseStale,
     #[error("live value module {0:?} has no retained compiler-certified interface")]
