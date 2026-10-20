@@ -18303,8 +18303,6 @@ pub(crate) mod tests {
         )
         .unwrap();
         let inventory = output.inventory();
-        let mut bound = inventory.bind_segment(&output, vec![], &selection).unwrap();
-        let before_bound = bound.observed_binding_state();
         let before = output.capture_graph_selection();
         let imports = [PendingImportOwner::Source {
             owner: product.owner().clone(),
@@ -18321,21 +18319,14 @@ pub(crate) mod tests {
             .err()
             .expect("two exact scopes have no dependency choice");
         let bound_error = inventory
-            .admit_bound_target(
-                &mut bound,
-                &output,
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                vec![],
-                &selection,
-            )
+            .bind_segment(&output, vec![], &selection)
             .err()
-            .expect("bound planner must consume the same unresolved input choice");
+            .expect("product completion must consume the same unresolved input choice");
         for error in [selected_error, bound_error] {
             assert!(
                 matches!(error, crate::CompileError::ArtifactInventory(error) if error.failure == ArtifactInventoryFailure::BindingAmbiguity { artifact: helper.descriptor.id })
             );
         }
-        assert_eq!(bound.observed_binding_state(), before_bound);
         assert_eq!(output.capture_graph_selection(), before);
     }
 
