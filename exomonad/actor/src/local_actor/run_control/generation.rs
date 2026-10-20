@@ -1,6 +1,163 @@
 //! Generation provenance travels through the existing run-directory owners.
 use super::*;
 use crate::resident_workbench::generation_admission::{GenerationAdmissionError, GenerationFence};
+use crate::ResidentActorWorkbenchError;
+
+use crate::resident_workbench::generation_admission::GenerationRetirementFence;
+use crate::resident_workbench::{
+    ActorGeneration, ActorGenerationCandidateCustody, ActorGenerationPublicationDiscard,
+    ActorGenerationPublicationOperation, ActorGenerationRetirementPreparation,
+    ActorPublicationAttemptObserver, PreparedActorGeneration, ReservedActorGeneration,
+};
+
+/// The existing reservation record owns this product throughout native retirement.
+/// The candidate and expected selection survive a panic inside consuming reserve.
+pub(super) struct GenerationRetirementAttempt {
+    actor: ActorRef,
+    candidate: ActorGenerationCandidateCustody,
+    expected: Arc<ActorGeneration>,
+    phase: GenerationRetirementPhase,
+}
+
+enum GenerationRetirementPhase {
+    Preparation(ActorGenerationRetirementPreparation),
+    Reserving,
+    Reserved {
+        operation: ActorGenerationPublicationOperation,
+        observer: ActorPublicationAttemptObserver,
+        cutoff: GenerationRetirementCutoffPhase,
+    },
+}
+
+enum GenerationRetirementCutoffPhase {
+    NotStarted,
+    AwaitCapture(GenerationRetirementFence),
+    Captured {
+        fence: GenerationRetirementFence,
+        capture: GenerationRetirementCapture,
+    },
+    Unconfirmed {
+        fence: GenerationRetirementFence,
+        error: ResidentActorWorkbenchError,
+    },
+    Refused(ResidentActorWorkbenchError),
+}
+
+/// These are the actual existing cleanup handles, retained separately from the
+/// census. Observation identities alone cannot preserve physical cleanup custody.
+struct GenerationRetirementCapture {
+    population: GenerationPopulation,
+    actors: Vec<LocalActorRef>,
+    resources: Vec<ResourceChild>,
+}
+
+pub(super) struct RetainedGenerationRetirement {
+    actor: ActorRef,
+    candidate: ActorGenerationCandidateCustody,
+    expected: Arc<ActorGeneration>,
+    phase: RetainedGenerationRetirementPhase,
+}
+
+enum RetainedGenerationRetirementPhase {
+    Preparation(PreparedActorGeneration),
+    Reserving,
+    Reserved {
+        reserved: ReservedActorGeneration,
+        observer: ActorPublicationAttemptObserver,
+        cutoff: GenerationRetirementCutoffPhase,
+    },
+}
+
+impl GenerationRetirementAttempt {
+    fn into_retained(
+        self,
+    ) -> (
+        RetainedGenerationRetirement,
+        Option<ActorGenerationPublicationDiscard>,
+    ) {
+        let Self {
+            actor,
+            candidate,
+            expected,
+            phase,
+        } = self;
+        let (phase, discard) = match phase {
+            GenerationRetirementPhase::Preparation(preparation) => {
+                let (prepared, discard) = preparation.into_retained_parts();
+                (
+                    RetainedGenerationRetirementPhase::Preparation(prepared),
+                    Some(discard),
+                )
+            }
+            GenerationRetirementPhase::Reserving => {
+                (RetainedGenerationRetirementPhase::Reserving, None)
+            }
+            GenerationRetirementPhase::Reserved {
+                operation,
+                observer,
+                cutoff,
+            } => {
+                let (reserved, discard) = operation.into_retained_parts();
+                (
+                    RetainedGenerationRetirementPhase::Reserved {
+                        reserved,
+                        observer,
+                        cutoff,
+                    },
+                    Some(discard),
+                )
+            }
+        };
+        (
+            RetainedGenerationRetirement {
+                actor,
+                candidate,
+                expected,
+                phase,
+            },
+            discard,
+        )
+    }
+}
+
+impl RunState {
+    /// Both vectors remain empty while the owner is live. Each retained record
+    /// has at most one outstanding attempt, including records without an entry.
+    pub(super) fn reserve_retirement_loss_capacity(
+        &mut self,
+        records: usize,
+    ) -> Result<(), DirectoryError> {
+        self.lost_retirements
+            .try_reserve(records)
+            .map_err(|_| DirectoryError::RetentionCapacityUnavailable)?;
+        self.retirement_discards
+            .try_reserve(records)
+            .map_err(|_| DirectoryError::RetentionCapacityUnavailable)?;
+        Ok(())
+    }
+
+    pub(super) fn retain_retirements_after_owner_loss(&mut self) {
+        for record in self.reservations.values_mut() {
+            if let Some(attempt) = record.retirement.take() {
+                let (retained, discard) = attempt.into_retained();
+                // Record admission reserves these slots before any publication
+                // reservation can be issued. Neither vector grows here.
+                self.lost_retirements.push(retained);
+                if let Some(discard) = discard {
+                    self.retirement_discards.push(discard);
+                }
+            }
+        }
+        let attempts = std::mem::take(&mut self.lost_retirements);
+        let _ = self
+            .native_cleanup
+            .terminal
+            .set(RunControlNativeExit::OwnerLost { attempts });
+        // Publisher closures can lead back to this client. Release them only
+        // after the actual affine products are visible in the terminal owner.
+        drop(std::mem::take(&mut self.retirement_discards));
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GenerationDirectoryError {
@@ -817,5 +974,62 @@ mod retirement_tests {
                 assert_eq!(stopped.load(Ordering::SeqCst), nodes.len());
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod retirement_retention_tests {
+    use super::*;
+
+    #[test]
+    fn loss_capacity_refuses_overflow_without_issuing_an_identity() {
+        let mut state = RunState::default();
+        assert_eq!(
+            state.reserve_retirement_loss_capacity(usize::MAX),
+            Err(DirectoryError::RetentionCapacityUnavailable)
+        );
+        assert!(state.identities.claimed.is_empty());
+        assert!(state.reservations.is_empty());
+        assert!(state.lost_retirements.is_empty());
+        assert!(state.retirement_discards.is_empty());
+    }
+
+    #[tokio::test]
+    async fn record_issuer_reserves_both_empty_loss_vectors_before_admission() {
+        let mut state = RunState::default();
+        for id in 1..=5 {
+            let actor = ActorRef::first(crate::ActorId(id));
+            let (reply, received) = oneshot::channel();
+            begin_reservation(&mut state, actor, ReservationPurpose::Root, reply);
+            assert!(matches!(
+                received.await.unwrap(),
+                Err(DirectoryError::Unavailable)
+            ));
+            assert_eq!(state.identities.claimed.get(&actor.id), Some(&actor));
+            assert_eq!(state.reservations.len(), id as usize);
+            assert!(state.lost_retirements.capacity() >= state.reservations.len());
+            assert!(state.retirement_discards.capacity() >= state.reservations.len());
+            assert!(state.lost_retirements.is_empty());
+            assert!(state.retirement_discards.is_empty());
+        }
+        let capacities = (
+            state.lost_retirements.capacity(),
+            state.retirement_discards.capacity(),
+        );
+        let actor = ActorRef::first(crate::ActorId(1));
+        let (reply, received) = oneshot::channel();
+        begin_reservation(&mut state, actor, ReservationPurpose::Root, reply);
+        assert!(matches!(
+            received.await.unwrap(),
+            Err(DirectoryError::IdentityConflict { .. })
+        ));
+        assert_eq!(
+            (
+                state.lost_retirements.capacity(),
+                state.retirement_discards.capacity()
+            ),
+            capacities
+        );
+        assert_eq!(state.reservations.len(), 5);
     }
 }

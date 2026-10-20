@@ -111,6 +111,8 @@ fn can_observe(
 pub enum DirectoryError {
     #[error("run control is unavailable")]
     Unavailable,
+    #[error("native retirement retention capacity is unavailable")]
+    RetentionCapacityUnavailable,
     #[error("actor forest admission is closed")]
     Closed,
     #[error("logical actor {actor:?} is already claimed")]
@@ -155,6 +157,8 @@ pub(super) struct RunState {
     next_preparation: u64,
     preparation_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
     reservations: HashMap<ActorRef, ReservationRecord>,
+    lost_retirements: Vec<generation::RetainedGenerationRetirement>,
+    retirement_discards: Vec<crate::resident_workbench::ActorGenerationPublicationDiscard>,
     recovery_boot: Option<Arc<RootStartupRecoveryAuthority>>,
     resource_retirement: ResourceRetirement,
     resource_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
@@ -190,6 +194,8 @@ impl RunState {
             next_preparation: 0,
             preparation_waiters: Vec::new(),
             reservations: HashMap::new(),
+            lost_retirements: Vec::new(),
+            retirement_discards: Vec::new(),
             recovery_boot: None,
             resource_retirement: ResourceRetirement::Available,
             resource_waiters: Vec::new(),
@@ -209,18 +215,18 @@ pub(super) struct RunControlNativeCleanup {
     terminal: std::sync::OnceLock<RunControlNativeExit>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
 enum RunControlNativeExit {
-    OwnerLost,
+    OwnerLost {
+        attempts: Vec<generation::RetainedGenerationRetirement>,
+    },
     Finalized,
 }
 
 impl Drop for RunState {
     fn drop(&mut self) {
-        let _ = self
-            .native_cleanup
-            .terminal
-            .set(RunControlNativeExit::OwnerLost);
+        if self.native_cleanup.terminal.get().is_none() {
+            self.retain_retirements_after_owner_loss();
+        }
     }
 }
 
@@ -379,6 +385,7 @@ struct ReservationRecord {
     reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
     dependency: Option<SourceDependency>,
     preparation: Option<u64>,
+    retirement: Option<generation::GenerationRetirementAttempt>,
 }
 
 impl ReservationRecord {
@@ -931,13 +938,11 @@ fn reserve_actor(
             break ActorRef { id, incarnation };
         }
     };
-    state.identities.claimed.insert(actor.id, actor);
     begin_reservation_after(
         state,
         actor,
         purpose,
         planned_ownership,
-        None,
         dependency,
         reply,
     );
@@ -955,7 +960,6 @@ fn begin_reservation(
         purpose,
         SpawnOwnership::Independent,
         None,
-        None,
         reply,
     );
 }
@@ -964,10 +968,52 @@ fn begin_reservation_after(
     actor: ActorRef,
     purpose: ReservationPurpose,
     planned_ownership: SpawnOwnership,
-    predecessor: Option<crate::kernel::LifecycleHandle>,
     dependency: Option<SourceDependency>,
     reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
 ) {
+    if state
+        .identities
+        .claimed
+        .get(&actor.id)
+        .is_some_and(|previous| {
+            actor.incarnation <= previous.incarnation
+                || state
+                    .reservations
+                    .get(previous)
+                    .is_none_or(|record| record.terminal.get().is_none())
+        })
+    {
+        let _ = reply.send(Err(DirectoryError::IdentityConflict { actor: actor.id }));
+        return;
+    }
+    if state
+        .reservations
+        .get(&actor)
+        .is_some_and(|record| record.retirement.is_some())
+    {
+        let _ = reply.send(Err(DirectoryError::LifetimeTransitionPending { actor }));
+        return;
+    }
+    let predecessor = state
+        .identities
+        .claimed
+        .get(&actor.id)
+        .and_then(|previous| state.reservations.get(previous))
+        .and_then(|record| record.lifecycle.clone());
+    let records = state
+        .reservations
+        .len()
+        .checked_add(usize::from(!state.reservations.contains_key(&actor)));
+    let capacity = records
+        .ok_or(DirectoryError::RetentionCapacityUnavailable)
+        .and_then(|records| state.reserve_retirement_loss_capacity(records));
+    if let Err(error) = capacity {
+        let _ = reply.send(Err(error));
+        return;
+    }
+    advance_actor_ids_past(actor.id);
+    state.identities.fenced.remove(&actor.id);
+    state.identities.claimed.insert(actor.id, actor);
     let terminal = RetainedActorExit::new();
     state.reservations.insert(
         actor,
@@ -986,6 +1032,7 @@ fn begin_reservation_after(
             reply: Some(reply),
             dependency,
             preparation: None,
+            retirement: None,
         },
     );
     if state
@@ -1091,7 +1138,7 @@ impl Actor for RunControl {
                     && state
                         .reservations
                         .values()
-                        .all(|record| !record.preparation_pending())
+                        .all(|record| !record.preparation_pending() && record.retirement.is_none())
                     && state.worker_transfers.is_empty()
                     && state.resource_transfers.is_empty()
                     && state
@@ -2041,7 +2088,6 @@ impl Actor for RunControl {
                             break ActorRef { id, incarnation };
                         }
                     };
-                    state.identities.claimed.insert(actor.id, actor);
                     let purpose = ReservationPurpose::ExistingInput;
                     begin_reservation(state, actor, purpose, reply);
                 }
@@ -2058,42 +2104,18 @@ impl Actor for RunControl {
                             break ActorRef { id, incarnation };
                         }
                     };
-                    state.identities.claimed.insert(actor.id, actor);
                     begin_reservation(state, actor, ReservationPurpose::Root, reply);
                 }
             }
             RunControlMessage::ClaimExact { actor, reply } => {
                 if state.phase != RunPhase::Running {
                     let _ = reply.send(Err(DirectoryError::Closed));
-                } else if state
-                    .identities
-                    .claimed
-                    .get(&actor.id)
-                    .is_some_and(|previous| {
-                        actor.incarnation <= previous.incarnation
-                            || state
-                                .reservations
-                                .get(previous)
-                                .is_none_or(|record| record.terminal.get().is_none())
-                    })
-                {
-                    let _ = reply.send(Err(DirectoryError::IdentityConflict { actor: actor.id }));
                 } else {
-                    let predecessor = state
-                        .identities
-                        .claimed
-                        .get(&actor.id)
-                        .and_then(|previous| state.reservations.get(previous))
-                        .and_then(|record| record.lifecycle.clone());
-                    advance_actor_ids_past(actor.id);
-                    state.identities.fenced.remove(&actor.id);
-                    state.identities.claimed.insert(actor.id, actor);
                     begin_reservation_after(
                         state,
                         actor,
                         ReservationPurpose::Root,
                         SpawnOwnership::Independent,
-                        predecessor,
                         None,
                         reply,
                     );
@@ -2850,7 +2872,7 @@ impl RunControlClient {
             Some(RunControlNativeExit::Finalized) => {
                 return crate::CleanupComponentOutcome::Confirmed;
             }
-            Some(RunControlNativeExit::OwnerLost) => {
+            Some(RunControlNativeExit::OwnerLost { .. }) => {
                 return crate::CleanupComponentOutcome::Unconfirmed(
                     "run-control owner was lost before finalization".into(),
                 );
