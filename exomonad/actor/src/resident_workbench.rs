@@ -22053,6 +22053,19 @@ pub(crate) mod request_tests {
         }).await;
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the dedicated rooted generation publication execution group"]
+    async fn actual_retirement_publication_body_refusal_retains_same_guard() {
+        with_test_compiler_owner(|client| async move {
+            quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                client, Some(crate::ActorPersistencePolicy::Ephemeral),
+                Some(PublicationFailureControl::RetirementNativeOwnerLoss(
+                    crate::local_actor::run_control::GenerationRetirementNativeControl::PublicationBodyRefusal,
+                )),
+            ).await;
+        }).await;
+    }
+
     async fn assert_real_publisher_checkout_loss(
         workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
         state: Arc<InstalledToolsState>,

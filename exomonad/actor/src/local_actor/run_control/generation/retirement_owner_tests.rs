@@ -17,6 +17,22 @@ fn expect_begin(
 }
 
 impl RunControlClient {
+    pub(crate) async fn assert_retirement_owner_loss_without_attempt(
+        &self,
+        owner_task: ractor::concurrency::JoinHandle<()>,
+    ) {
+        let retained = self.native_cleanup.clone();
+        self.owner.get_cell().kill();
+        tokio::time::timeout(Duration::from_secs(10), owner_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let Some(RunControlNativeExit::OwnerLost { attempts, .. }) = retained.terminal.get() else {
+            panic!("lost native owner must retain its terminal observation");
+        };
+        assert!(attempts.is_empty());
+    }
+
     pub(crate) async fn assert_generation_retirement_owner_control(
         &self,
         owner_task: ractor::concurrency::JoinHandle<()>,

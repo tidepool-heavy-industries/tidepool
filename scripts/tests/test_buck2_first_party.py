@@ -1078,14 +1078,28 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             'resident_workbench::request_tests::actual_retirement_handler_panic_retains_frozen_candidate',
             'resident_workbench::request_tests::actual_retirement_waiter_loss_retains_frozen_candidate',
             'resident_workbench::request_tests::actual_retirement_owner_loss_after_capture_retains_guarded_membership',
+            'resident_workbench::request_tests::actual_retirement_publication_body_refusal_retains_same_guard',
         ])
-        self.assertEqual(retirement['expected_count'], 7)
+        self.assertEqual(retirement['expected_count'], 8)
         self.assertTrue(retirement['ignored'])
         self.assertEqual(retirement['case_compiler_modes'], {
             name: 'owned-resident' for name in retirement['exact_tests']
         })
         self.assertEqual(retirement['resource_env'], rooted['resource_env'])
         self.assertEqual(retirement['resources'], rooted['resources'])
+        refusal = self.rule('exomonad/actor', 'actor_generation_publication_refusal_tests',
+                            'tidepool_rust_test_cases')
+        self.assertEqual(refusal['binary'], retirement['binary'])
+        self.assertEqual(refusal['exact_tests'], [
+            'resident_workbench::request_tests::actual_retirement_publication_body_refusal_retains_same_guard',
+        ])
+        self.assertEqual(refusal['expected_count'], 1)
+        self.assertTrue(refusal['ignored'])
+        self.assertEqual(refusal['case_compiler_modes'], {
+            name: 'owned-resident' for name in refusal['exact_tests']
+        })
+        self.assertEqual(refusal['resource_env'], rooted['resource_env'])
+        self.assertEqual(refusal['resources'], rooted['resources'])
 
     def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [
