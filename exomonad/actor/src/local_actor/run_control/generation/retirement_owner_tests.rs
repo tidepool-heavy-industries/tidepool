@@ -486,6 +486,92 @@ impl RunControlClient {
         }
     }
 
+    pub(crate) async fn assert_generation_retirement_reservation_failed(
+        &self,
+        owner_task: ractor::concurrency::JoinHandle<()>,
+        preparation: ActorGenerationRetirementPreparation,
+        state: Arc<InstalledToolsState>,
+        expected: Arc<ActorGeneration>,
+        decision: Arc<tidepool_runtime::session::PublicationDecision>,
+        target_fence: GenerationFence,
+    ) {
+        let actor = preparation.actor();
+        let candidate = preparation.candidate_custody();
+        assert!(Arc::ptr_eq(
+            preparation.expected_generation().unwrap(),
+            &expected,
+        ));
+        assert_eq!(actor, expected.context().actor);
+        let target = target_fence.dependency().clone();
+        let retained = self.native_cleanup.clone();
+        let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        let (reply, answer) = oneshot::channel();
+        self.owner
+            .send_message(RunControlMessage::BeginGenerationRetirement {
+                preparation,
+                inventory: GenerationRetirementInventory::Unavailable,
+                diagnostic: GenerationRetirementDiagnostic::CancelledComponent,
+                reply: GenerationRetirementBeginReply::Observe(reply),
+            })
+            .unwrap();
+        let Err(GenerationRetirementBeginFailure::Publication(primary)) = answer.await.unwrap()
+        else {
+            panic!("the actual foreign target fence must refuse reservation before A cutoff");
+        };
+        assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
+        drop(
+            SourceDependency::Generation(expected.dependency().clone())
+                .claim()
+                .unwrap(),
+        );
+        assert!(SourceDependency::Generation(target.clone())
+            .claim()
+            .is_err());
+        assert_eq!(
+            decision.phase(),
+            tidepool_runtime::session::PublicationPhase::Running
+        );
+        self.owner.get_cell().kill();
+        tokio::time::timeout(Duration::from_secs(10), owner_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let recovery = retained.take_recovery().unwrap();
+        let custody = recovery.custody.as_ref().unwrap();
+        assert_eq!(custody.attempts.len(), 1);
+        let attempt = custody.attempts[0].active_for_test();
+        assert_eq!(attempt.actor, actor);
+        assert!(candidate.same_candidate(&attempt.candidate));
+        assert!(Arc::ptr_eq(&attempt.expected, &expected));
+        let GenerationRetirementPhase::ReservationFailed(actual) = &attempt.phase else {
+            panic!("native loss must retain the SAME failed reservation, not a completion");
+        };
+        assert!(Arc::ptr_eq(actual, &primary));
+        // Releasing the foreign gate is not an instruction to retry the failed
+        // reservation or to enter the body. Its original cause remains owned.
+        target_fence.reopen().unwrap();
+        drop(SourceDependency::Generation(target).claim().unwrap());
+        assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
+        drop(
+            SourceDependency::Generation(expected.dependency().clone())
+                .claim()
+                .unwrap(),
+        );
+        assert_eq!(
+            decision.phase(),
+            tidepool_runtime::session::PublicationPhase::Running
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), compiler_calls);
+        drop(recovery);
+        let recovery = retained.take_recovery().unwrap();
+        let attempt = recovery.custody.as_ref().unwrap().attempts[0].active_for_test();
+        assert!(candidate.same_candidate(&attempt.candidate));
+        assert!(
+            matches!(&attempt.phase, GenerationRetirementPhase::ReservationFailed(actual)
+            if Arc::ptr_eq(actual, &primary))
+        );
+    }
+
     pub(crate) async fn assert_generation_retirement_owner_control(
         &self,
         owner_task: ractor::concurrency::JoinHandle<()>,
