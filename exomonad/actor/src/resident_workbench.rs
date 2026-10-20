@@ -19626,6 +19626,13 @@ pub(crate) mod request_tests {
     #[tokio::test]
     #[ignore = "requires the dedicated rooted compiler-world service execution group"]
     async fn private_world_cell_json_operand_survives_plan_end_and_preparation() {
+        if std::env::var_os("RUST_LOG").is_some() {
+            let _ = tracing_subscriber::fmt()
+                .json()
+                .with_ansi(false)
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .try_init();
+        }
         with_test_compiler_owner(|client| async move {
             let fixture = RootedWorldInputTest::new(client, 7).await;
             for (used, correct) in [(false, true), (true, true), (true, false)] {

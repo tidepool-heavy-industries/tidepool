@@ -563,6 +563,27 @@ impl CertifiedSegmentOriginals {
                     .collect(),
             )
             .map_err(|error| {
+                if tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG) {
+                    if let crate::CompileError::ArtifactInventory(failure) = &error {
+                        if let crate::artifact_inventory::ArtifactInventoryFailure::NativeRootOutsideView { artifact } = &failure.failure {
+                            let incoming = artifact_entries.iter().chain(&value_entries)
+                                .find(|entry| entry.descriptor.id == *artifact);
+                            let retained = compiler_inputs.artifacts().observed_payload(artifact);
+                            let selected = products.source_selection.native_selections()
+                                .find(|native| native.original_artifact_id().ok() == Some(*artifact));
+                            let offered = products.source_selection.issued_native_availability()
+                                .any(|offer| offer.original_artifact_id() == *artifact);
+                            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                                stage = "segment_native_availability", ?artifact,
+                                incoming_descriptor = ?incoming.map(|entry| &entry.descriptor),
+                                retained_descriptor = ?retained.map(|entry| &entry.descriptor),
+                                selected_owner = ?selected.map(|native| &native.owner),
+                                selected_origin = ?selected.map(|native| &native.origin),
+                                offered,
+                                "native root refusal physical issuer evidence");
+                        }
+                    }
+                }
                 tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                     stage = "segment_native_availability", %error,
                     "compiler original selection refused");

@@ -1819,6 +1819,7 @@ pub(crate) fn admission_failure(failure: ArtifactInventoryFailure) -> CompileErr
         &failure,
         ArtifactInventoryFailure::NativeOfferSelectionConflict { .. }
             | ArtifactInventoryFailure::NativeGroupUnavailable { .. }
+            | ArtifactInventoryFailure::NativeRootOutsideView { .. }
     ) {
         tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
             ?failure, refusal_site = %std::panic::Location::caller(),
