@@ -228,7 +228,6 @@ data RequestField
   | InspectBrowse String
   | InspectBrowseExpanded String
   | InspectScopeBrowse
-  | InspectScopeBrowseBounded Int
   | InspectBrowseBounded String Bool Int
   | InspectSearch String
   | InspectSearchBounded String Int
@@ -488,7 +487,6 @@ data InspectionRequest
   | InspectModule String Bool
   | InspectModuleBounded String Bool Int
   | InspectScope
-  | InspectScopeBounded Int
   | InspectTypeSearch String
   | InspectTypeSearchBounded String Int
   | InspectStructuredInfoOf StructuredInspection
@@ -577,8 +575,6 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
         { requestInspections = InspectModule name True : requestInspections request }
       InspectScopeBrowse -> request
         { requestInspections = InspectScope : requestInspections request }
-      InspectScopeBrowseBounded budget -> request
-        { requestInspections = InspectScopeBounded budget : requestInspections request }
       InspectBrowseBounded name expanded budget -> request
         { requestInspections = InspectModuleBounded name expanded budget : requestInspections request }
       InspectSearch query -> request
@@ -747,7 +743,6 @@ encodeField field = case field of
     <> BS.singleton (case worldQueryMode request of WorldStructuredInfo -> 0; WorldStructuredType -> 1)
     <> encodeStructuredInspection (worldQueryInspection request) <> textFrame (worldQueryOutput request)
   InspectScopeBrowse -> BS.singleton 43
-  InspectScopeBrowseBounded budget -> BS.singleton 61 <> putU32 budget
   InspectBrowseBounded value expanded budget ->
     BS.singleton 62 <> textFrame value <> BS.singleton (if expanded then 1 else 0) <> putU32 budget
   InspectSearchBounded value budget -> BS.singleton 63 <> textFrame value <> putU32 budget
@@ -889,9 +884,6 @@ pField bytes = do
       if validExactInputsRequest request then Right (EnsureExactInputs request, afterValue)
         else Left "worker request: invalid exact input reference"
     43 -> Right (InspectScopeBrowse, rest)
-    61 -> do
-      (budget, afterBudget) <- pWord32 rest
-      bounded "scope browse" (InspectScopeBrowseBounded . fromIntegral) budget afterBudget
     62 -> do
       (name, afterName) <- pText rest
       (expandedTag, afterExpanded) <- pWord8 afterName

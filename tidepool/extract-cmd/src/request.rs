@@ -502,8 +502,6 @@ enum Field {
     /// `--inspect-browse`/`--inspect-browse-expanded` with an enumeration cap.
     InspectBrowseBounded(String, bool, u32),
     InspectScopeBrowse,
-    /// `--inspect-scope-browse` carrying a compiler-side enumeration cap.
-    InspectScopeBrowseBounded(u32),
     InspectSearch(String),
     /// `--inspect-search` carrying a compiler-side match cap.
     InspectSearchBounded(String, u32),
@@ -721,7 +719,6 @@ impl ExtractRequest {
                             | Field::InspectBrowse(_)
                             | Field::InspectBrowseExpanded(_)
                             | Field::InspectScopeBrowse
-                            | Field::InspectScopeBrowseBounded(_)
                             | Field::InspectBrowseBounded(..)
                             | Field::InspectSearch(_)
                             | Field::InspectSearchBounded(..)
@@ -877,12 +874,6 @@ impl ExtractRequest {
                 Some("--inspect-search") => request.fields.push(Field::InspectSearch(
                     text_value(&mut args, "--inspect-search")?.into(),
                 )),
-                Some("--inspect-scope-browse-bounded") => request.fields.push(
-                    Field::InspectScopeBrowseBounded(bounded_budget(
-                        &text_value(&mut args, "--inspect-scope-browse-bounded")?,
-                        "--inspect-scope-browse-bounded",
-                    )?),
-                ),
                 Some(option @ ("--inspect-browse-bounded" | "--inspect-browse-expanded-bounded")) => {
                     let raw = text_value(&mut args, option)?;
                     let (module, budget) = bounded_value(&raw, option)?;
@@ -984,7 +975,6 @@ impl ExtractRequest {
                 29 => Field::InspectBrowse(decoder.string()?),
                 30 => Field::InspectBrowseExpanded(decoder.string()?),
                 43 => Field::InspectScopeBrowse,
-                61 => Field::InspectScopeBrowseBounded(nonzero_budget(decoder.u32()?)?),
                 62 => {
                     let module = decoder.string()?;
                     let expanded = match decoder.byte()? {
@@ -1413,10 +1403,6 @@ impl ExtractRequest {
         self.fields.push(Field::InspectScopeBrowse);
     }
 
-    pub(crate) fn inspect_scope_browse_bounded(&mut self, budget: u32) {
-        self.fields.push(Field::InspectScopeBrowseBounded(budget));
-    }
-
     pub(crate) fn inspect_browse(&mut self, module: &str, expanded: bool) {
         self.fields.push(if expanded {
             Field::InspectBrowseExpanded(module.to_owned())
@@ -1560,11 +1546,6 @@ impl ExtractRequest {
                     flag(&mut flags, "--inspect-browse-expanded", OsStr::new(value))
                 }
                 Field::InspectScopeBrowse => flags.push("--inspect-scope-browse".into()),
-                Field::InspectScopeBrowseBounded(budget) => flag(
-                    &mut flags,
-                    "--inspect-scope-browse-bounded",
-                    OsStr::new(&budget.to_string()),
-                ),
                 Field::InspectBrowseBounded(value, expanded, budget) => flag(
                     &mut flags,
                     if *expanded {
@@ -1973,10 +1954,6 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::InspectBrowse(value) => tagged_frame(out, 29, OsStr::new(value)),
         Field::InspectBrowseExpanded(value) => tagged_frame(out, 30, OsStr::new(value)),
         Field::InspectScopeBrowse => out.push(43),
-        Field::InspectScopeBrowseBounded(budget) => {
-            out.push(61);
-            out.extend_from_slice(&budget.to_le_bytes());
-        }
         Field::InspectBrowseBounded(module, expanded, budget) => {
             out.push(62);
             push_frame(out, OsStr::new(module));
@@ -2327,14 +2304,12 @@ mod tests {
     #[test]
     fn bounded_inspection_fields_round_trip_their_budget() {
         let mut request = ExtractRequest::default();
-        request.inspect_scope_browse_bounded(256);
         request.inspect_browse_bounded("Data.Thing", true, 256);
         request.inspect_search_bounded("a -> a", 64);
         let decoded = ExtractRequest::decode(&request.encode()).unwrap();
         assert!(matches!(
             decoded.fields.as_slice(),
             [
-                Field::InspectScopeBrowseBounded(256),
                 Field::InspectBrowseBounded(module, true, 256),
                 Field::InspectSearchBounded(query, 64),
             ] if module == "Data.Thing" && query == "a -> a"

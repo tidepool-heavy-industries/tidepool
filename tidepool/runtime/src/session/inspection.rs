@@ -25,8 +25,6 @@ pub enum InspectionQuery {
         budget: usize,
     },
     ScopeBrowse,
-    /// Scope enumeration whose rendered entry list stops at `budget` names.
-    ScopeBrowseBounded(usize),
     Browse {
         module: String,
         expanded: bool,
@@ -956,7 +954,6 @@ fn run_inspection_batch(
             query,
             InspectionQuery::Info(_)
                 | InspectionQuery::ScopeBrowse
-                | InspectionQuery::ScopeBrowseBounded(_)
                 | InspectionQuery::Browse { .. }
                 | InspectionQuery::BrowseBounded { .. }
                 | InspectionQuery::StructuredInfo { .. }
@@ -975,7 +972,6 @@ fn run_inspection_batch(
             | InspectionQuery::TypeSearch(_)
             | InspectionQuery::TypeSearchBounded { .. }
             | InspectionQuery::ScopeBrowse
-            | InspectionQuery::ScopeBrowseBounded(_)
             | InspectionQuery::Browse { .. }
             | InspectionQuery::BrowseBounded { .. }
             | InspectionQuery::StructuredInfo { .. }
@@ -1016,9 +1012,6 @@ fn run_inspection_batch(
                 }
                 InspectionQuery::ScopeBrowse => {
                     command.inspect_scope_browse();
-                }
-                InspectionQuery::ScopeBrowseBounded(budget) => {
-                    command.inspect_scope_browse_bounded(budget_u32(*budget)?);
                 }
                 InspectionQuery::Browse { module, expanded } => {
                     command.inspect_browse(module, *expanded);
