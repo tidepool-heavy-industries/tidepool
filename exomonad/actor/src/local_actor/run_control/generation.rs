@@ -10,8 +10,7 @@ use crate::resident_workbench::{
     ActorGeneration, ActorGenerationCandidateCustody, ActorGenerationCandidateObserver,
     ActorGenerationCommit, ActorGenerationPublicationBody, ActorGenerationPublicationBodyResult,
     ActorGenerationPublicationDriver, ActorGenerationPublicationOwner,
-    ActorGenerationPublicationRefusal, ActorGenerationPublicationRefusalObservation,
-    ActorGenerationPublicationSettlement, ActorGenerationReservationDriver,
+    ActorGenerationPublicationRefusalObservation, ActorGenerationReservationDriver,
     ActorGenerationRetirementCutoff, ActorGenerationRetirementPreparation,
     ActorGenerationRetirementPreparationOutcome, ActorPublicationAttemptObserver,
     PreparedActorGeneration, PublicationOwnerSettlement, ReservedActorGeneration,
@@ -167,6 +166,8 @@ pub(crate) enum InitialGenerationPublicationError {
     OwnerLost,
     #[error("initial publication remains unconfirmed in its actual owner")]
     Unconfirmed,
+    #[error("initial source settlement failed: {0}")]
+    Settlement(Arc<crate::resident_workbench::PublicationSettlementError>),
     #[error("initial generation notification was refused")]
     NotificationRefused,
 }
@@ -261,27 +262,6 @@ impl GenerationRetirementDiagnostic {
             #[cfg(test)]
             Self::CancelledComponent => true,
             Self::Operation { .. } => false,
-        }
-    }
-
-    fn project_settlement(&mut self, settlement: &ActorGenerationPublicationSettlement) {
-        let handoff = match self {
-            Self::Operation { handoff, .. } => handoff,
-            #[cfg(test)]
-            Self::CancelledComponent => return,
-        };
-        if matches!(handoff, RetirementDiagnosticHandoff::Unprojected) {
-            let Some(evidence) =
-                crate::resident_actor::RetirementDiagnosticEvidence::from_settlement(settlement)
-            else {
-                return;
-            };
-            // Retain the SAME projection before any write. A lost receipt never
-            // requires rebuilding evidence or comparing rendered diagnostics.
-            *handoff = RetirementDiagnosticHandoff::Projected {
-                evidence: Arc::new(evidence),
-                refusals: Vec::new(),
-            };
         }
     }
 
@@ -858,8 +838,17 @@ impl GenerationRetirementCore {
                         (Some(cutoff), restored, evidence_required)
                     }
                     GenerationRetirementPhase::Entered {
-                        cutoff, custody, ..
+                        cutoff,
+                        custody,
+                        owner,
+                        ..
                     } => {
+                        if let Some(error) = owner.settlement_error() {
+                            secondary.push(RlCause {
+                                kind: RlCauseKind::ReloadCandidateSettlementFailed,
+                                detail: error.to_string(),
+                            });
+                        }
                         let candidate = match custody {
                             GenerationPublicationCustody::Settled { outcome, .. }
                                 if matches!(
@@ -872,7 +861,16 @@ impl GenerationRetirementCore {
                             GenerationPublicationCustody::Waiting { .. }
                             | GenerationPublicationCustody::NotStarted { .. }
                             | GenerationPublicationCustody::Received => {
-                                Some(Observation::ReloadObligationPending)
+                                Some(match owner.settlement() {
+                                    PublicationOwnerSettlement::Failed(_) => {
+                                        Observation::ReloadObligationRefused
+                                    }
+                                    PublicationOwnerSettlement::Confirming
+                                    | PublicationOwnerSettlement::Restoring => {
+                                        Observation::ReloadObligationUnconfirmed
+                                    }
+                                    _ => Observation::ReloadObligationPending,
+                                })
                             }
                             // The same full body/refusal remains retained until
                             // its positive owning settlement gate consumes it.
@@ -2094,6 +2092,17 @@ impl GenerationRetirementRecord {
         } = &mut self.core
         {
             let Some((generation, _)) = owner.confirmed_generation() else {
+                if !matches!(custody, GenerationPublicationCustody::Waiting { .. }) {
+                    if let Some(reply) = self.driver.initial_reply.take() {
+                        let error = owner
+                            .settlement_error()
+                            .map(|error| {
+                                InitialGenerationPublicationError::Settlement(error.clone())
+                            })
+                            .unwrap_or(InitialGenerationPublicationError::Unconfirmed);
+                        let _ = reply.sender.send(Err(error));
+                    }
+                }
                 return;
             };
             let Some(reply) = self.driver.initial_reply.take() else {
@@ -2174,6 +2183,13 @@ impl GenerationRetirementCore {
                         };
                     }
                 }
+            }
+            if matches!(
+                custody,
+                GenerationPublicationCustody::Received
+                    | GenerationPublicationCustody::NotStarted { .. }
+            ) {
+                owner.refuse_initial();
             }
             return;
         }
@@ -2434,6 +2450,9 @@ impl RunState {
             Err((prepared, reserve)) => {
                 *phase = InitialPublicationPhase::CandidateChanged(prepared);
                 record.retirement.driver.action = GenerationRetirementAction::Reservation(reserve);
+                if let Some(reply) = record.retirement.driver.initial_reply.take() {
+                    refuse(reply, InitialGenerationPublicationError::Unconfirmed);
+                }
                 return;
             }
         };
@@ -2464,6 +2483,9 @@ impl RunState {
             Err(_) => {
                 record.retirement.driver.action =
                     GenerationRetirementAction::Publication(publisher);
+                if let Some(reply) = record.retirement.driver.initial_reply.take() {
+                    refuse(reply, InitialGenerationPublicationError::Unconfirmed);
+                }
                 return;
             }
         };

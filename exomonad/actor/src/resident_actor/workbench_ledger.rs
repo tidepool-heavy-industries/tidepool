@@ -60,12 +60,14 @@ impl RetirementDiagnosticEvidence {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_refusal(
         refusal: &crate::resident_workbench::ActorGenerationPublicationRefusal,
     ) -> Self {
         Self::from_outcome(refusal.outcome().as_ref(), refusal.observation())
     }
 
+    #[cfg(test)]
     pub(crate) fn from_settlement(
         settlement: &crate::resident_workbench::ActorGenerationPublicationSettlement,
     ) -> Option<Self> {

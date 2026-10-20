@@ -2096,7 +2096,7 @@ pub(crate) enum PublicationOwnerSettlement {
     Confirmed,
     Restoring,
     Restored,
-    Failed(PublicationSettlementError),
+    Failed(Arc<PublicationSettlementError>),
 }
 
 impl ActorGenerationPublicationOwner {
@@ -2179,6 +2179,17 @@ impl ActorGenerationPublicationOwner {
         Ok(())
     }
 
+    pub(crate) fn settlement(&self) -> &PublicationOwnerSettlement {
+        &self.settlement
+    }
+
+    pub(crate) fn settlement_error(&self) -> Option<&Arc<PublicationSettlementError>> {
+        match &self.settlement {
+            PublicationOwnerSettlement::Failed(error) => Some(error),
+            _ => None,
+        }
+    }
+
     pub(crate) fn source_restored(&self) -> bool {
         matches!(self.settlement, PublicationOwnerSettlement::Restored)
     }
@@ -2229,7 +2240,7 @@ impl ActorGenerationPublicationOwner {
         self.settlement = PublicationOwnerSettlement::Confirming;
         self.settlement = match self.guard.confirmed() {
             Ok(()) => PublicationOwnerSettlement::Confirmed,
-            Err(error) => PublicationOwnerSettlement::Failed(error),
+            Err(error) => PublicationOwnerSettlement::Failed(Arc::new(error)),
         };
         &self.settlement
     }
@@ -2245,6 +2256,36 @@ impl ActorGenerationPublicationOwner {
             } => Some((generation, *cancellation_pending)),
             _ => None,
         }
+    }
+
+    pub(crate) fn refuse_initial(&mut self) -> &PublicationOwnerSettlement {
+        if !matches!(self.settlement, PublicationOwnerSettlement::Pending)
+            || !matches!(
+                self.guard.attempt.expected,
+                ActorRequestSnapshot::Bootstrap(_)
+            )
+        {
+            return &self.settlement;
+        }
+        let known_unpublished = match &self.body {
+            Some(RecordedPublicationBody::Failure { outcome, .. }) => {
+                self.guard.known_unpublished(outcome)
+            }
+            Some(
+                RecordedPublicationBody::Visible { .. }
+                | RecordedPublicationBody::Unobserved { .. },
+            ) => false,
+            None => self.prepared.is_some(),
+        };
+        if !known_unpublished {
+            return &self.settlement;
+        }
+        self.settlement = PublicationOwnerSettlement::Restoring;
+        self.settlement = match self.guard.refuse_unstarted() {
+            Ok(()) => PublicationOwnerSettlement::Restored,
+            Err(error) => PublicationOwnerSettlement::Failed(Arc::new(error)),
+        };
+        &self.settlement
     }
 
     pub(crate) fn refuse_retirement(
@@ -2270,7 +2311,7 @@ impl ActorGenerationPublicationOwner {
         self.settlement = PublicationOwnerSettlement::Restoring;
         self.settlement = match self.guard.refuse_retirement(original) {
             Ok(()) => PublicationOwnerSettlement::Restored,
-            Err(error) => PublicationOwnerSettlement::Failed(error),
+            Err(error) => PublicationOwnerSettlement::Failed(Arc::new(error)),
         };
         &self.settlement
     }
@@ -2594,11 +2635,13 @@ impl ActorGenerationPublicationDriver {
 /// The observed outcome carries no settlement authority. Only `Unpublished`
 /// retains the original armed guard needed to restore a held retirement fence.
 #[must_use]
+#[cfg(test)]
 pub(crate) enum ActorGenerationPublicationSettlement {
     Unpublished(ActorGenerationPublicationRefusal),
     Settled(Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>),
 }
 
+#[cfg(test)]
 impl ActorGenerationPublicationSettlement {
     pub(crate) fn diagnostic_outcome(
         &self,
@@ -2691,6 +2734,7 @@ pub(crate) enum ActorPublicationFailureCause {
 }
 
 #[must_use]
+#[cfg(test)]
 pub(crate) struct ActorGenerationPublicationRefusal {
     guard: ActorPublicationGuard,
     outcome: Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>,
@@ -2704,6 +2748,7 @@ pub(crate) enum PublicationBodyObligations {
     Retained,
 }
 
+#[cfg(test)]
 impl ActorGenerationPublicationRefusal {
     pub(crate) fn outcome(
         &self,
@@ -2789,6 +2834,7 @@ fn publication_failure_observation(
 
 /// Checkout completion and source settlement are distinct observations. An
 /// unobserved body never grants the right to reopen either source.
+#[cfg(test)]
 enum PublicationBodyCompletion {
     Observed {
         guard: ActorPublicationGuard,
@@ -2802,6 +2848,7 @@ enum PublicationBodyCompletion {
     Terminal(Result<ActorGenerationCommit, ResidentActorWorkbenchError>),
 }
 
+#[cfg(test)]
 impl PublicationBodyCompletion {
     fn complete(self) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
         match self {
@@ -2964,6 +3011,24 @@ impl PublicationFence {
         }
     }
 
+    fn reserve_scope(
+        &self,
+        scope: tidepool_runtime::session::UnpublishedNotebookScope,
+    ) -> Result<
+        tidepool_runtime::session::ReservedNotebookScope,
+        (
+            tidepool_runtime::session::UnpublishedNotebookScope,
+            PublicationSettlementError,
+        ),
+    > {
+        match self {
+            Self::Held(fence) => scope
+                .into_reserved(fence)
+                .map_err(|(scope, error)| (scope, error.into())),
+            Self::ReopenAttempted => Err((scope, PublicationSettlementError::ReopenAttempted)),
+        }
+    }
+
     fn confirm(
         &mut self,
         target: &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
@@ -2971,13 +3036,12 @@ impl PublicationFence {
         settle: impl for<'a> FnOnce(
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
         ) -> Result<(), PublicationSettlementError>,
-    ) -> Result<(), PublicationSettlementError> {
+    ) -> Result<tidepool_runtime::session::ConfirmedSourcePublication, PublicationSettlementError>
+    {
         let Self::Held(fence) = std::mem::replace(self, Self::ReopenAttempted) else {
             return Err(PublicationSettlementError::ReopenAttempted);
         };
-        fence
-            .confirm_publication_with(target, prerequisite, settle)?
-            .map(|_reopened| ())
+        fence.confirm_publication_with(target, prerequisite, settle)?
     }
 
     fn reopen(
@@ -2986,13 +3050,11 @@ impl PublicationFence {
         settle: impl for<'a> FnOnce(
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
         ) -> Result<(), PublicationSettlementError>,
-    ) -> Result<(), PublicationSettlementError> {
+    ) -> Result<tidepool_runtime::session::OwnSourceFenceReopened, PublicationSettlementError> {
         let Self::Held(fence) = std::mem::replace(self, Self::ReopenAttempted) else {
             return Err(PublicationSettlementError::ReopenAttempted);
         };
-        fence
-            .reopen_with(target.original_source(), settle)?
-            .map(|_reopened| ())
+        fence.reopen_with(target.original_source(), settle)?
     }
 }
 
@@ -3001,12 +3063,20 @@ enum ActorPublicationState {
     Settled,
 }
 
+enum PublicationScopeSettlement {
+    Pending,
+    Reopened(tidepool_runtime::session::OwnSourceFenceReopened),
+    Confirmed(tidepool_runtime::session::ConfirmedSourcePublication),
+}
+
 struct ActorPublicationGuard {
     state: Arc<InstalledToolsState>,
     attempt: Arc<ActorPublicationAttempt>,
     settlement: ActorPublicationState,
     decision: Arc<tidepool_runtime::session::PublicationDecision>,
     owner: ActorPublicationLiveness,
+    notebook_scope: Option<tidepool_runtime::session::ReservedNotebookScope>,
+    scope_settlement: PublicationScopeSettlement,
     #[cfg(test)]
     settlement_probe: Option<Arc<PublicationSettlementProbe>>,
 }
@@ -3102,9 +3172,53 @@ impl ActorPublicationGuard {
             settlement: ActorPublicationState::Armed(authority),
             decision,
             owner: owner.retained_liveness(),
+            notebook_scope: None,
+            scope_settlement: PublicationScopeSettlement::Pending,
             #[cfg(test)]
             settlement_probe: None,
         }))
+    }
+
+    fn reserve_notebook_scope(
+        &mut self,
+        scope: tidepool_runtime::session::UnpublishedNotebookScope,
+    ) -> Result<
+        (),
+        (
+            tidepool_runtime::session::UnpublishedNotebookScope,
+            PublicationSettlementError,
+        ),
+    > {
+        let reserved = match &self.settlement {
+            ActorPublicationState::Armed(authority) => authority.reserve_scope(scope)?,
+            ActorPublicationState::Settled => {
+                return Err((scope, PublicationSettlementError::ReopenAttempted))
+            }
+        };
+        self.notebook_scope = Some(reserved);
+        Ok(())
+    }
+
+    fn close_unpublished_scope(&mut self) -> Result<(), PublicationSettlementError> {
+        if let Some(scope) = &mut self.notebook_scope {
+            let PublicationScopeSettlement::Reopened(witness) = &self.scope_settlement else {
+                return Err(PublicationSettlementError::ReopenAttempted);
+            };
+            scope.close_reopened_source(witness)?;
+            self.notebook_scope = None;
+        }
+        Ok(())
+    }
+
+    fn release_published_scope(&mut self) -> Result<(), PublicationSettlementError> {
+        if let Some(scope) = &mut self.notebook_scope {
+            let PublicationScopeSettlement::Confirmed(witness) = &self.scope_settlement else {
+                return Err(PublicationSettlementError::PublicationUnconfirmed);
+            };
+            scope.settle_published(witness)?;
+            self.notebook_scope = None;
+        }
+        Ok(())
     }
 
     fn has_no_commit_claim(&self) -> bool {
@@ -3127,6 +3241,7 @@ impl ActorPublicationGuard {
             )
     }
 
+    #[cfg(test)]
     fn complete(
         mut self,
         outcome: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
@@ -3157,6 +3272,7 @@ impl ActorPublicationGuard {
         outcome
     }
 
+    #[cfg(test)]
     fn unobserved(self, primary: ResidentActorWorkbenchError) -> ResidentActorWorkbenchError {
         ResidentActorWorkbenchError::PublicationSettlement {
             failure: Box::new(ActorPublicationSettlementFailure {
@@ -3262,7 +3378,7 @@ impl ActorPublicationGuard {
                 PublicationSettlementError::ReopenAttempted,
             ));
         };
-        authority.refused_when(&attempt.target, |reopen| {
+        let reopened = authority.refused_when(&attempt.target, |reopen| {
             owner.with_live_source_settlement(|| {
                 let record = state.0.lock();
                 if !matches!(&record.availability, InstalledToolsAvailability::PublicationInProgress(issued) if Arc::ptr_eq(issued, &attempt)) {
@@ -3272,6 +3388,7 @@ impl ActorPublicationGuard {
                 Ok(())
             }).ok_or(PublicationSettlementError::OwnerUnavailable)?
         }).map_err(|error| at(RetirementSettlementStage::Candidate, error))?;
+        self.scope_settlement = PublicationScopeSettlement::Reopened(reopened);
         #[cfg(test)]
         if let Some(probe) = &self.settlement_probe {
             probe.wait();
@@ -3290,10 +3407,12 @@ impl ActorPublicationGuard {
                 Ok(())
             }).ok_or(PublicationSettlementError::OwnerUnavailable)?
         }).map_err(|error| at(RetirementSettlementStage::Original, error))?;
+        self.close_unpublished_scope()?;
         self.settlement = ActorPublicationState::Settled;
         Ok(())
     }
 
+    #[cfg(test)]
     fn refused(mut self) -> Result<(), PublicationSettlementError> {
         self.refuse_unstarted()
     }
@@ -3320,7 +3439,9 @@ impl ActorPublicationGuard {
         let ActorPublicationState::Armed(authority) = &mut self.settlement else {
             return Err(PublicationSettlementError::ReopenAttempted);
         };
-        authority.refused_when(&self.attempt.target, restore)?;
+        let reopened = authority.refused_when(&self.attempt.target, restore)?;
+        self.scope_settlement = PublicationScopeSettlement::Reopened(reopened);
+        self.close_unpublished_scope()?;
         self.settlement = ActorPublicationState::Settled;
         Ok(())
     }
@@ -3345,11 +3466,11 @@ impl ActorPublicationGuard {
                     let Some(generation) = selected else {
                         return Err(PublicationSettlementError::SelectionChanged);
                     };
-                    *current = InstalledToolsAvailability::Generation(generation);
                     #[cfg(test)]
                     if let Some(probe) = &self.settlement_probe {
                         probe.wait();
                     }
+                    *current = InstalledToolsAvailability::Generation(generation);
                     reopen.commit();
                     Ok(())
                 })
@@ -3358,7 +3479,9 @@ impl ActorPublicationGuard {
         let ActorPublicationState::Armed(authority) = &mut self.settlement else {
             return Err(PublicationSettlementError::ReopenAttempted);
         };
-        authority.confirmed_when(&self.attempt.target, promote)?;
+        let confirmed = authority.confirmed_when(&self.attempt.target, promote)?;
+        self.scope_settlement = PublicationScopeSettlement::Confirmed(confirmed);
+        self.release_published_scope()?;
         self.settlement = ActorPublicationState::Settled;
         Ok(())
     }
@@ -3458,6 +3581,22 @@ impl ActorPublicationVisibility {
 }
 
 impl PublicationAuthority {
+    fn reserve_scope(
+        &self,
+        scope: tidepool_runtime::session::UnpublishedNotebookScope,
+    ) -> Result<
+        tidepool_runtime::session::ReservedNotebookScope,
+        (
+            tidepool_runtime::session::UnpublishedNotebookScope,
+            PublicationSettlementError,
+        ),
+    > {
+        match self {
+            Self::World(world) => world.reserve_scope(scope),
+            Self::TargetFence { fence, .. } => fence.reserve_scope(scope),
+        }
+    }
+
     fn unavailable(&mut self, mark_installed: impl FnOnce()) {
         match self {
             Self::World(world) => world.unavailable(mark_installed),
@@ -3476,16 +3615,16 @@ impl PublicationAuthority {
         restore: impl for<'a> FnOnce(
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
         ) -> Result<(), PublicationSettlementError>,
-    ) -> Result<(), PublicationSettlementError> {
+    ) -> Result<tidepool_runtime::session::OwnSourceFenceReopened, PublicationSettlementError> {
         match self {
             Self::World(world) => world.refused_when(restore),
             Self::TargetFence {
                 fence,
                 prerequisite,
             } => {
-                fence.reopen(target.runtime_lease(), restore)?;
+                let reopened = fence.reopen(target.runtime_lease(), restore)?;
                 drop(prerequisite.take());
-                Ok(())
+                Ok(reopened)
             }
         }
     }
@@ -3496,16 +3635,18 @@ impl PublicationAuthority {
         promote: impl for<'a> FnOnce(
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
         ) -> Result<(), PublicationSettlementError>,
-    ) -> Result<(), PublicationSettlementError> {
+    ) -> Result<tidepool_runtime::session::ConfirmedSourcePublication, PublicationSettlementError>
+    {
         match self {
             Self::World(world) => world.confirmed_when(promote),
             Self::TargetFence {
                 fence,
                 prerequisite,
             } => {
-                fence.confirm(target.runtime_lease(), prerequisite.as_ref(), promote)?;
+                let confirmed =
+                    fence.confirm(target.runtime_lease(), prerequisite.as_ref(), promote)?;
                 drop(prerequisite.take());
-                Ok(())
+                Ok(confirmed)
             }
         }
     }
@@ -3562,6 +3703,7 @@ where
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn publish(
         &self,
         prepared: PreparedActorGeneration,
@@ -3578,7 +3720,7 @@ where
 
     pub(crate) fn reserve(
         &self,
-        prepared: PreparedActorGeneration,
+        mut prepared: PreparedActorGeneration,
         publication: Arc<tidepool_runtime::session::PublicationDecision>,
         publication_kind: ActorGenerationPublication,
     ) -> Result<ActorGenerationReservation, ResidentActorWorkbenchError> {
@@ -3596,7 +3738,7 @@ where
                 "prepared generation belongs to a different machine owner".into(),
             ));
         }
-        let Some(owner) = ActorPublicationGuard::reserve(
+        let Some(mut owner) = ActorPublicationGuard::reserve(
             self.state.clone(),
             prepared.expected.clone(),
             prepared
@@ -3615,6 +3757,19 @@ where
                 "actor generation changed during reload preparation".into(),
             ));
         };
+        if let Some(scope) = prepared.unpublished.take() {
+            if let Err((scope, settlement)) = owner.reserve_notebook_scope(scope) {
+                prepared.unpublished = Some(scope);
+                return Err(ResidentActorWorkbenchError::PublicationSettlement {
+                    failure: Box::new(ActorPublicationSettlementFailure {
+                        outcome: Arc::new(Ok(ActorGenerationCommit::Refused(
+                            "provisional source reservation refused".into(),
+                        ))),
+                        settlement,
+                    }),
+                });
+            }
+        }
         Ok(ActorGenerationReservation::Reserved(
             ReservedActorGeneration {
                 prepared,
@@ -3624,6 +3779,7 @@ where
         ))
     }
 
+    #[cfg(test)]
     pub(crate) async fn publish_reserved(
         &self,
         reserved: ReservedActorGeneration,
@@ -3631,6 +3787,7 @@ where
         self.run_publication_body(reserved).await.complete()
     }
 
+    #[cfg(test)]
     async fn run_publication_body(
         &self,
         reserved: ReservedActorGeneration,

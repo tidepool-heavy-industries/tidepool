@@ -345,6 +345,22 @@ impl WorldPublicationVisibility {
 }
 
 impl WorldPublication {
+    pub(super) fn reserve_scope(
+        &self,
+        scope: tidepool_runtime::session::UnpublishedNotebookScope,
+    ) -> Result<
+        tidepool_runtime::session::ReservedNotebookScope,
+        (
+            tidepool_runtime::session::UnpublishedNotebookScope,
+            super::PublicationSettlementError,
+        ),
+    > {
+        match &self.settlement {
+            WorldPublicationSettlement::Armed { fence, .. } => fence.reserve_scope(scope),
+            _ => Err((scope, super::PublicationSettlementError::ReopenAttempted)),
+        }
+    }
+
     pub(super) fn source_publication_view(
         &self,
     ) -> Result<
@@ -412,7 +428,10 @@ impl WorldPublication {
         current: impl for<'a> FnOnce(
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
         ) -> Result<(), super::PublicationSettlementError>,
-    ) -> Result<(), super::PublicationSettlementError> {
+    ) -> Result<
+        tidepool_runtime::session::ConfirmedSourcePublication,
+        super::PublicationSettlementError,
+    > {
         let WorldPublicationSettlement::Armed {
             fence,
             prerequisite,
@@ -420,7 +439,7 @@ impl WorldPublication {
         else {
             return Err(super::PublicationSettlementError::ReopenAttempted);
         };
-        fence.confirm(self.visibility.target.runtime_lease(), prerequisite.as_ref(), |reopen| {
+        let confirmed = fence.confirm(self.visibility.target.runtime_lease(), prerequisite.as_ref(), |reopen| {
             let mut state = self.world.0.state.lock();
             if !state.publication.as_ref().is_some_and(|issued| Arc::ptr_eq(issued, &self.visibility.attempt))
                 || !matches!(&state.phase, WorldPhase::Bound(target) if target.same_prepared(&self.visibility.target)) {
@@ -432,7 +451,7 @@ impl WorldPublication {
         })?;
         // Last prerequisite custody drops only after gate/world locks release.
         self.settlement = WorldPublicationSettlement::Settled;
-        Ok(())
+        Ok(confirmed)
     }
     #[cfg(test)]
     pub(super) fn confirmed(mut self) {
@@ -447,11 +466,12 @@ impl WorldPublication {
         current: impl for<'a> FnOnce(
             tidepool_runtime::session::RuntimeSourceReopen<'a>,
         ) -> Result<(), super::PublicationSettlementError>,
-    ) -> Result<(), super::PublicationSettlementError> {
+    ) -> Result<tidepool_runtime::session::OwnSourceFenceReopened, super::PublicationSettlementError>
+    {
         let WorldPublicationSettlement::Armed { fence, .. } = &mut self.settlement else {
             return Err(super::PublicationSettlementError::ReopenAttempted);
         };
-        fence.reopen(self.visibility.target.runtime_lease(), |reopen| {
+        let reopened = fence.reopen(self.visibility.target.runtime_lease(), |reopen| {
             let mut state = self.world.0.state.lock();
             if !state
                 .publication
@@ -467,7 +487,7 @@ impl WorldPublication {
             Ok(())
         })?;
         self.settlement = WorldPublicationSettlement::Settled;
-        Ok(())
+        Ok(reopened)
     }
     #[cfg(test)]
     pub(super) fn refused(mut self) {
@@ -1151,7 +1171,8 @@ mod tests {
 
         fn replacement(external: bool) -> Self {
             let mut fixture = Self::with_prerequisite(external);
-            let initial = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            let mut initial =
+                fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
             assert!(initial
                 .visibility()
                 .unwrap()
@@ -1685,9 +1706,10 @@ mod tests {
             assert!(primary_error
                 .to_string()
                 .contains("retained storage evidence"));
-            let refusal = refusal.into_settled_diagnostic().err().expect(
-                "source restoration cannot settle unassessed storage work",
-            );
+            let refusal = refusal
+                .into_settled_diagnostic()
+                .err()
+                .expect("source restoration cannot settle unassessed storage work");
             assert!(Arc::ptr_eq(&primary, refusal.outcome()));
         }
     }
@@ -1695,8 +1717,9 @@ mod tests {
     #[test]
     fn typed_durable_refusal_keeps_refusal_control_and_unassessed_obligations() {
         use super::super::{
-            ActorGenerationCommit, ActorGenerationPublicationRefusalObservation as Observation,
-            ActorGenerationPublicationIssue, ActorPublicationFailureCause as Cause,
+            ActorGenerationCommit, ActorGenerationPublicationIssue,
+            ActorGenerationPublicationRefusalObservation as Observation,
+            ActorPublicationFailureCause as Cause,
         };
         use tidepool_runtime::session::{SessionError, StoreError, StoreErrorKind};
         let fixture = PublicationFixture::replacement(true);
@@ -1706,13 +1729,13 @@ mod tests {
             guard,
             obligations: super::super::PublicationBodyObligations::Retained,
             outcome: Ok(ActorGenerationCommit::Refused(
-                ActorGenerationPublicationIssue::Durable(Box::new(SessionError::RecoveryStore(Box::new(
-                    StoreError {
+                ActorGenerationPublicationIssue::Durable(Box::new(SessionError::RecoveryStore(
+                    Box::new(StoreError {
                         path: "typed-refusal-control.db".into(),
                         kind: StoreErrorKind::Storage,
                         detail: "actual typed storage cause".into(),
-                    },
-                )))),
+                    }),
+                ))),
             )),
         }
         .for_retirement();
@@ -2132,7 +2155,8 @@ mod tests {
                 } else {
                     PublicationFixture::replacement(true)
                 };
-                let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+                let mut owner =
+                    fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
                 let parent = fixture
                     .generation
                     .dependency()
@@ -2308,7 +2332,7 @@ mod tests {
             } else {
                 PublicationFixture::after_confirmed_c()
             };
-            let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
             assert!(owner
                 .visibility()
                 .unwrap()
@@ -2429,7 +2453,7 @@ mod tests {
             release.send(()).unwrap();
             settling.join().unwrap().unwrap();
             drain.join().unwrap();
-            if let Some(owner) = republish.join().unwrap() {
+            if let Some(mut owner) = republish.join().unwrap() {
                 assert!(
                     owner.confirmed().is_err(),
                     "a late publisher must not confirm after terminal drain"
@@ -2461,7 +2485,7 @@ mod tests {
     fn publisher_closed_actual_preparation_owner_prevents_confirmation_and_refusal_reopen() {
         for confirmed in [true, false] {
             let mut fixture = PublicationFixture::new();
-            let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
             if confirmed {
                 assert!(owner
                     .visibility()
@@ -2503,7 +2527,7 @@ mod tests {
                 .as_ref()
                 .unwrap();
             let independent = parent.runtime_lease().admit_source().unwrap();
-            let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
             assert!(owner
                 .visibility()
                 .unwrap()
@@ -2534,7 +2558,7 @@ mod tests {
                 .prerequisite()
                 .as_ref()
                 .unwrap();
-            let owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+            let mut owner = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
             let parent_fence = parent.fence().unwrap();
             assert!(parent_fence.pending_claims() > 0);
             assert!(owner
@@ -2740,7 +2764,7 @@ mod tests {
         ));
         drop(fixture.source.claim().unwrap());
         assert!(fixture.state.snapshot_for_call().is_ok());
-        let retry = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let mut retry = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
         assert!(!stale.install(fixture.generation.clone()));
         assert!(retry.visibility().unwrap().is_current());
         assert!(retry
