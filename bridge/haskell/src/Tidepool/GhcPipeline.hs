@@ -294,7 +294,7 @@ import Tidepool.ExactScope
   , scopeAvailableOriginalProducts
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
   , exactInputRetentionLimits, commitWorldInputRetention
-  , WorldInputFacts, WorldBinding, CapturedWorldSources, WorldSourceClosureEntry(..), readWorldInputsWithOwner, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
+  , WorldInputFacts, WorldBinding, CapturedWorldSources, WorldSourceClosureEntry(..), readWorldInputsWithOwner, readWorldSuccessorWithOwner, worldSuccessorFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsProducer, worldInputsProfile
   , worldInputsSources, worldSourceRoots, worldSourceFiles, worldSourceDomainSha256, worldInputsSourceModuleHints, worldInputsRetainedCharge, worldInputsBindings
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow, worldBindingRowFactCID
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
@@ -6181,6 +6181,40 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         writeIORef heldWorld (Just world)
                         observeCompilerWorld timing selected event root reference (Just world)
                         pure (ExactInputsReady (worldInputsIdentity facts) reference)
+                      publish world@(HeldCompilerWorld facts reference _ _) = do
+                        selected <- readIORef universe
+                        let (nextWorlds,evicted) = admitCompilerWorld
+                              (exactInputRetentionLimits (universeOriginalInputs selected)) root world (universeWorlds selected)
+                            retiredWorlds = removeCompilerWorld root nextWorlds
+                        _ <- evaluate (toInteger (length evicted) + fst (compilerWorldCacheCharge retiredWorlds))
+                        retired <- evaluate (selected {universeWorlds=retiredWorlds})
+                        held <- evaluate (Just world)
+                        ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) reference)
+                        -- Retire old private owners before unlinking their backing.
+                        -- The shared reservation remains conservative until cleanup
+                        -- succeeds; failure retains it and retires this worker.
+                        writeIORef universe retired
+                        failures <- attemptReleases
+                          [(CompilerScopeRestore, do
+                              observeCompilerWorld timing retired WorldEvicted
+                                (worldInputsIdentity oldFacts) oldReference (Just old)
+                              retireCompilerWorldBacking timing universe old)
+                          | old@(HeldCompilerWorld oldFacts oldReference _ _) <- evicted]
+                        released <- captureCompletion (pure ())
+                        finishCompletion (appendCleanupFailures released failures)
+                        settled <- readIORef universe
+                        let (settledWorlds,unexpected) = admitCompilerWorld
+                              (exactInputRetentionLimits (universeOriginalInputs settled)) root world (universeWorlds settled)
+                            finalNext = settled {universeWorlds=settledWorlds}
+                            (settledBytes,settledCount) = compilerWorldCacheCharge settledWorlds
+                        unless (null unexpected) (throwIO WorldQueryCorrupt)
+                        _ <- evaluate finalNext
+                        finalResult <- evaluate (ready,world,finalNext)
+                        -- No fallible or interruptible work follows decoder commit.
+                        commitWorldInputRetention (universeOriginalInputs selected) settledBytes settledCount $ do
+                          writeIORef universe finalNext
+                          writeIORef heldWorld held
+                        pure finalResult
                       conflicting = case held of
                         Just (HeldCompilerWorld facts _ _ _) -> worldInputsIdentity facts /= root
                         Nothing -> False
@@ -6188,7 +6222,40 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     Nothing -> pure (ExactInputsRejected UnsupportedOperation)
                     Just _ | conflicting -> pure (ExactInputsRejected InvalidRealization)
                     Just association -> case acquisition of
-                      SuccessorExactInputs _ _ _ -> pure (ExactInputsRejected UnsupportedOperation)
+                      SuccessorExactInputs predecessor reference manifest -> do
+                        let previous = case held <|> lookupCompilerWorld predecessor (universeWorlds selected) of
+                              Just world@(HeldCompilerWorld facts issued _ _)
+                                | worldInputsIdentity facts == predecessor && issued == reference -> Just world
+                              _ -> Nothing
+                        case previous of
+                          Nothing -> do
+                            observeCompilerWorld timing selected WorldNeedsAcquisition root reference Nothing
+                            pure (ExactInputsNeedsAcquisition root)
+                          Just base@(HeldCompilerWorld baseFacts _ _ _) -> do
+                            acquired <- try (readWorldSuccessorWithOwner (universeOriginalInputs selected) baseFacts manifest)
+                            case acquired of
+                              Left (WorldInputsFailure cause detail) -> do
+                                emitWorldAcquisitionRejection ("successor read/decode " ++ show cause) manifest detail
+                                pure (ExactInputsRejected AcquisitionRejected)
+                              Right successor
+                                | worldInputsIdentity (worldSuccessorFacts successor) /= root -> do
+                                    emitWorldAcquisitionRejection "successor world identity mismatch" manifest
+                                      ("expected " ++ root ++ "; captured " ++ worldInputsIdentity (worldSuccessorFacts successor))
+                                    pure (ExactInputsRejected InvalidRoot)
+                                | otherwise -> case lookupCompilerWorld root (universeWorlds selected) of
+                                    Just world -> install WorldCompleteReused world
+                                    Nothing -> do
+                                      unique <- RequestUnique.hashUnique <$> RequestUnique.newUnique
+                                      let facts = worldSuccessorFacts successor
+                                          issued = hexBytes (servicePackageWorkerInstance association) ++ "." ++ show unique
+                                      (ready,world,committed) <- retainHeldWorldSuccessor universe base facts
+                                        (worldInputsSourceModuleHints facts) issued publish
+                                      emitCount timing "world.successor.inherited_realizations" 1
+                                      let event = case lookupCompilerWorld root (universeWorlds committed) of
+                                            Just _ -> WorldAdmittedRetained
+                                            Nothing -> WorldAdmittedActiveOnly
+                                      observeCompilerWorld timing committed event root issued (Just world)
+                                      pure ready
                       ResidentExactInputs reference ->
                         case held of
                           Just world@(HeldCompilerWorld _ issued _ _) | issued == reference -> install WorldResidentHeldHit world
@@ -6231,38 +6298,10 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                         let reference = hexBytes (servicePackageWorkerInstance association) ++ "." ++ show unique
                                             world = HeldCompilerWorld facts reference materialized table
                                         _ <- evaluate (length reference)
-                                        let (nextWorlds,evicted) = admitCompilerWorld
-                                              (exactInputRetentionLimits (universeOriginalInputs selected)) root world (registerWorldBacking materialized (universeWorlds selected))
-                                            retiredWorlds = removeCompilerWorld root nextWorlds
-                                        _ <- evaluate (toInteger (length evicted) + fst (compilerWorldCacheCharge retiredWorlds))
-                                        retired <- evaluate (selected {universeWorlds=retiredWorlds})
-                                        held <- evaluate (Just world)
-                                        ready <- evaluate (ExactInputsReady (worldInputsIdentity facts) reference)
-                                        -- Retire old private owners before unlinking their backing.
-                                        -- The shared reservation remains conservative until cleanup
-                                        -- succeeds; failure retains it and retires this worker.
-                                        writeIORef universe retired
-                                        failures <- attemptReleases
-                                          [(CompilerScopeRestore, do
-                                              observeCompilerWorld timing retired WorldEvicted
-                                                (worldInputsIdentity oldFacts) oldReference (Just old)
-                                              retireCompilerWorldBacking timing universe old)
-                                          | old@(HeldCompilerWorld oldFacts oldReference _ _) <- evicted]
-                                        released <- captureCompletion (pure ())
-                                        finishCompletion (appendCleanupFailures released failures)
-                                        settled <- readIORef universe
-                                        let (settledWorlds,unexpected) = admitCompilerWorld
-                                              (exactInputRetentionLimits (universeOriginalInputs settled)) root world (universeWorlds settled)
-                                            finalNext = settled {universeWorlds=settledWorlds}
-                                            (settledBytes,settledCount) = compilerWorldCacheCharge settledWorlds
-                                        unless (null unexpected) (throwIO WorldQueryCorrupt)
-                                        _ <- evaluate finalNext
-                                        finalResult <- evaluate (ready,world,finalNext)
-                                        -- No fallible or interruptible work follows decoder commit.
-                                        commitWorldInputRetention (universeOriginalInputs selected) settledBytes settledCount $ do
-                                          writeIORef universe finalNext
-                                          writeIORef heldWorld held
-                                        pure finalResult
+                                        current <- readIORef universe
+                                        writeIORef universe current
+                                          {universeWorlds=registerWorldBacking materialized (universeWorlds current)}
+                                        publish world
                                     -- The unpublished-directory owner has transferred custody.
                                     -- Observation cannot make that owner unlink this world.
                                     let event = case lookupCompilerWorld root (universeWorlds committed) of
