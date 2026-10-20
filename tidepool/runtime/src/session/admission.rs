@@ -5276,6 +5276,56 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_token_transaction_keeps_source_authority_and_target_resources_separately() {
+        let mut session = PersistentSession::new(None, 1024);
+        let original_lease = session.mint_isolated_scope_with_lease().unwrap();
+        let original_scope = original_lease.scope();
+        let original = original_lease.original_source().clone();
+        let target = session.mint_isolated_scope_with_lease().unwrap();
+        let target_scope = target.scope();
+        let source_observation = Arc::downgrade(&original);
+        let target_observation = Arc::downgrade(&target);
+        drop(original_lease);
+        session.reap_admission_leases();
+        assert!(!session.scope_tree().is_live(original_scope));
+        let close = std::cell::Cell::new(None);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = original.with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |settled| close.set(Some(settled)),
+                |owner, _| -> () {
+                    owner.admit(Some(target.clone())).unwrap();
+                    panic!("admitted operation unwinds before returning");
+                },
+            );
+        }));
+        assert!(panic.is_err());
+        assert_eq!(
+            close.take(),
+            Some(crate::CompilerTransactionClose::NotStarted)
+        );
+        drop(original);
+        drop(target);
+        session.reap_admission_leases();
+        let source = source_observation.upgrade().unwrap();
+        let retained_target = target_observation.upgrade().unwrap();
+        assert!(!session.scope_tree().is_live(original_scope));
+        assert!(session.scope_tree().is_live(target_scope));
+        assert!(matches!(
+            source.with_open_target(&retained_target, || ()),
+            Err(super::super::SourceAdmissionError::Unconfirmed { .. })
+        ));
+        drop(retained_target);
+        session.retire_scope(target_scope);
+        assert!(target_observation.upgrade().is_none());
+        drop(source);
+        session.retire_scope(original_scope);
+        assert!(source_observation.upgrade().is_none());
+    }
+
+    #[test]
     fn world_private_admission_requires_the_actual_transaction_original() {
         let root = tempfile::tempdir().unwrap();
         let lib =
