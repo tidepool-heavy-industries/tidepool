@@ -18942,12 +18942,18 @@ pub(crate) mod request_tests {
         }
     }
 
+    enum WorldInputPlanBoundary {
+        Actual,
+        ForeignWorld(Arc<tidepool_toolchain::compiler_world::CompilerWorld>),
+        ForeignOriginal(generation_admission::SourceDependency),
+    }
+
     async fn plan_actual_world_input(
         frontend: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
         context: &crate::ActorSessionContext,
         input: HostInputRetirement,
         source: &str,
-        world_override: Option<Arc<tidepool_toolchain::compiler_world::CompilerWorld>>,
+        boundary: WorldInputPlanBoundary,
     ) -> (
         Result<
             tidepool_runtime::session::turn::RuntimeWorldCellPlan,
@@ -18964,8 +18970,13 @@ pub(crate) mod request_tests {
                 Some(input.mounted_input()),
             )
             .unwrap();
-        let world =
-            world_override.unwrap_or_else(|| execution.admission.compiler_world().unwrap().clone());
+        let mut world = execution.admission.compiler_world().unwrap().clone();
+        let mut dependency = context.source_dependency().clone();
+        match boundary {
+            WorldInputPlanBoundary::Actual => {}
+            WorldInputPlanBoundary::ForeignWorld(foreign) => world = foreign,
+            WorldInputPlanBoundary::ForeignOriginal(foreign) => dependency = foreign,
+        }
         let (operand, input) = frontend
             .access
             .with_compiler_machine(context.clone(), move |session, _, _, _| {
@@ -18985,7 +18996,6 @@ pub(crate) mod request_tests {
         let scope = crate::capabilities::WorkbenchServices::new()
             .with_compiler_owner(CompilerCloseOwner::ActorLifecycle(closes.clone()))
             .for_preparation();
-        let dependency = context.source_dependency().clone();
         let result = scope
             .scope(async move {
                 let work = crate::capabilities::CompilerOwnerScope::current()
@@ -19087,7 +19097,7 @@ pub(crate) mod request_tests {
             let (other, other_context) = fixture.private().await;
             let input = frontend.lease_cell_input(&context).await.unwrap().unwrap();
             let other_input = other.lease_cell_input(&other_context).await.unwrap().unwrap();
-            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", None).await;
+            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let plan = plan.ok().expect("a real input parser result after confirmed END");
             let execution = other.private_execution.as_ref().unwrap().admission.clone();
             let input = frontend.access.with_machine(context.clone(), move |session, context, _| {
@@ -19101,7 +19111,7 @@ pub(crate) mod request_tests {
                     session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope)));
                 Ok(input)
             }).await.unwrap();
-            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", None).await;
+            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let plan = plan.ok().unwrap();
             let execution = frontend.private_execution.as_ref().unwrap().admission.clone();
             let other_input = frontend.access.with_machine(context.clone(), move |session, context, _| {
@@ -19121,9 +19131,9 @@ pub(crate) mod request_tests {
 
             // Two genuine affine parser results let one refusal consume a plan
             // while another still owns physical custody after logical retirement.
-            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", None).await;
+            let (plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let plan = plan.ok().unwrap();
-            let (retained_plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", None).await;
+            let (retained_plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let retained_plan = retained_plan.ok().unwrap();
             let input_name = input.mounted_input().binder.name.clone();
             let roots_with_input = frontend.access.with_machine(context.clone(), |session, _, _| Ok(session.persistent_roots_count())).await.unwrap();
@@ -19157,15 +19167,29 @@ pub(crate) mod request_tests {
             // This uses the existing runtime operand/source admission boundary;
             // no caller-built source proof or replacement PendingWrite is involved.
             let foreign = RootedWorldInputTest::new(client, 8).await;
-            let (foreign_frontend, _) = foreign.private().await;
+            let (foreign_frontend, foreign_context) = foreign.private().await;
             let foreign_world = foreign_frontend.private_execution.as_ref().unwrap().admission.compiler_world().unwrap().clone();
             let (frontend, context) = fixture.private().await;
             let input = frontend.lease_cell_input(&context).await.unwrap().unwrap();
             let name = input.mounted_input().binder.name.clone();
-            let (refused, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", Some(foreign_world)).await;
+            let (refused, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::ForeignWorld(foreign_world)).await;
             assert!(matches!(refused, Err(tidepool_runtime::session::WorldInspectionError::Runtime(
                 tidepool_runtime::RuntimeError::Session(tidepool_runtime::session::SessionError::SourceAdmission(
                     tidepool_runtime::session::SourceAdmissionError::ForeignTransaction))))));
+            drop(input);
+            frontend.wait_for_host_input_retirement_for_test(context, name).await;
+
+            let (frontend, context) = fixture.private().await;
+            let input = frontend.lease_cell_input(&context).await.unwrap().unwrap();
+            let name = input.mounted_input().binder.name.clone();
+            let (refused, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input",
+                WorldInputPlanBoundary::ForeignOriginal(foreign_context.source_dependency().clone())).await;
+            assert!(matches!(refused, Err(tidepool_runtime::session::WorldInspectionError::Runtime(
+                tidepool_runtime::RuntimeError::Session(tidepool_runtime::session::SessionError::SourceAdmission(
+                    tidepool_runtime::session::SourceAdmissionError::DifferentOriginalSource))))),
+                "a real second rooted source cannot admit this operand's original source");
+            // The source-admission owner's counter control independently proves
+            // this typed refusal precedes claims; this actor observes cleanup.
             drop(input);
             frontend.wait_for_host_input_retirement_for_test(context, name).await;
             fixture.assert_public_unchanged().await;
