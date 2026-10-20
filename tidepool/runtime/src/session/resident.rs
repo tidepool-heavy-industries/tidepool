@@ -127,6 +127,42 @@ impl RuntimeSourceOrigin {
     }
 }
 
+/// Project one exact installation import into this invocation's local builder.
+/// Native physical/semantic ownership does not itself supply runtime source custody.
+fn contribute_import_source<'a>(
+    owner: &ImportOwner,
+    bindings: &'a HashMap<u64, Arc<ProgramProvenance>>,
+    possible_sites: impl Iterator<Item = u64>,
+    sources: &mut BTreeMap<u64, RuntimeSourceOrigin>,
+) -> Option<&'a Arc<ProgramProvenance>> {
+    match owner {
+        ImportOwner::Retained { id, .. } => {
+            if let Some(original) = bindings.get(&id.raw()) {
+                for (site, source) in &original.original_sources {
+                    sources
+                        .entry(*site)
+                        .and_modify(|held| held.merge(source))
+                        .or_insert_with(|| source.clone());
+                }
+                return Some(original);
+            }
+        }
+        ImportOwner::Source { .. } | ImportOwner::CodeExport { .. } => {}
+        ImportOwner::Package { .. } => return None,
+    }
+    // Missing binding/native provenance has no trustworthy site projection.
+    // The exact selected target closure bounds its possible contribution.
+    for site in possible_sites {
+        sources
+            .entry(site)
+            .and_modify(|held| {
+                held.merge(&RuntimeSourceOrigin::Unknown(Vec::new()));
+            })
+            .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
+    }
+    None
+}
+
 impl PartialEq for RuntimeSourceOrigin {
     fn eq(&self, other: &Self) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
@@ -7029,33 +7065,14 @@ where
                     .iter()
                     .flat_map(|group| group.original().imports()),
             );
-            let ids = imports
-                .filter_map(|owner| match owner {
-                    ImportOwner::Retained { id, .. } => Some(id.raw()),
-                    _ => None,
-                })
-                .collect::<std::collections::BTreeSet<_>>();
-            for id in ids {
-                if let Some(original) = self.binding_provenance.get(&id) {
-                    for (site, source) in &original.original_sources {
-                        sources
-                            .entry(*site)
-                            .and_modify(|held| held.merge(source))
-                            .or_insert_with(|| source.clone());
-                    }
+            for owner in imports {
+                if let Some(original) = contribute_import_source(
+                    owner,
+                    &self.binding_provenance,
+                    provenance.native_sites.ids(),
+                    &mut sources,
+                ) {
                     retained.push(original);
-                } else {
-                    // The retained value's site projection is unavailable. The
-                    // exact target-issued native closure bounds its possible
-                    // contribution; unrelated frame observations remain separate.
-                    for site in provenance.native_sites.ids() {
-                        sources
-                            .entry(site)
-                            .and_modify(|held| {
-                                held.merge(&RuntimeSourceOrigin::Unknown(Vec::new()));
-                            })
-                            .or_insert_with(|| RuntimeSourceOrigin::Unknown(Vec::new()));
-                    }
                 }
             }
         }
@@ -12456,6 +12473,75 @@ mod source_origin_tests {
             &provenance.original_sources[&23].require_unique(23).unwrap(),
             &source_b
         ));
+    }
+
+    #[test]
+    fn unresolved_import_owners_poison_only_selected_native_sites() {
+        let mut owner = PersistentSession::new(None, 1024);
+        let source = owner.retain_lexical_scope(ScopeId::ROOT).unwrap();
+        let binder = SymbolIdentity {
+            unit: "Source".into(),
+            module: "Source".into(),
+            namespace: "value".into(),
+            occurrence: "f".into(),
+            record_parent: None,
+        };
+        let selected_binding = SessionVarId::from_extract(7);
+        let known = Arc::new(issued(17, &source));
+        let bindings = HashMap::from([(selected_binding.raw(), known.clone())]);
+        let retained = ImportOwner::Retained {
+            id: selected_binding,
+            generation: 1,
+        };
+        let missing_owners = [
+            ImportOwner::Retained {
+                id: SessionVarId::from_extract(8),
+                generation: 1,
+            },
+            ImportOwner::Source {
+                version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
+                binder: binder.clone(),
+            },
+            ImportOwner::CodeExport {
+                binder,
+                generation: 1,
+                root_id: 9,
+                interface_digest: None,
+            },
+        ];
+        for missing in &missing_owners {
+            for missing_first in [false, true] {
+                let mut sources =
+                    BTreeMap::from([(23, RuntimeSourceOrigin::Known(source.clone()))]);
+                let imports = if missing_first {
+                    [missing, &retained]
+                } else {
+                    [&retained, missing]
+                };
+                for import in imports {
+                    contribute_import_source(import, &bindings, [17, 19].into_iter(), &mut sources);
+                }
+                assert!(matches!(
+                    sources[&17].require_unique(17),
+                    Err(ResidentError::MissingOriginalSource {
+                        known_origins: 1,
+                        ..
+                    })
+                ));
+                assert!(Arc::ptr_eq(&sources[&17].known()[0], &source));
+                assert!(matches!(
+                    sources[&19].require_unique(19),
+                    Err(ResidentError::MissingOriginalSource {
+                        known_origins: 0,
+                        ..
+                    })
+                ));
+                assert!(Arc::ptr_eq(
+                    &sources[&23].require_unique(23).unwrap(),
+                    &source
+                ));
+            }
+        }
     }
 
     proptest! {
