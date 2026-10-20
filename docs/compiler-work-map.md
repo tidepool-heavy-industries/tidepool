@@ -1,6 +1,6 @@
 # Compiler work and authority map
 
-The current integrated source baseline is `d91f6a67a6` (2026-10-20).
+The current integrated source baseline is `f6d9976b70` (2026-10-20).
 It contains the compiler-primary projection, bounded World residency, idle-worker
 affinity, completed compiler-product handoff and the earlier affine retirement
 tranche. Integration is not release qualification: the actual joined runtime
@@ -15,8 +15,8 @@ service dataflow. Stage timings are inclusive and are not additive. Use
 
 The [demand-products contract](../plans/shared-warm-compiler/completion/demand-products.md)
 owns the accepted implementation. The
-[review checkpoint](../plans/shared-warm-compiler/completion/review-checkpoint-20261020.md)
-separates joined evidence, receiving repairs and open design decisions.
+[ownership completion contract](../plans/shared-warm-compiler/completion/ownership-completion.md)
+owns the next repairs; the review checkpoint retains their failing baseline.
 
 | Producer and consumer | Integrated boundary | Remaining work or qualification |
 | --- | --- | --- |
@@ -46,13 +46,28 @@ selected certificate/input paths. The joined declared runtime cohort reproduces
 read/write of the retained expected interface is byte-identical; that excludes
 only simple reserialization as a reproducer, not other compiler-state differences.
 The actual differing current bytes were not retained by the earlier failure.
+Source review found an independent provenance defect: selected canonical owners
+can enter fresh frontend finalization, then pair with the earlier certificate in
+a late owner-keyed join. Cross-case retained interfaces contain different physical
+source paths inside executable error literals. Exact failure-pair capture and
+co-issued reused/fresh acquisition products are in progress; neither is claimed
+implemented by this baseline.
+
+Reload review also found that effect-site provenance cannot certify whole-entry
+independence, and a publication worker can lose its actual guard while retaining
+only a terminal tag. The accepted replacement uses the existing closed
+PreparedSourceEntry proof with a runtime-owned fresh install, and keeps the
+publication guard in serial owner custody before dispatch. These are planned
+repairs, not properties established by the current code.
 
 Joined compilation passed for the production worker, Haskell source-boot test
 binary, toolchain tests and actor tests. Two joined Haskell selections passed
 (SOURCE history with eleven actual admissions; finalized Core). The actual
 compiled-C test exposed a temporary validation namespace escaping as authored
-Original selection; its private-result repair is receiving. Do not weaken the
-role oracle or rebuild exact issued dependency edges from a broader inventory.
+Original selection; its private-result repair is integrated and the actual compiled-C history passes
+(1 selected, 1 executed). The private completed result carries custody and offers,
+not temporary selection roles or namespace. Do not weaken the role oracle or
+rebuild exact issued dependency edges from a broader inventory.
 
 ## Earlier service checkpoint and receiving boundaries
 
