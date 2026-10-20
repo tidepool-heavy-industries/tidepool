@@ -40,7 +40,10 @@ pub(crate) enum GenerationInvocationState {
     SourceUnclassified,
     CleanupPending,
     CleanupUnconfirmed(String),
-    Compiler(crate::CompilerWorkClose),
+    Compiler {
+        registration: usize,
+        close: crate::CompilerWorkClose,
+    },
     Form(String),
     DisplayPendingProducer(WorkbenchOperationId),
     DisplayPublication(
@@ -369,10 +372,13 @@ impl InvocationWork {
                     }
                 }
             }
-            for compiler in compilers {
+            for (registration, compiler) in compilers.into_iter().enumerate() {
                 let close = compiler.observation();
                 if !close.is_confirmed() {
-                    record(GenerationInvocationState::Compiler(close));
+                    record(GenerationInvocationState::Compiler {
+                        registration,
+                        close,
+                    });
                 }
             }
         }
