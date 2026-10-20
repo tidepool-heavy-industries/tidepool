@@ -1951,6 +1951,7 @@ impl CompilerSourceSupport {
     /// Add the actual closed support fragment issued for one program prefix.
     /// Unchanged roles and native facts share their persistent owners. Incoming
     /// offers retain custody without choosing additional executable roots.
+    #[track_caller]
     pub(crate) fn append_program_fragment(
         &self,
         incoming: &Self,
@@ -1971,6 +1972,16 @@ impl CompilerSourceSupport {
                     }));
                 }
                 if previous.interface.0 != row.interface.0 {
+                    tracing::debug!(
+                        target: "tidepool::artifact_inventory::ambiguity_trace",
+                        ?owner,
+                        previous_binding = ?previous.interface.0,
+                        incoming_binding = ?row.interface.0,
+                        previous_role = ?self.projection.roles[owner],
+                        incoming_role = ?role,
+                        receiving_caller = %std::panic::Location::caller(),
+                        "program fragment carries different issued interface bindings"
+                    );
                     return Err(admission_failure(
                         ArtifactInventoryFailure::BindingAmbiguity {
                             artifact: row.interface.0.artifact,
