@@ -12922,6 +12922,7 @@ mod authored_publication_tests {
             assemble_expression_module, run_turn, ExpressionLift, TemplateSelector, TurnRequest,
             TurnResult, TurnTemplate,
         };
+        use tidepool_codegen::prepared_program::CompiledProgram;
         use tidepool_testing::effect_surface::TestEffectSurface;
         tidepool_testing::eval_harness::require_extract();
         let effects = TestEffectSurface::minimal(&[tidepool_mcp::agent_tools_decl()]).unwrap();
