@@ -1920,19 +1920,30 @@ impl ActorGenerationCandidateCustody {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
+    pub(crate) fn identity_observer(&self) -> ActorGenerationCandidateObserver {
+        ActorGenerationCandidateObserver(Arc::downgrade(&self.0))
+    }
+
     #[cfg(test)]
-    pub(crate) fn retention_observer(&self) -> ActorGenerationCandidateRetentionObserver {
-        ActorGenerationCandidateRetentionObserver(Arc::downgrade(&self.0))
+    pub(crate) fn retention_observer(&self) -> ActorGenerationCandidateObserver {
+        self.identity_observer()
     }
 }
 
-#[cfg(test)]
-pub(crate) struct ActorGenerationCandidateRetentionObserver(
-    std::sync::Weak<ActorGenerationCandidate>,
-);
+/// Exact issued identity without candidate custody or publication rights.
+#[derive(Clone)]
+pub(crate) struct ActorGenerationCandidateObserver(std::sync::Weak<ActorGenerationCandidate>);
 
-#[cfg(test)]
-impl ActorGenerationCandidateRetentionObserver {
+impl ActorGenerationCandidateObserver {
+    pub(crate) fn same_candidate(&self, candidate: &ActorGenerationCandidateCustody) -> bool {
+        self.0.ptr_eq(&Arc::downgrade(&candidate.0))
+    }
+
+    pub(crate) fn same_observer(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_retained(&self) -> bool {
         self.0.upgrade().is_some()
     }
