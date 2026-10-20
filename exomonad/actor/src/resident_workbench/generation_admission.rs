@@ -1391,6 +1391,187 @@ mod tests {
     }
 
     #[test]
+    fn retirement_body_refusal_retains_the_same_guard_until_both_sources_settle() {
+        let fixture = PublicationFixture::replacement(true);
+        let mut guard = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        let attempt = guard.attempt.clone();
+        let mut original = capture_original(&mut guard);
+        let completion = super::super::PublicationBodyCompletion::Observed {
+            guard,
+            outcome: Err(crate::ResidentActorWorkbenchError::InvocationCancelled),
+        }
+        .for_retirement();
+        let super::super::ActorGenerationPublicationSettlement::Unpublished(mut refusal) =
+            completion
+        else {
+            panic!("observed unpublished work must retain its actual settlement owner");
+        };
+        assert!(Arc::ptr_eq(&attempt, &refusal.guard.attempt));
+        assert!(matches!(
+            refusal.outcome().as_ref(),
+            Err(crate::ResidentActorWorkbenchError::InvocationCancelled)
+        ));
+        assert!(expected.scope.admit_source().is_err());
+        assert!(fixture.generation.scope.admit_source().is_err());
+        refusal.refuse_retirement(&mut original).unwrap();
+        assert!(Arc::ptr_eq(
+            &fixture.state.current_generation().unwrap(),
+            &expected
+        ));
+        assert!(expected.scope.admit_source().is_ok());
+        assert!(fixture.generation.scope.admit_source().is_ok());
+        drop(refusal);
+        assert!(expected.scope.admit_source().is_ok());
+    }
+
+    #[test]
+    fn retirement_body_refusal_failure_shares_primary_and_retains_original_fence() {
+        let mut fixture = PublicationFixture::replacement(true);
+        let mut guard = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let expected = fixture.expected.generation().unwrap().clone();
+        let mut original = capture_original(&mut guard);
+        let completion = super::super::PublicationBodyCompletion::Observed {
+            guard,
+            outcome: Err(crate::ResidentActorWorkbenchError::InvocationCancelled),
+        }
+        .for_retirement();
+        let super::super::ActorGenerationPublicationSettlement::Unpublished(mut refusal) =
+            completion
+        else {
+            panic!("the actual guard must survive body refusal");
+        };
+        let primary = refusal.outcome().clone();
+        drop(fixture.preparation.take());
+        let error = refusal.refuse_retirement(&mut original).unwrap_err();
+        assert!(error.requires_recovery());
+        assert_eq!(
+            error.execution_failure_kind(),
+            Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
+        );
+        let crate::ResidentActorWorkbenchError::PublicationSettlement { failure } = error else {
+            panic!("restoration failure must retain both causes");
+        };
+        assert!(Arc::ptr_eq(&primary, &failure.outcome));
+        assert_eq!(original.pending_claims().unwrap(), 0);
+        assert!(expected.scope.admit_source().is_err());
+        drop(refusal);
+        fixture.assert_candidate_unavailable();
+    }
+
+    #[test]
+    fn retirement_unobserved_body_never_issues_a_refusal_continuation() {
+        let fixture = PublicationFixture::replacement(true);
+        let mut guard = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let _original = capture_original(&mut guard);
+        let completion = super::super::PublicationBodyCompletion::Unobserved {
+            guard,
+            primary: crate::ResidentActorWorkbenchError::InvocationCancelled,
+        }
+        .for_retirement();
+        let super::super::ActorGenerationPublicationSettlement::Settled(outcome) = completion
+        else {
+            panic!("body observation loss cannot authorize restoration");
+        };
+        let Err(error) = outcome.as_ref() else {
+            panic!("the body remains unconfirmed")
+        };
+        assert!(error.requires_recovery());
+        assert_eq!(
+            error.execution_failure_kind(),
+            Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
+        );
+        fixture.assert_candidate_unavailable();
+    }
+
+    #[test]
+    fn retirement_observed_unconfirmed_body_never_issues_a_refusal_continuation() {
+        let fixture = PublicationFixture::replacement(true);
+        let mut guard = fixture.reserve(tidepool_runtime::session::PublicationDecision::new());
+        let _original = capture_original(&mut guard);
+        let completion = super::super::PublicationBodyCompletion::Observed {
+            guard,
+            outcome: Ok(super::super::ActorGenerationCommit::Unconfirmed(
+                "actual commit observation was lost".into(),
+            )),
+        }
+        .for_retirement();
+        let super::super::ActorGenerationPublicationSettlement::Settled(outcome) = completion
+        else {
+            panic!("unconfirmed physical publication cannot authorize restoration");
+        };
+        assert!(matches!(
+            outcome.as_ref(),
+            Ok(super::super::ActorGenerationCommit::Unconfirmed(_))
+        ));
+        fixture.assert_candidate_unavailable();
+    }
+
+    #[test]
+    fn retirement_claimed_body_error_never_issues_a_refusal_continuation() {
+        for published in [false, true] {
+            for refused in [false, true] {
+                let fixture = PublicationFixture::replacement(true);
+                let decision = tidepool_runtime::session::PublicationDecision::new();
+                let mut guard = fixture.reserve(decision.clone());
+                let _original = capture_original(&mut guard);
+                let claim = decision.claim_commit().unwrap();
+                let pending_claim = if published {
+                    claim.published();
+                    None
+                } else {
+                    Some(claim)
+                };
+                let primary = if refused {
+                    Ok(super::super::ActorGenerationCommit::Refused(
+                        "body observed a refusal after claim".into(),
+                    ))
+                } else {
+                    Err(crate::ResidentActorWorkbenchError::InvocationCancelled)
+                };
+                let completion = super::super::PublicationBodyCompletion::Observed {
+                    guard,
+                    outcome: primary,
+                }
+                .for_retirement();
+                let super::super::ActorGenerationPublicationSettlement::Settled(outcome) =
+                    completion
+                else {
+                    panic!("a commit claim excludes known-unpublished restoration");
+                };
+                let Err(error) = outcome.as_ref() else {
+                    panic!("the contradictory observed outcome retains uncertainty")
+                };
+                assert!(error.requires_recovery());
+                assert_eq!(
+                    error.execution_failure_kind(),
+                    if refused {
+                        None
+                    } else {
+                        Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
+                    }
+                );
+                let crate::ResidentActorWorkbenchError::PublicationSettlement { failure } = error
+                else {
+                    panic!("both causes remain typed")
+                };
+                assert!(matches!(
+                    failure.settlement,
+                    super::super::PublicationSettlementError::PublicationUnconfirmed
+                ));
+                assert!(
+                    matches!(
+                        failure.outcome.as_ref(),
+                        Ok(super::super::ActorGenerationCommit::Refused(_))
+                    ) == refused
+                );
+                fixture.assert_candidate_unavailable();
+                drop(pending_claim);
+            }
+        }
+    }
+
+    #[test]
     fn publisher_failed_settlement_retains_external_prerequisite_and_primary_outcome() {
         for bootstrap in [true, false] {
             for visible in [true, false] {
@@ -1596,7 +1777,7 @@ mod tests {
                     panic!("both facts remain owned")
                 };
                 assert!(matches!(
-                    failure.outcome,
+                    failure.outcome.as_ref(),
                     Err(crate::ResidentActorWorkbenchError::InvocationCancelled)
                 ));
                 assert!(
@@ -2425,6 +2606,148 @@ mod tests {
         }
     }
 
+    pub(crate) async fn assert_native_retirement_owner_control(
+        workbench: &super::super::ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        state: Arc<super::super::InstalledToolsState>,
+        context: crate::ActorSessionContext,
+        descriptor: crate::ActorDescriptor,
+        expected: Arc<super::super::ActorGeneration>,
+        prepared: super::super::PreparedActorGeneration,
+        control: crate::local_actor::run_control::GenerationRetirementNativeControl,
+    ) {
+        assert_eq!(expected.context().actor, context.actor);
+        assert!(Arc::ptr_eq(&state.current_generation().unwrap(), &expected));
+        let (directory, directory_task) = crate::LocalActorDirectory::start().await.unwrap();
+        let (start_entered, starting) = tokio::sync::oneshot::channel();
+        let (start_release, continue_start) = tokio::sync::oneshot::channel();
+        let (stopped_entered, stopped) = tokio::sync::oneshot::channel();
+        let (stopped_release, continue_stop) = tokio::sync::oneshot::channel();
+        let identity = context.actor;
+        let spawning = tokio::spawn(
+            crate::local_actor::spawn_local_actor_in_directory_with_identity(
+                None,
+                PopulationBehavior {
+                    start_entered: Some(start_entered),
+                    start_release: Some(continue_start),
+                    stopped_entered: Some(stopped_entered),
+                    stopped_release: Some(continue_stop),
+                    realm: crate::CleanupComponentOutcome::Confirmed,
+                },
+                identity,
+                directory.clone(),
+            ),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(10), starting)
+            .await
+            .unwrap()
+            .unwrap();
+        let actor = directory.resolve(identity).await.unwrap().unwrap();
+        assert_eq!(actor.identity(), expected.context().actor);
+        let kernel = directory.context(identity).await.unwrap().unwrap();
+        let runner = workbench.boundary_runner();
+        kernel
+            .lifecycle()
+            .configure_resident(
+                context.clone(),
+                descriptor.clone(),
+                None,
+                Arc::new(runner.clone()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        kernel
+            .register_resident(context, descriptor, false)
+            .await
+            .unwrap();
+        kernel.lifecycle().generation_published(expected.clone());
+        let observed = kernel
+            .lifecycle()
+            .public_owner(Some(expected.public_owner().clone()), false)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&observed, expected.public_owner()));
+        assert_eq!(kernel.lifecycle().identity(), identity);
+        let publication = tidepool_runtime::session::PublicationDecision::new();
+        let mut publisher = workbench.generation_publisher(
+            state.clone(),
+            super::super::ActorPublicationOwner::Actor(kernel.lifecycle().clone()),
+        );
+        let disposed = (control
+            == crate::local_actor::run_control::GenerationRetirementNativeControl::KillAfterReserveDisposalPanic)
+            .then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        if let Some(disposed) = &disposed {
+            publisher = publisher.with_disposal_probe(disposed.clone());
+        }
+        let preparation = publisher.into_retirement_preparation(
+            prepared,
+            publication.clone(),
+            super::super::ActorGenerationPublication::Terminal,
+            runner.compiler_scope(super::super::CompilerCloseOwner::ActorLifecycle(
+                kernel.retained_exit(),
+            )),
+        );
+        assert_eq!(preparation.actor(), actor.identity());
+        assert!(Arc::ptr_eq(
+            preparation.expected_generation().unwrap(),
+            &expected
+        ));
+        assert!(actor.terminal().get().is_none());
+        directory
+            .assert_generation_retirement_owner_control(
+                directory_task,
+                preparation,
+                state,
+                expected,
+                publication,
+                control,
+                disposed,
+            )
+            .await;
+        assert!(actor.terminal().get().is_none());
+        assert!(
+            actor.terminal().requested_shutdown().is_none(),
+            "native control loss must not initiate an actor stop"
+        );
+        start_release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+            .await
+            .unwrap()
+            .unwrap();
+        stopped_release.send(()).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), spawning)
+            .await
+            .unwrap()
+            .unwrap();
+        let error = match result {
+            Err(error @ ractor::SpawnErr::StartupFailed(_)) => error,
+            _ => panic!("startup cannot attach its lifecycle after the real run owner is lost"),
+        };
+        let ractor::SpawnErr::StartupFailed(ref failure) = error else {
+            unreachable!()
+        };
+        assert!(matches!(
+            failure.source().and_then(|cause| cause.downcast_ref::<crate::local_actor::StartupFailureCause>()),
+            Some(crate::local_actor::StartupFailureCause::Lifecycle(crate::KernelCallFailure::TargetUnavailable(actor))) if *actor == identity
+        ));
+        let cleanup = crate::local_actor::startup_cleanup(&error)
+            .expect("the real refused startup retains its cleanup observation");
+        assert_eq!(cleanup.actor, identity);
+        assert_eq!(cleanup.hook, crate::CleanupComponentOutcome::Confirmed);
+        assert_eq!(cleanup.realm, crate::CleanupComponentOutcome::Confirmed);
+        assert!(matches!(
+            cleanup.children,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        actor
+            .address()
+            .get_cell()
+            .wait(Some(std::time::Duration::from_secs(10)))
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn generation_population_reports_actual_unclassified_child_without_stopping_it() {
         use crate::local_actor::run_control::{
@@ -2659,3 +2982,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) use tests::assert_native_retirement_owner_control;

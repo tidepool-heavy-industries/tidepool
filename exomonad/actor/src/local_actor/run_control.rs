@@ -18,6 +18,8 @@ mod generation;
 pub(crate) use generation::GenerationCompilerOwner;
 pub(crate) use generation::GenerationPopulation;
 #[cfg(test)]
+pub(crate) use generation::GenerationRetirementNativeControl;
+#[cfg(test)]
 pub(crate) use generation::{
     GenerationCollateralIdentity, GenerationLifetimeEdge, GenerationResourceIdentity,
     GenerationResourceState,
@@ -30,10 +32,12 @@ pub(crate) use preparation::{
     PublishedRootPlacement, RootAdmissionOutcome, RootOperation, RootOperationResult,
     RootPlacementMint,
 };
-use transfers::{ResourceTransfer, WorkerTransfer};
+use transfers::{ResourceTransfer, TransferPhase, WorkerTransfer};
 pub(crate) use transfers::{
     ResourceTransferReservation, WorkerTransferError, WorkerTransferReservation,
 };
+#[cfg(test)]
+pub(in crate::local_actor) use transfers::ResourceTransferTestFailure;
 
 pub(super) struct ActorAuthority {
     creator: Option<ActorRef>,
@@ -111,6 +115,8 @@ fn can_observe(
 pub enum DirectoryError {
     #[error("run control is unavailable")]
     Unavailable,
+    #[error("native retirement retention capacity is unavailable")]
+    RetentionCapacityUnavailable,
     #[error("actor forest admission is closed")]
     Closed,
     #[error("logical actor {actor:?} is already claimed")]
@@ -119,6 +125,13 @@ pub enum DirectoryError {
     Unauthorized { actor: ActorRef },
     #[error("actor {actor:?} has an unfinished physical lifetime transition")]
     LifetimeTransitionPending { actor: ActorRef },
+    #[error("lifetime transfer {id} settlement is unconfirmed")]
+    LifetimeSettlementUnconfirmed { id: u64 },
+    #[error("lifetime transfer {id} failed and retains unresolved custody: {primary}")]
+    LifetimeSettlementFailed {
+        id: u64,
+        primary: Box<DirectoryError>,
+    },
     #[error("actor {actor:?} is already registered by another executor")]
     AlreadyRegistered { actor: ActorRef },
     #[error("resident context differs from actor {actor:?}'s descriptor")]
@@ -155,6 +168,8 @@ pub(super) struct RunState {
     next_preparation: u64,
     preparation_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
     reservations: HashMap<ActorRef, ReservationRecord>,
+    lost_retirements: Vec<generation::RetainedGenerationRetirement>,
+    retirement_discards: Vec<generation::GenerationRetirementDiscard>,
     recovery_boot: Option<Arc<RootStartupRecoveryAuthority>>,
     resource_retirement: ResourceRetirement,
     resource_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
@@ -190,6 +205,8 @@ impl RunState {
             next_preparation: 0,
             preparation_waiters: Vec::new(),
             reservations: HashMap::new(),
+            lost_retirements: Vec::new(),
+            retirement_discards: Vec::new(),
             recovery_boot: None,
             resource_retirement: ResourceRetirement::Available,
             resource_waiters: Vec::new(),
@@ -209,18 +226,20 @@ pub(super) struct RunControlNativeCleanup {
     terminal: std::sync::OnceLock<RunControlNativeExit>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
 enum RunControlNativeExit {
-    OwnerLost,
+    OwnerLost {
+        attempts: Vec<generation::RetainedGenerationRetirement>,
+        worker_transfers: HashMap<u64, WorkerTransfer>,
+        resource_transfers: HashMap<u64, ResourceTransfer>,
+    },
     Finalized,
 }
 
 impl Drop for RunState {
     fn drop(&mut self) {
-        let _ = self
-            .native_cleanup
-            .terminal
-            .set(RunControlNativeExit::OwnerLost);
+        if self.native_cleanup.terminal.get().is_none() {
+            self.retain_retirements_after_owner_loss();
+        }
     }
 }
 
@@ -379,6 +398,7 @@ struct ReservationRecord {
     reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
     dependency: Option<SourceDependency>,
     preparation: Option<u64>,
+    retirement: Option<generation::GenerationRetirementAttempt>,
 }
 
 impl ReservationRecord {
@@ -631,11 +651,36 @@ impl RunState {
 
 pub(super) enum RunControlMessage {
     #[cfg(test)]
+    ResourceTransferTestFailure {
+        id: u64,
+        failure: ResourceTransferTestFailure,
+        reply: oneshot::Sender<()>,
+    },
+    #[cfg(test)]
     PanicForNativeRetention,
+    #[cfg(test)]
+    PauseForNativeRetention {
+        entered: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    },
     #[cfg(test)]
     ObserveActorPreparations {
         actor: ActorRef,
         reply: oneshot::Sender<Vec<(u64, bool)>>,
+    },
+    BeginGenerationRetirement {
+        preparation: crate::resident_workbench::ActorGenerationRetirementPreparation,
+        inventory: generation::GenerationRetirementInventory,
+        reply: oneshot::Sender<
+            Result<
+                crate::resident_workbench::ActorPublicationAttemptObserver,
+                generation::GenerationRetirementBeginFailure,
+            >,
+        >,
+    },
+    CaptureGenerationRetirement {
+        actor: ActorRef,
+        observer: crate::resident_workbench::ActorPublicationAttemptObserver,
     },
     GenerationPopulation {
         dependency: GenerationDependency,
@@ -778,6 +823,7 @@ pub(super) enum RunControlMessage {
     },
     CommitResourceTransfer {
         id: u64,
+        parent_lease: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
         reply: oneshot::Sender<Result<(), DirectoryError>>,
     },
     AbortResourceTransfer {
@@ -931,13 +977,11 @@ fn reserve_actor(
             break ActorRef { id, incarnation };
         }
     };
-    state.identities.claimed.insert(actor.id, actor);
     begin_reservation_after(
         state,
         actor,
         purpose,
         planned_ownership,
-        None,
         dependency,
         reply,
     );
@@ -955,7 +999,6 @@ fn begin_reservation(
         purpose,
         SpawnOwnership::Independent,
         None,
-        None,
         reply,
     );
 }
@@ -964,10 +1007,63 @@ fn begin_reservation_after(
     actor: ActorRef,
     purpose: ReservationPurpose,
     planned_ownership: SpawnOwnership,
-    predecessor: Option<crate::kernel::LifecycleHandle>,
     dependency: Option<SourceDependency>,
     reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
 ) {
+    let affected = match &purpose {
+        ReservationPurpose::Replacement { predecessor } => Some(*predecessor),
+        _ => match planned_ownership {
+            SpawnOwnership::Supervised(parent) => Some(parent),
+            SpawnOwnership::Independent => None,
+        },
+    };
+    if let Some(actor) = affected.and_then(|actor| state.retirement_blocks_link(&[actor], &[])) {
+        let _ = reply.send(Err(DirectoryError::LifetimeTransitionPending { actor }));
+        return;
+    }
+    if state
+        .identities
+        .claimed
+        .get(&actor.id)
+        .is_some_and(|previous| {
+            actor.incarnation <= previous.incarnation
+                || state
+                    .reservations
+                    .get(previous)
+                    .is_none_or(|record| record.terminal.get().is_none())
+        })
+    {
+        let _ = reply.send(Err(DirectoryError::IdentityConflict { actor: actor.id }));
+        return;
+    }
+    if state
+        .reservations
+        .get(&actor)
+        .is_some_and(|record| record.retirement.is_some())
+    {
+        let _ = reply.send(Err(DirectoryError::LifetimeTransitionPending { actor }));
+        return;
+    }
+    let predecessor = state
+        .identities
+        .claimed
+        .get(&actor.id)
+        .and_then(|previous| state.reservations.get(previous))
+        .and_then(|record| record.lifecycle.clone());
+    let records = state
+        .reservations
+        .len()
+        .checked_add(usize::from(!state.reservations.contains_key(&actor)));
+    let capacity = records
+        .ok_or(DirectoryError::RetentionCapacityUnavailable)
+        .and_then(|records| state.reserve_retirement_loss_capacity(records));
+    if let Err(error) = capacity {
+        let _ = reply.send(Err(error));
+        return;
+    }
+    advance_actor_ids_past(actor.id);
+    state.identities.fenced.remove(&actor.id);
+    state.identities.claimed.insert(actor.id, actor);
     let terminal = RetainedActorExit::new();
     state.reservations.insert(
         actor,
@@ -986,6 +1082,7 @@ fn begin_reservation_after(
             reply: Some(reply),
             dependency,
             preparation: None,
+            retirement: None,
         },
     );
     if state
@@ -1030,8 +1127,19 @@ impl Actor for RunControl {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             #[cfg(test)]
+            RunControlMessage::ResourceTransferTestFailure { id, failure, reply } => {
+                state.resource_transfers.get_mut(&id).expect("issued transfer")
+                    .test_failure = Some(failure);
+                let _ = reply.send(());
+            }
+            #[cfg(test)]
             RunControlMessage::PanicForNativeRetention => {
                 panic!("run-control native retention test");
+            }
+            #[cfg(test)]
+            RunControlMessage::PauseForNativeRetention { entered, release } => {
+                let _ = entered.send(());
+                let _ = release.await;
             }
             #[cfg(test)]
             RunControlMessage::ObserveActorPreparations { actor, reply } => {
@@ -1045,6 +1153,17 @@ impl Actor for RunControl {
                         })
                         .collect(),
                 );
+            }
+            RunControlMessage::BeginGenerationRetirement {
+                preparation,
+                inventory,
+                reply,
+            } => {
+                let outcome = state.begin_generation_retirement(&myself, preparation, inventory);
+                let _ = reply.send(outcome);
+            }
+            RunControlMessage::CaptureGenerationRetirement { actor, observer } => {
+                state.capture_generation_retirement(actor, observer);
             }
             RunControlMessage::GenerationPopulation { dependency, reply } => {
                 let _ = reply.send(state.generation_population(dependency));
@@ -1091,7 +1210,7 @@ impl Actor for RunControl {
                     && state
                         .reservations
                         .values()
-                        .all(|record| !record.preparation_pending())
+                        .all(|record| !record.preparation_pending() && record.retirement.is_none())
                     && state.worker_transfers.is_empty()
                     && state.resource_transfers.is_empty()
                     && state
@@ -1426,9 +1545,22 @@ impl Actor for RunControl {
                 successor,
                 reply,
             } => {
-                let pending = state
-                    .pending_child_link(predecessor)
-                    .or_else(|| state.pending_child_link(successor));
+                let affected_actor = state.retirement_blocks_link(&[predecessor, successor], &[])
+                        .or_else(|| state.entries.iter().find_map(|(actor, entry)| {
+                            (entry.spawn_ownership == SpawnOwnership::Supervised(predecessor))
+                                .then(|| state.retirement_blocks_link(&[*actor], &[entry.actor.address().get_id()]))
+                                .flatten()
+                        }))
+                        .or_else(|| state.resources.iter().find_map(|(id, resource)| {
+                            matches!(resource.owner, ResourceOwner::Owned(ResourceLifetime::Actor(owner)) if owner == predecessor)
+                                .then(|| state.retirement_blocks_link(&[], &[*id]))
+                                .flatten()
+                        }));
+                let pending = affected_actor.or_else(|| {
+                    state
+                        .pending_child_link(predecessor)
+                        .or_else(|| state.pending_child_link(successor))
+                });
                 let result = if let Some(actor) = pending {
                     Err(DirectoryError::LifetimeTransitionPending { actor })
                 } else if !state.entries.contains_key(&predecessor)
@@ -1453,8 +1585,7 @@ impl Actor for RunControl {
                         if matches!(resource.owner, ResourceOwner::Owned(ResourceLifetime::Actor(owner)) if owner == predecessor)
                         {
                             resource.resource.cell.link(target.clone());
-                            resource.owner =
-                                ResourceOwner::Owned(ResourceLifetime::Actor(successor));
+                            resource.owner = ResourceOwner::Owned(ResourceLifetime::Actor(successor));
                         }
                     }
                     if let Some(outcome) = state.child_cleanup.remove(&predecessor) {
@@ -1558,59 +1689,77 @@ impl Actor for RunControl {
                 reply,
             } => {
                 let identity = child.identity();
-                let result =
-                    if state.phase != RunPhase::Running {
-                        Err(DirectoryError::Closed)
-                    } else if state.unfinished_link(identity) {
-                        Err(DirectoryError::LifetimeTransitionPending { actor: identity })
-                    } else if state.entries.get(&identity).is_none_or(|entry| {
-                        entry.actor.address().get_id() != child.address().get_id()
-                    }) || !state.entries.contains_key(&parent)
-                    {
-                        Err(DirectoryError::Unauthorized { actor: identity })
-                    } else if state.entries.get(&identity).is_some_and(|entry| {
-                        let parent_cell = state.entries[&parent].actor.address().get_cell();
-                        let supervisor = child.address().get_cell().try_get_supervisor();
-                        match entry.spawn_ownership {
-                            SpawnOwnership::Supervised(owner) => {
-                                owner != parent
-                                    || supervisor
-                                        .is_none_or(|cell| cell.get_id() != parent_cell.get_id())
-                            }
-                            SpawnOwnership::Independent => supervisor.is_some(),
-                        }
-                    }) {
-                        Err(DirectoryError::Unauthorized { actor: identity })
-                    } else if child.terminal().get().is_some() {
-                        Err(DirectoryError::Unauthorized { actor: identity })
-                    } else if state
-                        .worker_transfers
-                        .values()
-                        .any(|transfer| transfer.child == identity)
-                    {
-                        Err(DirectoryError::IdentityConflict { actor: identity.id })
-                    } else {
-                        let id = state.next_transfer;
-                        state.next_transfer = state
-                            .next_transfer
-                            .checked_add(1)
-                            .ok_or("run transfer identity exhausted")?;
-                        state.worker_transfers.insert(
-                            id,
-                            WorkerTransfer {
-                                parent,
-                                child: identity,
-                                source: state.entries[&identity].spawn_ownership,
-                                destination_run,
-                            },
-                        );
-                        Ok(WorkerTransferReservation {
-                            id,
-                            owner: myself.clone(),
-                            armed: true,
-                            parent_lease: None,
+                let link_parents = [parent, identity];
+                let result = if state.phase != RunPhase::Running {
+                    Err(DirectoryError::Closed)
+                } else if let Some(actor) = state.retirement_blocks_link(
+                    if !destination_run
+                        || state.entries.get(&identity).is_some_and(|entry| {
+                            matches!(entry.spawn_ownership, SpawnOwnership::Supervised(_))
                         })
-                    };
+                    {
+                        &link_parents
+                    } else {
+                        &link_parents[1..]
+                    },
+                    &[child.address().get_id()],
+                ) {
+                    Err(DirectoryError::LifetimeTransitionPending { actor })
+                } else if state.unfinished_link(identity) {
+                    Err(DirectoryError::LifetimeTransitionPending { actor: identity })
+                } else if state
+                    .entries
+                    .get(&identity)
+                    .is_none_or(|entry| entry.actor.address().get_id() != child.address().get_id())
+                    || !state.entries.contains_key(&parent)
+                {
+                    Err(DirectoryError::Unauthorized { actor: identity })
+                } else if state.entries.get(&identity).is_some_and(|entry| {
+                    let parent_cell = state.entries[&parent].actor.address().get_cell();
+                    let supervisor = child.address().get_cell().try_get_supervisor();
+                    match entry.spawn_ownership {
+                        SpawnOwnership::Supervised(owner) => {
+                            owner != parent
+                                || supervisor.is_none_or(|cell| cell.get_id() != parent_cell.get_id())
+                        }
+                        SpawnOwnership::Independent => supervisor.is_some(),
+                    }
+                }) {
+                    Err(DirectoryError::Unauthorized { actor: identity })
+                } else if child.terminal().get().is_some() {
+                    Err(DirectoryError::Unauthorized { actor: identity })
+                } else if state
+                    .worker_transfers
+                    .values()
+                    .any(|transfer| transfer.child == identity)
+                {
+                    Err(DirectoryError::IdentityConflict { actor: identity.id })
+                } else {
+                    let id = state.next_transfer;
+                    state.next_transfer = state
+                        .next_transfer
+                        .checked_add(1)
+                        .ok_or("run transfer identity exhausted")?;
+                    let terminal = Arc::new(std::sync::OnceLock::new());
+                    state.worker_transfers.insert(
+                        id,
+                        WorkerTransfer {
+                            parent,
+                            child: identity,
+                            source: state.entries[&identity].spawn_ownership,
+                            destination_run,
+                            phase: TransferPhase::Armed,
+                            terminal: terminal.clone(),
+                        },
+                    );
+                    Ok(WorkerTransferReservation {
+                        id,
+                        owner: myself.clone(),
+                        armed: true,
+                        parent_lease: None,
+                        terminal,
+                    })
+                };
                 let _ = reply.send(result);
             }
             RunControlMessage::CommitWorkerTransfer {
@@ -1619,7 +1768,14 @@ impl Actor for RunControl {
                 parent_lease,
                 reply,
             } => {
-                let result = if let Some(transfer) = state.worker_transfers.remove(&id) {
+                let result = if let Some(transfer) = state.worker_transfers.get_mut(&id) {
+                    if !matches!(transfer.phase, TransferPhase::Armed) {
+                        let _ = reply.send(Err(WorkerTransferError::SettlementUnconfirmed));
+                        return Ok(());
+                    }
+                    transfer.phase = TransferPhase::Settling {
+                        _parent_lease: parent_lease,
+                    };
                     let parent_cell = state
                         .entries
                         .get(&transfer.parent)
@@ -1673,13 +1829,22 @@ impl Actor for RunControl {
                 } else {
                     Err(WorkerTransferError::Directory(DirectoryError::Unavailable))
                 };
-                drop(parent_lease);
+                if let Some(transfer) = state.worker_transfers.get(&id) {
+                    let _ = transfer.terminal.set(result.clone());
+                }
+                state.worker_transfers.remove(&id);
                 let _ = reply.send(result);
                 state.settle_preparation_waiters();
                 state.start_resource_retirement();
             }
             RunControlMessage::AbortWorkerTransfer { id } => {
-                state.worker_transfers.remove(&id);
+                if state
+                    .worker_transfers
+                    .get(&id)
+                    .is_some_and(|transfer| matches!(transfer.phase, TransferPhase::Armed))
+                {
+                    state.worker_transfers.remove(&id);
+                }
                 state.settle_preparation_waiters();
                 state.start_resource_retirement();
             }
@@ -1700,69 +1865,162 @@ impl Actor for RunControl {
                 } else {
                     ResourceLifetime::Actor(parent)
                 };
+                let protected = state
+                    .retirement_blocks_link(
+                        if !source_run || !destination_run {
+                            std::slice::from_ref(&parent)
+                        } else {
+                            &[]
+                        },
+                        &[],
+                    )
+                    .or_else(|| {
+                        cells
+                            .iter()
+                            .find_map(|cell| state.retirement_blocks_link(&[], &[cell.get_id()]))
+                    });
                 let result = if state.phase != RunPhase::Running { Err(DirectoryError::Closed) }
-                else if !state.entries.contains_key(&parent) || cells.iter().any(|cell| state.resources.get(&cell.get_id()).is_none_or(|owned| !matches!(owned.owner, ResourceOwner::Owned(owner) | ResourceOwner::Retired { owner } if owner == source))) { Err(DirectoryError::Unauthorized { actor: parent }) }
-                else {
-                    let id = state.next_transfer;
-                    state.next_transfer = state.next_transfer.checked_add(1).ok_or("run transfer identity exhausted")?;
-                    let mut resources = Vec::new();
-                    for cell in cells {
-                        let resource = state.resources.get_mut(&cell.get_id()).expect("selected resource");
-                        if matches!(resource.owner, ResourceOwner::Owned(_)) { resource.owner = ResourceOwner::Transfer { id, source }; resources.push(cell.get_id()); }
-                    }
-                    state.resource_transfers.insert(id, ResourceTransfer { source, destination, resources });
-                    Ok(ResourceTransferReservation { id, owner: myself.clone(), armed: true, parent_lease: None })
-                };
+                    else if let Some(actor) = protected { Err(DirectoryError::LifetimeTransitionPending { actor }) }
+                    else if !state.entries.contains_key(&parent) || cells.iter().any(|cell| state.resources.get(&cell.get_id()).is_none_or(|owned| !matches!(owned.owner, ResourceOwner::Owned(owner) | ResourceOwner::Retired { owner } if owner == source))) { Err(DirectoryError::Unauthorized { actor: parent }) }
+                    else {
+                        let id = state.next_transfer;
+                        state.next_transfer = state.next_transfer.checked_add(1).ok_or("run transfer identity exhausted")?;
+                        let mut resources = Vec::new();
+                        for cell in cells {
+                            let resource = state.resources.get_mut(&cell.get_id()).expect("selected resource");
+                            if matches!(resource.owner, ResourceOwner::Owned(_)) { resource.owner = ResourceOwner::Transfer { id, source }; resources.push(cell.get_id()); }
+                        }
+                        let terminal = Arc::new(std::sync::OnceLock::new());
+                        state.resource_transfers.insert(id, ResourceTransfer { source, destination, resources,
+                            phase: TransferPhase::Armed, terminal: terminal.clone(),
+                            #[cfg(test)]
+                            test_failure: None,
+                        });
+                        Ok(ResourceTransferReservation { id, owner: myself.clone(), armed: true, parent_lease: None, terminal })
+                    };
                 let _ = reply.send(result);
             }
-            RunControlMessage::CommitResourceTransfer { id, reply } => {
-                let result = if let Some(transfer) = state.resource_transfers.remove(&id) {
-                    for key in transfer.resources {
-                        if let Some(resource) = state.resources.get_mut(&key) {
-                            if matches!(resource.owner, ResourceOwner::Transfer { id: issued, .. } if issued == id)
-                            {
-                                let source_cell = match transfer.source {
-                                    ResourceLifetime::Actor(actor) => state
-                                        .entries
-                                        .get(&actor)
-                                        .map(|entry| entry.actor.address().get_cell()),
-                                    ResourceLifetime::Run => None,
-                                };
-                                let destination_cell = match transfer.destination {
-                                    ResourceLifetime::Actor(actor) => state
-                                        .entries
-                                        .get(&actor)
-                                        .map(|entry| entry.actor.address().get_cell()),
-                                    ResourceLifetime::Run => None,
-                                };
-                                if let Some(source) = source_cell {
-                                    resource.resource.cell.unlink(source);
+            RunControlMessage::CommitResourceTransfer {
+                id,
+                parent_lease,
+                reply,
+            } => {
+                let result = if let Some(transfer) = state.resource_transfers.get_mut(&id) {
+                    if !matches!(transfer.phase, TransferPhase::Armed) {
+                        let _ = reply.send(Err(DirectoryError::LifetimeSettlementUnconfirmed { id }));
+                        return Ok(());
+                    }
+                    transfer.phase = TransferPhase::Settling {
+                        _parent_lease: parent_lease,
+                    };
+                    let cell = |owner| match owner {
+                        ResourceLifetime::Actor(actor) => state
+                            .entries
+                            .get(&actor)
+                            .map(|entry| Some(entry.actor.address().get_cell()))
+                            .ok_or(DirectoryError::Unauthorized { actor }),
+                        ResourceLifetime::Run => Ok(None),
+                    };
+                    let endpoints = cell(transfer.source).and_then(|source| {
+                        cell(transfer.destination).map(|destination| (source, destination))
+                    });
+                    let all_owned = transfer.resources.iter().all(|key| {
+                        state.resources.get(key).is_some_and(|resource| {
+                            matches!(resource.owner, ResourceOwner::Transfer { id: issued, source }
+                                    if issued == id && source == transfer.source)
+                                && endpoints.as_ref().is_ok_and(|(source, _)| {
+                                    match (source, resource.resource.cell.try_get_supervisor()) {
+                                        (Some(expected), Some(actual)) => {
+                                            expected.get_id() == actual.get_id()
+                                        }
+                                        (None, None) => true,
+                                        _ => false,
+                                    }
+                                })
+                        })
+                    });
+                    match endpoints {
+                        Ok((source, destination)) if all_owned => {
+                            for key in &transfer.resources {
+                                let resource = state
+                                    .resources
+                                    .get_mut(key)
+                                    .expect("validated transfer resource");
+                                if let Some(source) = &source {
+                                    resource.resource.cell.unlink(source.clone());
                                 }
-                                if let Some(destination) = destination_cell {
-                                    resource.resource.cell.link(destination);
+                                if let Some(destination) = &destination {
+                                    resource.resource.cell.link(destination.clone());
                                 }
                                 resource.owner = ResourceOwner::Owned(transfer.destination);
                             }
+                            #[cfg(test)]
+                            if matches!(transfer.test_failure, Some(ResourceTransferTestFailure::PanicAfterMutation)) {
+                                panic!("resource transfer interrupted after actual ownership mutation");
+                            }
+                            Ok(())
                         }
+                        Ok(_) => Err(DirectoryError::LifetimeSettlementUnconfirmed { id }),
+                        Err(error) => Err(DirectoryError::LifetimeSettlementFailed {
+                            id,
+                            primary: Box::new(error),
+                        }),
                     }
-                    Ok(())
                 } else {
                     Err(DirectoryError::Unavailable)
                 };
+                if let Some(transfer) = state.resource_transfers.get(&id) {
+                    let _ = transfer.terminal.set(result.clone());
+                }
+                #[cfg(test)]
+                let lose_reply = state.resource_transfers.get(&id).is_some_and(|transfer|
+                    matches!(transfer.test_failure, Some(ResourceTransferTestFailure::LoseReply)));
+                // A mismatched owned resource is unresolved custody, not a
+                // successful empty transfer. Preserve the original record.
+                if result.is_ok() {
+                    state.resource_transfers.remove(&id);
+                }
+                #[cfg(test)]
+                if lose_reply { drop(reply); } else { let _ = reply.send(result); }
+                #[cfg(not(test))]
                 let _ = reply.send(result);
                 state.settle_preparation_waiters();
                 state.start_resource_retirement();
                 state.start_pending_actor_resources();
             }
             RunControlMessage::AbortResourceTransfer { id } => {
-                if let Some(transfer) = state.resource_transfers.remove(&id) {
-                    for key in transfer.resources {
-                        if let Some(resource) = state.resources.get_mut(&key) {
-                            if matches!(resource.owner, ResourceOwner::Transfer { id: issued, .. } if issued == id)
-                            {
-                                resource.owner = ResourceOwner::Owned(transfer.source);
-                            }
+                let armed = state
+                    .resource_transfers
+                    .get(&id)
+                    .is_some_and(|transfer| matches!(transfer.phase, TransferPhase::Armed));
+                if armed {
+                    let transfer = state
+                        .resource_transfers
+                        .get_mut(&id)
+                        .expect("armed transfer");
+                    let all_owned = transfer.resources.iter().all(|key| {
+                        state.resources.get(key).is_some_and(|resource| {
+                            matches!(resource.owner,
+                                ResourceOwner::Transfer { id: issued, source }
+                                if issued == id && source == transfer.source)
+                        })
+                    });
+                    if all_owned {
+                        for key in &transfer.resources {
+                            state
+                                .resources
+                                .get_mut(key)
+                                .expect("validated transfer resource")
+                                .owner = ResourceOwner::Owned(transfer.source);
                         }
+                        state.resource_transfers.remove(&id);
+                    } else {
+                        transfer.phase = TransferPhase::Settling {
+                            _parent_lease: None,
+                        };
+                        let _ = transfer
+                            .terminal
+                            .set(Err(DirectoryError::LifetimeSettlementUnconfirmed { id }));
                     }
                 }
                 state.settle_preparation_waiters();
@@ -1833,6 +2091,10 @@ impl Actor for RunControl {
                 if let RootPreparationOwner::NativeResource(parent) = owner {
                     if !state.entries.contains_key(&parent) {
                         let _ = reply.send(Err(DirectoryError::Unauthorized { actor: parent }));
+                        return Ok(());
+                    }
+                    if let Some(actor) = state.retirement_blocks_link(&[parent], &[]) {
+                        let _ = reply.send(Err(DirectoryError::LifetimeTransitionPending { actor }));
                         return Ok(());
                     }
                 }
@@ -2041,7 +2303,6 @@ impl Actor for RunControl {
                             break ActorRef { id, incarnation };
                         }
                     };
-                    state.identities.claimed.insert(actor.id, actor);
                     let purpose = ReservationPurpose::ExistingInput;
                     begin_reservation(state, actor, purpose, reply);
                 }
@@ -2058,42 +2319,18 @@ impl Actor for RunControl {
                             break ActorRef { id, incarnation };
                         }
                     };
-                    state.identities.claimed.insert(actor.id, actor);
                     begin_reservation(state, actor, ReservationPurpose::Root, reply);
                 }
             }
             RunControlMessage::ClaimExact { actor, reply } => {
                 if state.phase != RunPhase::Running {
                     let _ = reply.send(Err(DirectoryError::Closed));
-                } else if state
-                    .identities
-                    .claimed
-                    .get(&actor.id)
-                    .is_some_and(|previous| {
-                        actor.incarnation <= previous.incarnation
-                            || state
-                                .reservations
-                                .get(previous)
-                                .is_none_or(|record| record.terminal.get().is_none())
-                    })
-                {
-                    let _ = reply.send(Err(DirectoryError::IdentityConflict { actor: actor.id }));
                 } else {
-                    let predecessor = state
-                        .identities
-                        .claimed
-                        .get(&actor.id)
-                        .and_then(|previous| state.reservations.get(previous))
-                        .and_then(|record| record.lifecycle.clone());
-                    advance_actor_ids_past(actor.id);
-                    state.identities.fenced.remove(&actor.id);
-                    state.identities.claimed.insert(actor.id, actor);
                     begin_reservation_after(
                         state,
                         actor,
                         ReservationPurpose::Root,
                         SpawnOwnership::Independent,
-                        predecessor,
                         None,
                         reply,
                     );
@@ -2356,6 +2593,20 @@ impl RunControlClient {
     pub(crate) async fn stop_owner_for_test(&self) {
         self.owner.stop(None);
         let _ = self.owner.get_cell().wait(Some(SHUTDOWN_BUDGET)).await;
+    }
+    #[cfg(test)]
+    pub(in crate::local_actor) fn assert_unsettled_resource_transfer_for_test(
+        &self,
+        terminal: &Arc<std::sync::OnceLock<Result<(), DirectoryError>>>,
+    ) {
+        let Some(RunControlNativeExit::OwnerLost { resource_transfers, .. }) =
+            self.native_cleanup.terminal.get() else {
+                panic!("native transfer owner loss must be retained");
+            };
+        let transfer = resource_transfers.values().find(|transfer|
+            Arc::ptr_eq(&transfer.terminal, terminal)).expect("same issued transfer retained");
+        assert!(matches!(transfer.phase, TransferPhase::Settling { .. }));
+        assert!(terminal.get().is_none());
     }
     pub async fn start() -> Result<(Self, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         let native_cleanup = Arc::new(RunControlNativeCleanup::default());
@@ -2850,7 +3101,7 @@ impl RunControlClient {
             Some(RunControlNativeExit::Finalized) => {
                 return crate::CleanupComponentOutcome::Confirmed;
             }
-            Some(RunControlNativeExit::OwnerLost) => {
+            Some(RunControlNativeExit::OwnerLost { .. }) => {
                 return crate::CleanupComponentOutcome::Unconfirmed(
                     "run-control owner was lost before finalization".into(),
                 );

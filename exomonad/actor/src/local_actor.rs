@@ -8207,6 +8207,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_transfer_abort_and_lost_reply_preserve_actual_ownership() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (parent, task) = spawn_local_actor(None, observed_probe(&observations))
+            .await
+            .unwrap();
+        let context = observations.lock()[0].0.clone();
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let resource = context
+            .spawn_resource(None, FenceResource, (), {
+                let cleaned = cleaned.clone();
+                move |_| {
+                    cleaned.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async { crate::CleanupComponentOutcome::Confirmed })
+                }
+            })
+            .await
+            .unwrap();
+        let cell = resource.get_cell();
+        let reservation = context
+            .reserve_resource_lifetime_transfer(&[cell.clone()], false, true)
+            .await
+            .unwrap();
+        drop(reservation);
+        assert!(context
+            .directory
+            .owned_resource(parent.identity(), cell.get_id())
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            cell.try_get_supervisor().unwrap().get_id(),
+            parent.address().get_id()
+        );
+        assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+
+        let reservation = context
+            .reserve_resource_lifetime_transfer(&[cell.clone()], false, true)
+            .await
+            .unwrap();
+        let terminal = reservation.terminal_observation();
+        reservation
+            .test_failure(run_control::ResourceTransferTestFailure::LoseReply)
+            .await;
+        // The actual owner deliberately loses only the reply after recording
+        // its real link/ownership settlement. The same issued cell answers it.
+        reservation.try_commit().unwrap().await.unwrap();
+        assert!(matches!(terminal.get(), Some(Ok(()))));
+        assert!(cell.try_get_supervisor().is_none());
+        assert!(context
+            .directory
+            .owned_resource(parent.identity(), cell.get_id())
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            context.directory.shutdown_run_resources().await,
+            crate::CleanupComponentOutcome::Confirmed
+        ));
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+        parent
+            .shutdown(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "transfer control complete",
+            ))
+            .await
+            .unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_transfer_unwind_retains_same_unsettled_owner_and_admission() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (parent, task) = spawn_local_actor(None, observed_probe(&observations))
+            .await
+            .unwrap();
+        let context = observations.lock()[0].0.clone();
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let resource = context
+            .spawn_resource(None, FenceResource, (), {
+                let cleaned = cleaned.clone();
+                move |_| {
+                    cleaned.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async { crate::CleanupComponentOutcome::Confirmed })
+                }
+            })
+            .await
+            .unwrap();
+        let reservation = context
+            .reserve_resource_lifetime_transfer(&[resource.get_cell()], false, true)
+            .await
+            .unwrap();
+        let terminal = reservation.terminal_observation();
+        reservation
+            .test_failure(run_control::ResourceTransferTestFailure::PanicAfterMutation)
+            .await;
+        assert!(matches!(
+            reservation.try_commit().unwrap().await,
+            Err(run_control::DirectoryError::LifetimeSettlementUnconfirmed { .. })
+        ));
+        context.directory.stop_owner_for_test().await;
+        context
+            .directory
+            .assert_unsettled_resource_transfer_for_test(&terminal);
+        assert!(resource.get_cell().try_get_supervisor().is_none());
+        assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+        assert!(parent.lifecycle().observation().transactions > 0);
+        // No cleanup receipt was earned. End only the physical test probes;
+        // retained uncertainty and its admission remain owned by the terminal.
+        resource.stop(None);
+        resource
+            .get_cell()
+            .wait(Some(SHUTDOWN_BUDGET))
+            .await
+            .unwrap();
+        parent.address().get_cell().kill();
+        task.await.unwrap();
+        assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
     async fn owned_child_teardown_fences_siblings_before_resource_cleanup() {
         let observations = Arc::new(Mutex::new(Vec::new()));
         let (parent, task) = spawn_local_actor(None, observed_probe(&observations))

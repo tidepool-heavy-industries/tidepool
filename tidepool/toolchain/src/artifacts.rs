@@ -3456,7 +3456,63 @@ impl SealedOriginalEvidence {
     }
 }
 
+/// One requested group's membership in its actual physical output. This
+/// observes native bytes; only the runtime producer can pair its source issuer.
+pub struct PhysicalCurrentNativeGroup<'a> {
+    group: &'a certified_products::PendingCertifiedGroup,
+}
+
+impl PhysicalCurrentNativeGroup<'_> {
+    pub fn sites(&self) -> impl Iterator<Item = u64> + '_ {
+        self.group
+            .group()
+            .definitions()
+            .sites()
+            .iter()
+            .map(|site| site.site)
+    }
+}
+
 impl SealedTurnProducts {
+    /// Inspect only the actual group requested by a receiving native installer.
+    /// Historical payload custody and native reuse labels cannot qualify it.
+    pub fn physical_current_native_group(
+        &self,
+        group: &certified_products::PendingCertifiedGroup,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Result<Option<PhysicalCurrentNativeGroup<'_>>, CompileError> {
+        if !self
+            .target
+            .artifacts()
+            .contains_issued_native_group(binding)
+        {
+            return Err(CompileError::ExtractFailed(
+                "native source group is outside its target acquisition".into(),
+            ));
+        }
+        let actual = self
+            .certified_groups
+            .iter()
+            .find(|actual| actual.same_issuance(group))
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("native group belongs to another sealed output".into())
+            })?;
+        if binding.original_ordinal != actual.group().original_ordinal() {
+            return Err(CompileError::ExtractFailed(
+                "native source group ordinal differs from its target acquisition".into(),
+            ));
+        }
+        if self
+            .source_selection()
+            .physical_current_original(actual.owner())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
+            != Some(binding.binding.artifact())
+        {
+            return Ok(None);
+        }
+        Ok(Some(PhysicalCurrentNativeGroup { group: actual }))
+    }
+
     pub fn artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
         match &self.original {
             SealedOriginalEvidence::Exact { output, .. } => output.artifacts(),

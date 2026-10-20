@@ -7,10 +7,11 @@ async fn native_cleanup_retains_owner_loss_after_actor_kill() {
     assert!(retained.terminal.get().is_none());
     control.owner.get_cell().kill();
     task.await.unwrap();
-    assert_eq!(
+    assert!(matches!(
         retained.terminal.get(),
-        Some(&RunControlNativeExit::OwnerLost)
-    );
+        Some(RunControlNativeExit::OwnerLost { attempts, worker_transfers, resource_transfers })
+            if attempts.is_empty() && worker_transfers.is_empty() && resource_transfers.is_empty()
+    ));
     assert!(matches!(
         control
             .settle_run_preparations(Duration::from_millis(10))
@@ -18,10 +19,11 @@ async fn native_cleanup_retains_owner_loss_after_actor_kill() {
         crate::CleanupComponentOutcome::Unconfirmed(_)
     ));
     drop(control);
-    assert_eq!(
+    assert!(matches!(
         retained.terminal.get(),
-        Some(&RunControlNativeExit::OwnerLost)
-    );
+        Some(RunControlNativeExit::OwnerLost { attempts, worker_transfers, resource_transfers })
+            if attempts.is_empty() && worker_transfers.is_empty() && resource_transfers.is_empty()
+    ));
 }
 
 #[tokio::test]
@@ -33,15 +35,17 @@ async fn native_cleanup_retains_owner_loss_after_handler_panic() {
         .send_message(RunControlMessage::PanicForNativeRetention)
         .unwrap();
     task.await.unwrap();
-    assert_eq!(
+    assert!(matches!(
         retained.terminal.get(),
-        Some(&RunControlNativeExit::OwnerLost)
-    );
+        Some(RunControlNativeExit::OwnerLost { attempts, worker_transfers, resource_transfers })
+            if attempts.is_empty() && worker_transfers.is_empty() && resource_transfers.is_empty()
+    ));
     assert!(control.finish_run().await.is_err());
-    assert_eq!(
+    assert!(matches!(
         retained.terminal.get(),
-        Some(&RunControlNativeExit::OwnerLost)
-    );
+        Some(RunControlNativeExit::OwnerLost { attempts, worker_transfers, resource_transfers })
+            if attempts.is_empty() && worker_transfers.is_empty() && resource_transfers.is_empty()
+    ));
 }
 
 #[tokio::test]
@@ -109,10 +113,10 @@ async fn seal_overtaking_prepared_input_coordinator_preserves_cleanup_reservatio
     ));
     control.finish_run().await.unwrap();
     task.await.unwrap();
-    assert_eq!(
+    assert!(matches!(
         control.native_cleanup.terminal.get(),
-        Some(&RunControlNativeExit::Finalized)
-    );
+        Some(RunControlNativeExit::Finalized)
+    ));
 }
 
 #[tokio::test]
