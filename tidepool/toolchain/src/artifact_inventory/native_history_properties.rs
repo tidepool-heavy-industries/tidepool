@@ -864,6 +864,7 @@ fn root_groups(root: u8) -> BTreeSet<RawGroup> {
             .flat_map(|node| ORDINALS.map(|ordinal| (node, ordinal)))
             .collect(),
         5 => BTreeSet::from([(3, 29)]),
+        6 => BTreeSet::from([(2, 3)]),
         _ => BTreeSet::new(),
     }
 }
@@ -1712,16 +1713,24 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let selection =
+        let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &base.metadata_snapshot(),
                 &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
             )
             .unwrap();
-        let output =
-            crate::declaration_context::OriginalCompilerInputs::from_selection(&selection, &base)
-                .unwrap();
+        let completed =
+            crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
+                &mut selection,
+                &base,
+                Vec::new(),
+            )
+            .unwrap();
+        let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
+            &selection, &completed,
+        )
+        .unwrap();
         let support = CompilerSourceSupport::close_complete_output(&output).unwrap();
         let mut rows = Rows::default();
         let empty = View {
@@ -1826,27 +1835,16 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
         )
         .unwrap();
         assert!(merged.artifacts().selected_native_groups().is_empty());
-        // Capture the completed support as actual request input, preserving
-        // its issued rows and decisions. Reusing the earlier NewProduct
-        // selection would describe another output rather than this continuation.
-        let context =
-            crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
-                .unwrap()
-                .extend_issued_compiler_support(&merged)
-                .unwrap();
-        let inputs = context
-            .capture_world_primary_compiler_inputs([2; 32])
-            .unwrap();
-        let continuation =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                &inputs,
-                &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+        // Full availability alone retains an explicit empty input choice.
+        // Only the same finished producer's selected closure opts into bodies.
+        let full_empty = merged
+            .close_request(
+                None,
+                &crate::declaration_context::ProtectedScaffoldRequirements::default(),
             )
             .unwrap();
-        let receiving_inventory = inputs.artifacts().inventory();
-        let mut fixed = receiving_inventory
-            .bind_segment(inputs.artifacts(), Vec::new(), &continuation)
-            .unwrap();
+        let closure = selection.selected_original_closure(&completed).unwrap();
+        let opted = merged.certify_original_closure(&closure).unwrap();
         let owner = match &catalog.originals[0].payload {
             ArtifactPayload::Original(product) => product.owner().clone(),
             _ => unreachable!(),
@@ -1862,17 +1860,6 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                 record_parent: None,
             },
         }];
-        let target = receiving_inventory
-            .admit_bound_target(
-                &mut fixed,
-                inputs.artifacts(),
-                NativeArtifactDemand::CertifiedTargetImports(&imports),
-                Vec::new(),
-                &continuation,
-            )
-            .unwrap();
-        let target = target.bind_target(None, imports);
-        let resolved = target.resolve().unwrap();
         let required = catalog.group_closure(&root_groups(0));
         let expected_groups = identities
             .iter()
@@ -1884,7 +1871,46 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
             })
             .copied()
             .collect::<BTreeSet<_>>();
-        assert_eq!(resolved.groups(), &expected_groups);
+        for (admitted, expects_empty) in [(&full_empty, true), (&opted, false)] {
+            let context =
+                crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
+                    .unwrap()
+                    .extend_issued_compiler_support(admitted)
+                    .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs([2; 32])
+                .unwrap();
+            let continuation =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    &inputs,
+                    &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                )
+                .unwrap();
+            let receiving_inventory = inputs.artifacts().inventory();
+            let mut fixed = receiving_inventory
+                .bind_segment(inputs.artifacts(), Vec::new(), &continuation)
+                .unwrap();
+            let target = receiving_inventory.admit_bound_target(
+                &mut fixed,
+                inputs.artifacts(),
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                Vec::new(),
+                &continuation,
+            );
+            if expects_empty {
+                assert!(matches!(target, Err(CompileError::ArtifactInventory(error))
+                    if matches!(&error.failure, ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact, original_ordinal: 3,
+                    } if *artifact == catalog.key((0, 3)).artifact)
+                    && matches!(&error.native_refusal, Some(NativeAdmissionRefusal::RootChoiceExplicitEmpty {
+                        owner, original_ordinal: 3,
+                    }) if owner.unit == "fixture" && owner.module == "History0")));
+            } else {
+                let target = target.unwrap().bind_target(None, imports.clone());
+                let resolved = target.resolve().unwrap();
+                assert_eq!(resolved.groups(), &expected_groups);
+            }
+        }
         check_graph_observation(
             &expected,
             &GraphObservation::actual(support.artifacts()),
@@ -1974,6 +2000,46 @@ fn raw_graph_oracle_rejects_extra_bindings_edges_roots_and_demand() {
         .unwrap();
         assert_eq!(coverage.projections, 1);
     }
+    // The diamond's module2/ordinal3 is initially only a descendant of the
+    // module0 root. A later explicit request promotes that same retained row.
+    let coverage = run_history(
+        &catalog,
+        &[
+            Op::Empty {
+                inventory: 0,
+                to: 0,
+            },
+            Op::Admit {
+                parent: 0,
+                root: 0,
+                future: true,
+                reverse: false,
+                to: 1,
+            },
+            Op::Project {
+                from: 1,
+                nodes: vec![0],
+                to: 2,
+            },
+            Op::Admit {
+                parent: 2,
+                root: 2,
+                future: true,
+                reverse: false,
+                to: 3,
+            },
+            Op::Admit {
+                parent: 3,
+                root: 6,
+                future: true,
+                reverse: false,
+                to: 4,
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(coverage.admissions, 3);
+    assert_eq!(coverage.projections, 1);
     let inventory = ArtifactInventory::default();
     let parent = View {
         inventory: 0,
