@@ -453,16 +453,14 @@ impl RuntimeWorldCellOperand {
         source: &super::RuntimeSourceCompilerTransaction,
         world: &tidepool_toolchain::compiler_world::CompilerWorld,
     ) -> Result<(), SessionError> {
-        let original = source.admitted_original_source()?;
         let expected = self.execution.original_source()?;
         let held_world = self.execution.compiler_world()?;
-        if !Arc::ptr_eq(&original, &expected)
-            || !Arc::ptr_eq(world.restoration(), held_world.restoration())
+        if !Arc::ptr_eq(world.restoration(), held_world.restoration())
             || world.logical_id() != held_world.logical_id()
         {
             return Err(super::SourceAdmissionError::ForeignTransaction.into());
         }
-        source.admit(Some(self.execution.retained_lexical_scope()))?;
+        source.admit_original(&expected, Some(self.execution.retained_lexical_scope()))?;
         Ok(())
     }
 
@@ -5039,14 +5037,11 @@ impl PersistentSession {
         use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
 
         self.validate_lexical_scope_lease(scope, &retained_scope)?;
-        self.admit_source_work_in(scope)?;
         let transaction = self
             .source_transaction
             .as_ref()
             .ok_or(super::SourceAdmissionError::MissingTransaction)?;
-        if !Arc::ptr_eq(&transaction.source, &original_source) {
-            return Err(super::SourceAdmissionError::ForeignTransaction.into());
-        }
+        transaction.admit_original(&original_source, Some(retained_scope.clone()))?;
         if plan
             .items()
             .iter()
