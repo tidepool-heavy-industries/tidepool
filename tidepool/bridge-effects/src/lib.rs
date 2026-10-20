@@ -811,20 +811,16 @@ mod context_constructor_tests {
                 ),
                 RlRetirementObligation::ReloadDiagnosticDeliveryObligation(observation.clone()),
             ] {
-                let value = obligation.to_value(&table).unwrap();
+                let mut value = obligation.to_value(&table).unwrap();
                 assert_eq!(
                     RlRetirementObligation::from_value(&value, &table).unwrap(),
                     obligation
                 );
-                let HaskellValue::Con(tag, mut fields) = value else {
+                let HaskellValue::Con(_, fields) = &mut value else {
                     panic!("obligation constructor")
                 };
                 fields.pop();
-                assert!(RlRetirementObligation::from_value(
-                    &HaskellValue::Con(tag, fields),
-                    &table
-                )
-                .is_err());
+                assert!(RlRetirementObligation::from_value(&value, &table).is_err());
                 settlements.push(RlOperationalSettlement::ReloadOperationalUnsettled(
                     obligation,
                     vec![],
