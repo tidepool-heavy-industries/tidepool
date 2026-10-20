@@ -76,14 +76,15 @@ import Tidepool.ExactScope
   , exactInputRetentionLimits, commitWorldInputRetention
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
-import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldCellPlan, validateBoundWorldCell, boundWorldCellSlots)
+import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldCellPlan, boundWorldCellPreparation)
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..)
   , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
   , RequestField(..), WorkerRequest, workerArgv, workerRequestFromArgv )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
-  , scopedEnsureWorld
+  , scopedEnsureWorld, scopedCompileWorldCell, heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
+  , WorldCellRefusal(..)
   , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts
   , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents
   , withResidentCompilerScopes, scopedRunGhc )
@@ -102,6 +103,7 @@ import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming, TaskAtte
 import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor, runCompilerTasksWithAttempt)
 import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse)
 import Tidepool.PreparedStg (newPreparedBodyCache)
+import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.SessionArtifacts (prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment
   , typedSegmentSessionGlobals, typedSegmentSessionInterfaces)
 import Codec.CBOR.Term (Term(..), encodeTerm, decodeTerm)
@@ -1413,8 +1415,8 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
     worldDirectory <- canonicalizePath work
     withRootedCompilerEnvironment worldDirectory $ do
       (outcome,diagnostics) <- withQuietStdout $ captureDiagnostics $
-        withResidentCompilerScopes [] $ \runScope ->
-          runScope (pure ()) $ \compiler -> do
+        withResidentCompilerScopes [] $ \runScope -> do
+          admission <- runScope (pure ()) $ \compiler -> do
             ready <- scopedEnsureWorld compiler (ExactInputsRequest identity (CompleteExactInputs packetPath))
             reference <- case ready of
               ExactInputsReady _ realization -> pure realization
@@ -1445,18 +1447,40 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                   (BS.replicate 32 7) slots directory (directory </> "prepared.cbor")
             createDirectoryIfMissing True directory
             prepareArgs <- decodeWorldArgs [WorldCellPrepare prepareRequest]
-            (validated,admittedSlots) <- (withBoundCompilerRequest (const (pure ())) compiler prepareArgs >=> finishCompletion) $ \request -> do
-              validation <- validateBoundWorldCell request
-              pure (validation,boundWorldCellSlots request)
+            validated <- (withBoundCompilerRequest (const (pure ())) compiler prepareArgs >=> finishCompletion) $ \request -> do
+              validation <- boundWorldCellPreparation request
+              forM_ validation $ \admitted -> do
+                -- Consumption enters the same scope while its phase is Running.
+                -- It must reach stage policy, not re-run a Ready-only guard.
+                unsupported <- try (void (scopedCompileWorldCell compiler admitted CheckedEnvironment
+                  Set.empty GeneralCompile (directory </> "not-generated.hs")))
+                  :: IO (Either WorldCellRefusal ())
+                unless (either (== WorldCellUnsupported) (const False) unsupported)
+                  (fail "same-owner consumption did not reach its typed stage policy")
+              pure validation
             case validated of
               Left refusal -> fail ("admitted real preparation refused its plan: " ++ show refusal)
               Right admitted
-                | worldCellPreparePlan prepareRequest /= planBytes ->
+                | worldCellPreparePlan (heldWorldCellQuestion admitted) /= planBytes ->
                     fail "admission changed the prepared plan bytes"
-                | otherwise -> pure ()
-            unless (admittedSlots == Just slots)
-              (fail "admitted preparation lost its matched slot collection")
-            pure ()
+                | length (cellPlanItems (heldWorldCellPlan admitted)) /= 1 ->
+                    fail "admission lost its actual parsed execution item"
+                | heldWorldCellSlots admitted /= slots ->
+                    fail "admitted preparation lost its matched slot collection"
+                | otherwise -> pure admitted
+          runScope (pure ()) $ \compiler -> do
+            let question = heldWorldCellQuestion admission
+            ready <- scopedEnsureWorld compiler (ExactInputsRequest identity
+              (ResidentExactInputs (worldCellPrepareRealization question)))
+            case ready of
+              ExactInputsReady _ _ -> pure ()
+              other -> fail ("scope substitution control lost the actual retained world: " ++ show other)
+            crossed <- try (void (scopedCompileWorldCell compiler admission CheckedEnvironment
+              Set.empty GeneralCompile (worldCellPrepareDirectory question </> "not-generated.hs")))
+              :: IO (Either InputRejection ())
+            unless (either (\failure -> case failure of CheckedPurposeMismatch -> True; _ -> False)
+                (const False) crossed)
+              (fail "another compiler scope consumed the original scope's admission")
       outcome `seq` pure ()
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))

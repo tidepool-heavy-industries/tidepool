@@ -37,6 +37,7 @@ module Tidepool.GhcPipeline
   , withResidentPipelineSelectedRequests
   , CompilerScope, scopedCompile, scopedCompileCompleted, scopedReadExactScope, scopedRunGhc, scopedParserFlags
   , scopedEnsureWorld, scopedReadHeldWorld, scopedQueryWorld, scopedPlanWorldCell, scopedValidateWorldCell, scopedCompileWorldCell, scopedCommitWorldDependencies, HeldWorldQueryBinding
+  , HeldWorldCellAdmission, heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
   , WorldCellRefusal(..)
   , materializeWorldSources, worldMaterializationCharge, retainWorldMaterialization, releaseWorldMaterialization
   , worldMaterializationOwners, emitWorldAcquisitionRejection
@@ -265,7 +266,7 @@ import Tidepool.ExecutionProjection
   , preparedRootIdentity )
 import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, serialCompilerExecutionGrant, compilerModuleJobs
-  , CompilerExecutor, requireCompilerExecutorOpen, withCompilerExecutor, runCompilerTasks, runCompilerTasksWithAttempt, dependencyClosedReuse )
+  , CompilerExecutor, sameCompilerExecutor, requireCompilerExecutorOpen, withCompilerExecutor, runCompilerTasks, runCompilerTasksWithAttempt, dependencyClosedReuse )
 import Tidepool.PreparedSites
   ( resolvePreparedSiblings, resolvePreparedInterfaceSiblings )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
@@ -1355,7 +1356,8 @@ data WorldDependencyAttempt = WorldDependencyAttempt
 
 -- No held world, mutable attempt, source tree or backing lease escapes in this
 -- pending result. The scope resolves the actual held owner again at commit.
-data PendingWorldDependencies = PendingWorldDependencies String String WorldDependencyPolicy WorldModuleVersions
+data PendingWorldDependencies = PendingWorldDependencies CompilerExecutor String String WorldDependencyPolicy
+  (IORef (Maybe WorldModuleVersions))
 
 emptyWorldPreparedModules :: WorldPreparedModules
 emptyWorldPreparedModules = WorldPreparedModules emptyHomePackageTable Map.empty Nothing
@@ -1405,8 +1407,8 @@ worldDependencyCycle (WorldDependencyAttempt _ _ _ _ versions cache memo recover
 worldDependencyRecovery :: WorldDependencyAttempt -> IO CompilerRecoveryCaches
 worldDependencyRecovery (WorldDependencyAttempt _ _ _ _ _ _ _ recoveryRef _) = readIORef recoveryRef
 
-stageHeldWorldDependencies :: WorldDependencyAttempt -> PipelineVariant -> HscEnv -> FilePath -> IO PendingWorldDependencies
-stageHeldWorldDependencies
+stageHeldWorldDependencies :: CompilerExecutor -> WorldDependencyAttempt -> PipelineVariant -> HscEnv -> FilePath -> IO PendingWorldDependencies
+stageHeldWorldDependencies executor
     (WorldDependencyAttempt identity reference policy paths previous _ memo recoveryRef interpreter) variant final path = do
   target <- targetModuleFor (hsc_mod_graph final) path
   recovery <- readIORef recoveryRef
@@ -1443,10 +1445,11 @@ stageHeldWorldDependencies
             || completedModuleEpoch node /= epoch) previousVersion]
   evictCompilerRecovery recovery (== target)
   _ <- evaluate (Map.size additions)
-  pure (PendingWorldDependencies identity reference policy additions)
+  pending <- newIORef (Just additions)
+  pure (PendingWorldDependencies executor identity reference policy pending)
 
 commitHeldWorldDependencies :: PendingWorldDependencies -> HeldCompilerWorld -> IO ()
-commitHeldWorldDependencies (PendingWorldDependencies identity reference policy additions)
+commitHeldWorldDependencies (PendingWorldDependencies _ identity reference policy pending)
     (HeldCompilerWorld facts issued _ preparedRef) = do
   unless (identity == worldInputsIdentity facts && reference == issued) (throwIO WorldCellCorrupt)
   WorldPreparedModules table receipts previous <- readIORef preparedRef
@@ -1455,6 +1458,10 @@ commitHeldWorldDependencies (PendingWorldDependencies identity reference policy 
     Just (WorldCompletedDependencies selected retained)
       | selected == policy -> pure retained
       | otherwise -> throwIO WorldCellCorrupt
+  -- Preflight has verified the exact scope, allowance, held owner and policy.
+  -- Consume before changing retained state; an uncertain mutation cannot replay.
+  additions <- atomicModifyIORef' pending (\value -> (Nothing,value))
+    >>= maybe (throwIO CheckedPurposeMismatch) pure
   let completed = WorldCompletedDependencies policy
         (Map.unionWith (Map.unionWith (Map.unionWith preferModuleVersion)) additions versions)
   let WorldCompletedDependencies _ retained = completed
@@ -2100,7 +2107,7 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt
   result <- runCompileCycle (WithCompilerExecution grant executor selection) cycle policy
     Nothing timing identity start resources withAliases path
   final <- getSession
-  pending <- liftIO (stageHeldWorldDependencies dependencies withAliases final path)
+  pending <- liftIO (stageHeldWorldDependencies executor dependencies withAliases final path)
   recovery <- liftIO (worldDependencyRecovery dependencies)
   (sourceSelection,imports) <- liftIO (readIORef importsRef >>= maybe (throwIO WorldCellCorrupt) pure)
   forM_ sourceSelection $ \selected -> do
@@ -5791,6 +5798,21 @@ withResidentPipelineSelectedRequests baseIncludes useRequests =
     useRequests $ \clearRecovery action ->
       runScope clearRecovery (\scope -> action (scopedCompile scope))
 
+-- Issued only after this scope has parsed the recipe and matched its slots.
+-- The existing phase reference identifies the issuing scope; immutable facts
+-- may be observed after close, but cannot authorize another scope or allowance.
+data HeldWorldCellAdmission = HeldWorldCellAdmission (IORef CompilerPhase)
+  HeldWorldQueryBinding WorldCellPrepareRequest CellSourcePlan CompilerExecutionGrant CompilerExecutor
+
+heldWorldCellQuestion :: HeldWorldCellAdmission -> WorldCellPrepareRequest
+heldWorldCellQuestion (HeldWorldCellAdmission _ _ question _ _ _) = question
+
+heldWorldCellPlan :: HeldWorldCellAdmission -> CellSourcePlan
+heldWorldCellPlan (HeldWorldCellAdmission _ _ _ plan _ _) = plan
+
+heldWorldCellSlots :: HeldWorldCellAdmission -> [(Word64,PlannedCellSlot)]
+heldWorldCellSlots = worldCellPrepareSlots . heldWorldCellQuestion
+
 -- | Transaction-issued operations share one thread/phase guard. A released
 -- capability cannot access contexts retained by the worker for later requests.
 data CompilerScope = CompilerScope
@@ -5801,11 +5823,11 @@ data CompilerScope = CompilerScope
   , ownedScopedReadHeldWorld :: String -> String -> IO (Maybe HeldWorldQueryBinding)
   , ownedScopedQueryWorld :: Maybe HeldWorldQueryBinding -> CompilerExecutionGrant -> CompilerExecutor -> WorldPublicModuleRequest -> IO BS.ByteString
   , ownedScopedPlanWorldCell :: Maybe HeldWorldQueryBinding -> CompilerExecutionGrant -> CompilerExecutor -> WorldCellPlanRequest -> IO BS.ByteString
-  , ownedScopedValidateWorldCell :: Maybe HeldWorldQueryBinding -> CompilerExecutionGrant -> CompilerExecutor -> WorldCellPrepareRequest -> IO (Either WorldCellRefusal CellSourcePlan)
-  , ownedScopedCompileWorldCell :: forall result. Maybe HeldWorldQueryBinding -> CompilerExecutionGrant -> CompilerExecutor
-      -> WorldCellPrepareRequest -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> FilePath
+  , ownedScopedValidateWorldCell :: CompilerExecutionGrant -> CompilerExecutor -> WorldCellPrepareRequest -> IO (Either WorldCellRefusal HeldWorldCellAdmission)
+  , ownedScopedCompileWorldCell :: forall result. HeldWorldCellAdmission
+      -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> FilePath
       -> IO (CompletedCompilerResult result)
-  , ownedScopedCommitWorldDependencies :: Maybe HeldWorldQueryBinding -> CompilerExecutor -> WorldCellPrepareRequest -> PendingWorldDependencies -> IO ()
+  , ownedScopedCommitWorldDependencies :: HeldWorldCellAdmission -> PendingWorldDependencies -> IO ()
   , ownedScopedRunGhc :: forall result. Ghc result -> IO result
   , ownedScopedParserFlags :: DynFlags
   }
@@ -5848,19 +5870,18 @@ scopedQueryWorld = ownedScopedQueryWorld
 scopedPlanWorldCell :: CompilerScope -> Maybe HeldWorldQueryBinding -> CompilerExecutionGrant -> CompilerExecutor -> WorldCellPlanRequest -> IO BS.ByteString
 scopedPlanWorldCell = ownedScopedPlanWorldCell
 
-scopedValidateWorldCell :: CompilerScope -> Maybe HeldWorldQueryBinding -> CompilerExecutionGrant -> CompilerExecutor
-  -> WorldCellPrepareRequest -> IO (Either WorldCellRefusal CellSourcePlan)
+scopedValidateWorldCell :: CompilerScope -> CompilerExecutionGrant -> CompilerExecutor
+  -> WorldCellPrepareRequest -> IO (Either WorldCellRefusal HeldWorldCellAdmission)
 scopedValidateWorldCell = ownedScopedValidateWorldCell
 
 -- This is an internal compiler operation on a fresh admitted prepare request,
 -- never a generic Ghc callback or a second current-world/publication owner.
-scopedCompileWorldCell :: CompilerScope -> Maybe HeldWorldQueryBinding -> CompilerExecutionGrant -> CompilerExecutor
-  -> WorldCellPrepareRequest -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> FilePath
+scopedCompileWorldCell :: CompilerScope -> HeldWorldCellAdmission
+  -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> FilePath
   -> IO (CompletedCompilerResult result)
 scopedCompileWorldCell scope = ownedScopedCompileWorldCell scope
 
-scopedCommitWorldDependencies :: CompilerScope -> Maybe HeldWorldQueryBinding -> CompilerExecutor
-  -> WorldCellPrepareRequest -> PendingWorldDependencies -> IO ()
+scopedCommitWorldDependencies :: CompilerScope -> HeldWorldCellAdmission -> PendingWorldDependencies -> IO ()
 scopedCommitWorldDependencies = ownedScopedCommitWorldDependencies
 
 scopedRunGhc :: CompilerScope -> Ghc result -> IO result
@@ -6195,24 +6216,27 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         && worldCellPlanRealization question == reference ->
                           planHeldWorldCell parserFlags facts (worldCellPlanRecipe question)
                     _ -> throwIO WorldCellUnavailable
-                validateWorldCell expected _grant executor question = runGuarded $ do
+                validateWorldCell grant executor question = runGuarded $ do
                   requireCompilerExecutorOpen executor
                   held <- readIORef heldWorld
-                  case (expected,held) of
-                    (Just (HeldWorldQueryBinding identity reference),Just (HeldCompilerWorld facts issued _ _))
-                      | worldInputsIdentity facts == identity && issued == reference
-                        && worldCellPrepareIdentity question == identity
-                        && worldCellPrepareRealization question == reference ->
-                          validateHeldWorldCell parserFlags facts question
+                  case held of
+                    Just (HeldCompilerWorld facts issued _ _)
+                      | worldCellPrepareIdentity question == worldInputsIdentity facts
+                        && worldCellPrepareRealization question == issued -> do
+                          admitted <- validateHeldWorldCell parserFlags facts question
+                          pure (fmap (\plan -> HeldWorldCellAdmission phase
+                            (HeldWorldQueryBinding (worldInputsIdentity facts) issued) question plan grant executor) admitted)
                     _ -> pure (Left WorldCellUnavailable)
-                compileWorldCell :: forall result. Maybe HeldWorldQueryBinding -> CompilerExecutionGrant -> CompilerExecutor
-                  -> WorldCellPrepareRequest -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> FilePath
+                compileWorldCell :: forall result. HeldWorldCellAdmission
+                  -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> FilePath
                   -> IO (CompletedCompilerResult result)
-                compileWorldCell expected grant executor question selection retained purpose path = runGuarded $ do
+                compileWorldCell (HeldWorldCellAdmission issuingPhase expected question _ grant executor)
+                    selection retained purpose path = runGuarded $ do
+                  unless (issuingPhase == phase) (throwIO CheckedPurposeMismatch)
                   requireCompilerExecutorOpen executor
                   held <- readIORef heldWorld
                   case (expected,held) of
-                    (Just (HeldWorldQueryBinding identity reference),Just world@(HeldCompilerWorld facts issued _ _))
+                    (HeldWorldQueryBinding identity reference,Just world@(HeldCompilerWorld facts issued _ _))
                       | worldInputsIdentity facts == identity && issued == reference
                         && worldCellPrepareIdentity question == identity
                         && worldCellPrepareRealization question == reference -> do
@@ -6224,11 +6248,14 @@ withResidentCompilerScopes baseIncludes useRequests = do
                             reflectGhc (compileHeldWorldCell requireReady producer selected baseEnv timing interpreterAttempt world grant executor
                               question selection retained purpose path) session
                     _ -> throwIO WorldCellUnavailable
-                commitWorldDependencies expected executor question pending = runGuarded $ do
+                commitWorldDependencies (HeldWorldCellAdmission issuingPhase expected question _ _ executor)
+                    pending@(PendingWorldDependencies issuingExecutor _ _ _ _) = runGuarded $ do
+                  unless (issuingPhase == phase && sameCompilerExecutor executor issuingExecutor)
+                    (throwIO CheckedPurposeMismatch)
                   requireCompilerExecutorOpen executor
                   held <- readIORef heldWorld
                   case (expected,held) of
-                    (Just (HeldWorldQueryBinding identity reference),Just world@(HeldCompilerWorld facts issued _ _))
+                    (HeldWorldQueryBinding identity reference,Just world@(HeldCompilerWorld facts issued _ _))
                       | worldInputsIdentity facts == identity && issued == reference
                         && worldCellPrepareIdentity question == identity
                         && worldCellPrepareRealization question == reference ->

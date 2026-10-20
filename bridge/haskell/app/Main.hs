@@ -69,6 +69,7 @@ import Tidepool.GhcPipeline
   , withResidentCompilerScopes, checkCellInstances
   , captureSupportedPackageProfile
   , scopedEnsureWorld, WorldCellRefusal(..), WorldModulePolicyFailure(..)
+  , heldWorldCellPlan, heldWorldCellSlots
   , worldCellRetainedGenerations, worldCellInputReferences, worldCellSourceSnapshot, worldCellExactImports, worldCellSourceSelection, worldCellSourceRootAliases
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
@@ -1044,14 +1045,15 @@ selectWorldCellInterface interfaces (binder:_) =
 
 runWorldCellPrepareMode :: BoundCompilerRequest -> WorldCellPrepareRequest -> IO [Diag]
 runWorldCellPrepareMode bound question = do
-  admitted <- validateBoundWorldCell bound
+  admitted <- boundWorldCellPreparation bound
   case admitted of
     Left refusal -> writeResult (Left refusal) BS.empty [] [] []
-    Right initial
-      | null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "") [] [] []
+    Right preparation
+      | let initial = heldWorldCellPlan preparation
+      , null (cellPlanItems initial) -> writeResult (Right []) (encodeCellOut initial [] [] "") [] [] []
       | otherwise -> do
-          matchedSlots <- maybe (fail "world cell preparation lost its admitted matched slots")
-            pure (boundWorldCellSlots bound)
+          let initial = heldWorldCellPlan preparation
+              matchedSlots = heldWorldCellSlots preparation
           attempted <- trySynchronous (prepareSegment initial matchedSlots)
           case attempted of
             Right (items,observations,inputs,common,plans,completion) -> do
