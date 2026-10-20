@@ -4520,18 +4520,14 @@ where
         ),
         PreparedRuntimeError,
     > {
-        let (program, source_keys) = self.state.install_certified_turn_in(
+        self.state.install_certified_turn_in(
             scope,
             metadata,
             target,
             source_evidence,
             demanded,
             inherited_needed,
-        )?;
-        if !source_keys.is_empty() {
-            self.advance_public_visibility(scope);
-        }
-        Ok((program, source_keys))
+        )
     }
 
     fn retire_failed_turn_source_instances(
@@ -7865,6 +7861,7 @@ where
                 Some(bundle) => TurnImageAcquisition::Ready { bundle },
                 None => TurnImageAcquisition::Compile,
             },
+            checked.as_deref(),
         )?;
         timing::record_stage(
             timing::NO_NODE,
@@ -7928,6 +7925,7 @@ where
         &mut self,
         admission: AdmittedTurnCode<'a>,
         images: TurnImageAcquisition<'_>,
+        checked: Option<&CheckedTurnCompletion>,
     ) -> Result<InstalledAdmittedTurn<'a>, ResidentError> {
         let AdmittedTurnCode {
             code,
@@ -7951,14 +7949,25 @@ where
                     )?
                 }
             };
-            self.install_certified_turn_in(
-                scope,
-                &metadata,
-                target,
-                &resolved.source_evidence,
-                demanded,
-                &resolved.inherited_needed,
-            )?
+            match checked {
+                Some(checked) => checked.install_certified_turn_in(
+                    &mut self.state,
+                    scope,
+                    &metadata,
+                    target,
+                    &resolved.source_evidence,
+                    demanded,
+                    &resolved.inherited_needed,
+                )?,
+                None => self.install_certified_turn_in(
+                    scope,
+                    &metadata,
+                    target,
+                    &resolved.source_evidence,
+                    demanded,
+                    &resolved.inherited_needed,
+                )?,
+            }
         } else {
             if matches!(images, TurnImageAcquisition::Ready { .. }) {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
@@ -8021,7 +8030,7 @@ where
             program,
             source_keys,
             _inputs: _installed_inputs,
-        } = self.install_admitted_turn(admission, TurnImageAcquisition::Compile)?;
+        } = self.install_admitted_turn(admission, TurnImageAcquisition::Compile, None)?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)
