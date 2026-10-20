@@ -322,16 +322,18 @@ impl Drop for RuntimeSourceClaim {
 /// share a gate. Issued only by a validated canonical lexical lease.
 pub struct RuntimeSourceLeaseClaim {
     claims: Vec<RuntimeSourceClaim>,
+    sources: Vec<Arc<super::RuntimeOriginalSource>>,
     leases: Vec<Arc<super::RuntimeLexicalScopeLease>>,
 }
 impl RuntimeSourceLeaseClaim {
     pub(super) fn admit(
+        sources: &[Arc<super::RuntimeOriginalSource>],
         leases: &[Arc<super::RuntimeLexicalScopeLease>],
     ) -> Result<Self, SourceAdmissionError> {
         let mut gates: Vec<RuntimeSourceAdmission> = Vec::new();
         let mut claims = Vec::new();
-        for lease in leases {
-            let gate = lease.source_admission();
+        for source in sources {
+            let gate = source.source_admission();
             if !gates.iter().any(|held| held.same_owner(gate)) {
                 claims.push(gate.admit_local()?);
                 gates.push(gate.clone());
@@ -339,11 +341,15 @@ impl RuntimeSourceLeaseClaim {
         }
         Ok(Self {
             claims,
+            sources: sources.to_vec(),
             leases: leases.to_vec(),
         })
     }
 
     pub fn retain_unconfirmed(self) {
+        for source in &self.sources {
+            source.retain_unconfirmed_source_custody();
+        }
         for lease in &self.leases {
             lease.retain_unconfirmed_source_custody();
         }
@@ -1086,7 +1092,8 @@ mod tests {
 /// One physical compiler scope retains every earned lower claim until its END.
 /// The original lease is independent of the recipient's current placement.
 pub struct RuntimeSourceCompilerTransaction {
-    pub(super) source: Arc<super::RuntimeLexicalScopeLease>,
+    pub(super) source: Arc<super::RuntimeOriginalSource>,
+    operation_target: Option<Arc<super::RuntimeLexicalScopeLease>>,
     origin: crate::CompilerTransactionOrigin,
     hook: Option<SourceAdmissionHook>,
     holds: Mutex<SourceCompilerHolds>,
@@ -1096,11 +1103,23 @@ pub struct RuntimeSourceCompilerTransaction {
 struct SourceCompilerHolds {
     hook_admitted: bool,
     claims: Vec<(RuntimeSourceAdmission, RuntimeSourceClaim)>,
+    sources: Vec<Arc<super::RuntimeOriginalSource>>,
     leases: Vec<Arc<super::RuntimeLexicalScopeLease>>,
 }
 impl RuntimeSourceCompilerTransaction {
     pub(super) fn origin(&self) -> &crate::CompilerTransactionOrigin {
         &self.origin
+    }
+
+    pub(crate) fn admit_original(
+        &self,
+        original: &Arc<super::RuntimeOriginalSource>,
+        target: Option<Arc<super::RuntimeLexicalScopeLease>>,
+    ) -> Result<(), SourceAdmissionError> {
+        if !Arc::ptr_eq(&self.source, original) {
+            return Err(SourceAdmissionError::ForeignTransaction);
+        }
+        self.admit(target)
     }
 
     pub(super) fn admit(
@@ -1120,11 +1139,12 @@ impl RuntimeSourceCompilerTransaction {
             }
             holds.hook_admitted = true;
         }
-        super::RuntimeLexicalScopeLease::with_source_leases(
-            std::iter::once(self.source.clone()).chain(target),
-            |leases| {
-                for lease in leases {
-                    let admission = lease.source_admission();
+        super::RuntimeOriginalSource::with_sources_and_targets(
+            [self.source.clone()],
+            self.operation_target.iter().cloned().chain(target),
+            |sources, leases| {
+                for source in sources {
+                    let admission = source.source_admission();
                     if !holds
                         .claims
                         .iter()
@@ -1134,6 +1154,11 @@ impl RuntimeSourceCompilerTransaction {
                             .claims
                             .push((admission.clone(), admission.admit_local()?));
                     }
+                    if !holds.sources.iter().any(|held| Arc::ptr_eq(held, source)) {
+                        holds.sources.push(source.clone());
+                    }
+                }
+                for lease in leases {
                     if !holds.leases.iter().any(|held| Arc::ptr_eq(held, lease)) {
                         holds.leases.push(lease.clone());
                     }
@@ -1144,7 +1169,7 @@ impl RuntimeSourceCompilerTransaction {
     }
     pub(crate) fn admitted_original_source(
         &self,
-    ) -> Result<Arc<super::RuntimeLexicalScopeLease>, SourceAdmissionError> {
+    ) -> Result<Arc<super::RuntimeOriginalSource>, SourceAdmissionError> {
         self.admit(None)?;
         Ok(self.source.clone())
     }
@@ -1154,6 +1179,9 @@ impl RuntimeSourceCompilerTransaction {
             .store(true, std::sync::atomic::Ordering::Release);
         let mut holds = self.holds.lock();
         if !confirmed {
+            for source in &holds.sources {
+                source.retain_unconfirmed_source_custody();
+            }
             for lease in &holds.leases {
                 lease.retain_unconfirmed_source_custody();
             }
@@ -1163,12 +1191,14 @@ impl RuntimeSourceCompilerTransaction {
                 claim.retain_unconfirmed();
             }
         }
+        holds.sources.clear();
         holds.leases.clear();
     }
 }
 
 pub(super) fn run_source_compiler_transaction<T>(
-    source: Arc<super::RuntimeLexicalScopeLease>,
+    source: Arc<super::RuntimeOriginalSource>,
+    operation_target: Option<Arc<super::RuntimeLexicalScopeLease>>,
     workload: tidepool_toolchain::artifacts::CompileWorkload,
     cancellation: crate::CompilerTransactionCancellation,
     supplemental_hook: Option<SourceAdmissionHook>,
@@ -1200,6 +1230,7 @@ pub(super) fn run_source_compiler_transaction<T>(
         |report| {
             let issued = Arc::new(RuntimeSourceCompilerTransaction {
                 source,
+                operation_target,
                 origin: crate::CompilerTransactionOrigin::current().expect("actual compiler owner"),
                 hook: supplemental_hook,
                 holds: Mutex::new(SourceCompilerHolds::default()),
@@ -1213,8 +1244,8 @@ pub(super) fn run_source_compiler_transaction<T>(
     ))
 }
 
-impl super::RuntimeLexicalScopeLease {
-    /// Run one off-checkout source compiler phase with the original strong lease.
+impl super::RuntimeOriginalSource {
+    /// Run one off-checkout compiler phase from its actual original-source token.
     /// The borrowed capability can only be used inside this physical owner.
     pub fn with_source_compiler_transaction<T>(
         self: &Arc<Self>,
@@ -1229,6 +1260,32 @@ impl super::RuntimeLexicalScopeLease {
     ) -> Result<crate::CompilerTransactionSettled<T>, SourceAdmissionError> {
         run_source_compiler_transaction(
             self.clone(),
+            None,
+            workload,
+            cancellation,
+            supplemental_hook,
+            close_sink,
+            |owner, report| action(&owner, report),
+        )
+    }
+}
+
+impl super::RuntimeLexicalScopeLease {
+    /// Retain this actual operation placement separately from source identity.
+    pub fn with_source_compiler_transaction<T>(
+        self: &Arc<Self>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        cancellation: crate::CompilerTransactionCancellation,
+        supplemental_hook: Option<SourceAdmissionHook>,
+        close_sink: impl FnOnce(crate::CompilerTransactionClose),
+        action: impl FnOnce(
+            &RuntimeSourceCompilerTransaction,
+            &mut dyn FnMut(crate::CompilerTransactionClose),
+        ) -> T,
+    ) -> Result<crate::CompilerTransactionSettled<T>, SourceAdmissionError> {
+        run_source_compiler_transaction(
+            self.original_source().clone(),
+            Some(self.clone()),
             workload,
             cancellation,
             supplemental_hook,

@@ -410,7 +410,7 @@ pub(super) struct InspectionWorldBase {
     pub(super) owner: std::sync::Arc<super::admission::RuntimeAdmissionOwner>,
     pub(super) epoch: u64,
     pub(super) source: std::sync::Arc<super::GenerationArtifactReference>,
-    pub(super) original_source: InspectionWorldLeaseObservation,
+    pub(super) original_source: InspectionWorldSourceObservation,
     pub(super) target: InspectionWorldLeaseObservation,
 }
 
@@ -418,6 +418,23 @@ pub(super) struct InspectionWorldBase {
 /// alive. The canonical lease and its prerequisite DAG remain the only issuer.
 #[derive(Clone)]
 pub(super) struct InspectionWorldLeaseObservation(std::sync::Weak<super::RuntimeLexicalScopeLease>);
+
+#[derive(Clone)]
+pub(super) struct InspectionWorldSourceObservation(std::sync::Weak<super::RuntimeOriginalSource>);
+
+impl InspectionWorldSourceObservation {
+    pub(super) fn new(source: &std::sync::Arc<super::RuntimeOriginalSource>) -> Self {
+        Self(std::sync::Arc::downgrade(source))
+    }
+
+    pub(super) fn matches(&self, source: &std::sync::Arc<super::RuntimeOriginalSource>) -> bool {
+        self.0.ptr_eq(&std::sync::Arc::downgrade(source))
+    }
+
+    pub(super) fn same_observation(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+}
 
 impl InspectionWorldLeaseObservation {
     pub(super) fn new(lease: &std::sync::Arc<super::RuntimeLexicalScopeLease>) -> Self {
@@ -437,7 +454,7 @@ impl InspectionWorldLeaseObservation {
 /// installation. Installed associations never own this custody pair.
 #[derive(Clone)]
 pub(super) struct InspectionWorldCustody {
-    pub(super) original_source: std::sync::Arc<super::RuntimeLexicalScopeLease>,
+    pub(super) original_source: std::sync::Arc<super::RuntimeOriginalSource>,
     pub(super) target: std::sync::Arc<super::RuntimeLexicalScopeLease>,
 }
 
@@ -457,9 +474,10 @@ impl InspectionWorldBase {
             .0
             .upgrade()
             .ok_or(super::SourceAdmissionError::StaleSourceLease)?;
-        super::RuntimeLexicalScopeLease::with_source_leases(
-            [original_source.clone(), target.clone()],
-            |_| {
+        super::RuntimeOriginalSource::with_sources_and_targets(
+            [original_source.clone()],
+            [target.clone()],
+            |_, _| {
                 Ok(InspectionWorldCustody {
                     original_source,
                     target,
@@ -473,11 +491,12 @@ impl InspectionWorldBase {
         &self,
     ) -> Result<InspectionWorldCustody, super::SourceAdmissionError> {
         let custody = self.observed_custody()?;
-        super::RuntimeLexicalScopeLease::with_source_leases(
-            [custody.original_source.clone(), custody.target.clone()],
-            |leases| {
+        super::RuntimeOriginalSource::with_sources_and_targets(
+            [custody.original_source.clone()],
+            [custody.target.clone()],
+            |sources, _| {
                 super::RuntimeSourceAdmission::with_open_admissions(
-                    leases.iter().map(|lease| lease.source_admission()),
+                    sources.iter().map(|source| source.source_admission()),
                     || custody,
                 )
             },
