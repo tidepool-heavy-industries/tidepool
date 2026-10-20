@@ -2,6 +2,7 @@
 //! lookup, while their explicit virtual graph owns lexical visibility.
 
 use ciborium::value::Value;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -2332,9 +2333,9 @@ struct ReceiptNativeInputDemand<'a> {
 }
 
 struct ExternalSourceGlobal<'a> {
-    unit: &'a str,
-    module: &'a str,
-    module_version: Option<&'a tidepool_repr::execution_schema::ModuleVersion>,
+    unit: Cow<'a, str>,
+    module: Cow<'a, str>,
+    module_version: Option<Cow<'a, tidepool_repr::execution_schema::ModuleVersion>>,
     original_ordinal: u32,
 }
 
@@ -2342,6 +2343,7 @@ impl<'a> ReceiptNativeInputDemand<'a> {
     fn from_products(
         receipt: &'a crate::certified_products::CertifiedReceipt,
         products: &crate::certified_products::ParsedModuleProducts,
+        source: Option<&crate::artifact_inventory::CompilerSourceSupport>,
     ) -> Result<Self, CompileError> {
         use crate::certified_products::ReceiptImportOwner;
         let budget = NativeDemandBudget(Some(products.operation()));
@@ -2373,6 +2375,38 @@ impl<'a> ReceiptNativeInputDemand<'a> {
             .chain(receipt.targets.values().flatten())
         {
             budget.checkpoint()?;
+            if let ReceiptImportOwner::OriginalBinding {
+                unit,
+                module,
+                interface,
+                original,
+                binder,
+            } = &global.owner
+            {
+                let owner = identity(unit, module);
+                let source = source.ok_or_else(|| compiler_evidence_failure(
+                    crate::certified_products::CertificationError::InputDecision {
+                        owner: owner.clone(), reason: crate::certified_products::InputDecisionRefusal::MissingContinuationOwner,
+                    }))?;
+                let (resolved, ordinal) =
+                    crate::certified_products::resolve_selected_original_binding(
+                        source,
+                        &owner,
+                        *interface,
+                        *original,
+                        binder,
+                        products.operation(),
+                    )
+                    .map_err(compiler_evidence_failure)?;
+                budget.reserve::<ExternalSourceGlobal<'_>>(1)?;
+                sources.push(ExternalSourceGlobal {
+                    unit: Cow::Owned(resolved.unit),
+                    module: Cow::Owned(resolved.module),
+                    module_version: Some(Cow::Owned(resolved.module_version)),
+                    original_ordinal: ordinal,
+                });
+                continue;
+            }
             let ReceiptImportOwner::Source {
                 unit,
                 module,
@@ -2390,9 +2424,9 @@ impl<'a> ReceiptNativeInputDemand<'a> {
             }
             budget.reserve::<ExternalSourceGlobal<'_>>(1)?;
             sources.push(ExternalSourceGlobal {
-                unit,
-                module,
-                module_version: module_version.as_ref(),
+                unit: Cow::Borrowed(unit),
+                module: Cow::Borrowed(module),
+                module_version: module_version.as_ref().map(Cow::Borrowed),
                 original_ordinal: *original_ordinal,
             });
         }
@@ -2475,9 +2509,9 @@ impl DemandNativeInputs {
                 .get(&id)
                 .ok_or_else(|| failure("receipt native group lacks its issued row"))?;
             let native_owner = row.original_owner();
-            if native_owner.unit != *unit
-                || native_owner.module != *module
-                || *module_version != Some(&native_owner.module_version)
+            if native_owner.unit != unit.as_ref()
+                || native_owner.module != module.as_ref()
+                || module_version.as_deref() != Some(&native_owner.module_version)
             {
                 return Err(failure(
                     "receipt native group differs from its issued owner or permission",
@@ -2786,9 +2820,9 @@ impl RequestCompilerInputs {
             |id| {
                 let payload = self.metadata.retained.artifacts.get(id);
                 let row = self.native_selection.availability.0.get(id);
-                let same_payload = payload.zip(row).is_some_and(|(payload, row)| {
-                    Arc::ptr_eq(payload, &row.original)
-                });
+                let same_payload = payload
+                    .zip(row)
+                    .is_some_and(|(payload, row)| Arc::ptr_eq(payload, &row.original));
                 if !same_payload {
                     tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                         artifact = ?id,
@@ -9895,7 +9929,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             charge(operation.charge(1))?;
             charge(operation.charge(global.unit.len()))?;
             charge(operation.charge(global.module.len()))?;
-            let owner = identity(global.unit, global.module);
+            let owner = identity(&global.unit, &global.module);
             insert(&mut roots, &owner)?;
             insert(&mut native_roots, &owner)?;
         }
@@ -9922,9 +9956,10 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             charge(operation.charge(interface.unit().len()))?;
             charge(operation.charge(interface.module().len()))?;
             let compiler_owner = identity(interface.unit(), interface.module());
-            if roles.get(&compiler_owner).is_none_or(|role| {
-                role.interface() != row.certified_interface().artifact_id()
-            }) {
+            if roles
+                .get(&compiler_owner)
+                .is_none_or(|role| role.interface() != row.certified_interface().artifact_id())
+            {
                 return Err(failure(
                     "checked World value interface differs from its primary compiler role",
                 ));
@@ -10014,7 +10049,11 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         .map_err(compiler_evidence_failure)?;
 
         let operation = program.validation().inventory.as_ref();
-        let native_inputs = ReceiptNativeInputDemand::from_products(&receipt, &raw)?;
+        let native_inputs = ReceiptNativeInputDemand::from_products(
+            &receipt,
+            &raw,
+            Some(continuation.inputs.compiler_source_support()),
+        )?;
         let demand = self.demand_inputs(&continuation.inputs, &native_inputs)?;
         let groups = demand.certify_receipt_groups(&native_inputs, validation)?;
         let support = demand.semantic_source_support(&groups, operation)?;
@@ -20606,7 +20645,7 @@ mod tests {
         ciborium::ser::into_writer(&value, &mut bytes).unwrap();
         let products =
             crate::certified_products::ParsedModuleProducts::decode(&bytes, b"").unwrap();
-        ReceiptNativeInputDemand::from_products(receipt, &products).unwrap()
+        ReceiptNativeInputDemand::from_products(receipt, &products, None).unwrap()
     }
 
     /// Untrusted group-demand DATA for the `DemandParent`/`DemandChild`
@@ -20743,7 +20782,7 @@ mod tests {
                 },
                 source_recipe: WorkerExecutionSource::Ordinary,
             };
-            let inputs = ReceiptNativeInputDemand::from_products(&receipt, &current).unwrap();
+            let inputs = ReceiptNativeInputDemand::from_products(&receipt, &current, None).unwrap();
             assert!(
                 inputs.sources.is_empty(),
                 "actual current output is independent of origin label"
@@ -20790,11 +20829,15 @@ mod tests {
             duplicate_receipt
                 .modules
                 .push(duplicate_receipt.modules[0].clone());
-            assert!(ReceiptNativeInputDemand::from_products(&duplicate_receipt, &current).is_err());
+            assert!(
+                ReceiptNativeInputDemand::from_products(&duplicate_receipt, &current, None)
+                    .is_err()
+            );
             let mut mismatched_receipt = receipt.clone();
             mismatched_receipt.modules[0].module = "MissingCurrentOwner".into();
             assert!(
-                ReceiptNativeInputDemand::from_products(&mismatched_receipt, &current).is_err()
+                ReceiptNativeInputDemand::from_products(&mismatched_receipt, &current, None)
+                    .is_err()
             );
             let mut historical = global.clone();
             let ReceiptImportOwner::Source { module_version, .. } = &mut historical.owner else {
@@ -20802,7 +20845,7 @@ mod tests {
             };
             *module_version = Some(tidepool_repr::execution_schema::ModuleVersion([37; 32]));
             receipt.targets.get_mut("target").unwrap().push(historical);
-            let mixed = ReceiptNativeInputDemand::from_products(&receipt, &current).unwrap();
+            let mixed = ReceiptNativeInputDemand::from_products(&receipt, &current, None).unwrap();
             assert_eq!(
                 mixed.sources.len(),
                 1,

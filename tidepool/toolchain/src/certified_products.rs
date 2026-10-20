@@ -76,6 +76,13 @@ pub enum PendingImportOwner {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ReceiptImportOwner {
+    OriginalBinding {
+        unit: String,
+        module: String,
+        interface: crate::artifact_inventory::ArtifactBinding,
+        original: crate::artifact_inventory::ArtifactBinding,
+        binder: SymbolIdentity,
+    },
     Source {
         unit: String,
         module: String,
@@ -1332,6 +1339,14 @@ pub enum OriginalMembershipFailure {
     UnexpectedOwner(CachedHomeOwner),
     MissingOwner(CachedHomeOwner),
     OriginalBytes(CachedHomeOwner),
+    MissingSymbol {
+        owner: CachedHomeOwner,
+        symbol: SymbolIdentity,
+    },
+    AmbiguousSymbol {
+        owner: CachedHomeOwner,
+        symbol: SymbolIdentity,
+    },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1568,12 +1583,43 @@ fn signature(value: &Value) -> CertResult<Option<Signature>> {
     Ok(Some(Signature { arguments, results }))
 }
 
-fn owner(value: &Value) -> CertResult<ReceiptImportOwner> {
+fn receipt_artifact_binding(
+    value: &Value,
+) -> CertResult<crate::artifact_inventory::ArtifactBinding> {
+    let row = sized(value, 2)?;
+    let raw_digest = |value: &Value| {
+        let Value::Bytes(bytes) = value else {
+            return Err(CertificationError::Receipt("binding digest bytes"));
+        };
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| CertificationError::Receipt("binding digest width"))
+    };
+    Ok(crate::artifact_inventory::ArtifactBinding {
+        artifact: crate::artifact_inventory::ArtifactId(raw_digest(&row[0])?),
+        selection: crate::artifact_inventory::ArtifactSelectionId(raw_digest(&row[1])?),
+    })
+}
+
+fn owner(value: &Value, binder: &SymbolIdentity) -> CertResult<ReceiptImportOwner> {
     let row = array(value)?;
     let Some(tag) = row.first() else {
         return Err(CertificationError::Receipt("empty import owner"));
     };
     match string(tag)? {
+        "original-binding" => {
+            if row.len() != 5 {
+                return Err(CertificationError::Receipt("original binding owner arity"));
+            }
+            Ok(ReceiptImportOwner::OriginalBinding {
+                unit: string(&row[1])?.to_owned(),
+                module: string(&row[2])?.to_owned(),
+                interface: receipt_artifact_binding(&row[3])?,
+                original: receipt_artifact_binding(&row[4])?,
+                binder: binder.clone(),
+            })
+        }
         "source" => {
             if row.len() != 6 {
                 return Err(CertificationError::Receipt("source owner arity"));
@@ -1625,12 +1671,13 @@ fn owner(value: &Value) -> CertResult<ReceiptImportOwner> {
 
 fn accepted_global(value: &Value) -> CertResult<AcceptedGlobal> {
     let row = sized(value, 5)?;
+    let binder = identity(&row[0])?;
     Ok(AcceptedGlobal {
-        identity: identity(&row[0])?,
+        identity: binder.clone(),
         rep: rep(&row[1])?,
         entry_signature: signature(&row[2])?,
         required_evaluated: boolean(&row[3])?,
-        owner: owner(&row[4])?,
+        owner: owner(&row[4], &binder)?,
     })
 }
 
@@ -1672,7 +1719,8 @@ fn validate_global_witness(
                 && &binder.module == module
                 && declaration.required_generation == Some(*generation)
         }
-        ReceiptImportOwner::Source { binder, .. } => {
+        ReceiptImportOwner::Source { binder, .. }
+        | ReceiptImportOwner::OriginalBinding { binder, .. } => {
             binder == &declaration.identity && declaration.required_generation.is_none()
         }
         ReceiptImportOwner::Package {
@@ -1693,7 +1741,7 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded ordinary `TPCERT10` tuple with exact owner rows shared
+/// Decode the worker's bounded ordinary `TPCERT11` tuple with exact owner rows shared
 /// through an immutable dictionary. Older ownership formats are refused.
 /// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
@@ -2053,11 +2101,11 @@ fn product_receipt_payload(value: &Value) -> CertResult<&[Value]> {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let version = number(&header[1])?;
-    if version != 10 {
+    if version != 11 {
         return Err(CertificationError::UnsupportedVersion {
             format: CertificationFormat::ProductReceipt,
             found: version,
-            expected: 10,
+            expected: 11,
         });
     }
     if header.len() != 3 {
@@ -2160,6 +2208,12 @@ fn decode_package_rows(
 // substitute for the exact global symbol. Only the binder is shared with it.
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
 enum OwnerCoordinate {
+    OriginalBinding {
+        unit: String,
+        module: String,
+        interface: crate::artifact_inventory::ArtifactBinding,
+        original: crate::artifact_inventory::ArtifactBinding,
+    },
     Source {
         unit: String,
         module: String,
@@ -2184,14 +2238,23 @@ impl OwnerCoordinates {
         let rows = values
             .iter()
             .map(|value| {
-                let row = sized(value, 4)?;
-                let coordinate = match string(&row[0])? {
-                    "source" => OwnerCoordinate::Source {
+                let row = array(value)?;
+                let tag = row
+                    .first()
+                    .ok_or(CertificationError::Receipt("empty owner coordinate"))?;
+                let coordinate = match (string(tag)?, row.len()) {
+                    ("original-binding", 5) => OwnerCoordinate::OriginalBinding {
+                        unit: string(&row[1])?.to_owned(),
+                        module: string(&row[2])?.to_owned(),
+                        interface: receipt_artifact_binding(&row[3])?,
+                        original: receipt_artifact_binding(&row[4])?,
+                    },
+                    ("source", 4) => OwnerCoordinate::Source {
                         unit: string(&row[1])?.to_owned(),
                         module: string(&row[2])?.to_owned(),
                         module_version: optional_version(&row[3])?,
                     },
-                    "package" => OwnerCoordinate::Package {
+                    ("package", 4) => OwnerCoordinate::Package {
                         unit: string(&row[1])?.to_owned(),
                         module: string(&row[2])?.to_owned(),
                         interface_digest: digest(&row[3])?,
@@ -2226,6 +2289,29 @@ impl OwnerCoordinates {
         let tag = row
             .first()
             .ok_or(CertificationError::Receipt("empty import owner"))?;
+        if matches!(tag, Value::Integer(value) if u64::try_from(*value).ok() == Some(3)) {
+            if row.len() != 2 {
+                return Err(CertificationError::Receipt(
+                    "original binding compact owner arity",
+                ));
+            }
+            let OwnerCoordinate::OriginalBinding {
+                unit,
+                module,
+                interface,
+                original,
+            } = self.get(&row[1])?
+            else {
+                return Err(CertificationError::Receipt("owner coordinate kind"));
+            };
+            return Ok(ReceiptImportOwner::OriginalBinding {
+                unit: unit.clone(),
+                module: module.clone(),
+                interface: *interface,
+                original: *original,
+                binder: binder.clone(),
+            });
+        }
         match string(tag)? {
             "source" if row.len() == 3 => {
                 let original_ordinal = u32::try_from(number(&row[2])?)
@@ -2397,6 +2483,12 @@ fn global_payload_copy_bytes(global: &AcceptedGlobal) -> CertResult<usize> {
     add(symbol_bytes(&global.identity)?)?;
     match &global.owner {
         ReceiptImportOwner::Source {
+            unit,
+            module,
+            binder,
+            ..
+        }
+        | ReceiptImportOwner::OriginalBinding {
             unit,
             module,
             binder,
@@ -4618,6 +4710,81 @@ fn resolve_receipt_owner(
     )
 }
 
+/// Resolve only one selected Original's authenticated symbol membership. The
+/// exact acquired pair is checked before body permission; custody and names
+/// cannot choose another Original or supply an absent permission.
+pub(crate) fn resolve_selected_original_binding(
+    source: &crate::artifact_inventory::CompilerSourceSupport,
+    owner: &crate::declaration_join::ExactModuleIdentity,
+    interface: crate::artifact_inventory::ArtifactBinding,
+    original: crate::artifact_inventory::ArtifactBinding,
+    binder: &SymbolIdentity,
+    operation: &InventoryOperation,
+) -> CertResult<(CachedHomeOwner, u32)> {
+    let refuse = |reason| CertificationError::InputDecision {
+        owner: owner.clone(),
+        reason,
+    };
+    let primary = source
+        .compiler_primary_input(owner)
+        .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
+        .ok_or_else(|| refuse(InputDecisionRefusal::RoleMismatch))?;
+    if primary.original().is_none() {
+        return Err(refuse(InputDecisionRefusal::RoleMismatch));
+    }
+    if primary.interface() != interface || primary.original() != Some(original) {
+        return Err(refuse(InputDecisionRefusal::ArtifactIdentityMismatch));
+    }
+    let crate::artifact_inventory::ArtifactPayload::Original(product) = &primary.entry().payload
+    else {
+        return Err(refuse(InputDecisionRefusal::NativeOwnerMismatch));
+    };
+    operation.charge(product.owner().unit.len())?;
+    operation.charge(product.owner().module.len())?;
+    let witness = product
+        .original_native()
+        .filter(|witness| witness.matches_original(product))
+        .ok_or_else(|| {
+            CertificationError::OriginalMembership(Box::new(
+                OriginalMembershipFailure::OriginalBytes(product.owner().clone()),
+            ))
+        })?;
+    let mut ordinal = None;
+    for group in witness.groups.iter() {
+        crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
+        operation.charge(group.group.binders().len())?;
+        if group.group.binders().contains(binder) {
+            if ordinal.replace(group.group.original_ordinal()).is_some() {
+                return Err(CertificationError::OriginalMembership(Box::new(
+                    OriginalMembershipFailure::AmbiguousSymbol {
+                        owner: product.owner().clone(),
+                        symbol: binder.clone(),
+                    },
+                )));
+            }
+        }
+    }
+    let ordinal = ordinal.ok_or_else(|| {
+        CertificationError::OriginalMembership(Box::new(OriginalMembershipFailure::MissingSymbol {
+            owner: product.owner().clone(),
+            symbol: binder.clone(),
+        }))
+    })?;
+    let permitted = source
+        .native_availability()
+        .issued_row(original.artifact)
+        .is_some_and(|row| row.original_owner() == product.owner() && row.permits(ordinal));
+    if !permitted {
+        return Err(CertificationError::OriginalAvailability(Box::new(
+            OriginalAvailabilityRefusal {
+                owner: product.owner().clone(),
+                original_ordinal: ordinal,
+            },
+        )));
+    }
+    Ok((product.owner().clone(), ordinal))
+}
+
 fn resolve_receipt_owner_with_validation(
     import: ReceiptImportOwner,
     sources: &SourceGroupMap,
@@ -4626,6 +4793,56 @@ fn resolve_receipt_owner_with_validation(
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<PendingImportOwner> {
     match import {
+        ReceiptImportOwner::OriginalBinding {
+            unit,
+            module,
+            interface,
+            original,
+            binder,
+        } => {
+            let owner = crate::declaration_join::ExactModuleIdentity { unit, module };
+            let selected = selection.ok_or_else(|| CertificationError::InputDecision {
+                owner: owner.clone(),
+                reason: InputDecisionRefusal::MissingContinuationOwner,
+            })?;
+            let (source, _) = selected.continuation_input(&owner)?.ok_or_else(|| {
+                CertificationError::InputDecision {
+                    owner: owner.clone(),
+                    reason: InputDecisionRefusal::RoleMismatch,
+                }
+            })?;
+            let (native, ordinal) = resolve_selected_original_binding(
+                source,
+                &owner,
+                interface,
+                original,
+                &binder,
+                &validation.inventory,
+            )?;
+            // The item receipt must still agree with this selected continuation.
+            selected.receipt_source_owner(
+                &owner.unit,
+                &owner.module,
+                Some(&native.module_version),
+                ordinal,
+            )?;
+            let resolved = sources
+                .get(&(native.clone(), ordinal, binder.clone()))
+                .ok_or_else(|| {
+                    source_closure_mismatch(
+                        "receipt_original_binding",
+                        Some(&native),
+                        ordinal,
+                        &binder,
+                        Some(sources),
+                    )
+                })?;
+            Ok(PendingImportOwner::Source {
+                owner: resolved.0.clone(),
+                original_ordinal: ordinal,
+                binder,
+            })
+        }
         ReceiptImportOwner::Source {
             unit,
             module,
@@ -5284,6 +5501,25 @@ fn value_signature(signature: &Option<Signature>) -> Value {
 }
 fn value_import(owner: &ReceiptImportOwner) -> Value {
     match owner {
+        ReceiptImportOwner::OriginalBinding {
+            unit,
+            module,
+            interface,
+            original,
+            ..
+        } => value_array([
+            value_text("original-binding"),
+            value_text(unit),
+            value_text(module),
+            value_array([
+                Value::Bytes(interface.artifact.0.to_vec()),
+                Value::Bytes(interface.selection.0.to_vec()),
+            ]),
+            value_array([
+                Value::Bytes(original.artifact.0.to_vec()),
+                Value::Bytes(original.selection.0.to_vec()),
+            ]),
+        ]),
         ReceiptImportOwner::Source {
             unit,
             module,
@@ -5376,6 +5612,12 @@ fn charge_global(operation: &InventoryOperation, global: &AcceptedGlobal) -> Cer
     operation.reserve::<Value>(16)?;
     match &global.owner {
         ReceiptImportOwner::Source {
+            unit,
+            module,
+            binder,
+            ..
+        }
+        | ReceiptImportOwner::OriginalBinding {
             unit,
             module,
             binder,
@@ -5700,6 +5942,11 @@ fn decode_home_witness_with_operation(
                     }
                     used_packages.insert(key);
                 }
+                ReceiptImportOwner::OriginalBinding { .. } => {
+                    return Err(CertificationError::Receipt(
+                        "unresolved original binding in home witness",
+                    ));
+                }
                 ReceiptImportOwner::Retained { identity, .. } if identity != &global.identity => {
                     return Err(CertificationError::Mismatch("home retained witness"));
                 }
@@ -5827,6 +6074,11 @@ fn validate_home_witness_structure(witness: &HomeCertification) -> CertResult<()
                         return Err(CertificationError::Mismatch("home package witness"));
                     }
                     used_packages.insert(key);
+                }
+                ReceiptImportOwner::OriginalBinding { .. } => {
+                    return Err(CertificationError::Receipt(
+                        "unresolved original binding in home witness",
+                    ));
                 }
                 ReceiptImportOwner::Retained { identity, .. } if identity != &global.identity => {
                     return Err(CertificationError::Mismatch("home retained witness"));
@@ -6427,6 +6679,9 @@ fn native_requirements_from_witness(witness: &HomeCertification) -> CertifiedNat
                         interface_digest: *interface_digest,
                     });
                     continue;
+                }
+                ReceiptImportOwner::OriginalBinding { .. } => {
+                    unreachable!("home witness decoder rejects unresolved original binding")
                 }
                 ReceiptImportOwner::Package { .. } => continue,
             };
@@ -7269,8 +7524,9 @@ impl<'a> OriginalValidationInventory<'a> {
     ) -> CertResult<Self> {
         operation.reserve::<((String, String), [usize; 4])>(available.len())?;
         for product in available.values() {
-            crate::host_work::checkpoint()
-                .map_err(|error| CertificationError::OriginalClosure(Box::new(crate::CompileError::Io(error))))?;
+            crate::host_work::checkpoint().map_err(|error| {
+                CertificationError::OriginalClosure(Box::new(crate::CompileError::Io(error)))
+            })?;
             operation.charge(product.owner().unit.len() + product.owner().module.len())?;
         }
         Ok(Self {
@@ -7346,8 +7602,9 @@ impl<'a> OriginalValidationInventory<'a> {
             ));
         }
         for binding in &bindings {
-            crate::host_work::checkpoint()
-                .map_err(|error| CertificationError::OriginalClosure(Box::new(crate::CompileError::Io(error))))?;
+            crate::host_work::checkpoint().map_err(|error| {
+                CertificationError::OriginalClosure(Box::new(crate::CompileError::Io(error)))
+            })?;
             let key = crate::artifact_inventory::NativeGroupKey {
                 artifact: binding.binding.artifact(),
                 original_ordinal: binding.original_ordinal,
@@ -7360,8 +7617,9 @@ impl<'a> OriginalValidationInventory<'a> {
         }
         let mut additional = Vec::new();
         for binding in bindings {
-            crate::host_work::checkpoint()
-                .map_err(|error| CertificationError::OriginalClosure(Box::new(crate::CompileError::Io(error))))?;
+            crate::host_work::checkpoint().map_err(|error| {
+                CertificationError::OriginalClosure(Box::new(crate::CompileError::Io(error)))
+            })?;
             let key = crate::artifact_inventory::NativeGroupKey {
                 artifact: binding.binding.artifact(),
                 original_ordinal: binding.original_ordinal,
@@ -12996,6 +13254,196 @@ pub(crate) mod tests {
                 "current group outside selected binding closure"
             ))
         ));
+    }
+
+    #[test]
+    fn original_binding_receipts_require_selected_pair_symbol_and_permission() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection, CompilerSourceSupport,
+            NativeGroupKey,
+        };
+        use crate::declaration_context::{
+            ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
+        };
+        use crate::declaration_join::ExactLexicalNode;
+        let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(b"original-binding-test").sha256();
+        let product = fixture_finalized_product(
+            full_native_fixture("BoundOriginal", vec![(7, vec![]), (11, vec![])], 1), producer);
+        let entry = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
+        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+        let inventory = ArtifactInventory::default();
+        let physical = inventory
+            .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+            .unwrap();
+        let operation = InventoryOperation::new(Default::default());
+        let mut selected = CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &physical.metadata_snapshot(),
+            &operation,
+        )
+        .unwrap();
+        let output = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selected,
+            &physical,
+            vec![entry.clone()],
+        )
+        .unwrap();
+        let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
+        let owner = entry.descriptor.owner.clone();
+        let primary = completed.compiler_primary_input(&owner).unwrap().unwrap();
+        let interface = primary.interface();
+        let original = primary.original().unwrap();
+        let binder = testing::identity("BoundOriginal", "entry_7");
+        assert_eq!(
+            resolve_selected_original_binding(
+                &completed, &owner, interface, original, &binder, &operation
+            )
+            .unwrap(),
+            (product.owner().clone(), 7)
+        );
+
+        // A genuine different artifact for the same owner cannot replace the selected pair.
+        let alternate = Arc::new(
+            ArtifactEntry::original([3; 32], fixture_finalized_product(product.clone(), [3; 32]))
+                .unwrap(),
+        );
+        let alternate_view = inventory
+            .admit_shared(&inventory.empty_view(), vec![alternate.clone()])
+            .unwrap();
+        let alternate_pair = *alternate_view
+            .capture_graph_selection()
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == alternate.descriptor.id)
+            .unwrap();
+        assert_ne!(original, alternate_pair);
+        assert!(matches!(
+            resolve_selected_original_binding(
+                &completed,
+                &owner,
+                interface,
+                alternate_pair,
+                &binder,
+                &operation
+            ),
+            Err(CertificationError::InputDecision {
+                reason: InputDecisionRefusal::ArtifactIdentityMismatch,
+                ..
+            })
+        ));
+        let foreign_owner = crate::declaration_join::ExactModuleIdentity {
+            unit: owner.unit.clone(),
+            module: "Other".into(),
+        };
+        assert!(matches!(
+            resolve_selected_original_binding(
+                &completed,
+                &foreign_owner,
+                interface,
+                original,
+                &binder,
+                &operation
+            ),
+            Err(CertificationError::InputDecision {
+                reason: InputDecisionRefusal::RoleMismatch,
+                ..
+            })
+        ));
+        let missing = testing::identity("BoundOriginal", "absent");
+        assert!(
+            matches!(resolve_selected_original_binding(&completed, &owner, interface, original,
+            &missing, &operation), Err(CertificationError::OriginalMembership(reason))
+                if *reason == OriginalMembershipFailure::MissingSymbol { owner: product.owner().clone(), symbol: missing })
+        );
+        let custody = completed.for_source_owners(&BTreeSet::new()).unwrap();
+        assert!(custody
+            .artifacts()
+            .metadata_snapshot()
+            .artifacts
+            .contains_key(&entry.descriptor.id));
+        assert!(matches!(
+            resolve_selected_original_binding(
+                &custody, &owner, interface, original, &binder, &operation
+            ),
+            Err(CertificationError::InputDecision {
+                reason: InputDecisionRefusal::RoleMismatch,
+                ..
+            })
+        ));
+
+        // The production recovery/input issuer owns the bounded offer; membership alone
+        // cannot expand ordinal 7 permission to another binder in the same artifact.
+        let partial = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                vec![entry.clone()],
+                &BTreeSet::from([NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: 7,
+                }]),
+            )
+            .unwrap();
+        let context = ExactDeclarationContext::from_authenticated_execution(
+            producer,
+            &partial,
+            projection,
+            vec![ExactLexicalNode {
+                owner: owner.clone(),
+                imports: vec![],
+            }],
+            owner.clone(),
+            &[],
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(context))
+            .prepare_compilation(directory.path(), b"original-binding-test")
+            .unwrap();
+        let source = request.compiler_inputs().compiler_source_support();
+        let primary = source.compiler_primary_input(&owner).unwrap().unwrap();
+        let interface = primary.interface();
+        let original = primary.original().unwrap();
+        let selection =
+            CertifiedSourceSelection::from_compiler_inputs(request.compiler_inputs(), &operation)
+                .unwrap();
+        let membership = request
+            .compiler_inputs()
+            .available_original_sources(std::slice::from_ref(&product), &operation)
+            .unwrap();
+        let mut validation = PackageInterfaceValidation::default();
+        let sources = membership.overlay(&request.groups, &operation).unwrap();
+        for (ordinal, permitted) in [(7, true), (11, false)] {
+            let binder = testing::identity("BoundOriginal", &format!("entry_{ordinal}"));
+            let receipt = ReceiptImportOwner::OriginalBinding {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                interface,
+                original,
+                binder: binder.clone(),
+            };
+            let result = resolve_receipt_owner_with_validation(
+                receipt,
+                &sources,
+                Some(&selection),
+                &BTreeMap::new(),
+                &mut validation,
+            );
+            if permitted {
+                assert_eq!(
+                    result.unwrap(),
+                    PendingImportOwner::Source {
+                        owner: product.owner().clone(),
+                        original_ordinal: ordinal,
+                        binder
+                    }
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(CertificationError::OriginalAvailability(reason))
+                    if reason.owner == *product.owner() && reason.original_ordinal == ordinal)
+                );
+            }
+        }
     }
 
     #[test]
@@ -26319,7 +26767,7 @@ None,
         payload.remove(2);
         let item = value_array([
             value_text("TPCERT"),
-            Value::Integer(10.into()),
+            Value::Integer(11.into()),
             value_array([value_text("segment-item"), value_array([]), value_array([])]),
         ]);
         let decode_originals = |value: &Value| {
@@ -26367,6 +26815,61 @@ None,
     }
 
     #[test]
+    fn original_binding_receipt_codec_preserves_exact_pairs_and_outer_symbol() {
+        use crate::artifact_inventory::{ArtifactBinding, ArtifactId, ArtifactSelectionId};
+        let mut global = dictionary_test_global();
+        global.owner = ReceiptImportOwner::OriginalBinding {
+            unit: "fixture".into(),
+            module: "Support".into(),
+            interface: ArtifactBinding {
+                artifact: ArtifactId([1; 32]),
+                selection: ArtifactSelectionId([2; 32]),
+            },
+            original: ArtifactBinding {
+                artifact: ArtifactId([3; 32]),
+                selection: ArtifactSelectionId([4; 32]),
+            },
+            binder: global.identity.clone(),
+        };
+        assert_eq!(accepted_global(&value_global(&global)).unwrap(), global);
+        let mut facts = empty_product_facts();
+        facts.as_array_mut().unwrap()[3] = value_array([value_array([
+            value_text("target"),
+            value_array([value_global(&global)]),
+        ])]);
+        let packet = dictionary_receipt(&facts);
+        assert_eq!(
+            decode_receipt(&receipt_bytes(&packet)).unwrap().targets["target"],
+            vec![global.clone()]
+        );
+        let mut changed = packet.clone();
+        // The compact coordinate does not duplicate the reached symbol.
+        let payload = receipt_payload_mut(&mut changed);
+        let globals = payload[4].as_array_mut().unwrap();
+        globals[0].as_array_mut().unwrap()[4] =
+            value_array([Value::Integer(3.into()), Value::Integer(99.into())]);
+        assert!(matches!(
+            decode_receipt(&receipt_bytes(&changed)),
+            Err(CertificationError::Receipt("owner coordinate index"))
+        ));
+        let mut raw = value_global(&global);
+        let owner = raw.as_array_mut().unwrap()[4].as_array_mut().unwrap();
+        owner[3].as_array_mut().unwrap()[0] = Value::Bytes(vec![1; 31]);
+        assert!(matches!(
+            accepted_global(&raw),
+            Err(CertificationError::Receipt("binding digest width"))
+        ));
+        let declaration = GlobalDecl {
+            identity: global.identity.clone(),
+            rep: global.rep.clone(),
+            entry_signature: None,
+            required_evaluated: global.required_evaluated,
+            required_generation: Some(7),
+        };
+        assert!(validate_global_witness(&declaration, &[], &global).is_err());
+    }
+
+    #[test]
     fn receipt_dictionary_preserves_full_facts_and_refuses_invalid_references() {
         let mut facts = empty_product_facts();
         let global = dictionary_test_global();
@@ -26390,7 +26893,7 @@ None,
             Err(CertificationError::UnsupportedVersion {
                 format: CertificationFormat::ProductReceipt,
                 found: 9,
-                expected: 10
+                expected: 11
             })
         ));
         let mut trailing = encoded;
@@ -26711,23 +27214,26 @@ None,
                         ReceiptImportOwner::Retained { generation, .. }
                         | ReceiptImportOwner::RetainedPackage { generation, .. } => *generation += 1,
                         ReceiptImportOwner::Package { interface_digest, .. } => interface_digest[0] ^= 1,
+                        ReceiptImportOwner::OriginalBinding { original, .. } => original.artifact.0[0] ^= 1,
                     },
                     9 => match &mut right.owner {
                         ReceiptImportOwner::Source { module_version, .. } => *module_version = None,
                         ReceiptImportOwner::Retained { identity, .. } => identity.module.push('x'),
                         ReceiptImportOwner::Package { module, .. }
-                        | ReceiptImportOwner::RetainedPackage { module, .. } => module.push('x'),
+                        | ReceiptImportOwner::RetainedPackage { module, .. }
+                        | ReceiptImportOwner::OriginalBinding { module, .. } => module.push('x'),
                     },
                     10 => right.owner = ReceiptImportOwner::Retained { identity: right.identity.clone(), generation: 999 },
                     _ => match &mut right.owner {
                         ReceiptImportOwner::Source { binder, .. }
                         | ReceiptImportOwner::Package { binder, .. }
-                        | ReceiptImportOwner::RetainedPackage { binder, .. } => binder.occurrence.push('x'),
+                        | ReceiptImportOwner::RetainedPackage { binder, .. }
+                        | ReceiptImportOwner::OriginalBinding { binder, .. } => binder.occurrence.push('x'),
                         ReceiptImportOwner::Retained { identity, .. } => identity.occurrence.push('x'),
                     },
                 }
             }
-            let item = value_array([value_text("TPCERT"), Value::Integer(10.into()), value_array([
+            let item = value_array([value_text("TPCERT"), Value::Integer(11.into()), value_array([
                 value_text("segment-item"), value_array([value_global(&left)]), value_array([]),
             ])]);
             let operation = InventoryOperation::new(Default::default());
@@ -26997,7 +27503,7 @@ None,
     fn receipt_payload_mut(value: &mut Value) -> &mut Vec<Value> {
         let header = value.as_array_mut().unwrap();
         assert_eq!(header[0], value_text("TPCERT"));
-        assert_eq!(header[1], Value::Integer(10.into()));
+        assert_eq!(header[1], Value::Integer(11.into()));
         header[2].as_array_mut().unwrap()
     }
 
@@ -27024,6 +27530,7 @@ None,
             let row = array(row).unwrap();
             let owner = array(&row[4]).unwrap();
             let coordinate = match string(&owner[0]).unwrap() {
+                "original-binding" => Some(value_array(owner.iter().cloned())),
                 "source" => {
                     assert_eq!(row[0], owner[5]);
                     Some(value_array(owner[..4].iter().cloned()))
@@ -27064,6 +27571,10 @@ None,
             };
             let owner = array(&row[4]).unwrap();
             row[4] = match string(&owner[0]).unwrap() {
+                "original-binding" => value_array([
+                    Value::Integer(3.into()),
+                    index(value_array(owner.iter().cloned())),
+                ]),
                 "source" => value_array([
                     value_text("source"),
                     index(value_array(owner[..4].iter().cloned())),
@@ -27097,7 +27608,7 @@ None,
         ));
         let payload =
             value_array(std::iter::once(value_text("ordinary")).chain(header[2..].iter().cloned()));
-        value_array([value_text("TPCERT"), Value::Integer(10.into()), payload])
+        value_array([value_text("TPCERT"), Value::Integer(11.into()), payload])
     }
 
     fn test_dictionary(globals: &[AcceptedGlobal]) -> GlobalDictionary {
@@ -27595,7 +28106,7 @@ None,
     }
 
     fn owner_from_test_value(value: &Value) -> ReceiptImportOwner {
-        owner(value).unwrap()
+        owner(value, &testing::identity("Unused", "unused")).unwrap()
     }
 
     #[test]
@@ -27814,7 +28325,7 @@ None,
 
     #[test]
     fn certificate_versions_refuse_legacy_ownership_without_reinterpretation() {
-        for version in [1, 2, 3, 4, 5, 6, 7, 8, 9] {
+        for version in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] {
             let mut receipt = dictionary_receipt(&empty_product_facts());
             let Value::Array(rows) = &mut receipt else {
                 unreachable!()
@@ -27824,7 +28335,7 @@ None,
                 decode_receipt(&receipt_bytes(&receipt)),
                 Err(CertificationError::UnsupportedVersion {
                     format: CertificationFormat::ProductReceipt,
-                    expected: 10,
+                    expected: 11,
                     ..
                 })
             ));

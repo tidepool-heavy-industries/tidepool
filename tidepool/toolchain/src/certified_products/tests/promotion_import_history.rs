@@ -809,7 +809,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     );
     let empty_delta = receipt_bytes(&value_array([
         value_text("TPCERT"),
-        Value::Integer(10.into()),
+        Value::Integer(11.into()),
         value_array([value_text("segment-item"), value_array([]), value_array([])]),
     ]));
     let native_issues = HOME_CERTIFICATION_ISSUES.with(std::cell::Cell::get);
