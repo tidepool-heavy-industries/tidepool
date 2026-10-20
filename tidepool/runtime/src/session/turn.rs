@@ -3139,7 +3139,7 @@ pub fn plan_world_cell_admitted(
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     let command = extract_cmd()?;
     let endpoint = bind_extract_cmd(&command)?;
-    tidepool_toolchain::compiler_world::plan_cell(&endpoint, world, recipe)
+    tidepool_toolchain::compiler_world::plan_cell(&endpoint, world, recipe, None)
 }
 
 pub struct PreparedWorldCellPlan {

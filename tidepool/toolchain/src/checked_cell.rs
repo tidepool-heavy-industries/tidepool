@@ -3651,6 +3651,9 @@ impl ExactCompiledItem {
     pub fn bound_binder_identities(&self) -> impl Iterator<Item = (&str, u64)> {
         bound_binder_identities(&self.bound_binders)
     }
+    pub(crate) fn checked_bound_binders(&self) -> impl Iterator<Item = &Value> {
+        self.bound_binders.iter()
+    }
     /// Only same-check compiled native Value rows may overlay declaration
     /// spellings in their owning private scope. Their declaration context and
     /// qualified original owners remain unchanged.

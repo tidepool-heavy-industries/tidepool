@@ -8360,6 +8360,7 @@ mod module_product_tests {
                             .into(),
                             turn_templates: Vec::new(),
                         }),
+                        None,
                     )?;
                     assert_eq!(plan.items().len(), 1);
                     let origin =
@@ -8582,6 +8583,7 @@ mod module_product_tests {
                             .into(),
                             turn_templates: Vec::new(),
                         }),
+                        None,
                     )?;
                     assert_eq!(plan.items().len(), item_count);
                     let origin =
