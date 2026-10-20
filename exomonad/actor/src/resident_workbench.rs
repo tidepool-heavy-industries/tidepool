@@ -20283,12 +20283,126 @@ pub(crate) mod request_tests {
         ).await
     }
 
+    #[derive(Clone, Copy)]
+    enum PublicationFailureControl {
+        BootstrapOwnerLoss,
+        ReplacementOwnerLoss,
+        BootstrapCheckoutRetired,
+        ReplacementCheckoutRetired,
+    }
+
+    impl PublicationFailureControl {
+        fn bootstrap(self) -> bool {
+            matches!(
+                self,
+                Self::BootstrapOwnerLoss | Self::BootstrapCheckoutRetired
+            )
+        }
+    }
+
     #[tokio::test]
-    async fn actual_publisher_owner_loss_after_visibility_retains_external_prerequisite() {
-        for bootstrap in [true, false] {
+    async fn actual_publisher_checkout_loss_reaches_reload_as_unconfirmed() {
+        for control in [
+            PublicationFailureControl::BootstrapCheckoutRetired,
+            PublicationFailureControl::ReplacementCheckoutRetired,
+        ] {
             with_test_compiler_owner(|client| async move {
                 quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
-                    client, Some(crate::ActorPersistencePolicy::Ephemeral), Some(bootstrap),
+                    client, Some(crate::ActorPersistencePolicy::Ephemeral), Some(control),
+                ).await;
+            }).await;
+        }
+    }
+
+    async fn assert_real_publisher_checkout_loss(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        state: Arc<InstalledToolsState>,
+        prepared: PreparedActorGeneration,
+    ) {
+        let target = prepared
+            .installation
+            .source_dependency()
+            .generation()
+            .unwrap()
+            .clone();
+        let parent = target.prerequisite().as_ref().unwrap().clone();
+        let checkout = workbench
+            .access
+            .machines
+            .checkout_run(prepared.checkout_context.placement.session)
+            .unwrap();
+        let (held_session, receipt) = checkout.into_parts();
+        let terminal = crate::CompilerPreparationOwner::new();
+        let publisher = workbench.generation_publisher(
+            state.clone(),
+            ActorPublicationOwner::Preparation(terminal.client()),
+        );
+        let publication = publisher.publish(
+            prepared,
+            tidepool_runtime::session::PublicationDecision::new(),
+            ActorGenerationPublication::Terminal,
+        );
+        tokio::pin!(publication);
+        assert!(futures_util::poll!(publication.as_mut()).is_pending());
+        assert!(
+            matches!(&state.0.lock().availability, InstalledToolsAvailability::PublicationInProgress(attempt) if attempt.target.same_prepared(&target))
+        );
+        let parent_fence = parent.runtime_admission().fence().unwrap();
+        assert_eq!(parent_fence.pending_claims(), 1);
+        workbench.access.machines.settle_retire(
+            receipt,
+            "publication checkout control retired the actual owner",
+        );
+        let error = match publication.await {
+            Err(error) => error,
+            Ok(_) => panic!("retired checkout cannot publish"),
+        };
+        assert!(error.requires_recovery());
+        assert!(
+            matches!(&error, ResidentActorWorkbenchError::PublicationSettlement { failure }
+            if matches!(failure.outcome, Err(ResidentActorWorkbenchError::Checkout(_)))
+                && matches!(failure.settlement, PublicationSettlementError::BodyUnobserved))
+        );
+        let diagnostic = error.to_string();
+        let observed = crate::resident_actor::reload_publication_result(Err(error)).unwrap();
+        assert!(
+            matches!(observed, ActorGenerationCommit::Unconfirmed(ref detail) if detail == &diagnostic && detail.contains("publication checkout control retired the actual owner"))
+        );
+        assert!(
+            matches!(&state.0.lock().availability, InstalledToolsAvailability::PublicationUnavailable(attempt) if attempt.target.same_prepared(&target))
+        );
+        assert_eq!(parent_fence.pending_claims(), 1);
+        assert_eq!(parent_fence.unconfirmed_claims(), 1);
+        drop(held_session);
+    }
+
+    async fn assert_real_publisher_failure(
+        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        state: Arc<InstalledToolsState>,
+        prepared: PreparedActorGeneration,
+        control: PublicationFailureControl,
+    ) {
+        match control {
+            PublicationFailureControl::BootstrapOwnerLoss
+            | PublicationFailureControl::ReplacementOwnerLoss => {
+                assert_real_publisher_owner_loss(workbench, state, prepared).await;
+            }
+            PublicationFailureControl::BootstrapCheckoutRetired
+            | PublicationFailureControl::ReplacementCheckoutRetired => {
+                assert_real_publisher_checkout_loss(workbench, state, prepared).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_publisher_owner_loss_after_visibility_retains_external_prerequisite() {
+        for control in [
+            PublicationFailureControl::BootstrapOwnerLoss,
+            PublicationFailureControl::ReplacementOwnerLoss,
+        ] {
+            with_test_compiler_owner(|client| async move {
+                quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
+                    client, Some(crate::ActorPersistencePolicy::Ephemeral), Some(control),
                 ).await;
             }).await;
         }
@@ -20370,7 +20484,7 @@ pub(crate) mod request_tests {
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
         preparation_client: crate::CompilerPreparationClient,
         generation_replacement: Option<crate::ActorPersistencePolicy>,
-        publication_owner_loss: Option<bool>,
+        publication_failure: Option<PublicationFailureControl>,
     ) {
         let mut recovery = None;
         let (mut session, mut context, source, session_root) = host_mount_fixture_with_lib(|lib| {
@@ -20380,7 +20494,7 @@ pub(crate) mod request_tests {
             recovery = Some(fixture);
         });
         let recovery = recovery.unwrap();
-        if publication_owner_loss.is_some() {
+        if publication_failure.is_some() {
             let lease = session.mint_notebook_scope_with_lease(None).unwrap();
             let parent = generation_admission::GenerationDependency::new(
                 crate::ActorRef::first(crate::ActorId(99)),
@@ -20847,8 +20961,8 @@ pub(crate) mod request_tests {
                 restored_decodes: 0,
             };
             assert_eq!(prepared.installation_work, expected_work);
-            if publication_owner_loss == Some(true) {
-                assert_real_publisher_owner_loss(&workbench, state, prepared).await;
+            if let Some(control) = publication_failure.filter(|control| control.bootstrap()) {
+                assert_real_publisher_failure(&workbench, state, prepared, control).await;
                 return;
             }
             let initial = match workbench
@@ -21144,8 +21258,8 @@ pub(crate) mod request_tests {
                 revision,
                 "an unrelated public owner forces the prepared replacement to rebase"
             );
-            if publication_owner_loss == Some(false) {
-                assert_real_publisher_owner_loss(&workbench, state, prepared).await;
+            if let Some(control) = publication_failure.filter(|control| !control.bootstrap()) {
+                assert_real_publisher_failure(&workbench, state, prepared, control).await;
                 return;
             }
             let replacement = match workbench
