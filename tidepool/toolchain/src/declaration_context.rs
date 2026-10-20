@@ -9737,6 +9737,8 @@ pub(crate) struct WorldStageSourceAdmission {
 pub(crate) fn assert_world_repeated_source_refusals(
     program: &crate::compiler_world::CheckedWorldCellProgram,
 ) {
+    use sha2::Digest;
+
     #[derive(Clone, Copy, Debug)]
     enum Observation {
         Unchanged,
