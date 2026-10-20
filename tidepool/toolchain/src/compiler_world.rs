@@ -4366,6 +4366,20 @@ fn world_response_error(provenance: bool) -> CompileError {
     ))
 }
 
+fn world_answer_decode_error(
+    cause: tidepool_extract_report::world_query::WorldAnswerDecodeError,
+) -> CompileError {
+    use tidepool_extract_cmd::CompilerResponseRejection as R;
+    use tidepool_extract_report::world_query::WorldAnswerDecodeError as E;
+    let reason = match &cause {
+        E::Malformed(_) => R::Malformed,
+        E::ProvenanceMismatch(_) => R::ProvenanceMismatch,
+    };
+    let mut rejection = tidepool_extract_cmd::reject_compiler_response(reason);
+    rejection.source = std::io::Error::new(std::io::ErrorKind::InvalidData, cause);
+    CompileError::CompilerEndpoint(rejection)
+}
+
 fn answer_array(
     value: &ciborium::value::Value,
     count: usize,
@@ -4446,9 +4460,7 @@ fn decode_world_answer(
     bytes: &[u8],
 ) -> Result<WorldQueryResult, CompileError> {
     use crate::inspection::IdentifierNamespace as N;
-    use tidepool_extract_report::world_query::{
-        self, WorldAnswerDecodeError, WorldQueryExpectation, WorldQueryKind,
-    };
+    use tidepool_extract_report::world_query::{self, WorldQueryExpectation, WorldQueryKind};
     let namespace = match question.namespace() {
         InspectionNamespace::Any => None,
         InspectionNamespace::Value => Some(N::Value),
@@ -4471,10 +4483,7 @@ fn decode_world_answer(
             fingerprint: question.fingerprint(),
         },
     )
-    .map_err(|error| match error {
-        WorldAnswerDecodeError::Malformed(_) => world_response_error(false),
-        WorldAnswerDecodeError::ProvenanceMismatch(_) => world_response_error(true),
-    })?;
+    .map_err(world_answer_decode_error)?;
     let sources = &world.restoration.inputs.sources;
     let profile = &world.restoration.profile;
     match &answer {
@@ -5054,6 +5063,28 @@ mod identity_tests {
     use super::*;
     use crate::exact_context::{FrontierWork, Materializer, ReachableBlocks};
     use fvm_ipld_blockstore::MemoryBlockstore;
+
+    #[test]
+    fn world_answer_rejection_retains_the_structural_decode_cause() {
+        use tidepool_extract_report::world_query::WorldAnswerDecodeError as E;
+
+        for cause in [
+            E::Malformed("unknown answer tag".into()),
+            E::ProvenanceMismatch("question fingerprint"),
+        ] {
+            let message = cause.to_string();
+            let CompileError::CompilerEndpoint(rejection) = world_answer_decode_error(cause) else {
+                panic!("accepted response rejection must retain endpoint settlement");
+            };
+            let retained = rejection
+                .source
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<E>())
+                .expect("the original typed decoder cause");
+            assert_eq!(retained.to_string(), message);
+            assert!(rejection.to_string().contains(&message));
+        }
+    }
 
     #[test]
     fn source_selection_names_the_captured_namespace_and_refuses_missing_identity() {
