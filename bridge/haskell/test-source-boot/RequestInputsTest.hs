@@ -43,13 +43,19 @@ import GHC.IO.Encoding.Types (BufferCodec(BufferCodec), TextEncoding(TextEncodin
 import System.Timeout (timeout)
 import Test.QuickCheck
 import Test.QuickCheck.Random (mkQCGen)
-import GHC.Driver.Env (HscEnv(..))
+import GHC.Driver.Env (HscEnv(..), hsc_HPT)
 import GHC (getSession, setSession, setContext, InteractiveImport(..), simpleImportDecl, exprType, TcRnExprMode(TM_Inst))
 import GHC.Data.ShortText qualified as PackageText
 import GHC.Unit.Env (ue_setUnits)
 import GHC.Unit.State (UnitState(..))
 import GHC.Unit.Info (unitImportDirs, unitLibraryDirs, unitLibraryDynDirs, unitIncludeDirs)
 import GHC.Types.Unique.Map (mapUniqMap)
+import GHC.Tc.Types (tcg_mod)
+import GHC.Types.TypeEnv (typeEnvIds)
+import GHC.Types.Var (varName)
+import GHC.Unit.Home.ModInfo (lookupHpt, hm_details)
+import GHC.Unit.Module.ModDetails (md_types)
+import GHC.Driver.Session (importPaths)
 import GHC.Driver.Env (hsc_units)
 import Control.Monad.IO.Class (liftIO)
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
@@ -85,18 +91,20 @@ import Tidepool.ExactScope
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldCellPlan, boundWorldCellPreparation
-  , prepareWorldCell, commitPreparedWorldDependencies)
+  , prepareWorldCell, commitPreparedWorldDependencies, preparedCompilationResult
+  , preparedCompilationWorldInputs, prepareCompilationOriginals)
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), WorldResidency(..), WorldNonRetentionReason(..)
   , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
   , RequestField(..), WorkerRequest, workerArgv, workerRequestFromArgv )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
-  , scopedEnsureWorld, scopedReadExactScope, scopedCompileWorldCell, scopedPrepareWorldCellStage
+  , scopedEnsureWorld, scopedReadExactScope, scopedCompileWorldCell, scopedPrepareWorldCellStage, scopedValidateWorldCell
   , heldWorldCellStagePath, heldWorldCellStageTypedSource
   , heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
   , WorldCellRefusal(..), emitWorldAcquisitionRejection
-  , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts
+  , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts, prTargetTcGblEnv
+  , completedCompilerResult, completedCompilerWorldCompletion, requireWorldProductPredecessor
   , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents
   , withResidentCompilerScopes, scopedRunGhc )
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
@@ -105,7 +113,7 @@ import Tidepool.ArtifactBytes
 import Tidepool.RequestInputs
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), inputImageDigest, inputKindTag)
 import Tidepool.OwnedInputTransport qualified as Transport
-import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..)
+import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..), scaffoldTargetName
   , capturedSessionInterface, capturedSessionInterfaceEvidence)
 import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext, writeGenuinePublishedScopeWithContext)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
@@ -113,7 +121,9 @@ import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodec
 import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer, issueCodecFixturePacket)
 import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming, TaskAttempt(..), newTimingRequestIdentity)
 import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor, runCompilerTasksWithAttempt)
-import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse, retainTypeInterfaceCaptures)
+import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse, retainTypeInterfaceCaptures
+  , newPreparedOriginalInterfaceArtifactsWithPrior, writeCertifiedSegmentProducts, withStagedOriginalBindings, StagedProductFailure(..))
+import Tidepool.ExecutionProjection (ProjectionContext(..))
 import Tidepool.PreparedStg (newPreparedBodyCache, pmModule, pmIdentityResolver)
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.SessionArtifacts (prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment
@@ -1766,7 +1776,70 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                               Right (remaining,TList (TString "TPCWORIGINAL1":fields))
                                 | BL.null remaining,length fields == 7 -> pure ()
                               _ -> fail "original stage emitted an executable item surrogate"
+                        when (label == "declaration") $ case completions of
+                          [completion] -> do
+                            let prepared = preparedCompilationResult completion
+                                environment = prHscEnv (pprPipelineResult prepared)
+                                owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
+                                captureDirectory = ownDirectory </> "name-projection-control"
+                            createDirectory captureDirectory
+                            projection <- prepareCompilerProjectionContext prepared Map.empty owner scaffoldTargetName [] Nothing
+                            (_,products) <- prepareCompilationOriginals completion Nothing projection Set.empty
+                            originals <- newPreparedOriginalInterfaceArtifactsWithPrior prepared
+                              (preparedCompilationWorldInputs completion) Nothing captureDirectory
+                            staged <- writeCertifiedSegmentProducts (importPaths (hsc_dflags environment))
+                              originals captureDirectory prepared products
+                            selected <- withStagedOriginalBindings prepared (Just staged) projection
+                            repeated <- withStagedOriginalBindings prepared (Just staged) selected
+                            unless (projectionCurrentOriginals selected == projectionCurrentOriginals repeated)
+                              (fail "repeated certified Name association changed native availability")
+                            case Map.toAscList (projectionCurrentOriginals selected) of
+                              (name,identity):(_,other):_ | identity /= other -> do
+                                refused <- try (withStagedOriginalBindings prepared (Just staged)
+                                  projection {projectionCurrentOriginals=Map.singleton name other})
+                                  :: IO (Either StagedProductFailure ProjectionContext)
+                                unless (case refused of
+                                    Left (CertifiedNameConflict before after) -> before == other && after == identity
+                                    _ -> False)
+                                  (fail "certified Name accepted another actual binder identity")
+                                -- Vary only the projection input. The certification is
+                                -- unchanged; an actual erased wrapper Name is not a
+                                -- second native group or another issued authority.
+                                home <- maybe (fail "Name control lost its completed home") pure
+                                  (lookupHpt (hsc_HPT environment) (moduleName owner))
+                                alias <- case [varName identifier | identifier <- typeEnvIds (md_types (hm_details home))
+                                    , Map.notMember (varName identifier) (projectionCurrentOriginals selected)] of
+                                  value:_ -> pure value
+                                  _ -> fail "Name alias control has no actual unselected compiler binder"
+                                aliases <- withStagedOriginalBindings prepared (Just staged)
+                                  projection {projectionCurrentOriginals=Map.singleton alias identity}
+                                unless (Map.lookup alias (projectionCurrentOriginals aliases) == Just identity
+                                    && Map.lookup name (projectionCurrentOriginals aliases) == Just identity)
+                                  (fail "two actual Names could not retain one certified identity")
+                              _ -> fail "Name refusal control needs two distinct certified binders"
+                          _ -> fail "Name refusal control lost its declaration completion"
                         mapM_ (commitPreparedWorldDependencies request) completions
+                        when (label == "source-family") $ do
+                          grant <- either fail pure (compilerExecutionGrant 2)
+                          (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \executor -> do
+                            firstAdmission <- scopedValidateWorldCell compiler grant executor ownPrepare >>= either (fail . show) pure
+                            siblingAdmission <- scopedValidateWorldCell compiler grant executor ownPrepare >>= either (fail . show) pure
+                            let compileOriginal admitted = do
+                                  _ <- scopedPrepareWorldCellStage compiler admitted >>= maybe
+                                    (fail "predecessor control lost its actual Original stage") pure
+                                  scopedCompileWorldCell compiler admitted (PreparedProducts Nothing) Set.empty
+                            first <- compileOriginal firstAdmission
+                            sibling <- compileOriginal siblingAdmission
+                            next <- compileOriginal firstAdmission
+                            expected <- maybe (fail "predecessor control lost its completion") pure
+                              (completedCompilerWorldCompletion first)
+                            siblingCompletion <- maybe (fail "sibling control lost its completion") pure
+                              (completedCompilerWorldCompletion sibling)
+                            requireWorldProductPredecessor (completedCompilerResult next) expected
+                            refused <- try (requireWorldProductPredecessor (completedCompilerResult next) siblingCompletion)
+                              :: IO (Either WorldCellRefusal ())
+                            unless (either (== WorldCellCorrupt) (const False) refused)
+                              (fail "same-World sibling supplied another cursor's completed products")
                     pure admitted
           runScope (pure ()) $ \compiler -> do
             let question = heldWorldCellQuestion admission
@@ -1781,9 +1854,14 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                 (const False) crossed)
               (fail "another compiler scope consumed the original scope's admission")
       outcome `seq` pure ()
+      forM_ ["CacheEntry","CacheEven","CacheOdd"] $ \name ->
+        unless (counterValues ("world.cell.source_frontends.main:" ++ name) diagnostics == [1])
+          (fail "later native demand replayed an already finalized SOURCE owner")
+      unless (sum (counterValues "world.cell.prior_source_preparations" diagnostics) > 0)
+        (fail "SOURCE history did not prepare its newly demanded prior source body")
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
-      unless (admissionParses == replicate 9 1)
+      unless (admissionParses == replicate 11 1)
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 
@@ -2160,7 +2238,7 @@ compilerTimingRoundtrip = withTiming $ withScratch $ \work -> do
           context <- prepareCompilerProjectionContext prepared Map.empty
             (mkModule (stringToUnit "main") (mkModuleName owner)) "__original_projection" [] Nothing
           void $ prepareOriginalProductsWithCacheAndReuse (Just (pprReuseContext prepared))
-            cache Nothing executor (prHscEnv (pprPipelineResult prepared)) Nothing
+            cache Nothing executor Nothing (prHscEnv (pprPipelineResult prepared)) Nothing
             (pprProductInterfaces prepared) context Set.empty (pprModules prepared)
     plain <- runPipelineSessionSelected
       (WithCompilerExecution grant executor (PreparedProducts Nothing)) Set.empty CertifyHomeProductsCompile

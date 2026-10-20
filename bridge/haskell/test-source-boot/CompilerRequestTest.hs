@@ -471,7 +471,7 @@ projectA target completion = do
       && hasIntResultLiteral 41 (prBinds result)) $
     fail "completed preparation lost its independently specified owner or Core value"
   context <- prepareCompilerProjectionContext prepared Map.empty owner target [] Nothing
-  (_,actual) <- prepareCompilationOriginals completion context Set.empty
+  (_,actual) <- prepareCompilationOriginals completion Nothing context Set.empty
   let reference = projectOriginalHomeModuleProducts env interfaces context Set.empty modules
   unless (preparedModuleProductOutcomes (preparedProductInventory actual)
       == preparedModuleProductOutcomes reference) $

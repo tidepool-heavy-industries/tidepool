@@ -11,8 +11,8 @@ module Tidepool.ExactScope
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, bindCanonicalProofInputs, CanonicalCoreArtifact
   , CanonicalInterfaceAdmission(ModuleInterfaceAdmission, LocalInterfaceAdmission), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
-  , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, canonicalProofOriginalBody, relocateCanonicalInterfaceProof, revalidateCanonicalProofInputs
-  , captureFinalizedSourceOriginals, compilationOriginalSourceImports
+  , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), CapturedCanonicalMetadata, captureCanonicalMetadata, capturedCanonicalMetadataProof, canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, canonicalProofOriginalBody, relocateCanonicalInterfaceProof, revalidateCanonicalProofInputs
+  , captureFinalizedSourceOriginals, captureSourceOriginals, compilationOriginalSourceImports
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCertificateBytes, canonicalCoreArtifact, canonicalInterfaceInput
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
@@ -955,6 +955,24 @@ withCanonicalInputReader inputs proof fresh action = case proofInputCustody proo
 data CanonicalInterfaceUse = MetadataInterfaceUse | ExecutableInterfaceUse
   deriving (Eq, Show)
 
+-- Only the existing capture operation can issue metadata readiness. The
+-- wrapper promises certificate/interface/package custody, never old Core or
+-- native execution permission. Captured partial descriptors cannot issue it.
+newtype CapturedCanonicalMetadata = CapturedCanonicalMetadata CanonicalInterfaceProof
+
+capturedCanonicalMetadataProof :: CapturedCanonicalMetadata -> CanonicalInterfaceProof
+capturedCanonicalMetadataProof (CapturedCanonicalMetadata proof) = proof
+
+captureCanonicalMetadata :: Maybe ExactScope -> CanonicalInterfaceProof -> IO CapturedCanonicalMetadata
+captureCanonicalMetadata scope proof = do
+  captured <- captureCanonicalProofs scope [(proof,MetadataInterfaceUse)] >>= \case
+    [selected] -> pure selected
+    _ -> fail "canonical metadata capture lost its selected owner"
+  let (iface,packages,packageSha) = canonicalInterfaceInput captured
+  _ <- canonicalProofInterfaceBody captured iface
+  _ <- canonicalProofOriginalBody captured packages packageSha
+  pure (CapturedCanonicalMetadata captured)
+
 -- Optional metadata validation retains no payload. Promotion captures every
 -- selected original input in one owner; only executable use requires Core.
 captureCanonicalProofs :: Maybe ExactScope -> [(CanonicalInterfaceProof,CanonicalInterfaceUse)]
@@ -1626,15 +1644,28 @@ captureFinalizedSourceOriginals compilation accepted target finalized evidence
 captureCheckedSourceOriginals
   :: ExactCompilation -> [ModuleCandidate] -> (String,String) -> FinalizedModuleArtifacts
   -> DependencyEvidence -> IO (Map.Map (String,String) CanonicalInterfaceProof)
-captureCheckedSourceOriginals compilation accepted target finalized evidence = do
-  let scope = compilationScope compilation
-      admissions = Map.delete target (finalizedLocalAdmissions finalized)
-      rows = map localFinalizedInterface (Map.elems admissions)
-        ++ [(ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
-              (candidateInterface candidate) (candidateInterfaceSha256 candidate)
-              (candidateInterfaceRequirements candidate),candidatePackageImports candidate,
-              candidatePackageImportsSha256 candidate) | candidate <- accepted]
-      inherited = scopeInterfaces scope
+captureCheckedSourceOriginals compilation accepted target finalized evidence =
+  captureSourceOriginals (scopeProducerSha256 scope) (scopeInterfaces scope)
+    [(ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
+        (candidateInterface candidate) (candidateInterfaceSha256 candidate)
+        (candidateInterfaceRequirements candidate),candidatePackageImports candidate,
+        candidatePackageImportsSha256 candidate) | candidate <- accepted]
+    (Map.fromList [((T.unpack unit,T.unpack name),T.unpack sha)
+      | ((unit,name),sha) <- finalizedValueInterfaceSeals finalized])
+    (compilationExactImports compilation) target finalized evidence
+  where scope = compilationScope compilation
+
+-- Both admitted routes issue the same canonical certificate from actual local
+-- captures. The route owns the producer, inherited interfaces and import facts.
+captureSourceOriginals
+  :: String -> [(ExactIfaceArtifact,FilePath,String)]
+  -> [(ExactIfaceArtifact,FilePath,String)] -> Map.Map (String,String) String
+  -> [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])]
+  -> (String,String) -> FinalizedModuleArtifacts -> DependencyEvidence
+  -> IO (Map.Map (String,String) CanonicalInterfaceProof)
+captureSourceOriginals producer inherited additional inputSeals exactImports target finalized evidence = do
+  let admissions = Map.delete target (finalizedLocalAdmissions finalized)
+      rows = map localFinalizedInterface (Map.elems admissions) ++ additional
       keyOf (artifact,_,_) = (exactUnit artifact,exactModule artifact)
   interfaces <- foldM (\selected row -> case filter ((== keyOf row) . keyOf) selected of
       [] -> pure (row:selected)
@@ -1657,11 +1688,11 @@ captureCheckedSourceOriginals compilation accepted target finalized evidence = d
         , dependencySourcePath source == dependencyModuleSource node]
         == [localFinalizedSourceSha256 admission])
       (fail "captured source original import receipt differs from its consumed source")
-    imports <- either fail pure (compilationOriginalSourceImports compilation evidence key)
+    imports <- either fail pure (originalSourceImports exactImports evidence key)
     let (iface,_,packageSha) = localFinalizedInterface admission
         core = localFinalizedCore admission
         certificate = CanonicalModuleCertificate
-          (scopeProducerSha256 scope) (localFinalizedHomeUnits admission) key
+          producer (localFinalizedHomeUnits admission) key
           (localFinalizedSourceSha256 admission) (exactSha256 iface) packageSha (snd <$> core)
           (localFinalizedRequirements admission) (SourceOriginal imports)
         bytes = toStrictByteString (encodeCanonicalModuleCertificate certificate)
@@ -1670,17 +1701,19 @@ captureCheckedSourceOriginals compilation accepted target finalized evidence = d
     BS.writeFile path bytes
     pure (key,CanonicalInterfaceDescriptor path seal
       (uncurry CanonicalCoreArtifact <$> core) (ScopeInterface SourceOriginalRole))
-  let valueSeals = Map.fromList
-        [((T.unpack unit,T.unpack name),T.unpack sha)
-        | ((unit,name),sha) <- finalizedValueInterfaceSeals finalized]
-  validateCanonicalInterfacesWithValueSeals (scopeProducerSha256 scope) interfaces valueSeals descriptors
+  validateCanonicalInterfacesWithValueSeals producer interfaces inputSeals descriptors
 
 -- The completed source graph and exact-import graph jointly own original
 -- authored adjacency, for both canonical issuance and same-cell retention.
 compilationOriginalSourceImports
   :: ExactCompilation -> DependencyEvidence -> (String,String)
   -> Either String [CanonicalSourceImport]
-compilationOriginalSourceImports compilation evidence key = do
+compilationOriginalSourceImports compilation = originalSourceImports (compilationExactImports compilation)
+
+originalSourceImports
+  :: [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])]
+  -> DependencyEvidence -> (String,String) -> Either String [CanonicalSourceImport]
+originalSourceImports exactImports evidence key = do
   node <- case [node | node <- dependencyModules evidence
       , (dependencyModuleUnit node,dependencyModuleName node) == key
       , not (dependencyModuleBoot node)] of
@@ -1697,7 +1730,7 @@ compilationOriginalSourceImports compilation evidence key = do
         _ -> Left "captured source import has no unique original home owner"
     pure (dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge,home)
   let exact = [(qualifier,name,boot,Just unit)
-        | ((ownerUnit,ownerName,False),edges) <- compilationExactImports compilation
+        | ((ownerUnit,ownerName,False),edges) <- exactImports
         , (ownerUnit,ownerName) == key
         , (qualifier,name,boot,unit) <- edges]
       importKey (qualifier,name,boot,_) = (qualifier,name,boot)
