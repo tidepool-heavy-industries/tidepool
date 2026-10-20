@@ -3080,6 +3080,7 @@ pub fn plan_cell(
             world: world_hex(world.logical_id()),
             realization: "not-resident".into(),
             recipe: Arc::clone(&recipe),
+            operand: None,
             output: output.clone(),
         };
         request
@@ -3748,6 +3749,7 @@ fn prepare_world_cell_outputs(
             &world_id,
             "not-resident",
             plan.recipe(),
+            None,
             plan.receipt(),
             reservation
                 .slots()
@@ -3780,8 +3782,10 @@ fn prepare_world_cell_outputs(
             world: world_id,
             realization: "not-resident".into(),
             recipe: plan.recipe_owned(),
+            operand: None,
             plan: plan.receipt_owned(),
             admission: *reservation.admission_digest(),
+            defining_scope: reservation.defining_scope(),
             slots: world_cell_slots(&reservation),
             directory: directory.path().to_path_buf(),
             output: output.clone(),
