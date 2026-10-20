@@ -3041,9 +3041,12 @@ admitWorldQuoteFreeModuleGraph timing targetProof graph = do
         parsed <- parseModule summary
         unless (classifyQuasiQuoteUse parsed == NoQuasiQuotes)
           (liftIO (throwIO (WorldModulePolicyFailure (ms_hspp_file summary) WorldUntrackedOptions)))
-  let narrowed = mapMG (\summary -> if xopt LangExt.QuasiQuotes (ms_hspp_opts summary)
-        then summary {ms_hspp_opts=(ms_hspp_opts summary) {backend=noBackend}}
-        else summary) graph
+  -- Downsweep propagates the target's executable-backend requirement to
+  -- dependencies even when those dependencies do not enable quote syntax.
+  -- Authored codegen options were refused at FileArgs. Once every summary's
+  -- compiler-time inputs are proved inert, lower only that derived backend.
+  let narrowed = mapMG (\summary -> summary
+        {ms_hspp_opts=(ms_hspp_opts summary) {backend=noBackend}}) graph
   current <- getSession
   setSession current {hsc_mod_graph=narrowed}
   liftIO (emitCount timing "world.quote_free_modules" (toInteger (length summaries)))
