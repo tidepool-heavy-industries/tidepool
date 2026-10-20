@@ -14,9 +14,9 @@ pub(crate) use startup::{
     RootStartupAdmission, RootStartupRecoveryAuthority, StartupPredecessorAuthority,
 };
 mod generation;
-pub(crate) use generation::GenerationPopulation;
 #[cfg(test)]
 pub(crate) use generation::GenerationCompilerOwner;
+pub(crate) use generation::GenerationPopulation;
 #[cfg(test)]
 pub(crate) use generation::{
     GenerationCollateralIdentity, GenerationLifetimeEdge, GenerationResourceIdentity,
@@ -143,6 +143,7 @@ pub(crate) enum RunPhase {
 }
 
 pub(super) struct RunState {
+    native_cleanup: Arc<RunControlNativeCleanup>,
     shared_compiler: crate::CompilerPreparationOwner,
     phase: RunPhase,
     entries: HashMap<ActorRef, DirectoryEntry>,
@@ -171,7 +172,13 @@ pub(super) struct RunState {
 }
 impl Default for RunState {
     fn default() -> Self {
+        Self::new(Arc::default())
+    }
+}
+impl RunState {
+    fn new(native_cleanup: Arc<RunControlNativeCleanup>) -> Self {
         Self {
+            native_cleanup,
             shared_compiler: crate::CompilerPreparationOwner::new(),
             phase: RunPhase::Running,
             entries: HashMap::new(),
@@ -192,6 +199,28 @@ impl Default for RunState {
             worker_transfers: HashMap::new(),
             resource_transfers: HashMap::new(),
         }
+    }
+}
+
+/// The client retains the native owner's terminal fact after its actor state
+/// is destroyed. A normal stop is not evidence of successful finalization.
+#[derive(Default)]
+pub(super) struct RunControlNativeCleanup {
+    terminal: std::sync::OnceLock<RunControlNativeExit>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RunControlNativeExit {
+    OwnerLost,
+    Finalized,
+}
+
+impl Drop for RunState {
+    fn drop(&mut self) {
+        let _ = self
+            .native_cleanup
+            .terminal
+            .set(RunControlNativeExit::OwnerLost);
     }
 }
 
@@ -602,6 +631,8 @@ impl RunState {
 
 pub(super) enum RunControlMessage {
     #[cfg(test)]
+    PanicForNativeRetention,
+    #[cfg(test)]
     ObserveActorPreparations {
         actor: ActorRef,
         reply: oneshot::Sender<Vec<(u64, bool)>>,
@@ -983,13 +1014,13 @@ pub(super) struct RunControl;
 impl Actor for RunControl {
     type Msg = RunControlMessage;
     type State = RunState;
-    type Arguments = ();
+    type Arguments = Arc<RunControlNativeCleanup>;
     async fn pre_start(
         &self,
         _myself: RactorRef<Self::Msg>,
-        (): (),
+        native_cleanup: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(RunState::default())
+        Ok(RunState::new(native_cleanup))
     }
     async fn handle(
         &self,
@@ -998,6 +1029,10 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            #[cfg(test)]
+            RunControlMessage::PanicForNativeRetention => {
+                panic!("run-control native retention test");
+            }
             #[cfg(test)]
             RunControlMessage::ObserveActorPreparations { actor, reply } => {
                 let _ = reply.send(
@@ -1115,6 +1150,10 @@ impl Actor for RunControl {
                                 .is_none_or(|lifecycle| lifecycle.run_finalized())
                     })
                 {
+                    let _ = state
+                        .native_cleanup
+                        .terminal
+                        .set(RunControlNativeExit::Finalized);
                     let supervisor = state.preparation_supervisor.take().map(|supervisor| {
                         let cell = supervisor.get_cell();
                         supervisor.stop(None);
@@ -2304,6 +2343,7 @@ pub struct RunControlClient {
     owner: RactorRef<RunControlMessage>,
     shared_compiler: crate::CompilerPreparationClient,
     shared_cleanup: crate::CompilerPreparationCleanup,
+    native_cleanup: Arc<RunControlNativeCleanup>,
 }
 impl RunControlClient {
     pub(crate) fn preparation_client(&self) -> crate::CompilerPreparationClient {
@@ -2318,7 +2358,8 @@ impl RunControlClient {
         let _ = self.owner.get_cell().wait(Some(SHUTDOWN_BUDGET)).await;
     }
     pub async fn start() -> Result<(Self, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
-        let (owner, task) = Actor::spawn(None, RunControl, ()).await?;
+        let native_cleanup = Arc::new(RunControlNativeCleanup::default());
+        let (owner, task) = Actor::spawn(None, RunControl, native_cleanup.clone()).await?;
         let (supervisor, supervisor_task) =
             Actor::spawn_linked(None, PreparationSupervisor, owner.clone(), owner.get_cell())
                 .await?;
@@ -2334,6 +2375,7 @@ impl RunControlClient {
             owner,
             shared_compiler,
             shared_cleanup,
+            native_cleanup,
         };
         client
             .ask(|reply| RunControlMessage::AttachPreparationSupervisor { supervisor, reply })
@@ -2804,6 +2846,17 @@ impl RunControlClient {
         &self,
         timeout: Duration,
     ) -> crate::CleanupComponentOutcome {
+        match self.native_cleanup.terminal.get() {
+            Some(RunControlNativeExit::Finalized) => {
+                return crate::CleanupComponentOutcome::Confirmed;
+            }
+            Some(RunControlNativeExit::OwnerLost) => {
+                return crate::CleanupComponentOutcome::Unconfirmed(
+                    "run-control owner was lost before finalization".into(),
+                );
+            }
+            None => {}
+        }
         let deadline = tokio::time::Instant::now() + timeout;
         let shared = self.shared_cleanup.wait_for_settlement(timeout).await;
         let preparations =
