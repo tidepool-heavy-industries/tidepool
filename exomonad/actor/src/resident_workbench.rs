@@ -2222,40 +2222,24 @@ type GenerationPublicationAction = Box<
         + Send,
 >;
 
-type GenerationReservationAction = Box<
-    dyn FnOnce(
-            PreparedActorGeneration,
-        )
-            -> Result<ActorGenerationRetirementPreparationOutcome, ResidentActorWorkbenchError>
-        + Send,
->;
-
-/// The publisher is discarded only after its affine product is retained by the
-/// cleanup owner. This value exposes no publication or reservation operation.
-pub(crate) struct ActorGenerationPublicationDiscard {
-    _action: GenerationPublicationDiscardAction,
-}
-
-enum GenerationPublicationDiscardAction {
-    Reservation {
-        _reserve: GenerationReservationAction,
-    },
-    Publication {
-        _publish: GenerationPublicationAction,
-    },
-}
+type GenerationReservationAction =
+    Box<dyn FnOnce(PreparedActorGeneration) -> ActorGenerationRetirementPreparationOutcome + Send>;
 
 /// The real publisher and its single frozen candidate cross into RunState
 /// before reservation changes either source admission or installed state.
 #[must_use]
 pub(crate) struct ActorGenerationRetirementPreparation {
     prepared: PreparedActorGeneration,
-    reserve: GenerationReservationAction,
+    driver: ActorGenerationReservationDriver,
 }
 
 pub(crate) enum ActorGenerationRetirementPreparationOutcome {
-    Reserved(ActorGenerationPublicationOperation),
+    Reserved {
+        reserved: ReservedActorGeneration,
+        publisher: ActorGenerationPublicationDriver,
+    },
     Refused(String),
+    Failed(ResidentActorWorkbenchError),
 }
 
 impl ActorGenerationRetirementPreparation {
@@ -2275,61 +2259,52 @@ impl ActorGenerationRetirementPreparation {
         self.prepared.expected.generation()
     }
 
-    pub(crate) fn reserve(
-        self,
-    ) -> Result<ActorGenerationRetirementPreparationOutcome, ResidentActorWorkbenchError> {
-        let Self { prepared, reserve } = self;
-        reserve(prepared)
-    }
-
-    pub(crate) fn into_retained_parts(
-        self,
-    ) -> (PreparedActorGeneration, ActorGenerationPublicationDiscard) {
-        let Self { prepared, reserve } = self;
-        (
-            prepared,
-            ActorGenerationPublicationDiscard {
-                _action: GenerationPublicationDiscardAction::Reservation { _reserve: reserve },
-            },
-        )
+    /// The serial owner retains the affine preparation before invoking its
+    /// transient driver. Dropping that driver cannot drop the preparation.
+    pub(crate) fn into_parts(self) -> (PreparedActorGeneration, ActorGenerationReservationDriver) {
+        let Self { prepared, driver } = self;
+        (prepared, driver)
     }
 }
 
-/// Affine transfer payload for the linked publication worker. The concrete
-/// publisher supplies its consumer; callers cannot replace it with a closure
-/// that loses the reservation before recording whether publication started.
+/// Executable endpoints are separate from the retained affine state. Their
+/// private issuer binds each endpoint to the same immutable candidate.
 #[must_use]
-pub(crate) struct ActorGenerationPublicationOperation {
-    reserved: ReservedActorGeneration,
+pub(crate) struct ActorGenerationReservationDriver {
+    candidate: std::sync::Weak<ActorGenerationCandidate>,
+    reserve: GenerationReservationAction,
+}
+
+impl ActorGenerationReservationDriver {
+    pub(crate) fn reserve(
+        self,
+        prepared: PreparedActorGeneration,
+    ) -> Result<ActorGenerationRetirementPreparationOutcome, (PreparedActorGeneration, Self)> {
+        if !self.candidate.ptr_eq(&Arc::downgrade(&prepared.candidate)) {
+            return Err((prepared, self));
+        }
+        Ok((self.reserve)(prepared))
+    }
+}
+
+#[must_use]
+pub(crate) struct ActorGenerationPublicationDriver {
+    candidate: std::sync::Weak<ActorGenerationCandidate>,
     publish: GenerationPublicationAction,
 }
 
-impl ActorGenerationPublicationOperation {
-    pub(crate) fn attempt_observer(&self) -> ActorPublicationAttemptObserver {
-        self.reserved.attempt_observer()
-    }
-
-    pub(crate) fn reserved_mut(&mut self) -> &mut ReservedActorGeneration {
-        &mut self.reserved
-    }
-
-    /// Possession of the unconsumed payload proves its publication body has not
-    /// run. A failed worker transfer must return this whole payload first.
-    pub(crate) fn into_retained_parts(
+impl ActorGenerationPublicationDriver {
+    pub(crate) async fn run(
         self,
-    ) -> (ReservedActorGeneration, ActorGenerationPublicationDiscard) {
-        let Self { reserved, publish } = self;
-        (
-            reserved,
-            ActorGenerationPublicationDiscard {
-                _action: GenerationPublicationDiscardAction::Publication { _publish: publish },
-            },
-        )
-    }
-
-    pub(crate) async fn run(self) -> ActorGenerationPublicationSettlement {
-        let Self { reserved, publish } = self;
-        publish(reserved).await
+        reserved: ReservedActorGeneration,
+    ) -> Result<ActorGenerationPublicationSettlement, (ReservedActorGeneration, Self)> {
+        if !self
+            .candidate
+            .ptr_eq(&Arc::downgrade(&reserved.prepared.candidate))
+        {
+            return Err((reserved, self));
+        }
+        Ok((self.publish)(reserved).await)
     }
 }
 
@@ -2541,7 +2516,8 @@ impl PublicationBodyCompletion {
 }
 
 #[cfg(test)]
-static_assertions::assert_not_impl_any!(ActorGenerationPublicationOperation: Clone, Copy);
+static_assertions::assert_not_impl_any!(ActorGenerationReservationDriver: Clone, Copy);
+static_assertions::assert_not_impl_any!(ActorGenerationPublicationDriver: Clone, Copy);
 #[cfg(test)]
 static_assertions::assert_not_impl_any!(ActorGenerationRetirementPreparation: Clone, Copy);
 
@@ -3179,39 +3155,37 @@ where
         prepared: PreparedActorGeneration,
         decision: Arc<tidepool_runtime::session::PublicationDecision>,
         kind: ActorGenerationPublication,
-        compiler: crate::capabilities::CompilerOwnerScope,
     ) -> ActorGenerationRetirementPreparation {
+        let candidate = Arc::downgrade(&prepared.candidate);
         ActorGenerationRetirementPreparation {
             prepared,
-            reserve: Box::new(move |prepared| {
-                Ok(match self.reserve(prepared, decision, kind)? {
-                    ActorGenerationReservation::Reserved(reserved) => {
-                        ActorGenerationRetirementPreparationOutcome::Reserved(
-                            self.into_publication_operation(reserved, compiler),
-                        )
-                    }
-                    ActorGenerationReservation::Refused(reason) => {
-                        ActorGenerationRetirementPreparationOutcome::Refused(reason)
-                    }
-                })
-            }),
-        }
-    }
-
-    pub(crate) fn into_publication_operation(
-        self,
-        reserved: ReservedActorGeneration,
-        compiler: crate::capabilities::CompilerOwnerScope,
-    ) -> ActorGenerationPublicationOperation {
-        ActorGenerationPublicationOperation {
-            reserved,
-            publish: Box::new(move |reserved| {
-                Box::pin(async move {
-                    compiler
-                        .scope(async { self.run_publication_body(reserved).await.for_retirement() })
-                        .await
-                })
-            }),
+            driver: ActorGenerationReservationDriver {
+                candidate,
+                reserve: Box::new(
+                    move |prepared| match self.reserve(prepared, decision, kind) {
+                        Ok(ActorGenerationReservation::Reserved(reserved)) => {
+                            let candidate = Arc::downgrade(&reserved.prepared.candidate);
+                            ActorGenerationRetirementPreparationOutcome::Reserved {
+                                reserved,
+                                publisher: ActorGenerationPublicationDriver {
+                                    candidate,
+                                    publish: Box::new(move |reserved| {
+                                        Box::pin(async move {
+                                            self.run_publication_body(reserved)
+                                                .await
+                                                .for_retirement()
+                                        })
+                                    }),
+                                },
+                            }
+                        }
+                        Ok(ActorGenerationReservation::Refused(reason)) => {
+                            ActorGenerationRetirementPreparationOutcome::Refused(reason)
+                        }
+                        Err(error) => ActorGenerationRetirementPreparationOutcome::Failed(error),
+                    },
+                ),
+            },
         }
     }
 
@@ -22990,7 +22964,12 @@ pub(crate) mod request_tests {
         );
         observed.insert(
             "owned_publication",
-            output_size(|operation: ActorGenerationPublicationOperation| operation.run()),
+            output_size(
+                |(publisher, reserved): (
+                    ActorGenerationPublicationDriver,
+                    ReservedActorGeneration,
+                )| { publisher.run(reserved) },
+            ),
         );
         eprintln!(
             "ACTOR_GENERATION_FUTURE_LAYOUT {}",
@@ -23213,27 +23192,46 @@ pub(crate) mod request_tests {
         assert_eq!(preparations.len(), 3);
         let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
         let preparation = crate::CompilerPreparationOwner::new();
-        let publisher = workbench.generation_publisher(
-            state.clone(),
-            ActorPublicationOwner::Preparation(preparation.client()),
-        );
         let mut preparations = preparations.into_iter();
-        let reserve = |prepared| match publisher
-            .reserve(
-                prepared,
-                tidepool_runtime::session::PublicationDecision::new(),
-                ActorGenerationPublication::Terminal,
-            )
-            .unwrap()
+        let issue = |prepared| {
+            workbench
+                .generation_publisher(
+                    state.clone(),
+                    ActorPublicationOwner::Preparation(preparation.client()),
+                )
+                .into_retirement_preparation(
+                    prepared,
+                    tidepool_runtime::session::PublicationDecision::new(),
+                    ActorGenerationPublication::Terminal,
+                )
+                .into_parts()
+        };
+        let reserve = |driver: ActorGenerationReservationDriver, prepared| match driver
+            .reserve(prepared)
+            .unwrap_or_else(|_| panic!("the issued driver must accept its same prepared candidate"))
         {
-            ActorGenerationReservation::Reserved(reserved) => reserved,
-            ActorGenerationReservation::Refused(detail) => panic!("{detail}"),
+            ActorGenerationRetirementPreparationOutcome::Reserved {
+                reserved,
+                publisher,
+            } => (reserved, publisher),
+            ActorGenerationRetirementPreparationOutcome::Refused(detail) => panic!("{detail}"),
+            ActorGenerationRetirementPreparationOutcome::Failed(error) => panic!("{error}"),
         };
         let capture = |reserved: &mut ReservedActorGeneration| match reserved.fence_original() {
             ActorGenerationRetirementCutoff::Fenced(fence) => fence,
             _ => panic!("the actual reservation must fence its selected source A"),
         };
-        let mut first = reserve(preparations.next().unwrap());
+        let (first_prepared, first_driver) = issue(preparations.next().unwrap());
+        let (second_prepared, second_driver) = issue(preparations.next().unwrap());
+        let (second_prepared, first_driver) = first_driver
+            .reserve(second_prepared)
+            .err()
+            .expect("a driver cannot reserve another actual B candidate");
+        let (first_prepared, second_driver) = second_driver
+            .reserve(first_prepared)
+            .err()
+            .expect("the reverse crossed reservation returns both same owners");
+        let (mut first, first_publisher) = reserve(first_driver, first_prepared);
         let first_candidate = first.candidate_custody();
         let first_identity = first_candidate.identity_observer();
         assert!(first_identity.same_candidate(&first_candidate));
@@ -23242,13 +23240,25 @@ pub(crate) mod request_tests {
         let first_settlement = first
             .refuse_retirement(&mut first_original, "first actual refusal")
             .unwrap();
-        let mut second = reserve(preparations.next().unwrap());
+        let (mut second, second_publisher) = reserve(second_driver, second_prepared);
+        let (returned_second, first_publisher) = first_publisher
+            .run(second)
+            .await
+            .err()
+            .expect("a publication driver cannot enter another actual B reservation");
+        second = returned_second;
         let second_candidate = second.candidate_custody();
         assert!(!first_identity.same_candidate(&second_candidate));
         let mut second_original = capture(&mut second);
         let second_settlement = second
             .refuse_retirement(&mut second_original, "second actual refusal")
             .unwrap();
+        let (first, second_publisher) = second_publisher
+            .run(first)
+            .await
+            .err()
+            .expect("crossed publication returns the same unentered reservation and driver");
+        drop((first_publisher, second_publisher));
         let (first, second_settlement) = first
             .into_settled_unstarted(second_settlement)
             .err()
@@ -23260,7 +23270,9 @@ pub(crate) mod request_tests {
             .expect("the reverse crossed receipt also refuses without losing either owner");
         assert!(second.candidate_custody().same_candidate(&second_candidate));
 
-        let mut third = reserve(preparations.next().unwrap());
+        let (third_prepared, third_driver) = issue(preparations.next().unwrap());
+        let (mut third, third_publisher) = reserve(third_driver, third_prepared);
+        drop(third_publisher);
         let expected = third.expected_generation().unwrap().clone();
         let target = third.prepared.candidate.scope.clone();
         assert!(!target

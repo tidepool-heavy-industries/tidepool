@@ -2903,12 +2903,20 @@ mod tests {
             InstalledToolsAvailability,
         };
         let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
-        let mut operation = match preparation.reserve().unwrap() {
-            ActorGenerationRetirementPreparationOutcome::Reserved(operation) => operation,
+        let (prepared, driver) = preparation.into_parts();
+        let (mut reserved, publisher) = match driver
+            .reserve(prepared)
+            .unwrap_or_else(|_| panic!("the issued driver must accept its same preparation"))
+        {
+            ActorGenerationRetirementPreparationOutcome::Reserved {
+                reserved,
+                publisher,
+            } => (reserved, publisher),
             ActorGenerationRetirementPreparationOutcome::Refused(reason) => panic!("{reason}"),
+            ActorGenerationRetirementPreparationOutcome::Failed(error) => panic!("{error}"),
         };
-        let observer = operation.attempt_observer();
-        let mut original = match operation.reserved_mut().fence_original() {
+        let observer = reserved.attempt_observer();
+        let mut original = match reserved.fence_original() {
             ActorGenerationRetirementCutoff::Fenced(fence) => fence,
             _ => panic!("the actual live owner must fence its exact selected A"),
         };
@@ -2925,7 +2933,10 @@ mod tests {
             decision.request_cancellation(),
             tidepool_runtime::session::PublicationCancellation::RequestedBeforeCommit
         );
-        let ActorGenerationPublicationSettlement::Unpublished(mut refusal) = operation.run().await
+        let ActorGenerationPublicationSettlement::Unpublished(mut refusal) = publisher
+            .run(reserved)
+            .await
+            .unwrap_or_else(|_| panic!("the issued publisher must accept its same reservation"))
         else {
             panic!("an observed cancelled body must return its actual armed guard");
         };
@@ -2934,9 +2945,10 @@ mod tests {
             primary.as_ref(),
             Ok(ActorGenerationCommit::Refused(_))
         ));
-        refusal = refusal.into_settled_diagnostic().err().expect(
-            "a pre-effect body still cannot release its armed source owner",
-        );
+        refusal = refusal
+            .into_settled_diagnostic()
+            .err()
+            .expect("a pre-effect body still cannot release its armed source owner");
         assert!(Arc::ptr_eq(refusal.outcome(), &primary));
         assert!(matches!(&state.0.lock().availability,
             InstalledToolsAvailability::PublicationInProgress(attempt)
@@ -2967,9 +2979,10 @@ mod tests {
             "observed cancellation and source settlement never replay the compiler"
         );
         assert_eq!(
-            refusal.into_settled_diagnostic().ok().expect(
-                "the actual cancelled Ephemeral body issued diagnostic-only settlement",
-            ),
+            refusal
+                .into_settled_diagnostic()
+                .ok()
+                .expect("the actual cancelled Ephemeral body issued diagnostic-only settlement",),
             super::super::ActorGenerationPublicationRefusalObservation::Refused,
         );
     }
@@ -3071,9 +3084,6 @@ mod tests {
             prepared,
             publication.clone(),
             super::super::ActorGenerationPublication::Terminal,
-            runner.compiler_scope(super::super::CompilerCloseOwner::ActorLifecycle(
-                kernel.retained_exit(),
-            )),
         );
         assert_eq!(preparation.actor(), actor.identity());
         assert!(Arc::ptr_eq(
