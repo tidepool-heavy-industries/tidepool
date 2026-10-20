@@ -2259,6 +2259,19 @@ impl ActorGenerationRetirementPreparation {
         self.prepared.expected.generation()
     }
 
+    pub(crate) fn matches_execution_control(
+        &self,
+        control: Option<&Arc<crate::WorkbenchExecutionControl>>,
+    ) -> bool {
+        match (self.driver.publication_kind, control) {
+            (ActorGenerationPublication::Terminal, None) => true,
+            (ActorGenerationPublication::Continuing, Some(control)) => {
+                Arc::ptr_eq(&self.driver.decision, &control.publication_decision())
+            }
+            _ => false,
+        }
+    }
+
     /// The serial owner retains the affine preparation before invoking its
     /// transient driver. Dropping that driver cannot drop the preparation.
     pub(crate) fn into_parts(self) -> (PreparedActorGeneration, ActorGenerationReservationDriver) {
@@ -2272,6 +2285,8 @@ impl ActorGenerationRetirementPreparation {
 #[must_use]
 pub(crate) struct ActorGenerationReservationDriver {
     candidate: std::sync::Weak<ActorGenerationCandidate>,
+    decision: Arc<tidepool_runtime::session::PublicationDecision>,
+    publication_kind: ActorGenerationPublication,
     reserve: GenerationReservationAction,
 }
 
@@ -3161,6 +3176,8 @@ where
             prepared,
             driver: ActorGenerationReservationDriver {
                 candidate,
+                decision: decision.clone(),
+                publication_kind: kind,
                 reserve: Box::new(
                     move |prepared| match self.reserve(prepared, decision, kind) {
                         Ok(ActorGenerationReservation::Reserved(reserved)) => {
