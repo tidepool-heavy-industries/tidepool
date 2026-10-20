@@ -2244,13 +2244,14 @@ impl SessionLib {
             )
             .map_err(|_| ExactExportError::UncertifiedExports)?
             .ok_or(ExactExportError::UncertifiedExports)?;
-            Ok(ExactExportSurface::certified(
+            ExactExportSurface::certified(
                 self.id,
                 self.current_module_in(scope),
                 baseline,
                 exports,
                 self.extra_include.clone(),
-            )?)
+            )
+            .map_err(|_| ExactExportError::UnsupportedCertifiedExports)
         } else {
             Ok(ExactExportSurface::legacy(
                 self.id,
