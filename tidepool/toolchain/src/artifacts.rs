@@ -8672,7 +8672,7 @@ mod module_product_tests {
                 panic!("World basis")
             };
             let checked = checked.clone();
-            let mut current = Arc::new(checked.reservation().plan().world().clone());
+            let mut current = Arc::clone(checked.reservation().plan().world_owned());
             let history_observations = observations.join(format!("history-{item_count}"));
             current
                 .restoration()
