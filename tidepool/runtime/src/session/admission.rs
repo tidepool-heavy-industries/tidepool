@@ -1854,6 +1854,15 @@ impl std::fmt::Debug for RuntimeCellAdmission {
 }
 
 impl RuntimeCellAdmission {
+    pub(super) fn original_source_lease(
+        &self,
+    ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
+        match &self.compiler_basis {
+            RuntimeCellCompilerBasis::World { original_source, .. } => Ok(original_source.clone()),
+            RuntimeCellCompilerBasis::Finite(_) => Err(SessionError::WorldCellRequiresServicePreparation),
+        }
+    }
+
     pub(super) fn admit_compiler_preparation(
         &self,
         source: &super::RuntimeSourceCompilerTransaction,
