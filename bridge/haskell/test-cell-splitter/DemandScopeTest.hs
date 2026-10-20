@@ -85,6 +85,7 @@ controls =
   , ("ImportedFieldShadow","root",["old"],Bindings ["old"])
   , ("ParseOnlyQuoteFlag","root",["old"],Bindings [])
   , ("QualifiedField","root",["versionBranch","old"],Bindings ["old"])
+  , ("AliasNamespace","root",["versionBranch"],Bindings [])
   , ("AliasSynonyms","root",["first","second"],Bindings ["first","second"])
   , ("RenameError","root",["old"],RenameRefusal)
   , ("ActualQuote","root",[],ParseRefusal)

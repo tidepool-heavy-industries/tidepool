@@ -73,7 +73,8 @@ prepareSegmentDemand plan flags captured = case unP Parser.parseModule parser of
 -- association stays with the supplied admitted binding; they never supply a type,
 -- native identity or value certificate. A fixed private interactive module
 -- lets NameCache share each alias across worlds without retaining per-cell
--- namespaces. GHC gives each query's declarations their own module.
+-- namespaces. The colon makes this qualifier impossible in authored syntax.
+-- GHC gives each query's declarations their own module.
 data SegmentDemandScope binding = SegmentDemandScope
   !GlobalRdrEnv !(Map.Map Name (String,binding))
 
@@ -81,7 +82,7 @@ newSegmentDemandScope :: HscEnv -> Map.Map String binding -> IO (SegmentDemandSc
 newSegmentDemandScope environment bindings = do
   entries <- forM (Map.toAscList bindings) $ \(alias,binding) -> do
     name <- allocateGlobalBinder (hsc_NC environment)
-      (mkModule interactiveUnit (mkModuleName "TidepoolDemand")) (mkVarOcc alias) noSrcSpan
+      (mkModule interactiveUnit (mkModuleName ":TidepoolDemand")) (mkVarOcc alias) noSrcSpan
     pure (name,(alias,binding))
   pure (SegmentDemandScope
     (mkGlobalRdrEnv [mkLocalVanillaGRE NoParent name | (name,_) <- entries])
