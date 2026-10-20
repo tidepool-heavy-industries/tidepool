@@ -34,6 +34,7 @@ impl exomonad_actor::JevBackend for UnexpectedJudgment {
 #[derive(Default)]
 struct ReloadGate {
     armed: std::sync::atomic::AtomicBool,
+    staged: AtomicUsize,
     entered: tokio::sync::Notify,
     released: std::sync::Mutex<bool>,
     release: std::sync::Condvar,
@@ -191,6 +192,7 @@ impl exomonad_actor::ActorSourceLayers for GatedSourceLayers {
         checks: &[String],
     ) -> Result<Box<dyn exomonad_actor::StagedActorSourceReload>, exomonad_actor::SourceLayerReload>
     {
+        self.gate.staged.fetch_add(1, Ordering::SeqCst);
         self.gate.wait_if_armed();
         self.owner.clone().stage_reload(actor, source, checks)
     }
@@ -742,14 +744,18 @@ async fn standard_reload_retains_complete_large_source_receipts_after_publicatio
         let bytes = serde_json::to_vec(value).unwrap().len();
         assert!(bytes > 100_000, "receipt must exceed the former display observation budget: {bytes}");
         let contents = &value["Right"]["contents"];
-        assert_eq!(value["Right"]["tag"], "ReloadPublished");
-        for revision in [0, 1] {
+        assert_eq!(value["Right"]["tag"], "ReloadRetirement");
+        assert_eq!(contents["reloadRetirementState"]["tag"], "ReloadBPublished");
+        assert_eq!(contents["reloadOperationalSettlement"]["tag"], "ReloadOperationalSettled");
+        assert!(contents["reloadBlockers"].as_array().unwrap().is_empty());
+        assert!(contents["reloadResourceOutcomes"].as_array().unwrap().is_empty());
+        for revision in ["reloadPrevious", "reloadCandidate"] {
             let modules = contents[revision]["revisionModules"].as_array().unwrap();
             assert!(modules.len() >= 450);
             assert!(modules.iter().any(|module| module["sourceModuleName"] == "Inventory.M0449"));
         }
-        assert_ne!(contents[0]["revisionIdentity"], contents[1]["revisionIdentity"]);
-        assert!(contents[2].as_array().unwrap().contains(&serde_json::json!("Project.Work")));
+        assert_ne!(contents["reloadPrevious"]["revisionIdentity"], contents["reloadCandidate"]["revisionIdentity"]);
+        assert!(contents["reloadRetirementState"]["contents"][0].as_array().unwrap().contains(&serde_json::json!("Project.Work")));
         assert_ne!(selected_root_generation(host).await, generation_a);
         assert_eq!(authored_tool_names(&round.request), tools_a);
         assert_ne!(round.request.instructions, instructions_a);
@@ -757,6 +763,130 @@ async fn standard_reload_retains_complete_large_source_receipts_after_publicatio
         assert_eq!(judgments.0.load(Ordering::SeqCst), 0);
         round.finish();
     })).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unsupported_force_preserves_the_original_generation_for_a_later_default_reload() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let judgments = Arc::new(UnexpectedJudgment(AtomicUsize::new(0)));
+    let gate = Arc::new(ReloadGate::default());
+    let transform: super::hosted_test_context::HostSourceLayersTransform = {
+        let gate = gate.clone();
+        Arc::new(move |owner| {
+            Arc::new(GatedSourceLayers {
+                owner,
+                gate: gate.clone(),
+                observe_gate: None,
+            })
+        })
+    };
+    let host = HostedTestRuntime::start_configured_with_source_layers(
+        &settings,
+        &provider,
+        |config| {
+            configure_workshop(
+                config,
+                judgments.clone(),
+                Some(include_str!("fixtures/sync_reload_spec_a.hs")),
+            )
+        },
+        transform,
+    )
+    .await
+    .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = VecDeque::new();
+            host.input("Refuse unsupported force without changing the live workshop.")
+                .await
+                .unwrap();
+            let round = host
+                .while_host_running(next_hosted_script_round(&mut requests, &mut pending, &root))
+                .await
+                .unwrap();
+            let generation_a = selected_root_generation(host).await;
+            let instructions_a = round.request.instructions.clone();
+            let tools_a = authored_tool_names(&round.request);
+            std::fs::write(
+                host.context
+                    .config
+                    .workspace
+                    .join(".exomonad/Project/Work.hs"),
+                include_str!("fixtures/coherent_reload_work_b.hs"),
+            )
+            .unwrap();
+            let round = authored_reload(
+                host,
+                &mut requests,
+                &mut pending,
+                &root,
+                round,
+                "force-refused",
+                "apply_draft",
+                serde_json::json!({"force":true}),
+            )
+            .await;
+            let refused = round.settled_output("force-refused");
+            assert_reload_disposition(
+                &refused,
+                tidepool_runtime::session::WorkbenchOperationDisposition::Rejected,
+            );
+            assert_eq!(
+                refused["items"][0]["value"]["Left"]["tag"],
+                "ReloadUnavailable"
+            );
+            assert_eq!(
+                gate.staged.load(Ordering::SeqCst),
+                0,
+                "unsupported force must not prepare or publish a candidate"
+            );
+            assert_eq!(selected_root_generation(host).await, generation_a);
+            assert_eq!(round.request.instructions, instructions_a);
+            assert_eq!(authored_tool_names(&round.request), tools_a);
+            let round = authored_cell(
+                host,
+                &mut requests,
+                &mut pending,
+                &root,
+                round,
+                "still-a",
+                "display True",
+            )
+            .await;
+            assert_eq!(selected_root_generation(host).await, generation_a);
+            let round = authored_reload(
+                host,
+                &mut requests,
+                &mut pending,
+                &root,
+                round,
+                "ordinary-after-force",
+                "apply_draft",
+                serde_json::json!({}),
+            )
+            .await;
+            let published = round.settled_output("ordinary-after-force");
+            assert_reload_disposition(
+                &published,
+                tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
+            );
+            assert_reload_tool(&published, "ReloadRetirement");
+            let receipt = &published["items"][0]["value"]["Right"]["contents"];
+            assert_eq!(receipt["reloadRetirementState"]["tag"], "ReloadBPublished");
+            assert_eq!(
+                receipt["reloadOperationalSettlement"]["tag"],
+                "ReloadOperationalSettled"
+            );
+            assert_ne!(selected_root_generation(host).await, generation_a);
+            assert_eq!(gate.staged.load(Ordering::SeqCst), 1);
+            assert_eq!(judgments.0.load(Ordering::SeqCst), 0);
+            round.finish();
+        })
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

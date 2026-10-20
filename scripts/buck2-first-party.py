@@ -1408,6 +1408,12 @@ def facade_test_cases(binary):
                                + ["//bridge/atomic-write:directory_fault_shared", "toolchains//:rustc", "toolchains//:cc"]))
     prefix = "actor_host::m1_host_tests::"
     groups = [
+        ("facade_reload_default_publication_test", [
+            "actor_host::coherent_reload_acceptance_tests::standard_reload_retains_complete_large_source_receipts_after_publication",
+        ], host_env, service_host_paths, service_host_resources, True, False, 900),
+        ("facade_reload_force_refusal_test", [
+            "actor_host::coherent_reload_acceptance_tests::unsupported_force_preserves_the_original_generation_for_a_later_default_reload",
+        ], host_env, service_host_paths, service_host_resources, True, False, 900),
         ("facade_introspection_service_test", [
             "actor_host::documentation_tests::published_introspection_example_returns_structured_declaration",
         ], host_env, service_host_paths, service_host_resources, True, False, 600),
@@ -1565,7 +1571,7 @@ def facade_test_cases(binary):
         if tests:
             lines.extend(["    exact_tests = [", render_strings(tests, 8), "    ],",
                           f"    expected_count = {len(tests)},"])
-        if name == "facade_introspection_service_test":
+        if name in ("facade_introspection_service_test", "facade_reload_default_publication_test", "facade_reload_force_refusal_test"):
             lines.append('    case_compiler_modes = {' + ", ".join(
                 json.dumps(test) + ': "owned-resident"' for test in tests
             ) + "},")
