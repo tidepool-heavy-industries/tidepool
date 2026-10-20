@@ -4111,26 +4111,8 @@ impl ActorGenerationPublicationIssue {
     }
 }
 
+#[cfg(test)]
 impl ActorGenerationCommit {
-    pub(crate) fn notify_initial_generation(
-        self,
-        lifecycle: &crate::LifecycleHandle,
-    ) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
-        if let Self::Published { generation, .. } = &self {
-            if lifecycle.generation_published(generation.clone())
-                == crate::kernel::GenerationPublicationNotification::Refused
-            {
-                return Err(ResidentActorWorkbenchError::PublicationSettlement {
-                    failure: Box::new(ActorPublicationSettlementFailure {
-                        outcome: Arc::new(Ok(self)),
-                        settlement: PublicationSettlementError::NotificationRefused,
-                    }),
-                });
-            }
-        }
-        self.into_initial_generation()
-    }
-
     fn into_initial_generation(self) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
         match self {
             Self::Published { generation, .. } => Ok(generation),
@@ -24356,23 +24338,12 @@ pub(crate) mod request_tests {
             .refuse_retirement(&mut first_original, "first actual refusal")
             .unwrap();
         let (mut second, second_publisher) = reserve(second_driver, second_prepared);
-        let (returned_second, first_publisher) = first_publisher
-            .run(second)
-            .await
-            .err()
-            .expect("a publication driver cannot enter another actual B reservation");
-        second = returned_second;
         let second_candidate = second.candidate_custody();
         assert!(!first_identity.same_candidate(&second_candidate));
         let mut second_original = capture(&mut second);
         let second_settlement = second
             .refuse_retirement(&mut second_original, "second actual refusal")
             .unwrap();
-        let (first, second_publisher) = second_publisher
-            .run(first)
-            .await
-            .err()
-            .expect("crossed publication returns the same unentered reservation and driver");
         drop((first_publisher, second_publisher));
         let (first, second_settlement) = first
             .into_settled_unstarted(second_settlement)

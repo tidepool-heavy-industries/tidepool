@@ -178,6 +178,8 @@ pub(crate) enum InitialGenerationPublicationError {
     NotStarted(preparation::PublicationNonStartKind),
     #[error("initial publication did not commit: {}", initial_body_failure(.0))]
     Body(Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>),
+    #[error("initial publication retains unresolved obligations: {}", initial_body_failure(.0))]
+    UnconfirmedBody(Arc<Result<ActorGenerationCommit, ResidentActorWorkbenchError>>),
 }
 
 fn initial_body_failure(
@@ -199,6 +201,7 @@ impl InitialGenerationPublicationError {
         match self {
             Self::OwnerLost
             | Self::Unconfirmed
+            | Self::UnconfirmedBody(_)
             | Self::Settlement(_)
             | Self::NotificationRefused => true,
             Self::NotStarted(preparation::PublicationNonStartKind::SpawnFailed) => true,
@@ -314,8 +317,10 @@ impl GenerationRetirementDiagnostic {
     }
 
     fn project_publication(&mut self, publication: &ActorGenerationPublicationOwner) {
-        let Self::Operation { handoff, .. } = self else {
-            return;
+        let handoff = match self {
+            Self::Operation { handoff, .. } => handoff,
+            #[cfg(test)]
+            Self::CancelledComponent => return,
         };
         if !matches!(handoff, RetirementDiagnosticHandoff::Unprojected) {
             return;
@@ -2161,22 +2166,27 @@ impl GenerationRetirementRecord {
                 let Some(reply) = self.driver.initial_reply.take() else {
                     return;
                 };
-                let error = if let Some(error) = owner.settlement_error() {
-                    InitialGenerationPublicationError::Settlement(error.clone())
-                } else if let Some(outcome) = owner.failure_outcome() {
-                    InitialGenerationPublicationError::Body(outcome.clone())
-                } else if let GenerationPublicationCustody::NotStarted { reason } = custody {
-                    InitialGenerationPublicationError::NotStarted(reason.kind())
-                } else {
-                    InitialGenerationPublicationError::Unconfirmed
-                };
                 let independent_nonstart = matches!(
                     custody,
                     GenerationPublicationCustody::NotStarted {
                         reason: preparation::PublicationNonStart::SpawnFailed(_)
                     }
                 );
-                if owner.settled_obligations() && !independent_nonstart {
+                let discharge = owner.settled_obligations() && !independent_nonstart;
+                let error = if let Some(error) = owner.settlement_error() {
+                    InitialGenerationPublicationError::Settlement(error.clone())
+                } else if let Some(outcome) = owner.failure_outcome() {
+                    if discharge {
+                        InitialGenerationPublicationError::Body(outcome.clone())
+                    } else {
+                        InitialGenerationPublicationError::UnconfirmedBody(outcome.clone())
+                    }
+                } else if let GenerationPublicationCustody::NotStarted { reason } = custody {
+                    InitialGenerationPublicationError::NotStarted(reason.kind())
+                } else {
+                    InitialGenerationPublicationError::Unconfirmed
+                };
+                if discharge {
                     let actor = *actor;
                     let candidate = candidate.identity_observer();
                     // Actual source restoration and the body's positive
