@@ -14011,7 +14011,7 @@ fn certify_artifact_view_groups(
             }
         }
         Some(CertifiedNativeGroupBaseline::Rows(rows)) => {
-            for (binding, row) in *rows {
+            for (binding, row) in rows.iter() {
                 inherit_binding(*binding, row)?;
             }
         }
@@ -22565,9 +22565,11 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let weak_first = Arc::downgrade(&first_owner);
         let weak_second = Arc::downgrade(&second_owner);
+        let captured_artifacts = joined_metadata.retained.artifacts.iter()
+            .map(|(id, entry)| (*id, Arc::clone(entry))).collect::<BTreeMap<_, _>>();
         let captured = RetainedArtifactMaterialization::capture_custody(
             &[first_owner, second_owner],
-            &joined_metadata.retained.artifacts,
+            &captured_artifacts,
             &aliases,
         )
         .unwrap();

@@ -7270,7 +7270,7 @@ impl<'a> OriginalValidationInventory<'a> {
         operation.reserve::<((String, String), [usize; 4])>(available.len())?;
         for product in available.values() {
             crate::host_work::checkpoint()
-                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(crate::CompileError::Io(error))))?;
             operation.charge(product.owner().unit.len() + product.owner().module.len())?;
         }
         Ok(Self {
@@ -7347,7 +7347,7 @@ impl<'a> OriginalValidationInventory<'a> {
         }
         for binding in &bindings {
             crate::host_work::checkpoint()
-                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(crate::CompileError::Io(error))))?;
             let key = crate::artifact_inventory::NativeGroupKey {
                 artifact: binding.binding.artifact(),
                 original_ordinal: binding.original_ordinal,
@@ -7361,7 +7361,7 @@ impl<'a> OriginalValidationInventory<'a> {
         let mut additional = Vec::new();
         for binding in bindings {
             crate::host_work::checkpoint()
-                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(crate::CompileError::Io(error))))?;
             let key = crate::artifact_inventory::NativeGroupKey {
                 artifact: binding.binding.artifact(),
                 original_ordinal: binding.original_ordinal,
