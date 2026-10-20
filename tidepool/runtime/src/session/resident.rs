@@ -10436,11 +10436,11 @@ mod authored_publication_tests {
             });
             value.scope = scope.scope();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _settled = session.with_source_compiler_transaction(scope.clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground, crate::CompilerTransactionCancellation::new(), None, |_| {}, |session, report| {
+                let _settled = session.with_source_compiler_transaction(scope.original_source().clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground, crate::CompilerTransactionCancellation::new(), None, |_| {}, |session, report| {
                     session.state.bind_replacing_decls_in(scope.scope(), vec![value], report).unwrap();
                     let fence = scope.source_admission().fence().unwrap();
                     assert_eq!(fence.pending_claims(), 1, "actual binding claim remains held inside its owner");
-                    fence.reopen(&scope).unwrap();
+                    fence.reopen(scope.original_source()).unwrap();
                     if unwind { panic!("compiler action unwind"); }
                     // Synthetic aggregate uncertainty checks joined custody, not a GHC END fault.
                     report(crate::CompilerTransactionClose::Unconfirmed(tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled, tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved { disconnect: None })));
@@ -10451,7 +10451,7 @@ mod authored_publication_tests {
             assert_eq!(fence.pending_claims(), 1);
             assert_eq!(fence.unconfirmed_claims(), 1);
             assert!(matches!(
-                fence.reopen(&scope),
+                fence.reopen(scope.original_source()),
                 Err(super::super::SourceAdmissionError::Unconfirmed { .. })
             ));
         }
@@ -10509,7 +10509,7 @@ mod authored_publication_tests {
             value.scope = target_scope;
             let binding_id = value.id;
             recipient.with_source_compiler_transaction(
-                source.clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                source.original_source().clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(), None, |_| {},
                 |session, report| {
                     session.state.bind_replacing_decls_in(target_scope, vec![value], report).unwrap();
@@ -10572,7 +10572,7 @@ mod authored_publication_tests {
                 assert!(matches!(
                     target_weak
                         .upgrade()
-                        .map(|lease| target_fence.reopen(&lease)),
+                        .map(|lease| target_fence.reopen(lease.original_source())),
                     Some(Err(super::super::SourceAdmissionError::Unconfirmed { .. }))
                 ));
                 recipient.state.retire_scope(target_scope);
@@ -10589,7 +10589,7 @@ mod authored_publication_tests {
                 "explicit retirement releases only that exact target hold"
             );
             assert!(recipient.state.bindings().get(binding_id).is_none());
-            assert!(source.validate_source_issuer().is_ok());
+            assert!(source.validate_lexical_issuer().is_ok());
             assert!(matches!(
                 source.source_admission().admit(),
                 Err(super::super::SourceAdmissionError::Unconfirmed { count: 1, .. })
@@ -10603,10 +10603,10 @@ mod authored_publication_tests {
             ));
             drop(_next);
             drop(recipient);
-            assert_eq!(source.validate_source_issuer().is_err(), shared_gate);
+            assert_eq!(source.validate_lexical_issuer().is_err(), shared_gate);
             drop(original);
             assert!(matches!(
-                source.validate_source_issuer(),
+                source.validate_lexical_issuer(),
                 Err(super::super::SourceAdmissionError::StaleSourceLease)
             ));
             drop(source);
@@ -10662,7 +10662,7 @@ mod authored_publication_tests {
         });
         child_session
             .with_source_compiler_transaction(
-                child.clone(),
+                child.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -10765,14 +10765,14 @@ mod authored_publication_tests {
                 1,
                 "distinct lexical owners sharing a gate earn only one gate claim"
             );
-            fence.reopen(&source).unwrap();
+            fence.reopen(source.original_source()).unwrap();
             id
         });
         recipient.state.retire_scope(captured.scope());
         assert!(recipient.state.bindings().get(recipient_binding).is_none());
         assert!(original.state.bindings().get(original_binding).is_some());
         assert_eq!(original.state.persistent_roots_count(), native_roots);
-        assert!(source.validate_source_issuer().is_ok());
+        assert!(source.validate_lexical_issuer().is_ok());
         drop(
             source
                 .source_admission()
@@ -10780,8 +10780,8 @@ mod authored_publication_tests {
                 .expect("foreign retirement leaves original gate open"),
         );
         drop(recipient);
-        assert!(captured.validate_source_issuer().is_err());
-        assert!(source.validate_source_issuer().is_ok());
+        assert!(captured.validate_lexical_issuer().is_err());
+        assert!(source.validate_lexical_issuer().is_ok());
         assert!(original.state.scope_tree().is_live(source.scope()));
         assert!(original.state.bindings().get(original_binding).is_some());
         assert_eq!(original.state.persistent_roots_count(), native_roots);
@@ -10914,7 +10914,7 @@ mod authored_publication_tests {
         let includes = view.include_paths(effects.include_paths());
         let admitted = original
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -11023,11 +11023,11 @@ mod authored_publication_tests {
             assert_eq!(transferred.epoch, predecessor_epoch + 1);
             assert!(original.state.scope_tree().is_live(source.scope()));
             assert!(matches!(
-                source.validate_source_issuer(),
+                source.validate_lexical_issuer(),
                 Err(super::super::SourceAdmissionError::StaleSourceLease)
             ));
             assert!(matches!(
-                admission.source_lease().validate_source_issuer(),
+                admission.source_lease().validate_lexical_issuer(),
                 Err(super::super::SourceAdmissionError::StaleSourceLease)
             ));
             drop(admission.source_lease().source_admission().admit().expect(
@@ -11098,7 +11098,7 @@ mod authored_publication_tests {
                 recipient.public_visibility_snapshot_in(unrelated.scope()),
                 before_public
             );
-            assert!(unrelated.validate_source_issuer().is_ok());
+            assert!(unrelated.validate_lexical_issuer().is_ok());
             drop(unrelated.source_admission().admit().unwrap());
             let entered = std::cell::Cell::new(false);
             let stale_entry = source.with_source_compiler_transaction(
@@ -11123,7 +11123,7 @@ mod authored_publication_tests {
     ) -> T {
         session
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,

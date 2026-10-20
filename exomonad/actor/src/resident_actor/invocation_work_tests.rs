@@ -58,7 +58,7 @@ async fn fenced_source_preserves_admitted_callback_cleanup_and_refuses_new_activ
     assert!(work.cleanup_observation().unwrap().uncertainty().is_none());
     assert!(fixture.actor.terminal().get().is_none());
     fence
-        .reopen_with(&scope, |reopen| {
+        .reopen_with(scope.original_source(), |reopen| {
             reopen.commit();
             Ok::<_, ()>(())
         })
@@ -101,7 +101,7 @@ fn callback_registration_racing_source_fence_is_captured_or_refused() {
             Err(_) => assert!(captured.is_empty()),
         }
         fence
-            .reopen_with(&scope, |reopen| {
+            .reopen_with(scope.original_source(), |reopen| {
                 reopen.commit();
                 Ok::<_, ()>(())
             })
@@ -3827,7 +3827,7 @@ mod form_source_admission {
         assert_eq!(host.opens.load(Ordering::SeqCst), 2);
         second.close().unwrap();
         fence
-            .reopen_with(&scope, |reopen| {
+            .reopen_with(scope.original_source(), |reopen| {
                 reopen.commit();
                 Ok::<_, ()>(())
             })
@@ -3935,8 +3935,10 @@ fn original_execution_origin_binds_exact_issuer_and_keeps_cleanup_observable_aft
     use crate::termination::{ExecutionSourceBindingError, ExecutionSourceOrigin};
     let actor = ActorRef::first(crate::ActorId(1));
     let mut session = tidepool_runtime::session::PersistentSession::new(None, 1024);
-    let original = session.mint_notebook_scope_with_lease(None).unwrap();
-    let foreign = session.mint_notebook_scope_with_lease(None).unwrap();
+    let original_scope = session.mint_notebook_scope_with_lease(None).unwrap();
+    let original = original_scope.original_source().clone();
+    let foreign_scope = session.mint_notebook_scope_with_lease(None).unwrap();
+    let foreign = foreign_scope.original_source().clone();
     let work = InvocationWork::new_selecting(actor, reservation());
     let scope = work.new_scope().unwrap();
     work.bind_original_source(original.clone()).unwrap();

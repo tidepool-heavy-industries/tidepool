@@ -833,7 +833,7 @@ mod tests {
             let lease = session.mint_notebook_scope_with_lease(None).unwrap();
             let gate = lease.source_admission();
             assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = gate.fence_with::<()>(&lease, |transition| {
+                let _ = gate.fence_with::<()>(lease.original_source(), |transition| {
                     if commit {
                         transition.commit();
                     }
@@ -1138,7 +1138,7 @@ mod tests {
                         if let Ok(fence) = result { phases[gate] = 1; fences[gate] = Some(fence); }
                     }
                     2 => if let Some(fence) = fences[gate].take() {
-                        let result = fence.reopen(leases[gate]);
+                        let result = fence.reopen(leases[gate].original_source());
                         prop_assert_eq!(result.is_ok(), uncertainty[gate] == 0);
                         if result.is_ok() { phases[gate] = 0; }
                     },

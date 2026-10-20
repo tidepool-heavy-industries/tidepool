@@ -365,7 +365,7 @@ fn source_action<T>(
         .expect("mint the fixture compiler source lease");
     let settled = resident
         .with_source_compiler_transaction(
-            source,
+            source.original_source().clone(),
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             crate::CompilerTransactionCancellation::new(),
             None,

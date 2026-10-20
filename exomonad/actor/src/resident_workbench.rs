@@ -3806,13 +3806,13 @@ where
             .with_compiler_machine(context.clone(), move |session, _, _, _| {
                 let admitted = match &preparing.commit {
                     PreparedGenerationCommit::Durable { prepared, .. } => session
-                        .capture_notebook_generation_world(prepared, &preparing.scope)
+                        .capture_notebook_generation_world(prepared, preparing.scope.original_source())
                         .map_err(ResidentError::Session)?,
                     _ => session
                         .capture_inspection_world_in(
                             preparing.scope.scope(),
                             &capture_reference,
-                            &preparing.scope,
+                            preparing.scope.original_source(),
                         )
                         .map_err(ResidentError::Session)?,
                 };
@@ -3845,7 +3845,7 @@ where
             PreparedGenerationCommit::Restored { .. } | PreparedGenerationCommit::Ephemeral { .. }
         ) {
             let install = compiler_world.clone();
-            let original = preparing.scope.clone();
+            let original = preparing.scope.original_source().clone();
             self.access
                 .with_compiler_machine(context, move |session, _, _, _| {
                     if !session.install_compiler_world_if_current(&install, &reference, &original) {
@@ -15287,7 +15287,7 @@ where
                         "compiler world lacks retained source evidence".into(),
                     )
                 })?;
-                let original = context.source_dependency().source_lease()?;
+                let original = context.source_dependency().source_lease()?.original_source().clone();
                 session
                     .capture_inspection_world_in(
                         context.placement.lexical_scope,
@@ -15333,7 +15333,7 @@ where
                     "compiler world lost retained source evidence".into(),
                 )
             })?;
-            let original = context.source_dependency().source_lease()?;
+            let original = context.source_dependency().source_lease()?.original_source().clone();
             if !session.install_compiler_world_if_current(
                 &completed,
                 &evidence.reference,
@@ -18657,7 +18657,7 @@ pub(crate) mod request_tests {
             .access
             .with_machine(context, move |session, context, _| {
                 observation.scope(|| {
-                    let original = context.source_dependency().source_lease()?;
+                    let original = context.source_dependency().source_lease()?.original_source().clone();
                     assert!(session.install_inspection_world_if_current(
                         &completed,
                         &source.generation_evidence().unwrap().reference,
@@ -18752,7 +18752,7 @@ pub(crate) mod request_tests {
                     let source = tidepool_runtime::session::GenerationArtifactReference::capture(
                         b"checked binding capture".to_vec(),
                     );
-                    let original = context.source_dependency().source_lease()?;
+                    let original = context.source_dependency().source_lease()?.original_source().clone();
                     let observation = HostWorkObservation::new();
                     let admitted = observation
                         .scope(|| session.capture_inspection_world_in(scope, &source, &original))
@@ -18885,7 +18885,7 @@ pub(crate) mod request_tests {
             let answer = frontend
                 .access
                 .with_machine(frontend_context.clone(), move |session, context, _| {
-                    let original = context.source_dependency().source_lease()?;
+                    let original = context.source_dependency().source_lease()?.original_source().clone();
                     let admitted = session
                         .capture_inspection_world_in(
                             context.placement.lexical_scope,
@@ -19173,20 +19173,20 @@ pub(crate) mod request_tests {
             let gate_results = workbench.access.with_machine(transferred, move |session, context, _| {
                 let reference = &gate_source.generation_evidence().unwrap().reference;
                 let before = session.public_visibility_snapshot_in(context.placement.lexical_scope);
-                assert!(session.install_inspection_world_if_current(&completed, reference, &original));
+                assert!(session.install_inspection_world_if_current(&completed, reference, original.original_source()));
                 let mut results = Vec::new();
                 for (label, lease) in [("original source", &original), ("receiving scope", &target)] {
                     let fence = lease.source_admission().fence().unwrap();
                     // Gate state is the only change: source, epoch, scope and
                     // compile-view identities still match this actual output.
-                    results.push((label, session.install_inspection_world_if_current(&completed, reference, &original)));
+                    results.push((label, session.install_inspection_world_if_current(&completed, reference, original.original_source())));
                     assert_eq!(session.public_visibility_snapshot_in(context.placement.lexical_scope), before);
                     assert!(matches!(completed.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. } if info.expression.canonical == "Int"));
                     fence.reopen_with(lease.original_source(), |reopen| {
                         reopen.commit();
                         Ok::<_, ()>(())
                     }).unwrap().unwrap();
-                    assert!(session.install_inspection_world_if_current(&completed, reference, &original));
+                    assert!(session.install_inspection_world_if_current(&completed, reference, original.original_source()));
                 }
                 Ok(results)
             }).await.unwrap();
@@ -19231,7 +19231,7 @@ pub(crate) mod request_tests {
                 namespace: tidepool_runtime::session::NameNamespace::Value, name: "known".into(),
             }, StructuredInspectionKind::Type, Some(HostWorkObservation::new())).await.unwrap();
             workbench.access.with_machine(context.clone(), move |session, context, _| {
-                let original = context.source_dependency().source_lease()?;
+                let original = context.source_dependency().source_lease()?.original_source().clone();
                 session.set_catalog_selection(tidepool_toolchain::toolchain::CatalogSelection::Acquired(None));
                 assert!(!session.install_inspection_world_if_current(&stale, &captured.generation_evidence().unwrap().reference, &original));
                 Ok(())
@@ -24736,7 +24736,7 @@ pub(crate) mod request_tests {
         };
         let outcome = session
             .with_source_compiler_transaction(
-                source,
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 tidepool_runtime::CompilerTransactionCancellation::new(),
                 None,
@@ -29053,7 +29053,7 @@ pub(crate) mod request_tests {
         ) -> T {
             let settled = session
                 .with_source_compiler_transaction(
-                    source.clone(),
+                    source.original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     tidepool_runtime::CompilerTransactionCancellation::new(),
                     None,
@@ -29078,7 +29078,7 @@ pub(crate) mod request_tests {
         ) -> T {
             let settled = session
                 .with_source_compiler_transaction(
-                    source.clone(),
+                    source.original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     tidepool_runtime::CompilerTransactionCancellation::new(),
                     None,
@@ -29230,7 +29230,7 @@ pub(crate) mod request_tests {
             .capture_inspection_world_in(
                 context.placement.lexical_scope,
                 &fixture_reference,
-                &fixture_source,
+                fixture_source.original_source(),
             )
             .unwrap();
         assert!(admitted_world.needs_source_capture());
@@ -29257,7 +29257,7 @@ pub(crate) mod request_tests {
             assert!(session.install_compiler_world_if_current(
                 &completed_world,
                 &fixture_reference,
-                &fixture_source,
+                fixture_source.original_source(),
             ));
         });
         let receiver_started = std::time::Instant::now();
@@ -29276,7 +29276,7 @@ pub(crate) mod request_tests {
         assert!(Arc::ptr_eq(&world, completed_world.world()));
         assert!(Arc::ptr_eq(
             &execution.original_source().unwrap(),
-            &fixture_source,
+            fixture_source.original_source(),
         ));
         let receiver_source = source.clone().for_workbench(&private_context, None);
         let preamble = cell_module_preamble(

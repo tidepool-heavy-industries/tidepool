@@ -32,7 +32,7 @@ fn prepared_target_source() -> (
     let source = state.adopt_initial_notebook_scope(scope).unwrap();
     let seeded = state
         .with_source_compiler_transaction(
-            source.clone(),
+            source.original_source().clone(),
             artifacts::CompileWorkload::Foreground,
             CompilerTransactionCancellation::new(),
             None,

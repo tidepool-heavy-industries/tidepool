@@ -905,7 +905,7 @@ mod tests {
                     .admit_work()
                     .unwrap();
                 let pending_original = scope.admit_continuation().unwrap();
-                pending_original.bind_original_source(original_a).unwrap();
+                pending_original.bind_original_source(original_a.original_source().clone()).unwrap();
                 let pending_b = scope
                     .clone()
                     .with_source_dependency(&source_b)

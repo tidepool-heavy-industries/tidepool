@@ -6491,7 +6491,7 @@ mod tests {
             let source = state.adopt_initial_notebook_scope(public).unwrap();
             let admitted = state
                 .with_source_compiler_transaction(
-                    source,
+                    source.original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -6577,7 +6577,7 @@ mod tests {
             let include_paths = view.include_paths(&roots);
             let admitted = resident
                 .with_source_compiler_transaction(
-                    execution.retained_lexical_scope(),
+                    execution.retained_lexical_scope().original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -6666,7 +6666,7 @@ mod tests {
         ) -> Vec<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
             let source = cell.admission.source_lease();
             let executed = resident.with_source_compiler_transaction(
-                source, tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                source.original_source().clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(), None, |_| {},
                 |resident, settlement| {
             let prefix = resident
@@ -6827,7 +6827,7 @@ mod tests {
             let restaged = self
                 .resident
                 .with_source_compiler_transaction(
-                    source.clone(),
+                    source.original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -6897,7 +6897,7 @@ mod tests {
             let admitted = self
                 .resident
                 .with_source_compiler_transaction(
-                    self.execution.retained_lexical_scope(),
+                    self.execution.retained_lexical_scope().original_source().clone(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -7811,7 +7811,7 @@ mod tests {
         let open = fixture
             .resident
             .with_source_compiler_transaction(
-                source.clone(),
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -7847,7 +7847,7 @@ mod tests {
         let closed = fixture
             .resident
             .with_source_compiler_transaction(
-                source,
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
@@ -8134,7 +8134,7 @@ mod tests {
         ).unwrap());
         let includes = view.include_paths(effects.include_paths());
         let admitted = resident.with_source_compiler_transaction(
-            source.clone(),
+            source.original_source().clone(),
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             crate::CompilerTransactionCancellation::new(), None, |_| {},
             |resident, settlement| {
