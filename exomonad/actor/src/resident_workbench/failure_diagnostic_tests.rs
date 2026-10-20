@@ -249,3 +249,33 @@ fn renderer_production_keeps_action_and_publication_refusal_together() {
     assert!(!error.is_tool_presentation_failure());
     assert!(error.requires_recovery());
 }
+
+#[test]
+fn renderer_clean_admission_failure_preserves_the_resident_recovery_requirement() {
+    use tidepool_runtime::session::turn::ActivationRendererFailure;
+    use tidepool_runtime::session::{
+        RendererProductionFailure, SessionError, StoreError, StoreErrorKind,
+    };
+    for kind in [StoreErrorKind::RecoveryRequired, StoreErrorKind::Storage] {
+        let cause = || {
+            ResidentError::Session(SessionError::RecoveryStore(Box::new(StoreError {
+                path: "renderer-recovery".into(),
+                kind,
+                detail: "typed resident failure".into(),
+            })))
+        };
+        let original = ResidentActorWorkbenchError::Resident(cause());
+        let renderer = ResidentActorWorkbenchError::RendererProduction {
+            failure: Arc::new(RendererProductionFailure::Compile(
+                ActivationRendererFailure::Admission(cause()),
+            )),
+            producer_join: None,
+        };
+        assert_eq!(renderer.requires_recovery(), original.requires_recovery());
+        assert_eq!(
+            renderer.requires_recovery(),
+            kind == StoreErrorKind::RecoveryRequired
+        );
+        assert_eq!(renderer.failure_diagnostic(), original.failure_diagnostic());
+    }
+}

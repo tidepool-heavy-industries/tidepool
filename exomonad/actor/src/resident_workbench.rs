@@ -6418,6 +6418,12 @@ fn resident_error_diagnostic(
     }
 }
 
+fn resident_error_requires_recovery(error: &ResidentError) -> bool {
+    matches!(error, ResidentError::Session(
+        tidepool_runtime::session::SessionError::RecoveryStore(error)
+    ) if error.kind == tidepool_runtime::session::StoreErrorKind::RecoveryRequired)
+}
+
 fn activation_renderer_failure_diagnostic(
     failure: &tidepool_runtime::session::turn::ActivationRendererFailure,
 ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
@@ -6707,18 +6713,16 @@ impl ResidentActorWorkbenchError {
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.requires_recovery(),
             Self::PreparationAdmission(source) => source.requires_recovery(),
-            Self::RendererProduction { failure, .. } => matches!(
-                failure.as_ref(),
+            Self::RendererProduction { failure, .. } => match failure.as_ref() {
+                tidepool_runtime::session::RendererProductionFailure::Compile(
+                    tidepool_runtime::session::turn::ActivationRendererFailure::Admission(error),
+                ) => resident_error_requires_recovery(error),
+                tidepool_runtime::session::RendererProductionFailure::Compile(_) => false,
                 tidepool_runtime::session::RendererProductionFailure::ProducerLost { .. }
-                    | tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { .. }
-                    | tidepool_runtime::session::RendererProductionFailure::Publication { .. }
-            ),
-            Self::Resident(ResidentError::Session(
-                tidepool_runtime::session::SessionError::RecoveryStore(error),
-            ))
-            | Self::Delivered(ResidentError::Session(
-                tidepool_runtime::session::SessionError::RecoveryStore(error),
-            )) => error.kind == tidepool_runtime::session::StoreErrorKind::RecoveryRequired,
+                | tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed { .. }
+                | tidepool_runtime::session::RendererProductionFailure::Publication { .. } => true,
+            },
+            Self::Resident(error) | Self::Delivered(error) => resident_error_requires_recovery(error),
             _ => false,
         }
     }
@@ -27549,6 +27553,9 @@ pub(crate) mod request_tests {
         ] {
             preamble = insert_preamble_imports(&preamble, import);
         }
+        let (fixture_sources, _fixture_sources_owner) =
+            world_query_test_source_files_with_support(&[], &include);
+        context.source_layer = crate::ActorSourceRoots::Complete(fixture_sources.clone());
         context.haskell_effects_alias = "'[Replies]".into();
         context.effect_policy = tidepool_effect::EffectRunPolicy::SuspendAll;
         let root = tempfile::tempdir().unwrap();
@@ -27753,6 +27760,58 @@ pub(crate) mod request_tests {
             "activation fixture producer preparation: {:?}",
             producer_started.elapsed()
         );
+        // This owner-cluster fixture explicitly bootstraps its real World before
+        // private setup; it does not qualify a cold first authored cell.
+        let fixture_reference = fixture_sources
+            .generation_evidence()
+            .unwrap()
+            .reference
+            .clone();
+        let admitted_world = session
+            .capture_inspection_world_in(
+                context.placement.lexical_scope,
+                &fixture_reference,
+                &fixture_source,
+            )
+            .unwrap();
+        assert!(admitted_world.needs_source_capture());
+        let dependency = context.source_dependency().clone();
+        let compiler_work = crate::capabilities::CompilerOwnerScope::current()
+            .unwrap()
+            .with_source_dependency(&dependency)
+            .admit_work()
+            .unwrap();
+        let settled_world = compiler_work.run_source_compiler_phase(
+            &dependency, tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            |owner, _| tidepool_runtime::session::run_admitted_world_inspection(
+                owner, admitted_world,
+                || fixture_sources.capture_compiler_sources().map_err(|error| match error {
+                    crate::SourceInspectionError::Unavailable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnavailable(detail),
+                    crate::SourceInspectionError::Unreadable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnreadable(detail),
+                }),
+                tidepool_runtime::session::NameQuery {
+                    scope: tidepool_runtime::session::NameScope::PublicModule("Prelude".into()),
+                    namespace: tidepool_runtime::session::NameNamespace::Value,
+                    name: "id".into(),
+                },
+                tidepool_toolchain::compiler_world::PublicModuleQuestionKind::StructuredType,
+            ),
+        ).unwrap();
+        let completed_world =
+            tidepool_runtime::session::finish_admitted_world_inspection(settled_world).unwrap();
+        assert!(matches!(
+            completed_world.result(),
+            Ok(tidepool_runtime::session::InspectionResult::StructuredType(
+                Ok(_)
+            ))
+        ));
+        fixture_setup(&mut session, &fixture_source, |session| {
+            assert!(session.install_inspection_world_if_current(
+                &completed_world,
+                &fixture_reference,
+                &fixture_source,
+            ));
+        });
         let receiver_started = std::time::Instant::now();
         let previous_context = session.run_context();
         let execution = Arc::new(fixture_setup(&mut session, &fixture_source, |session| {
