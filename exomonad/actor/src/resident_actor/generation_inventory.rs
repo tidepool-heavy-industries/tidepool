@@ -139,6 +139,22 @@ pub(crate) async fn assert_owner_observation_contract(dependency: GenerationDepe
         })
         .with_source_dependency(&source);
     let pending = compiler_scope.admit_work().unwrap();
+    let neutral_scope = fixture.environment.runner.compiler_scope(
+        crate::resident_workbench::CompilerCloseOwner::Invocation {
+            work: neutral_custody.clone(),
+            control: None,
+        },
+    );
+    let neutral_pending = neutral_scope
+        .clone()
+        .with_source_dependency(&source)
+        .admit_work()
+        .unwrap();
+    let original_pending = neutral_scope.admit_continuation().unwrap();
+    original_pending
+        .bind_original_source(dependency.runtime_lease().clone())
+        .unwrap();
+    let unknown_pending = neutral_scope.admit_continuation().unwrap();
 
     let mut independent_session = PersistentSession::new(None, 1024);
     let independent_scope = independent_session
@@ -173,7 +189,7 @@ pub(crate) async fn assert_owner_observation_contract(dependency: GenerationDepe
     assert!(observed.routes.is_empty());
     assert_eq!(
         observed.invocations.len(),
-        2,
+        5,
         "inert custody and independent work do not block A"
     );
     assert!(
@@ -192,15 +208,43 @@ pub(crate) async fn assert_owner_observation_contract(dependency: GenerationDepe
                     observation.state,
                     GenerationInvocationState::Compiler {
                         registration: 0,
-                        close: crate::CompilerWorkClose::Pending
+                        close: crate::CompilerWorkClose::Pending,
+                        source: invocation_work::GenerationCompilerSource::Dependent,
                     }
                 )
         }),
         "the coordinator's physical compiler obligation remains visible"
     );
+    for registration in 0..3 {
+        assert!(
+            observed.invocations.iter().any(|observation| {
+                observation.reservation == neutral_custody.reservation_owner()
+                    && observation.state
+                        == GenerationInvocationState::Compiler {
+                            registration,
+                            close: crate::CompilerWorkClose::Pending,
+                            source: if registration == 2 {
+                                invocation_work::GenerationCompilerSource::Unclassified
+                            } else {
+                                invocation_work::GenerationCompilerSource::Dependent
+                            },
+                        }
+            }),
+            "compiler provenance belongs to each receipt, including mixed neutral custody"
+        );
+    }
+    assert!(
+        unknown_pending
+            .bind_original_source(dependency.runtime_lease().clone())
+            .is_err(),
+        "a fenced issuer cannot bind a late source selection"
+    );
     assert!(fixture.actor.terminal().requested_shutdown().is_none());
     drop(independent_source.claim().unwrap());
     pending.run(|_| ());
+    neutral_pending.run(|_| ());
+    original_pending.run(|_| ());
+    unknown_pending.run(|_| ());
     independent_pending.run(|_| ());
     fence.reopen().unwrap();
     for work in [

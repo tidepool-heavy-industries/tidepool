@@ -155,16 +155,9 @@ impl WorkbenchExecutions {
             // The exact compiled coordinator only exempts its continuation.
             // Its compiler and resource cleanup obligations are still observed.
             observed.extend(work.generation_observations(dependency, active));
-            let source_dependent = match work.source_observation() {
-                invocation_work::InvocationSourceObservation::Neutral => false,
-                invocation_work::InvocationSourceObservation::Unclassified => true,
-                invocation_work::InvocationSourceObservation::Source(source) => {
-                    matches!(
-                    source,
-                    crate::resident_workbench::generation_admission::SourceDependency::Unqualified
-                ) || source.depends_on(dependency)
-                }
-            };
+            let source_dependent = work
+                .source_observation()
+                .is_none_or(|origin| origin.is_unclassified() || origin.depends_on(dependency));
             if source_dependent {
                 for display in record.display_settlements.retirement_observations() {
                     let state = match display {
@@ -348,7 +341,7 @@ impl WorkbenchExecutions {
             root.matches(actor, &reservation)
                 && matches!(
                     root.source_observation(),
-                    invocation_work::InvocationSourceObservation::Neutral
+                    Some(crate::termination::ExecutionSourceOrigin::Neutral)
                 )
         }) {
             return root.clone();
@@ -394,7 +387,7 @@ impl WorkbenchExecutions {
     ) -> Option<Arc<InvocationWork>> {
         self.1.iter().find(|root| {
             root.matches(actor, reservation)
-                && matches!(root.source_observation(), invocation_work::InvocationSourceObservation::Source(selected) if selected == source)
+                && matches!(root.source_observation(), Some(crate::termination::ExecutionSourceOrigin::Actor(selected)) if selected == source)
         }).cloned()
     }
 
