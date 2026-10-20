@@ -9408,13 +9408,13 @@ impl PersistentSession {
             world.association.base.target.clone(),
         ];
         super::RuntimeLexicalScopeLease::with_source_leases(leases, |_| {
-            self.commit_notebook_generation_with_completion(
+            Ok(self.commit_notebook_generation_with_completion(
                 prepared,
                 publication,
                 on_visible,
                 continuing,
                 Some(world),
-            )
+            ))
         })?
     }
 
