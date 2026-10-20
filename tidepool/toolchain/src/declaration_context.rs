@@ -1044,6 +1044,13 @@ pub(crate) struct WorldPrimaryTypeInterfaces {
     pub(crate) changed_owners: Vec<ExactModuleIdentity>,
 }
 
+pub(crate) struct WorldPrimaryProgramSupport {
+    pub(crate) inputs: Arc<RequestCompilerInputs>,
+    pub(crate) context: Arc<ExactDeclarationContext>,
+    pub(crate) changed_owners: Vec<ExactModuleIdentity>,
+    pub(crate) promotion_qualifier_invocations: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NativeTransportAvailability {
     original: Arc<ArtifactEntry>,
@@ -2024,7 +2031,7 @@ impl RequestNativeAvailability {
 /// Native selection can own dependency bodies without issuing compiler namespace roles.
 /// Exact issuer bindings remain in the offers; this map records direct body availability.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct AdvertisedNativeOriginals(Arc<BTreeMap<ExactModuleIdentity, ArtifactId>>);
+pub(crate) struct AdvertisedNativeOriginals(Arc<imbl::OrdMap<ExactModuleIdentity, ArtifactId>>);
 
 impl AdvertisedNativeOriginals {
     pub(crate) fn receipt_original<'a>(
@@ -2574,7 +2581,7 @@ impl RequestCompilerInputs {
             demand,
             native_selection: NativeInputSelection {
                 availability,
-                advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
+                advertised: AdvertisedNativeOriginals(Arc::new(advertised.into_iter().collect())),
             },
             permission_delta,
             work,
@@ -2667,7 +2674,7 @@ impl NativeInputSelection {
         }
         Ok(Self {
             availability: normalized,
-            advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
+            advertised: AdvertisedNativeOriginals(Arc::new(advertised.into_iter().collect())),
         })
     }
 
@@ -3039,6 +3046,106 @@ impl RequestCompilerInputs {
             context,
             changed_owners,
         })
+    }
+
+    fn advance_program_support(
+        self: &Arc<Self>,
+        projection_context: &Arc<ExactDeclarationContext>,
+        incoming: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<WorldPrimaryProgramSupport, CompileError> {
+        let primary = self.world_primary_context.as_ref().ok_or_else(|| {
+            failure("program support delta requires the actual World primary owner")
+        })?;
+        if primary.owner.facts.producer == [0; 32]
+            || projection_context.owner.facts.producer != primary.owner.facts.producer
+        {
+            return Err(failure(
+                "program support delta differs from its primary producer",
+            ));
+        }
+        let delta = self.source_support.append_program_fragment(incoming)?;
+        let metadata = delta.support.program_fragment_metadata(
+            &self.metadata,
+            incoming,
+            &delta.changed_owners,
+        )?;
+        let mut advertised = self.native_selection.advertised.0.as_ref().clone();
+        let changed_direct = RequestNativeAvailability::from_issued_rows(
+            delta
+                .changed_owners
+                .iter()
+                .filter_map(|owner| {
+                    delta
+                        .support
+                        .projection()
+                        .snapshot_roles()
+                        .get(owner)
+                        .and_then(CompilerInputRole::original)
+                        .map(|id| {
+                            delta
+                                .support
+                                .native_availability()
+                                .issued_row(id)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    failure("program Original role lacks its issued native row")
+                                })
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )?;
+        let checked_direct = NativeInputSelection::from_normalized_rows(
+            delta.support.projection(),
+            &metadata,
+            delta.support.artifacts(),
+            changed_direct,
+            incoming.native_offers(),
+        )?;
+        for (owner, id) in checked_direct.advertised.0.iter() {
+            advertised.insert(owner.clone(), *id);
+        }
+        let native_selection = NativeInputSelection {
+            availability: delta.support.native_availability().clone(),
+            advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
+        };
+        let mut facts = projection_context.owner.facts.clone();
+        facts.compiler_support = delta.support.clone();
+        let context = Arc::new(ExactDeclarationContext::from_facts(facts));
+        let inputs = Arc::new(Self {
+            source_support: Arc::new(delta.support),
+            metadata,
+            native_selection,
+            original_sources: Arc::clone(&self.original_sources),
+            world_primary_context: Some(Arc::clone(&context)),
+        });
+        Ok(WorldPrimaryProgramSupport {
+            inputs,
+            context,
+            changed_owners: delta.changed_owners,
+            promotion_qualifier_invocations: delta.promotion_qualifier_invocations,
+        })
+    }
+
+    /// The runtime supplies the context issued for this same accepted facade.
+    /// The join owns its interface and input closure; its input context alone
+    /// does not contain that newly issued facade.
+    pub(crate) fn with_declaration_projection(
+        self: &Arc<Self>,
+        joined: &Arc<crate::declaration_join::AcceptedJoin>,
+        projection_context: &Arc<ExactDeclarationContext>,
+    ) -> Result<WorldPrimaryProgramSupport, CompileError> {
+        let owner = identity(joined.interface().unit(), joined.interface().module());
+        let incoming = joined.compiler_source_support();
+        if joined.toolchain_identity_sha256() != projection_context.owner.facts.producer
+            || !projection_context
+                .compiler_source_support()
+                .same_interface_binding(incoming, &owner, joined.artifact_id())
+        {
+            return Err(failure(
+                "declaration projection differs from its accepted facade",
+            ));
+        }
+        self.advance_program_support(projection_context, incoming)
     }
 
     pub(crate) fn shared_compiler_source_support(
@@ -20142,7 +20249,7 @@ mod tests {
                     .map(|(id, row)| (*id, Arc::clone(row)))
                     .collect(),
             ),
-            advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
+            advertised: AdvertisedNativeOriginals(Arc::new(advertised.into_iter().collect())),
         })
     }
 

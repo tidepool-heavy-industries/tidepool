@@ -6347,6 +6347,9 @@ pub(crate) struct RetainedArtifactMetadata {
     pub entries: imbl::OrdMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
     pub artifacts: imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
     pub ambiguous_native_owners: Arc<BTreeSet<ExactModuleIdentity>>,
+    // Deterministic fallback for owners with multiple native carriers. This is
+    // catalog metadata, not compiler role selection or native permission.
+    interface_representatives: imbl::OrdMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
     dependencies: imbl::OrdSet<(ArtifactId, ArtifactId, ArtifactDependency)>,
     pub(crate) selected_native_groups: Arc<BTreeSet<NativeGroupKey>>,
 }
@@ -6787,6 +6790,10 @@ impl ArtifactView {
                 }
                 artifacts.insert(id, Arc::clone(entry));
             }
+            let interface_representatives = entries
+                .iter()
+                .map(|(owner, id)| (owner.clone(), Arc::clone(&artifacts[id])))
+                .collect();
             let mut ambiguous_native_owners = BTreeSet::new();
             for (owner, ids) in natives {
                 if ids.len() == 1 {
@@ -6807,6 +6814,7 @@ impl ArtifactView {
                 artifacts: artifacts.into_iter().collect(),
                 dependencies,
                 ambiguous_native_owners: Arc::new(ambiguous_native_owners),
+                interface_representatives,
                 selected_native_groups: Arc::new(selected_native_groups),
             })
         }))

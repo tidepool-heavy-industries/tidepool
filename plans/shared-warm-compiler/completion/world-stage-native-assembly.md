@@ -226,3 +226,71 @@ full compiled closure; it is not a cumulative `AcceptedJoin` facade. The
 runtime join owner must supply that authority. A separate open native boundary
 is how a new explicit Original role affects prior optional Full qualification;
 no full retained-native census or unchecked promotion is accepted as its repair.
+
+
+## Keyed program-support checkpoint
+
+The shared custody append now accepts exact admitted bindings and opaque native
+offers. It follows their actual issuing scope references and direct ancestors,
+merges same-payload custody through the existing owner, and retains only the
+native offer's actual artifact carriers as passive custody. It does not add
+Group roots. TYPE insertion delegates to this same mechanism.
+
+`CompilerSourceSupport::append_program_fragment` updates only incoming admitted
+roles, exact canonical/Original binding pairs, native availability rows and
+recorded input choices. It returns the changed owner keys. An actual existing
+InterfaceOnly-to-Original promotion explicitly invokes the established native
+qualifier once. Fresh-owner additions and canonical-only insertion do not call
+that qualifier. Prior exact historical contribution graphs remain with their
+issuers. The native offer reference array still copies its retained handles;
+that residual is separate from selected-role and metadata work. Existing live
+view registry cleanup is retained.
+
+The same `RetainedArtifactMetadata` now remembers its greatest-ID non-native
+representatives during the existing cold metadata traversal. That category
+includes canonical interfaces, value interfaces and lexical joins. Keyed
+updates preserve the existing unique-native overlay and ambiguity fallback
+without scanning retained payloads. These catalog representatives never issue
+compiler roles or native permission.
+
+`RequestCompilerInputs::with_declaration_projection` accepts the actual
+`AcceptedJoin` and its associated issued projection context. It checks the
+facade's exact canonical binding, consumes the join's existing compiler support,
+and returns coherent inputs/context/changed owners plus the promotion qualifier
+count. The resulting context retains the supplied lexical, instance and
+template facts. Only changed Original roles get direct advertised native roots;
+new private dependency custody does not become a direct root. The existing
+advertised-owner map now shares persistent structure. The engine owns runtime
+receipt/context correlation, materialization and atomic adoption.
+
+At parent `5a36bf7391` plus this delta, command
+`swarm-build just test-lib tidepool-toolchain --exact artifact_inventory::compiler_projection::tests::program_original_promotion_qualifies_once_and_keeps_issued_dependencies --exact artifact_inventory::compiler_projection::tests::program_fragment_metadata_matches_cold_multiversion_representatives_and_releases --exact artifact_inventory::compiler_projection::tests::ordinary_native_fact_successors_encode_only_changed_facts --expected-count 3 --output-dir /srv/swarm/evidence/inanna/world-stage-program-inputs-compile-20261020 --retain-artifacts`
+compiled production and cfg consumers and passed 3/3, exit 0, build
+`539f6e9d-2015-4a0e-ba89-c8caa1981c1a`. Executed Rust SHA:
+`051492dcac960c7f9017651208f0ffa6855a9ba1d89dfb368351462ef9380638`.
+Controls compare a retained prior snapshot and the general merge oracle,
+check exact retained issuing offers/dependency carriers, compare metadata to
+cold recomputation in both native insertion orders, and verify that the prior
+snapshot does not retain the new payload after the updated metadata is dropped.
+The existing TYPE fixed-work control also passed in the preceding 4/4 run
+`ce5d8362-f1eb-46a0-9e52-31311f26a2dd`.
+
+The ordered stage fold and a genuine mixed declaration-to-later-use consumer
+remain pending. The new AcceptedJoin input hook is compiled but has not yet
+been exercised through the runtime's actual declaration adoption consumer.
+The selected input-decision owner is receiving a separate live-acquisition
+repair from its owner; program insertion must use that owner's merge helper
+when it lands, preserving those same live receipts as well as recorded facts.
+
+The inherited planned-original negative case was separately observed with its
+oracle unchanged. `planned_original_history_tests.rs` emits independent groups
+7 and 11 in one selected Original, then deliberately rebounds it without the
+issued Full closure. The current issuer first refuses group 11 with
+`NativeGroupUnavailable`/`InputNoCompatibleCandidate`; the test hardcodes group
+7. Matched v26 run `94452c0f-8785-4ecb-9f10-df9217ab28d9` executed that case and
+failed its assertion, Rust SHA
+`5786a750a20418095e77d7baf2900fb373dd97901d552e05bda337a3d7b35909`.
+The exact diagnostic is retained under
+`/srv/swarm/evidence/inanna/world-stage-matched-promotion-diagnosis-20261020`.
+Independent oracle review is separate; no expected refusal or product
+permission was weakened here.
