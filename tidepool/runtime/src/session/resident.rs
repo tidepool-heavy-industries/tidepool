@@ -3772,6 +3772,34 @@ where
         self.state
             .prepare_notebook_generation(scope, actor, expected, references, source)
     }
+    pub fn capture_notebook_generation_world(
+        &self,
+        prepared: &super::PreparedNotebookGeneration,
+        source: &Arc<super::RuntimeLexicalScopeLease>,
+    ) -> Result<super::AdmittedInspectionWorld, SessionError> {
+        self.state.capture_notebook_generation_world(prepared, source, |id| {
+            self.hidden_host_bindings.contains_key(&id)
+        })
+    }
+
+    pub fn commit_notebook_generation_with_world(
+        &mut self,
+        prepared: super::PreparedNotebookGenerationWithWorld,
+        publication: &Arc<super::PublicationDecision>,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        self.state.commit_notebook_generation_with_world(prepared, publication, on_visible)
+    }
+
+    pub fn commit_notebook_generation_with_world_continuing(
+        &mut self,
+        prepared: super::PreparedNotebookGenerationWithWorld,
+        publication: &Arc<super::PublicationDecision>,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        self.state.commit_notebook_generation_with_world_continuing(prepared, publication, on_visible)
+    }
+
     pub fn commit_notebook_generation(
         &mut self,
         prepared: super::PreparedNotebookGeneration,

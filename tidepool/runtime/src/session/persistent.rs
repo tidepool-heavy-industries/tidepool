@@ -321,6 +321,45 @@ impl CompileViewKey {
     }
 }
 
+impl super::PreparedNotebookGeneration {
+    fn prospective_compiler_key(&self) -> Result<CompileViewKey, SessionError> {
+        let mut key = self
+            .compiler_key
+            .clone()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        key.public_epoch = self.epoch;
+        Ok(key)
+    }
+
+    fn validate_compiler_world(
+        &self,
+        completed: &super::CompletedCompilerWorld,
+    ) -> Result<(), SessionError> {
+        let base = &completed.association.base;
+        if !self.owner_stamp.matches(&base.owner)
+            || base.epoch != base.owner.epoch()
+            || base.scope != self.scope
+            || base.key != self.prospective_compiler_key()?
+            || base.source.as_ref() != &self.next.references.source
+            || !Arc::ptr_eq(&base.original_source, &base.target)
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        Ok(())
+    }
+
+    pub fn with_compiler_world(
+        self,
+        completed: super::CompletedCompilerWorld,
+    ) -> Result<super::PreparedNotebookGenerationWithWorld, SessionError> {
+        self.validate_compiler_world(&completed)?;
+        Ok(super::PreparedNotebookGenerationWithWorld {
+            prepared: self,
+            world: Arc::new(completed),
+        })
+    }
+}
+
 pub(super) struct CachedCompileView {
     key: Option<CompileViewKey>,
     view: SessionCompileView,
@@ -9127,6 +9166,7 @@ impl PersistentSession {
         let staged = staged
             .with_compiler_context(context)
             .map_err(|e| super::recovery::graph_error(&state.path, e))?;
+        let compiler_key = self.compile_view_key_in(scope);
         Ok(super::PreparedNotebookGeneration {
             owner_stamp: super::OwnerStamp::capture(self.admission_owner()),
             domain: state.domain_id,
@@ -9138,7 +9178,101 @@ impl PersistentSession {
             next,
             expected,
             source,
+            compiler_key,
         })
+    }
+
+    /// Capture the prospective World from this owner's exact staged B facts.
+    pub(super) fn capture_notebook_generation_world(
+        &self,
+        prepared: &super::PreparedNotebookGeneration,
+        original_source: &Arc<super::RuntimeLexicalScopeLease>,
+        hidden: impl Fn(tidepool_repr::SessionVarId) -> bool,
+    ) -> Result<super::AdmittedInspectionWorld, SessionError> {
+        if !Arc::ptr_eq(&self.source_lease_in(prepared.scope)?, original_source) {
+            return Err(super::SourceAdmissionError::ForeignTransaction.into());
+        }
+        if !prepared.owner_stamp.matches(self.admission_owner())
+            || self.public_visibility_snapshot_in(prepared.scope).as_ref()
+                != Some(&prepared.snapshot)
+            || self.compile_view_key_in(prepared.scope).as_ref() != prepared.compiler_key.as_ref()
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        if let Some(source) = &prepared.source {
+            tidepool_toolchain::timing::record_host_work(
+                tidepool_toolchain::timing::HostWorkCounter::ColdBootstrap,
+                1,
+            );
+            return Ok(super::inspection::AdmittedInspectionWorld {
+                base: super::inspection::InspectionWorldBase {
+                    scope: prepared.scope,
+                    key: prepared.prospective_compiler_key()?,
+                    owner: self.admission_owner().clone(),
+                    epoch: self.admission_owner().epoch(),
+                    source: Arc::new(prepared.next.references.source.clone()),
+                    original_source: original_source.clone(),
+                    target: original_source.clone(),
+                },
+                inputs: super::inspection::InspectionWorldInputs::Cold {
+                    primary: Some(source.context.exact().clone()),
+                    bindings: tidepool_toolchain::compiler_world::CompilerWorldBindings::from_published_bindings(
+                        prepared.scope.0,
+                        Vec::new(),
+                    )?,
+                },
+            });
+        }
+        let mut admitted = self.capture_inspection_world_in(
+            prepared.scope,
+            &prepared.next.references.source,
+            original_source,
+            hidden,
+        )?;
+        admitted.base.key = prepared.prospective_compiler_key()?;
+        Ok(admitted)
+    }
+
+    /// Publication consumes the same durable candidate that acquired its World.
+    pub fn commit_notebook_generation_with_world(
+        &mut self,
+        prepared: super::PreparedNotebookGenerationWithWorld,
+        publication: &Arc<super::PublicationDecision>,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        self.commit_notebook_generation_world_mode(prepared, publication, on_visible, false)
+    }
+
+    pub fn commit_notebook_generation_with_world_continuing(
+        &mut self,
+        prepared: super::PreparedNotebookGenerationWithWorld,
+        publication: &Arc<super::PublicationDecision>,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        self.commit_notebook_generation_world_mode(prepared, publication, on_visible, true)
+    }
+
+    fn commit_notebook_generation_world_mode(
+        &mut self,
+        prepared: super::PreparedNotebookGenerationWithWorld,
+        publication: &Arc<super::PublicationDecision>,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+        continuing: bool,
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        let super::PreparedNotebookGenerationWithWorld { prepared, world } = prepared;
+        let leases = [
+            world.association.base.original_source.clone(),
+            world.association.base.target.clone(),
+        ];
+        super::RuntimeLexicalScopeLease::with_source_leases(leases, |_| {
+            self.commit_notebook_generation_with_completion(
+                prepared,
+                publication,
+                on_visible,
+                continuing,
+                Some(world),
+            )
+        })?
     }
 
     /// The caller holds its generation issuance fence through this operation.
@@ -9149,7 +9283,13 @@ impl PersistentSession {
         publication: &Arc<super::PublicationDecision>,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.commit_notebook_generation_with_completion(prepared, publication, on_visible, false)
+        self.commit_notebook_generation_with_completion(
+            prepared,
+            publication,
+            on_visible,
+            false,
+            None,
+        )
     }
 
     /// Commit an intermediate generation and keep the same execution decision
@@ -9161,7 +9301,13 @@ impl PersistentSession {
         publication: &Arc<super::PublicationDecision>,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.commit_notebook_generation_with_completion(prepared, publication, on_visible, true)
+        self.commit_notebook_generation_with_completion(
+            prepared,
+            publication,
+            on_visible,
+            true,
+            None,
+        )
     }
 
     fn commit_notebook_generation_with_completion(
@@ -9170,7 +9316,18 @@ impl PersistentSession {
         publication: &Arc<super::PublicationDecision>,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
         continuing: bool,
+        compiler_world: Option<Arc<super::CompletedCompilerWorld>>,
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        if let Some(world) = &compiler_world {
+            prepared.validate_compiler_world(world)?;
+            world
+                .cancellation
+                .checkpoint()
+                .map_err(tidepool_toolchain::CompileError::from)?;
+            if self.compile_view_key_in(prepared.scope).as_ref() != prepared.compiler_key.as_ref() {
+                return Err(SessionError::WrongPublicManifestTicket);
+            }
+        }
         let super::PreparedNotebookGeneration {
             owner_stamp,
             domain: issued_domain,
@@ -9182,6 +9339,7 @@ impl PersistentSession {
             next,
             expected,
             source,
+            compiler_key: _,
         } = prepared;
         if !owner_stamp.matches(self.admission_owner())
             || self.public_visibility_snapshot_in(scope).as_ref() != Some(&snapshot)
@@ -9283,6 +9441,12 @@ impl PersistentSession {
             scope,
             self.admission_owner().epoch(),
         );
+        if let Some(world) = &compiler_world {
+            world
+                .cancellation
+                .checkpoint()
+                .map_err(tidepool_toolchain::CompileError::from)?;
+        }
         let Some(claim) = publication.claim_commit() else {
             return Ok(super::durable_owner_disposition(
                 super::StoreDisposition::Refused(super::StoreRefusal::StaleEpoch),
@@ -9344,6 +9508,13 @@ impl PersistentSession {
                 lib.durable_public_scopes = scopes;
                 lib.tips = tips;
                 self.public_visibility_epochs.insert(scope, epoch);
+                if let Some(world) = compiler_world {
+                    self.lib_mut()
+                        .tips
+                        .get_mut(&scope)
+                        .expect("committed notebook scope")
+                        .inspection_world = Some(world.association.clone());
+                }
                 on_visible(readiness.clone());
                 match receipt.installed_blocking() {
                     Ok(context) => {
