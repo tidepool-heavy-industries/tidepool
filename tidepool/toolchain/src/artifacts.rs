@@ -882,217 +882,288 @@ pub fn prepare_world_cell_program(
         SelectedSessionValueOwners::capture(names.iter().map(std::ffi::OsStr::new))?;
     let produced_outputs =
         checked_cell::CheckedValueInputs::capture_world_produced_types(&program, &mut validation)?;
-    let stage = program.stages().first().ok_or_else(|| {
-        CompileError::ExtractFailed("World output lacks its checked stage".into())
-    })?;
-    let stage_root = root.join(
-        stage
-            .outputs()
-            .source_receipt()
-            .relative()
-            .parent()
-            .ok_or_else(|| {
-                CompileError::ExtractFailed("World stage source output has no namespace".into())
-            })?,
-    );
-    let decoded = crate::declaration_context::decode_world_source_receipt(&program, 0)?;
-    let (packages_path, packages) = decoded.package_imports();
-    validation
-        .record_captured_bytes(packages_path, packages)
-        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-    let raw = certified_products::ParsedModuleProducts::decode_with_operation(
-        checked_cell::world_output_bytes(&program, stage.outputs().module_products().relative())?,
-        packages,
-        validation.inventory.clone(),
-    )
-    .map_err(compiler_evidence_failure)?;
-    let receipt = certified_products::decode_segment_originals_with_operation(
-        checked_cell::world_output_bytes(
-            &program,
-            stage.outputs().certified_products().relative(),
-        )?,
-        &stage_root,
-        &validation.inventory,
-    )
-    .map_err(compiler_evidence_failure)?;
-    let mut segment = decoded.issue_segment_originals(
-        receipt,
-        raw,
-        None,
-        &selected_values,
-        Some(&produced_outputs),
-        &mut validation,
-        crate::declaration_context::WorldProgramContinuation::begin(&program),
-    )?;
-    let checked = checked_cell::admit_world_cell(
-        program.clone(),
-        &[(segment.source(), segment.source_text())],
-        segment.aliases(),
-        BTreeMap::new(),
-    )?;
-    let mut artifacts =
-        crate::declaration_context::bind_certified_segment_artifacts_with_validation(
-            &segment.originals,
-            segment.artifacts(),
-            &mut validation,
-        )?;
-    let mut context = program.primary_context().clone();
-    let mut native_prefix: Option<Arc<SealedTurnProducts>> = None;
+    let mut continuation = crate::declaration_context::WorldProgramContinuation::begin(&program);
+    let mut stage_sources = Vec::new();
+    let mut planned_declarations = BTreeMap::new();
     let mut outputs = BTreeMap::new();
-    let mut prepared_items = BTreeMap::new();
     let mut item_contexts = BTreeMap::new();
-    for (index, slot) in program.reservation().slots().iter().enumerate() {
+    for stage in program.stages() {
         crate::host_work::checkpoint()?;
-        let (generation, observation) = match slot {
+        let first = *stage
+            .ordinals()
+            .first()
+            .ok_or_else(|| CompileError::ExtractFailed("World stage has no item".into()))?;
+        let end = stage.ordinals().last().expect("nonempty stage") + 1;
+        let original = stage.identity().original_owner().is_some();
+        let stage_produced =
+            produced_outputs.for_segment(first..if original { first } else { end })?;
+        let stage_root = root.join(
+            stage
+                .outputs()
+                .source_receipt()
+                .relative()
+                .parent()
+                .ok_or_else(|| {
+                    CompileError::ExtractFailed("World stage source output has no namespace".into())
+                })?,
+        );
+        let decoded =
+            crate::declaration_context::decode_world_source_receipt(&program, stage.index())?;
+        let (packages_path, packages) = decoded.package_imports();
+        validation
+            .record_captured_bytes(packages_path, packages)
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let raw = certified_products::ParsedModuleProducts::decode_with_operation(
+            checked_cell::world_output_bytes(
+                &program,
+                stage.outputs().module_products().relative(),
+            )?,
+            packages,
+            validation.inventory.clone(),
+        )
+        .map_err(compiler_evidence_failure)?;
+        let receipt = certified_products::decode_segment_originals_with_operation(
+            checked_cell::world_output_bytes(
+                &program,
+                stage.outputs().certified_products().relative(),
+            )?,
+            &stage_root,
+            &validation.inventory,
+        )
+        .map_err(compiler_evidence_failure)?;
+        let mut segment = decoded.issue_segment_originals(
+            receipt,
+            raw,
+            None,
+            &selected_values,
+            Some(&stage_produced),
+            &mut validation,
+            continuation,
+        )?;
+        if original {
+            let planned = segment.planned_declaration(&program, stage)?;
+            let view = segment
+                .originals
+                .authored_artifacts()
+                .map_err(compiler_evidence_failure)?
+                .clone();
+            let selection = segment.originals.source_selection().clone();
+            let context =
+                segment.admit_program_support(&program, &view, &stage_produced, &selection)?;
+            item_contexts.insert(
+                first,
+                crate::checked_cell::CellProgramItemContext {
+                    context,
+                    source_lexical: segment.source_lexical().to_vec(),
+                },
+            );
+            planned_declarations.insert(first, planned);
+        } else {
+            let mut artifacts =
+                crate::declaration_context::bind_certified_segment_artifacts_with_validation(
+                    &segment.originals,
+                    segment.artifacts(),
+                    &mut validation,
+                )?;
+            let mut native_prefix: Option<Arc<SealedTurnProducts>> = None;
+            for &index in stage.ordinals() {
+                let slot = &program.reservation().slots()[index];
+                crate::host_work::checkpoint()?;
+                let (generation, _observation) = match slot {
+                    CheckedPlannedCellSlot::Bind { value } => (*value, None),
+                    CheckedPlannedCellSlot::Expression {
+                        capture,
+                        observation_name,
+                    } => (*capture, Some(observation_name.as_str())),
+                    CheckedPlannedCellSlot::Prologue { .. }
+                    | CheckedPlannedCellSlot::Declaration { .. } => {
+                        return Err(CompileError::ExtractFailed(
+                            "World declaration output lacks its original declaration certificate"
+                                .into(),
+                        ));
+                    }
+                };
+                let produced = produced_outputs.for_item(index)?;
+                let item = program.item(index).ok_or_else(|| {
+                    CompileError::ExtractFailed("World output lacks its reserved item".into())
+                })?;
+                let prepared_path = item
+                    .executable()
+                    .ok_or_else(|| {
+                        CompileError::ExtractFailed(
+                            "World original has no executable manifest".into(),
+                        )
+                    })?
+                    .manifest()
+                    .keys()
+                    .find(|path| {
+                        path.to_str()
+                            .is_some_and(|path| path.ends_with(".prepared.cbor"))
+                    })
+                    .ok_or_else(|| {
+                        CompileError::ExtractFailed("World item lacks its prepared program".into())
+                    })?;
+                let directory = root.join(format!("item-{index}"));
+                let relative = PathBuf::from(format!("item-{index}"));
+                let bytes =
+                    checked_cell::world_output_bytes(&program, &relative.join(prepared_path))?;
+                validation
+                    .inventory
+                    .charge(bytes.len().checked_mul(64).ok_or_else(|| {
+                        CompileError::ExtractFailed(
+                            "World prepared program accounting overflow".into(),
+                        )
+                    })?)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                let target = Arc::new(tidepool_repr::execution_schema::parse_program(
+                    bytes,
+                    &crate::prepared_artifact::production_requirements()?,
+                    DecodeLimits::default(),
+                )?);
+                let item_receipt = certified_products::decode_segment_item_with_operation(
+                    checked_cell::world_output_bytes(
+                        &program,
+                        &relative.join("certified-products.cbor"),
+                    )?,
+                    &validation.inventory,
+                )
+                .map_err(compiler_evidence_failure)?;
+                let (certified, globals, packages) = segment
+                    .originals
+                    .select_item(
+                        item_receipt,
+                        &target,
+                        &selected_values,
+                        Some(&produced),
+                        &mut validation,
+                    )
+                    .map_err(compiler_evidence_failure)?;
+                let generated = segment.source().generated_source_owner()?;
+                let entry = checked_cell::CheckedTypedEntry::issue_world_item(
+                    &program,
+                    index,
+                    &target,
+                    &generated,
+                    &certified.recovery_products,
+                )?;
+                let prior_view = native_prefix
+                    .as_ref()
+                    .map_or_else(|| segment.artifacts(), |prefix| prefix.artifact_view());
+                let prior_groups = native_prefix.as_ref().map_or_else(
+                    || segment.groups(),
+                    |prefix| prefix.certified_groups.as_ref(),
+                );
+                let admitted = admit_native_target_products(
+                    *program.producer_sha256(),
+                    &target,
+                    &certified,
+                    &globals,
+                    &segment_package_availability(&segment.originals, &packages),
+                    Some(&segment.originals),
+                    Some(entry),
+                    None,
+                    &[],
+                    Some(SegmentItemDemand {
+                        selection: &mut artifacts,
+                        view: prior_view,
+                        groups: prior_groups,
+                    }),
+                    &mut validation,
+                )?;
+                let output = crate::declaration_context::IssuedOriginalOutput::issue(
+                    certified.source_selection.clone(),
+                    admitted.target.artifacts().clone(),
+                )?;
+                let execution = segment.original_execution_context(output.compiler_inputs())?;
+                segment.retain_private_output(&output);
+                let products = Arc::new(SealedTurnProducts {
+                    original: SealedOriginalEvidence::Exact { output, execution },
+                    target: admitted.target,
+                    original_compile_input: None,
+                    checked: None,
+                    certified_groups: admitted.certified_groups,
+                    recovery_products: certified.recovery_products,
+                    retained_core_products: certified.retained_core_products,
+                    package_interfaces: admitted.package_interfaces,
+                });
+                let output = ProgramNativeOutput {
+                    directory,
+                    target,
+                    turn: checked_cell::world_output_bytes(&program, &relative.join("turn.cbor"))?
+                        .clone(),
+                    metadata: checked_cell::world_output_bytes(
+                        &program,
+                        &relative.join("meta.cbor"),
+                    )?
+                    .clone(),
+                    products: Some(products.clone()),
+                    source: segment.source_text().to_owned(),
+                };
+                let mut context = segment.admit_program_support(
+                    &program,
+                    products.artifact_view(),
+                    &produced,
+                    products.source_selection(),
+                )?;
+                if !item.binders().is_empty() {
+                    context = segment
+                        .admit_value_interface(produced.current_interface(generation)?.clone())?;
+                }
+                item_contexts.insert(
+                    index,
+                    crate::checked_cell::CellProgramItemContext {
+                        context: context.clone(),
+                        source_lexical: segment.source_lexical().to_vec(),
+                    },
+                );
+                outputs.insert(index, output);
+                native_prefix = Some(products);
+            }
+        }
+        let (next, source) = segment.finish();
+        continuation = next;
+        stage_sources.push(source);
+    }
+    let aliases = stage_sources
+        .iter()
+        .flat_map(|source| source.aliases.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let sources = stage_sources
+        .iter()
+        .map(|source| (&source.source, source.text.as_str()))
+        .collect::<Vec<_>>();
+    let checked =
+        checked_cell::admit_world_cell(program.clone(), &sources, &aliases, planned_declarations)?;
+    let mut prepared_items = BTreeMap::new();
+    for (&index, output) in &outputs {
+        let (generation, observation) = match &program.reservation().slots()[index] {
             CheckedPlannedCellSlot::Bind { value } => (*value, None),
             CheckedPlannedCellSlot::Expression {
                 capture,
                 observation_name,
             } => (*capture, Some(observation_name.as_str())),
-            CheckedPlannedCellSlot::Prologue { .. }
-            | CheckedPlannedCellSlot::Declaration { .. } => {
+            _ => {
                 return Err(CompileError::ExtractFailed(
-                    "World declaration output lacks its original declaration certificate".into(),
-                ));
+                    "World original owns an executable output".into(),
+                ))
             }
         };
-        let produced = produced_outputs.for_item(index)?;
-        let item = program.item(index).ok_or_else(|| {
-            CompileError::ExtractFailed("World output lacks its reserved item".into())
-        })?;
-        let prepared_path = item
-            .executable()
-            .ok_or_else(|| {
-                CompileError::ExtractFailed("World original has no executable manifest".into())
-            })?
-            .manifest()
-            .keys()
-            .find(|path| {
-                path.to_str()
-                    .is_some_and(|path| path.ends_with(".prepared.cbor"))
-            })
-            .ok_or_else(|| {
-                CompileError::ExtractFailed("World item lacks its prepared program".into())
-            })?;
-        let directory = root.join(format!("item-{index}"));
-        let relative = PathBuf::from(format!("item-{index}"));
-        let bytes = checked_cell::world_output_bytes(&program, &relative.join(prepared_path))?;
-        validation
-            .inventory
-            .charge(bytes.len().checked_mul(64).ok_or_else(|| {
-                CompileError::ExtractFailed("World prepared program accounting overflow".into())
-            })?)
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        let target = Arc::new(tidepool_repr::execution_schema::parse_program(
-            bytes,
-            &crate::prepared_artifact::production_requirements()?,
-            DecodeLimits::default(),
-        )?);
-        let item_receipt = certified_products::decode_segment_item_with_operation(
-            checked_cell::world_output_bytes(&program, &relative.join("certified-products.cbor"))?,
-            &validation.inventory,
-        )
-        .map_err(compiler_evidence_failure)?;
-        let (certified, globals, packages) = segment
-            .originals
-            .select_item(
-                item_receipt,
-                &target,
-                &selected_values,
-                Some(&produced),
-                &mut validation,
-            )
-            .map_err(compiler_evidence_failure)?;
-        let generated = segment.source().generated_source_owner()?;
-        let entry = checked_cell::CheckedTypedEntry::issue_world_item(
-            &program,
+        prepared_items.insert(
             index,
-            &target,
-            &generated,
-            &certified.recovery_products,
-        )?;
-        let prior_view = native_prefix
-            .as_ref()
-            .map_or_else(|| segment.artifacts(), |prefix| prefix.artifact_view());
-        let prior_groups = native_prefix.as_ref().map_or_else(
-            || segment.groups(),
-            |prefix| prefix.certified_groups.as_ref(),
+            checked_cell::PreparedCheckedItemOutput::capture(
+                &checked.item(index)?,
+                generation,
+                observation,
+                true,
+                output,
+                checked_cell::PreparedItemOrigin::World(&program),
+            )?,
         );
-        let admitted = admit_native_target_products(
-            *program.producer_sha256(),
-            &target,
-            &certified,
-            &globals,
-            &segment_package_availability(&segment.originals, &packages),
-            Some(&segment.originals),
-            Some(entry),
-            None,
-            &[],
-            Some(SegmentItemDemand {
-                selection: &mut artifacts,
-                view: prior_view,
-                groups: prior_groups,
-            }),
-            &mut validation,
-        )?;
-        let output = crate::declaration_context::IssuedOriginalOutput::issue(
-            certified.source_selection.clone(),
-            admitted.target.artifacts().clone(),
-        )?;
-        let execution = segment.original_execution_context(output.compiler_inputs())?;
-        let products = Arc::new(SealedTurnProducts {
-            original: SealedOriginalEvidence::Exact { output, execution },
-            target: admitted.target,
-            original_compile_input: None,
-            checked: None,
-            certified_groups: admitted.certified_groups,
-            recovery_products: certified.recovery_products,
-            retained_core_products: certified.retained_core_products,
-            package_interfaces: admitted.package_interfaces,
-        });
-        let output = ProgramNativeOutput {
-            directory,
-            target,
-            turn: checked_cell::world_output_bytes(&program, &relative.join("turn.cbor"))?.clone(),
-            metadata: checked_cell::world_output_bytes(&program, &relative.join("meta.cbor"))?
-                .clone(),
-            products: Some(products.clone()),
-            source: segment.source_text().to_owned(),
-        };
-        let support = program_support_artifacts(products.artifact_view(), &generated)?;
-        context = segment.admit_program_support(
-            context,
-            &support,
-            &produced,
-            products.source_selection(),
-        )?;
-        if !item.binders().is_empty() {
-            context =
-                Arc::new((*context).clone().extend_program_value_interface(
-                    produced.current_interface(generation)?.clone(),
-                )?);
-        }
-        let prepared = checked_cell::PreparedCheckedItemOutput::capture(
-            &checked.item(index)?,
-            generation,
-            observation,
-            true,
-            &output,
-            checked_cell::PreparedItemOrigin::World(&program),
-        )?;
-        prepared_items.insert(index, prepared);
-        item_contexts.insert(
-            index,
-            crate::checked_cell::CellProgramItemContext {
-                context: context.clone(),
-                source_lexical: segment.source_lexical().to_vec(),
-            },
-        );
-        outputs.insert(index, output);
-        native_prefix = Some(products);
     }
     let slots = program.reservation().slots().to_vec();
-    drop(segment);
+    drop(continuation);
     Ok(PreparedCellProgram {
         root_owner: Some(program.directory().clone()),
         checked,

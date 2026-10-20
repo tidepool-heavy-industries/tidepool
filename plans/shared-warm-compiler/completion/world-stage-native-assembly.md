@@ -332,3 +332,55 @@ three supplied roles with zero view queries, graph visits or metadata handle
 copies, then compares against the independent metadata entry point. It also
 refuses a crossed selected owner and missing required payload.
 Command: `swarm-build just test-lib tidepool-toolchain --exact certified_products::tests::source_support_projection_uses_only_issued_keys_and_keeps_all_interface_kinds --exact certified_products::tests::physical_native_issuance_survives_item_type_projection_without_future_demand --expected-count 2 --output-dir /srv/swarm/evidence/inanna/world-stage-keyed-source-projection-20261020 --retain-artifacts`.
+
+
+## Ordered stage consumer checkpoint
+
+The World consumer folds the checked stage table in order. It decodes each
+stage's named receipt and products once, carries one move-only prefix containing
+its context, inputs, program source state and same private Original input, and
+retains each source admission until the common checked-cell adapter validates
+the complete declaration map. Original stages use the same issued physical
+view, Original output and common declaration certifier; executable stages reuse
+the existing target/native issuer. Each item retains its own resulting prefix.
+No finite request or executable placeholder is created for an Original.
+
+The World prefix no longer calls the finite support continuation's broad
+metadata rebuild. It validates the actual supplied role rows, appends their
+keyed support, and updates the same persistent lexical owner. The common source
+edge filter is shared with existing finite callers. Program input decisions
+merge through their owner's selected-acquisition helper, retaining live custody
+separately from recorded facts. Native offer reference-array copying, the
+existing view-registry cleanup, declaration certificate closure work, and
+per-item lexical slice observations remain explicit costs.
+
+At parent `7d756fd749` plus this delta, cfg compilation and three controls passed
+3/3, exit 0, build `2c817573-b5fe-4954-8e3a-1e90e2e3a78c`. Rust SHA:
+`b9ff8fe576a0839a80eb4a0873b2eaaaa2c1b412469a6e124d24e21798a594d7`.
+The lexical append control compares cold recomputation and retained old facts
+at 1/32/128 rows, checks equal-owner sharing, and refuses changed adjacency.
+The keyed source closure compares the general policy oracle with authentic
+session implementation kinds and observes one adjacency lookup despite
+unrelated baseline growth. The existing native snapshot isolation control
+remains unchanged. Command: `swarm-build just test-lib tidepool-toolchain --exact exact_context::tests::lexical_append_shares_unchanged_facts_and_refuses_changed_adjacency --exact declaration_join::tests::keyed_source_closure_matches_general_policy_without_baseline_walk --exact declaration_context::tests::native_availability_delta_preserves_snapshot_and_untouched_row_owners --expected-count 3 --jobs 1 --timeout 300 --output-dir /srv/swarm/evidence/inanna/world-stage-ordered-fold-compile-fixed-20261020 --retain-artifacts`.
+
+A local formatting procedure caused the first ordered-fold compile to fail
+(`c64097d9`): selecting individual formatting edits by text alignment paired
+repeated blocks incorrectly during the large owned function's reindent. The
+complete formatted function was retained and correct. Replacing only that
+wholly owned function from the retained copy repaired the source; the following
+compile and controls above passed. For an owned function with large repeated
+blocks, replace the complete function from the formatter output and review its
+boundaries rather than selecting diff alignment edits. This is a local tooling
+finding, not a compiler-product refusal.
+
+Mixed declaration-to-later-use and runtime declaration adoption remain
+unqualified at this checkpoint. The matched Haskell mixed producer must be
+received before those controls. Within-cell stages also do not establish the
+separate declaration-cell-to-next-cell runtime and cold-restoration workflow.
+
+The existing authentic World bind control also passed 1/1, exit 0, through
+the ordered fold: build `acb47003-efd8-463c-8cd1-2929556e37f0`, same executed
+Rust SHA as the three controls above. It exercises actual prepared native
+evidence plus the matching compiler END and post-END cancellation refusal.
+Command: `swarm-build just test-native //tidepool/toolchain:toolchain_world_native_seal_test --output-dir /srv/swarm/evidence/inanna/world-stage-ordered-fold-native-20261020 --retain-artifacts`.

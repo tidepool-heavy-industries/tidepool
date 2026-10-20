@@ -1940,6 +1940,17 @@ impl CompilerSourceSupport {
         }
     }
 
+    pub(crate) fn implementation_entry(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Option<&Arc<ArtifactEntry>> {
+        self.selected.get(owner).map(|row| {
+            row.original
+                .as_ref()
+                .map_or(&row.interface.1, |(_, entry)| entry)
+        })
+    }
+
     /// Add the actual closed support fragment issued for one program prefix.
     /// Unchanged roles and native facts share their persistent owners. Incoming
     /// offers retain custody without choosing additional executable roots.
@@ -5445,7 +5456,10 @@ mod tests {
             assert_eq!(changed.projection, expected.projection);
             assert_eq!(changed.native_offer_facts, expected.native_offer_facts);
             assert_eq!(changed.native_availability, expected.native_availability);
-            assert_eq!(changed.input_decisions, expected.input_decisions);
+            assert_eq!(
+                changed.input_decisions.facts,
+                expected.input_decisions.facts
+            );
             assert_eq!(source.projection, prior_projection);
             assert_eq!(source.artifacts.capture_graph_selection(), prior_view);
             for (owner, prior) in source.selected.iter() {

@@ -554,7 +554,10 @@ mod program_source_support_history {
                     current.imports.as_ref(),
                     &graph
                         .iter()
-                        .map(|(owner, edges)| (owner.clone(), edges.iter().cloned().collect()))
+                        .map(|(owner, edges)| (
+                            owner.clone(),
+                            edges.iter().cloned().collect::<Vec<_>>()
+                        ))
                         .collect()
                 );
                 for selected in &owners {
