@@ -1628,7 +1628,10 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         self.assertFalse(set(unit["resource_env"]) & set(unit["env"]))
         admission = self.rule("tidepool/runtime", "runtime_admission_tests", "tidepool_rust_test_cases")
         self.assertEqual(admission["binary"], ":tidepool_runtime_unit_tests")
-        self.assertEqual(admission["expected_count"], 3)
+        selected = admission["exact_tests"]
+        self.assertTrue(selected)
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertEqual(admission["expected_count"], len(selected))
         self.assertNotIn("haskell_worker", admission)
         self.assertNotIn("TIDEPOOL_EXTRACT", admission.get("env", {}))
         self.assertFalse(any(label.startswith("//web:") for label in admission.get("resources", [])))
