@@ -158,6 +158,8 @@ import Tidepool.SessionArtifacts
   , emitHostBindingInterface
   , prepareTypedSegmentSessionBindings
   , typedSegmentSessionEnvironment, typedSegmentSessionGlobals, typedSegmentSessionInterfaces
+  , ResolvedTypedItemBindings, resolveTypedSegmentBindings
+  , resolvedTypedItemOrdinal, resolvedTypedItemBinders, resolvedTypedItemInterface
   , typedSegmentSessionBinders, typedSegmentSessionRetainedGlobals
   , typedSegmentSessionBindingRepresentations, withTypedSegmentSessionPublication )
 import Tidepool.Metadata (metadataForConstructors, targetBindingHasIO)
@@ -953,11 +955,16 @@ runCellPlanMode parserFlags args cellPath = do
 data WorldCellItemSource = WorldCellItemSource
   { worldCellItemTyped :: TypedItem
   , worldCellItemParsed :: CellAnalysisItem
-  , worldCellItemCaptures :: [BoundBinder]
+  , worldCellItemBindings :: ResolvedTypedItemBindings
   , worldCellItemSignatures :: [CheckedSignature]
-  , worldCellItemInterface :: Maybe CapturedSessionInterface
   , worldCellItemArtifact :: PreparedArtifact
   }
+
+worldCellItemCaptures :: WorldCellItemSource -> [BoundBinder]
+worldCellItemCaptures = resolvedTypedItemBinders . worldCellItemBindings
+
+worldCellItemInterface :: WorldCellItemSource -> Maybe CapturedSessionInterface
+worldCellItemInterface = resolvedTypedItemInterface . worldCellItemBindings
 
 data PreparedWorldCellItem = PreparedWorldCellItem
   { preparedWorldCellItemSource :: WorldCellItemSource
@@ -965,10 +972,9 @@ data PreparedWorldCellItem = PreparedWorldCellItem
   }
 
 correlateWorldCellItems
-  :: [TypedItem] -> [PreparedArtifact] -> [CellAnalysisItem]
-  -> [(Int,[BoundBinder])] -> [(Int,[CheckedSignature])]
-  -> [CapturedSessionInterface] -> IO [WorldCellItemSource]
-correlateWorldCellItems typedItems artifacts parsedItems captures signatures interfaces = do
+  :: [TypedItem] -> [PreparedArtifact] -> [(Int,CellAnalysisItem)]
+  -> [ResolvedTypedItemBindings] -> [(Int,[CheckedSignature])] -> IO [WorldCellItemSource]
+correlateWorldCellItems typedItems artifacts parsedItems captures signatures = do
   let itemPlan item = typedItemPlan item
       itemOrdinal = plannedItemOrdinal . itemPlan
       itemTarget = plannedItemEntry . itemPlan
@@ -978,7 +984,7 @@ correlateWorldCellItems typedItems artifacts parsedItems captures signatures int
     (fail "world typed items repeat an item ordinal")
   unless (Set.size targets == length typedItems)
     (fail "world typed items repeat an item target")
-  capturesByItem <- Map.map snd <$> uniqueEntries "world item captures" fst captures
+  capturesByItem <- uniqueEntries "world item captures" resolvedTypedItemOrdinal captures
   signaturesByItem <- Map.map snd <$> uniqueEntries "world item capture signatures" fst signatures
   unless (Map.keysSet capturesByItem == expected)
     (fail "world item captures do not cover exactly the typed items")
@@ -987,12 +993,7 @@ correlateWorldCellItems typedItems artifacts parsedItems captures signatures int
   artifactsByTarget <- uniqueEntries "world item artifacts" paTarget artifacts
   unless (Map.keysSet artifactsByTarget == targets)
     (fail "world item artifacts do not cover exactly the typed items")
-  parsedByOrdinal <- forM parsedItems $ \parsed -> case cellAnalysisSourceItems parsed of
-    [source] -> pure (cellAnalysisSourceOrdinal source,parsed)
-    _ -> fail "world parsed item does not carry exactly one original source item"
-  let parsedByKey = Map.fromList parsedByOrdinal
-  unless (length parsedByOrdinal == Map.size parsedByKey)
-    (fail "world parsed items repeat an original source ordinal")
+  parsedByKey <- Map.map snd <$> uniqueEntries "world parsed execution items" fst parsedItems
   unless (Map.keysSet parsedByKey == expected)
     (fail "world parsed items do not cover exactly the typed items")
   sources <- forM typedItems $ \item -> do
@@ -1006,24 +1007,7 @@ correlateWorldCellItems typedItems artifacts parsedItems captures signatures int
       (Map.lookup key signaturesByItem)
     artifact <- maybe (fail "world typed item lost its prepared artifact") pure
       (Map.lookup (plannedItemEntry plan) artifactsByTarget)
-    interface <- selectWorldCellInterface interfaces selected
-    pure (WorldCellItemSource item parsed selected itemSignatures interface artifact)
-  let interfaceOwner value =
-        let (owner,_) = capturedSessionInterface value in moduleNameString (moduleName owner)
-      interfaceBytes = snd . capturedSessionInterface
-      selectedInterfaces = [(interfaceOwner value,value)
-        | source <- sources, Just value <- [worldCellItemInterface source]]
-      issuedInterfaces = [(interfaceOwner value,value) | value <- interfaces]
-      selectedMap = Map.fromList selectedInterfaces
-      issuedMap = Map.fromList issuedInterfaces
-  unless (length issuedInterfaces == Map.size issuedMap)
-    (fail "world issued interfaces repeat an exact owner")
-  unless (length selectedInterfaces == Map.size selectedMap)
-    (fail "world items select one issued interface more than once")
-  unless (Map.keysSet selectedMap == Map.keysSet issuedMap
-      && all (\(name,value) -> maybe False ((== interfaceBytes value) . interfaceBytes)
-           (Map.lookup name issuedMap)) (Map.toList selectedMap))
-    (fail "world issued interfaces do not cover exactly the captured items")
+    pure (WorldCellItemSource item parsed selected itemSignatures artifact)
   pure sources
   where
     uniqueEntries label key values = do
@@ -1031,17 +1015,6 @@ correlateWorldCellItems typedItems artifacts parsedItems captures signatures int
       unless (length values == Map.size keyed)
         (fail (label ++ " repeat an item identity"))
       pure keyed
-
-selectWorldCellInterface
-  :: [CapturedSessionInterface] -> [BoundBinder] -> IO (Maybe CapturedSessionInterface)
-selectWorldCellInterface _ [] = pure Nothing
-selectWorldCellInterface interfaces (binder:_) =
-  case [value | value <- interfaces
-      , let (owner,_) = capturedSessionInterface value
-      , moduleNameString (moduleName owner) == bbModule binder] of
-    [value] -> pure (Just value)
-    [] -> fail "world value output lacks one exact issued thin interface"
-    _ -> fail "world value output has an ambiguous issued thin interface"
 
 runWorldCellPrepareMode :: BoundCompilerRequest -> WorldCellPrepareRequest -> IO [Diag]
 runWorldCellPrepareMode bound question = do
@@ -1152,7 +1125,7 @@ runWorldCellPrepareMode bound question = do
       actualTarget <- case [value | value <- pprModules prepared,pmModule value == targetOwner] of
         [value] -> pure value
         _ -> fail "world cell completion has no unique actual target"
-      captures <- either throwIO pure (typedSegmentSessionBinders (pmIdentityResolver actualTarget) batch)
+      captures <- either throwIO pure (resolveTypedSegmentBindings (pmIdentityResolver actualTarget) batch)
       signaturesByItem <- forM items $ \item -> do
         signatures <- forM (typedItemCaptures item) $ \capture ->
           captureCheckedSignature (prHscEnv result)
@@ -1168,8 +1141,8 @@ runWorldCellPrepareMode bound question = do
       let generations = Map.union producedGenerations retainedGenerations
       (artifacts,context) <- prepareArtifacts originalInterfaces directory completion targets (standardAuxiliaryRoots binds)
         generations (typedSegmentSessionBindingRepresentations batch)
-      correlated <- correlateWorldCellItems items artifacts (cellPlanItems finalized) captures
-        signaturesByItem (typedSegmentSessionInterfaces batch)
+      correlated <- correlateWorldCellItems items artifacts (zip [0..] (cellPlanItems finalized)) captures
+        signaturesByItem
       products <- maybe (fail "world cell has no actual original inventory") pure context
       staged <- writeCertifiedSegmentProducts (importPaths (hsc_dflags (prHscEnv result))) originalInterfaces directory prepared products
       preparedItems <- forM correlated $ \correlatedItem -> do

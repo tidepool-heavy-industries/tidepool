@@ -56,7 +56,7 @@ import GHC.Unit.Module (mkModule, mkModuleName)
 import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Types (stringToUnit, GenWithIsBoot(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
-import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue, analyzeOrderedCellWithFlags
+import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue, analyzeOrderedCellWithFlags, BoundBinder(..)
   , CellSourcePlan(..), CellAnalysisItem(..), TurnKind(..), StmtBinders(..), cellInferenceSegments
   , prepareTypedSegmentSource, preparedTypedSegmentPlan, preparedTypedSegmentSource, preparedTypedSegmentOperations)
 import Tidepool.DependencyEvidence
@@ -94,7 +94,8 @@ import Tidepool.ArtifactBytes
 import Tidepool.RequestInputs
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), inputImageDigest, inputKindTag)
 import Tidepool.OwnedInputTransport qualified as Transport
-import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..))
+import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..)
+  , capturedSessionInterface, capturedSessionInterfaceEvidence)
 import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext, writeGenuinePublishedScopeWithContext)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
@@ -102,10 +103,12 @@ import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runP
 import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming, TaskAttempt(..), newTimingRequestIdentity)
 import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor, runCompilerTasksWithAttempt)
 import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse)
-import Tidepool.PreparedStg (newPreparedBodyCache)
+import Tidepool.PreparedStg (newPreparedBodyCache, pmModule, pmIdentityResolver)
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.SessionArtifacts (prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment
-  , typedSegmentSessionGlobals, typedSegmentSessionInterfaces)
+  , typedSegmentSessionGlobals, typedSegmentSessionInterfaces, resolveTypedSegmentBindings
+  , resolvedTypedItemOrdinal, resolvedTypedItemBinders, resolvedTypedItemInterface)
+import GHC.Unit.Module (moduleName, moduleNameString)
 import Codec.CBOR.Term (Term(..), encodeTerm, decodeTerm)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
@@ -1716,14 +1719,20 @@ compilerTimingRoundtrip = withTiming $ withScratch $ \work -> do
     effects <- lookupEnv "TIDEPOOL_TEST_EFFECTS_DIR" >>= maybe (fail "missing declared effects") pure
     prelude <- lookupEnv "TIDEPOOL_PRELUDE_DIR" >>= maybe (fail "missing declared prelude") pure
     template <- readFile "test-source-boot/fixtures/TelemetryTypedTemplate.hs"
-    let body = "let telemetryValue = (42 :: Int)"
+    let body = unlines
+          ["let (telemetryValue,telemetryOther) = ((42 :: Int),(43 :: Int))"
+          ,"_ <- pure ()"
+          ,"let afterDiscard = telemetryValue + telemetryOther"]
     ordered <- analyzeOrderedCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult plain)))
       template body >>= either (fail . show) pure
-    source <- either fail pure (prepareTypedSegmentSource template ordered (digest (BS8.pack body)) [(0,1,Nothing)])
+    source <- either fail pure (prepareTypedSegmentSource template ordered (digest (BS8.pack body))
+      [(0,1,Nothing),(1,2,Nothing),(2,3,Nothing)])
+    completedBatch <- newIORef Nothing
     let path = work </> "TelemetryTyped.hs"
         plan = preparedTypedSegmentPlan source
         prepare environment admissions segment = do
           batch <- prepareTypedSegmentSessionBindings environment admissions segment (work </> "typed-stage")
+          writeIORef completedBatch (Just batch)
           pure (typedSegmentSessionEnvironment batch, typedSegmentSessionGlobals batch,
             typedSegmentSessionInterfaces batch)
     writeFile path (preparedTypedSegmentSource source)
@@ -1732,6 +1741,24 @@ compilerTimingRoundtrip = withTiming $ withScratch $ \work -> do
         (WithTypedSegmentPreparation prepare (PreparedSegmentProducts plan Nothing))) Set.empty
       (TypedSegmentCompile plan (preparedTypedSegmentOperations source) GeneralCompile)
       Nothing path [work,effects,prelude] Nothing
+    batch <- readIORef completedBatch >>= maybe (fail "typed producer omitted its actual capture batch") pure
+    actualTarget <- case [value | value <- pprModules (preparedSegmentProducts typed)
+        , moduleNameString (moduleName (pmModule value)) == "TelemetryTyped"] of
+      [value] -> pure value
+      _ -> fail "typed capture finalization lacks the unique actual target"
+    resolved <- either throwIO pure (resolveTypedSegmentBindings (pmIdentityResolver actualTarget) batch)
+    unless (map resolvedTypedItemOrdinal resolved == [0,1,2]
+        && map (map bbName . resolvedTypedItemBinders) resolved
+          == [["telemetryValue","telemetryOther"],[],["afterDiscard"]])
+      (fail "typed capture finalization lost pattern/discard/execution-item correspondence")
+    forM_ resolved $ \item -> case (resolvedTypedItemBinders item,resolvedTypedItemInterface item) of
+      ([],Nothing) -> pure ()
+      (binders,Just interface) -> do
+        let (owner,_) = capturedSessionInterface interface
+        unless (all ((== moduleNameString (moduleName owner)) . bbModule) binders
+            && case capturedSessionInterfaceEvidence interface of Just _ -> True; Nothing -> False)
+          (fail "typed capture finalization crossed its actual issued interface")
+      _ -> fail "typed capture finalization split capture presence from its issued interface"
     finishFallback "TelemetryTyped" (preparedSegmentProducts typed)
   let logPath = work </> "producer.log"
   writeFile logPath diagnostics
