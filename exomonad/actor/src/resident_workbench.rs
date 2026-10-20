@@ -18847,14 +18847,63 @@ pub(crate) mod request_tests {
                     let step = frontend.begin_prepared_cell_item(frontend_context.clone(), ParsedBlock {
                         ordinal: 1, total: 1, source: cell,
                     }, items.remove(0)).await.unwrap();
-                    let ResidentWorkbenchStep::Running { fragment, outcome } = step else { panic!("actual Introspection effect must suspend"); };
-                    let boundary = workbench_runner_for_test(&frontend).capture_boundary(
-                        frontend_context.clone(), (*outcome).into(), frontend_context.placement.resource_scope,
-                    ).await.unwrap();
-                    let ResidentActorBoundary::Introspection { continuation, query, kind } = boundary else { panic!("real structured inspection boundary"); };
-                    assert_eq!(query.scope, tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into()));
+                    let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+                        panic!("actual currentScopeView effect must suspend");
+                    };
+                    let boundary = workbench_runner_for_test(&frontend)
+                        .capture_boundary(
+                            frontend_context.clone(),
+                            (*outcome).into(),
+                            frontend_context.placement.resource_scope,
+                        )
+                        .await
+                        .unwrap();
+                    let ResidentActorBoundary::CompilerQuery {
+                        continuation,
+                        query,
+                    } = boundary
+                    else {
+                        panic!("real currentScopeView boundary");
+                    };
+                    assert!(matches!(
+                        query,
+                        super::compiler_query::CompilerQuery::CurrentScopeView
+                    ));
+                    let resumed = frontend
+                        .resume_compiler_query(frontend_context.clone(), continuation, query)
+                        .await
+                        .expect("capture the actual query view before public-module inspection");
+                    let step = frontend
+                        .settle_item(frontend_context.clone(), *fragment, resumed)
+                        .await
+                        .unwrap();
+                    let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+                        panic!("the same authored item must next suspend on public-module info");
+                    };
+                    let boundary = workbench_runner_for_test(&frontend)
+                        .capture_boundary(
+                            frontend_context.clone(),
+                            (*outcome).into(),
+                            frontend_context.placement.resource_scope,
+                        )
+                        .await
+                        .unwrap();
+                    let ResidentActorBoundary::Introspection {
+                        continuation,
+                        query,
+                        kind,
+                    } = boundary
+                    else {
+                        panic!("real structured inspection boundary");
+                    };
+                    assert_eq!(
+                        query.scope,
+                        tidepool_runtime::session::NameScope::PublicModule("WorldQuestion".into())
+                    );
                     assert!(matches!(kind, StructuredInspectionKind::Info));
-                    let resumed = frontend.resume_structured_introspection(frontend_context.clone(), continuation, query, kind).await;
+                    let resumed = frontend
+                        .resume_structured_introspection(frontend_context.clone(), continuation, query, kind)
+                        .await;
                     if valid_answer {
                         let outcome = resumed.expect("the strict answer guard must accept the actual world answer");
                         let step = frontend.settle_item(frontend_context, *fragment, outcome).await.unwrap();
