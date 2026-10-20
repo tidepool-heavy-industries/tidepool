@@ -3158,7 +3158,6 @@ mod tests {
         let query = WorldQueryRequest {
             world: "a".repeat(64),
             realization: "realized".into(),
-            residency: WorldResidency::RetainedAtAdmission,
             question: WorldQueryQuestion::PublicInfo(StructuredInspection {
                 scope: InspectionScope::PublicModule("Data.List".into()),
                 namespace: InspectionNamespace::Value,

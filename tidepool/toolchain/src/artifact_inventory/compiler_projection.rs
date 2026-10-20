@@ -4449,7 +4449,7 @@ mod tests {
             .is_err());
         assert_eq!(
             first.compiler_primary_inputs().count(),
-            first.selected.len()
+            first.selected.rows.len()
         );
     }
 
