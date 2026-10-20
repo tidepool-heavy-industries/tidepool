@@ -183,7 +183,7 @@ pub fn check_source(
 /// Parse the source before reserving original module and value identities.
 /// This capability contains no checked types or native authority.
 pub fn parse_cell_plan(
-    specification: Arc<crate::checked_cell::CheckedCellSpecification>,
+    specification: Arc<crate::checked_cell::CellRecipe>,
     include_paths: &[PathBuf],
     settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<Arc<crate::cell_plan::ParsedCellPlan>, CompileError> {
@@ -613,7 +613,7 @@ pub struct ModuleCandidateOffer {
     producer: Vec<u8>,
     include: Vec<PathBuf>,
     exact: Option<crate::declaration_context::ExactCompilationRequest>,
-    checked_cell: Option<crate::checked_cell::CheckedCellSpecification>,
+    checked_cell: Option<Arc<crate::checked_cell::CheckedCellRequest>>,
     planned_cell: Option<crate::checked_cell::CheckedPlannedCellSpecification>,
     checked_values: Option<Arc<crate::checked_cell::CheckedValueInputs>>,
     checked_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
@@ -1057,7 +1057,7 @@ pub(crate) fn checked_search_authorization(
 
 fn checked_cell_authorization(
     purpose: CheckedCellPurpose,
-    specification: &crate::checked_cell::CheckedCellSpecification,
+    specification: &crate::checked_cell::CheckedCellRequest,
     values: &crate::checked_cell::CheckedValueInputs,
     context: &crate::declaration_context::ExactDeclarationContext,
     include: &[PathBuf],
@@ -1079,7 +1079,7 @@ fn checked_cell_authorization(
 
 pub(crate) fn encode_cell_authorization(
     purpose: crate::checked_cell::CheckedCellManifestPurpose,
-    specification: &crate::checked_cell::CheckedCellSpecification,
+    specification: &crate::checked_cell::CheckedCellRequest,
     baseline: Value,
     templates: &crate::declaration_context::SelectedTemplateImports,
 ) -> Result<Value, CompileError> {
@@ -1270,15 +1270,16 @@ fn private_native_availability(
 }
 
 fn checked_candidate_reservations(
-    specification: &crate::checked_cell::CheckedCellSpecification,
+    specification: &crate::checked_cell::CheckedCellRequest,
     planned: Option<&crate::checked_cell::CheckedPlannedCellSpecification>,
 ) -> BTreeSet<String> {
     use crate::checked_cell::CheckedPlannedCellSlot;
     use tidepool_repr::{Generation, SessionModule};
     let mut reserved = specification
-        .injected_modules
+        .recipe()
+        .injected_modules()
         .iter()
-        .chain(&specification.reserved_declaration_modules)
+        .chain(specification.reserved_declaration_modules())
         .cloned()
         .collect::<BTreeSet<_>>();
     if let Some(planned) = planned {
@@ -1646,14 +1647,15 @@ impl ModuleCandidateOffer {
         include: &[PathBuf],
         scratch: &Path,
         context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
-        specification: crate::checked_cell::CheckedCellSpecification,
+        specification: Arc<crate::checked_cell::CheckedCellRequest>,
         purpose: CheckedCellPurpose,
         checked_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
         retained_projections: &[Arc<crate::declaration_join::AcceptedJoin>],
     ) -> Result<Self, CompileError> {
         let expected = specification
-            .injected_modules
+            .recipe()
+            .injected_modules()
             .iter()
             .cloned()
             .collect::<BTreeSet<_>>();
@@ -1727,7 +1729,7 @@ impl ModuleCandidateOffer {
         include: &[PathBuf],
         scratch: &Path,
         context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
-        specification: crate::checked_cell::CheckedCellSpecification,
+        specification: Arc<crate::checked_cell::CheckedCellRequest>,
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         planned: crate::checked_cell::CheckedPlannedCellSpecification,
         retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
@@ -1758,7 +1760,7 @@ impl ModuleCandidateOffer {
         include: &[PathBuf],
         scratch: &Path,
         context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
-        specification: crate::checked_cell::CheckedCellSpecification,
+        specification: Arc<crate::checked_cell::CheckedCellRequest>,
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         planned: crate::checked_cell::CheckedPlannedCellSpecification,
         retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
@@ -1773,7 +1775,8 @@ impl ModuleCandidateOffer {
         timing.advance("validate_injected_inventory");
         let producer = endpoint.identity().producer_bytes();
         let expected = specification
-            .injected_modules
+            .recipe()
+            .injected_modules()
             .iter()
             .cloned()
             .collect::<BTreeSet<_>>();
@@ -2303,6 +2306,7 @@ impl SelectedModuleCandidateOffer {
         let mut outputs = BTreeMap::new();
         let mut segment = 0usize;
         let mut index = 0usize;
+        let mut declaration_cursor = 0usize;
         while index < planned.parsed_plan.items().len() {
             let item = &planned.parsed_plan.items()[index];
             let declaration = matches!(
@@ -2312,34 +2316,31 @@ impl SelectedModuleCandidateOffer {
             let segment_root = root.join(format!("segment-{segment}"));
             if declaration {
                 let _span = tracing::debug_span!(target: "exomonad_harness::timing", "products.cell_program.declaration", inclusive = true, ordinal = index, segment).entered();
+                let declaration_ordinal = declaration_cursor;
+                declaration_cursor += 1;
                 let mut declaration_timing = timing::InvocationTiming::start_scoped(
                     "products.cell_program.declaration",
                     "context_and_source_specification",
                 );
-                let generation = match planned.slots[index] {
-                    CheckedPlannedCellSlot::Prologue { declaration }
-                    | CheckedPlannedCellSlot::Declaration { declaration } => declaration,
+                match planned.slots[index] {
+                    CheckedPlannedCellSlot::Prologue { .. }
+                    | CheckedPlannedCellSlot::Declaration { .. } => {}
                     _ => {
                         return Err(CompileError::ExtractFailed(
                             "declaration has another reserved slot".into(),
                         ));
                     }
-                };
+                }
                 program_request = program_request.in_program_context(context.clone())?;
                 let effective = self.program_offer(initial.clone());
-                let mut source_spec = specification.clone();
-                source_spec.reserved_declaration_modules =
-                    vec![
-                        tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation))
-                            .module_name(),
-                    ];
                 let produced_types = produced_outputs.for_segment(index..index)?;
                 declaration_timing.advance("admit_and_seal_planned_declaration");
                 let original = effective
                     .admit_planned_declaration(
                         &segment_root,
                         &program_request,
-                        &source_spec,
+                        specification,
+                        declaration_ordinal,
                         Some(&produced_types),
                         &mut validation,
                     )?
@@ -2492,7 +2493,7 @@ impl SelectedModuleCandidateOffer {
                         root,
                         &segment_root,
                         &typed_segments,
-                        specification.admission_digest,
+                        specification.admission_digest(),
                         generation,
                         &mut validation,
                     )?;
@@ -2513,7 +2514,7 @@ impl SelectedModuleCandidateOffer {
             initial.context().clone(),
             self.checked_projections.clone(),
             &initial.request_sha256,
-            specification,
+            Arc::clone(specification),
             pending_segments
                 .iter()
                 .flat_map(|(_, segment)| segment.admissions()),
@@ -2839,7 +2840,8 @@ impl SelectedModuleCandidateOffer {
         &self,
         root: &Path,
         continuation: &crate::declaration_context::ProgramAdmissionContinuation,
-        specification: &crate::checked_cell::CheckedCellSpecification,
+        specification: &crate::checked_cell::CheckedCellRequest,
+        declaration_ordinal: usize,
         produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Option<crate::checked_cell::PlannedCheckedDeclaration>, CompileError> {
@@ -2873,7 +2875,11 @@ impl SelectedModuleCandidateOffer {
         if string(&fields[0])? != "TPEXACTDECL"
             || string(&fields[1])? != "1"
             || string(&fields[2])? != exact.physical_request().request_sha256
-            || specification.reserved_declaration_modules.as_slice() != [module_name]
+            || specification
+                .reserved_declaration_modules()
+                .get(declaration_ordinal)
+                .map(String::as_str)
+                != Some(module_name)
             || module.module_name() != module_name
             || string(&fields[7])? != "planned-declaration"
             || extract_module_name(source).as_deref() != Some(module_name)

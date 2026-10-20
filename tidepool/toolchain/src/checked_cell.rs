@@ -12,22 +12,50 @@ use sha2::{Digest, Sha256};
 use crate::declaration_context::ExactSourceAdmission;
 use crate::CompileError;
 
-#[derive(Clone, Debug)]
-pub struct CheckedCellSpecification {
-    pub admission_digest: [u8; 32],
-    pub cell_source: String,
-    pub template_source: String,
-    pub turn_templates: Vec<(String, String)>,
-    pub injected_modules: Vec<String>,
-    pub reserved_declaration_modules: Vec<String>,
+/// Caller-authored, immutable whole-cell recipe. It names the exact source,
+/// template and turn-template texts and the injected owners, and carries no
+/// admission facts at all. A recipe may be cloned and re-parsed freely; it can
+/// never carry, acquire or be relabelled with an admission digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellRecipe {
+    cell_source: String,
+    template_source: String,
+    turn_templates: Vec<(String, String)>,
+    injected_modules: Vec<String>,
 }
 
-pub(crate) enum CheckedCellManifestPurpose {
-    Authored,
-    Program,
-}
-
-impl CheckedCellSpecification {
+impl CellRecipe {
+    /// The authored specification's own constructor. Duplicate injected
+    /// owners are refused here, at the owning entry point, rather than at
+    /// each manifest consumer.
+    pub fn new(
+        cell_source: impl Into<String>,
+        template_source: impl Into<String>,
+        turn_templates: Vec<(String, String)>,
+        injected_modules: Vec<String>,
+    ) -> Result<Self, CompileError> {
+        if injected_modules.iter().collect::<BTreeSet<_>>().len() != injected_modules.len() {
+            return Err(failure("duplicate injected module"));
+        }
+        Ok(Self {
+            cell_source: cell_source.into(),
+            template_source: template_source.into(),
+            turn_templates,
+            injected_modules,
+        })
+    }
+    pub fn cell_source(&self) -> &str {
+        &self.cell_source
+    }
+    pub fn template_source(&self) -> &str {
+        &self.template_source
+    }
+    pub fn turn_templates(&self) -> &[(String, String)] {
+        &self.turn_templates
+    }
+    pub fn injected_modules(&self) -> &[String] {
+        &self.injected_modules
+    }
     pub(crate) fn template_sources(&self) -> Vec<String> {
         std::iter::once(self.template_source.clone())
             .chain(self.turn_templates.iter().map(|(_, source)| source.clone()))
@@ -52,20 +80,87 @@ impl CheckedCellSpecification {
         ciborium::ser::into_writer(&value, &mut bytes).expect("specification encodes to memory");
         Sha256::digest(bytes).into()
     }
+}
+
+/// The one runtime-admission digest the source owner finalized for a cell.
+/// The newtype keeps a bare `[u8; 32]` out of the consumer API, refuses the
+/// all-zero value so an absent digest cannot stand in for an admission, and is
+/// only ever produced once, before the admission is shared. A digest value is
+/// still not authority: installing the compiled cell compares it with the
+/// runtime admission that issued it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdmissionDigest([u8; 32]);
+
+impl AdmissionDigest {
+    /// Finalize a runtime admission's digest. The admission owner computes the
+    /// digest, calls this once before constructing its admission, and never
+    /// re-derives or patches it afterwards.
+    pub fn finalize(digest: [u8; 32]) -> Result<Self, CompileError> {
+        if digest == [0; 32] {
+            return Err(failure("runtime admission digest is absent"));
+        }
+        Ok(Self(digest))
+    }
+    pub fn bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+/// One issued whole-cell request: the exact admitted recipe together with the
+/// admission digest and original declaration owners the source owner finalized.
+/// Fields are private, there is no mutable access and no `Clone`; a consumer
+/// path can only read the request it was handed. The only issuer is the source
+/// admission owner, once per reservation, through [`CheckedCellRequest::issue`].
+#[derive(Debug)]
+pub struct CheckedCellRequest {
+    recipe: Arc<CellRecipe>,
+    admission: AdmissionDigest,
+    reserved_declaration_modules: Arc<[String]>,
+}
+
+impl CheckedCellRequest {
+    /// Issue the one request for an admitted recipe. `reserved` is the exact
+    /// original declaration owner inventory in declaration order; duplicates
+    /// are refused here, before any consumer observes the request.
+    pub fn issue(
+        recipe: Arc<CellRecipe>,
+        admission: AdmissionDigest,
+        reserved_declaration_modules: Vec<String>,
+    ) -> Result<Self, CompileError> {
+        if reserved_declaration_modules
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != reserved_declaration_modules.len()
+        {
+            return Err(failure("duplicate planned module"));
+        }
+        Ok(Self {
+            recipe,
+            admission,
+            reserved_declaration_modules: reserved_declaration_modules.into(),
+        })
+    }
+    pub fn recipe(&self) -> &Arc<CellRecipe> {
+        &self.recipe
+    }
+    pub fn admission(&self) -> AdmissionDigest {
+        self.admission
+    }
+    pub fn admission_digest(&self) -> [u8; 32] {
+        self.admission.bytes()
+    }
+    pub fn reserved_declaration_modules(&self) -> &[String] {
+        &self.reserved_declaration_modules
+    }
+    pub(crate) fn template_sources(&self) -> Vec<String> {
+        self.recipe.template_sources()
+    }
     pub(crate) fn manifest_value(
         &self,
         purpose: CheckedCellManifestPurpose,
     ) -> Result<Value, CompileError> {
-        if self.admission_digest == [0; 32] {
-            return Err(failure("runtime admission digest is absent"));
-        }
-        let modules = &self.reserved_declaration_modules;
-        if modules.iter().collect::<BTreeSet<_>>().len() != modules.len()
-            || self.injected_modules.iter().collect::<BTreeSet<_>>().len()
-                != self.injected_modules.len()
-        {
-            return Err(failure("duplicate planned or injected module"));
-        }
+        let modules = self.reserved_declaration_modules();
         Ok(array([
             text(match purpose {
                 CheckedCellManifestPurpose::Authored => {
@@ -75,19 +170,25 @@ impl CheckedCellSpecification {
                     crate::artifacts::CheckedPurpose::Program.wire_tag()
                 }
             }),
-            text(hex(&self.admission_digest)),
-            text(hash(self.cell_source.as_bytes())),
-            text(hash(self.template_source.as_bytes())),
+            text(hex(&self.admission_digest())),
+            text(hash(self.recipe.cell_source.as_bytes())),
+            text(hash(self.recipe.template_source.as_bytes())),
             Value::Array(
-                self.turn_templates
+                self.recipe
+                    .turn_templates
                     .iter()
                     .map(|(kind, source)| array([text(kind), text(hash(source.as_bytes()))]))
                     .collect(),
             ),
-            Value::Array(self.injected_modules.iter().map(text).collect()),
+            Value::Array(self.recipe.injected_modules.iter().map(text).collect()),
             Value::Array(modules.iter().map(text).collect()),
         ]))
     }
+}
+
+pub(crate) enum CheckedCellManifestPurpose {
+    Authored,
+    Program,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -511,7 +612,7 @@ struct CheckedItem {
 
 #[derive(Debug)]
 pub struct ExactCheckedCell {
-    specification: CheckedCellSpecification,
+    specification: Arc<CheckedCellRequest>,
     producer: [u8; 32],
     context: [u8; 32],
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
@@ -634,17 +735,18 @@ pub struct CheckedPlannedCellSpecification {
 impl CheckedPlannedCellSpecification {
     pub(crate) fn authorization(
         &self,
-        specification: &CheckedCellSpecification,
+        specification: &CheckedCellRequest,
         producer: &[u8],
         include: &[std::path::PathBuf],
         scratch: &Path,
     ) -> Result<Vec<Value>, CompileError> {
         use crate::cell_plan::ParsedCellPlanKind;
         if self.reservation_digest == [0; 32]
-            || self.reservation_digest != specification.admission_digest
-            || self.parsed_plan.specification_digest() != specification.specification_digest()
+            || self.reservation_digest != specification.admission_digest()
+            || self.parsed_plan.specification_digest()
+                != specification.recipe().specification_digest()
             || !same_include_paths(self.parsed_plan.include_paths(), include)
-            || self.parsed_plan.injected_modules() != specification.injected_modules
+            || self.parsed_plan.injected_modules() != specification.recipe().injected_modules()
             || self.parsed_plan.producer_sha256()
                 != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                     producer,
@@ -713,7 +815,7 @@ impl CheckedPlannedCellSpecification {
             };
             encoded.push(Value::Array(fields));
         }
-        if libraries != specification.reserved_declaration_modules
+        if libraries != specification.reserved_declaration_modules()
             || libraries.iter().collect::<BTreeSet<_>>().len() != libraries.len()
         {
             return Err(planned_input_rejection(
@@ -2489,7 +2591,7 @@ impl ExactCheckedCell {
         self.items.len()
     }
     pub fn admission_digest(&self) -> [u8; 32] {
-        self.specification.admission_digest
+        self.specification.admission_digest()
     }
     pub fn checked_source(&self) -> &str {
         &self.checked_source
@@ -3483,7 +3585,8 @@ impl ExactCompiledPrefix {
     pub fn injected_modules(&self) -> Vec<String> {
         self.cell
             .specification
-            .injected_modules
+            .recipe()
+            .injected_modules()
             .iter()
             .cloned()
             .chain(
@@ -3645,13 +3748,13 @@ impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
     pub fn specification_digest(&self) -> [u8; 32] {
-        self.cell.specification.specification_digest()
+        self.cell.specification.recipe().specification_digest()
     }
     pub fn reserved_declaration_modules(&self) -> &[String] {
-        &self.cell.specification.reserved_declaration_modules
+        self.cell.specification.reserved_declaration_modules()
     }
     pub fn injected_modules(&self) -> &[String] {
-        &self.cell.specification.injected_modules
+        self.cell.specification.recipe().injected_modules()
     }
     pub fn include_paths(&self) -> &[std::path::PathBuf] {
         &self.cell.include
@@ -3699,7 +3802,7 @@ impl ExactCheckedItem {
         &self.cell.include
     }
     pub fn turn_templates(&self) -> &[(String, String)] {
-        &self.cell.specification.turn_templates
+        self.cell.specification.recipe().turn_templates()
     }
     pub fn index(&self) -> usize {
         self.index
@@ -4180,7 +4283,7 @@ fn validate_cell_receipt_header(
     output: &[Value],
     observations: &[u8],
     request_digest: &str,
-    specification: &CheckedCellSpecification,
+    specification: &CheckedCellRequest,
     program: Option<&CheckedPlannedCellSpecification>,
 ) -> Result<(), CompileError> {
     let checked_source = string(&output[2])?;
@@ -4192,9 +4295,9 @@ fn validate_cell_receipt_header(
         }
         || string(&header[1])? != if program.is_some() { "4" } else { "3" }
         || string(&header[2])? != request_digest
-        || string(&header[3])? != hex(&specification.admission_digest)
-        || string(&header[4])? != hash(specification.cell_source.as_bytes())
-        || string(&header[5])? != hash(specification.template_source.as_bytes())
+        || string(&header[3])? != hex(&specification.admission_digest())
+        || string(&header[4])? != hash(specification.recipe().cell_source().as_bytes())
+        || string(&header[5])? != hash(specification.recipe().template_source().as_bytes())
         || string(&header[6])? != hash(observations)
         || string(&header[7])? != hash(checked_source.as_bytes())
     {
@@ -4212,7 +4315,7 @@ fn validate_cell_receipt_header(
 pub(crate) fn read_program_typed_segments(
     root: &Path,
     request: &str,
-    specification: &CheckedCellSpecification,
+    specification: &CheckedCellRequest,
     program: &CheckedPlannedCellSpecification,
 ) -> Result<Vec<CheckedTypedSegmentPlan>, CompileError> {
     let receipt = decode(&read(root.join("checked-cell.cbor"), 8 << 20)?)?;
@@ -4237,7 +4340,7 @@ pub(crate) fn admit_checked_cell<'a>(
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
     retained_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
     request_digest: &str,
-    specification: &CheckedCellSpecification,
+    specification: Arc<CheckedCellRequest>,
     admissions: impl IntoIterator<Item = &'a ExactSourceAdmission>,
     include: &[std::path::PathBuf],
     planned_declaration: Option<PlannedCheckedDeclaration>,
@@ -4261,7 +4364,7 @@ pub(crate) fn admit_checked_cell<'a>(
         output,
         &observations,
         request_digest,
-        specification,
+        &specification,
         program,
     )?;
     if let Some(program) = program {
@@ -4507,7 +4610,7 @@ pub(crate) fn admit_checked_cell<'a>(
     }
     admission_timing.advance("assemble_checked_owner");
     let cell = Arc::new(ExactCheckedCell {
-        specification: specification.clone(),
+        specification,
         producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
             producer,
         )
@@ -4622,7 +4725,9 @@ fn validate_world_binder_symbol(value: &Value) -> Result<(), CompileError> {
         || string(&fields[2])?.is_empty()
         || string(&fields[3])?.is_empty()
     {
-        return Err(failure("world binder type identity has an empty symbol field"));
+        return Err(failure(
+            "world binder type identity has an empty symbol field",
+        ));
     }
     match &fields[4] {
         Value::Array(option) => match option.as_slice() {
@@ -4861,6 +4966,31 @@ fn failure(error: impl std::fmt::Display) -> CompileError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    fn fixture_request(
+        cell_source: impl Into<String>,
+        template_source: impl Into<String>,
+        turn_templates: Vec<(String, String)>,
+        injected_modules: Vec<String>,
+    ) -> Arc<CheckedCellRequest> {
+        Arc::new(
+            CheckedCellRequest::issue(
+                Arc::new(
+                    CellRecipe::new(
+                        cell_source,
+                        template_source,
+                        turn_templates,
+                        injected_modules,
+                    )
+                    .unwrap(),
+                ),
+                AdmissionDigest::finalize([3; 32]).unwrap(),
+                vec![],
+            )
+            .unwrap(),
+        )
+    }
+
     #[test]
     fn selected_native_sites_compose_semantically_and_refuse_conflicts_atomically() {
         use super::*;
@@ -5350,14 +5480,7 @@ mod tests {
     ) -> super::ExactCheckedCell {
         use super::*;
         ExactCheckedCell {
-            specification: CheckedCellSpecification {
-                admission_digest: [3; 32],
-                cell_source: String::new(),
-                template_source: String::new(),
-                turn_templates: vec![],
-                injected_modules: vec![],
-                reserved_declaration_modules: vec![],
-            },
+            specification: fixture_request(String::new(), String::new(), vec![], vec![]),
             producer,
             context: original.semantic_sha256(),
             declaration_context: original,
@@ -5422,14 +5545,7 @@ mod tests {
         let producer = [2; 32];
         let (inputs, owner, path) = prepare_test_value_interface_files(generation, demands_epoch);
         let cell = ExactCheckedCell {
-            specification: CheckedCellSpecification {
-                admission_digest: [3; 32],
-                cell_source: String::new(),
-                template_source: template.into(),
-                turn_templates: vec![],
-                injected_modules: vec![],
-                reserved_declaration_modules: vec![],
-            },
+            specification: fixture_request(String::new(), template, vec![], vec![]),
             producer,
             context: original.semantic_sha256(),
             declaration_context: Arc::clone(original),
@@ -5868,14 +5984,7 @@ mod tests {
             crate::declaration_context::PreparedValueSourceSupport::new(context.clone(), &[])
                 .unwrap();
         let cell = ExactCheckedCell {
-            specification: CheckedCellSpecification {
-                admission_digest: [3; 32],
-                cell_source: String::new(),
-                template_source: String::new(),
-                turn_templates: vec![],
-                injected_modules: vec![],
-                reserved_declaration_modules: vec![],
-            },
+            specification: fixture_request(String::new(), String::new(), vec![], vec![]),
             producer,
             context: original.semantic_sha256(),
             declaration_context: original.clone(),
@@ -7269,18 +7378,16 @@ mod tests {
                     let produced = capture_test_produced_value_interface(producer, owner, &path, 0);
                     let interface = produced.output(owner).unwrap().interface.clone();
                     let cell = ExactCheckedCell {
-                        specification: CheckedCellSpecification {
-                            admission_digest: [3; 32],
-                            cell_source: String::new(),
-                            template_source: if template {
-                                "import Epoch\nimport TemplateOnly\n".into()
+                        specification: fixture_request(
+                            String::new(),
+                            if template {
+                                "import Epoch\nimport TemplateOnly\n".to_string()
                             } else {
                                 String::new()
                             },
-                            turn_templates: vec![],
-                            injected_modules: vec![],
-                            reserved_declaration_modules: vec![],
-                        },
+                            vec![],
+                            vec![],
+                        ),
                         producer,
                         context: original.semantic_sha256(),
                         declaration_context: original.clone(),
@@ -8206,7 +8313,10 @@ mod tests {
         assert_eq!(decoded[0].module(), "SessionMain");
         assert_eq!(decoded[0].tier(), WorldItemBinderTier::ForceData);
         assert_eq!(decoded[0].type_display(), "Int");
-        assert_eq!(decoded[0].host_authority(), Some(WorldItemHostAuthority::Text));
+        assert_eq!(
+            decoded[0].host_authority(),
+            Some(WorldItemHostAuthority::Text)
+        );
         assert!(decoded[0].root_head().is_some());
 
         for (wire, message) in [

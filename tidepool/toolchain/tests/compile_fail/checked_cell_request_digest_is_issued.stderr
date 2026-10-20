@@ -1,0 +1,2 @@
+error[E0616]: field `admission` of struct `CheckedCellRequest` is private
+ --> tests/compile_fail/checked_cell_request_digest_is_issued.rs:14:13

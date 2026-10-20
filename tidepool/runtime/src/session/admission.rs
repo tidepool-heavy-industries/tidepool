@@ -629,7 +629,7 @@ pub struct RuntimeCellAdmission {
     reserved_generations: Vec<Generation>,
     initial_value_generation: Generation,
     compiler_basis: RuntimeCellCompilerBasis,
-    digest: [u8; 32],
+    digest: tidepool_toolchain::checked_cell::AdmissionDigest,
 }
 
 enum RuntimeCellCompilerBasis {
@@ -673,6 +673,9 @@ pub(super) struct RuntimeFiniteCellInputs {
     specification_digest: [u8; 32],
     authority_digest: [u8; 32],
     include_paths: Vec<PathBuf>,
+    /// The one issued request for this admission's exact recipe. A consumer
+    /// can read it but cannot relabel it with another admission digest.
+    checked_request: Option<Arc<tidepool_toolchain::checked_cell::CheckedCellRequest>>,
 }
 
 /// One runtime-issued execution purpose. Component controls can capture an
@@ -1989,7 +1992,17 @@ impl RuntimeCellAdmission {
         Ok(&self.finite_inputs()?.interfaces)
     }
     pub fn digest(&self) -> [u8; 32] {
-        self.digest
+        self.digest.bytes()
+    }
+    /// The issued checked-cell request for this admission's exact recipe.
+    /// Issued once, before the admission was shared; consumers read it only.
+    pub fn checked_request(
+        &self,
+    ) -> Result<&Arc<tidepool_toolchain::checked_cell::CheckedCellRequest>, SessionError> {
+        self.finite_inputs()?
+            .checked_request
+            .as_ref()
+            .ok_or(SessionError::StaleStagedDeclaration)
     }
     pub fn specification_digest(&self) -> Result<[u8; 32], SessionError> {
         Ok(self.finite_inputs()?.specification_digest)
@@ -3454,12 +3467,32 @@ impl PersistentSession {
         }
         purpose.frame_authorization(&mut frame);
         compile_inputs.frame_authorization(&mut frame);
-        let digest = *digest.finalize().as_bytes();
+        let digest = tidepool_toolchain::checked_cell::AdmissionDigest::finalize(
+            *digest.finalize().as_bytes(),
+        )
+        .map_err(SessionError::Compile)?;
+        let checked_request = match &planned {
+            Some((plan, _)) => {
+                let reserved = reserved_generations
+                    .iter()
+                    .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
+                    .collect::<Vec<_>>();
+                Some(Arc::new(
+                    tidepool_toolchain::checked_cell::CheckedCellRequest::issue(
+                        Arc::clone(plan.specification()),
+                        digest,
+                        reserved,
+                    )
+                    .map_err(SessionError::Compile)?,
+                ))
+            }
+            None => None,
+        };
         let planned = planned.map(|(plan, items)| {
             Arc::new(super::planned_cell::RuntimeCellPlanReservation {
                 plan,
                 items,
-                digest,
+                digest: digest.bytes(),
             })
         });
         let prepared = Arc::new(RuntimeCellAdmission {
@@ -3488,6 +3521,7 @@ impl PersistentSession {
                 specification_digest,
                 authority_digest,
                 include_paths,
+                checked_request,
             }),
             digest,
         });
@@ -3888,7 +3922,10 @@ impl PersistentSession {
             )?;
         let token = plan.issue_admission_token(subject, slots, expected_bindings)?;
         let reservation = plan.reserve(token)?;
-        let digest = *reservation.admission_digest();
+        let digest = tidepool_toolchain::checked_cell::AdmissionDigest::finalize(
+            *reservation.admission_digest(),
+        )
+        .map_err(SessionError::Compile)?;
         Ok(Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),

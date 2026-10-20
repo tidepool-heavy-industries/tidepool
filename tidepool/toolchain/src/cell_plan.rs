@@ -2,12 +2,13 @@
 //! items and compiler inputs; they confer no checked types or live values.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 
-use crate::checked_cell::CheckedCellSpecification;
+use crate::checked_cell::CellRecipe;
 use crate::CompileError;
 
 const RECEIPT_LIMIT: u64 = 8 << 20;
@@ -111,7 +112,7 @@ impl ParsedCellPlanItem {
 /// Runtime reservations retain this plan before authoritative checking.
 #[derive(Debug)]
 pub struct ParsedCellPlan {
-    specification: Arc<CheckedCellSpecification>,
+    specification: Arc<CellRecipe>,
     include_paths: Vec<PathBuf>,
     producer_sha256: [u8; 32],
     items: Vec<ParsedCellPlanItem>,
@@ -123,7 +124,7 @@ pub struct ParsedCellPlan {
 impl ParsedCellPlan {
     /// Immutable source recipe bound by the parser receipt and retained by
     /// runtime admission. Consumers derive compiler requests from this owner.
-    pub fn specification(&self) -> &Arc<CheckedCellSpecification> {
+    pub fn specification(&self) -> &Arc<CellRecipe> {
         &self.specification
     }
 
@@ -134,7 +135,7 @@ impl ParsedCellPlan {
         &self.include_paths
     }
     pub fn injected_modules(&self) -> &[String] {
-        &self.specification.injected_modules
+        self.specification.injected_modules()
     }
     pub fn items(&self) -> &[ParsedCellPlanItem] {
         &self.items
@@ -165,6 +166,22 @@ pub struct CompilerWorldCellPlan {
     observations: Arc<[u8]>,
     digest: [u8; 32],
     allocation: Arc<()>,
+    issued: AdmissionIssueGate,
+}
+
+/// One-shot issuance for a live parser plan. A plan validates its requested
+/// slots first, then claims this gate exactly once, so one plan authorises one
+/// execution and one generation range.
+#[derive(Debug, Default)]
+struct AdmissionIssueGate(AtomicBool);
+
+impl AdmissionIssueGate {
+    fn claim(&self) -> Result<(), CompileError> {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| failure("world cell plan already issued its admission token"))
+    }
 }
 
 impl CompilerWorldCellPlan {
@@ -333,17 +350,49 @@ fn consume_world_cell_admission(
     Ok((token.slots, token.expected_bindings, token.admission_digest))
 }
 
+/// Validate the requested reservations, then claim the plan's single issue
+/// and derive the token. Validation runs before the claim so a refused issue
+/// leaves the plan unburned; `CompilerWorldCellPlan::issue_admission_token`
+/// is the only production caller.
+fn claim_and_issue_world_cell_admission(
+    issued: &AdmissionIssueGate,
+    world_logical_id: &[u8; 32],
+    producer_sha256: &[u8; 32],
+    plan_digest: &[u8; 32],
+    allocation: &Arc<()>,
+    items: &[ParsedCellPlanItem],
+    subject: WorldCellAdmissionSubject,
+    slots: Vec<crate::checked_cell::CheckedPlannedCellSlot>,
+    expected_bindings: Vec<Vec<(String, tidepool_repr::SessionVarId)>>,
+) -> Result<WorldCellAdmissionToken, CompileError> {
+    validate_world_cell_reservations(items, &slots, &expected_bindings)?;
+    issued.claim()?;
+    issue_world_cell_admission(
+        world_logical_id,
+        producer_sha256,
+        plan_digest,
+        allocation,
+        items,
+        subject,
+        slots,
+        expected_bindings,
+    )
+}
+
 impl CompilerWorldCellPlan {
     /// Issue the one admission token for this exact plan. Slot kinds,
-    /// generations and binders are validated here, before the reservation can
-    /// exist, and the digest is derived from the plan plus the subject facts.
+    /// generations and binders are validated first, so a refused issue does
+    /// not burn the plan; only a valid request can claim the plan's single
+    /// issue. A second issue on the same live plan is refused, so one plan
+    /// authorises at most one execution and one generation range.
     pub fn issue_admission_token(
         self: &Arc<Self>,
         subject: WorldCellAdmissionSubject,
         slots: Vec<crate::checked_cell::CheckedPlannedCellSlot>,
         expected_bindings: Vec<Vec<(String, tidepool_repr::SessionVarId)>>,
     ) -> Result<WorldCellAdmissionToken, CompileError> {
-        issue_world_cell_admission(
+        claim_and_issue_world_cell_admission(
+            &self.issued,
             self.world().logical_id(),
             self.producer_sha256(),
             self.digest(),
@@ -503,6 +552,7 @@ pub(crate) fn admit_world_plan(
         receipt: receipt.into(),
         digest: facts.digest,
         allocation: facts.allocation,
+        issued: AdmissionIssueGate::default(),
     }))
 }
 
@@ -565,15 +615,15 @@ fn admit_world_parser_receipt(
 }
 
 pub(crate) fn parse(
-    specification: Arc<CheckedCellSpecification>,
+    specification: Arc<CellRecipe>,
     include_paths: &[PathBuf],
     settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<Arc<ParsedCellPlan>, CompileError> {
-    if specification.cell_source.len() > (2 << 20)
-        || specification.template_source.len() > (2 << 20)
-        || specification.turn_templates.len() > 256
+    if specification.cell_source().len() > (2 << 20)
+        || specification.template_source().len() > (2 << 20)
+        || specification.turn_templates().len() > 256
         || specification
-            .turn_templates
+            .turn_templates()
             .iter()
             .any(|(_, source)| source.len() > (2 << 20))
     {
@@ -586,16 +636,13 @@ pub(crate) fn parse(
     {
         return Err(CellPlanInputRejection::SearchRoot.error());
     }
-    if !specification.reserved_declaration_modules.is_empty() {
-        return Err(CellPlanInputRejection::ReservedOwners.error());
-    }
-    if specification.injected_modules.len() > 4096
+    if specification.injected_modules().len() > 4096
         || specification
-            .injected_modules
+            .injected_modules()
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .len()
-            != specification.injected_modules.len()
+            != specification.injected_modules().len()
     {
         return Err(CellPlanInputRejection::InjectedInventory.error());
     }
@@ -603,8 +650,8 @@ pub(crate) fn parse(
     let source = scratch.path().join("cell.txt");
     let template = scratch.path().join("cell-template.hs");
     let output = scratch.path().join("cell-plan.cbor");
-    std::fs::write(&source, &specification.cell_source)?;
-    std::fs::write(&template, &specification.template_source)?;
+    std::fs::write(&source, specification.cell_source())?;
+    std::fs::write(&template, specification.template_source())?;
     let mut command =
         tidepool_extract_cmd::ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
     command
@@ -613,8 +660,8 @@ pub(crate) fn parse(
         .cell_template(&template)
         .cell_out(&output)
         .includes(include_paths)
-        .inject_vals(&specification.injected_modules);
-    for (index, (kind, source)) in specification.turn_templates.iter().enumerate() {
+        .inject_vals(specification.injected_modules());
+    for (index, (kind, source)) in specification.turn_templates().iter().enumerate() {
         let path = scratch.path().join(format!("turn-template-{index}.hs"));
         std::fs::write(&path, source)?;
         command.turn_template(kind, &path);
@@ -637,7 +684,7 @@ pub(crate) fn parse(
 }
 
 fn admit(
-    specification: Arc<CheckedCellSpecification>,
+    specification: Arc<CellRecipe>,
     include_paths: &[PathBuf],
     producer: &[u8; 32],
     receipt: Vec<u8>,
@@ -645,16 +692,17 @@ fn admit(
     let root = decode(&receipt)?;
     let fields = crate::checked_cell::row(&root, 8)?;
     if text(&fields[0])? != "TPCELLPLAN3"
-        || text(&fields[1])? != crate::checked_cell::hash(specification.cell_source.as_bytes())
-        || text(&fields[2])? != crate::checked_cell::hash(specification.template_source.as_bytes())
+        || text(&fields[1])? != crate::checked_cell::hash(specification.cell_source().as_bytes())
+        || text(&fields[2])?
+            != crate::checked_cell::hash(specification.template_source().as_bytes())
     {
         return Err(failure("source or template differs from parser receipt"));
     }
     let templates = list(&fields[3], 256)?;
-    if templates.len() != specification.turn_templates.len() {
+    if templates.len() != specification.turn_templates().len() {
         return Err(failure("parser template count"));
     }
-    for (row, (kind, source)) in templates.iter().zip(&specification.turn_templates) {
+    for (row, (kind, source)) in templates.iter().zip(specification.turn_templates()) {
         let row = crate::checked_cell::row(row, 2)?;
         if text(&row[0])? != kind || text(&row[1])? != crate::checked_cell::hash(source.as_bytes())
         {
@@ -667,7 +715,7 @@ fn admit(
             .iter()
             .zip(include_paths)
             .any(|(expected, actual)| Some(expected.as_str()) != actual.to_str())
-        || texts(&fields[5], 4096)? != specification.injected_modules
+        || texts(&fields[5], 4096)? != specification.injected_modules()
     {
         return Err(failure("parser search inputs or injected inventory"));
     }
@@ -872,22 +920,23 @@ mod tests {
         ciborium::ser::into_writer(value, &mut bytes).unwrap();
         bytes
     }
-    fn fixture() -> (Arc<CheckedCellSpecification>, Vec<PathBuf>, Value) {
-        let specification = Arc::new(CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: "let owned = (42 :: Int)".into(),
-            template_source: "compiler-template".into(),
-            turn_templates: vec![("bind".into(), "turn-template".into())],
-            injected_modules: vec!["Tidepool.Session.Val.G7".into()],
-            reserved_declaration_modules: Vec::new(),
-        });
+    fn fixture() -> (Arc<CellRecipe>, Vec<PathBuf>, Value) {
+        let specification = Arc::new(
+            CellRecipe::new(
+                "let owned = (42 :: Int)",
+                "compiler-template",
+                vec![("bind".to_string(), "turn-template".to_string())],
+                vec!["Tidepool.Session.Val.G7".to_string()],
+            )
+            .unwrap(),
+        );
         let a = |values: Vec<Value>| Value::Array(values);
         let t = |value: &str| Value::Text(value.into());
         let span = a(vec![1.into(), 1.into(), 1.into(), 23.into()]);
         let item = a(vec![
             span.clone(),
             t("bind"),
-            t(&specification.cell_source),
+            t(specification.cell_source()),
             a(vec![a(vec![t("owned")]), a(vec![])]),
             a(vec![a(vec![0.into(), span, t("bind")])]),
             Value::Bool(false),
@@ -906,10 +955,10 @@ mod tests {
         let receipt = a(vec![
             t("TPCELLPLAN3"),
             t(&crate::checked_cell::hash(
-                specification.cell_source.as_bytes(),
+                specification.cell_source().as_bytes(),
             )),
             t(&crate::checked_cell::hash(
-                specification.template_source.as_bytes(),
+                specification.template_source().as_bytes(),
             )),
             a(vec![a(vec![
                 t("bind"),
@@ -987,18 +1036,25 @@ mod tests {
         .is_err());
     }
 
-    #[test]
-    fn world_parser_receipt_binds_world_canonical_producer_and_authored_recipe() {
+    /// The world identity and parser facts `admit_world_plan` would retain
+    /// for the `fixture()` recipe. The held `CompilerWorld` wrapper adds only
+    /// `logical_id()` and a fresh issue gate.
+    fn world_plan_fixture() -> (
+        tidepool_extract_cmd::WorldCellRecipe,
+        [u8; 32],
+        [u8; 32],
+        Value,
+    ) {
         let (specification, _, legacy) = fixture();
         let recipe = tidepool_extract_cmd::WorldCellRecipe {
-            source: specification.cell_source.clone(),
-            template: specification.template_source.clone(),
-            turn_templates: specification.turn_templates.clone(),
+            source: specification.cell_source().to_owned(),
+            template: specification.template_source().to_owned(),
+            turn_templates: specification.turn_templates().to_vec(),
         };
         let producer =
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&[1; 32])
                 .sha256();
-        let world = [9; 32];
+        let world: [u8; 32] = [9; 32];
         let hash = |bytes: &[u8]| Value::Bytes(Sha256::digest(bytes).to_vec());
         let fields = legacy.as_array().unwrap();
         let receipt = Value::Array(vec![
@@ -1019,6 +1075,13 @@ mod tests {
             fields[6].clone(),
             fields[7].clone(),
         ]);
+        (recipe, world, producer, receipt)
+    }
+
+    #[test]
+    fn world_parser_receipt_binds_world_canonical_producer_and_authored_recipe() {
+        let (recipe, world, producer, receipt) = world_plan_fixture();
+        let (_, _, legacy) = fixture();
         let admitted =
             admit_world_parser_receipt(&world, &recipe, producer, &encoded(&receipt)).unwrap();
         assert_eq!(admitted.items[0].binders(), ["owned"]);
@@ -1176,6 +1239,80 @@ mod tests {
         .unwrap();
         assert!(consume_world_cell_admission(&derived.allocation, token).is_err());
         assert!(admit_world_parser_receipt(&world, &recipe, producer, &encoded(&legacy)).is_err());
+    }
+
+    #[test]
+    fn live_plan_issues_its_admission_token_once() {
+        let (recipe, world, producer, receipt) = world_plan_fixture();
+        let admitted =
+            admit_world_parser_receipt(&world, &recipe, producer, &encoded(&receipt)).unwrap();
+        use crate::checked_cell::CheckedPlannedCellSlot as Slot;
+        let subject = |owner: [u8; 16]| {
+            WorldCellAdmissionSubject::new(
+                owner,
+                3,
+                4,
+                5,
+                [b"TidepoolPrivateExecutionAdmission1".to_vec()],
+            )
+            .unwrap()
+        };
+        let bindings = || {
+            vec![vec![(
+                "owned".to_string(),
+                tidepool_repr::SessionVarId::from_extract(91),
+            )]]
+        };
+        let issue = |gate: &AdmissionIssueGate| {
+            claim_and_issue_world_cell_admission(
+                gate,
+                &world,
+                &producer,
+                &admitted.digest,
+                &admitted.allocation,
+                &admitted.items,
+                subject([7; 16]),
+                vec![Slot::Bind { value: 7 }],
+                bindings(),
+            )
+        };
+        let issued = AdmissionIssueGate::default();
+        assert!(issue(&issued).is_ok());
+        // The same live plan refuses a second, independently well-formed token:
+        // one plan authorises one execution and one generation range.
+        assert!(issue(&issued).is_err());
+        // A refused request does not burn a plan, because validation runs
+        // before the claim.
+        let unburned = AdmissionIssueGate::default();
+        assert!(claim_and_issue_world_cell_admission(
+            &unburned,
+            &world,
+            &producer,
+            &admitted.digest,
+            &admitted.allocation,
+            &admitted.items,
+            subject([7; 16]),
+            vec![Slot::Bind { value: 0 }],
+            bindings(),
+        )
+        .is_err());
+        assert!(issue(&unburned).is_ok());
+        // A fresh admission of the same receipt has its own allocation and
+        // gate, exactly as `admit_world_plan` constructs it, and still issues.
+        let fresh =
+            admit_world_parser_receipt(&world, &recipe, producer, &encoded(&receipt)).unwrap();
+        assert!(claim_and_issue_world_cell_admission(
+            &AdmissionIssueGate::default(),
+            &world,
+            &producer,
+            &fresh.digest,
+            &fresh.allocation,
+            &fresh.items,
+            subject([7; 16]),
+            vec![Slot::Bind { value: 7 }],
+            bindings(),
+        )
+        .is_ok());
     }
 
     #[test]

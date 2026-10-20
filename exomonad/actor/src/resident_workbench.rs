@@ -8426,11 +8426,10 @@ where
                 let template = resident_cell_check_template(&preamble, effects, &prepared.imports);
                 let templates =
                     resident_workbench_templates(&prepared.preamble, effects, &prepared.imports);
-                let cell = tidepool_toolchain::checked_cell::CheckedCellSpecification {
-                    admission_digest: [0; 32],
-                    cell_source: snapshot_cell_source,
-                    template_source: template,
-                    turn_templates: templates
+                let cell = tidepool_toolchain::checked_cell::CellRecipe::new(
+                    snapshot_cell_source,
+                    template,
+                    templates
                         .iter()
                         .map(|template| {
                             let kind = match template.kind {
@@ -8444,9 +8443,9 @@ where
                             (kind.to_owned(), template.source.clone())
                         })
                         .collect(),
-                    injected_modules: prepared.injected,
-                    reserved_declaration_modules: Vec::new(),
-                };
+                    prepared.injected,
+                )
+                .unwrap();
                 let specification = Arc::new(WorkbenchCompilationSpec {
                     _authority: authority.clone(),
                     cell,
@@ -8473,7 +8472,7 @@ where
                     settlement,
                 )
                 .map_err(|error| {
-                    cell_check_error(error.into(), &parser_specification.cell.cell_source)
+                    cell_check_error(error.into(), parser_specification.cell.cell_source())
                 })
             })
         }))
@@ -8537,7 +8536,7 @@ where
                 );
                 let prepared = prepared.map_err(ResidentActorWorkbenchError::from)?;
                 tidepool_runtime::session::turn::finish_cell_program_admitted(prepared).map_err(
-                    |failure| cell_check_error(failure, &check_specification.cell.cell_source),
+                    |failure| cell_check_error(failure, check_specification.cell.cell_source()),
                 )
             }))
             .await
@@ -13690,7 +13689,7 @@ impl CellPreparationPurpose {
 
 struct WorkbenchCompilationSpec {
     _authority: Arc<crate::resident_actor::WorkbenchCompilationAuthority>,
-    cell: tidepool_toolchain::checked_cell::CheckedCellSpecification,
+    cell: tidepool_toolchain::checked_cell::CellRecipe,
     include: Vec<PathBuf>,
     compile_inputs: tidepool_runtime::session::RuntimeCompileInputs,
 }
@@ -14547,7 +14546,6 @@ fn structured_introspection_answer(
     }
 }
 
-
 fn observe_inspection_work<T>(
     observation: Option<&Arc<tidepool_toolchain::timing::HostWorkObservation>>,
     work: impl FnOnce() -> T,
@@ -15026,7 +15024,6 @@ pub(crate) mod request_tests {
         );
         include
     }
-
 
     fn host_mount_fixture() -> (
         ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
@@ -18432,7 +18429,6 @@ pub(crate) mod request_tests {
         machines.insert_idle(session_id, Box::new(session));
         (machines, context, source, root)
     }
-
 
     #[tokio::test]
     async fn source_preparation_retains_actual_close_after_waiter_cancel_and_owner_retirement_observation(
@@ -26548,25 +26544,28 @@ pub(crate) mod request_tests {
         let receiver_text = tidepool_testing::fixture_source(
             "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
         );
-        let specification = Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: receiver_text.clone(),
-            template_source: template.clone(),
-            turn_templates: templates
-                .iter()
-                .map(|template| {
-                    let kind = match template.kind {
-                        tidepool_runtime::session::TemplateSelector::Decl => "decl",
-                        tidepool_runtime::session::TemplateSelector::Bind => "bind",
-                        tidepool_runtime::session::TemplateSelector::BindDiscard => "binddiscard",
-                        tidepool_runtime::session::TemplateSelector::Expr => "expr",
-                    };
-                    (kind.into(), template.source.clone())
-                })
-                .collect(),
-            injected_modules: prepared.injected.clone(),
-            reserved_declaration_modules: Vec::new(),
-        });
+        let specification = Arc::new(
+            tidepool_toolchain::checked_cell::CellRecipe::new(
+                receiver_text.clone(),
+                template.clone(),
+                templates
+                    .iter()
+                    .map(|template| {
+                        let kind = match template.kind {
+                            tidepool_runtime::session::TemplateSelector::Decl => "decl",
+                            tidepool_runtime::session::TemplateSelector::Bind => "bind",
+                            tidepool_runtime::session::TemplateSelector::BindDiscard => {
+                                "binddiscard"
+                            }
+                            tidepool_runtime::session::TemplateSelector::Expr => "expr",
+                        };
+                        (kind.to_owned(), template.source.clone())
+                    })
+                    .collect(),
+                prepared.injected.clone(),
+            )
+            .unwrap(),
+        );
         let plan = tidepool_testing::with_settlement(|settlement| {
             tidepool_toolchain::artifacts::parse_cell_plan(
                 specification.clone(),
@@ -26976,7 +26975,6 @@ pub(crate) mod request_tests {
         }
     }
 
-
     #[test]
     fn request_annotations_survive_planned_admission() {
         use tidepool_runtime::session::RequestCompileAnnotations;
@@ -26998,14 +26996,15 @@ pub(crate) mod request_tests {
             context.haskell_effects_alias.expression(),
             &prepared.imports,
         );
-        let specification = Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: "pure ()".into(),
-            template_source: template,
-            turn_templates: Vec::new(),
-            injected_modules: prepared.injected,
-            reserved_declaration_modules: Vec::new(),
-        });
+        let specification = Arc::new(
+            tidepool_toolchain::checked_cell::CellRecipe::new(
+                "pure ()".to_string(),
+                template,
+                Vec::new(),
+                prepared.injected,
+            )
+            .unwrap(),
+        );
         let plan = tidepool_testing::with_settlement(|settlement| {
             tidepool_toolchain::artifacts::parse_cell_plan(
                 specification.clone(),
@@ -30268,12 +30267,11 @@ pub(crate) mod request_tests {
             let before = actor_compile_view(&session, &context, &source)
                 .unwrap()
                 .next_value_generation();
-            let specification =
-                Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
-                    admission_digest: [0; 32],
-                    cell_source: text.into(),
-                    template_source: template.clone(),
-                    turn_templates: templates
+            let specification = Arc::new(
+                tidepool_toolchain::checked_cell::CellRecipe::new(
+                    text.to_string(),
+                    template.clone(),
+                    templates
                         .iter()
                         .map(|template| {
                             let kind = match template.kind {
@@ -30287,9 +30285,10 @@ pub(crate) mod request_tests {
                             (kind.to_owned(), template.source.clone())
                         })
                         .collect(),
-                    injected_modules: prepared.injected.clone(),
-                    reserved_declaration_modules: Vec::new(),
-                });
+                    prepared.injected.clone(),
+                )
+                .unwrap(),
+            );
             let plan = tidepool_testing::with_settlement(|settlement| {
                 tidepool_toolchain::artifacts::parse_cell_plan(
                     specification.clone(),
@@ -30326,28 +30325,37 @@ pub(crate) mod request_tests {
                 "refused setup reserved generation for {text:?}"
             );
         }
-        let specification = Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
-            admission_digest: [0; 32],
-            cell_source: "_ <- pure ()".into(),
-            template_source: template,
-            turn_templates: templates
-                .iter()
-                .map(|template| {
-                    let kind = match template.kind {
-                        tidepool_runtime::session::TemplateSelector::Decl => "decl",
-                        tidepool_runtime::session::TemplateSelector::Bind => "bind",
-                        tidepool_runtime::session::TemplateSelector::BindDiscard => "binddiscard",
-                        tidepool_runtime::session::TemplateSelector::Expr => "expr",
-                    };
-                    (kind.to_owned(), template.source.clone())
-                })
-                .collect(),
-            injected_modules: prepared.injected,
-            reserved_declaration_modules: Vec::new(),
-        });
-        let mut leaked = specification.as_ref().clone();
-        leaked.injected_modules = raw_injection;
-        let leaked = Arc::new(leaked);
+        let specification = Arc::new(
+            tidepool_toolchain::checked_cell::CellRecipe::new(
+                "_ <- pure ()".to_string(),
+                template,
+                templates
+                    .iter()
+                    .map(|template| {
+                        let kind = match template.kind {
+                            tidepool_runtime::session::TemplateSelector::Decl => "decl",
+                            tidepool_runtime::session::TemplateSelector::Bind => "bind",
+                            tidepool_runtime::session::TemplateSelector::BindDiscard => {
+                                "binddiscard"
+                            }
+                            tidepool_runtime::session::TemplateSelector::Expr => "expr",
+                        };
+                        (kind.to_owned(), template.source.clone())
+                    })
+                    .collect(),
+                prepared.injected,
+            )
+            .unwrap(),
+        );
+        let leaked = Arc::new(
+            tidepool_toolchain::checked_cell::CellRecipe::new(
+                specification.cell_source(),
+                specification.template_source(),
+                specification.turn_templates().to_vec(),
+                raw_injection,
+            )
+            .unwrap(),
+        );
         let leaked_plan = tidepool_testing::with_settlement(|settlement| {
             tidepool_toolchain::artifacts::parse_cell_plan(
                 leaked.clone(),
