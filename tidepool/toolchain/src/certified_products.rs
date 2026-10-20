@@ -15280,9 +15280,9 @@ pub(crate) mod tests {
     #[ignore = "requires the matched Haskell worker and frontend"]
     fn compiled_new_output_refuses_absent_input_native_permission() {
         use crate::artifact_inventory::{
-            ArtifactDependency, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure,
-            CanonicalProducerIdentity, CompilerInputProjection, CompilerInputRole,
-            IssuedNativeOffer, NativeArtifactDemand,
+            ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
+            ArtifactInventoryFailure, CanonicalProducerIdentity, CompilerInputProjection,
+            CompilerInputRole, IssuedNativeOffer, NativeArtifactDemand,
         };
         use crate::declaration_context::{
             issue_fixture_compiler_support, recover_fixture_compiler_support, ExactCompileContext,
@@ -15296,9 +15296,8 @@ pub(crate) mod tests {
             let root = directory.path();
             let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1));
             let source = include_str!("../tests/fixtures/checked-prefix-publication/G1.hs");
-            let support_source = include_str!(
-                "../tests/fixtures/checked-prefix-publication/PrefixSelectedSupport.hs"
-            );
+            let support_source =
+                include_str!("../tests/fixtures/checked-prefix-publication/PrefixSelectedSupport.hs");
             let source_path = root.join(module.relative_hs_path());
             std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
             std::fs::write(&source_path, source).unwrap();
@@ -15331,12 +15330,10 @@ pub(crate) mod tests {
             let support_product = supports[0];
             let output_product = certificate.product();
             assert_ne!(output_product.owner(), support_product.owner());
-            let support_entry = Arc::new(
-                ArtifactEntry::original(producer.sha256(), support_product.clone()).unwrap(),
-            );
-            let output_entry = Arc::new(
-                ArtifactEntry::original(producer.sha256(), output_product.clone()).unwrap(),
-            );
+            let support_entry =
+                Arc::new(ArtifactEntry::original(producer.sha256(), support_product.clone()).unwrap());
+            let output_entry =
+                Arc::new(ArtifactEntry::original(producer.sha256(), output_product.clone()).unwrap());
             let canonical_support = Arc::new(ArtifactEntry::canonical(
                 support_product.module_interface().unwrap().clone(),
             ));
@@ -15542,6 +15539,46 @@ pub(crate) mod tests {
                         .bindings
                         .contains(&issued_a_binding));
                 }
+                // Save the input owner's exact group/carrier/canonical tuple
+                // before C can issue anything. Logical A identity is insufficient.
+                let mut input_bindings = BTreeSet::new();
+                for offer in input
+                    .compiler_source_support()
+                    .native_offers()
+                    .iter()
+                    .filter(|offer| offer.original() == support_entry.descriptor.id && offer.is_full())
+                {
+                    let edges = offer.custody_snapshot().binding_dependencies().unwrap();
+                    for (group, carrier) in offer.issued_group_carriers().unwrap() {
+                        if group.binding.artifact() != support_entry.descriptor.id
+                            || group.original_ordinal != required_ordinal
+                        {
+                            continue;
+                        }
+                        let canonical = edges
+                            .iter()
+                            .filter_map(|(from, to, edge)| match to {
+                                ArtifactBindingNode::Artifact(binding)
+                                    if *from == ArtifactBindingNode::Artifact(carrier)
+                                        && *edge == ArtifactDependency::Interface
+                                        && binding.artifact == canonical_support.descriptor.id =>
+                                {
+                                    Some(*binding)
+                                }
+                                _ => None,
+                            })
+                            .collect::<BTreeSet<_>>();
+                        assert_eq!(canonical.len(), 1);
+                        input_bindings.insert((group, carrier, *canonical.first().unwrap()));
+                    }
+                }
+                let expected_input = if expected {
+                    assert_eq!(input_bindings.len(), 1);
+                    Some(*input_bindings.first().unwrap())
+                } else {
+                    assert!(input_bindings.is_empty());
+                    None
+                };
                 let operation = InventoryOperation::new(Default::default());
                 let mut selection =
                     CertifiedSourceSelection::from_compiler_inputs(input, &operation).unwrap();
@@ -15555,8 +15592,7 @@ pub(crate) mod tests {
                     .unwrap();
                 selection
                     .bind_produced_originals(
-                        &IssuedGroupCandidates::bind(Arc::from([]), &[output_product.clone()])
-                            .unwrap(),
+                        &IssuedGroupCandidates::bind(Arc::from([]), &[output_product.clone()]).unwrap(),
                     )
                     .unwrap();
                 let completed = OriginalCompilerInputs::issue_segment_native_availability(
@@ -15623,6 +15659,48 @@ pub(crate) mod tests {
                         .expect("actual completed C has its issued native offer")
                         .clone();
                     assert!(completed_offer.is_full());
+                    let (expected_a, expected_carrier, expected_canonical) = expected_input.unwrap();
+                    let carriers = completed_offer.issued_group_carriers().unwrap();
+                    let edges = completed_offer
+                        .custody_snapshot()
+                        .binding_dependencies()
+                        .unwrap();
+                    for (dependent_ordinal, imported_ordinal, _) in &required_edges {
+                        let dependent = carriers
+                            .iter()
+                            .filter_map(|(group, carrier)| {
+                                (group.binding.artifact() == output_entry.descriptor.id
+                                    && group.original_ordinal == *dependent_ordinal)
+                                    .then_some((*group, *carrier))
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(dependent.len(), 1);
+                        let (dependent, carrier) = dependent[0];
+                        assert_eq!(*imported_ordinal, expected_a.original_ordinal);
+                        assert!(edges.contains(&(
+                            ArtifactBindingNode::Group(dependent),
+                            ArtifactBindingNode::Group(expected_a),
+                            ArtifactDependency::NativeGroup {
+                                dependent_ordinal: *dependent_ordinal,
+                                required_ordinal: *imported_ordinal,
+                            },
+                        )));
+                        assert!(edges.contains(&(
+                            ArtifactBindingNode::Group(dependent),
+                            ArtifactBindingNode::Artifact(carrier),
+                            ArtifactDependency::Interface,
+                        )));
+                    }
+                    assert!(edges.contains(&(
+                        ArtifactBindingNode::Group(expected_a),
+                        ArtifactBindingNode::Artifact(expected_carrier),
+                        ArtifactDependency::Interface,
+                    )));
+                    assert!(edges.contains(&(
+                        ArtifactBindingNode::Artifact(expected_carrier),
+                        ArtifactBindingNode::Artifact(expected_canonical),
+                        ArtifactDependency::Interface,
+                    )));
                     let next = ExactCompileContext::new(context.clone())
                         .prepare_compilation_with_private_input(
                             &root.join("completed"),
