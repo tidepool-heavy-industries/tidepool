@@ -67,7 +67,7 @@ import System.Mem.StableName (makeStableName)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256)
 import Tidepool.CertifiedProducts
   ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders, certifiedBinderInputClosure
-  , encodeCertifiedItemProducts, encodeCertifiedItemProductsWithInputs, sourceProductSha256 )
+  , encodeCertifiedItemProducts, encodeCertifiedItemProductsWithInputs, readyNativeProductSourceSha256 )
 import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts )
 import Tidepool.DependencyEvidence
@@ -982,7 +982,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
                     compilationScope <$> preparedExactCompilation prepared) of
                     (Nothing,Just scope) -> maybe "" (T.pack . (\source ->
                       exactProgramProductVersionFromDigest scope (T.unpack unit) (T.unpack name)
-                        (T.unpack source) iface native packages)) (sourceProductSha256 finalDependencies (T.unpack unit) (T.unpack name))
+                        (T.unpack source) iface native packages)) (readyNativeProductSourceSha256 finalDependencies (T.unpack unit) (T.unpack name))
                     _ -> ""]
       reconciled <- case inventory of
         Just current -> pure (currentReconciledOriginalProducts current)
