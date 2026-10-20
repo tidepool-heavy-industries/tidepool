@@ -2,7 +2,9 @@
 
 Accepted implementation contract, 2026-10-20; base `c14dad0f0c` on
 `integration/compiler-query-warm-final`. Replaces the earlier ownership design;
-retains the campaign G2/G3 gates in `plan.md`.
+retains the campaign G2/G3 gates in `plan.md`. The current
+[G2 completion contract](g2-completion.md) owns the remaining work split and
+refines stage composition, successor custody and the finite-native producer.
 
 ## Outcome
 
@@ -144,7 +146,9 @@ publish_application_surface, bind_initial_generation. A failure flag cannot skip
 it. Every distinct installation consumes its own ticket; only an exact unchanged
 surface permits idempotent initialization. Preserve genuine early bootstrap
 failure controls. Observe actual typed terminal results before deliberate result
-loss; strict-Visible's cause is unknown until observed.
+loss. The current strict-Visible fixture creates B inside A's source transaction
+and retains A: cutoff correctly refuses it. Keep that negative control and use
+actual ReloadPreparation for independent closed-B success/caller-loss evidence.
 
 The passing lower protocol test can reuse the same unrun body, but does not prove
 fresh candidates. Distinct candidates share immutable code and invoke actual
@@ -162,7 +166,7 @@ pointer equality is not a fresh-state oracle.
 | W / review_world_lifetime_architecture | H package-group products/projection and Rust codegen/ImageRegistry integration; artifact shape coordinated with N |
 | L / audit_reload_ownership | Scope-neutral preparation, fresh runtime installation, ambient live-package deletion |
 | T / audit_warm_lifecycle | Production bootstrap, useful diagnostics and lifecycle/fresh-instance histories |
-| Q / audit_native_selection | Independent joined review: bypasses, eager work and test authority |
+| Q / audit_native_selection | Package graph/binding issuance, artifact kinds, storage and recovery |
 
 Preserve worker checkpoints and integrate complete base-to-tip deltas. Publication
 commits already folded into L/T must not be cherry-picked twice. E owns
