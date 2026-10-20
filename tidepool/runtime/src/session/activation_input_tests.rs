@@ -172,7 +172,7 @@ impl InputFixture {
             )
             .unwrap();
         let previous_context = resident.run_context();
-        let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+        let execution = begin_fixture_execution(&mut resident);
         resident
             .set_run_context(SessionRunContext {
                 lexical_scope: execution.private_scope(),
@@ -208,7 +208,7 @@ impl InputFixture {
             interface.owner(),
             tidepool_repr::SessionModule::val(reservation.generation())
         );
-        let outcome = tidepool_testing::with_settlement(|settlement| {
+        let outcome = source_action(&mut resident, |resident, settlement| {
             resident.run_projected_bind_with_sites(
                 "nativeActivationReceiver",
                 receiver.code(),
@@ -252,7 +252,9 @@ impl InputFixture {
     fn resume_activation(&self, resident: &mut TestSession, hole: ResidentHole) -> ResidentOutcome {
         let site = parked_site(resident, &hole);
         assert!(matches!(
-            tidepool_testing::with_settlement(|settlement| resident.resume(hole.clone(), (), settlement)),
+            source_action(resident, |resident, settlement| {
+                resident.resume(hole.clone(), (), settlement)
+            }),
             Err(ResidentError::Prepared(PreparedRuntimeError::AnswerDelivery {
                 site: rejected,
                 delivery: tidepool_repr::execution_schema::SiteDelivery::ExitCellFill,
@@ -264,7 +266,7 @@ impl InputFixture {
             .expect("retain the genuine native Unit reply")
             .expect("compiled Unit reply binding is installed");
         let publication = suspended(
-            tidepool_testing::with_settlement(|settlement| {
+            source_action(resident, |resident, settlement| {
                 resident.resume_handle(hole, reply, settlement)
             })
             .expect("deliver native reply custody into the original request"),
@@ -272,7 +274,7 @@ impl InputFixture {
         let captured = resident
             .capture_result_publication(&publication, site, RealmId::ROOT)
             .expect("the protected helper publishes the original typed native result");
-        let outcome = tidepool_testing::with_settlement(|settlement| {
+        let outcome = source_action(resident, |resident, settlement| {
             resident.resume(publication, (), settlement)
         })
         .expect("settle owned result publication");
@@ -282,7 +284,7 @@ impl InputFixture {
 
     fn start(&self, resident: &mut TestSession) -> ResidentHole {
         suspended(
-            tidepool_testing::with_settlement(|settlement| {
+            source_action(resident, |resident, settlement| {
                 resident.run_with_sites(
                     "originalActivationRequests",
                     self.producer.code(),
@@ -310,7 +312,7 @@ impl InputFixture {
             .unwrap()
             .expect("real compiled native receiver");
         let activation = suspended(
-            tidepool_testing::with_settlement(|settlement| {
+            source_action(resident, |resident, settlement| {
                 resident.run_rooted_application(
                     "realRequestSession",
                     &receiver,
@@ -344,6 +346,51 @@ impl InputFixture {
     }
 }
 
+/// Run one runtime source phase under the compiler transaction it requires.
+///
+/// The transaction is origin-bound, so a phase that owns its own transaction
+/// (checked-cell compilation, renderer production) must be called outside this
+/// helper. A nested call reuses the ambient transaction; its owner already
+/// holds the close-report sink.
+fn source_action<T>(
+    resident: &mut TestSession,
+    action: impl FnOnce(&mut TestSession, &mut dyn FnMut(crate::CompilerTransactionClose)) -> T,
+) -> T {
+    if crate::CompilerTransactionOrigin::current().is_some() {
+        let mut settlement = |_close| {};
+        return action(resident, &mut settlement);
+    }
+    let source = resident
+        .mint_isolated_scope_with_lease()
+        .expect("mint the fixture compiler source lease");
+    let settled = resident
+        .with_source_compiler_transaction(
+            source,
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |resident, settlement| action(resident, settlement),
+        )
+        .expect("open the fixture compiler transaction");
+    assert!(
+        settled.close().resources_retired(),
+        "fixture compiler transaction retained source custody: {:?}",
+        settled.close()
+    );
+    settled.into_outcome().action
+}
+
+fn begin_fixture_execution(
+    resident: &mut TestSession,
+) -> Arc<crate::session::PrivateExecutionAdmission> {
+    Arc::new(source_action(resident, |resident, _| {
+        resident
+            .begin_private_execution(ScopeId::ROOT)
+            .expect("begin the fixture private source execution")
+    }))
+}
+
 fn publish_checked_fixture(
     resident: &mut TestSession,
     execution: &crate::session::PrivateExecutionAdmission,
@@ -353,28 +400,30 @@ fn publish_checked_fixture(
         .freeze_private_execution(execution)
         .expect("freeze the checked fixture publication");
     assert_eq!(intent.native_write_ids().len(), native_writes);
-    let publication = resident
-        .restage_ephemeral_execution_publication(intent)
-        .expect("stage the checked fixture into ROOT");
-    let ticket = match publication {
-        crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
-        crate::session::ExecutionPublication::Declarations(base) => {
-            let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
-                tidepool_testing::with_settlement(|settlement| base.certify(settlement))
-                    .expect("certify the checked declaration/value publication")
-            else {
-                panic!("checked fixture publication must be accepted");
-            };
-            accepted.stage().unwrap()
-        }
-    };
-    assert!(matches!(
-        resident
-            .attempt_public_manifest(ticket, &crate::session::PublicationDecision::new())
-            .map(crate::session::settled_manifest_attempt)
-            .expect("commit the checked fixture to ROOT"),
-        crate::session::PublicManifestCommit::Ephemeral
-    ));
+    source_action(resident, |resident, settlement| {
+        let publication = resident
+            .restage_ephemeral_execution_publication(intent)
+            .expect("stage the checked fixture into ROOT");
+        let ticket = match publication {
+            crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
+            crate::session::ExecutionPublication::Declarations(base) => {
+                let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
+                    base.certify(settlement)
+                        .expect("certify the checked declaration/value publication")
+                else {
+                    panic!("checked fixture publication must be accepted");
+                };
+                accepted.stage().unwrap()
+            }
+        };
+        assert!(matches!(
+            resident
+                .attempt_public_manifest(ticket, &crate::session::PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
+                .expect("commit the checked fixture to ROOT"),
+            crate::session::PublicManifestCommit::Ephemeral
+        ));
+    });
 }
 
 fn assert_startup_origin(label: &str, compiled: &CompiledTurn, requires_input: bool) {
@@ -529,7 +578,7 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
             LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         )
         .unwrap();
-    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
@@ -542,7 +591,7 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
         execution.clone(),
     );
     assert_eq!(binders.len(), 2);
-    let outcome = tidepool_testing::with_settlement(|settlement| {
+    let outcome = source_action(&mut resident, |resident, settlement| {
         resident.run_projected_bind_with_sites(
             "receiverInstaller",
             compiled.code(),
@@ -571,7 +620,7 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
     observed.provenance =
         Arc::new(ProgramProvenance::from_sites(&installer.provenance.sites()).unwrap());
     let observation_hole = suspended(
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut resident, |resident, settlement| {
             resident.run_rooted_entry_borrowed(
                 "observedReceiverInstaller",
                 &observed,
@@ -611,7 +660,7 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
 
     let register = |resident: &mut TestSession| {
         suspended(
-            tidepool_testing::with_settlement(|settlement| {
+            source_action(resident, |resident, settlement| {
                 resident.run_rooted_entry_borrowed(
                     "issuedReceiverInstaller",
                     &installer,
@@ -676,7 +725,7 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
         .unwrap();
     let mut foreign = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
     assert!(matches!(
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut foreign, |foreign, settlement| {
             foreign.run_request_receiver_entry(entry, settlement)
         }),
         Err(ResidentError::ForeignCustody)
@@ -698,13 +747,13 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
     let entry = resident
         .capture_request_receiver_entry(&registration, site_wire, realm)
         .unwrap();
-    let settled = tidepool_testing::with_settlement(|settlement| {
+    let settled = source_action(&mut resident, |resident, settlement| {
         resident.resume(registration.clone(), (), settlement)
     })
     .unwrap();
     assert!(matches!(settled, ResidentOutcome::Completed { .. }));
     let receiver = suspended(
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut resident, |resident, settlement| {
             resident.run_request_receiver_entry(entry, settlement)
         })
         .unwrap(),
@@ -738,7 +787,7 @@ fn settle_request_reservation(
     request: i64,
 ) -> ResidentHole {
     suspended(
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(resident, |resident, settlement| {
             resident.resume(hole, Ok::<i64, ()>(request), settlement)
         })
         .expect("settle ReserveRequestWith with Right request ID"),
@@ -746,7 +795,7 @@ fn settle_request_reservation(
 }
 
 fn settle_request_submission(resident: &mut TestSession, hole: ResidentHole) -> ResidentOutcome {
-    tidepool_testing::with_settlement(|settlement| {
+    source_action(resident, |resident, settlement| {
         resident.resume(hole, Ok::<(), ()>(()), settlement)
     })
     .expect("settle SubmitRequestWith with Right Unit")
@@ -777,9 +826,11 @@ fn issued_captured_input(
     let before = resident.residency();
     let codegen = resident.codegen_totals();
     let visibility = resident.public_visibility_snapshot_in(scope).unwrap();
-    let owner = resident
-        .admit_activation_input_in(scope, input)
-        .expect("reserve one original live input without authored checking");
+    let owner = source_action(resident, |resident, _| {
+        resident
+            .admit_activation_input_in(scope, input)
+            .expect("reserve one original live input without authored checking")
+    });
     let reservation = owner.reservation();
     let requests = tidepool_toolchain::artifacts::host_binding_interface_request_count();
     let submissions = tidepool_extract_cmd::extract_spawn_count();
@@ -842,7 +893,7 @@ fn mount_original(
     let roots = resident.persistent_roots_count();
     let custody = resident.outstanding_custody();
     let codegen = resident.codegen_totals();
-    let mounted = tidepool_testing::with_settlement(|settlement| {
+    let mounted = source_action(resident, |resident, settlement| {
         resident.mount_activation_input(owner, interface.clone(), settlement)
     })
     .expect("mount the original value under its thin type interface");
@@ -958,11 +1009,13 @@ fn try_check_fixture_cell(
         reserved_declaration_modules: Vec::new(),
     });
     let includes = view.include_paths(&recipe.include);
-    let plan = tidepool_testing::with_settlement(|settlement| {
-        tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &includes, settlement)
-    })?;
-    let admission = resident
-        .admit_planned_cell_for_execution(
+    let admission = source_action(resident, |resident, settlement| {
+        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+            specification.clone(),
+            &includes,
+            settlement,
+        )?;
+        Ok::<_, turn::CellCheckFailure>(resident.admit_planned_cell_for_execution(
             execution,
             plan,
             specification.clone(),
@@ -971,7 +1024,8 @@ fn try_check_fixture_cell(
             includes,
             None,
         )
-        .expect("admit checked fixture bindings with their selected interfaces");
+        .expect("admit checked fixture bindings with their selected interfaces"))
+    })?;
     let (checked, program) = tidepool_testing::with_settlement(|settlement| {
         turn::compile_cell_program_admitted(admission.clone(), settlement)
     })?;
@@ -993,9 +1047,11 @@ impl CheckedFixtureCell {
         Arc<crate::session::RuntimeCheckedItemAdmission>,
     ) {
         let item = self.checked.checked_item(index).unwrap();
-        let reservation = resident
-            .admit_checked_item(self.prefix.clone(), item.clone())
-            .unwrap();
+        let reservation = source_action(resident, |resident, _| {
+            resident
+                .admit_checked_item(self.prefix.clone(), item.clone())
+                .unwrap()
+        });
         let TurnResult::Bind {
             bound, compiled, ..
         } = turn::consume_cell_program_item(reservation.clone())
@@ -1015,10 +1071,12 @@ impl CheckedFixtureCell {
             .owner()
             .module
             .clone();
-        let reservation = resident
-            .admit_checked_item(self.prefix.clone(), item)
-            .unwrap();
-        resident.adopt_checked_declaration(reservation).unwrap();
+        source_action(resident, |resident, _| {
+            let reservation = resident
+                .admit_checked_item(self.prefix.clone(), item)
+                .unwrap();
+            resident.adopt_checked_declaration(reservation).unwrap();
+        });
         owner
     }
 }
@@ -1043,7 +1101,7 @@ fn publish_fixture_declaration(
     native_writes: usize,
 ) -> String {
     let previous_context = resident.run_context();
-    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let execution = begin_fixture_execution(resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
@@ -1092,7 +1150,7 @@ fn publish_fixture_declaration(
             .unwrap()
             .value_interface_certificate()
             .unwrap();
-        let outcome = tidepool_testing::with_settlement(|settlement| {
+        let outcome = source_action(resident, |resident, settlement| {
             resident.run_bind_with_sites(
                 &bound[0].name,
                 compiled.code(),
@@ -1136,7 +1194,7 @@ fn original_value_probe(
 ) {
     let previous_context = resident.run_context();
     let original_bindings = resident.binding_names_in(ScopeId::ROOT);
-    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let execution = begin_fixture_execution(resident);
     let private_scope = execution.private_scope();
     resident
         .set_run_context(SessionRunContext {
@@ -1150,7 +1208,7 @@ fn original_value_probe(
         compile_checked_binding(resident, recipe, &source, execution);
     assert_eq!(bound.len(), 1);
     let ResidentOutcome::Completed { result, .. } =
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(resident, |resident, settlement| {
             resident.run_bind_with_sites(
                 "originalInputProbe",
                 compiled.code(),
@@ -1176,7 +1234,7 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
     use crate::session::TemplateSelector;
     use tidepool_toolchain::checked_cell::CheckedCellSpecification;
 
-    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let execution = begin_fixture_execution(resident);
     let scope = execution.private_scope();
     resident
         .set_run_context(SessionRunContext {
@@ -1210,24 +1268,26 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
         injected_modules: view.injected_module_names(),
         reserved_declaration_modules: Vec::new(),
     });
-    let admission = resident
-        .admit_planned_cell_for_execution(
-            execution.clone(),
-            tidepool_testing::with_settlement(|settlement| {
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    specification.clone(),
-                    &(view.include_paths(&fixture.recipe.include)),
-                    settlement,
-                )
-            })
-            .unwrap(),
+    let includes = view.include_paths(&fixture.recipe.include);
+    let admission = source_action(resident, |resident, settlement| {
+        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
             specification.clone(),
-            specification.specification_digest(),
-            fixture.recipe.digest(),
-            view.include_paths(&fixture.recipe.include),
-            None,
+            &includes,
+            settlement,
         )
         .unwrap();
+        resident
+            .admit_planned_cell_for_execution(
+                execution.clone(),
+                plan,
+                specification.clone(),
+                specification.specification_digest(),
+                fixture.recipe.digest(),
+                includes,
+                None,
+            )
+            .unwrap()
+    });
     let (checked, program) = tidepool_testing::with_settlement(|settlement| {
         turn::compile_cell_program_admitted(admission.clone(), settlement)
     })
@@ -1237,7 +1297,9 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
         .begin_cell_program(admission, program)
         .unwrap()
         .unwrap();
-    let reservation = resident.admit_checked_item(prefix.clone(), item).unwrap();
+    let reservation = source_action(resident, |resident, _| {
+        resident.admit_checked_item(prefix.clone(), item).unwrap()
+    });
     let TurnResult::Bind {
         bound, compiled, ..
     } = turn::consume_cell_program_item(reservation.clone()).unwrap()
@@ -1275,7 +1337,7 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
     );
     changed.sites = Cow::Owned(sites);
     assert!(changed.original_source().is_err());
-    let error = tidepool_testing::with_settlement(|settlement| {
+    let error = source_action(resident, |resident, settlement| {
         resident.run_bind_with_sites(
             "changedCheckedSiteMap",
             changed,
@@ -1354,7 +1416,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
         panic!("the producer must bind one Eff value");
     };
     assert!(matches!(
-        tidepool_testing::with_settlement(|settlement| source.run_bind_with_sites(
+        source_action(&mut source, |source, settlement| source.run_bind_with_sites(
             "evaluatedReceiveValue",
             compiled.code(),
             binder,
@@ -1402,7 +1464,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
         "the independent receiver did not issue the producer's receive site"
     );
     assert!(matches!(
-        tidepool_testing::with_settlement(|settlement| receiver.run_projected_bind_with_sites(
+        source_action(&mut receiver, |receiver, settlement| receiver.run_projected_bind_with_sites(
             "receiveValueRunner",
             runner.code(),
             &bound,
@@ -1456,7 +1518,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
         .unwrap()
         .unwrap();
     let hole = suspended(
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut receiver, |receiver, settlement| {
             receiver.run_rooted_application(
                 "importedReceiveValue",
                 &runner,
@@ -1474,7 +1536,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
     assert_eq!(receiver.parked_count(), 1);
     assert_eq!(receiver.stowed_roots_count(), 1);
     assert!(matches!(
-        tidepool_testing::with_settlement(|settlement| receiver.resume_classified(
+        source_action(&mut receiver, |receiver, settlement| receiver.resume_classified(
             hole.clone(),
             serde_json::json!("custody reply"),
             settlement
@@ -1492,7 +1554,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
         .unwrap()
         .unwrap();
     let ResidentOutcome::Completed { result, .. } =
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut receiver, |receiver, settlement| {
             receiver.resume_handle(hole, answer, settlement)
         })
         .unwrap()
@@ -1568,7 +1630,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         .unwrap()
         .unwrap();
     let activation = suspended(
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut destination, |destination, settlement| {
             destination.run_rooted_application(
                 "importedOriginalRequest",
                 &receiver,
@@ -1942,7 +2004,7 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
     drop(source);
     let imported = destination.import_parcel(parcel, RealmId::ROOT).unwrap();
     let activation = suspended(
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut destination, |destination, settlement| {
             destination.run_rooted_application(
                 "sharedOriginalRequest",
                 &receiver,
@@ -2047,7 +2109,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
     });
     let session = SessionId(1793);
     let mut source = InputFixture::fresh_in(session, &root, &recipe);
-    let execution = Arc::new(source.begin_private_execution(ScopeId::ROOT).unwrap());
+    let execution = begin_fixture_execution(&mut source);
     source
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
@@ -2078,7 +2140,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             panic!("each selected-site fixture item binds one value");
         };
         assert!(matches!(
-            tidepool_testing::with_settlement(|settlement| source.run_bind_with_sites(
+            source_action(&mut source, |source, settlement| source.run_bind_with_sites(
                 "selectedSiteFixture",
                 compiled.code(),
                 binder,
@@ -2171,10 +2233,16 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
     let reobserved = outputs
         .iter()
         .map(|output| {
-            source
-                .admit_turn_code_in(source.run_context.lexical_scope, output.code())
-                .and_then(|admission| source.provenance_for(&admission))
-                .unwrap()
+            source_action(&mut source, |source, _| {
+                source
+                    .admit_turn_code_in(
+                        source.run_context.lexical_scope,
+                        output.code(),
+                        TurnInstallationAdmission::Compilation,
+                    )
+                    .and_then(|admission| source.provenance_for(&admission))
+                    .unwrap()
+            })
         })
         .collect::<Vec<_>>();
     for (output, retained) in outputs.iter().zip(&reobserved) {
@@ -2289,7 +2357,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             panic!("retained import control binds one alias");
         };
         assert!(matches!(
-            tidepool_testing::with_settlement(|settlement| source.run_bind_with_sites(
+            source_action(&mut source, |source, settlement| source.run_bind_with_sites(
                 "retainedSiteAlias",
                 compiled.code(),
                 binder,
@@ -2310,17 +2378,24 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             "implicit retained imports carry exactly their original authority"
         );
         assert_eq!(
-            source
-                .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
-                .and_then(|admission| source.provenance_for(&admission))
-                .unwrap()
-                .authenticated_inputs,
+            source_action(&mut source, |source, _| {
+                source
+                    .admit_turn_code_in(
+                        source.run_context.lexical_scope,
+                        compiled.code(),
+                        TurnInstallationAdmission::Compilation,
+                    )
+                    .and_then(|admission| source.provenance_for(&admission))
+                    .unwrap()
+                    .authenticated_inputs
+                    .clone()
+            }),
             original.authenticated_inputs,
             "warm immutable plans still instantiate current retained binding lineage"
         );
         if index == 0 {
             let previous = source.run_context();
-            let sibling = source.begin_private_execution(ScopeId::ROOT).unwrap();
+            let sibling = begin_fixture_execution(&mut source);
             source
                 .set_run_context(SessionRunContext {
                     lexical_scope: sibling.private_scope(),
@@ -2330,9 +2405,13 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             let roots = source.persistent_roots_count();
             assert!(
                 matches!(
-                    source
-                        .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
-                        .and_then(|admission| source.provenance_for(&admission)),
+                    source_action(&mut source, |source, _| source
+                        .admit_turn_code_in(
+                            source.run_context.lexical_scope,
+                            compiled.code(),
+                            TurnInstallationAdmission::Compilation,
+                        )
+                        .and_then(|admission| source.provenance_for(&admission))),
                     Err(ResidentError::Prepared(
                         PreparedRuntimeError::MissingRetainedCertifiedOwner { .. }
                     ))
@@ -2342,9 +2421,13 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             source.retire_scope(sibling.private_scope());
             assert!(
                 matches!(
-                    source
-                        .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
-                        .and_then(|admission| source.provenance_for(&admission)),
+                    source_action(&mut source, |source, _| source
+                        .admit_turn_code_in(
+                            source.run_context.lexical_scope,
+                            compiled.code(),
+                            TurnInstallationAdmission::Compilation,
+                        )
+                        .and_then(|admission| source.provenance_for(&admission))),
                     Err(ResidentError::Prepared(
                         PreparedRuntimeError::SourceScopeAdmission
                     ))
@@ -2354,11 +2437,18 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             assert_eq!(source.persistent_roots_count(), roots);
             source.set_run_context(previous).unwrap();
             assert_eq!(
-                source
-                    .admit_turn_code_in(source.run_context.lexical_scope, compiled.code())
-                    .and_then(|admission| source.provenance_for(&admission))
-                    .unwrap()
-                    .authenticated_inputs,
+                source_action(&mut source, |source, _| {
+                    source
+                        .admit_turn_code_in(
+                            source.run_context.lexical_scope,
+                            compiled.code(),
+                            TurnInstallationAdmission::Compilation,
+                        )
+                        .and_then(|admission| source.provenance_for(&admission))
+                        .unwrap()
+                        .authenticated_inputs
+                        .clone()
+                }),
                 original.authenticated_inputs,
                 "failed and retired scope observations do not poison the immutable plan"
             );
@@ -2458,7 +2548,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
     let receiver_parcel = source.export_custody(values.remove(0)).unwrap();
     let action = values.remove(0);
     let reservation = suspended(
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut source, |source, settlement| {
             source.run_rooted_entry("selectedAction", action, 1, RealmId::ROOT, None, settlement)
         })
         .unwrap(),
@@ -2470,7 +2560,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         .collect::<Vec<_>>();
     let handles_before_answer = source.value_handle_count();
     assert!(matches!(
-        tidepool_testing::with_settlement(|settlement| source.resume(
+        source_action(&mut source, |source, settlement| source.resume(
             reservation.clone(),
             1_i64,
             settlement
@@ -2510,7 +2600,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         "parcel export/import keeps original native site rows"
     );
     let activation = suspended(
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut destination, |destination, settlement| {
             destination.run_rooted_application(
                 "selectedOriginalRequest",
                 &receiver,
@@ -2644,7 +2734,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
         .unwrap()
         .expect("real compiled request receiver");
     let hole = suspended(
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut unsealed, |unsealed, settlement| {
             unsealed.run_rooted_application(
                 "observedRequestWithoutInputAuthority",
                 &receiver,
@@ -2750,7 +2840,7 @@ fn activation_opaque_input_native_owner_survives_same_spelling_source_shadow() {
         .unwrap()
         .1;
     let previous_context = resident.run_context();
-    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
@@ -3290,7 +3380,7 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
     let unrelated_binding = resident
         .current_binding_in(ScopeId::ROOT, "unrelatedPreviewPrefix")
         .expect("genuine unrelated completed binding is present before request compilation");
-    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
@@ -3429,12 +3519,15 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
             .expect("pure preview must not transport unrelated original prefix generations")
         {
             turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
+            turn::ActivationPreviewCompilation::Opaque => {
+                panic!("an opaque proof cannot execute the custom display")
+            }
             turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => {
                 panic!("actual custom display remains available")
             }
         };
     let ResidentOutcome::Completed { result, .. } =
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut resident, |resident, settlement| {
             resident.run_activation_preview(compiled, settlement)
         })
         .unwrap()
@@ -3561,6 +3654,9 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         .expect("prepare a pure display from the original ordinary compiler evidence")
     {
         turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
+        turn::ActivationPreviewCompilation::Opaque => panic!(
+            "the genuine ordinary home dictionary must expose its rendered display"
+        ),
         turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => panic!(
             "the genuine ordinary home dictionary must retain complete original instance evidence"
         ),
@@ -3684,21 +3780,106 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         assert!(Arc::ptr_eq(first, next));
     }
     drop(repeated);
+    // The same sealed renderer code still cannot enter through the generic
+    // source installer: only its opaque original-A/target-B admission may
+    // install a preview.
+    let unsealed = source_action(&mut resident, |resident, _| {
+        resident.admit_turn_code_in(
+            compiled.admission().scope_lease.scope(),
+            compiled.renderer.compiled.code(),
+            TurnInstallationAdmission::Compilation,
+        )
+    });
+    assert!(
+        matches!(
+            unsealed,
+            Err(ResidentError::Session(SessionError::SourceAdmission(
+                super::super::SourceAdmissionError::Unqualified
+            )))
+        ),
+        "preview code cannot enter the generic source installer"
+    );
+    assert!(
+        !compiled.admission().is_consumed(),
+        "generic-installer refusal must not spend the affine preview admission"
+    );
+    // The purpose refusal precedes source-lease admission: outside any
+    // compiler transaction the generic installer still reports the
+    // unqualified purpose rather than a missing transaction.
+    assert!(
+        matches!(
+            resident.admit_turn_code_in(
+                compiled.admission().scope_lease.scope(),
+                compiled.renderer.compiled.code(),
+                TurnInstallationAdmission::Compilation,
+            ),
+            Err(ResidentError::Session(SessionError::SourceAdmission(
+                super::super::SourceAdmissionError::Unqualified
+            )))
+        ),
+        "generic-installer refusal precedes missing-transaction admission"
+    );
+    // The authored-turn production entry reaches the same purpose refusal
+    // without a caller-side pre-check, and that refusal leaves the admission
+    // fresh for its own preview install.
+    let production = source_action(&mut resident, |resident, settlement| {
+        resident.run_with_sites(
+            "genericPreviewRefusal",
+            compiled.renderer.compiled.code(),
+            settlement,
+        )
+    });
+    assert!(
+        matches!(
+            production,
+            Err(ResidentError::Session(SessionError::SourceAdmission(
+                super::super::SourceAdmissionError::Unqualified
+            )))
+        ),
+        "the authored-turn entry refuses preview code through the generic installer"
+    );
+    assert!(
+        !compiled.admission().is_consumed(),
+        "authored-turn refusal must not spend the affine preview admission"
+    );
+    // The snapshot entry owns a MissingTransaction refusal; the purpose guard
+    // must report Unqualified first even when no compiler transaction exists.
+    let snapshot = resident.snapshot_run_prepared(
+        compiled.renderer.compiled.code().into_owned(),
+        PendingPreparedMode::Value,
+        None,
+    );
+    assert!(
+        matches!(
+            snapshot,
+            Err(ResidentError::Session(SessionError::SourceAdmission(
+                super::super::SourceAdmissionError::Unqualified
+            )))
+        ),
+        "snapshot refusal is Unqualified, not MissingTransaction"
+    );
+    assert!(
+        !compiled.admission().is_consumed(),
+        "snapshot refusal must not spend the affine preview admission"
+    );
     let before_fault = resident.residency();
     {
         let incomplete = bundle.omitting_target_image();
-        let admission = resident
-            .admit_turn_code_in(
-                compiled.admission.scope_lease.scope(),
-                compiled.renderer.compiled.code(),
+        let refused = source_action(&mut resident, |resident, _| {
+            let admission = resident
+                .admit_turn_code_in(
+                    compiled.admission().scope_lease.scope(),
+                    compiled.renderer.compiled.code(),
+                    TurnInstallationAdmission::ActivationPreviewFresh(compiled.admission()),
+                )
+                .unwrap();
+            resident.install_admitted_turn(
+                admission,
+                TurnImageAcquisition::Ready {
+                    bundle: &incomplete,
+                },
             )
-            .unwrap();
-        let refused = resident.install_admitted_turn(
-            admission,
-            TurnImageAcquisition::Ready {
-                bundle: &incomplete,
-            },
-        );
+        });
         assert!(
             matches!(
                 refused,
@@ -3720,7 +3901,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         );
     }
     let ResidentOutcome::Completed { result, .. } =
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut resident, |resident, settlement| {
             resident.run_activation_preview(compiled, settlement)
         })
         .expect("execute the original custom dictionary against the original mounted heap input")
@@ -3843,7 +4024,7 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
             .unwrap()
             .unwrap();
         let hole = suspended(
-            tidepool_testing::with_settlement(|settlement| {
+            source_action(&mut child, |child, settlement| {
                 child.run_rooted_application(
                     "sharedDisplayChild",
                     &receiver,
@@ -3889,7 +4070,8 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
     };
     assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before + 1);
     let renderer = Arc::downgrade(&first.renderer);
-    let failed = tidepool_testing::with_settlement(|settlement| {
+    let cached = first.renderer.clone();
+    let failed = source_action(&mut parent, |parent, settlement| {
         parent.resume(last_submission.unwrap(), Ok::<(), ()>(()), settlement)
     });
     assert!(
@@ -3897,15 +4079,41 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
         "parent continuation must really fail after dispatch"
     );
     drop(parent);
-    let turn::ActivationPreviewCompilation::Ready(second) = compile_activation_preview(
-        children[1].1.clone(),
-        &template,
-        512,
-        &fixture.recipe.include,
-    )
-    .unwrap() else {
-        panic!("second package input is renderable")
+    // Two concurrent binders race for the second child's single admission.
+    let (left, right) = std::thread::scope(|scope| {
+        let cached = &cached;
+        let left_admission = children[1].1.clone();
+        let right_admission = children[1].1.clone();
+        let left = scope.spawn(move || {
+            turn::bind_activation_renderer(
+                left_admission,
+                &SharedActivationRenderer::Renderable(cached.clone()),
+            )
+        });
+        let right = scope.spawn(move || {
+            turn::bind_activation_renderer(
+                right_admission,
+                &SharedActivationRenderer::Renderable(cached.clone()),
+            )
+        });
+        (left.join().unwrap(), right.join().unwrap())
+    });
+    let (second, refused_binding) = match (left, right) {
+        (
+            Ok(turn::ActivationPreviewCompilation::Ready(second)),
+            Err(turn::ActivationRendererFailure::Admission(
+                ResidentError::ActivationPreviewRefused { binding },
+            )),
+        )
+        | (
+            Err(turn::ActivationRendererFailure::Admission(
+                ResidentError::ActivationPreviewRefused { binding },
+            )),
+            Ok(turn::ActivationPreviewCompilation::Ready(second)),
+        ) => (second, binding),
+        _ => panic!("exactly one concurrent binder must win"),
     };
+    assert_eq!(refused_binding, children[1].1.mounted.binding);
     assert!(Arc::ptr_eq(&first.renderer, &second.renderer));
     assert_eq!(
         tidepool_extract_cmd::extract_spawn_count(),
@@ -3915,7 +4123,7 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
     for (index, preview) in [first, second].into_iter().enumerate() {
         let child = &mut children[index].0;
         let ResidentOutcome::Completed { result, .. } =
-            tidepool_testing::with_settlement(|settlement| {
+            source_action(child, |child, settlement| {
                 child.run_activation_preview(preview, settlement)
             })
             .unwrap()
@@ -3927,6 +4135,31 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
             serde_json::json!([format!("{}", index + 41), false])
         );
     }
+    assert!(
+        children[0].1.is_consumed() && children[1].1.is_consumed(),
+        "a successful preview install spends its admission"
+    );
+    assert!(matches!(
+        children[0].1.try_bind(),
+        Err(ResidentError::ActivationPreviewRefused { binding })
+            if binding == children[0].1.mounted.binding
+    ));
+    // Reuse of immutable renderer code still requires its own unconsumed
+    // admission; the spent first-child permission cannot be resealed.
+    let refused = turn::bind_activation_renderer(
+        children[0].1.clone(),
+        &SharedActivationRenderer::Renderable(cached.clone()),
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(turn::ActivationRendererFailure::Admission(
+                ResidentError::ActivationPreviewRefused { binding }
+            )) if binding == children[0].1.mounted.binding
+        ),
+        "a spent admission cannot bind cached renderer code"
+    );
+    drop(cached);
     assert!(
         renderer.upgrade().is_some(),
         "child provenance retains native code"
@@ -3946,10 +4179,211 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
 }
 
 #[test]
+fn activation_preview_revoked_original_lease_refuses_before_spend() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-display-two-children.hs"),
+        false,
+        SessionId(1851),
+    );
+    let owners = Arc::new(ActivationDisplayOwners::default());
+    let images = Arc::new(ImageRegistry::new());
+    let mut parent = fixture.fresh();
+    parent.set_activation_display_owners(owners.clone());
+    parent.set_image_registry(images.clone());
+    let mut reservation = fixture.start(&mut parent);
+    let mut children = Vec::new();
+    let mut child_roots = Vec::new();
+    let mut last_submission = None;
+    for index in 0..2 {
+        let submission = settle_request_reservation(&mut parent, reservation, index + 1);
+        let payload = parent
+            .live_payload_handle(submission.cont_id())
+            .unwrap()
+            .unwrap();
+        let parcel = parent.export_custody(payload).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut child =
+            InputFixture::fresh_in(SessionId(1851 + index as u64), &root, &fixture.recipe);
+        child.set_activation_display_owners(owners.clone());
+        child.set_image_registry(images.clone());
+        let imported = child.import_parcel(parcel, RealmId::ROOT).unwrap();
+        let receiver = child
+            .retain_binding_custody("activationReceiver")
+            .unwrap()
+            .unwrap();
+        let hole = suspended(
+            source_action(&mut child, |child, settlement| {
+                child.run_rooted_application(
+                    "revokedLeaseChild",
+                    &receiver,
+                    &imported,
+                    RealmId::ROOT,
+                    None,
+                    settlement,
+                )
+            })
+            .unwrap(),
+        );
+        let site = parked_site(&mut child, &hole);
+        let (input, interface) = issued_input(&mut child, &hole, site, fixture.recipe.clone());
+        let mounted = mount_original(&mut child, input, interface);
+        let view = child
+            .compile_view_in(ScopeId::ROOT)
+            .unwrap()
+            .with_scoped_injection();
+        let admission = child.admit_activation_preview(mounted, view).unwrap();
+        child_roots.push(root);
+        children.push((child, admission));
+        if index == 0 {
+            reservation = suspended(settle_request_submission(&mut parent, submission));
+        } else {
+            last_submission = Some(submission);
+            break;
+        }
+    }
+    assert!(last_submission.is_some(), "parent retained its last request");
+    let template = turn::assemble_activation_preview_module(512);
+    let turn::ActivationPreviewCompilation::Ready(first) = compile_activation_preview(
+        children[0].1.clone(),
+        &template,
+        512,
+        &fixture.recipe.include,
+    )
+    .unwrap() else {
+        panic!("package input is renderable")
+    };
+    let cached = first.renderer.clone();
+    // A revoked original lease refuses a fresh bind and leaves the admission
+    // unspent, so the refusal cannot strand it in the bound phase.
+    let revoked_scope = children[1].1.scope_lease.scope();
+    let retired = children[1].0.retire_scope(revoked_scope);
+    assert_eq!(retired.scopes_retired, 1, "the detached preview scope retires");
+    let refused = turn::bind_activation_renderer(
+        children[1].1.clone(),
+        &SharedActivationRenderer::Renderable(cached.clone()),
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(turn::ActivationRendererFailure::Admission(
+                ResidentError::Session(SessionError::SourceAdmission(
+                    super::super::SourceAdmissionError::StaleSourceLease
+                ))
+            ))
+        ),
+        "a revoked original lease refuses a fresh bind"
+    );
+    assert!(
+        !children[1].1.is_consumed(),
+        "the refused bind leaves the preview admission unspent"
+    );
+    // The same revocation between bind and run refuses execution before the
+    // spend, with a typed dead-scope failure that consumes nothing. The first
+    // child's renderer is already bound, so only the execution lease stands
+    // between the admission and its spend.
+    let revoked_scope = children[0].1.scope_lease.scope();
+    let retired = children[0].0.retire_scope(revoked_scope);
+    assert_eq!(retired.scopes_retired, 1, "the bound preview scope retires");
+    let refused = source_action(&mut children[0].0, |child, settlement| {
+        child.run_activation_preview(first, settlement)
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(ResidentError::Session(SessionError::DeadScope(scope))) if scope == revoked_scope
+        ),
+        "a revoked original lease refuses execution before consumption"
+    );
+    assert!(
+        !children[0].1.is_consumed(),
+        "revocation between bind and run does not spend the admission"
+    );
+    drop(parent);
+}
+
+#[test]
+fn activation_preview_failed_execution_admission_after_spend_stays_consumed() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-package.hs"),
+        false,
+        SessionId(1854),
+    );
+    let mut resident = fixture.fresh();
+    let reservation = fixture.start(&mut resident);
+    let (_, hole) = fixture.deliver(&mut resident, reservation, 1);
+    let site = parked_site(&mut resident, &hole);
+    let input = resident
+        .capture_activation_input(&hole, RealmId::ROOT, site)
+        .unwrap();
+    let (owner, interface) = issued_captured_input(&mut resident, input, fixture.recipe.clone());
+    let mounted = mount_original(&mut resident, owner, interface);
+    let view = resident
+        .compile_view_in(ScopeId::ROOT)
+        .unwrap()
+        .with_scoped_injection();
+    let admission = resident.admit_activation_preview(mounted, view).unwrap();
+    let template = turn::assemble_activation_preview_module(512);
+    let turn::ActivationPreviewCompilation::Ready(compiled) = compile_activation_preview(
+        admission.clone(),
+        &template,
+        512,
+        &fixture.recipe.include,
+    )
+    .unwrap() else {
+        panic!("package input is renderable")
+    };
+    let CompiledActivationPreview { bound, renderer } = compiled;
+    let binding = admission.mounted.binding;
+    let spent = bound
+        .try_consume()
+        .expect("the bound preview admission spends exactly once");
+    assert!(admission.is_consumed());
+    // A failing execution admission after the spend leaves the admission
+    // consumed: the spent token admits only code carrying this admission's
+    // preview proof, and the failure cannot reseal it.
+    let mut foreign = renderer.compiled.code().into_owned();
+    foreign.certification = Cow::Owned(None);
+    let refused = resident.admit_turn_code_in(
+        admission.scope_lease.scope(),
+        foreign,
+        TurnInstallationAdmission::ActivationPreviewSpent(&spent),
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(ResidentError::ActivationPreviewRefused { binding: refused }) if refused == binding
+        ),
+        "the spent token refuses code without this admission's preview proof"
+    );
+    assert!(
+        admission.is_consumed(),
+        "a failed execution admission cannot reseal the spent preview"
+    );
+    assert!(matches!(
+        admission.try_bind(),
+        Err(ResidentError::ActivationPreviewRefused { binding: refused }) if refused == binding
+    ));
+    let refused = turn::bind_activation_renderer(
+        admission.clone(),
+        &SharedActivationRenderer::Renderable(renderer.clone()),
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(turn::ActivationRendererFailure::Admission(
+                ResidentError::ActivationPreviewRefused { binding: refused }
+            )) if refused == binding
+        ),
+        "cached renderer reuse after the spend is refused"
+    );
+    drop(spent);
+}
+
+#[test]
 fn display_owner_preserves_checked_segment_capture_demand_across_value_prefix() {
     let (root, recipe) = InputFixture::source_recipe(false);
     let mut source = InputFixture::fresh_in(SessionId(1844), &root, &recipe);
-    let execution = Arc::new(source.begin_private_execution(ScopeId::ROOT).unwrap());
+    let execution = begin_fixture_execution(&mut source);
     source
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
@@ -3973,7 +4407,7 @@ fn display_owner_preserves_checked_segment_capture_demand_across_value_prefix() 
                 panic!("middle item binds one unrelated value")
             };
             assert!(matches!(
-                tidepool_testing::with_settlement(|settlement| source.run_bind_with_sites(
+                source_action(&mut source, |source, settlement| source.run_bind_with_sites(
                     "displayPrefix",
                     producer.code(),
                     binder,
@@ -4083,7 +4517,7 @@ fn display_owner_preserves_checked_segment_capture_demand_across_value_prefix() 
         }
         previous_renderer = Some(preview.renderer.clone());
         let ResidentOutcome::Completed { result, .. } =
-            tidepool_testing::with_settlement(|settlement| {
+            source_action(&mut source, |source, settlement| {
                 source.run_activation_preview(preview, settlement)
             })
             .unwrap()
@@ -4137,7 +4571,7 @@ fn activation_preview_earlier_output_ignores_later_display_instance() {
         include_str!("fixtures/activation-input-later-display.hs"),
         0,
     );
-    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
@@ -4229,6 +4663,9 @@ fn execute_mounted_input_preview(
         .expect("prepare preview against actual original compiler authority")
     {
         turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
+        turn::ActivationPreviewCompilation::Opaque => {
+            panic!("complete original display environment must remain renderable")
+        }
         turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => {
             panic!("complete original display environment must remain available")
         }
@@ -4239,7 +4676,7 @@ fn execute_mounted_input_preview(
         "the universal Display fallback is a real renderer, not missing-instance evidence",
     );
     let ResidentOutcome::Completed { result, .. } =
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(resident, |resident, settlement| {
             resident.run_activation_preview(compiled, settlement)
         })
         .unwrap()
@@ -4287,7 +4724,7 @@ fn display_owner_preserves_later_family_evidence_without_a_new_display_dictionar
         include_str!("fixtures/activation-display-later-family.hs"),
         0,
     );
-    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
@@ -4410,6 +4847,9 @@ fn activation_preview_selected_original_dictionary_without_native_body_is_unavai
     );
     match selected {
         turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => {},
+        turn::ActivationPreviewCompilation::Opaque => panic!(
+            "an opaque proof is not authenticated unavailable evidence"
+        ),
         turn::ActivationPreviewCompilation::Ready(compiled) => panic!(
             "original dictionary {} has no native body, but preview returned Ready with {:?} disposition",
             dictionary_owner.owner.module,
@@ -4486,7 +4926,7 @@ fn activation_task_input_preserves_parent_action_row_across_child_facade() {
         include_str!("fixtures/activation-input-resident-task.hs"),
         3,
     );
-    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
@@ -4531,7 +4971,7 @@ fn activation_task_input_preserves_parent_action_row_across_child_facade() {
         42,
     );
 
-    let action_execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let action_execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: action_execution.private_scope(),
@@ -4568,7 +5008,7 @@ fn activation_task_input_preserves_parent_action_row_across_child_facade() {
     resident.set_run_context(SessionRunContext::ROOT).unwrap();
     resident.retire_scope(action_execution.private_scope());
 
-    let action_execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let action_execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: action_execution.private_scope(),
@@ -4585,7 +5025,7 @@ fn activation_task_input_preserves_parent_action_row_across_child_facade() {
         panic!("parent action has one checked result");
     };
     let ResidentOutcome::Completed { result, .. } =
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut resident, |resident, settlement| {
             resident.run_bind_with_sites(
                 "originalActionResult",
                 compiled.code(),
@@ -4682,11 +5122,11 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     assert!(before_selection.inherited().is_empty());
     let before_binding_tip = resident.state.bindings().tip_id(public);
 
-    let producer_execution = Arc::new(
+    let producer_execution = Arc::new(source_action(&mut resident, |resident, _| {
         resident
             .begin_durable_private_execution(&durable, public)
-            .unwrap(),
-    );
+            .unwrap()
+    }));
     let producer_scope = producer_execution.private_scope();
     resident
         .set_run_context(SessionRunContext {
@@ -4748,11 +5188,11 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .capture_activation_input(&activation, realm, site)
         .unwrap();
     resident.set_run_context(public_context).unwrap();
-    let activation_execution = Arc::new(
+    let activation_execution = Arc::new(source_action(&mut resident, |resident, _| {
         resident
             .begin_durable_private_execution(&durable, public)
-            .unwrap(),
-    );
+            .unwrap()
+    }));
     let activation_scope = activation_execution.private_scope();
     resident
         .set_run_context(SessionRunContext {
@@ -4777,10 +5217,10 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         "binding reachability retains the private source without promoting its selection"
     );
     assert!(matches!(
-        resident
+        source_action(&mut resident, |resident, _| resident
             .attempt_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
             .map(crate::session::settled_manifest_attempt)
-            .unwrap(),
+            .unwrap()),
         PublicManifestCommit::Durable
     ));
     let published = resident.public_visibility_snapshot_in(public).unwrap();
@@ -4869,11 +5309,11 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     let collections = prepared.heap_stats().gc_count;
     prepared.quiesce_and_collect_now().unwrap();
     assert_eq!(prepared.heap_stats().gc_count, collections + 1);
-    let read = Arc::new(
+    let read = Arc::new(source_action(&mut resident, |resident, _| {
         resident
             .begin_durable_private_execution(&durable, public)
-            .unwrap(),
-    );
+            .unwrap()
+    }));
     let read_scope = read.private_scope();
     resident
         .set_run_context(SessionRunContext {
@@ -4888,7 +5328,7 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         read.clone(),
     );
     let ResidentOutcome::Completed { result, .. } =
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut resident, |resident, settlement| {
             resident.run_bind_with_sites(
                 "privateSourceResult",
                 code.code(),
@@ -5088,7 +5528,7 @@ fn activation_input_interface_staging_io_failure_precedes_root_consumption() {
                 );
             }
             ExistingFile::Directory | ExistingFile::Conflict => {
-                let error = tidepool_testing::with_settlement(|settlement| {
+                let error = source_action(&mut resident, |resident, settlement| {
                     resident.mount_activation_input(owner, interface.clone(), settlement)
                 })
                 .err()
@@ -5160,7 +5600,7 @@ fn activation_input_mount_observes_invocation_and_resource_cancellation_before_t
                 .with_invocation_cancel(
                     Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     |resident| {
-                        tidepool_testing::with_settlement(|settlement| {
+                        source_action(resident, |resident, settlement| {
                             resident.mount_activation_input(owner, interface.clone(), settlement)
                         })
                     },
@@ -5173,7 +5613,7 @@ fn activation_input_mount_observes_invocation_and_resource_cancellation_before_t
                 .unwrap()
                 .cancel_handle(RealmId::ROOT)
                 .cancel();
-            tidepool_testing::with_settlement(|settlement| {
+            source_action(&mut resident, |resident, settlement| {
                 resident.mount_activation_input(owner, interface.clone(), settlement)
             })
             .err()
@@ -5251,7 +5691,7 @@ fn activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservation
                 let roots = destination.persistent_roots_count();
                 let handles = resident.value_handle_count();
                 assert!(matches!(
-                    tidepool_testing::with_settlement(|settlement| destination
+                    source_action(&mut destination, |destination, settlement| destination
                         .mount_activation_input(owner, interface, settlement)),
                     Err(ResidentError::ForeignCustody)
                 ));
@@ -5277,7 +5717,7 @@ fn activation_input_mount_fences_owner_epoch_visibility_and_consumed_reservation
             .unwrap();
         let handles = resident.value_handle_count();
         let roots = resident.persistent_roots_count();
-        let error = tidepool_testing::with_settlement(|settlement| {
+        let error = source_action(&mut resident, |resident, settlement| {
             resident.mount_activation_input(owner, interface, settlement)
         })
         .err()
@@ -5384,7 +5824,7 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
         crate::DEFAULT_NURSERY_SIZE,
         Some(library),
     );
-    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    let execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: execution.private_scope(),
@@ -5412,7 +5852,7 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
         interface.owner(),
         tidepool_repr::SessionModule::val(reservation.generation())
     );
-    let outcome = tidepool_testing::with_settlement(|settlement| {
+    let outcome = source_action(&mut resident, |resident, settlement| {
         resident.run_bind_with_sites(
             "held",
             compiled.code(),
@@ -5562,7 +6002,7 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         .unwrap()
         .unwrap();
     let publication = suspended(
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut source, |source, settlement| {
             source.resume_handle(activation, reply, settlement)
         })
         .unwrap(),
@@ -5614,7 +6054,7 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
     assert!(captured.belongs_to_bindings(&source_lease));
     let parcel = source.export_result_shared(&captured).unwrap();
     assert!(matches!(
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut source, |source, settlement| {
             source.resume(publication, (), settlement)
         })
         .unwrap(),
@@ -5667,7 +6107,7 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         .unwrap()
         .unwrap();
     let ResidentOutcome::Completed { result, .. } =
-        tidepool_testing::with_settlement(|settlement| {
+        source_action(&mut destination, |destination, settlement| {
             destination.run_rooted_application(
                 "forceRetiredCallableResult",
                 &probe,
