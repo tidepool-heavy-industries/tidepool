@@ -1235,6 +1235,10 @@ def runtime_test_cases(binary):
         "settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots",
         "world_private_admission_requires_the_actual_transaction_original",
     )]
+    tests += ["session::resident::authored_publication_tests::" + name for name in (
+        "inspection_key_invalidates_hidden_inherited_binding_projection",
+        "never_visible_input_retirement_keeps_hidden_classification_until_last_lease",
+    )]
     compiler_env, compiler_resources, worker = test_runtime_inputs("tidepool-runtime", "")
     compiler_arguments = runtime_arguments(
         compiler_env, compiler_resources, worker,

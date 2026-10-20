@@ -429,6 +429,16 @@ pub struct PendingHostValueWrite {
     scope: ScopeId,
     id: tidepool_repr::SessionVarId,
     write: CertifiedPrivateValueWrite,
+    private_hidden_mount: Option<PrivateHiddenHostMount>,
+}
+
+/// The actual mount owner's transition across a fresh, never-visible input.
+/// It is carried by the original native/interface write, not registered apart
+/// from it or reconstructed from a later compiler view.
+struct PrivateHiddenHostMount {
+    execution: Arc<PrivateExecutionAdmission>,
+    before: Arc<super::inspection::InspectionWorldAssociation>,
+    after: Arc<super::inspection::InspectionWorldAssociation>,
 }
 
 impl std::fmt::Debug for PendingHostValueWrite {
@@ -495,12 +505,110 @@ impl PendingHostValueWrite {
                 root_id: entry.value.handle.raw().0,
                 proof,
             },
+            private_hidden_mount: None,
         })
+    }
+
+    pub(super) fn retain_private_hidden_mount(
+        mut self,
+        session: &PersistentSession,
+        execution: Arc<PrivateExecutionAdmission>,
+        before: Arc<super::inspection::InspectionWorldAssociation>,
+        after: Arc<super::inspection::InspectionWorldAssociation>,
+    ) -> Result<Self, SessionError> {
+        if !self.matches_private_mount(session, &execution)
+            || !Arc::ptr_eq(&before.world, &after.world)
+            || !Arc::ptr_eq(&before.world, execution.compiler_world()?)
+            || !Arc::ptr_eq(&before.base.source, &after.base.source)
+            || !Arc::ptr_eq(&before.base.original_source, &after.base.original_source)
+            || !Arc::ptr_eq(&before.base.target, &after.base.target)
+            || !session.inspection_world_base_is_current(
+                &after.base,
+                &after.base.source,
+                &after.base.original_source,
+            )
+            || !session
+                .lib()
+                .tips
+                .get(&self.scope)
+                .and_then(|tip| tip.inspection_world.as_ref())
+                .is_some_and(|live| Arc::ptr_eq(live, &after))
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        self.private_hidden_mount = Some(PrivateHiddenHostMount {
+            execution,
+            before,
+            after,
+        });
+        Ok(self)
+    }
+
+    pub(super) fn matches_private_mount(
+        &self,
+        session: &PersistentSession,
+        execution: &PrivateExecutionAdmission,
+    ) -> bool {
+        Arc::ptr_eq(&self.owner, &execution.owner)
+            && Arc::ptr_eq(&self.owner, session.admission_owner())
+            && self.owner_epoch == execution.owner_epoch
+            && self.owner_epoch == self.owner.epoch()
+            && self.scope == execution.private_scope()
+            && session
+                .bindings()
+                .get(self.id)
+                .is_some_and(|entry| entry.scope == self.scope && self.write.matches(entry))
+    }
+
+    pub(super) fn matches_private_hidden_mount(
+        &self,
+        session: &PersistentSession,
+        execution: &PrivateExecutionAdmission,
+        id: tidepool_repr::SessionVarId,
+    ) -> bool {
+        self.id == id
+            && self.matches_private_mount(session, execution)
+            && self
+                .private_hidden_mount
+                .as_ref()
+                .is_some_and(|mount| std::ptr::eq(mount.execution.as_ref(), execution))
+    }
+
+    pub(super) fn private_hidden_mount_key(
+        &self,
+        session: &PersistentSession,
+        execution: &Arc<PrivateExecutionAdmission>,
+    ) -> Result<super::persistent::CompileViewKey, SessionError> {
+        let mount = self
+            .private_hidden_mount
+            .as_ref()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        if !Arc::ptr_eq(&mount.execution, execution)
+            || !self.matches_private_mount(session, execution)
+            || !Arc::ptr_eq(&mount.before.world, execution.compiler_world()?)
+            || !session.inspection_world_base_is_current(
+                &mount.after.base,
+                &mount.after.base.source,
+                &mount.after.base.original_source,
+            )
+            || !session
+                .lib()
+                .tips
+                .get(&self.scope)
+                .and_then(|tip| tip.inspection_world.as_ref())
+                .is_some_and(|live| Arc::ptr_eq(live, &mount.after))
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        Ok(mount.after.base.key.clone())
     }
 
     /// Transfer an accepted effect's exact write to its existing private owner.
     /// Final publication revalidates the native identity under machine checkout.
     pub fn accept(self, admission: &PrivateExecutionAdmission) -> Result<(), SessionError> {
+        if self.private_hidden_mount.is_some() {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
         if !Arc::ptr_eq(&self.owner, &admission.owner)
             || self.owner_epoch != admission.owner_epoch
             || self.owner_epoch != self.owner.epoch()
@@ -3402,6 +3510,59 @@ impl PersistentSession {
             .transpose()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         super::complete_native_transition(admission)?;
+        // Detached runtime placement borrows the SAME published compiler World.
+        // A different runtime scope does not invent a compiler product or ID.
+        let facts = prepared
+            .world_execution_facts()
+            .expect("World birth retains its issuer");
+        RuntimeLexicalScopeLease::with_source_leases(
+            [
+                facts.original_source.clone(),
+                prepared.scope_lease.clone(),
+                facts.published.base.target.clone(),
+            ],
+            |leases| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    leases.iter().map(|lease| lease.source_admission()),
+                    || {
+                        if !Arc::ptr_eq(&prepared.owner, self.admission_owner())
+                            || prepared.owner_epoch != self.admission_owner().epoch()
+                            || !self.inspection_world_base_is_current(
+                                &facts.published.base,
+                                &facts.source,
+                                &facts.original_source,
+                            )
+                        {
+                            return Err(SessionError::WorldCellPublicationBaseStale);
+                        }
+                        let key = self
+                            .compile_view_key_in(private_scope)
+                            .ok_or(SessionError::StaleStagedDeclaration)?;
+                        if &key != prepared.world_basis()?.1 {
+                            return Err(SessionError::StaleStagedDeclaration);
+                        }
+                        let association = Arc::new(super::inspection::InspectionWorldAssociation {
+                            base: super::inspection::InspectionWorldBase {
+                                scope: private_scope,
+                                key,
+                                owner: prepared.owner.clone(),
+                                epoch: prepared.owner_epoch,
+                                source: facts.source.clone(),
+                                original_source: facts.original_source.clone(),
+                                target: prepared.scope_lease.clone(),
+                            },
+                            world: facts.published.world.clone(),
+                        });
+                        self.lib_mut()
+                            .tips
+                            .entry(private_scope)
+                            .or_default()
+                            .inspection_world = Some(association);
+                        Ok(())
+                    },
+                )
+            },
+        )??;
         Ok(prepared)
     }
 
@@ -4274,6 +4435,15 @@ impl PersistentSession {
         execution: Arc<PrivateExecutionAdmission>,
         plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        self.admit_world_planned_cell_with_input(execution, plan, None)
+    }
+
+    pub fn admit_world_planned_cell_with_input(
+        &mut self,
+        execution: Arc<PrivateExecutionAdmission>,
+        plan: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellPlan>,
+        input: Option<&PendingHostValueWrite>,
+    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         let scope = execution.private_scope();
         self.reap_admission_leases();
         if !Arc::ptr_eq(&execution.owner, self.admission_owner())
@@ -4281,7 +4451,7 @@ impl PersistentSession {
             || !self.has_lib()
             || execution.session() != self.lib().session_id()
             || execution.library != self.lib().compile_view_identity
-            || self.binding_tip_id(scope) != Some(execution.binding_tip())
+            || (input.is_none() && self.binding_tip_id(scope) != Some(execution.binding_tip()))
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
@@ -4294,14 +4464,17 @@ impl PersistentSession {
                 return Err(SessionError::WorldCellRequiresServicePreparation)
             }
         };
-        let (world, private_key) = execution.world_basis()?;
-        if self.compile_view_key_in(scope).as_ref() != Some(private_key)
+        let (world, original_key) = execution.world_basis()?;
+        let private_key = match input {
+            Some(input) => input.private_hidden_mount_key(self, &execution)?,
+            None => original_key.clone(),
+        };
+        if self.compile_view_key_in(scope).as_ref() != Some(&private_key)
             || !Arc::ptr_eq(plan.world().restoration(), world.restoration())
             || plan.world().logical_id() != world.logical_id()
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        let private_key = private_key.clone();
         self.reserve_world_cell(
             scope,
             plan,
