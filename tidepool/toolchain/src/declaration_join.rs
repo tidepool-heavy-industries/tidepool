@@ -2256,14 +2256,20 @@ mod authored_tests {
         let path = root.path().join(module.relative_hs_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "module Tidepool.Session.Lib.G1 where\n").unwrap();
-        let error = crate::artifacts::test_support::certify_authored_declaration(
+        let mut closes = Vec::new();
+        let error = certify_authored_declaration(
             module,
             &path,
             "module Tidepool.Session.Lib.G1 where\nx = 1\n",
             &[root.path().to_path_buf()],
             root.path(),
+            &mut |close| closes.push(close),
         )
         .unwrap_err();
+        assert!(
+            closes.is_empty(),
+            "source drift must be refused before a compiler transaction: {closes:?}"
+        );
         assert!(error
             .to_string()
             .contains("source changed before certification"));
