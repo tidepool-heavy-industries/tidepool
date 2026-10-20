@@ -19,8 +19,10 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
     let ((endpoint, world, source, prepared), admission) = settle(|| {
         let configured = crate::toolchain::CompilerDeploymentConfiguration::from_env()
             .expect("declared compiler deployment");
-        let (endpoint, _, _) = crate::toolchain::bind_admitted_extract_endpoint(&configured)?;
-        let endpoint = AdmittedCompilerEndpoint::from_bound(endpoint)?;
+        let (endpoint, _, _) = crate::toolchain::bind_admitted_extract_endpoint(&configured)
+            .expect("configured compiler endpoint");
+        let endpoint =
+            AdmittedCompilerEndpoint::from_bound(endpoint).expect("admitted compiler endpoint");
         let root = Arc::new(tempfile::tempdir()?);
         let body = b"module Module where\n";
         std::fs::write(root.path().join("Module.hs"), body)?;
