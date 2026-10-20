@@ -12915,10 +12915,12 @@ mod authored_publication_tests {
         use tidepool_testing::effect_surface::TestEffectSurface;
         tidepool_testing::eval_harness::require_extract();
         let effects = TestEffectSurface::minimal(&[tidepool_mcp::agent_tools_decl()]).unwrap();
+        let preamble = crate::session::insert_preamble_imports(effects.preamble(),
+            "import Tidepool.Effects.Core (AgentTools (..))");
         let templates = vec![TurnTemplate {
             kind: TemplateSelector::Expr,
             source: assemble_expression_module(
-                effects.preamble(),
+                &preamble,
                 "__result",
                 effects.row(),
                 "{{TURN}}",
