@@ -84,6 +84,23 @@ same-program repeated-SourceOriginal guard without silently duplicating native
 issuance. SOURCE-cycle source-body restoration and ordinary mixed reuse remain
 separate boundaries. H/engine and R own those respective repairs.
 
+Earlier source capture and current lookup observations belong to different
+compiler operations. `DependencyEvidence` validates every module import against
+one operation's resolution map; merging earlier source rows into a later
+source-less lookup map violates that contract. Do not drop resolutions or weaken
+that validator to accommodate the merge.
+
+Reuse the existing canonical source-capture issuer instead. Factor its real
+producer, inherited interfaces and original import facts out of the finite
+`ExactCompilation` wrapper; the World wrapper supplies those facts from its
+actual completed owner. Retain the resulting `CanonicalInterfaceProof` with the
+earlier staged products. A newly demanded body uses the existing retained-Core
+promotion path, prepared for its current consuming site, while current-operation
+dependency evidence remains separate. Do not synthesize an ExactScope or native
+availability from captured source. Haskell proof identity must agree with Rust's
+already-issued prior SourceOriginal. H/engine owns implementation; the
+cross-operation evidence merge in `4c8d6a46d9` is not accepted for integration.
+
 An initial authored runtime exception is an ordinary `Rejected` result;
 `Delivered` describes a result after an actual effect-response resume. Root's
 wrong-payload control must discriminate that boundary without accepting success
