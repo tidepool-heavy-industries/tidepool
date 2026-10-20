@@ -1470,6 +1470,23 @@ impl CompilerWorld {
     }
 }
 
+/// A successful checked item's next compiler state. The context is borrowed
+/// from the same World, so callers cannot pair a warm World with older cold
+/// restoration facts. Only checked item advancement issues this owner.
+pub struct CheckedWorldSuccessor {
+    world: Arc<CompilerWorld>,
+}
+
+impl CheckedWorldSuccessor {
+    pub fn world(&self) -> &Arc<CompilerWorld> {
+        &self.world
+    }
+
+    pub fn compiler_context(&self) -> &Arc<ExactDeclarationContext> {
+        &self.world.restoration.inputs.primary_context
+    }
+}
+
 impl crate::checked_cell::CellProgram {
     /// Advance a declaration only from its actual checked item and the
     /// authenticated cumulative facade prepared for that item.
@@ -1481,7 +1498,7 @@ impl crate::checked_cell::CellProgram {
         projection_context: &Arc<ExactDeclarationContext>,
         import_specs: Vec<String>,
         visible_changes: impl IntoIterator<Item = (&'a str, Option<CompilerWorldBinding<'a>>)>,
-    ) -> Result<Arc<CompilerWorld>, CompileError> {
+    ) -> Result<CheckedWorldSuccessor, CompileError> {
         let crate::checked_cell::CellProgramBasis::World(program) = self.basis() else {
             return Err(source_failure("finite declaration has no World successor"));
         };
@@ -1596,7 +1613,7 @@ impl crate::checked_cell::CellProgram {
             });
             (name, fact)
         });
-        predecessor.project_bindings_with_declaration(
+        let world = predecessor.project_bindings_with_declaration(
             predecessor.restoration.inputs.bindings.query_scope,
             changes,
             Some(WorldCellPosition {
@@ -1606,7 +1623,8 @@ impl crate::checked_cell::CellProgram {
                 total_items: program.items().len(),
             }),
             Some((advance, lexical)),
-        )
+        )?;
+        Ok(CheckedWorldSuccessor { world })
     }
     /// Issue the compiler facts of one successful runtime prefix. The caller
     /// supplies descriptions of the actual installed delta; this owner checks
@@ -1617,7 +1635,7 @@ impl crate::checked_cell::CellProgram {
         predecessor: &Arc<CompilerWorld>,
         item: &crate::checked_cell::ExactCheckedItem,
         bindings: impl IntoIterator<Item = CompilerWorldBinding<'a>>,
-    ) -> Result<Arc<CompilerWorld>, CompileError> {
+    ) -> Result<CheckedWorldSuccessor, CompileError> {
         let crate::checked_cell::CellProgramBasis::World(program) = self.basis() else {
             return Err(source_failure(
                 "finite cell has no compiler-world successor",
@@ -1683,7 +1701,7 @@ impl crate::checked_cell::CellProgram {
                 ));
             }
         }
-        predecessor.project_bindings(
+        let world = predecessor.project_bindings(
             predecessor.restoration.inputs.bindings.query_scope,
             additions
                 .entries
@@ -1695,7 +1713,8 @@ impl crate::checked_cell::CellProgram {
                 next_item: ordinal + 1,
                 total_items: program.items().len(),
             }),
-        )
+        )?;
+        Ok(CheckedWorldSuccessor { world })
     }
 }
 

@@ -9141,7 +9141,9 @@ mod module_product_tests {
                             row,
                         )],
                     )
-                    .expect("same checked item's compiler successor");
+                    .expect("same checked item's compiler successor")
+                    .world()
+                    .clone();
                 current
                     .restoration()
                     .export_transport_observation_for_test(
