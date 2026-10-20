@@ -98,6 +98,40 @@ impl GenerationRetirementDiagnostic {
                 refusals: Vec::new(),
             };
         }
+        Self::write_projected(owner, handoff)
+    }
+
+    fn operation_id(&self) -> Option<&tidepool_runtime::session::WorkbenchOperationId> {
+        match self {
+            Self::Operation { owner, .. } => Some(owner.operation()),
+            #[cfg(test)]
+            Self::CancelledComponent => None,
+        }
+    }
+
+    fn record_default(
+        &mut self,
+        evidence: &Arc<crate::resident_actor::RetirementDiagnosticEvidence>,
+    ) -> Option<crate::resident_actor::RecordedRetirementDiagnosticObservation> {
+        let Self::Operation { owner, handoff } = self else {
+            return None;
+        };
+        if matches!(handoff, RetirementDiagnosticHandoff::Unprojected) {
+            *handoff = RetirementDiagnosticHandoff::Projected {
+                evidence: evidence.clone(),
+                refusals: Vec::new(),
+            };
+        }
+        Self::write_projected(owner, handoff).map(|(observation, _)| observation)
+    }
+
+    fn write_projected(
+        owner: &crate::resident_actor::WorkbenchOperationDiagnosticOwner,
+        handoff: &mut RetirementDiagnosticHandoff,
+    ) -> Option<(
+        crate::resident_actor::RecordedRetirementDiagnosticObservation,
+        Vec<crate::resident_actor::WorkbenchDiagnosticRefusal>,
+    )> {
         if let RetirementDiagnosticHandoff::Projected { evidence, refusals } = handoff {
             match owner.record(evidence.clone()) {
                 Ok(receipt) => match owner.acknowledge(receipt) {
@@ -180,6 +214,28 @@ enum GenerationRetirementPhase {
         cutoff: GenerationRetirementCutoffPhase,
         custody: GenerationPublicationCustody,
     },
+    DefaultRefusal {
+        operation: ActorGenerationPublicationOperation,
+        observer: ActorPublicationAttemptObserver,
+        cutoff: GenerationRetirementCutoffPhase,
+        progress: GenerationDefaultRefusalProgress,
+    },
+}
+
+enum GenerationDefaultRefusalProgress {
+    ProjectionRefused(GenerationRetirementProjectionRefusal),
+    PublicationNotQualified(tidepool_bridge_effects::RlRetirementReceipt),
+    Refusing {
+        receipt: tidepool_bridge_effects::RlRetirementReceipt,
+    },
+    SourcesRestored {
+        receipt: tidepool_bridge_effects::RlRetirementReceipt,
+        evidence: Arc<crate::resident_actor::RetirementDiagnosticEvidence>,
+    },
+    SettlementFailed {
+        receipt: tidepool_bridge_effects::RlRetirementReceipt,
+        error: Arc<ResidentActorWorkbenchError>,
+    },
 }
 
 enum GenerationPublicationCustody {
@@ -256,6 +312,253 @@ struct GenerationRetirementCapture {
     physical_closure: GenerationCapturePhysicalClosure,
 }
 
+/// A wire projection may refuse a coordinate; the owning capture remains intact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GenerationRetirementProjectionRefusal {
+    ActorIdentity,
+    PreparationIdentity,
+    CompilerRegistration,
+    WatchIdentity,
+    OperationCoordinate,
+    PendingClaims,
+    FrozenReloadReportMissing,
+    OperationMissing,
+}
+
+impl GenerationRetirementCapture {
+    fn blockers(
+        &self,
+    ) -> Result<Vec<tidepool_bridge_effects::RlBlocker>, GenerationRetirementProjectionRefusal>
+    {
+        use crate::resident_actor::invocation_work::GenerationInvocationState as Invocation;
+        use tidepool_bridge_effects::{
+            RlBlocker as Blocker, RlBlockerReason as Reason, RlResource as Resource,
+        };
+        let mut blockers = Vec::new();
+        for observed in &self.population.resources {
+            blockers.push(Blocker::ReloadResourceBlocker(
+                retirement_resource(&observed.identity)?,
+                match &observed.state {
+                    GenerationResourceState::Starting => Reason::ReloadStartingResource,
+                    GenerationResourceState::Running => Reason::ReloadRunningResource,
+                    GenerationResourceState::Transferring => Reason::ReloadTransferringResource,
+                    GenerationResourceState::CleanupUnsupported => Reason::ReloadCleanupUnsupported,
+                    GenerationResourceState::CleanupUnconfirmed(detail) => {
+                        Reason::ReloadCleanupUnconfirmed(detail.clone())
+                    }
+                },
+            ));
+        }
+        for observed in &self.population.unclassified {
+            blockers.push(Blocker::ReloadResourceBlocker(
+                retirement_resource(&observed.identity)?,
+                Reason::ReloadUnclassifiedWork,
+            ));
+        }
+        for edge in &self.population.collateral {
+            use tidepool_bridge_effects::RlLifetimeEdge as Edge;
+            blockers.push(Blocker::ReloadCollateralBlocker(
+                retirement_resource(&edge.stopping)?,
+                match &edge.affected {
+                    GenerationCollateralIdentity::Classified(resource) => {
+                        retirement_resource(resource)?
+                    }
+                    GenerationCollateralIdentity::UnclassifiedPhysical(id) => {
+                        Resource::ReloadUnclassifiedPhysicalResource(retirement_native_identity(
+                            *id,
+                        ))
+                    }
+                },
+                match edge.edge {
+                    GenerationLifetimeEdge::PhysicalSupervision => Edge::ReloadPhysicalSupervision,
+                    GenerationLifetimeEdge::PendingSupervision => Edge::ReloadPendingSupervision,
+                    GenerationLifetimeEdge::PendingResourcePreparation => {
+                        Edge::ReloadPendingResourcePreparation
+                    }
+                    GenerationLifetimeEdge::ResourceOwnership => Edge::ReloadResourceOwnership,
+                    GenerationLifetimeEdge::OwnershipTransfer => Edge::ReloadOwnershipTransfer,
+                    GenerationLifetimeEdge::OwnershipTransferUnconfirmed => {
+                        Edge::ReloadOwnershipTransferUnconfirmed
+                    }
+                },
+            ));
+        }
+        for observed in &self.population.compilers {
+            let resource = match observed.owner {
+                GenerationCompilerOwner::Actor(actor) => Resource::ReloadActorCompilerResource(
+                    retirement_actor_identity(actor)?,
+                    observed.compiler.registration.to_string(),
+                ),
+                GenerationCompilerOwner::Preparation(id) => {
+                    Resource::ReloadPreparationCompilerResource(
+                        id.to_string(),
+                        observed.compiler.registration.to_string(),
+                    )
+                }
+            };
+            blockers.push(Blocker::ReloadResourceBlocker(
+                resource,
+                retirement_compiler_reason(&observed.compiler.close, &observed.compiler.source),
+            ));
+        }
+        match &self.work {
+            GenerationRetirementWork::Unavailable => {
+                blockers.push(Blocker::ReloadUnclassifiedSourceWork(1))
+            }
+            GenerationRetirementWork::Observed(work) => {
+                for observed in &work.invocations {
+                    let actor = retirement_actor_identity(observed.actor)?;
+                    let reservation = retirement_reservation(&observed.reservation)?;
+                    let (resource, reason) = match &observed.state {
+                        Invocation::Active => (Resource::ReloadInvocationResource(actor, reservation), Reason::ReloadActiveDependentWork),
+                        Invocation::SourceUnclassified => (Resource::ReloadInvocationResource(actor, reservation), Reason::ReloadUnclassifiedWork),
+                        Invocation::CleanupPending => (Resource::ReloadInvocationResource(actor, reservation), Reason::ReloadCleanupUnconfirmed("invocation cleanup is pending".into())),
+                        Invocation::CleanupUnconfirmed(detail) => (Resource::ReloadInvocationResource(actor, reservation), Reason::ReloadCleanupUnconfirmed(detail.clone())),
+                        Invocation::Compiler { registration, close, source } => (
+                            Resource::ReloadCompilerResource(actor, reservation, i64::try_from(*registration).map_err(|_| GenerationRetirementProjectionRefusal::CompilerRegistration)?),
+                            retirement_compiler_reason(close, source),
+                        ),
+                        Invocation::Form(mount) => (Resource::ReloadFormResource(actor, reservation, mount.clone()), Reason::ReloadActiveDependentWork),
+                        Invocation::DisplayPendingProducer(operation) => (Resource::ReloadDisplayResource(retirement_operation(operation)?), Reason::ReloadPendingProducer),
+                        Invocation::DisplayPublication(operation, publication) => (
+                            Resource::ReloadDisplayResource(retirement_operation(operation)?),
+                            match publication {
+                                tidepool_runtime::session::WorkbenchDisplayPublication::Pending { .. } => Reason::ReloadDisplayAcknowledgementPending,
+                                tidepool_runtime::session::WorkbenchDisplayPublication::Unconfirmed { detail, .. }
+                                | tidepool_runtime::session::WorkbenchDisplayPublication::Refused { detail, .. } => Reason::ReloadDisplayAcknowledgementUnconfirmed(detail.clone()),
+                                tidepool_runtime::session::WorkbenchDisplayPublication::Published { .. } => continue,
+                            },
+                        ),
+                    };
+                    blockers.push(Blocker::ReloadResourceBlocker(resource, reason));
+                }
+                for route in &work.routes {
+                    use crate::request::routes::GenerationRouteDependency;
+                    blockers.push(Blocker::ReloadResourceBlocker(
+                        Resource::ReloadWatchResource(
+                            retirement_actor_identity(route.owner)?,
+                            i64::try_from(route.watch.0).map_err(|_| {
+                                GenerationRetirementProjectionRefusal::WatchIdentity
+                            })?,
+                        ),
+                        match route.dependency {
+                            GenerationRouteDependency::Dependent => {
+                                Reason::ReloadActiveDependentWork
+                            }
+                            GenerationRouteDependency::Unclassified => {
+                                Reason::ReloadUnclassifiedWork
+                            }
+                        },
+                    ));
+                }
+            }
+        }
+        match self.pending_claims {
+            Ok(0) => {}
+            Ok(count) => blockers.push(Blocker::ReloadUnclassifiedSourceWork(
+                i64::try_from(count)
+                    .map_err(|_| GenerationRetirementProjectionRefusal::PendingClaims)?,
+            )),
+            Err(_) => blockers.push(Blocker::ReloadUnclassifiedSourceWork(1)),
+        }
+        Ok(blockers)
+    }
+}
+
+fn retirement_compiler_reason(
+    close: &crate::CompilerWorkClose,
+    source: &crate::termination::GenerationCompilerSource,
+) -> tidepool_bridge_effects::RlBlockerReason {
+    use tidepool_bridge_effects::RlBlockerReason as Reason;
+    if matches!(
+        source,
+        crate::termination::GenerationCompilerSource::Unclassified
+    ) {
+        return Reason::ReloadUnclassifiedWork;
+    }
+    match close {
+        crate::CompilerWorkClose::Pending => Reason::ReloadCompilerPending,
+        crate::CompilerWorkClose::Abandoned => Reason::ReloadCompilerUnconfirmed(
+            "compiler producer abandoned without physical close".into(),
+        ),
+        crate::CompilerWorkClose::Settled(close) => {
+            Reason::ReloadCompilerUnconfirmed(format!("{close:?}"))
+        }
+    }
+}
+
+fn retirement_actor_identity(
+    actor: ActorRef,
+) -> Result<(i64, i64), GenerationRetirementProjectionRefusal> {
+    Ok((
+        i64::try_from(actor.id.0)
+            .map_err(|_| GenerationRetirementProjectionRefusal::ActorIdentity)?,
+        i64::try_from(actor.incarnation.0)
+            .map_err(|_| GenerationRetirementProjectionRefusal::ActorIdentity)?,
+    ))
+}
+
+fn retirement_native_identity(id: ractor::ActorId) -> tidepool_bridge_effects::RlNativeIdentity {
+    use tidepool_bridge_effects::RlNativeIdentity as Native;
+    match id {
+        ractor::ActorId::Local(pid) => Native::ReloadNativeLocal(pid.to_string()),
+        ractor::ActorId::Remote { node_id, pid } => {
+            Native::ReloadNativeRemote(node_id.to_string(), pid.to_string())
+        }
+    }
+}
+
+fn retirement_resource(
+    identity: &GenerationResourceIdentity,
+) -> Result<tidepool_bridge_effects::RlResource, GenerationRetirementProjectionRefusal> {
+    use tidepool_bridge_effects::RlResource as Resource;
+    Ok(match identity {
+        GenerationResourceIdentity::Actor(actor) => {
+            Resource::ReloadActorResource(retirement_actor_identity(*actor)?)
+        }
+        GenerationResourceIdentity::Native { issued_to, id } => Resource::ReloadNativeResource(
+            retirement_actor_identity(*issued_to)?,
+            retirement_native_identity(*id),
+        ),
+        GenerationResourceIdentity::Preparation(id) => Resource::ReloadPreparationResource(
+            i64::try_from(*id)
+                .map_err(|_| GenerationRetirementProjectionRefusal::PreparationIdentity)?,
+        ),
+    })
+}
+
+fn retirement_reservation(
+    owner: &crate::request::RequestReservationOwner,
+) -> Result<tidepool_bridge_effects::RlReservation, GenerationRetirementProjectionRefusal> {
+    use tidepool_bridge_effects::RlReservation as Reservation;
+    Ok(match owner {
+        crate::request::RequestReservationOwner::Workbench { execution, attempt } => {
+            Reservation::ReloadWorkbenchReservation(execution.to_string(), attempt.to_string())
+        }
+        crate::request::RequestReservationOwner::Route(watch) => {
+            Reservation::ReloadRouteReservation(
+                i64::try_from(watch.0)
+                    .map_err(|_| GenerationRetirementProjectionRefusal::WatchIdentity)?,
+            )
+        }
+        crate::request::RequestReservationOwner::Scope(scope) => {
+            Reservation::ReloadScopeReservation(*scope)
+        }
+    })
+}
+
+fn retirement_operation(
+    operation: &tidepool_runtime::session::WorkbenchOperationId,
+) -> Result<tidepool_bridge_effects::RlOperation, GenerationRetirementProjectionRefusal> {
+    Ok(tidepool_bridge_effects::RlOperation {
+        execution: operation.execution.to_string(),
+        input_unit_index: i64::try_from(operation.input_unit_index)
+            .map_err(|_| GenerationRetirementProjectionRefusal::OperationCoordinate)?,
+        effect_ordinal: i64::try_from(operation.effect_ordinal)
+            .map_err(|_| GenerationRetirementProjectionRefusal::OperationCoordinate)?,
+    })
+}
+
 enum GenerationCapturePhysicalClosure {
     Guarded {
         actors: HashSet<ActorRef>,
@@ -324,6 +627,12 @@ enum RetainedGenerationRetirementPhase {
         cutoff: GenerationRetirementCutoffPhase,
         custody: GenerationPublicationCustody,
     },
+    DefaultRefusal {
+        reserved: ReservedActorGeneration,
+        observer: ActorPublicationAttemptObserver,
+        cutoff: GenerationRetirementCutoffPhase,
+        progress: GenerationDefaultRefusalProgress,
+    },
 }
 
 impl GenerationRetirementAttempt {
@@ -363,6 +672,23 @@ impl GenerationRetirementAttempt {
                 RetainedGenerationRetirementPhase::ReservationFailed(error),
                 None,
             ),
+            GenerationRetirementPhase::DefaultRefusal {
+                operation,
+                observer,
+                cutoff,
+                progress,
+            } => {
+                let (reserved, discard) = operation.into_retained_parts();
+                (
+                    RetainedGenerationRetirementPhase::DefaultRefusal {
+                        reserved,
+                        observer,
+                        cutoff,
+                        progress,
+                    },
+                    Some(discard),
+                )
+            }
             GenerationRetirementPhase::Reserved {
                 operation,
                 observer,
@@ -632,6 +958,9 @@ impl RunState {
                 GenerationRetirementPhase::Publication {
                     custody: GenerationPublicationCustody::SourceRestoredPending(_),
                     ..
+                } | GenerationRetirementPhase::DefaultRefusal {
+                    progress: GenerationDefaultRefusalProgress::SourcesRestored { .. },
+                    ..
                 }
             ) {
                 // A is already reopened. This phase owns only the independent
@@ -643,6 +972,10 @@ impl RunState {
                 ..
             }
             | GenerationRetirementPhase::Publication {
+                cutoff: GenerationRetirementCutoffPhase::Captured { capture, .. },
+                ..
+            }
+            | GenerationRetirementPhase::DefaultRefusal {
                 cutoff: GenerationRetirementCutoffPhase::Captured { capture, .. },
                 ..
             }) = &attempt.phase
@@ -1011,6 +1344,133 @@ impl RunState {
         }
         // Physical closure revalidation and publication settlement are separate
         // owner transitions. Captured grants no authority to initiate a stop.
+        self.prepare_default_generation_refusal(actor);
+    }
+
+    /// This private branch consumes only the actual capture and unexecuted
+    /// reservation. It never requests resource stop, cancellation or publication.
+    fn prepare_default_generation_refusal(&mut self, actor: ActorRef) {
+        use tidepool_bridge_effects::{
+            RlCause, RlCauseKind, RlRetirementReceipt, RlRetirementStage, RlRetirementState,
+        };
+        let Some(attempt) = self
+            .reservations
+            .get_mut(&actor)
+            .and_then(|record| record.retirement.active_mut())
+        else {
+            return;
+        };
+        if attempt.diagnostic.is_cancelled_component() {
+            return;
+        }
+        let GenerationRetirementPhase::Reserved {
+            operation,
+            cutoff: GenerationRetirementCutoffPhase::Captured { capture, .. },
+            ..
+        } = &mut attempt.phase
+        else {
+            return;
+        };
+        let projected = (|| {
+            let report = operation
+                .reserved_mut()
+                .reload_report()
+                .ok_or(GenerationRetirementProjectionRefusal::FrozenReloadReportMissing)?;
+            let operation_id = attempt
+                .diagnostic
+                .operation_id()
+                .ok_or(GenerationRetirementProjectionRefusal::OperationMissing)?;
+            Ok(RlRetirementReceipt {
+                previous: report.previous.clone(),
+                candidate: report.candidate.clone(),
+                operation: Some(retirement_operation(operation_id)?),
+                state: RlRetirementState::ReloadRetirementFenced(
+                    RlRetirementStage::ReloadCandidateSettlement,
+                ),
+                blockers: capture.blockers()?,
+                outcomes: Vec::new(),
+                surface: report.surface.clone(),
+                primary: Some(RlCause {
+                    kind: RlCauseKind::ReloadRetirementBlocked,
+                    detail: "generation retirement refused because admitted dependent work remains"
+                        .into(),
+                }),
+                secondary: Vec::new(),
+            })
+        })();
+        let progress = match projected {
+            Err(refusal) => GenerationDefaultRefusalProgress::ProjectionRefused(refusal),
+            Ok(mut receipt) if receipt.blockers.is_empty() => {
+                // An empty census does not enable the unqualified publication
+                // consumer. Retain the same reservation/fence for reconciliation.
+                receipt.state = RlRetirementState::ReloadRetirementFenced(
+                    RlRetirementStage::ReloadSourcePublication,
+                );
+                receipt.primary = Some(RlCause {
+                    kind: RlCauseKind::ReloadPublicationFailed,
+                    detail: "generation publication is unavailable".into(),
+                });
+                GenerationDefaultRefusalProgress::PublicationNotQualified(receipt)
+            }
+            Ok(receipt) => GenerationDefaultRefusalProgress::Refusing { receipt },
+        };
+        let old = std::mem::replace(&mut attempt.phase, GenerationRetirementPhase::Reserving);
+        let GenerationRetirementPhase::Reserved {
+            operation,
+            observer,
+            cutoff,
+        } = old
+        else {
+            attempt.phase = old;
+            return;
+        };
+        attempt.phase = GenerationRetirementPhase::DefaultRefusal {
+            operation,
+            observer,
+            cutoff,
+            progress,
+        };
+        let GenerationRetirementPhase::DefaultRefusal {
+            operation,
+            cutoff: GenerationRetirementCutoffPhase::Captured { fence, .. },
+            progress,
+            ..
+        } = &mut attempt.phase
+        else {
+            return;
+        };
+        if let GenerationDefaultRefusalProgress::Refusing { receipt } = progress {
+            // The actual affine operation and its capture remain in the record
+            // across the borrowed B-then-A transition and any panic.
+            match operation.reserved_mut().refuse_retirement(
+                fence,
+                "generation retirement refused because admitted dependent work remains",
+            ) {
+                Ok(()) => {
+                    receipt.state = RlRetirementState::ReloadAReopened;
+                    let receipt = receipt.clone();
+                    let evidence = Arc::new(
+                        crate::resident_actor::RetirementDiagnosticEvidence::default_refusal(
+                            &receipt,
+                        ),
+                    );
+                    *progress =
+                        GenerationDefaultRefusalProgress::SourcesRestored { receipt, evidence };
+                }
+                Err(error) => {
+                    *progress = GenerationDefaultRefusalProgress::SettlementFailed {
+                        receipt: receipt.clone(),
+                        error: Arc::new(error),
+                    };
+                }
+            }
+        }
+        if let GenerationDefaultRefusalProgress::SourcesRestored { evidence, .. } = progress {
+            // A successful write+ack discharges only diagnostic retention. The
+            // actual unexecuted reservation's consuming source-settlement gate
+            // must still issue its receipt before any candidate compaction.
+            let _ = attempt.diagnostic.record_default(evidence);
+        }
     }
 
     /// Both vectors remain empty while the owner is live. Each retained record

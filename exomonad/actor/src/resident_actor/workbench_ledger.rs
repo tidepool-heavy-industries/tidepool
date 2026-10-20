@@ -20,9 +20,20 @@ pub(crate) struct RetirementDiagnosticEvidence {
     detail: String,
     diagnostic: Option<tidepool_toolchain::failclass::FailureEnvelope>,
     observation: crate::resident_workbench::ActorGenerationPublicationRefusalObservation,
+    retirement: Option<tidepool_bridge_effects::RlRetirementReceipt>,
 }
 
 impl RetirementDiagnosticEvidence {
+    pub(crate) fn default_refusal(receipt: &tidepool_bridge_effects::RlRetirementReceipt) -> Self {
+        Self {
+            detail: "generation retirement refused because admitted dependent work remains".into(),
+            diagnostic: None,
+            observation:
+                crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: Some(receipt.clone()),
+        }
+    }
+
     pub(crate) fn from_refusal(
         refusal: &crate::resident_workbench::ActorGenerationPublicationRefusal,
     ) -> Self {
@@ -37,6 +48,7 @@ impl RetirementDiagnosticEvidence {
             detail,
             diagnostic,
             observation: refusal.observation(),
+            retirement: None,
         }
     }
 }
@@ -101,6 +113,10 @@ pub(crate) struct RecordedRetirementDiagnosticObservation {
 }
 
 impl WorkbenchOperationDiagnosticOwner {
+    pub(crate) fn operation(&self) -> &WorkbenchOperationId {
+        &self.operation
+    }
+
     pub(crate) fn record(
         &self,
         evidence: Arc<RetirementDiagnosticEvidence>,
@@ -1096,6 +1112,7 @@ mod tests {
             diagnostic: None,
             observation:
                 crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: None,
         });
         // Losing the receipt does not erase the write or require a new evidence
         // identity. The actual owning phase keeps this same projection Arc.
@@ -1133,6 +1150,7 @@ mod tests {
             diagnostic: None,
             observation:
                 crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: None,
         });
         assert!(matches!(
             owner.record(reconstructed),
@@ -1189,6 +1207,7 @@ mod tests {
             diagnostic: None,
             observation:
                 crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: None,
         });
         assert!(matches!(
             owner.record(evidence.clone()),
@@ -1237,6 +1256,7 @@ mod tests {
             diagnostic: None,
             observation:
                 crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: None,
         });
         let old_receipt = old_owner.record(evidence.clone()).unwrap();
         // Model replacement through the existing begin issuer, preserving every
@@ -1311,6 +1331,7 @@ mod tests {
             diagnostic: None,
             observation:
                 crate::resident_workbench::ActorGenerationPublicationRefusalObservation::Refused,
+            retirement: None,
         });
         let receipt = first.record(evidence.clone()).unwrap();
         let (reason, returned) = match second.acknowledge(receipt) {
