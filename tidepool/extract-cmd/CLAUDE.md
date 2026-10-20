@@ -97,8 +97,13 @@ timeout settle through the endpoint's existing child termination/reap owner.
 
 A persistent daemon runs the existing pool of pinned GHC workers. One accept
 owner checks epoch/deployment fences and routes through bounded per-slot queues.
-The lowest live slot retains foreground context; preparation never occupies it.
-Foreground uses that slot first and may spill to an idle additional slot. At most
+The lowest live slot retains the foreground reserve; preparation never occupies it.
+Foreground defaults to that slot and may spill to an idle additional slot. An
+issued optional location may prefer its matching idle worker before lazy BEGIN;
+busy, stale, retired or workload-ineligible placement immediately uses the same
+ordinary admission policy. Affinity is private execution placement, excluded from
+compiler request semantics, correlation and artifact identity. Active and already
+accepted transactions never reroute. At most
 one foreground job waits beyond occupied workers. Every accepted connection holds
 its CPU grant through transaction cleanup and any owned worker rotation;
 `compiler_capacity_release` records the exact admission after its permit is
@@ -106,6 +111,16 @@ released, including failed delivery, cancellation and replacement. Failed
 acknowledgement, disconnect, worker failure and cancellation release the grant
 through the same owned permit.
 STOP and deployment changes drain accepted work before rejecting the backlog.
+
+Daemon acceptance issues an admission identity before the queued worker starts.
+Only a successful worker BEGIN issues the actual daemon epoch, slot and existing
+worker boot nonce. The v5 transaction stream carries that location once before
+output or END acknowledgement; malformed, duplicate, late or wrong-epoch metadata
+poisons accepted framing without replay. Failure before BEGIN leaves location
+unobserved. Returned daemon transaction results carry this actual location;
+direct and ordinary one-shot results make no cross-process residency promise.
+END acknowledgement does not establish idle capacity: the existing resource
+permit remains held through owned worker rotation and records its release.
 
 Requests and transaction acquisition declare `CompileWorkload::Foreground` or
 `Preparation`. Existing calls default to foreground. Required root installation

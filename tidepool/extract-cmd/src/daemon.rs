@@ -11,8 +11,10 @@
 //! identity  ::= "TPDPI004" producer[32] consumed_worker[32] boot_epoch[32] source-association
 //! request   ::= "TPDRQ002" expected_epoch[32]
 //!               frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
-//! transaction ::= "TPDTR004" expected_epoch[32] workload:u8
+//! transaction ::= "TPDTR005" expected_epoch[32] workload:u8 affinity
 //!                 (request-tag request)* end-tag
+//! affinity ::= 0u8 | 1u8 slot:u32-LE worker_instance[32]
+//! started ::= 3u8 epoch[32] slot:u32-LE worker_instance[32]
 //! stop      ::= "TPDST001"
 //! stop_ack  ::= 1u8
 //! decision  ::= accepted:u8 admission_id:u64-LE | rejected:u8 frame(reason) | busy:u8
@@ -82,7 +84,7 @@ const REQUEST: &[u8; 8] = b"TPDRQ002";
 /// explicit `REJECTED` and may safely rebind.
 const STOP: &[u8; 8] = b"TPDST001";
 const STOP_ACK: u8 = 1;
-pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR004";
+pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR005";
 // Direct v2 exit0 confirms checked worker/scratch close, independently of
 // the daemon's admission/BEGIN version and cleanup acknowledgement protocol.
 pub(crate) const DIRECT_TRANSACTION: &[u8; 8] = b"TPDTR002";
@@ -91,6 +93,7 @@ pub(crate) const TRANSACTION_REQUEST: u8 = 1;
 pub(crate) const TRANSACTION_OUTPUT: u8 = 0;
 pub(crate) const TRANSACTION_RETIRED: u8 = 1;
 pub(crate) const TRANSACTION_END_ACK: u8 = 2;
+pub(crate) const TRANSACTION_STARTED: u8 = 3;
 /// Requests one worker serves before the daemon replaces it. Keep ordinary
 /// request-count rotation out of the common session length; the RSS ceiling
 /// remains the tighter bound when a worker grows quickly.
@@ -606,6 +609,7 @@ pub(crate) struct DaemonTransaction {
     admission_id: AdmissionId,
     next_request: RequestOrdinal,
     received_outputs: u64,
+    worker_location: Option<crate::CompilerWorkerLocation>,
     terminal: Option<DaemonTerminal>,
     framing_known: bool,
     end_sent: bool,
@@ -624,6 +628,7 @@ struct DaemonTerminal {
 }
 
 enum TransactionEvent {
+    Started(crate::CompilerWorkerLocation),
     Output(Output),
     Retired(DaemonTerminal),
     EndAcknowledged,
@@ -668,6 +673,18 @@ impl Read for TransactionReader<'_> {
 fn read_transaction_event(reader: &mut impl Read) -> Result<TransactionEvent, DaemonError> {
     use crate::endpoint::{read_retirement_cause, CompilerWorkerRetirement};
     match read_exact_or_crash(reader, 1)?[0] {
+        TRANSACTION_STARTED => {
+            let epoch = read_exact_or_crash(reader, 32)?
+                .try_into()
+                .expect("fixed epoch width");
+            let slot = read_u32(reader)?;
+            let instance = read_exact_or_crash(reader, 32)?
+                .try_into()
+                .expect("fixed instance width");
+            Ok(TransactionEvent::Started(
+                crate::CompilerWorkerLocation::started(epoch, slot, instance),
+            ))
+        }
         TRANSACTION_OUTPUT => decode_output(reader).map(TransactionEvent::Output),
         TRANSACTION_RETIRED => {
             let epoch = read_exact_or_crash(reader, 32)?
@@ -721,6 +738,23 @@ fn read_transaction_event(reader: &mut impl Read) -> Result<TransactionEvent, Da
     }
 }
 
+pub(crate) fn write_worker_started(
+    writer: &mut impl Write,
+    epoch: &[u8; 32],
+    slot: usize,
+    instance: &[u8; 32],
+) -> Result<(), FrontendError> {
+    let slot = u32::try_from(slot)
+        .map_err(|_| FrontendError::Daemon("worker slot exceeds transport coordinate".into()))?;
+    writer
+        .write_all(&[TRANSACTION_STARTED])
+        .and_then(|()| writer.write_all(epoch))
+        .and_then(|()| writer.write_all(&slot.to_le_bytes()))
+        .and_then(|()| writer.write_all(instance))
+        .and_then(|()| writer.flush())
+        .map_err(FrontendError::Io)
+}
+
 fn write_retirement(
     writer: &mut impl Write,
     terminal: &DaemonTerminal,
@@ -768,33 +802,62 @@ fn write_retirement(
 }
 
 impl DaemonTransaction {
+    pub(crate) fn worker_location(&self) -> Option<&crate::CompilerWorkerLocation> {
+        self.worker_location.as_ref()
+    }
     fn read_event(&mut self, deadline: Instant) -> Result<TransactionEvent, DaemonError> {
-        let mut reader = TransactionReader {
-            stream: &mut self.stream,
-            deadline,
-            cancellation: self.cancellation.clone(),
-        };
-        let event = read_transaction_event(&mut reader);
-        if event.is_err() {
-            self.framing_known = false;
-        }
-        let event = event?;
-        if let TransactionEvent::Retired(terminal) = &event {
-            let submitted = self.next_request.0 - 1;
-            if terminal.epoch != self.epoch.0
-                || terminal.admission_id != self.admission_id.0
-                || terminal.emitted_outputs != self.received_outputs
-                || terminal.parsed_requests < terminal.emitted_outputs
-                || terminal.parsed_requests > submitted
-                || terminal.parsed_requests - terminal.emitted_outputs > 1
+        loop {
+            let mut reader = TransactionReader {
+                stream: &mut self.stream,
+                deadline,
+                cancellation: self.cancellation.clone(),
+            };
+            let event = read_transaction_event(&mut reader);
+            if event.is_err() {
+                self.framing_known = false;
+            }
+            let event = event?;
+            if let TransactionEvent::Started(location) = event {
+                if self.worker_location.is_some()
+                    || self.received_outputs != 0
+                    || self.terminal.is_some()
+                    || location.epoch() != &self.epoch.0
+                {
+                    self.framing_known = false;
+                    return Err(DaemonError::Protocol(
+                        "worker start differs from accepted transaction".into(),
+                    ));
+                }
+                self.worker_location = Some(location);
+                continue;
+            }
+            if matches!(
+                event,
+                TransactionEvent::Output(_) | TransactionEvent::EndAcknowledged
+            ) && self.worker_location.is_none()
             {
                 self.framing_known = false;
                 return Err(DaemonError::Protocol(
-                    "retirement differs from exact accepted transaction".into(),
+                    "worker result precedes actual BEGIN location".into(),
                 ));
             }
+            if let TransactionEvent::Retired(terminal) = &event {
+                let submitted = self.next_request.0 - 1;
+                if terminal.epoch != self.epoch.0
+                    || terminal.admission_id != self.admission_id.0
+                    || terminal.emitted_outputs != self.received_outputs
+                    || terminal.parsed_requests < terminal.emitted_outputs
+                    || terminal.parsed_requests > submitted
+                    || terminal.parsed_requests - terminal.emitted_outputs > 1
+                {
+                    self.framing_known = false;
+                    return Err(DaemonError::Protocol(
+                        "retirement differs from exact accepted transaction".into(),
+                    ));
+                }
+            }
+            return Ok(event);
         }
-        Ok(event)
     }
 }
 
@@ -814,6 +877,7 @@ impl DaemonTransaction {
             admission_id: AdmissionId(1),
             next_request: RequestOrdinal(1),
             received_outputs: 0,
+            worker_location: None,
             terminal: None,
             framing_known: true,
             end_sent: false,
@@ -1128,11 +1192,22 @@ pub(crate) fn begin_transaction_with_cancellation(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn begin_transaction_for_workload(
     socket_path: &Path,
     epoch: &[u8; 32],
     workload: CompileWorkload,
     cancellation: Option<&crate::CompilerTransactionCancellation>,
+) -> Result<DaemonTransaction, DaemonError> {
+    begin_transaction_for_workload_with_hint(socket_path, epoch, workload, cancellation, None)
+}
+
+pub(crate) fn begin_transaction_for_workload_with_hint(
+    socket_path: &Path,
+    epoch: &[u8; 32],
+    workload: CompileWorkload,
+    cancellation: Option<&crate::CompilerTransactionCancellation>,
+    hint: Option<&crate::CompilerWorkerLocation>,
 ) -> Result<DaemonTransaction, DaemonError> {
     let deadline = Instant::now() + IO_TIMEOUT;
     loop {
@@ -1143,7 +1218,8 @@ pub(crate) fn begin_transaction_for_workload(
         if remaining.is_zero() {
             return Err(DaemonError::Busy);
         }
-        let result = begin_transaction_once(socket_path, epoch, workload, remaining, cancellation);
+        let result =
+            begin_transaction_once(socket_path, epoch, workload, remaining, cancellation, hint);
         match result {
             Err(DaemonError::Busy) => {
                 if let Some(cancellation) = cancellation {
@@ -1168,6 +1244,7 @@ fn begin_transaction_once(
     workload: CompileWorkload,
     admission_timeout: Duration,
     cancellation: Option<&crate::CompilerTransactionCancellation>,
+    hint: Option<&crate::CompilerWorkerLocation>,
 ) -> Result<DaemonTransaction, DaemonError> {
     let mut stream = UnixStream::connect(socket_path).map_err(DaemonError::Connect)?;
     if let Some(cancellation) = cancellation {
@@ -1179,10 +1256,18 @@ fn begin_transaction_once(
     stream
         .set_write_timeout(Some(admission_timeout))
         .map_err(|error| DaemonError::NotAccepted(error.to_string()))?;
+    let hint = hint.filter(|hint| hint.epoch() == epoch);
     if let Err(error) = stream
         .write_all(TRANSACTION)
         .and_then(|()| stream.write_all(epoch))
         .and_then(|()| stream.write_all(&[workload.wire_tag()]))
+        .and_then(|()| stream.write_all(&[u8::from(hint.is_some())]))
+        .and_then(|()| match hint {
+            Some(hint) => stream
+                .write_all(&hint.slot().to_le_bytes())
+                .and_then(|()| stream.write_all(hint.instance())),
+            None => Ok(()),
+        })
         .and_then(|()| stream.flush())
     {
         return Err(explicit_refusal(&mut stream).unwrap_or_else(|| {
@@ -1217,6 +1302,7 @@ fn begin_transaction_once(
                 admission_id,
                 next_request: RequestOrdinal(1),
                 received_outputs: 0,
+                worker_location: None,
                 terminal: None,
                 framing_known: true,
                 end_sent: false,
@@ -1289,6 +1375,7 @@ pub(crate) fn execute_transaction_request(
         "compiler phase finished"
     );
     match response.map_err(|error| DaemonError::AfterAcceptance(Box::new(error)))? {
+        TransactionEvent::Started(_) => unreachable!("read_event consumes worker start metadata"),
         TransactionEvent::Output(output) => {
             if ordinal.0 != transaction.received_outputs + 1 {
                 transaction.framing_known = false;
@@ -1687,6 +1774,10 @@ fn service_transaction(
     let mut transaction_failed = worker
         .begin_transaction_while_connected(&connection, request_deadline)
         .err();
+    if transaction && transaction_failed.is_none() {
+        transaction_failed =
+            write_worker_started(&mut connection, epoch, worker_slot, &worker.instance).err();
+    }
     let mut orderly_end = false;
     let mut one_shot_response = None;
     let mut request_ordinal = RequestOrdinal(0);
@@ -2129,7 +2220,7 @@ pub(crate) fn serve(
 /// on the accept thread, exactly as they did before pooling, so a rejection
 /// never crosses into a worker thread.
 enum Job {
-    Transaction(UnixStream),
+    Transaction(UnixStream, Option<crate::CompilerWorkerLocation>),
     Request(UnixStream, std::path::PathBuf, PreparedRequest),
 }
 
@@ -2160,6 +2251,7 @@ struct ResourceUsage {
     cpus: usize,
     preparation_cpus: usize,
     slots: Vec<usize>,
+    instances: Vec<Option<[u8; 32]>>,
 }
 
 struct ResourceAdmission {
@@ -2229,6 +2321,7 @@ impl ResourceAdmission {
         std::sync::Arc::new(Self {
             usage: Mutex::new(ResourceUsage {
                 slots: vec![0; workers],
+                instances: vec![None; workers],
                 ..ResourceUsage::default()
             }),
             worker_rss: (0..workers).map(|_| AtomicU64::new(0)).collect(),
@@ -2274,10 +2367,27 @@ impl ResourceAdmission {
         None
     }
 
+    #[cfg(test)]
     fn acquire_with_capacity(
         self: &std::sync::Arc<Self>,
         workload: CompileWorkload,
         capacity: crate::resources::ResourceCapacity,
+    ) -> Option<ResourcePermit> {
+        self.acquire_with_affinity(workload, capacity, None)
+    }
+
+    fn observe_worker(&self, slot: usize, instance: [u8; 32]) {
+        self.usage
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .instances[slot] = Some(instance);
+    }
+
+    fn acquire_with_affinity(
+        self: &std::sync::Arc<Self>,
+        workload: CompileWorkload,
+        capacity: crate::resources::ResourceCapacity,
+        hint: Option<&crate::CompilerWorkerLocation>,
     ) -> Option<ResourcePermit> {
         let mut usage = self.usage.lock().unwrap_or_else(|p| p.into_inner());
         let workers = self.worker_rss.len();
@@ -2294,22 +2404,35 @@ impl ResourceAdmission {
         if usage.jobs >= live_workers + 1 {
             return None;
         }
-        let slot = match workload {
-            CompileWorkload::Foreground => {
-                if usage.slots[reserved_slot] == 0 {
-                    reserved_slot
-                } else if let Some(slot) = (0..workers)
-                    .find(|&slot| live(slot) && slot != reserved_slot && usage.slots[slot] == 0)
-                {
-                    slot
-                } else if usage.slots[reserved_slot] == 1 {
-                    reserved_slot
-                } else {
-                    return None;
+        let preferred = hint.and_then(|hint| {
+            usize::try_from(hint.slot()).ok().filter(|&slot| {
+                slot < workers
+                    && live(slot)
+                    && usage.slots[slot] == 0
+                    && usage.instances[slot].as_ref() == Some(hint.instance())
+                    && (workload == CompileWorkload::Foreground || slot != reserved_slot)
+            })
+        });
+        let slot = if let Some(slot) = preferred {
+            slot
+        } else {
+            match workload {
+                CompileWorkload::Foreground => {
+                    if usage.slots[reserved_slot] == 0 {
+                        reserved_slot
+                    } else if let Some(slot) = (0..workers)
+                        .find(|&slot| live(slot) && slot != reserved_slot && usage.slots[slot] == 0)
+                    {
+                        slot
+                    } else if usage.slots[reserved_slot] == 1 {
+                        reserved_slot
+                    } else {
+                        return None;
+                    }
                 }
+                CompileWorkload::Preparation => (0..workers)
+                    .find(|&slot| live(slot) && slot != reserved_slot && usage.slots[slot] == 0)?,
             }
-            CompileWorkload::Preparation => (0..workers)
-                .find(|&slot| live(slot) && slot != reserved_slot && usage.slots[slot] == 0)?,
         };
         let resident: u64 = self
             .worker_rss
@@ -2495,7 +2618,12 @@ fn admit_job_observed(
     } else {
         None
     };
-    let Some(mut resource_permit) = resources.acquire_with_capacity(workload, capacity) else {
+    let hint = match &job {
+        Job::Transaction(_, hint) => hint.as_ref().filter(|hint| hint.epoch() == &epoch.0),
+        Job::Request(..) => None,
+    };
+    let Some(mut resource_permit) = resources.acquire_with_affinity(workload, capacity, hint)
+    else {
         if let Job::Request(_, cwd, prepared) = &job {
             tracing::debug!(
                 compile_request = %compile_request_correlation(cwd, &prepared.request),
@@ -2582,7 +2710,8 @@ fn serve_workers(
     let consumed_worker = prepared.consumed_worker_identity();
     listener.set_nonblocking(true).map_err(FrontendError::Io)?;
     // The accept owner routes to the existing pool's bounded slot queues.
-    // Slot zero retains foreground context and never receives preparation.
+    // The lowest live slot retains the foreground reserve. Idle affinity may
+    // select another eligible slot; preparation never consumes that reserve.
     // Resource permits allow at most one pending foreground job globally.
     let (job_txs, job_rxs): (Vec<_>, Vec<_>) = (0..worker_count)
         .map(|_| std::sync::mpsc::sync_channel::<PendingJob>(1))
@@ -2608,6 +2737,7 @@ fn serve_workers(
                 let _dispatch = tracing::dispatcher::set_default(&dispatch);
                 let mut resident = ResidentSlot { resources: std::sync::Arc::clone(&resources), slot, quarantined: false };
                 let mut worker = Worker::spawn_in_slot(prepared, epoch, slot)?;
+                resources.observe_worker(slot, worker.instance);
                 tracing::info!(
                     run_id,
                     daemon_pid = std::process::id(),
@@ -2643,7 +2773,7 @@ fn serve_workers(
                     }
                     let job = pending.job;
                     let connection = match &job {
-                        Job::Transaction(connection) | Job::Request(connection, ..) => connection,
+                        Job::Transaction(connection, _) | Job::Request(connection, ..) => connection,
                     };
                     // An accepted transaction's half-close still owns a
                     // retirement response, even before its first worker use.
@@ -2651,7 +2781,7 @@ fn serve_workers(
                         continue;
                     }
                     let (connection, transaction, mut first_request) = match job {
-                        Job::Transaction(connection) => (connection, true, None),
+                        Job::Transaction(connection, _) => (connection, true, None),
                         Job::Request(connection, cwd, argv) => {
                             (connection, false, Some((cwd, argv)))
                         }
@@ -2725,6 +2855,9 @@ fn serve_workers(
                     if let Ok(rss) = worker_rss_mb(worker.child.id()) {
                         resources.worker_rss[slot].store(rss, Ordering::Release);
                     }
+                    // Publish the successfully booted replacement before an idle
+                    // permit can be observed by affinity admission.
+                    resources.observe_worker(slot, worker.instance);
                     match outcome {
                         Ok(ConnectionOutcome::Continue) => { drop(resource_permit); }
                         Ok(ConnectionOutcome::Quarantine(retirement)) => {
@@ -2903,6 +3036,30 @@ fn serve_workers(
                         continue;
                     }
                 };
+                let hint = match read_exact_or_crash(&mut connection, 1)
+                    .ok()
+                    .map(|bytes| bytes[0])
+                {
+                    Some(0) => None,
+                    Some(1) => match read_u32(&mut connection).and_then(|slot| {
+                        let instance = read_exact_or_crash(&mut connection, 32)?
+                            .try_into()
+                            .expect("fixed instance width");
+                        Ok(crate::CompilerWorkerLocation::started(
+                            *epoch, slot, instance,
+                        ))
+                    }) {
+                        Ok(hint) => Some(hint),
+                        Err(_) => {
+                            write_rejected(&mut connection, "invalid worker affinity hint").ok();
+                            continue;
+                        }
+                    },
+                    _ => {
+                        write_rejected(&mut connection, "invalid worker affinity hint").ok();
+                        continue;
+                    }
+                };
                 log_send_failure(
                     run_id,
                     "transaction read timeout",
@@ -2915,7 +3072,7 @@ fn serve_workers(
                         ordinary_busy.as_ref(),
                         &resources,
                         workload,
-                        Job::Transaction(worker_connection),
+                        Job::Transaction(worker_connection, hint),
                         &mut connection,
                         &mut next_admission_id,
                         DaemonEpoch(*epoch),
@@ -3781,6 +3938,7 @@ fn read_package_boot(stdout: &mut ChildStdout) -> io::Result<Vec<u8>> {
 }
 
 pub(crate) struct Worker {
+    instance: [u8; 32],
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: ChildStdout,
@@ -3871,6 +4029,7 @@ impl Worker {
             .take()
             .ok_or_else(|| FrontendError::Daemon("worker stdout was not piped".to_owned()))?;
         let mut worker = Self {
+            instance: worker_instance,
             child,
             stdin: Some(stdin),
             stdout,
@@ -4495,6 +4654,55 @@ mod tests {
     }
 
     #[test]
+    fn affinity_prefers_only_matching_idle_eligible_instances() {
+        let resources = ResourceAdmission::with_limits(3, 10 * WARM_WORKER_MB, 2, 4);
+        let capacity = admission_capacity(16, 10 * WARM_WORKER_MB);
+        for (slot, instance) in [[1; 32], [2; 32], [3; 32]].into_iter().enumerate() {
+            resources.observe_worker(slot, instance);
+        }
+        let hint = crate::CompilerWorkerLocation::started([7; 32], 1, [2; 32]);
+        let preferred = resources
+            .acquire_with_affinity(CompileWorkload::Foreground, capacity, Some(&hint))
+            .unwrap();
+        assert_eq!(
+            preferred.slot, 1,
+            "an eligible hint precedes the idle foreground default"
+        );
+        let fallback = resources
+            .acquire_with_affinity(CompileWorkload::Foreground, capacity, Some(&hint))
+            .unwrap();
+        assert_eq!(
+            fallback.slot, 0,
+            "busy affinity immediately uses ordinary admission"
+        );
+        assert_eq!(preferred.grant, fallback.grant);
+        drop((preferred, fallback));
+        for hint in [
+            crate::CompilerWorkerLocation::started([7; 32], 1, [99; 32]),
+            crate::CompilerWorkerLocation::started([7; 32], u32::MAX, [2; 32]),
+        ] {
+            let fallback = resources
+                .acquire_with_affinity(CompileWorkload::Foreground, capacity, Some(&hint))
+                .unwrap();
+            assert_eq!(fallback.slot, 0);
+        }
+        let reserved = crate::CompilerWorkerLocation::started([7; 32], 0, [1; 32]);
+        let preparation = resources
+            .acquire_with_affinity(CompileWorkload::Preparation, capacity, Some(&reserved))
+            .unwrap();
+        assert_eq!(
+            preparation.slot, 1,
+            "affinity cannot consume the foreground reserve"
+        );
+        assert_eq!(preparation.grant.jobs, 4);
+        let foreground = resources
+            .acquire_with_capacity(CompileWorkload::Foreground, capacity)
+            .unwrap();
+        assert_eq!(foreground.slot, 0);
+        assert_eq!(foreground.grant.jobs, 2);
+    }
+
+    #[test]
     fn typed_resource_refusal_is_known_unsubmitted_without_retry_or_rebind() {
         let dir = tempfile::tempdir().unwrap();
         for transaction in [false, true] {
@@ -4511,6 +4719,7 @@ mod tests {
                 if transaction {
                     assert_eq!(&header[..8], TRANSACTION);
                     assert_eq!(read_exact_or_crash(&mut connection, 1).unwrap(), [1]);
+                    assert_eq!(read_exact_or_crash(&mut connection, 1).unwrap(), [0]);
                 } else {
                     assert_eq!(&header[..8], REQUEST);
                     read_request(&mut connection).unwrap();
@@ -4759,7 +4968,7 @@ mod tests {
                     None,
                     &resources,
                     workload,
-                    Job::Transaction(worker_connection),
+                    Job::Transaction(worker_connection, None),
                     &mut connection,
                     &mut identity,
                     capacity,
@@ -5101,7 +5310,7 @@ mod tests {
         tx.send(PendingJob {
             admission_id: AdmissionId(99),
             queued_at: Instant::now(),
-            job: Job::Transaction(server),
+            job: Job::Transaction(server, None),
             accepted: acceptance,
             permit: Some(AdmissionPermit(std::sync::Arc::clone(&queued_busy))),
             resource_permit: queued,
@@ -5459,7 +5668,7 @@ mod tests {
                         None,
                         &resources,
                         CompileWorkload::Foreground,
-                        Job::Transaction(worker_connection),
+                        Job::Transaction(worker_connection, None),
                         &mut connection,
                         &mut next,
                         capacity,
@@ -6693,8 +6902,8 @@ tidepool-reuse-error: witness failed\n";
             let (mut connection, _) = listener.accept().unwrap();
             let magic = read_exact_or_crash(&mut connection, 8).unwrap();
             // The predecessor owns a different grammar and never accepts this
-            // connection. No response frame can be decoded as a v4 event.
-            assert_ne!(magic, b"TPDTR003");
+            // connection. No response frame can be decoded as a v5 event.
+            assert_ne!(magic, b"TPDTR004");
             drop(connection);
             listener.set_nonblocking(true).unwrap();
             assert_eq!(
@@ -6723,6 +6932,44 @@ tidepool-reuse-error: witness failed\n";
                 worker: crate::CompilerWorkerRetirement::Reaped(ExitStatus::from_raw(9)),
             },
             failure: crate::CompilerIoCause::from(&io::Error::from_raw_os_error(libc::ECANCELED)),
+        }
+    }
+
+    #[test]
+    fn worker_started_is_required_once_and_matches_the_accepted_epoch() {
+        for case in 0..5 {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let mut transaction = DaemonTransaction::for_test(client);
+            if case != 3 {
+                write_worker_started(&mut server, &[u8::from(case == 1); 32], 0, &[2; 32]).unwrap();
+            }
+            if case == 2 {
+                write_worker_started(&mut server, &[0; 32], 0, &[2; 32]).unwrap();
+            }
+            server.write_all(&[TRANSACTION_OUTPUT]).unwrap();
+            write_response(&mut server, 0, b"completed", b"").unwrap();
+            let result = transaction.read_event(Instant::now() + Duration::from_secs(1));
+            if case == 0 || case == 4 {
+                assert!(
+                    matches!(result, Ok(TransactionEvent::Output(output)) if output.stdout == b"completed")
+                );
+                let location = transaction.worker_location().unwrap();
+                assert_eq!(location.epoch(), &[0; 32]);
+                assert_eq!(location.instance(), &[2; 32]);
+                if case == 4 {
+                    write_worker_started(&mut server, &[0; 32], 0, &[3; 32]).unwrap();
+                    assert!(matches!(
+                        transaction.read_event(Instant::now() + Duration::from_secs(1)),
+                        Err(DaemonError::Protocol(_))
+                    ));
+                    assert!(!transaction.framing_known);
+                    assert!(end_transaction(&mut transaction).is_err());
+                }
+            } else {
+                assert!(matches!(result, Err(DaemonError::Protocol(_))));
+                assert!(!transaction.framing_known);
+                assert!(end_transaction(&mut transaction).is_err());
+            }
         }
     }
 
@@ -6770,6 +7017,7 @@ tidepool-reuse-error: witness failed\n";
             transaction.cancellation = Some(cancellation.clone());
             let server_cancel = cancellation.clone();
             let server_thread = std::thread::spawn(move || {
+                write_worker_started(&mut server, &[0; 32], 0, &[1; 32]).unwrap();
                 if phase != 0 {
                     assert_eq!(
                         read_exact_or_crash(&mut server, 1).unwrap(),
@@ -6830,6 +7078,7 @@ tidepool-reuse-error: witness failed\n";
         let mut transaction = DaemonTransaction::for_test(client);
         // A complete event tag and partial Output cannot be mistaken for a
         // later terminal boundary. Its owner refuses all further decoding.
+        write_worker_started(&mut server, &[0; 32], 0, &[1; 32]).unwrap();
         server.write_all(&[TRANSACTION_OUTPUT, 0]).unwrap();
         let started = Instant::now();
         assert!(transaction
@@ -6856,9 +7105,11 @@ tidepool-reuse-error: witness failed\n";
             let mut workload = [0];
             connection.read_exact(&mut workload).unwrap();
             assert_eq!(workload, [0]);
+            assert_eq!(read_exact_or_crash(&mut connection, 1).unwrap(), [0]);
             assert_eq!(&header[8..], &[3; 32]);
             connection.write_all(&[ACCEPTED]).unwrap();
             connection.write_all(&1u64.to_le_bytes()).unwrap();
+            write_worker_started(&mut connection, &[3; 32], 0, &[1; 32]).unwrap();
             for expected in ["one", "one"] {
                 let mut command = [0u8; 1];
                 connection.read_exact(&mut command).unwrap();
@@ -7002,6 +7253,10 @@ tidepool-reuse-error: witness failed\n";
                     },
                 )
                 .unwrap();
+                assert!(
+                    matches!(read_transaction_event(&mut client).unwrap(), TransactionEvent::Started(location)
+                    if location.epoch() == &[9; 32] && location.slot() == 0 && location.instance() == &worker.instance)
+                );
                 for _ in 0..request_count {
                     assert!(
                         matches!(read_transaction_event(&mut client).unwrap(), TransactionEvent::Output(output) if output.status.code() == Some(0))
@@ -7241,6 +7496,7 @@ tidepool-reuse-error: witness failed\n";
             let mut workload = [0];
             stream.read_exact(&mut workload).unwrap();
             assert_eq!(workload, [0]);
+            assert_eq!(read_exact_or_crash(&mut stream, 1).unwrap(), [0]);
             stream.write_all(&[ACCEPTED]).unwrap();
             stream.write_all(&81u64.to_le_bytes()).unwrap();
             let mut command = [0];
@@ -7320,6 +7576,7 @@ tidepool-reuse-error: witness failed\n";
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let mut worker = Worker {
+            instance: boot_epoch().unwrap(),
             child,
             stdin: Some(stdin),
             stdout,
@@ -7369,6 +7626,7 @@ tidepool-reuse-error: witness failed\n";
                 let mut other = children.pop().unwrap();
                 let mut child = children.pop().unwrap();
                 let mut worker = Worker {
+                    instance: boot_epoch().unwrap(),
                     stdin: child.stdin.take(),
                     stdout: child.stdout.take().unwrap(),
                     child,
@@ -7445,6 +7703,7 @@ tidepool-reuse-error: witness failed\n";
             .spawn()
             .unwrap();
         let mut worker = Worker {
+            instance: boot_epoch().unwrap(),
             stdin: child.stdin.take(),
             stdout: child.stdout.take().unwrap(),
             child,
@@ -7906,7 +8165,7 @@ tidepool-reuse-error: witness failed\n";
             legacy
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
-            legacy.write_all(b"TPDTR003").unwrap();
+            legacy.write_all(b"TPDTR004").unwrap();
             let mut refused = [0];
             assert_eq!(
                 legacy.read(&mut refused).unwrap(),
@@ -8790,6 +9049,229 @@ fn main() {{
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn idle_affinity_falls_back_and_queued_rotation_reports_actual_instance() {
+        struct OwnedServer {
+            socket: PathBuf,
+            thread: Option<std::thread::JoinHandle<Result<u8, FrontendError>>>,
+        }
+        impl Drop for OwnedServer {
+            fn drop(&mut self) {
+                if let Some(thread) = self.thread.take() {
+                    request_stop(&self.socket).unwrap();
+                    assert_eq!(thread.join().unwrap().unwrap(), 0);
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let argv = vec![OsString::from("Expr.hs")];
+        let worker_bin = compile_sleepy_fake_worker(dir.path(), &argv, 0);
+        for rotate in [false, true] {
+            let socket = dir.path().join(if rotate {
+                "rotation.sock"
+            } else {
+                "affinity.sock"
+            });
+            let prepared = PreparedWorker::for_test(worker_bin.clone()).unwrap();
+            let config = DaemonConfig {
+                socket: socket.clone(),
+                rotate_after: rotate.then_some(1),
+                rss_ceiling_mb: None,
+                request_deadline_secs: Some(10),
+                watch_stamp: None,
+                persistent: true,
+                run_id: Some("actual-worker-affinity".into()),
+                log_path: None,
+                workers: Some(2),
+                foreground_jobs: Some(1),
+                preparation_jobs: Some(1),
+            };
+            let trace = CapturedWriter::default();
+            let subscriber = tracing_subscriber(
+                CapturedWriter::default(),
+                CapturedWriter::default(),
+                trace.clone(),
+                tracing_subscriber::EnvFilter::new("info"),
+            );
+            let server = std::thread::spawn(move || {
+                tracing::subscriber::with_default(subscriber, || serve(&config, prepared))
+            });
+            let _server = OwnedServer {
+                socket: socket.clone(),
+                thread: Some(server),
+            };
+            let ready_deadline = Instant::now() + Duration::from_secs(10);
+            let binding = loop {
+                if let Ok(binding) = preflight(&socket) {
+                    break binding;
+                }
+                assert!(Instant::now() < ready_deadline, "daemon readiness deadline");
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "bounded test-owned daemon readiness polling"
+                )]
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            let await_release = |admission: AdmissionId| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let observed = trace.text();
+                    if observed
+                        .lines()
+                        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                        .any(|row| {
+                            row["fields"]["phase"] == "compiler_capacity_release"
+                                && row["fields"]["admission_id"].as_u64() == Some(admission.0)
+                                && row["fields"]["daemon_epoch"] == hex(&binding.epoch)
+                        })
+                    {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "capacity release for admission {} absent: {observed}",
+                        admission.0
+                    );
+                    #[allow(
+                        clippy::disallowed_methods,
+                        reason = "bounded wait for exact owned resource release event"
+                    )]
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            };
+            let mut first = begin_transaction(&socket, &binding.epoch).unwrap();
+            assert!(
+                first.worker_location().is_none(),
+                "acceptance does not invent an executing instance"
+            );
+            assert!(
+                execute_test_transaction_request(&mut first, dir.path(), &argv)
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            let first_location = first.worker_location().unwrap().clone();
+            let mut spill = begin_transaction(&socket, &binding.epoch).unwrap();
+            assert!(
+                execute_test_transaction_request(&mut spill, dir.path(), &argv)
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            let spill_location = spill.worker_location().unwrap().clone();
+            assert_eq!((first_location.slot(), spill_location.slot()), (0, 1));
+            if rotate {
+                let mut queued = begin_transaction_for_workload_with_hint(
+                    &socket,
+                    &binding.epoch,
+                    CompileWorkload::Foreground,
+                    None,
+                    Some(&spill_location),
+                )
+                .unwrap();
+                let accepted = queued.admission_id;
+                assert!(queued.worker_location().is_none());
+                end_transaction(&mut spill).unwrap();
+                await_release(spill.admission_id);
+                // Slot 1 becomes idle while this already accepted transaction
+                // retains the original slot-0 queue and its fixed CPU grant.
+                queued.stream.set_nonblocking(true).unwrap();
+                assert_eq!(
+                    queued.stream.read(&mut [0]).unwrap_err().kind(),
+                    io::ErrorKind::WouldBlock
+                );
+                queued.stream.set_nonblocking(false).unwrap();
+                end_transaction(&mut first).unwrap();
+                await_release(first.admission_id);
+                assert!(
+                    execute_test_transaction_request(&mut queued, dir.path(), &argv)
+                        .unwrap()
+                        .status
+                        .success()
+                );
+                assert_eq!(queued.admission_id, accepted);
+                let actual = queued.worker_location().unwrap();
+                assert_eq!(
+                    actual.slot(),
+                    0,
+                    "accepted work cannot reroute to the now idle hinted slot"
+                );
+                assert_ne!(
+                    actual.instance(),
+                    first_location.instance(),
+                    "queued execution observes the replacement instance after rotation"
+                );
+                end_transaction(&mut queued).unwrap();
+                await_release(queued.admission_id);
+                let mut stale = begin_transaction_for_workload_with_hint(
+                    &socket,
+                    &binding.epoch,
+                    CompileWorkload::Foreground,
+                    None,
+                    Some(&spill_location),
+                )
+                .unwrap();
+                assert!(
+                    execute_test_transaction_request(&mut stale, dir.path(), &argv)
+                        .unwrap()
+                        .status
+                        .success()
+                );
+                assert_eq!(
+                    stale.worker_location().unwrap().slot(),
+                    0,
+                    "a rotated hint immediately falls back to ordinary admission"
+                );
+                end_transaction(&mut stale).unwrap();
+            } else {
+                end_transaction(&mut spill).unwrap();
+                await_release(spill.admission_id);
+                end_transaction(&mut first).unwrap();
+                await_release(first.admission_id);
+                let mut preferred = begin_transaction_for_workload_with_hint(
+                    &socket,
+                    &binding.epoch,
+                    CompileWorkload::Foreground,
+                    None,
+                    Some(&spill_location),
+                )
+                .unwrap();
+                assert!(
+                    execute_test_transaction_request(&mut preferred, dir.path(), &argv)
+                        .unwrap()
+                        .status
+                        .success()
+                );
+                assert_eq!(
+                    preferred.worker_location(),
+                    Some(&spill_location),
+                    "the same eligible idle worker wins over the foreground default"
+                );
+                let mut fallback = begin_transaction_for_workload_with_hint(
+                    &socket,
+                    &binding.epoch,
+                    CompileWorkload::Foreground,
+                    None,
+                    Some(&spill_location),
+                )
+                .unwrap();
+                assert!(
+                    execute_test_transaction_request(&mut fallback, dir.path(), &argv)
+                        .unwrap()
+                        .status
+                        .success()
+                );
+                assert_eq!(
+                    fallback.worker_location(),
+                    Some(&first_location),
+                    "a busy hint does not wait for its preferred instance"
+                );
+                end_transaction(&mut fallback).unwrap();
+                end_transaction(&mut preferred).unwrap();
+            }
+        }
+    }
+
     /// Characterize the accepted connection's lease independently of compiler
     /// activity. The ready-worker FIFO comparison is a proposed policy, not the
     /// daemon's current contract.
@@ -8870,12 +9352,18 @@ fn main() {{
             let oldest = pending.admission_id.0;
             // Accepted on slot 0, but no physical request can execute there
             // until the completed predecessor sends END after its host work.
-            pending.stream.write_all(&[TRANSACTION_REQUEST]).unwrap();
-            pending
-                .stream
-                .write_all(&encode_request(dir.path(), &argv))
-                .unwrap();
-            pending.stream.flush().unwrap();
+            let pending_control = pending.stream.try_clone().unwrap();
+            let pending_directory = dir.path().to_owned();
+            let pending_argv = argv.clone();
+            let pending_request = std::thread::spawn(move || {
+                let response = execute_test_transaction_request(
+                    &mut pending,
+                    &pending_directory,
+                    &pending_argv,
+                );
+                let close = end_transaction(&mut pending);
+                (response, close)
+            });
             end_transaction(&mut spill).unwrap();
             drop(spill);
             let mut newer = Vec::new();
@@ -8890,12 +9378,6 @@ fn main() {{
                 );
                 end_transaction(&mut transaction).unwrap();
             }
-            pending.stream.set_nonblocking(true).unwrap();
-            assert_eq!(
-                pending.stream.read(&mut [0]).unwrap_err().kind(),
-                io::ErrorKind::WouldBlock
-            );
-            pending.stream.set_nonblocking(false).unwrap();
             let rows: Vec<serde_json::Value> = trace
                 .text()
                 .lines()
@@ -8926,15 +9408,18 @@ fn main() {{
             assert_eq!(fifo_first, oldest);
             assert_ne!(fifo_first, newer[0]);
             if cancel_pending {
-                pending.stream.shutdown(std::net::Shutdown::Both).unwrap();
-                drop(pending);
+                pending_control.shutdown(std::net::Shutdown::Both).unwrap();
                 end_transaction(&mut host).unwrap();
+                let (response, close) = pending_request.join().unwrap();
+                assert!(response.is_err());
+                assert!(close.is_err());
             } else {
                 end_transaction(&mut host).unwrap();
-                assert!(decode_output(&mut pending.stream).unwrap().status.success());
-                end_transaction(&mut pending).unwrap();
-                drop(pending);
+                let (response, close) = pending_request.join().unwrap();
+                assert!(response.unwrap().status.success());
+                assert!(matches!(close.unwrap(), DaemonClose::Clean(_)));
             }
+            drop(pending_control);
             // END neither replaces a completed body nor changes the epoch.
             assert!(host_reply.status.success());
             assert_eq!(preflight(&socket).unwrap().epoch, binding.epoch);

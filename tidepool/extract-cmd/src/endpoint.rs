@@ -26,6 +26,33 @@ pub(crate) const BOUND_ENDPOINT_FLAG: &str = "--compiler-endpoint-v1";
 pub(crate) const IDENTITY_MAGIC: &[u8; 8] = b"TPCID002";
 const DIRECT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+/// Actual daemon worker placement observed after worker BEGIN. This optional
+/// accelerator grants no compiler-input or runtime authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompilerWorkerLocation {
+    epoch: [u8; 32],
+    slot: u32,
+    instance: [u8; 32],
+}
+impl CompilerWorkerLocation {
+    pub(crate) fn started(epoch: [u8; 32], slot: u32, instance: [u8; 32]) -> Self {
+        Self {
+            epoch,
+            slot,
+            instance,
+        }
+    }
+    pub fn epoch(&self) -> &[u8; 32] {
+        &self.epoch
+    }
+    pub fn slot(&self) -> u32 {
+        self.slot
+    }
+    pub fn instance(&self) -> &[u8; 32] {
+        &self.instance
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompilerIdentity {
     producer: [u8; 32],
@@ -1513,6 +1540,15 @@ impl CompilerEndpoint {
         self.transaction_with_cancellation_timeout(workload, cancellation, DIRECT_HANDSHAKE_TIMEOUT)
     }
 
+    fn transaction_with_cancellation_timeout(
+        self,
+        workload: CompileWorkload,
+        cancellation: Option<CompilerTransactionCancellation>,
+        timeout: Duration,
+    ) -> Result<CompilerTransaction, SpawnError> {
+        self.transaction_with_cancellation_timeout_hint(workload, cancellation, timeout, None)
+    }
+
     #[tracing::instrument(
         target = "exomonad_harness::timing",
         name = "compiler_transaction.begin",
@@ -1520,11 +1556,12 @@ impl CompilerEndpoint {
         skip_all,
         fields(inclusive = true)
     )]
-    fn transaction_with_cancellation_timeout(
+    fn transaction_with_cancellation_timeout_hint(
         self,
         workload: CompileWorkload,
         cancellation: Option<CompilerTransactionCancellation>,
         timeout: Duration,
+        hint: Option<&CompilerWorkerLocation>,
     ) -> Result<CompilerTransaction, SpawnError> {
         let identity = self.identity.clone();
         let transport_name = self.transport.name();
@@ -1565,11 +1602,12 @@ impl CompilerEndpoint {
                 TransactionTransport::Direct(endpoint)
             }
             Transport::Daemon { socket, epoch } => {
-                let transaction = daemon::begin_transaction_for_workload(
+                let transaction = daemon::begin_transaction_for_workload_with_hint(
                     &socket,
                     &epoch,
                     workload,
                     cancellation.as_ref(),
+                    hint,
                 )
                 .map_err(|error| {
                     if matches!(error, daemon::DaemonError::Busy) {
@@ -1801,6 +1839,7 @@ impl CompilerEndpoint {
         );
         let _entered = span.enter();
         let start = Instant::now();
+        let mut worker_location = None;
         let output = match &mut self.transport {
             Transport::Direct(endpoint) => {
                 let request = daemon::encode_request(&cwd, &cmd.request.worker_argv());
@@ -1865,12 +1904,14 @@ impl CompilerEndpoint {
                     };
                     transaction.execute(cmd).map(|run| {
                         request_correlation = run.request_correlation;
+                        worker_location = run.worker_location;
                         run.output
                     })
                 })?
             }
         };
         Ok(ExtractRun {
+            worker_location,
             request_correlation,
             output,
             elapsed: start.elapsed(),
@@ -2178,7 +2219,12 @@ fn ensure_scoped_transaction(
             epoch: bound.epoch,
         },
     };
-    match endpoint.transaction_with_cancellation(workload, cancellation) {
+    match endpoint.transaction_with_cancellation_timeout_hint(
+        workload,
+        cancellation,
+        DIRECT_HANDSHAKE_TIMEOUT,
+        cmd.worker_affinity_hint.as_ref(),
+    ) {
         Ok(transaction) => TRANSACTION_SCOPE.with(|scope| {
             scope.borrow_mut().as_mut().expect("owning scope").compiler = ScopedCompiler::Active {
                 transaction,
@@ -2453,6 +2499,7 @@ impl CompilerTransaction {
             endpoint = %self.identity,
         );
         let _entered = span.enter();
+        let mut worker_location = None;
         let output = match transport {
             TransactionTransport::Direct(endpoint) => {
                 let request = daemon::encode_request(&cwd, &cmd.request.worker_argv());
@@ -2476,11 +2523,17 @@ impl CompilerTransaction {
             TransactionTransport::Daemon {
                 transaction,
                 socket,
-            } => daemon::execute_transaction_request(transaction, &cwd, &cmd.request).map_err(
-                |error| SpawnError::indeterminate(socket.as_os_str(), io::Error::other(error)),
-            )?,
+            } => {
+                let output = daemon::execute_transaction_request(transaction, &cwd, &cmd.request)
+                    .map_err(|error| {
+                    SpawnError::indeterminate(socket.as_os_str(), io::Error::other(error))
+                })?;
+                worker_location = transaction.worker_location().cloned();
+                output
+            }
         };
         Ok(ExtractRun {
+            worker_location,
             request_correlation,
             output,
             elapsed: start.elapsed(),
@@ -2731,6 +2784,7 @@ mod tests {
             cancellation.arm_daemon(&stream).unwrap();
             let server_cancel = cancellation.clone();
             let server = std::thread::spawn(move || {
+                daemon::write_worker_started(&mut peer, &[0; 32], 0, &[1; 32]).unwrap();
                 let mut command = [0];
                 let count = peer.read(&mut command).unwrap();
                 if phase == 4 {
@@ -3207,6 +3261,7 @@ mod tests {
             program: "fixture".into(),
             bin_source: BinSource::Explicit,
             request: ExtractRequest::default(),
+            worker_affinity_hint: None,
         };
         for expected in [b"1", b"2"] {
             let response = transaction.execute(&command).unwrap();
@@ -3436,6 +3491,7 @@ mod tests {
                 program: "fixture".into(),
                 bin_source: BinSource::Explicit,
                 request: ExtractRequest::default(),
+                worker_affinity_hint: None,
             };
             let response = CompilerEndpoint {
                 identity,
@@ -4163,6 +4219,7 @@ mod tests {
                 program: "fixture".into(),
                 bin_source: BinSource::Explicit,
                 request: ExtractRequest::default(),
+                worker_affinity_hint: None,
             };
             CompilerEndpoint {
                 identity,
@@ -4462,6 +4519,7 @@ mod tests {
         requests: usize,
         ends: usize,
         active: usize,
+        hints: Vec<Option<CompilerWorkerLocation>>,
     }
 
     /// The peer speaks the actual preflight/transaction protocol. Its census is
@@ -4519,6 +4577,24 @@ mod tests {
                     let mut workload = [0];
                     connection.read_exact(&mut workload).unwrap();
                     assert_eq!(workload, [0]);
+                    let mut affinity = [0];
+                    connection.read_exact(&mut affinity).unwrap();
+                    let hint = match affinity[0] {
+                        0 => None,
+                        1 => {
+                            let mut slot = [0; 4];
+                            let mut instance = [0; 32];
+                            connection.read_exact(&mut slot).unwrap();
+                            connection.read_exact(&mut instance).unwrap();
+                            Some(CompilerWorkerLocation::started(
+                                requested_epoch,
+                                u32::from_le_bytes(slot),
+                                instance,
+                            ))
+                        }
+                        _ => panic!("invalid affinity frame"),
+                    };
+                    server_counts.lock().unwrap().hints.push(hint);
                     server_counts.lock().unwrap().begins += 1;
                     if requested_epoch != *server_epoch.lock().unwrap() {
                         let message = b"replaced daemon epoch";
@@ -4551,6 +4627,13 @@ mod tests {
                         }
                         connection.write_all(&[1]).unwrap();
                         connection.write_all(&admission.to_le_bytes()).unwrap();
+                        daemon::write_worker_started(
+                            &mut connection,
+                            &requested_epoch,
+                            0,
+                            &[1; 32],
+                        )
+                        .unwrap();
                         loop {
                             let mut command = [0];
                             if connection.read_exact(&mut command).is_err() {
@@ -4607,6 +4690,7 @@ mod tests {
                 program: "fixture".into(),
                 bin_source: BinSource::Explicit,
                 request: ExtractRequest::default(),
+                worker_affinity_hint: None,
             }
         }
 
@@ -4700,6 +4784,66 @@ mod tests {
             ),
             (1, 1, 1, 1, 0)
         );
+    }
+
+    #[test]
+    fn scoped_worker_hint_is_placement_only_and_active_transactions_stay_pinned() {
+        let mut fixture = DeferredDaemonFixture::new(
+            DaemonFixtureBehavior::Normal,
+            CompilerTransactionCancellation::new(),
+        );
+        let mut command = fixture.command();
+        let first = with_compiler_transaction(
+            |_| {},
+            || {
+                fixture
+                    .bind(&command)
+                    .unwrap()
+                    .execute(&command)
+                    .unwrap()
+                    .worker_location
+                    .unwrap()
+            },
+        );
+        assert_eq!(first.close, CompilerTransactionClose::Clean);
+        let actual = first.action;
+        command.set_worker_affinity_hint(Some(actual.clone()));
+        let before = daemon::compile_request_correlation(Path::new("/tmp"), &command.request);
+        let second = with_compiler_transaction(
+            |_| {},
+            || {
+                let endpoint = fixture.bind(&command).unwrap();
+                assert_eq!(
+                    fixture.counts.lock().unwrap().begins,
+                    1,
+                    "hint selection precedes lazy BEGIN"
+                );
+                assert_eq!(
+                    endpoint.execute(&command).unwrap().worker_location.as_ref(),
+                    Some(&actual)
+                );
+                command.set_worker_affinity_hint(None);
+                assert_eq!(
+                    fixture
+                        .bind(&command)
+                        .unwrap()
+                        .execute(&command)
+                        .unwrap()
+                        .worker_location
+                        .as_ref(),
+                    Some(&actual)
+                );
+            },
+        );
+        assert_eq!(second.close, CompilerTransactionClose::Clean);
+        assert_eq!(
+            before,
+            daemon::compile_request_correlation(Path::new("/tmp"), &command.request)
+        );
+        fixture.settle();
+        let counts = fixture.counts.lock().unwrap();
+        assert_eq!(counts.hints, [None, Some(actual)]);
+        assert_eq!((counts.begins, counts.requests, counts.ends), (2, 3, 2));
     }
 
     #[test]
@@ -5501,6 +5645,7 @@ mod tests {
             program: launch.program,
             bin_source: BinSource::Explicit,
             request: ExtractRequest::default(),
+            worker_affinity_hint: None,
         };
         let retained = RefCell::new(None);
         let outcome = with_compiler_transaction_for_workload(
@@ -5567,6 +5712,7 @@ mod tests {
             program: "unused".into(),
             bin_source: BinSource::Explicit,
             request: ExtractRequest::default(),
+            worker_affinity_hint: None,
         };
 
         assert!(transaction.execute(&command).is_err());
