@@ -393,17 +393,25 @@ cells and programmatic calls cannot activate drafts.
 Reload never commits files implicitly; Git commits are a separate choice.
 It prepares source, AgentSpec handlers and workspace prompts together. Changed configuration replaces notebook bindings
 with a fresh notebook; unchanged configuration preserves them. Keep definitions
-you want to retain in `.hs` files. Conversation, owned resources and the published
-memory block persist. Reload does not rerun startup or refresh memory; memory
-writes need their own explicit context refresh.
+you want to retain in `.hs` files. Conversation and the published memory block
+persist. Reload does not rerun startup or refresh memory; memory writes need
+their own explicit context refresh.
 
 Tool surface changes refuse with a diff by default. Set
 `accept_cache_invalidation` to true to approve supported additions, removals,
 renames, reordering and schemas after provider validation. Runtime grants and
-typed actor protocols remain enforced. Preparation failures, refusals and
-cancellation before commit retain the active generation. Read the publication
-receipt: a confirmed commit with a projection repair warning is still committed;
-an uncertain commit requires reconciliation rather than blind replay. Already-issued
+typed actor protocols remain enforced. Retirement consent is separate: `force`
+defaults to false, so active dependent work or registrations refuse reload without
+stopping resources. `force: true` authorizes retirement of the captured dependent
+set and needs no earlier preview. It does not grant surface consent or authorize
+stopping independent resources.
+
+Preparation failure and preflight refusal stop nobody. Read the retirement receipt
+for exact blockers and actual stop and cleanup outcomes. A reopened generation can
+include settled partial stops; those resources remain stopped. Pending or uncertain
+cleanup keeps admission fenced until the owning attempt is reconciled. Read the
+publication receipt: a confirmed commit with a projection repair warning is still
+committed; an uncertain commit requires reconciliation rather than blind replay. Already-issued
 work and existing children remain pinned; fresh-context children select the
 published source. Captured-only children remain frozen. Source-backed actors may
 add, edit or remove modules inside declared roots; required missing imports fail

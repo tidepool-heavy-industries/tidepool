@@ -840,11 +840,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         resources.extend(["toolchains//:ghc", "//bridge/haskell:declaration_join_consumer"])
     if package_name == "tidepool-toolchain" and target_name == "prepared_fixture":
         env["TIDEPOOL_PREPARED_FIXTURE_COMPILER"] = "$(exe //tidepool/toolchain:prepared-fixture)"
-        env["TIDEPOOL_INTROSPECTION_FRONT_DOOR_FIXTURE_DIR"] = "$(location //bridge/haskell:introspection_front_door_prepared)"
-        resources.extend([
-            "//tidepool/toolchain:prepared-fixture",
-            "//bridge/haskell:introspection_front_door_prepared",
-        ])
+        resources.append("//tidepool/toolchain:prepared-fixture")
     if package_name == "tidepool-toolchain" and unit:
         env["TIDEPOOL_CATALOG_TEST_PYTHON"] = "$(exe toolchains//:python)"
         env["TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT"] = "$(location //build/package:qualification_script)"
@@ -1802,6 +1798,10 @@ tidepool_buildscript_run(
                         "resident_workbench::request_tests::public_module_world_hot_queries_skip_retained_history_preparation",
                         "resident_workbench::request_tests::public_module_world_retains_source_domain_and_invalidates_runtime_base",
                     ]),
+                    ("actor_world_cell_input_test", [
+                        "resident_workbench::request_tests::private_world_cell_json_operand_survives_plan_end_and_preparation",
+                        "resident_workbench::request_tests::private_world_cell_operand_refuses_crossed_and_retired_owners",
+                    ]),
                     ("actor_world_lifetime_test", [
                         "resident_workbench::request_tests::abandoned_private_world_birth_reaps_scope_after_lost_delivery",
                     ]),
@@ -1822,6 +1822,35 @@ tidepool_buildscript_run(
                         runtime_arguments(world_env, world_resources, world_worker),
                         '    visibility = ["PUBLIC"],', ")", "",
                     ]))
+                renderer_env, renderer_resources, renderer_worker = compiler_service_test_inputs(
+                    package_name, "activation_renderer_terminal_tests"
+                )
+                renderer_controls = ["resident_workbench::request_tests::" + name for name in (
+                    "renderer_producer_loss_preserves_shared_terminal_cause_for_current_and_later_observers",
+                    "renderer_producer_and_waiter_release_machine_checkout",
+                    "cancelled_renderer_producer_retains_sealed_code_for_fresh_child",
+                    "cancelled_renderer_producer_retries_only_after_native_close",
+                )]
+                renderer_diagnostics = ["resident_workbench::failure_diagnostic_tests::" + name for name in (
+                    "renderer_production_keeps_action_and_unconfirmed_close_together",
+                    "renderer_production_keeps_action_and_publication_refusal_together",
+                    "renderer_clean_admission_failure_preserves_the_resident_recovery_requirement",
+                )]
+                renderer_tests = renderer_diagnostics + renderer_controls
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "activation_renderer_terminal_tests",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings(renderer_tests, 8), "    ],",
+                    f"    expected_count = {len(renderer_tests)},",
+                    "    jobs = 1,", "    timeout = 600,",
+                    f"    test_rule_timeout_ms = {(len(renderer_tests) * 600 + 60) * 1000},",
+                    '    case_compiler_modes = {' + ", ".join(
+                        json.dumps(test) + ': "owned-resident"' for test in renderer_controls
+                    ) + "},",
+                    runtime_arguments(renderer_env, renderer_resources, renderer_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
         NATIVE_TARGETS[package_name]["libraries"][library["name"]].update({"test_build": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("" if shared else "_binary"), "test": "//" + CURRENT_DIR + ":" + unit_target["name"] + ("_all" if shared else "")})
         if package_name == "tidepool-toolchain":
             for world_target, world_case in [

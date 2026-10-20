@@ -414,6 +414,7 @@ pub(crate) struct CertifiedSegmentOriginals {
         Arc<crate::artifact_inventory::ArtifactEntry>,
     >,
     original_sources: Arc<AvailableOriginalSources>,
+    authored_artifacts: Option<crate::artifact_inventory::ArtifactView>,
 }
 
 impl CertifiedSegmentOriginals {
@@ -432,6 +433,7 @@ impl CertifiedSegmentOriginals {
         root: &Path,
         producer: &[u8],
         include: &[PathBuf],
+        authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
         candidates: Option<&CandidateSet>,
         selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
@@ -456,7 +458,7 @@ impl CertifiedSegmentOriginals {
             root,
             producer,
             include,
-            None,
+            authored,
             selected_values,
             produced,
             validation,
@@ -546,9 +548,9 @@ impl CertifiedSegmentOriginals {
             ));
         }
         timing.advance("native_availability");
-        // Completed selection rows already retain this physical custody. The
-        // segment owner needs their issuances, not another view handle here.
-        let _ =
+        // Original stages have no target view. Keep this same physical issuer
+        // for their authored closure; executable items use their bound cursor.
+        let physical =
             crate::declaration_context::OriginalCompilerInputs::issue_segment_native_availability(
                 &mut products.source_selection,
                 compiler_inputs.artifacts(),
@@ -574,6 +576,7 @@ impl CertifiedSegmentOriginals {
             value_entry_index,
             value_entries: value_entries.into(),
             original_sources,
+            authored_artifacts: authored.map(|_| physical),
             package_availability,
             raw,
             receipt,
@@ -606,6 +609,16 @@ impl CertifiedSegmentOriginals {
 
     pub(crate) fn artifact_entries(&self) -> &[Arc<crate::artifact_inventory::ArtifactEntry>] {
         &self.artifact_entries
+    }
+
+    pub(crate) fn authored_artifacts(
+        &self,
+    ) -> CertResult<&crate::artifact_inventory::ArtifactView> {
+        self.authored_artifacts
+            .as_ref()
+            .ok_or(CertificationError::Mismatch(
+                "executable segment has no authored original stage",
+            ))
     }
 
     pub(crate) fn original_sources(&self) -> &Arc<AvailableOriginalSources> {
@@ -3071,10 +3084,7 @@ impl CertifiedSourceSelection {
     pub(crate) fn finish_new_product_availability(
         &mut self,
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
-        issued: &BTreeMap<
-            crate::artifact_inventory::ArtifactId,
-            Arc<crate::declaration_context::NativeTransportAvailability>,
-        >,
+        issued: &crate::declaration_context::RequestNativeAvailability,
     ) -> CertResult<()> {
         for selected in Arc::make_mut(&mut self.modules).values_mut() {
             let ReceiptSourceSelection::Native { interface, native } = selected else {
@@ -3087,7 +3097,7 @@ impl CertifiedSourceSelection {
                 continue;
             }
             let id = native.original_artifact_id()?;
-            let original = issued.get(&id).ok_or(CertificationError::Mismatch(
+            let original = issued.issued_row(id).ok_or(CertificationError::Mismatch(
                 "new product lacks exact issued native availability",
             ))?;
             let entry = native.original_entry(*interface, metadata)?;
@@ -12649,11 +12659,7 @@ pub(crate) mod tests {
         let mut selected =
             CertifiedSourceSelection::from_compiler_projection(&projection, &metadata, &operation)
                 .unwrap();
-        let issued = support
-            .native_availability()
-            .rows()
-            .map(|row| (row.original_artifact_id(), Arc::clone(row)))
-            .collect();
+        let issued = support.native_availability();
         selected
             .finish_new_product_availability(&metadata, &issued)
             .unwrap();
@@ -12669,7 +12675,9 @@ pub(crate) mod tests {
             .unwrap();
         assert!(Arc::ptr_eq(
             &actual,
-            issued[&entry.descriptor.id]
+            issued
+                .issued_row(entry.descriptor.id)
+                .unwrap()
                 .target_original(product.owner())
                 .unwrap()
         ));
@@ -12734,17 +12742,13 @@ pub(crate) mod tests {
             &completed[0],
             &view.metadata_snapshot().artifacts[&entry.descriptor.id]
         ));
-        let issued = support
-            .native_availability()
-            .rows()
-            .map(|row| (row.original_artifact_id(), Arc::clone(row)))
-            .collect();
+        let issued = support.native_availability();
         selected
             .finish_new_product_availability(&view.metadata_snapshot(), &issued)
             .unwrap();
         assert!(Arc::ptr_eq(
             selected.issued_native_availability().next().unwrap(),
-            &issued[&entry.descriptor.id]
+            issued.issued_row(entry.descriptor.id).unwrap()
         ));
         assert!(
             selected.complete_native_entries(&view).unwrap().is_empty(),
@@ -17366,6 +17370,19 @@ pub(crate) mod tests {
             .collect::<BTreeMap<_, _>>();
         assert_eq!(issued_groups.len(), groups.len());
         assert_eq!(issued_groups, issued_offer.issued_group_carriers().unwrap());
+        let required_scopes = proof_graph
+            .bindings
+            .iter()
+            .map(|binding| binding.selection)
+            .chain(groups.iter().map(|group| group.binding.selection()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(issued_offer.required_scopes(), &required_scopes);
+        assert!(
+            issued_groups
+                .iter()
+                .any(|(group, carrier)| { group.binding.selection() != carrier.selection }),
+            "the control must exercise independent group and carrier scopes"
+        );
         let before = inventory.metrics();
         let mut item = physical.clone();
         Arc::make_mut(&mut item.modules)

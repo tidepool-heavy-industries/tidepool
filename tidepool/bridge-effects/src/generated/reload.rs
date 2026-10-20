@@ -44,6 +44,8 @@ pub struct RlRefusal {
 /// What one reload did. Every case is an ordinary value to match on.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum SrReloadOutcome {
+    /// Observed retirement effects and publication settlement. A reopened generation may have confirmed partial stops; stopped resources are not restarted.
+    ReloadRetirement(RlRetirementReceipt),
     /// The candidate was refused without publication; the receipt gives the typed category and surface difference.
     ReloadRefused(SrRevision, SrRevision, RlRefusal),
     /// The complete configuration is unchanged; notebook bindings are preserved.
@@ -69,4 +71,157 @@ pub enum SrReloadOutcome {
     ),
     /// Publication acknowledgement is uncertain. New admission is blocked until reconciliation; do not replay.
     ReloadPublicationUnconfirmed(SrRevision, String),
+}
+
+/// The existing hosted operation coordinate; absence means this caller has no issued coordinate.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(name = "ReloadOperation")]
+pub struct RlOperation {
+    pub execution: String,
+    pub input_unit_index: i64,
+    pub effect_ordinal: i64,
+}
+
+/// Existing request owner coordinates. Workbench execution and exact reservation attempt remain separate.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlReservation {
+    ReloadWorkbenchReservation(String, String),
+    ReloadRouteReservation(i64),
+    ReloadScopeReservation(i64),
+}
+
+/// Native actor identity preserves Local versus Remote and exact unsigned decimal node/pid coordinates without signed narrowing. These are observations, not authority.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlNativeIdentity {
+    ReloadNativeLocal(String),
+    ReloadNativeRemote(String, String),
+}
+
+/// Exact coordinates projected from existing resource owners, not names or new handles. Actor addresses contain id and incarnation. Native ids preserve the owning runtime's Local/Remote identity; form ids and reservation attempts retain their issuing UUIDs.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlResource {
+    ReloadActorResource((i64, i64)),
+    ReloadNativeResource((i64, i64), RlNativeIdentity),
+    ReloadPreparationResource(i64),
+    ReloadInvocationResource((i64, i64), RlReservation),
+    ReloadCompilerResource((i64, i64), RlReservation, i64),
+    ReloadFormResource((i64, i64), RlReservation, String),
+    ReloadDisplayResource(RlOperation),
+    ReloadWatchResource((i64, i64), i64),
+    ReloadUnclassifiedPhysicalResource(RlNativeIdentity),
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlBlockerReason {
+    ReloadActiveDependentWork,
+    ReloadUnclassifiedWork,
+    ReloadStartingResource,
+    ReloadRunningResource,
+    ReloadTransferringResource,
+    ReloadCleanupUnsupported,
+    ReloadCleanupUnconfirmed(String),
+    ReloadCompilerPending,
+    ReloadCompilerUnconfirmed(String),
+    ReloadPendingProducer,
+    ReloadDisplayAcknowledgementPending,
+    ReloadDisplayAcknowledgementUnconfirmed(String),
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlLifetimeEdge {
+    ReloadPhysicalSupervision,
+    ReloadPendingSupervision,
+    ReloadPendingResourcePreparation,
+    ReloadResourceOwnership,
+    ReloadOwnershipTransfer,
+    ReloadOwnershipTransferUnconfirmed,
+}
+
+/// Observed work that prevents retirement. A collateral blocker names the proposed stop and the independently affected resource.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlBlocker {
+    ReloadResourceBlocker(RlResource, RlBlockerReason),
+    ReloadCollateralBlocker(RlResource, RlResource, RlLifetimeEdge),
+    ReloadUnclassifiedSourceWork(i64),
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlCauseKind {
+    ReloadRetirementBlocked,
+    ReloadRetirementCancelled,
+    ReloadCandidateSettlementFailed,
+    ReloadOriginalReopenFailed,
+    ReloadStopFailed,
+    ReloadCleanupFailed,
+    ReloadPublicationFailed,
+    ReloadContinuationFailed,
+    ReloadAcknowledgementUnconfirmed,
+}
+
+/// Typed cause with explanatory detail. Detail text never selects control flow.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(name = "ReloadCause")]
+pub struct RlCause {
+    pub kind: RlCauseKind,
+    pub detail: String,
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlStopOutcome {
+    ReloadStopNotRequested,
+    ReloadStopPending,
+    ReloadStopConfirmed,
+    ReloadStopRefused(RlCause),
+    ReloadStopUnconfirmed(RlCause),
+}
+
+/// Physical cleanup settlement is independent of terminal stop acknowledgement.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlCleanupOutcome {
+    ReloadCleanupNotRequired,
+    ReloadCleanupPending,
+    ReloadCleanupConfirmed,
+    ReloadCleanupRefused(RlCause),
+    ReloadCleanupUnknown(RlCause),
+}
+
+/// Actual observed effects, never the planned population re-labelled as stopped.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(name = "ReloadResourceOutcome")]
+pub struct RlResourceOutcome {
+    pub resource: RlResource,
+    pub stop: RlStopOutcome,
+    pub cleanup: RlCleanupOutcome,
+}
+
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlRetirementStage {
+    ReloadCandidateSettlement,
+    ReloadOriginalReopen,
+    ReloadResourceStop,
+    ReloadResourceCleanup,
+    ReloadSourcePublication,
+}
+
+/// AReopened proves A selected, B uncommitted and all initiated effects settled; actual partial stops remain in the receipt. Fenced retains unresolved obligations; it does not claim A or B selected. BPublished confirms B selected and records changed modules and projection warnings.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RlRetirementState {
+    ReloadAReopened,
+    ReloadRetirementFenced(RlRetirementStage),
+    ReloadBPublished(Vec<String>, Vec<String>),
+}
+
+/// Retirement of exact frozen A toward candidate B. A later editable draft is not this candidate. Primary and secondary causes survive independently of selection/fence state. Inspect the owning operation and resource records for detailed retained obligations.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(name = "ReloadRetirementReceipt")]
+pub struct RlRetirementReceipt {
+    pub previous: SrRevision,
+    pub candidate: SrRevision,
+    pub operation: Option<RlOperation>,
+    pub state: RlRetirementState,
+    pub blockers: Vec<RlBlocker>,
+    pub outcomes: Vec<RlResourceOutcome>,
+    pub surface: RlSurfaceDiff,
+    pub primary: Option<RlCause>,
+    pub secondary: Vec<RlCause>,
 }

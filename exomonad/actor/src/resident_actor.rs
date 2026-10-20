@@ -31,6 +31,8 @@ mod forest_shutdown_tests;
 pub(crate) mod forms;
 mod generation_inventory;
 pub(crate) use generation_inventory::{GenerationWorkObservations, ResidentGenerationInventory};
+#[cfg(test)]
+pub(crate) use generation_inventory::assert_owner_observation_contract;
 pub(crate) mod green;
 mod green_notebook;
 #[cfg(test)]
@@ -8890,26 +8892,19 @@ where
                 prompts.clone(),
             )
             .await?;
-        match publisher
+        let generation = publisher
             .publish(
                 prepared,
                 tidepool_runtime::session::PublicationDecision::new(),
                 crate::resident_workbench::ActorGenerationPublication::Terminal,
             )
             .await?
-        {
-            crate::resident_workbench::ActorGenerationCommit::Published { generation, .. } => {
-                if let Some(lifecycle) = &self.lifecycle {
-                    lifecycle.generation_published(generation);
-                }
-                installation.prepared_tools.take();
-                Ok(())
-            }
-            crate::resident_workbench::ActorGenerationCommit::Refused(detail)
-            | crate::resident_workbench::ActorGenerationCommit::Unconfirmed(detail) => {
-                Err(ResidentActorWorkbenchError::ActorProtocol(detail))
-            }
+            .into_initial_generation()?;
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.generation_published(generation);
         }
+        installation.prepared_tools.take();
+        Ok(())
     }
 
     async fn commit_interactive_installation(
@@ -12985,18 +12980,6 @@ where
                 exomonad_tool::ToolArguments::Raw(text) => serde_json::Value::String(text),
                 exomonad_tool::ToolArguments::Structured(value) => value,
             };
-            self.checkpoint_publication = CheckpointPublication::Workbench {
-                boundary: hosted_boundary.or_else(|| {
-                    crate::resident_workbench::execution_control().map(|control| {
-                        crate::ContextCheckpointBoundary::Execution {
-                            actor_id: context.actor.id.0,
-                            incarnation: context.actor.incarnation.0,
-                            execution_id: control.execution_id(context.actor),
-                        }
-                    })
-                }),
-                capture: hosted_checkpoint_capture,
-            };
             let control = crate::resident_workbench::execution_control().ok_or_else(|| {
                 Self::invocation_failure(
                     context.actor,
@@ -13016,6 +12999,25 @@ where
                         "tool execution lost its original resource owner",
                     )
                 })?;
+            if let Err(error) = work.bind_original_source(awaiting.original_source.clone()) {
+                self.set_standing(context.actor, ResidentStanding::Tools(awaiting));
+                return Err(Self::tool_invocation_failure(
+                    context.actor,
+                    ResidentActorWorkbenchError::SourceAdmission(error.into_source_error()),
+                ));
+            }
+            self.checkpoint_publication = CheckpointPublication::Workbench {
+                boundary: hosted_boundary.or_else(|| {
+                    crate::resident_workbench::execution_control().map(|control| {
+                        crate::ContextCheckpointBoundary::Execution {
+                            actor_id: context.actor.id.0,
+                            incarnation: context.actor.incarnation.0,
+                            execution_id: control.execution_id(context.actor),
+                        }
+                    })
+                }),
+                capture: hosted_checkpoint_capture,
+            };
             let mut cursor = green_tool::ToolCursor::new(
                 work,
                 control,

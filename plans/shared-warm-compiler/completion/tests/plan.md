@@ -312,11 +312,12 @@ explicit refusal-before-submission control instead proves no request was issued.
    gate. Run a successor after predecessor realization eviction and disposable
    operation-output removal, keeping immutable source/native ownership.
 3. With queries, execute the five public discovery verbs and assert parsed
-   semantic fields, provenance and stale-view refusal. The current
-   `IntrospectionFrontDoor.hs` executes only `result = pure 43` in
-   `introspection_front_door_prepared_result_executes`; retain that as portable
-   execution evidence, not handler execution. Run the actual composition through
-   hosted Haskell, then invoke discovered behavior. Diagnose A1c at its exact
+   semantic fields, provenance and stale-view refusal. The shared
+   `IntrospectionFrontDoor.hs` has an effectful compile-only specialization;
+   its hosted documentation campaign must execute that same authored
+   composition, consume actual canonical references and then invoke discovered
+   behavior. A prepared fixture build does not establish handler execution.
+   Diagnose A1c at its exact
    received native dependency choice without widening inventories.
 4. Replace second-cell telemetry's `any(compiled_off_checkout)` oracle with
    evidence attached to that exact second cell and its real split/compile owner.

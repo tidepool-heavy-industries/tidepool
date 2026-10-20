@@ -68,7 +68,7 @@ impl BootstrapWorld {
         &self,
         scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
     ) -> Result<(), GenerationAdmissionError> {
-        scope.validate_source_issuer()?;
+        scope.validate_lexical_issuer()?;
         if let Some(existing) = self.0.scope.get() {
             if !Arc::ptr_eq(existing, &scope) {
                 return Err(GenerationAdmissionError::StaleSourceLease);
@@ -145,7 +145,7 @@ impl BootstrapWorld {
             .scope
             .get()
             .ok_or(GenerationAdmissionError::Unqualified)?;
-        scope.validate_source_issuer()?;
+        scope.validate_lexical_issuer()?;
         if !Arc::ptr_eq(scope, target.runtime_lease()) {
             return Err(GenerationAdmissionError::StaleSourceLease);
         }
@@ -494,7 +494,7 @@ impl SourceDependency {
             Self::Unqualified => None,
         };
         if let Some(lease) = &lease {
-            lease.validate_source_issuer()?;
+            lease.validate_lexical_issuer()?;
         }
         let claim = match self {
             Self::World(world) => world.claim(),
@@ -504,7 +504,7 @@ impl SourceDependency {
             Self::Unqualified => Err(GenerationAdmissionError::Unqualified),
         }?;
         if let Some(lease) = &lease {
-            lease.validate_source_issuer()?;
+            lease.validate_lexical_issuer()?;
         }
         Ok(claim)
     }
@@ -685,7 +685,7 @@ impl GenerationDependency {
         };
         match self
             .runtime_admission()
-            .fence_with(self.runtime_lease(), compare)
+            .fence_with(self.runtime_lease().original_source(), compare)
         {
             Ok(Ok(fence)) => super::ActorGenerationRetirementCutoff::Fenced(retain(fence)),
             Ok(Err(tidepool_runtime::session::SourceFenceTransitionFailure::Refused(error))) => {
@@ -799,7 +799,7 @@ impl GenerationRetirementFence {
         };
         fence
             .fence
-            .reopen_with(fence.dependency.runtime_lease(), settle)?
+            .reopen_with(fence.dependency.runtime_lease().original_source(), settle)?
             .map(|_reopened| ())
     }
 }
@@ -818,7 +818,7 @@ impl GenerationFence {
     pub(crate) fn reopen(self) -> Result<(), GenerationAdmissionError> {
         let lease = self.dependency.runtime_lease();
         self.fence
-            .reopen_with(lease, |reopen| {
+            .reopen_with(lease.original_source(), |reopen| {
                 reopen.commit();
                 Ok::<_, ()>(())
             })
@@ -874,6 +874,106 @@ mod tests {
         );
         history.scopes.push(scope);
         dependency
+    }
+
+    #[tokio::test]
+    async fn resident_inventory_preserves_exact_coordinator_compiler_and_sibling_activity() {
+        let mut history = History::new();
+        let dependency = generation(&mut history, NotebookGenerationId::INITIAL, None);
+        crate::resident_actor::assert_owner_observation_contract(dependency).await;
+    }
+
+    #[tokio::test]
+    async fn generation_population_observes_compilers_before_resident_registration() {
+        use crate::local_actor::run_control::GenerationCompilerOwner;
+        use crate::termination::GenerationCompilerSource;
+        let mut history = History::new();
+        let a = generation(&mut history, NotebookGenerationId::INITIAL, None);
+        let b = generation(&mut history, NotebookGenerationId::INITIAL, None);
+        let source_a = SourceDependency::Generation(a.clone());
+        let source_b = SourceDependency::Generation(b.clone());
+        let original_a = a.runtime_lease().clone();
+        let (directory, owner_task) = crate::LocalActorDirectory::start().await.unwrap();
+        let (admitted, admission) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
+            Box::pin(async move {
+                let scope = crate::capabilities::CompilerOwnerScope::current().unwrap();
+                let pending_a = scope
+                    .clone()
+                    .with_source_dependency(&source_a)
+                    .admit_work()
+                    .unwrap();
+                let pending_original = scope.admit_continuation().unwrap();
+                pending_original.bind_original_source(original_a.original_source().clone()).unwrap();
+                let pending_b = scope
+                    .clone()
+                    .with_source_dependency(&source_b)
+                    .admit_work()
+                    .unwrap();
+                let pending_unknown = scope.admit_continuation().unwrap();
+                scope
+                    .with_source_dependency(&source_a)
+                    .admit_work()
+                    .unwrap()
+                    .run(|_| ());
+                admitted.send(ticket.id).unwrap();
+                released.await.unwrap();
+                for pending in [pending_a, pending_original, pending_b, pending_unknown] {
+                    pending.run(|_| ());
+                }
+                (
+                    Err("preparation control allocates no native resource".into()),
+                    crate::CleanupComponentOutcome::Confirmed,
+                )
+            })
+        });
+        let preparing_directory = directory.clone();
+        let preparing =
+            tokio::spawn(async move { preparing_directory.prepare_root(operation).await });
+        let id = tokio::time::timeout(std::time::Duration::from_secs(10), admission)
+            .await
+            .unwrap()
+            .unwrap();
+        let fence = a.fence().unwrap();
+        let population = directory.generation_population(&fence).await.unwrap();
+        assert!(
+            population.resources.is_empty(),
+            "the mixed preparation has no container source label"
+        );
+        assert_eq!(population.compilers.len(), 3);
+        for (registration, source) in [
+            (0, GenerationCompilerSource::Dependent),
+            (1, GenerationCompilerSource::Dependent),
+            (3, GenerationCompilerSource::Unclassified),
+        ] {
+            let observed = population
+                .compilers
+                .iter()
+                .find(|compiler| compiler.compiler.registration == registration)
+                .unwrap();
+            assert_eq!(observed.owner, GenerationCompilerOwner::Preparation(id));
+            assert_eq!(observed.compiler.close, crate::CompilerWorkClose::Pending);
+            assert_eq!(observed.compiler.source, source);
+        }
+        assert!(
+            b.runtime_lease().admit_source().is_ok(),
+            "independent B remains admitted"
+        );
+        release.send(()).unwrap();
+        assert!(preparing.await.unwrap().unwrap().is_err());
+        assert!(
+            directory
+                .generation_population(&fence)
+                .await
+                .unwrap()
+                .compilers
+                .is_empty(),
+            "confirmed END receipts are inert even while retained by preparation history"
+        );
+        fence.reopen().unwrap();
+        directory.stop_owner_for_test().await;
+        owner_task.await.unwrap();
     }
 
     /// Owner-cluster controls use real canonical runtime leases and the actual
@@ -1399,7 +1499,7 @@ mod tests {
                 assert_eq!(parent_fence.pending_claims(), 0);
                 assert_eq!(parent_fence.unconfirmed_claims(), 0);
                 parent_fence
-                    .reopen_with(parent.runtime_lease(), |reopen| {
+                    .reopen_with(parent.runtime_lease().original_source(), |reopen| {
                         reopen.commit();
                         Ok::<_, ()>(())
                     })

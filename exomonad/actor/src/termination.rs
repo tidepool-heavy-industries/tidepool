@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -220,6 +220,115 @@ enum CompilerWorkAccess {
 pub(crate) struct CompilerWorkRegistration {
     access: CompilerWorkAccess,
     purpose: CompilerWorkPurpose,
+    source: Arc<OnceLock<ExecutionSourceOrigin>>,
+}
+
+/// Issuer-derived provenance for existing execution and compiler memberships.
+/// An unset slot remains unclassified; custody or cleanup purpose cannot imply
+/// that an operation is independent of a selected source.
+#[derive(Clone, Debug)]
+pub(crate) enum ExecutionSourceOrigin {
+    Neutral,
+    Actor(crate::resident_workbench::generation_admission::SourceDependency),
+    Original(Arc<tidepool_runtime::session::RuntimeOriginalSource>),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ExecutionSourceBindingError {
+    #[error(transparent)]
+    Admission(#[from] crate::resident_workbench::generation_admission::GenerationAdmissionError),
+    #[error("a neutral resource owner cannot become a source execution")]
+    NeutralOwner,
+    #[error("the execution already selected a different source owner")]
+    DifferentSource,
+}
+
+impl ExecutionSourceBindingError {
+    pub(crate) fn into_source_error(self) -> tidepool_runtime::session::SourceAdmissionError {
+        match self {
+            Self::Admission(error) => error,
+            Self::NeutralOwner => {
+                tidepool_runtime::session::SourceAdmissionError::NeutralSourceOwner
+            }
+            Self::DifferentSource => {
+                tidepool_runtime::session::SourceAdmissionError::DifferentOriginalSource
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GenerationCompilerSource {
+    Dependent,
+    Unclassified,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GenerationCompilerObservation {
+    pub(crate) registration: usize,
+    pub(crate) close: CompilerWorkClose,
+    pub(crate) source: GenerationCompilerSource,
+}
+
+impl ExecutionSourceOrigin {
+    fn same_issuer(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Neutral, Self::Neutral) => true,
+            (Self::Actor(left), Self::Actor(right)) => left == right,
+            (Self::Original(left), Self::Original(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+
+    fn bind_admitted(self, slot: &OnceLock<Self>) -> Result<(), ExecutionSourceBindingError> {
+        match slot.set(self) {
+            Ok(()) => Ok(()),
+            Err(origin) => match slot.get() {
+                Some(selected) if selected.same_issuer(&origin) => Ok(()),
+                Some(Self::Neutral) => Err(ExecutionSourceBindingError::NeutralOwner),
+                _ => Err(ExecutionSourceBindingError::DifferentSource),
+            },
+        }
+    }
+
+    pub(crate) fn bind_actor(
+        slot: &OnceLock<Self>,
+        source: crate::resident_workbench::generation_admission::SourceDependency,
+    ) -> Result<(), ExecutionSourceBindingError> {
+        source
+            .clone()
+            .with_open_admission(|| Self::Actor(source).bind_admitted(slot))?
+    }
+
+    pub(crate) fn bind_original(
+        slot: &OnceLock<Self>,
+        source: Arc<tidepool_runtime::session::RuntimeOriginalSource>,
+    ) -> Result<(), ExecutionSourceBindingError> {
+        source
+            .clone()
+            .with_open_source_admission(|| Self::Original(source).bind_admitted(slot))?
+    }
+    pub(crate) fn depends_on(
+        &self,
+        dependency: &crate::resident_workbench::generation_admission::GenerationDependency,
+    ) -> bool {
+        match self {
+            Self::Neutral => false,
+            Self::Actor(source) => source.depends_on(dependency),
+            Self::Original(source) => source
+                .source_admission()
+                .depends_on(dependency.runtime_admission()),
+        }
+    }
+
+    pub(crate) fn is_unclassified(&self) -> bool {
+        matches!(
+            self,
+            Self::Actor(
+                crate::resident_workbench::generation_admission::SourceDependency::Unqualified
+            )
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,6 +338,32 @@ enum CompilerWorkPurpose {
 }
 
 impl CompilerWorkRegistration {
+    pub(crate) fn source_origin(&self) -> Option<&ExecutionSourceOrigin> {
+        self.source.get()
+    }
+
+    pub(crate) fn generation_observation(
+        &self,
+        dependency: &crate::resident_workbench::generation_admission::GenerationDependency,
+        registration: usize,
+    ) -> Option<GenerationCompilerObservation> {
+        let origin = self.source_origin();
+        if origin.is_some_and(|origin| !origin.is_unclassified() && !origin.depends_on(dependency))
+        {
+            return None;
+        }
+        let close = self.observation();
+        (!close.is_confirmed()).then(|| GenerationCompilerObservation {
+            registration,
+            close,
+            source: if origin.is_none_or(|origin| origin.is_unclassified()) {
+                GenerationCompilerSource::Unclassified
+            } else {
+                GenerationCompilerSource::Dependent
+            },
+        })
+    }
+
     pub(crate) fn observation(&self) -> CompilerWorkClose {
         match &self.access {
             CompilerWorkAccess::Controlled(control) => control.observation.observation(),
@@ -247,6 +382,7 @@ impl CompilerWorkRegistration {
         Self {
             access: CompilerWorkAccess::Observed(self.observer()),
             purpose: self.purpose,
+            source: self.source.clone(),
         }
     }
 
@@ -268,6 +404,7 @@ pub(crate) struct CompilerWorkTicket {
     source_claim: Option<crate::resident_workbench::generation_admission::SourceClaim>,
     lazy_source_claims:
         Arc<Mutex<Vec<crate::resident_workbench::generation_admission::SourceClaim>>>,
+    source: Arc<OnceLock<ExecutionSourceOrigin>>,
 }
 
 #[derive(Clone, Copy)]
@@ -280,15 +417,17 @@ impl crate::capabilities::CompilerAdmission for crate::capabilities::CompilerAdm
     fn admit_work(
         &self,
         owner: &crate::resident_workbench::CompilerCloseOwner,
+        source: Option<ExecutionSourceOrigin>,
     ) -> Result<CompilerWorkTicket, crate::ResidentActorWorkbenchError> {
-        CompilerWorkTicket::admit(owner.clone(), CompilerWorkAdmission::Active)
+        CompilerWorkTicket::admit(owner.clone(), CompilerWorkAdmission::Active, source)
     }
 
     fn admit_publication(
         &self,
         owner: &crate::resident_workbench::CompilerCloseOwner,
+        source: Option<ExecutionSourceOrigin>,
     ) -> Result<CompilerWorkTicket, crate::ResidentActorWorkbenchError> {
-        CompilerWorkTicket::admit(owner.clone(), CompilerWorkAdmission::Publication)
+        CompilerWorkTicket::admit(owner.clone(), CompilerWorkAdmission::Publication, source)
     }
 }
 
@@ -323,9 +462,19 @@ impl crate::resident_workbench::CompilerCloseOwner {
 }
 
 impl CompilerWorkTicket {
+    /// The continuation issuer supplies its exact parked-program source. The
+    /// recipient's current source is not an acceptable substitute.
+    pub(crate) fn bind_original_source(
+        &self,
+        source: Arc<tidepool_runtime::session::RuntimeOriginalSource>,
+    ) -> Result<(), ExecutionSourceBindingError> {
+        ExecutionSourceOrigin::bind_original(&self.source, source)
+    }
+
     fn admit(
         owner: crate::resident_workbench::CompilerCloseOwner,
         admission: CompilerWorkAdmission,
+        source: Option<ExecutionSourceOrigin>,
     ) -> Result<Self, crate::ResidentActorWorkbenchError> {
         let control = CompilerWorkControl {
             observation: CompilerWorkObservation {
@@ -333,9 +482,11 @@ impl CompilerWorkTicket {
             },
             cancellation: tidepool_runtime::CompilerTransactionCancellation::new(),
         };
+        let source = Arc::new(source.map_or_else(OnceLock::new, OnceLock::from));
         let registration = CompilerWorkRegistration {
             access: CompilerWorkAccess::Controlled(control.clone()),
             purpose: CompilerWorkPurpose::Active,
+            source: source.clone(),
         };
         let ticket = Self {
             control,
@@ -343,6 +494,7 @@ impl CompilerWorkTicket {
             owner,
             source_claim: None,
             lazy_source_claims: Arc::new(Mutex::new(Vec::new())),
+            source,
         };
         if ticket.owner.register_receipt(registration, admission) {
             return Ok(ticket);
@@ -380,7 +532,7 @@ impl CompilerWorkTicket {
         let cancellation = ticket.control.cancellation.clone();
         session
             .with_source_compiler_transaction(
-                source,
+                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 cancellation,
                 Some(hook),
@@ -388,6 +540,62 @@ impl CompilerWorkTicket {
                 action,
             )
             .map(|settled| settled.into_outcome().action)
+    }
+
+    pub(crate) fn run_original_source_transaction<H, O, T>(
+        session: &mut tidepool_runtime::session::ResidentSession<H, O>,
+        ticket: Self,
+        source: Arc<tidepool_runtime::session::RuntimeOriginalSource>,
+        action: impl FnOnce(
+            &mut tidepool_runtime::session::ResidentSession<H, O>,
+            &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+        ) -> T,
+    ) -> Result<T, crate::resident_workbench::generation_admission::GenerationAdmissionError>
+    where
+        H: tidepool_effect::dispatch::DispatchEffect<O> + Send,
+        O: tidepool_runtime::session::OutputSink + Sync,
+    {
+        if let Err(error) = ticket.bind_original_source(source.clone()) {
+            ticket.consume_close(tidepool_runtime::CompilerTransactionClose::NotStarted);
+            return Err(error.into_source_error());
+        }
+        let cancellation = ticket.control.cancellation.clone();
+        session
+            .with_source_compiler_transaction(
+                source,
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                cancellation,
+                None,
+                move |close| ticket.consume_close(close),
+                action,
+            )
+            .map(|settled| settled.into_outcome().action)
+    }
+
+    pub(crate) fn run_original_source_compiler_phase<T>(
+        self,
+        source: Arc<tidepool_runtime::session::RuntimeOriginalSource>,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        action: impl FnOnce(
+            &tidepool_runtime::session::RuntimeSourceCompilerTransaction,
+            &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+        ) -> T,
+    ) -> Result<
+        tidepool_runtime::CompilerTransactionSettled<T>,
+        crate::resident_workbench::generation_admission::GenerationAdmissionError,
+    > {
+        if let Err(error) = self.bind_original_source(source.clone()) {
+            self.consume_close(tidepool_runtime::CompilerTransactionClose::NotStarted);
+            return Err(error.into_source_error());
+        }
+        let cancellation = self.control.cancellation.clone();
+        source.with_source_compiler_transaction(
+            workload,
+            cancellation,
+            None,
+            move |close| self.consume_close(close),
+            action,
+        )
     }
 
     pub(crate) fn run_source_compiler_phase<T>(
@@ -1321,6 +1529,22 @@ impl RetainedActorExit {
             .compilers
             .iter()
             .map(CompilerWorkRegistration::observation)
+            .collect()
+    }
+
+    pub(crate) fn generation_compiler_observations(
+        &self,
+        dependency: &crate::resident_workbench::generation_admission::GenerationDependency,
+    ) -> Vec<GenerationCompilerObservation> {
+        self.state
+            .cleanup
+            .lock()
+            .compilers
+            .iter()
+            .enumerate()
+            .filter_map(|(registration, compiler)| {
+                compiler.generation_observation(dependency, registration)
+            })
             .collect()
     }
 

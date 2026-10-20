@@ -7,6 +7,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.ByteString as BS
 import GHC
 import GHC.Driver.Backend (noBackend)
+import GHC.Types.Name (nameOccName)
+import GHC.Types.Name.Occurrence (occNameString)
 import System.Directory
   ( createDirectory, getTemporaryDirectory, removeDirectoryRecursive, removeFile )
 import System.FilePath ((</>))
@@ -34,47 +36,90 @@ demandScopeChecks = do
     runGhc (Just libdir) $ do
       initial <- getSessionDynFlags
       forM_ controls $ \(name,root,aliases,expected) -> do
-        source <- liftIO (readFile
-          ("test-cell-splitter/fixtures/demand-scope" </> name ++ ".hs"))
+        source <- liftIO $ case name of
+          "DeclarationModule" -> pure (unlines
+            ["module DeclarationModule where", "data Box = Box Int", "refer = old"])
+          "QualifiedOperand" -> pure (unlines
+            ["module QualifiedOperand where", "import qualified Data.Version as Operand", "root = Operand.makeVersion"])
+          "UnusedOperand" -> pure (unlines
+            ["module UnusedOperand where", "import qualified Data.Version as Operand", "root = ()"])
+          "ShadowOperand" -> pure (unlines
+            ["module ShadowOperand where", "import qualified Data.Version as Operand"
+            ,"root = let versionBranch value = value in versionBranch ()"])
+          "DeclarationQuote" -> pure (unlines
+            ["{-# LANGUAGE QuasiQuotes #-}", "module DeclarationQuote where"
+            ,"[doesNotExist| refuse before rename |]"])
+          _ -> readFile ("test-cell-splitter/fixtures/demand-scope" </> name ++ ".hs")
         actual <- liftIO (sourceModuleFlags initial source)
           >>= either (liftIO . fail . show) pure
         _ <- setSessionDynFlags actual {backend=noBackend,ghcLink=NoLink}
+        actualOperand <- if name `elem` ["QualifiedOperand","UnusedOperand","ShadowOperand"] then do
+          owner <- findModule (mkModuleName "Data.Version") Nothing
+          information <- getModuleInfo owner >>= maybe (liftIO (fail "missing actual Data.Version interface")) pure
+          case [exported | exported <- modInfoExports information,occNameString (nameOccName exported) == "makeVersion"] of
+            [exported] -> pure (Just exported)
+            _ -> liftIO (fail "operand fixture lacks its unique actual exported Name")
+          else pure Nothing
         environment <- getSession
         liftIO $ do
           let path = directory </> name ++ ".hs"
               bindings = Map.fromList (zip aliases [0 :: Int ..])
           writeFile path source
-          plan <- either (fail . show) pure
-            (typedSegmentPlan (replicate 64 '0') root
-              [TypedItemPlan 0 "item" 1 (LetItem "marker" [])])
           recipe <- generatedCheckingTemplateRecipe actual (CheckedTemplateImports [] [])
             source source path name >>= either fail pure
           captured <- captureGeneratedScaffoldSource recipe path >>= either fail pure
-          scope <- newSegmentDemandScope environment bindings
-          case prepareSegmentDemand plan actual captured of
+          let addOperand scope = case actualOperand of
+                Nothing -> pure scope
+                Just exported -> either (fail . show) pure (associateSegmentDemandName exported "input" 999 scope)
+          initialScope <- newSegmentDemandScope environment bindings
+          scope <- addOperand initialScope
+          forM_ actualOperand $ \exported -> do
+            case associateSegmentDemandName exported "other" 1000 scope of
+              Left ConflictingDemandName -> pure ()
+              _ -> fail "conflicting exact Name association was accepted"
+            case associateSegmentDemandName exported "input" 999 scope of
+              Left ConflictingDemandName -> pure ()
+              _ -> fail "duplicate exact Name association was accepted"
+          case prepareModuleDemand actual captured of
             Left _ | expected == ParseRefusal -> pure ()
             Left failure -> fail (name ++ ": parsing refused " ++ show failure)
             Right _ | expected == ParseRefusal -> fail (name ++ ": quote passed the parser gate")
             Right parsed -> do
               let sealedPath = capturedGeneratedScaffoldPath captured
                   sealedBytes = capturedGeneratedScaffoldBytes captured
-              unless (segmentDemandMatchesSource parsed sealedPath sealedBytes
-                  && not (segmentDemandMatchesSource parsed (sealedPath ++ ".other") sealedBytes)
-                  && not (segmentDemandMatchesSource parsed sealedPath (sealedBytes <> BS.singleton 0)))
+              unless (moduleDemandMatchesSource parsed sealedPath sealedBytes
+                  && not (moduleDemandMatchesSource parsed (sealedPath ++ ".other") sealedBytes)
+                  && not (moduleDemandMatchesSource parsed sealedPath (sealedBytes <> BS.singleton 0)))
                 (fail (name ++ ": quote proof lost its exact source identity"))
-              demanded <- typedSegmentInputOccurrences environment scope parsed
+              demanded <- moduleInputOccurrences environment scope parsed
+              if name == "ScopeControl" then do
+                let makePlan checker = either (fail . show) pure
+                      (typedSegmentPlan (replicate 64 '0') checker
+                        [TypedItemPlan 0 "item" 1 (LetItem "marker" [])])
+                plan <- makePlan root
+                typed <- either (fail . show) pure (prepareSegmentDemand plan actual captured)
+                typedDemand <- typedSegmentInputOccurrences environment scope typed
+                unless (typedDemand == demanded
+                    && moduleDemandMatchesSource (segmentModuleDemand typed) sealedPath sealedBytes
+                    && segmentDemandMatchesSource typed sealedPath sealedBytes)
+                  (fail "typed root wrapper changed its module proof or demand")
+                wrong <- makePlan "missingTypedCheckerRoot"
+                case prepareSegmentDemand wrong actual captured of
+                  Left UnprovedRootAbstraction -> pure ()
+                  _ -> fail "typed root wrapper admitted a plan without its unique checker root"
+              else pure ()
               case (expected,demanded) of
                 (Bindings names,Right selected) | map fst selected == names -> pure ()
                 (RenameRefusal,Left (InputDemandRenameRejected diagnostic))
                   | not (null diagnostic) -> putStrLn (name ++ ": " ++ diagnostic)
-                _ -> fail (name ++ ": wrong demand or refusal phase")
+                _ -> fail (name ++ ": wrong demand or refusal phase: " ++ show demanded)
               _ <- foldM (\(previous,previousBindings) changes -> do
                 updated <- updateSegmentDemandScope environment changes previous
                 let nextBindings = Map.mapMaybe id (Map.union (Map.fromList changes)
                       (Map.map Just previousBindings))
-                rebuilt <- newSegmentDemandScope environment nextBindings
-                incrementalDemand <- typedSegmentInputOccurrences environment updated parsed
-                rebuiltDemand <- typedSegmentInputOccurrences environment rebuilt parsed
+                rebuilt <- newSegmentDemandScope environment nextBindings >>= addOperand
+                incrementalDemand <- moduleInputOccurrences environment updated parsed
+                rebuiltDemand <- moduleInputOccurrences environment rebuilt parsed
                 unless (incrementalDemand == rebuiltDemand)
                   (fail (name ++ ": alias delta differs from a fresh GHC scope"))
                 pure (updated,nextBindings)) (scope,bindings)
@@ -83,7 +128,7 @@ demandScopeChecks = do
                   , [("old",Just 102),("pure",Just 103)]
                   , [("id",Nothing),("pure",Nothing),("old",Nothing)] ]
               forM_ demanded $ \selected -> forM_ selected $ \(alias,binding) ->
-                unless (Map.lookup alias bindings == Just binding)
+                unless (Map.lookup alias bindings == Just binding || (actualOperand /= Nothing && alias == "input" && binding == 999))
                   (fail (name ++ ": lost exact alias/binding association"))
           writeFile path (source ++ "\nchanged = ()\n")
           stale <- captureGeneratedScaffoldSource recipe path
@@ -112,4 +157,9 @@ controls =
   , ("RenameError","root",["old"],RenameRefusal)
   , ("MissingImport","root",["old"],RenameRefusal)
   , ("ActualQuote","root",[],ParseRefusal)
+  , ("QualifiedOperand","root",[],Bindings ["input"])
+  , ("UnusedOperand","root",[],Bindings [])
+  , ("ShadowOperand","root",[],Bindings [])
+  , ("DeclarationModule","",["old"],Bindings ["old"])
+  , ("DeclarationQuote","",[],ParseRefusal)
   ]

@@ -249,7 +249,7 @@ impl Notebook {
         let settled = self
             .session
             .with_source_compiler_transaction(
-                self.source.clone(),
+                self.source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 tidepool_runtime::CompilerTransactionCancellation::new(),
                 None,

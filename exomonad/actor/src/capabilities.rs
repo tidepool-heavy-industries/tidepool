@@ -21,6 +21,7 @@ pub(crate) trait CompilerAdmission: Send + Sync {
     fn admit_work(
         &self,
         owner: &CompilerCloseOwner,
+        source: Option<crate::termination::ExecutionSourceOrigin>,
     ) -> Result<CompilerWorkTicket, ResidentActorWorkbenchError>;
 
     /// Apply the exact owner's existing publication admission policy.
@@ -28,6 +29,7 @@ pub(crate) trait CompilerAdmission: Send + Sync {
     fn admit_publication(
         &self,
         owner: &CompilerCloseOwner,
+        source: Option<crate::termination::ExecutionSourceOrigin>,
     ) -> Result<CompilerWorkTicket, ResidentActorWorkbenchError>;
 }
 
@@ -106,7 +108,7 @@ impl CompilerOwnerScope {
         Ok(self
             .services
             .compiler_admission()
-            .admit_work(&self.owner)?
+            .admit_work(&self.owner, self.source_origin())?
             .with_source_claim(source_claim))
     }
 
@@ -143,6 +145,19 @@ impl CompilerOwnerScope {
         }
     }
 
+    fn source_origin(&self) -> Option<crate::termination::ExecutionSourceOrigin> {
+        match &self.source_authority {
+            CompilerSourceAuthority::Source(source) => Some(
+                crate::termination::ExecutionSourceOrigin::Actor(source.clone()),
+            ),
+            // These purposes carry cleanup custody, not proof of an independent
+            // source. The actual issuing operation must supply any provenance.
+            CompilerSourceAuthority::Unqualified
+            | CompilerSourceAuthority::Preparation
+            | CompilerSourceAuthority::Cleanup => None,
+        }
+    }
+
     /// Cleanup custody for resuming an already admitted continuation. This does
     /// not authorize a compiler request, installation or callback registration.
     pub(crate) fn admit_continuation(
@@ -156,13 +171,14 @@ impl CompilerOwnerScope {
         purpose: crate::termination::CompilerWorkAdmission,
     ) -> Result<CompilerWorkTicket, ResidentActorWorkbenchError> {
         match purpose {
-            crate::termination::CompilerWorkAdmission::Active => {
-                self.services.compiler_admission().admit_work(&self.owner)
-            }
+            crate::termination::CompilerWorkAdmission::Active => self
+                .services
+                .compiler_admission()
+                .admit_work(&self.owner, None),
             crate::termination::CompilerWorkAdmission::Publication => self
                 .services
                 .compiler_admission()
-                .admit_publication(&self.owner),
+                .admit_publication(&self.owner, None),
         }
     }
 
@@ -173,7 +189,7 @@ impl CompilerOwnerScope {
         Ok(self
             .services
             .compiler_admission()
-            .admit_publication(&self.owner)?
+            .admit_publication(&self.owner, self.source_origin())?
             .with_source_claim(source_claim))
     }
 
@@ -196,7 +212,7 @@ pub(crate) fn run_compiler_action<C: HasCompilerAdmission + ?Sized, T>(
 ) -> Result<T, ResidentActorWorkbenchError> {
     Ok(capabilities
         .compiler_admission()
-        .admit_work(owner)?
+        .admit_work(owner, None)?
         .run(action))
 }
 
@@ -325,7 +341,10 @@ mod tests {
             let services = WorkbenchServices::new();
             let retained = crate::RetainedActorExit::new();
             let owner = CompilerCloseOwner::ActorLifecycle(retained.clone());
-            let ticket = services.compiler_admission().admit_work(&owner).unwrap();
+            let ticket = services
+                .compiler_admission()
+                .admit_work(&owner, None)
+                .unwrap();
             let control = ticket.control();
             if stop_before {
                 control.cancel();
@@ -370,7 +389,7 @@ mod tests {
         let owner = CompilerCloseOwner::ActorLifecycle(retained.clone());
         let ticket = capabilities
             .compiler_admission()
-            .admit_work(&owner)
+            .admit_work(&owner, None)
             .unwrap();
         let observation = ticket.control().observation();
         assert_eq!(observation.observation(), CompilerWorkClose::Pending);
