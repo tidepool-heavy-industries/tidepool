@@ -34,6 +34,11 @@ That is not unqualified root ambiguity.
    belong to an exact runtime selection domain. An isolated replacement B gets
    fresh instances; later ordinary cells in B reuse B's exact instances. A real
    captured reference to A retains A's dependency and refusal behavior.
+   Installer scope I and the actor's public notebook scope B are distinct
+   runtime domains even when both use B's source generation. Repeated demand
+   reuses instances within the actual domain; it does not implicitly transfer
+   I's package state into public B. Such sharing requires the existing explicit
+   capture/selection transfer. Source-token equality alone selects no instance.
 2. Preparation selects the closed dependency graph once. Startup installation
    must not repeat symbol selection, infer dependencies from the current
    inventory, or fall back to a live export map.
