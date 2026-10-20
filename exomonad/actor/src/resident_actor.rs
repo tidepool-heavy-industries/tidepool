@@ -32,7 +32,10 @@ pub(crate) mod forms;
 mod generation_inventory;
 pub(crate) use generation_inventory::{GenerationWorkObservations, ResidentGenerationInventory};
 pub use workbench_ledger::WorkbenchDiagnosticRefusal;
-pub(crate) use workbench_ledger::{RecordedRetirementDiagnosticObservation, RetirementDiagnosticEvidence, WorkbenchOperationDiagnosticOwner};
+pub(crate) use workbench_ledger::{
+    RecordedRetirementDiagnostic, RecordedRetirementDiagnosticObservation,
+    RetirementDiagnosticEvidence, WorkbenchOperationDiagnosticOwner,
+};
 #[cfg(test)]
 pub(crate) use generation_inventory::assert_owner_observation_contract;
 pub(crate) mod green;

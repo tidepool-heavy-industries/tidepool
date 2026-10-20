@@ -51,6 +51,11 @@ pub(super) enum RetirementDiagnosticHandoff {
         observation: crate::resident_actor::RecordedRetirementDiagnosticObservation,
         refusals: Vec<crate::resident_actor::WorkbenchDiagnosticRefusal>,
     },
+    ReceiptRefused {
+        evidence: Arc<crate::resident_actor::RetirementDiagnosticEvidence>,
+        receipt: crate::resident_actor::RecordedRetirementDiagnostic,
+        refusals: Vec<crate::resident_actor::WorkbenchDiagnosticRefusal>,
+    },
 }
 
 impl GenerationRetirementDiagnostic {
@@ -103,12 +108,16 @@ impl GenerationRetirementDiagnostic {
                             refusals: prior,
                         };
                     }
-                    Err(_) => {
-                        let refusal =
-                            crate::resident_actor::WorkbenchDiagnosticRefusal::DifferentEvidence;
+                    Err((refusal, receipt)) => {
                         if !refusals.contains(&refusal) {
                             refusals.push(refusal);
                         }
+                        let refusals = std::mem::take(refusals);
+                        *handoff = RetirementDiagnosticHandoff::ReceiptRefused {
+                            evidence: evidence.clone(),
+                            receipt,
+                            refusals,
+                        };
                     }
                 },
                 Err(refusal) => {
@@ -515,24 +524,13 @@ impl GenerationPublicationCustody {
         match self {
             Self::SourceRestoredPending(PublicationSourceRestoredPending::Unpublished {
                 refusal,
-                observation,
+                ..
             }) => {
-                let (recorded, refusals) = diagnostic.record_refusal(refusal)?;
-                if matches!(
-                    observation,
-                    ActorGenerationPublicationRefusalObservation::Failed { .. }
-                ) {
-                    // Diagnostic acknowledgement is not proof that every other
-                    // owner settled. Keep any full primary/candidate until the
-                    // actual body owner attests its remaining obligations.
-                    return None;
-                }
-                Some(GenerationRetirementCompletion::AReopened {
-                    outcome: observation.clone(),
-                    nonstart: None,
-                    diagnostic: Some(recorded),
-                    diagnostic_refusals: refusals,
-                })
+                diagnostic.record_refusal(refusal)?;
+                // A recorded diagnostic does not settle the body's other owners.
+                // Both Refused and Failed retain the same full refusal until its
+                // actual producer positively assesses those obligations.
+                None
             }
             _ => None,
         }
