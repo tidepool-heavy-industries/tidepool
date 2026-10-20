@@ -18308,14 +18308,15 @@ pub(crate) mod tests {
         original
             .with_new_product_dependencies(&physical.metadata_snapshot(), &requirements)
             .unwrap();
-        let issued = OriginalCompilerInputs::issue_segment_native_availability(
+        let output = OriginalCompilerInputs::issue_segment_native_availability(
             &mut original,
             &physical,
             vec![r_entry.clone()],
         )
         .unwrap();
-        let output = OriginalCompilerInputs::from_selection(&original, &issued).unwrap();
-        let closure = original.selected_original_closure(&issued).unwrap();
+        let closure = original
+            .selected_original_closure(output.issued_artifacts())
+            .unwrap();
         eprintln!(
             "initial completed native rows: R={:?} G={:?}; R={} G={}",
             r_entry.descriptor.id,
@@ -18504,11 +18505,14 @@ pub(crate) mod tests {
             },
         );
         assert!(j_edges.contains(&j_to_r));
-        let physical_roots = finished.capture_graph_selection().roots;
+        let finished_artifacts = finished.issued_artifacts();
+        let physical_roots = finished_artifacts.capture_graph_selection().roots;
         assert!(!physical_roots.contains(&ArtifactBindingNode::Group(fresh_g)));
         assert!(!physical_roots.contains(&ArtifactBindingNode::Group(fresh_j)));
-        let owner = finished.inventory();
-        let mut bound = owner.bind_segment(&finished, entries, &current).unwrap();
+        let owner = finished_artifacts.inventory();
+        let mut bound = owner
+            .bind_segment(finished_artifacts, entries, &current)
+            .unwrap();
         let imports = [source(&g, 7), source(&j, 9)];
         let target = owner
             .admit_bound_target(
