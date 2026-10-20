@@ -2535,6 +2535,109 @@ impl InventoryState {
     }
 }
 
+/// Observe acquisition separately from the compiler namespace at its filtering boundary.
+fn trace_selected_native_dependency_custody(
+    stage: &'static str,
+    groups: &BTreeSet<NativeGroupKey>,
+    selected: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    namespace: Option<&BTreeSet<ArtifactId>>,
+    intent: &ArtifactRootIntent<'_>,
+) {
+    if !tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG)
+    {
+        return;
+    }
+    const ROW_LIMIT: usize = 32;
+    const CANDIDATE_LIMIT: usize = 4;
+    let mut total = 0usize;
+    for group in groups {
+        let Some(entry) = selected.get(&group.artifact) else {
+            continue;
+        };
+        for (owner, dependency) in entry.native_requirements_for(group.original_ordinal) {
+            let ArtifactDependency::NativeGroup {
+                required_ordinal, ..
+            } = dependency
+            else {
+                continue;
+            };
+            total += 1;
+            if total > ROW_LIMIT {
+                continue;
+            }
+            let wanted = entry.native_owners.get(owner);
+            let matching = || {
+                selected.values().filter(|candidate| {
+                    let ArtifactPayload::Original(product) = &candidate.payload else {
+                        return false;
+                    };
+                    wanted.is_some_and(|wanted| {
+                        NativeOwnerKey::from_owner(product.owner()) == *wanted
+                    })
+                })
+            };
+            let candidate_count = matching().count();
+            let candidates = matching()
+                .take(CANDIDATE_LIMIT)
+                .map(|candidate| {
+                    (
+                        candidate.descriptor.id,
+                        candidate.native_group_ordinals.contains(required_ordinal),
+                        namespace.is_some_and(|ids| ids.contains(&candidate.descriptor.id)),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let (availability_rows, availability) = match intent {
+                ArtifactRootIntent::Certified(selection) => {
+                    let matching = || {
+                        selection.issued_native_availability().filter(|row| {
+                            wanted.is_some_and(|wanted| {
+                                NativeOwnerKey::from_owner(row.original_owner()) == *wanted
+                            })
+                        })
+                    };
+                    let rows = matching().count();
+                    let observed = matching()
+                        .take(CANDIDATE_LIMIT)
+                        .map(|row| {
+                            let key = NativeGroupKey {
+                                artifact: row.original_artifact_id(),
+                                original_ordinal: *required_ordinal,
+                            };
+                            let (binding_count, bindings) = row
+                                .dependency_support(key, row.original_owner())
+                                .map(|support| {
+                                    (
+                                        support.groups().count(),
+                                        support.groups().take(CANDIDATE_LIMIT).collect::<Vec<_>>(),
+                                    )
+                                })
+                                .unwrap_or_default();
+                            (
+                                key.artifact,
+                                row.permits(*required_ordinal),
+                                binding_count,
+                                bindings,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    (Some(rows), observed)
+                }
+                _ => (None, Vec::new()),
+            };
+            tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+                stage, ?group, ?owner, ?dependency, ?wanted, ?candidates, candidate_count,
+                candidate_rows_omitted = candidate_count.saturating_sub(CANDIDATE_LIMIT),
+                ?availability, ?availability_rows,
+                "native dependency payload custody and exact issued support observation");
+        }
+    }
+    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+        stage, total, emitted = total.min(ROW_LIMIT), omitted = total.saturating_sub(ROW_LIMIT),
+        complete = total <= ROW_LIMIT, selected_artifacts = selected.len(),
+        "native dependency custody observation coverage");
+}
+
 /// Owner selection belongs to one sealed reachable closure, not the inventory.
 #[derive(Default)]
 struct SelectedOwners {
@@ -4605,6 +4708,13 @@ impl ArtifactInventory {
             }
             ArtifactRootIntent::SuppliedArtifacts => None,
         };
+        trace_selected_native_dependency_custody(
+            "selected_custody_before_acquisition",
+            &groups,
+            &selected,
+            namespace_ids.as_ref(),
+            &root_intent,
+        );
         let requirements = root_intent.native_original_requirements();
         let mut required_groups =
             BTreeMap::<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>::new();
@@ -4844,6 +4954,13 @@ impl ArtifactInventory {
             );
             required_artifact_ids.extend(artifact_ids(&inherited));
         }
+        trace_selected_native_dependency_custody(
+            "selected_custody_before_role_filter",
+            &groups,
+            &selected,
+            namespace_ids.as_ref(),
+            &root_intent,
+        );
         if let Some(ids) = &namespace_ids {
             let interfaces = ids
                 .iter()
@@ -4882,6 +4999,13 @@ impl ArtifactInventory {
                 }
             }
         }
+        trace_selected_native_dependency_custody(
+            "selected_custody_after_role_filter",
+            &groups,
+            &selected,
+            namespace_ids.as_ref(),
+            &root_intent,
+        );
         let owners = SelectedOwners::new(&state, &selected, &parent_ids)?;
         if matches!(root_intent, ArtifactRootIntent::PrivateAvailability { .. }) {
             let (_, complete_closure) =
@@ -15822,7 +15946,9 @@ mod tests {
                         &requirements,
                     )
                     .unwrap();
-                model.check(&selected).unwrap();
+                model.check(&selected).unwrap_or_else(|error| {
+                    panic!("stage=projected_admission, helper_groups={count}, reverse={reverse}: {error}")
+                });
                 let recovered_inventory = ArtifactInventory::default();
                 let recovered = recovered_inventory
                     .recover_selection(
@@ -15832,7 +15958,9 @@ mod tests {
                         &selected.binding_dependencies(),
                     )
                     .unwrap();
-                model.check(&recovered).unwrap();
+                model.check(&recovered).unwrap_or_else(|error| {
+                    panic!("stage=recovery, helper_groups={count}, reverse={reverse}: {error}")
+                });
                 let mut certified =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &projection,
@@ -15859,7 +15987,9 @@ mod tests {
                     )
                     .map(|admitted| admitted.artifacts)
                     .unwrap();
-                model.check(&target).unwrap();
+                model.check(&target).unwrap_or_else(|error| {
+                    panic!("stage=bound_target, helper_groups={count}, reverse={reverse}: {error}")
+                });
                 let helper_imports = [issued_source(&helper, 7)];
                 let before_bound_graph = recovered.capture_graph_selection();
                 let before_bound_nodes = recovered_inventory.node_count();
@@ -15895,7 +16025,9 @@ mod tests {
                         &helper_requirements,
                     )
                     .unwrap();
-                model.check(&chosen).unwrap();
+                model.check(&chosen).unwrap_or_else(|error| {
+                    panic!("stage=explicit_helper_admission, helper_groups={count}, reverse={reverse}: {error}")
+                });
                 let mut chosen_certified =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &helper_projection,
@@ -15924,7 +16056,9 @@ mod tests {
                     )
                     .map(|admitted| admitted.artifacts)
                     .unwrap();
-                model.check(&direct).unwrap();
+                model.check(&direct).unwrap_or_else(|error| {
+                    panic!("stage=explicit_helper_target, helper_groups={count}, reverse={reverse}: {error}")
+                });
 
                 let fresh = Arc::new(issued_native_groups(
                     "FreshRoot",
