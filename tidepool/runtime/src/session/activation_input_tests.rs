@@ -82,6 +82,23 @@ impl TestSession {
         self.resident.set_run_context(context)
     }
 
+    fn retain_visible_binding_custody(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<RootCustody>, ResidentError> {
+        let scope = self.resident.run_context().lexical_scope;
+        let Some(binding) = self
+            .resident
+            .state
+            .resolve_in(scope, name)
+            .map(|entry| entry.id)
+        else {
+            return Ok(None);
+        };
+        self.resident
+            .retain_binding_custody_in(scope, name, binding)
+    }
+
     fn bootstrap_world(&mut self, recipe: &InputRecipe) {
         let source = self.public_source.clone();
         let scope = self.public_scope();
@@ -423,7 +440,7 @@ impl InputFixture {
         ));
         assert!(resident.parked_holes().contains(&hole.cont_id()));
         let reply = resident
-            .retain_binding_custody("activationUnitReply")
+            .retain_visible_binding_custody("activationUnitReply")
             .expect("retain the genuine native Unit reply")
             .expect("compiled Unit reply binding is installed");
         let publication = suspended(
@@ -470,7 +487,7 @@ impl InputFixture {
             .unwrap()
             .expect("original RunRequest remains a live native value");
         let receiver = resident
-            .retain_binding_custody("activationReceiver")
+            .retain_visible_binding_custody("activationReceiver")
             .unwrap()
             .expect("real compiled native receiver");
         let activation = suspended(
@@ -788,7 +805,7 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
     resident.set_run_context(resident.public_context()).unwrap();
     resident.retire_scope(execution.private_scope());
     let installer = resident
-        .retain_binding_custody("receiverInstaller")
+        .retain_visible_binding_custody("receiverInstaller")
         .unwrap()
         .unwrap();
     let realm = RealmId::fresh();
@@ -796,7 +813,7 @@ fn request_receiver_capture_preserves_exact_authority_and_refusal_cleanup() {
     // Keep real installed code and reply evidence, but carry public observations
     // across the value-to-code boundary without its compiler-issued authority.
     let mut observed = resident
-        .retain_binding_custody("receiverInstaller")
+        .retain_visible_binding_custody("receiverInstaller")
         .unwrap()
         .unwrap();
     observed.provenance =
@@ -1571,7 +1588,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
         ResidentOutcome::Completed { .. }
     ));
     let custody = source
-        .retain_binding_custody("heldRequest")
+        .retain_visible_binding_custody("heldRequest")
         .unwrap()
         .unwrap();
     let original = Arc::clone(&custody.provenance);
@@ -1659,7 +1676,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
     let imported = receiver.import_parcel(parcel, RealmId::ROOT).unwrap();
     assert!(Arc::ptr_eq(&imported.provenance, &original));
     let runner = receiver
-        .retain_binding_custody("runRequestValue")
+        .retain_visible_binding_custody("runRequestValue")
         .unwrap()
         .unwrap();
     let hole = suspended(
@@ -1696,7 +1713,7 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
     ));
     assert_eq!(receiver.parked_holes(), vec![hole.cont_id()]);
     let answer = receiver
-        .retain_binding_custody("custodyAnswer")
+        .retain_visible_binding_custody("custodyAnswer")
         .unwrap()
         .unwrap();
     let ResidentOutcome::Completed { result, .. } =
@@ -1748,7 +1765,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     let mut destination =
         InputFixture::fresh_in(SessionId(1707), &destination_root, &fixture.recipe);
     let wrong_owner = source
-        .retain_binding_custody("activationReceiver")
+        .retain_visible_binding_custody("activationReceiver")
         .unwrap()
         .unwrap();
     let before = destination.residency();
@@ -1774,7 +1791,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     drop(source);
 
     let receiver = destination
-        .retain_binding_custody("activationReceiver")
+        .retain_visible_binding_custody("activationReceiver")
         .unwrap()
         .unwrap();
     let activation = suspended(
@@ -2042,7 +2059,7 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
         3,
     );
     let receiver = destination
-        .retain_binding_custody("activationReceiver")
+        .retain_visible_binding_custody("activationReceiver")
         .unwrap()
         .unwrap();
     let receiver_original = Arc::clone(&receiver.provenance);
@@ -2906,7 +2923,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
     assert!(payload.provenance.authenticated_inputs.is_empty());
     assert!(payload.provenance.native_sites.ids().next().is_none());
     let receiver = unsealed
-        .retain_binding_custody("activationReceiver")
+        .retain_visible_binding_custody("activationReceiver")
         .unwrap()
         .expect("real compiled request receiver");
     let hole = suspended(
@@ -4187,7 +4204,7 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
         child.set_image_registry(images.clone());
         let imported = child.import_parcel(parcel, RealmId::ROOT).unwrap();
         let receiver = child
-            .retain_binding_custody("activationReceiver")
+            .retain_visible_binding_custody("activationReceiver")
             .unwrap()
             .unwrap();
         let hole = suspended(
@@ -4375,7 +4392,7 @@ fn activation_preview_revoked_original_lease_refuses_before_spend() {
         child.set_image_registry(images.clone());
         let imported = child.import_parcel(parcel, RealmId::ROOT).unwrap();
         let receiver = child
-            .retain_binding_custody("activationReceiver")
+            .retain_visible_binding_custody("activationReceiver")
             .unwrap()
             .unwrap();
         let hole = suspended(
@@ -5990,10 +6007,9 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
         SessionId(1735),
     );
     let mut resident = fixture.fresh();
-    let scope = resident
-        .resident
-        .mint_detached_scope(resident.public_source.scope())
-        .unwrap();
+    let public = resident.public_scope();
+    let scope_lease = resident.retain_lexical_scope(public).unwrap();
+    let scope = scope_lease.scope();
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: scope,
@@ -6048,6 +6064,7 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
         "the original parked caller still owns its checked type prototype"
     );
     drop(resident);
+    drop(scope_lease);
     drop(fixture);
     assert!(prototype_lease.upgrade().is_none());
 }
@@ -6133,7 +6150,10 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
         .current_binding_in(resident.public_scope(), "held")
         .unwrap();
     assert_eq!(original.0, SessionVarId::from_extract(binder.var_id));
-    let custody = resident.retain_binding_custody("held").unwrap().unwrap();
+    let custody = resident
+        .retain_visible_binding_custody("held")
+        .unwrap()
+        .unwrap();
     let handles_before_export = resident.value_handle_count();
     let parcel = resident.export_custody(custody).unwrap();
     assert_eq!(resident.value_handle_count(), handles_before_export - 1);
@@ -6243,7 +6263,7 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         Err(ResidentError::InvalidActivationInput { .. })
     ));
     let reply = source
-        .retain_binding_custody("activationFunctionReply")
+        .retain_visible_binding_custody("activationFunctionReply")
         .unwrap()
         .unwrap();
     let publication = suspended(
@@ -6348,7 +6368,7 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         .quiesce_and_collect_now()
         .unwrap();
     let probe = destination
-        .retain_binding_custody("ownedResultProbe")
+        .retain_visible_binding_custody("ownedResultProbe")
         .unwrap()
         .unwrap();
     let ResidentOutcome::Completed { result, .. } =
