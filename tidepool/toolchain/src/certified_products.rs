@@ -13499,12 +13499,17 @@ pub(crate) mod tests {
         let primary = source.compiler_primary_input(&owner).unwrap().unwrap();
         let interface = primary.interface();
         let original = primary.original().unwrap();
+        let crate::artifact_inventory::ArtifactPayload::Original(product) =
+            &primary.entry().payload
+        else {
+            unreachable!()
+        };
         let mut selection =
             CertifiedSourceSelection::from_compiler_inputs(request.compiler_inputs(), &operation)
                 .unwrap();
         let membership = request
             .compiler_inputs()
-            .available_original_sources(std::slice::from_ref(&product), &operation)
+            .available_original_sources(std::slice::from_ref(product), &operation)
             .unwrap();
         let mut validation = PackageInterfaceValidation::default();
         let sources = membership.overlay(&request.groups, &operation).unwrap();
@@ -19566,6 +19571,88 @@ pub(crate) mod tests {
         assert!(g_edges.iter().all(|edge| edges.contains(edge)));
         assert!(target.artifact_ids().contains(&old_value.artifact));
         assert!(target.artifact_ids().contains(&fresh_value.artifact));
+
+        // The World demand owner must retain both exact G occurrences too;
+        // their equal logical key cannot erase either dependency history.
+        let complete = CompilerSourceSupport::close_complete_output(&finished).unwrap();
+        let closure = current.selected_original_closure(&target).unwrap();
+        let selected = complete.certify_original_closure(&closure).unwrap();
+        let context = ExactDeclarationContext::from_authenticated_execution_support(
+            producer.sha256(),
+            selected,
+            [
+                r_entry.descriptor.owner.clone(),
+                g_entry.descriptor.owner.clone(),
+                j_entry.descriptor.owner.clone(),
+            ]
+            .into_iter()
+            .map(|owner| crate::declaration_join::ExactLexicalNode {
+                owner,
+                imports: vec![],
+            })
+            .collect(),
+            j_entry.descriptor.owner.clone(),
+            &[],
+        )
+        .unwrap();
+        let inputs = context
+            .capture_world_primary_compiler_inputs(producer.sha256())
+            .unwrap();
+        let mut uses = Vec::new();
+        for (entry, product, ordinal) in [(&g_entry, &g, 7), (&j_entry, &j, 9)] {
+            let primary = inputs
+                .compiler_source_support()
+                .compiler_primary_input(&entry.descriptor.owner)
+                .unwrap()
+                .unwrap();
+            let pair = |binding: crate::artifact_inventory::ArtifactBinding| {
+                value_array([
+                    Value::Bytes(binding.artifact.0.to_vec()),
+                    Value::Bytes(binding.selection.0.to_vec()),
+                ])
+            };
+            let PendingImportOwner::Source { binder, .. } = source(product, ordinal) else {
+                unreachable!()
+            };
+            uses.push(value_array([
+                value_text(&entry.descriptor.owner.unit),
+                value_text(&entry.descriptor.owner.module),
+                pair(primary.interface()),
+                pair(primary.original().unwrap()),
+                value_identity(&binder),
+            ]));
+        }
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(
+            &value_array([value_text("TPNATIVEDEMAND1"), value_array(uses)]),
+            &mut bytes,
+        )
+        .unwrap();
+        let packet = NativeDemandPacket::decode(&bytes, &validation.inventory).unwrap();
+        let resolved = inputs
+            .resolve_native_demand(&packet, &mut validation)
+            .unwrap();
+        let rows = resolved.groups().selected_rows();
+        assert_eq!(
+            rows.keys().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([old_r, old_g, fresh_g, fresh_j])
+        );
+        assert_eq!(rows[&fresh_j].dependencies(), &[old_r]);
+        assert_eq!(rows[&old_r].dependencies(), &[old_g]);
+        assert!(rows[&fresh_g].dependencies().is_empty());
+        assert_eq!(
+            rows[&old_g].product().owner(),
+            rows[&fresh_g].product().owner()
+        );
+        assert_eq!(
+            resolved
+                .groups()
+                .retained_bindings()
+                .iter()
+                .map(|binding| binding.artifact_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([old_value.artifact, fresh_value.artifact])
+        );
     }
 
     #[test]

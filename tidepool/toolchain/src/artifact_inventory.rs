@@ -8166,7 +8166,7 @@ impl ArtifactView {
     pub(crate) fn select_acquired_compiler_bindings(
         &self,
         namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
-        groups: &BTreeMap<NativeGroupKey, NativeGroupBinding>,
+        groups: impl ExactSizeIterator<Item = NativeGroupBinding>,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Self, CompileError> {
         let budget = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
@@ -8179,7 +8179,7 @@ impl ArtifactView {
             .values()
             .copied()
             .map(InventoryNodeKey::Artifact)
-            .chain(groups.values().copied().map(InventoryNodeKey::Group))
+            .chain(groups.map(InventoryNodeKey::Group))
             .collect::<Vec<_>>();
         // Membership comes from this owner's acquired bindings and their
         // retained closure, never from a separately captured cold read
@@ -9542,11 +9542,17 @@ mod tests {
             .copied()
             .map(InventoryNodeKey::Artifact)
             .collect::<Vec<_>>();
-        let groups = BTreeMap::new();
+        let groups = BTreeSet::new();
         let operation = InventoryOperation::new(Default::default());
         let observation = HostWorkObservation::new();
         let selected = observation
-            .scope(|| cold.select_acquired_compiler_bindings(&namespace, &groups, &operation))
+            .scope(|| {
+                cold.select_acquired_compiler_bindings(
+                    &namespace,
+                    groups.iter().copied(),
+                    &operation,
+                )
+            })
             .unwrap();
 
         // R7: demand must not require or capture a cold read projection, and
