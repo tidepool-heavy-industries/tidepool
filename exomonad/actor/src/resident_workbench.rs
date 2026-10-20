@@ -18424,6 +18424,68 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn abandoned_private_world_birth_reaps_scope_after_lost_delivery() {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (machines, mut context, source, _root) = actor_registry_fixture();
+            let (captured, _owner) = world_query_test_source(&[
+                Some("module WorldQuestion where\nknown :: Int\nknown = 7\n"),
+            ]);
+            context.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            let workbench = ResidentActorWorkbench::new(
+                machines, source.bind_preparation(preparation_client), None,
+            );
+            workbench_runner_for_test(&workbench)
+                .adopt_final_source_scope(context.clone()).await.unwrap();
+            workbench.access.ensure_compiler_world(context.clone()).await.unwrap();
+            let before = workbench.access.with_machine(context.clone(), |session, context, _| {
+                Ok((session.heap_stats(), session.workbench_bindings_in(context.placement.lexical_scope)))
+            }).await.unwrap();
+            let gate = Arc::new(std::sync::Barrier::new(2));
+            let issued_gate = gate.clone();
+            let (issued, observed) = tokio::sync::oneshot::channel();
+            let (private_scope, weak) = {
+                let pending = workbench.access.with_compiler_machine(context.clone(), move |session, context, _, _| {
+                    let birth = session.begin_private_execution(context.placement.lexical_scope)
+                        .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
+                    issued.send((birth.private_scope(), Arc::downgrade(&birth.retained_lexical_scope())))
+                        .expect("the caller observes the real successful birth before abandoning delivery");
+                    issued_gate.wait();
+                    Ok(birth)
+                });
+                tokio::pin!(pending);
+                tokio::select! {
+                    observed = observed => observed.unwrap(),
+                    delivered = &mut pending => { drop(delivered); panic!("birth result crossed the blocked delivery boundary"); },
+                }
+            };
+            gate.wait();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while weak.upgrade().is_some() {
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("an installed observation must not retain the abandoned private lease");
+            workbench.access.with_machine(context.clone(), move |session, context, _| {
+                // This real owner entry drains the lease's existing scope reaper.
+                let public = session.retain_lexical_scope(context.placement.lexical_scope)
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                assert!(session.compile_view_in(private_scope).is_none(), "the private scope must already be reaped");
+                assert!(session.workbench_bindings_in(private_scope).is_empty());
+                assert_eq!(session.heap_stats(), before.0);
+                assert_eq!(session.workbench_bindings_in(context.placement.lexical_scope), before.1);
+                drop(public);
+                Ok(())
+            }).await.unwrap();
+            let answer = installed_world_query(
+                &workbench, context, captured, "WorldQuestion", StructuredInspectionKind::Type,
+                tidepool_toolchain::timing::HostWorkObservation::new(),
+            ).await;
+            assert!(matches!(answer.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Type { info, .. }
+                if info.expression.canonical == "Int"));
+        }).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
     async fn public_module_world_hot_queries_skip_retained_history_preparation() {
         with_test_compiler_owner(|preparation_client| async move {
             use tidepool_toolchain::timing::{HostWorkCounter, HostWorkObservation};
