@@ -267,6 +267,7 @@ Additional focused execution targets include:
 
 | Target | Execution boundary |
 | --- | --- |
+| `//tidepool/codegen:codegen_publication_preparation_tests` | Five counted promotion, custody and mutation-witness tests; no compiler worker |
 | `//tidepool/runtime:runtime_admission_tests` | Six counted admission and native-root tests; no compiler worker |
 | `//exomonad/host:facade_source_revision_tests` | Five counted source publication/recovery tests; no compiler or browser resources |
 | `//exomonad/host:facade_process_tests` | Six counted framing and process cleanup tests |

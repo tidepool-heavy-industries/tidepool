@@ -136,6 +136,55 @@ impl PreparedBindingPromotion {
     }
 }
 
+/// Borrowed projection of only names touched by this exact prepared commit.
+/// Each selection is the actual post-removal visible owner, including lexical
+/// fallback. Definition scope remains on the entry; target scope is separate.
+pub struct PreparedPromotionProjection<'a> {
+    table: &'a BindingTable,
+    tree: &'a ScopeTree,
+    prepared: &'a PreparedBindingPromotion,
+}
+
+impl<'a> PreparedPromotionProjection<'a> {
+    pub fn target_scope(&self) -> ScopeId {
+        self.prepared.plan.target
+    }
+
+    pub fn visible_changes(
+        &self,
+    ) -> impl Iterator<Item = (&'a BindingName, Option<&'a BindingEntry>)> + '_ {
+        let table = self.table;
+        let tree = self.tree;
+        let names = &self.prepared.names;
+        names
+            .writes
+            .iter()
+            .map(|(name, _)| name)
+            .chain(
+                names
+                    .removals
+                    .iter()
+                    .filter(|name| !names.writes.iter().any(|(written, _)| written == *name)),
+            )
+            .map(move |name| {
+                let selected = if names.removals.contains(name) {
+                    if table.tips.contains_key(&names.scope) {
+                        None
+                    } else {
+                        table.resolve_frame_name_in(tree, names.scope, name, false)
+                    }
+                } else {
+                    names
+                        .writes
+                        .iter()
+                        .find(|(written, _)| written == name)
+                        .and_then(|(_, id)| table.live.get(id))
+                };
+                (name, selected)
+            })
+    }
+}
+
 pub struct PreparedSourceOwnerOrigin {
     scope: ScopeId,
     selection: SourceSelectionView,
@@ -787,6 +836,19 @@ impl BindingTable {
                     )
                 })
                 .collect(),
+        })
+    }
+
+    pub fn prepared_promotion_projection<'a>(
+        &'a self,
+        tree: &'a ScopeTree,
+        prepared: &'a PreparedBindingPromotion,
+    ) -> Result<PreparedPromotionProjection<'a>, BindingPromotionError> {
+        self.prepared_promotion_scope_witness(tree, prepared)?;
+        Ok(PreparedPromotionProjection {
+            table: self,
+            tree,
+            prepared,
         })
     }
 
@@ -3664,8 +3726,21 @@ impl BindingTable {
                 .and_then(|tip| tip.visible.get(&key))
                 .and_then(|id| self.live.get(id));
         }
+        self.resolve_frame_name_in(tree, scope, &key, true)
+    }
+
+    fn resolve_frame_name_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        key: &BindingName,
+        include_local: bool,
+    ) -> Option<&BindingEntry> {
         for s in tree.lookup_chain(scope) {
-            if let Some(id) = self.current.get(&s).and_then(|frame| frame.get(&key)) {
+            if !include_local && s == scope {
+                continue;
+            }
+            if let Some(id) = self.current.get(&s).and_then(|frame| frame.get(key)) {
                 if s != scope && self.scope_local_aliases.contains(id) {
                     continue;
                 }
