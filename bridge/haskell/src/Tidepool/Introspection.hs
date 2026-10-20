@@ -1163,17 +1163,14 @@ thingAvailability context thing = case thing of
   AConLike constructor -> pure $ if isVanillaConLike constructor then Available else Unknown
   _ -> pure Available
 
+-- Dots may belong to an operator occurrence; compare the actual reader
+-- spelling instead of splitting the caller text into guessed name parts.
 matchesQuery :: String -> RdrName -> Bool
 matchesQuery query reader = case reader of
-  Unqual occurrence -> qualifier == Nothing && occNameString occurrence == wanted
-  Qual alias occurrence -> qualifier == Just (moduleNameString alias) && occNameString occurrence == wanted
+  Unqual occurrence -> query == occNameString occurrence
+  Qual alias occurrence -> query == moduleNameString alias ++ "." ++ occNameString occurrence
   Orig _ _ -> False
   Exact _ -> False
-  where
-    (qualifier, wanted) = case break (== '.') (reverse query) of
-      (reversedOccurrence, []) -> (Nothing, reverse reversedOccurrence)
-      (reversedOccurrence, _ : reversedQualifier) ->
-        (Just (reverse reversedQualifier), reverse reversedOccurrence)
 
 showEverything :: ShowSub
 showEverything = ShowSub ShowIface ShowForAllWhen

@@ -78,6 +78,8 @@ structuredScenario = do
       , InspectKeyedAvailability (query StructuredFieldName "sharedField") "StructuredIdentityFixture"
       , InspectStructuredInfoOf (query StructuredAnyName "sharedField")
       , InspectStructuredInfoOf (query StructuredValueName "R.onlyQualified")
+      , InspectStructuredInfoOf (query StructuredValueName ".")
+      , InspectStructuredInfoOf (query StructuredValueName "Q..%")
       ]
     pure (answers,names "sharedField",names "onlyQualified")
   let publicSpelling name = (moduleNameString . moduleName <$> nameModule_maybe name,occNameString (nameOccName name))
@@ -94,11 +96,16 @@ structuredScenario = do
       , InspectionStructuredError (StructuredUnsupported _)
       , InspectionStructuredError (StructuredAmbiguous _ fields)
       , InspectionStructuredInfo repeated
+      , InspectionStructuredInfo composition
+      , InspectionStructuredInfo dotted
       ] | inspectedIdentifier qualified == IdentifierRef "QualifiedSource" "onlyQualified" ValueIdentifier
           && inspectedIdentifier repeated == inspectedIdentifier qualified
           && structuredNamespace missing == StructuredTypeName
           && inspectedIdentifier operator == IdentifierRef "QualifiedSource" "%%" ValueIdentifier
           && fit == inspectedIdentifier qualified
+          && identifierName (inspectedIdentifier composition) == "."
+          && identifierNamespace (inspectedIdentifier composition) == ValueIdentifier
+          && inspectedIdentifier dotted == IdentifierRef "QualifiedSource" ".%" ValueIdentifier
           && length fields == 2 && head fields == last fields -> pure ()
     other -> fail ("structured identity selection lost namespace/alias/ambiguity: " ++ show other)
   where trim = reverse . dropWhile (`elem` ['\n','\r']) . reverse
@@ -389,11 +396,13 @@ fixture =
 qualifiedFixture :: String
 qualifiedFixture =
   unlines
-    [ "module QualifiedSource (onlyQualified, (%%)) where",
+    [ "module QualifiedSource (onlyQualified, (%%), (.%)) where",
       "onlyQualified :: Int -> Bool",
       "onlyQualified = undefined",
       "(%%) :: Int -> Bool",
-      "(%%) = undefined"
+      "(%%) = undefined",
+      "(.%) :: Int -> Bool",
+      "(.%) = undefined"
     ]
 
 ambiguousAFixture :: String
