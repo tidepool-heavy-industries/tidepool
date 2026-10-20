@@ -1,3 +1,5 @@
+// Match the actor library's proof budget for shared compiler snapshot ownership.
+#![recursion_limit = "256"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
