@@ -293,7 +293,9 @@ pub(super) fn verified_root_choice(
     owner: &tidepool_repr::execution_schema::CachedHomeOwner,
     entry: &ArtifactEntry,
 ) -> Result<NativeGroupBinding, CompileError> {
-    use crate::certified_products::{CertificationError, NativeGroupCandidates};
+    use crate::certified_products::{
+        CertificationError, InputDecisionRefusal, NativeGroupCandidates,
+    };
     let identity = module_identity(owner);
     let (support, native_owner) = match selection.continuation_input(&identity) {
         Ok(Some(input)) => input,
@@ -303,8 +305,11 @@ pub(super) fn verified_root_choice(
                 NativeAdmissionRefusal::RootChoiceMissing { owner: identity },
             ))
         }
-        Err(CertificationError::InputDecision { reason, .. }) => {
-            return Err(root_refusal(key, root_evidence_refusal(&identity, reason)))
+        Err(error @ CertificationError::InputDecision { reason, .. }) => {
+            return Err(match root_evidence_refusal(&identity, reason) {
+                Ok(refusal) => root_refusal(key, refusal),
+                Err(_) => CompileError::CompilerEvidence(Box::new(error)),
+            })
         }
         Err(error) => return Err(CompileError::CompilerEvidence(Box::new(error))),
     };
@@ -318,8 +323,15 @@ pub(super) fn verified_root_choice(
     );
     let choices = match support
         .checked_native_input_decision(key.artifact, canonical, native_owner)
-        .map_err(|reason| root_refusal(key, root_evidence_refusal(&identity, reason)))?
-    {
+        .map_err(|reason| match root_evidence_refusal(&identity, reason) {
+            Ok(refusal) => root_refusal(key, refusal),
+            Err(reason) => {
+                CompileError::CompilerEvidence(Box::new(CertificationError::InputDecision {
+                    owner: identity.clone(),
+                    reason,
+                }))
+            }
+        })? {
         InputNativeDecision::IssuedChoices(choices) => choices,
         InputNativeDecision::UnissuedPolicy => {
             return Err(root_refusal(
@@ -362,22 +374,36 @@ pub(super) fn verified_root_choice(
             key,
             NativeAdmissionRefusal::RootChoiceUnavailable { chosen: *chosen },
         )),
-        Ok(NativeGroupCandidates::NewProduct(_)) | Err(_) => Err(root_refusal(
+        Ok(NativeGroupCandidates::NewProduct(_)) => Err(root_refusal(
             key,
             NativeAdmissionRefusal::RootChoiceConflicting {
                 chosen: *chosen,
                 recorded: None,
             },
         )),
+        Err(CertificationError::InputDecision {
+            reason: InputDecisionRefusal::UnavailableChosenBinding,
+            ..
+        }) => Err(root_refusal(
+            key,
+            NativeAdmissionRefusal::RootChoiceUnavailable { chosen: *chosen },
+        )),
+        Err(error @ CertificationError::InputDecision { reason, .. }) => {
+            Err(match root_evidence_refusal(&identity, reason) {
+                Ok(refusal) => root_refusal(key, refusal),
+                Err(_) => CompileError::CompilerEvidence(Box::new(error)),
+            })
+        }
+        Err(error) => Err(CompileError::CompilerEvidence(Box::new(error))),
     }
 }
 
 fn root_evidence_refusal(
     identity: &ExactModuleIdentity,
     reason: crate::certified_products::InputDecisionRefusal,
-) -> NativeAdmissionRefusal {
+) -> Result<NativeAdmissionRefusal, crate::certified_products::InputDecisionRefusal> {
     use crate::certified_products::InputDecisionRefusal;
-    match reason {
+    Ok(match reason {
         InputDecisionRefusal::UnexpectedVersion => {
             NativeAdmissionRefusal::RootChoiceVersionMismatch {
                 owner: identity.clone(),
@@ -390,13 +416,13 @@ fn root_evidence_refusal(
         }
         InputDecisionRefusal::NativeOwnerMismatch
         | InputDecisionRefusal::ArtifactIdentityMismatch
-        | InputDecisionRefusal::RoleMismatch
-        | InputDecisionRefusal::UnavailableChosenBinding => {
+        | InputDecisionRefusal::RoleMismatch => {
             NativeAdmissionRefusal::RootChoiceIdentityMismatch {
                 owner: identity.clone(),
             }
         }
-    }
+        InputDecisionRefusal::UnavailableChosenBinding => return Err(reason),
+    })
 }
 
 /// Resolve the own binding of a positively completed product. A carried own

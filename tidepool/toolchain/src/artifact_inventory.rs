@@ -11059,6 +11059,183 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bound_target_root_choice_keeps_missing_empty_and_unavailable_distinct() {
+        use crate::certified_products::{
+            CertificationError, CertifiedSourceSelection, InputDecisionRefusal,
+        };
+        use crate::declaration_context::{
+            ExactDeclarationContext, OriginalCompilerInputs, ProtectedScaffoldRequirements,
+        };
+        for physical_choice in [false, true] {
+            let inventory = ArtifactInventory::default();
+            let native = Arc::new(issued_native_groups(
+                "BoundInheritedCarrier",
+                vec![(7, vec![])],
+                &[],
+                &BTreeMap::new(),
+            ));
+            let ArtifactPayload::Original(product) = &native.payload else {
+                unreachable!()
+            };
+            let key = NativeGroupKey {
+                artifact: native.descriptor.id,
+                original_ordinal: 7,
+            };
+            let entries = vec![native.clone(), Arc::new(entry("InheritedLeft", &[]))];
+            let physical = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    entries.clone(),
+                    if physical_choice {
+                        NativeArtifactDemand::AllGroups
+                    } else {
+                        NativeArtifactDemand::ScopeInterfaces
+                    },
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let operation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let mut current = CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &physical.metadata_snapshot(),
+                &operation.inventory,
+            )
+            .unwrap();
+            let initial = OriginalCompilerInputs::from_selection(&current, &physical).unwrap();
+            let unselected = CompilerSourceSupport::close_complete_output(&initial)
+                .unwrap()
+                .close_request(None, &ProtectedScaffoldRequirements::default())
+                .unwrap();
+            assert!(!unselected.native_offers().is_empty());
+            assert!(unselected
+                .native_offers()
+                .iter()
+                .all(|offer| offer.is_full()));
+
+            // Finish and select through the same actual producer before input use.
+            let issued = OriginalCompilerInputs::issue_segment_native_availability(
+                &mut current,
+                &physical,
+                entries,
+            )
+            .unwrap();
+            let closure = current.selected_original_closure(&issued).unwrap();
+            let expected = closure
+                .native_closure()
+                .capture_graph_selection()
+                .native_groups;
+            assert_eq!(expected.len(), 1);
+            assert_eq!(expected[0].binding.artifact(), key.artifact);
+            assert_eq!(expected[0].original_ordinal, key.original_ordinal);
+            let output = OriginalCompilerInputs::from_selection(&current, &issued).unwrap();
+            let selected = CompilerSourceSupport::close_complete_output(&output)
+                .unwrap()
+                .certify_original_closure(&closure)
+                .unwrap();
+            let context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&selected)
+                .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
+                .unwrap();
+            let selected_receipt =
+                CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory).unwrap();
+            let owner = inputs.artifacts().inventory();
+            let imports = [issued_source(&native, 7)];
+            let mut fixed = owner
+                .bind_segment(inputs.artifacts(), vec![], &selected_receipt)
+                .unwrap();
+            let admitted = owner
+                .admit_bound_target(
+                    &mut fixed,
+                    &owner.empty_view(),
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &selected_receipt,
+                )
+                .unwrap();
+            assert_eq!(
+                admitted.artifacts().capture_graph_selection().native_groups,
+                expected
+            );
+
+            // Current output is not an input continuation, even with Full bodies.
+            assert!(
+                matches!(native_availability::verified_root_choice(&current, key, product.owner(), &native),
+                Err(CompileError::ArtifactInventory(error)) if matches!(error.native_refusal,
+                    Some(NativeAdmissionRefusal::RootChoiceMissing { owner }) if owner == native.descriptor.owner))
+            );
+
+            let context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&unselected)
+                .unwrap();
+            let inputs = context
+                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
+                .unwrap();
+            let receipt =
+                CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory).unwrap();
+            let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap());
+            let InputNativeDecision::IssuedChoices(choices) = inputs
+                .compiler_source_support()
+                .checked_native_input_decision(key.artifact, canonical, product.owner())
+                .unwrap()
+            else {
+                panic!("the request must preserve its issued decision");
+            };
+            let chosen = choices.get(&key.original_ordinal).copied();
+            if physical_choice {
+                assert!(chosen.is_some());
+                assert!(matches!(
+                    receipt.native_group_candidates(key, product.owner()),
+                    Err(CertificationError::InputDecision {
+                        reason: InputDecisionRefusal::UnavailableChosenBinding,
+                        ..
+                    })
+                ));
+            } else {
+                assert!(choices.is_empty());
+            }
+            let owner = inputs.artifacts().inventory();
+            let mut fixed = owner
+                .bind_segment(inputs.artifacts(), vec![], &receipt)
+                .unwrap();
+            let before = fixed.view.capture_graph_selection();
+            let denied = owner
+                .admit_bound_target(
+                    &mut fixed,
+                    &owner.empty_view(),
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &receipt,
+                )
+                .unwrap_err();
+            let CompileError::ArtifactInventory(error) = denied else {
+                panic!("expected typed native root refusal");
+            };
+            assert!(
+                matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal: 7 } if artifact == key.artifact)
+            );
+            match (chosen, error.native_refusal) {
+                (
+                    Some(chosen),
+                    Some(NativeAdmissionRefusal::RootChoiceUnavailable { chosen: refused }),
+                ) => assert_eq!(refused, chosen),
+                (
+                    None,
+                    Some(NativeAdmissionRefusal::RootChoiceExplicitEmpty {
+                        owner,
+                        original_ordinal: 7,
+                    }),
+                ) => assert_eq!(owner, native.descriptor.owner),
+                (_, other) => panic!("root refusal lost the issued decision: {other:?}"),
+            }
+            assert_eq!(fixed.view.capture_graph_selection(), before);
+        }
+    }
+
     fn assert_bound_segment_exact_carrier(complete: bool) {
         {
             let inventory = ArtifactInventory::default();
