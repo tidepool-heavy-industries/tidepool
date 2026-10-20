@@ -6267,11 +6267,10 @@ where
     }
 
     fn hide_current_host_binding(&mut self, scope: ScopeId, id: SessionVarId) {
-        if self
-            .hidden_host_bindings
-            .insert(id, HiddenHostBinding::Generic)
-            .is_none()
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.hidden_host_bindings.entry(id)
         {
+            entry.insert(HiddenHostBinding::Generic);
             self.state.advance_compiler_input_revision();
             self.advance_public_visibility(scope);
         }
@@ -9696,7 +9695,7 @@ mod authored_publication_tests {
             id
         };
         let (_root, mut session) = startup_session();
-        let original = session.adopt_initial_notebook_scope(ScopeId::ROOT).unwrap();
+        let original = session.state.mint_notebook_scope_with_lease(None).unwrap();
         let parent = session.mint_isolated_scope();
         let _parent = session.adopt_initial_notebook_scope(parent).unwrap();
         let id = source_action(&mut session, &original, |session, _| {
@@ -9770,7 +9769,7 @@ mod authored_publication_tests {
     #[test]
     fn never_visible_input_retirement_keeps_hidden_classification_until_last_lease() {
         let (_root, mut session) = startup_session();
-        let original = session.adopt_initial_notebook_scope(ScopeId::ROOT).unwrap();
+        let original = session.state.mint_notebook_scope_with_lease(None).unwrap();
         let private = session.mint_isolated_scope();
         let _private = session.adopt_initial_notebook_scope(private).unwrap();
         let id = source_action(&mut session, &original, |session, _| {
