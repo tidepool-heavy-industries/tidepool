@@ -8885,26 +8885,19 @@ where
                 prompts.clone(),
             )
             .await?;
-        match publisher
+        let generation = publisher
             .publish(
                 prepared,
                 tidepool_runtime::session::PublicationDecision::new(),
                 crate::resident_workbench::ActorGenerationPublication::Terminal,
             )
             .await?
-        {
-            crate::resident_workbench::ActorGenerationCommit::Published { generation, .. } => {
-                if let Some(lifecycle) = &self.lifecycle {
-                    lifecycle.generation_published(generation);
-                }
-                installation.prepared_tools.take();
-                Ok(())
-            }
-            crate::resident_workbench::ActorGenerationCommit::Refused(detail)
-            | crate::resident_workbench::ActorGenerationCommit::Unconfirmed(detail) => {
-                Err(ResidentActorWorkbenchError::ActorProtocol(detail))
-            }
+            .into_initial_generation()?;
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.generation_published(generation);
         }
+        installation.prepared_tools.take();
+        Ok(())
     }
 
     async fn commit_interactive_installation(

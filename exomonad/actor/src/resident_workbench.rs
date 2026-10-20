@@ -2767,6 +2767,25 @@ pub(crate) enum ActorGenerationCommit {
     Unconfirmed(String),
 }
 
+impl ActorGenerationCommit {
+    pub(crate) fn into_initial_generation(
+        self,
+    ) -> Result<Arc<ActorGeneration>, ResidentActorWorkbenchError> {
+        match self {
+            Self::Published { generation, .. } => Ok(generation),
+            Self::Refused(detail) => Err(ResidentActorWorkbenchError::ActorProtocol(detail)),
+            outcome @ Self::Unconfirmed(_) => {
+                Err(ResidentActorWorkbenchError::PublicationSettlement {
+                    failure: Box::new(ActorPublicationSettlementFailure {
+                        outcome: Ok(outcome),
+                        settlement: PublicationSettlementError::PublicationUnconfirmed,
+                    }),
+                })
+            }
+        }
+    }
+}
+
 /// A primary publication outcome and its independent failed source settlement.
 /// The outcome stays typed until the actor's final diagnostic boundary.
 pub struct ActorPublicationSettlementFailure {
@@ -20515,6 +20534,33 @@ pub(crate) mod request_tests {
         with_test_compiler_owner(|preparation_client|
             quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(preparation_client.clone(), Some(crate::ActorPersistencePolicy::Ephemeral), None),
         ).await
+    }
+
+    #[test]
+    fn initial_publication_preserves_unconfirmed_outcome_and_recovery() {
+        let detail = "initial publication acknowledgement was lost";
+        let error = ActorGenerationCommit::Unconfirmed(detail.into())
+            .into_initial_generation()
+            .err()
+            .expect("unconfirmed publication cannot finish startup");
+        assert!(error.requires_recovery());
+        let ResidentActorWorkbenchError::PublicationSettlement { failure } = error else {
+            panic!("startup must retain its typed publication obligation");
+        };
+        assert!(matches!(
+            failure.outcome,
+            Ok(ActorGenerationCommit::Unconfirmed(ref observed)) if observed == detail
+        ));
+        assert!(matches!(
+            failure.settlement,
+            PublicationSettlementError::PublicationUnconfirmed
+        ));
+        let refusal = ActorGenerationCommit::Refused("candidate refused".into())
+            .into_initial_generation()
+            .err()
+            .expect("ordinary refusal cannot finish startup");
+        assert!(!refusal.requires_recovery());
+        assert!(matches!(refusal, ResidentActorWorkbenchError::ActorProtocol(_)));
     }
 
     #[derive(Clone, Copy)]
