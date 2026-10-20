@@ -385,6 +385,18 @@ impl RuntimeSourcePublicationView {
             {
                 return Err(SourceAdmissionError::StaleFence);
             }
+            if state.unconfirmed != 0 {
+                return Err(SourceAdmissionError::Unconfirmed {
+                    scope: self.owner.0.scope,
+                    count: state.unconfirmed,
+                });
+            }
+            if state.claims != 0 {
+                return Err(SourceAdmissionError::BootstrapBusy {
+                    claims: state.claims,
+                    unconfirmed: 0,
+                });
+            }
             Ok(action())
         })
     }
@@ -632,6 +644,35 @@ mod tests {
             .with_current(&lease, || ran.set(true))
             .unwrap();
         assert!(ran.get());
+    }
+
+    #[test]
+    fn publication_view_keeps_pending_and_unconfirmed_source_obligations() {
+        for unconfirmed in [false, true] {
+            let mut session = PersistentSession::new(None, 0);
+            let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+            let claim = lease.admit_source().unwrap();
+            let fence = lease.source_admission().fence().unwrap();
+            let view = fence.publication_view();
+            if unconfirmed {
+                claim.retain_unconfirmed();
+                assert!(matches!(
+                    view.with_current(&lease, || panic!("unconfirmed source cannot publish")),
+                    Err(SourceAdmissionError::Unconfirmed { count: 1, .. })
+                ));
+                assert_eq!(fence.unconfirmed_claims(), 1);
+            } else {
+                assert!(matches!(
+                    view.with_current(&lease, || panic!("pending source cannot publish")),
+                    Err(SourceAdmissionError::BootstrapBusy {
+                        claims: 1,
+                        unconfirmed: 0
+                    })
+                ));
+                drop(claim);
+                view.with_current(&lease, || ()).unwrap();
+            }
+        }
     }
 
     #[test]
