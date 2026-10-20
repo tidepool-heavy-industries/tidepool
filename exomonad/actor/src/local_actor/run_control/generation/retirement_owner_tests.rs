@@ -246,7 +246,7 @@ impl RunControlClient {
                 preparation,
                 inventory: GenerationRetirementInventory::Unavailable,
                 diagnostic: GenerationRetirementDiagnostic::CancelledComponent,
-                reply,
+                reply: GenerationRetirementBeginReply::Observe(reply),
             })
             .unwrap();
         let observer = expect_begin(answer.await.unwrap());
@@ -562,7 +562,7 @@ impl RunControlClient {
                     preparation,
                     inventory: GenerationRetirementInventory::Unavailable,
                     diagnostic: GenerationRetirementDiagnostic::CancelledComponent,
-                    reply,
+                    reply: GenerationRetirementBeginReply::Observe(reply),
                 })
                 .unwrap();
             if control == GenerationRetirementNativeControl::PanicAfterReserve {
