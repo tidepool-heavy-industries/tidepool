@@ -306,6 +306,13 @@ pub struct PersistentSession {
     retired_stub_sources: Vec<Generation>,
 }
 
+pub(super) struct WorldDeclarationVisibleBinding {
+    pub(super) identity: tidepool_repr::execution_schema::SymbolIdentity,
+    pub(super) id: SessionVarId,
+    pub(super) defining_scope: u64,
+    pub(super) row: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct CompileViewKey {
     library: uuid::Uuid,
@@ -2407,7 +2414,7 @@ impl PersistentSession {
         prepare: impl FnOnce(
             CompileViewKey,
             super::PublicVisibilitySnapshot,
-            Vec<(String, Option<(SessionVarId, u64)>)>,
+            Vec<(String, Option<WorldDeclarationVisibleBinding>)>,
         ) -> Result<A, SessionError>,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
         self.adopt_staged_declaration_prepared(
@@ -2429,12 +2436,27 @@ impl PersistentSession {
                 key.tip = staged.generation;
                 key.bindings = projected.scope_witness().clone();
                 key.public_epoch = next_epoch;
-                let delta: Vec<_> = projected
+                let delta = projected
                     .visible_changes()
                     .map(|(name, entry)| {
-                        (name.0.clone(), entry.map(|entry| (entry.id, entry.scope.0)))
+                        let binding = entry
+                            .map(|entry| {
+                                let row = session
+                                    .retained_checked_value_artifact(entry.module)
+                                    .ok_or(SessionError::MissingRetainedValueInterface(
+                                        entry.module,
+                                    ))?;
+                                Ok(WorldDeclarationVisibleBinding {
+                                    identity: entry.value.identity.clone(),
+                                    id: entry.id,
+                                    defining_scope: entry.scope.0,
+                                    row: row.clone(),
+                                })
+                            })
+                            .transpose()?;
+                        Ok((name.0.clone(), binding))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, SessionError>>()?;
                 let mut visibility = prior.clone();
                 visibility.epoch = next_epoch;
                 visibility.declaration_tip = staged.generation;
@@ -2445,10 +2467,10 @@ impl PersistentSession {
                             .binary_search_by(|(existing, _)| existing.cmp(name)),
                         entry,
                     ) {
-                        (Ok(index), Some((id, _))) => visibility.bindings[index].1 = *id,
-                        (Err(index), Some((id, _))) => {
-                            visibility.bindings.insert(index, (name.clone(), *id))
-                        }
+                        (Ok(index), Some(binding)) => visibility.bindings[index].1 = binding.id,
+                        (Err(index), Some(binding)) => visibility
+                            .bindings
+                            .insert(index, (name.clone(), binding.id)),
                         (Ok(index), None) => {
                             visibility.bindings.remove(index);
                         }

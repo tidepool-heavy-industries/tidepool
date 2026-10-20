@@ -1435,7 +1435,7 @@ impl crate::checked_cell::CellProgram {
         joined: &Arc<crate::declaration_join::AcceptedJoin>,
         projection_context: &Arc<ExactDeclarationContext>,
         import_specs: Vec<String>,
-        visible_changes: impl IntoIterator<Item = (&'a str, Option<(tidepool_repr::SessionVarId, u64)>)>,
+        visible_changes: impl IntoIterator<Item = (&'a str, Option<CompilerWorldBinding<'a>>)>,
     ) -> Result<Arc<CompilerWorld>, CompileError> {
         let crate::checked_cell::CellProgramBasis::World(program) = self.basis() else {
             return Err(source_failure("finite declaration has no World successor"));
@@ -1476,14 +1476,22 @@ impl crate::checked_cell::CellProgram {
             ));
         }
         let owner = authored.product().owner();
-        let expected = authored.compiler_source_support().world_primary_type_row(owner)
+        let expected = authored
+            .compiler_source_support()
+            .world_primary_type_row(owner)
             .ok_or_else(|| source_failure("authored item lacks its issued primary binding"))?;
-        let actual = projection_context.compiler_source_support().world_primary_type_row(owner)
-            .ok_or_else(|| source_failure("declaration projection omits the actual authored owner"))?;
+        let actual = projection_context
+            .compiler_source_support()
+            .world_primary_type_row(owner)
+            .ok_or_else(|| {
+                source_failure("declaration projection omits the actual authored owner")
+            })?;
         if actual.interface_binding != expected.interface_binding
             || actual.original_binding != expected.original_binding
         {
-            return Err(source_failure("declaration projection substitutes its authored binding"));
+            return Err(source_failure(
+                "declaration projection substitutes its authored binding",
+            ));
         }
         let advance = predecessor
             .restoration
@@ -1499,28 +1507,34 @@ impl crate::checked_cell::CellProgram {
         )?
         .with_observation(predecessor.restoration.inputs.lexical.observation.clone())?;
         let mut changes = BTreeMap::new();
+        let mut added = Vec::new();
         for (name, binding) in visible_changes {
             if name.is_empty() || name.contains('\0') || changes.contains_key(name) {
                 return Err(source_failure("invalid declaration binding delta"));
             }
-            let fact = match binding {
-                None => None,
-                Some((id, scope)) => Some(
-                    predecessor
-                        .restoration
-                        .inputs
-                        .bindings
-                        .entries
-                        .get(name)
-                        .filter(|fact| fact.session_var == id && fact.defining_scope == scope)
-                        .ok_or_else(|| {
-                            source_failure("declaration delta has another issued binding")
-                        })?
-                        .clone(),
-                ),
-            };
-            changes.insert(name.to_owned(), fact);
+            if let Some(binding) = binding {
+                if binding.occurrence != name {
+                    return Err(source_failure("declaration winner has another occurrence"));
+                }
+                added.push(binding);
+                changes.insert(name.to_owned(), true);
+            } else {
+                changes.insert(name.to_owned(), false);
+            }
         }
+        let mut additions = CompilerWorldBindings::from_published_bindings(
+            predecessor.restoration.inputs.bindings.query_scope,
+            added,
+        )?;
+        let changes = changes.into_iter().map(|(name, present)| {
+            let fact = present.then(|| {
+                additions
+                    .entries
+                    .remove(&name)
+                    .expect("validated declaration winner")
+            });
+            (name, fact)
+        });
         predecessor.project_bindings_with_declaration(
             predecessor.restoration.inputs.bindings.query_scope,
             changes,
@@ -1932,6 +1946,15 @@ impl CompilerWorld {
                     &mut materializer,
                     &mut remaining,
                 )?;
+                if let Some(previous) = prior
+                    .primary_compiler_inputs
+                    .compiler_source_support()
+                    .world_primary_type_row(owner)
+                {
+                    if previous.transport_binding != selected.transport_binding {
+                        associations.remove(previous.transport_binding);
+                    }
+                }
                 associations.insert(*selected.transport_binding, fact);
                 primary_changes.push(world_array(vec![
                     world_text(&owner.unit),

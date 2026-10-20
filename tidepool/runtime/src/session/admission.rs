@@ -3086,7 +3086,11 @@ impl PersistentSession {
                         import_specs,
                         delta
                             .iter()
-                            .map(|(name, binding)| (name.as_str(), *binding)),
+                            .map(|(name, binding)| (name.as_str(), binding.as_ref().map(|binding| {
+                                tidepool_toolchain::compiler_world::CompilerWorldBinding::from_checked_value(
+                                    name, &binding.identity, binding.id, binding.defining_scope, binding.row.clone(),
+                                )
+                            }))),
                     )?;
                     let association = Arc::new(super::inspection::InspectionWorldAssociation {
                         base: super::inspection::InspectionWorldBase {
