@@ -888,7 +888,7 @@ pub fn prepare_world_cell_program(
             .iter()
             .map(|row| row.owner().module_name())
             .collect::<Vec<_>>();
-        let selected_values =
+        let runtime_values =
             SelectedSessionValueOwners::capture(names.iter().map(std::ffi::OsStr::new))?;
         let first = *stage
             .ordinals()
@@ -902,7 +902,6 @@ pub fn prepare_world_cell_program(
             crate::declaration_context::decode_world_source_receipt(&program, stage.index())?;
         let mut segment = decoded.issue_segment_originals(
             None,
-            &selected_values,
             Some(&stage_produced),
             &mut validation,
             continuation,
@@ -1000,7 +999,7 @@ pub fn prepare_world_cell_program(
                     .select_item(
                         item_receipt,
                         &target,
-                        &selected_values,
+                        &runtime_values,
                         Some(&produced),
                         &mut validation,
                     )

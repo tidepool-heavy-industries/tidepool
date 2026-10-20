@@ -7275,7 +7275,8 @@ impl<'a> ProductInputFacts<'a> {
             ),
             groups: groups.groups(),
             // A world cell has no program-level source continuation. Its
-            // checked value imports are the output owner's demanded rows.
+            // checked imports also retain an unused operation input's interface;
+            // executable demand remains with the checked stage.
             source_lexical: &[],
             program_support: None,
             source_selected_support: &EMPTY_SELECTED_SUPPORT,
@@ -9629,11 +9630,9 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
     /// groups and native permission are projected through the demanded owner;
     /// no `ExactCompilationRequest` or finite baseline is manufactured.
     // boundary: see CELL-PREPARATION-BOUNDARY.md
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn issue_segment_originals(
         self,
         candidates: Option<&crate::module_candidates::CandidateSet>,
-        selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
         continuation: WorldProgramContinuation,
@@ -9674,6 +9673,10 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         let checked_values = crate::checked_cell::CheckedValueImportAuthority::from_world_stage(
             program,
             &self.binding.stage,
+        )?;
+        let selected_values = crate::artifacts::SelectedSessionValueOwners::from_checked_imports(
+            &checked_values,
+            operation,
         )?;
         let context = &continuation.context;
         let binding = WorldCompilationIdentity::from_binding(&self.binding);
@@ -9730,7 +9733,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             &self.aliases,
             authored.as_ref(),
             candidates,
-            selected_values,
+            &selected_values,
             produced,
             validation,
         )

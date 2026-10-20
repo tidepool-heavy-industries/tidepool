@@ -131,6 +131,10 @@ admitted prefix and executable demand; item admission stages support and value
 results before advancing both. Compiler receipt, binder, table and target checks
 belong to `PreparedCellProgram`. Contextual sealing consumes those observations
 after physical compiler close and preserves independent host cancellation.
+World certificate selection comes from the stage's checked import authority,
+which includes the operation's actual input even when unused. Runtime item
+selection comes from that stage's demanded rows. Neither list substitutes for
+the other: importing a value interface does not select its executable value.
 
 Candidate publication starts once after every item of the segment seals and
 rechecks mutable source observations. Cancellation refuses program handoff and
