@@ -46,7 +46,7 @@ module Tidepool.GhcPipeline
   , materializeWorldSources, worldMaterializationCharge, retainWorldMaterialization, releaseWorldMaterialization
   , worldMaterializationOwners, emitWorldAcquisitionRejection
   , CompletedCompilerResult, completedCompilerResult, completedCompilerRecovery, completedCompilerGuard
-  , completedCompilerWorldCompletion, WorldCompilerCompletion, worldCompilerCompletionInputs, worldCompilerCompletionDependencies, worldCompilerCompletionPlannedDeclaration
+  , completedCompilerWorldCompletion, WorldCompilerCompletion, worldCompilerCompletionInputs, worldCompilerCompletionDependencies, worldCompilerCompletionPlannedDeclaration, requireWorldProductPredecessor
   , WorldCellInputs, worldCellRetainedGenerations, worldCellCompilerInputReferences, worldCellSourceSnapshot, worldCellExactImports, worldCellSourceSelection, worldCellSourceRootAliases, worldCellTypeInterfaces
   , WorldCellInputReference, encodeWorldCellInputReference, worldCellInputReferenceBinding, selectWorldCellExecutionInputReferences
   , PendingWorldDependencies
@@ -497,7 +497,7 @@ revalidatePreparedCandidateInputs prepared =
 data PreparedDependencies
   = SourceOnly DependencyEvidence
   | ExactScoped DependencyEvidence ExactCompilation CompletedSourceImports
-  | WorldScoped DependencyEvidence BS.ByteString BS.ByteString (Maybe WorldCompletedDependencies)
+  | WorldScoped DependencyEvidence BS.ByteString BS.ByteString (Maybe WorldPrivateCompletion)
       WorldSourceCaptureBasis
 
 -- The admitted producer and source-import projection belong to this completed
@@ -523,7 +523,7 @@ worldSourceOriginalFinalization (WorldSourceOriginal original _) = original
 acquireWorldSourceOriginal :: PreparedPipelineResult -> Module -> LocalFinalizedAdmission
   -> IO (Maybe WorldSourceOriginal)
 acquireWorldSourceOriginal prepared owner proof = case ownedPprDependencies prepared of
-  WorldScoped _ _ domain (Just (WorldCompletedDependencies policy versions)) _ -> do
+  WorldScoped _ _ domain (Just (WorldPrivateCompletion _ (WorldCompletedDependencies policy versions))) _ -> do
     let WorldDependencyPolicy _ _ _ selectedDomain = policy
         (artifact,_,_) = localFinalizedInterface proof
         environment = prHscEnv (pprPipelineResult prepared)
@@ -1303,7 +1303,7 @@ data PipelineVariant = PipelineVariant
   , pvExactScope :: Maybe ExactScope
   , pvWorldOnly :: Bool
   , pvWorldOriginalBindings :: Map.Map Name SymbolIdentity
-  , pvWorldCompletedDependencies :: Maybe WorldCompletedDependencies
+  , pvWorldCompletedDependencies :: Maybe WorldPrivateCompletion
   , pvWorldSources :: Maybe WorldSourceInputBasis
     -- ^ Admitted immutable declaration owners, independent of live values.
   , pvCompilerProducer :: Maybe CompilerProducerIdentity
@@ -1495,6 +1495,10 @@ data WorldDependencyAttempt = WorldDependencyAttempt
 data PendingWorldDependencies = PendingWorldDependencies CompilerExecutor String String WorldDependencyPolicy
   (IORef (Maybe WorldModuleVersions))
 
+-- Immutable private versions remain paired with the actual pending completion
+-- that issued them. Borrowing is not publication or a second attempt owner.
+data WorldPrivateCompletion = WorldPrivateCompletion !PendingWorldDependencies !WorldCompletedDependencies
+
 emptyWorldPreparedModules :: WorldPreparedModules
 emptyWorldPreparedModules = WorldPreparedModules emptyHomePackageTable Map.empty Nothing Nothing
 
@@ -1513,7 +1517,7 @@ heldWorldCellFlags baseEnv directory roots = foldl' gopt_unset ((hsc_dflags base
   ,hiDir=Just directory,objectDir=Just directory,stubDir=Just directory})
   [Opt_WriteInterface,Opt_WriteIfSimplifiedCore,Opt_ByteCode,Opt_ByteCodeAndObjectCode]
 
-beginHeldWorldDependencyAttempt :: CompilerUniverse -> HeldCompilerWorld -> Maybe WorldCompletedDependencies -> IO WorldDependencyAttempt
+beginHeldWorldDependencyAttempt :: CompilerUniverse -> HeldCompilerWorld -> Maybe WorldPrivateCompletion -> IO WorldDependencyAttempt
 beginHeldWorldDependencyAttempt universe
     (HeldCompilerWorld facts reference (WorldMaterialization _ _ _ _ paths _ _ _ _) preparedRef) private = do
   policy <- worldDependencyPolicy universe facts
@@ -1525,7 +1529,7 @@ beginHeldWorldDependencyAttempt universe
       | otherwise -> throwIO WorldCellCorrupt
   versions <- case private of
     Nothing -> pure committed
-    Just (WorldCompletedDependencies issued selected)
+    Just (WorldPrivateCompletion _ (WorldCompletedDependencies issued selected))
       | issued == policy -> pure (mergeWorldModuleVersions selected committed)
       | otherwise -> throwIO WorldCellCorrupt
   cache <- newIfaceCache
@@ -1593,19 +1597,19 @@ stageHeldWorldDependencies executor
 -- publication. The admission owner already binds this continuation to one
 -- executor and held World; publication remains independently one-shot.
 borrowHeldWorldDependencies :: CompilerExecutor -> WorldInputFacts -> String
-  -> Maybe WorldCompletedDependencies -> PendingWorldDependencies -> IO WorldCompletedDependencies
+  -> Maybe WorldPrivateCompletion -> PendingWorldDependencies -> IO WorldPrivateCompletion
 borrowHeldWorldDependencies executor facts reference previous
-    (PendingWorldDependencies issued identity realization policy pending) = do
+    completion@(PendingWorldDependencies issued identity realization policy pending) = do
   unless (sameCompilerExecutor executor issued && identity == worldInputsIdentity facts
       && realization == reference) (throwIO WorldCellCorrupt)
   requireCompilerExecutorOpen executor
   additions <- readIORef pending >>= maybe (throwIO CheckedPurposeMismatch) pure
   retained <- case previous of
     Nothing -> pure Map.empty
-    Just (WorldCompletedDependencies old selected)
+    Just (WorldPrivateCompletion _ (WorldCompletedDependencies old selected))
       | old == policy -> pure selected
       | otherwise -> throwIO WorldCellCorrupt
-  pure (WorldCompletedDependencies policy (mergeWorldModuleVersions additions retained))
+  pure (WorldPrivateCompletion completion (WorldCompletedDependencies policy (mergeWorldModuleVersions additions retained)))
 
 mergeWorldModuleVersions :: WorldModuleVersions -> WorldModuleVersions -> WorldModuleVersions
 mergeWorldModuleVersions = Map.unionWith (Map.unionWith (Map.unionWith preferModuleVersion))
@@ -2474,8 +2478,10 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
               WorldCellSource _ _ prefix _ _ _ -> map ms_mod_name (worldCellPrefixOriginalSummaries prefix)
               WorldObservationSource {} -> []
         , pvWorldOriginalBindings=Map.empty
-        , pvWorldCompletedDependencies=case dependencies of
-            WorldDependencyAttempt _ _ policy _ versions _ _ _ _ -> Just (WorldCompletedDependencies policy versions)
+        , pvWorldCompletedDependencies=case (privateDependencies,dependencies) of
+            (Just (WorldPrivateCompletion previous _),WorldDependencyAttempt _ _ policy _ versions _ _ _ _) ->
+              Just (WorldPrivateCompletion previous (WorldCompletedDependencies policy versions))
+            _ -> Nothing
         , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand operandInterfaces)
         , pvTransformParsed = \target environment summary parsed -> do
             annotated <- if ms_mod_name summary /= target
@@ -6874,7 +6880,7 @@ data HeldWorldCellAdmission = HeldWorldCellAdmission (IORef CompilerPhase)
 -- Private compiler facts from successfully completed earlier stages. They grant
 -- neither runtime values nor permission to publish a partial cell.
 data WorldCellPrefix = WorldCellPrefix !Int HomePackageTable ModuleGraph
-  (Maybe WorldCompletedDependencies) [PlannedDeclarationInventory] (SegmentDemandScope WorldDemandBinding) [LocatedImport] WorldCellStageState
+  (Maybe WorldPrivateCompletion) [PlannedDeclarationInventory] (SegmentDemandScope WorldDemandBinding) [LocatedImport] WorldCellStageState
 
 data WorldCellStageState = WorldStagePending | WorldStageRendered HeldWorldCellStage | WorldStageRetry CellSourcePlan
 
@@ -7078,6 +7084,20 @@ data WorldCellInputs = WorldCellInputs
 -- completion issued by the same request. There is no empty World shape.
 data WorldCompilerCompletion = WorldCompilerCompletion WorldCellInputs PendingWorldDependencies
   (Maybe (PlannedDeclaration,PlannedDeclarationInventory))
+
+-- A private next stage may consume only the immediately preceding actual
+-- completion borrowed by its admitted compiler cursor, not a same-World sibling.
+requireWorldProductPredecessor :: PreparedPipelineResult -> WorldCompilerCompletion -> IO ()
+requireWorldProductPredecessor prepared (WorldCompilerCompletion _ previous _) =
+  case ownedPprDependencies prepared of
+    WorldScoped _ _ _ (Just (WorldPrivateCompletion actual _)) _
+      | samePending actual previous -> pure ()
+    _ -> throwIO WorldCellCorrupt
+  where
+    samePending (PendingWorldDependencies executor world reference _ pending)
+        (PendingWorldDependencies issued selected realization _ expected) =
+      sameCompilerExecutor executor issued && world == selected && reference == realization
+        && pending == expected
 
 worldCompilerCompletionInputs :: WorldCompilerCompletion -> WorldCellInputs
 worldCompilerCompletionInputs (WorldCompilerCompletion inputs _ _) = inputs

@@ -373,7 +373,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   changedInterface <- newFinalizedModule env
     originalHome {hm_iface=set_mi_usages [] originalIface} guts
   changedInterfaceBody <- captureFinalizedInterface changedInterface
-  rejectedInterface <- try (admitCompiledCanonicalOriginal env proof changedInterface roots)
+  rejectedInterface <- try (admitCompiledCanonicalOriginal env ready changedInterface roots)
     :: IO (Either CandidateCoreFailure AdmittedFinalizedOriginal)
   assert (case rejectedInterface of
       Left CandidateOriginalInterfaceMismatch

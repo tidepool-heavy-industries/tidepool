@@ -43,7 +43,7 @@ import Tidepool.CompilerProducts
   ( writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs
   , stagedOriginalEntryOrdinal, stagedOriginalOutputFiles, publishStagedOriginalProducts
   , certifiedOriginalProducts, certifiedFinalizedArtifacts
-  , StagedOriginalProducts, validateStagedOriginalProducts, withStagedOriginalBindings, stagedOriginalBinders, stagedOriginalPackageDemand, withPriorStagedOriginalProducts
+  , StagedOriginalProducts, withStagedOriginalBindings, stagedOriginalBinders, stagedOriginalPackageDemand, withPriorStagedOriginalProducts
   , stagedDeclarationInputReferences
   , newPreparedOriginalInterfaceArtifactsWithPrior
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, PreparedProductContext
@@ -344,12 +344,13 @@ prepareCompilationOriginals completion prior context external =
 prepareOriginals :: PreparedPipelineResult -> CompilerRecoveryCaches -> CompilerExecutor
   -> Maybe OriginalProductWorklist -> Maybe CompletedWorldProducts -> ProjectionContext -> Set.Set SymbolIdentity
   -> IO ([PreparedModule],PreparedProductContext)
-prepareOriginals prepared recovery executor worklist prior context external =
+prepareOriginals prepared recovery executor worklist prior context external = do
+  forM_ prior $ \(CompletedWorldProducts previous _) -> requireWorldProductPredecessor prepared previous
   let env = prHscEnv (pprPipelineResult prepared)
       exact = compilationScope <$> preparedExactCompilation prepared
       interfaces = pprProductInterfaces prepared
       modules = pprModules prepared
-  in case worklist of
+  case worklist of
     Just completed -> prepareOriginalProductsWithWorklist completed env exact interfaces context external modules
     Nothing -> prepareOriginalProductsWithCacheAndReuse (Just (pprReuseContext prepared))
       (compilerPreparedBodies recovery) (Just (compilerOriginalProjections recovery)) executor
@@ -544,6 +545,7 @@ prepareArtifactsWithProjectionIntent prior intent project originalInterfaces out
       firstTarget auxiliaryRoots (case mapMaybe hostBindingRepresentationJsonAuthority hostBindings of
         authority : _ -> Just authority
         [] -> Nothing)
+    forM_ prior $ \(CompletedWorldProducts previous _) -> requireWorldProductPredecessor prepared previous
     let priorNative = completedWorldNative <$> prior
     firstContext <- withStagedOriginalBindings prepared priorNative baseContext
     let contextFor target = firstContext
@@ -773,11 +775,15 @@ data CompletedWorldProducts = CompletedWorldProducts !WorldCompilerCompletion !S
 completedWorldNative :: CompletedWorldProducts -> StagedOriginalProducts
 completedWorldNative (CompletedWorldProducts _ native) = native
 
-completeWorldProducts :: PreparedCompilation -> StagedOriginalProducts -> IO CompletedWorldProducts
-completeWorldProducts completion staged = withPreparedCompilation completion $ \prepared _ _ _ ->
-  case completion of
+-- This is the sole paired issuer: the certifier consumes the guarded
+-- completion's own result; callers cannot supply an independent staged value.
+completeWorldProducts :: OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
+  -> PreparedProductContext -> IO CompletedWorldProducts
+completeWorldProducts interfaces directory completion products =
+  withPreparedCompilation completion $ \prepared _ _ _ -> case completion of
     PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion world) -> do
-      validateStagedOriginalProducts prepared staged
+      staged <- writeCertifiedSegmentProducts
+        (importPaths (hsc_dflags (prHscEnv (pprPipelineResult prepared)))) interfaces directory prepared products
       pure (CompletedWorldProducts world staged)
     _ -> throwIO CheckedPurposeMismatch
 
@@ -988,7 +994,8 @@ prepareWorldCellQuestion bound question = do
         correlated <- correlateWorldCellItems items artifacts (heldWorldCellStageItems issued) captures
           signaturesByItem
         products <- maybe (fail "world cell has no actual original inventory") pure context
-        staged <- writeCertifiedSegmentProducts (importPaths (hsc_dflags (prHscEnv result))) originalInterfaces stageDirectory prepared products
+        completedProducts <- completeWorldProducts originalInterfaces stageDirectory completion products
+        let staged = completedWorldNative completedProducts
         preparedItemsWithInputs <- forM correlated $ \correlatedItem -> do
           let item = worldCellItemTyped correlatedItem
               sourceItem = worldCellItemSourceIdentity correlatedItem
@@ -1043,7 +1050,7 @@ prepareWorldCellQuestion bound question = do
         _ <- publishStagedOriginalProducts prepared staged
         let identity = encodeListLen 2 <> text "exec" <> text (typedSegmentPlanDigest typedPlan)
         finishStage stageDirectory identity (map (plannedItemOrdinal . typedItemPlan) items)
-          rendered (map fst preparedItemsWithInputs) [typedPlan] completion prepared staged
+          rendered (map fst preparedItemsWithInputs) [typedPlan] completion prepared completedProducts
           (Set.unions (map snd preparedItemsWithInputs) `Set.difference`
             Set.fromList (Map.toList producedGenerations))
     prepareDeclaration preparation prior stageDirectory stage = do
@@ -1076,8 +1083,8 @@ prepareWorldCellQuestion bound question = do
         (_,context) <- prepareArtifactsWithProjectionIntent prior NativeOriginals requireProjection
           interfaces stageDirectory completion [scaffoldTargetName] [] generations []
         products <- maybe (fail "world declaration has no actual original inventory") pure context
-        staged <- writeCertifiedSegmentProducts (importPaths (hsc_dflags (prHscEnv result)))
-          interfaces stageDirectory prepared products
+        completedProducts <- completeWorldProducts interfaces stageDirectory completion products
+        let staged = completedWorldNative completedProducts
         certified <- publishStagedOriginalProducts prepared staged
         let (unit,owner) = plannedOriginalOwner inventory
         originalProduct <- case [product | product <- certifiedOriginalProducts certified
@@ -1108,8 +1115,9 @@ prepareWorldCellQuestion bound question = do
         BS.writeFile (child </> "world-item.cbor") description
         let item = PreparedWorldCellItem (ordinal,generation,SHA256.hash description) Nothing
         finishStage stageDirectory identity [fromIntegral ordinal] (plannedSource original)
-          [item] [] completion prepared staged publicationInputs
-    finishStage stageDirectory identity ordinals rendered preparedItems plans completion prepared staged executionInputs = do
+          [item] [] completion prepared completedProducts publicationInputs
+    finishStage stageDirectory identity ordinals rendered preparedItems plans completion prepared completedProducts executionInputs = do
+        let staged = completedWorldNative completedProducts
         validateDependencyEvidence (preparedFreshDependencies prepared)
         inputFacts <- maybe (fail "world cell completion lost its actual input basis") pure
           (preparedCompilationWorldInputs completion)
@@ -1153,7 +1161,6 @@ prepareWorldCellQuestion bound question = do
               <> encodeListLen (fromIntegral (length ordinals)) <> foldMap (encodeWord64 . fromIntegral) ordinals
               <> encodeListLen 3 <> receiptRef
               <> fileRef (stageName "module-products.cbor") <> fileRef (stageName "certified-products.cbor")
-        completedProducts <- completeWorldProducts completion staged
         pure PreparedWorldCellStage
           { preparedWorldStageItems = preparedItems
           , preparedWorldStageSource = rendered
