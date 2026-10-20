@@ -1,11 +1,17 @@
 # Complete the shared compiler service and remove the old cell path
 
-Status: reviewed implementation plan; implementation has not started under this
-plan. The controlling source is branch `integration/compiler-query-warm-final`,
-reviewed at `6f7ae09b3bdbcfd8952d9a513db91564ea1b5858`. Its code tip is
-`92fa518105`; intervening changes are Markdown, including shipped guidance.
-Use the latest published plan commit on this branch at worker kickoff, record its
-OID, and inspect any intervening code changes before proceeding.
+Status: implementation partially folded and reviewed at code
+`de12466597312787e7eda3230d67857c60df2997`; the service-only execution path is not
+complete or qualified. The controlling branch is
+`integration/compiler-query-warm-final`. Read the
+[current checkpoint review](review-de12466597.md) and
+[next-wave assignments](next-wave.md) before dispatch. Use this branch's latest
+published plan commit, record its OID, and inspect intervening code changes.
+
+Implementation follows [the scaffolding and receiving assignments](execution.md),
+including the final native, lifecycle and dataflow review corrections. Root owns
+the hard receiving boundaries; Sol area owners complete and fold the work beneath
+them. This execution plan supersedes older dispatch ordering.
 
 This plan supersedes the implementation ordering and readiness claims in the
 earlier campaign handoffs and `mid-plan-notes`. Existing detailed contracts remain
@@ -14,8 +20,8 @@ goal is the **complete mandatory campaign**, with an earlier qualified Persona
 candidate delivered as soon as its gate below passes. Optional deeper GHC import
 environment reuse remains an experiment, not a release prerequisite.
 
-[The review record](review.md) distinguishes audited facts, corrected older
-claims, remaining investigation and cross-plan findings. "Production profile"
+[The initial review record](review.md) retains the pre-implementation audit;
+the current review above supersedes its progress claims. "Production profile"
 below means the recorded deployment profile and real prepared catalog/service
 path (which may be `fast-dev`), not a new build profile named `production`.
 
@@ -26,36 +32,38 @@ unavailable to callers. Read its receiving-owner/checkpoint table before dispatc
 It is mandatory receiving-boundary work, not an independent refactoring queue or
 a reason to preserve the finite engine while building another abstraction layer.
 
-## What the review established
+## Current implementation and evidence
 
 - The compiler-query handlers reach real GHC. A persistent compiler universe and
   bounded worker infrastructure already exist. Do not describe the baseline as a
   new GHC process for every cell.
-- Ordinary actor cells still use finite admission, compiler-view reconstruction
-  and all-value preparation. `admit_world_cell_program` has no production caller;
-  world item settlement and final publication return explicit missing-capability
-  refusals. `retainHeldWorldSuccessor` has no caller. Passing Persona successor
-  tests therefore do not establish the required cell migration.
+- Ordinary actor preparation still uses finite admission, compiler-view
+  reconstruction and all-value preparation, while private runtime admission now
+  requires a published world. Its synchronous cold helper has no production
+  caller. The new checked output is not executable; world item settlement and
+  final publication still refuse missing capabilities. A finite hosted pass
+  cannot establish this migration.
 - World preparation currently excludes declarations/multiple inference segments,
   source-dependent retained value types and ordinary expression reservations.
   These are required completion work, not unsupported Persona profiles to retain.
-- The recorded full toolchain run has 32 failures. Its 1054 passing cases and
-  named hosted passes are historical evidence, not acceptance of this plan.
-  Several proposed repairs weaken or bypass their oracles. Preserve the useful
-  contracts while replacing those fixtures.
-- The A1c structured-introspection probe fails during compilation of a later
-  probe declaration. The initial `info` example reached its first display check.
-  A missing exact native dependency is not proof that a module/interface is
-  absent from all retained custody. Its exact lost selection remains to be traced.
-- The join already has stronger Fresh/Bound/Consumed preview transitions than
-  the stale reload follow-up. Original-source retention, final custody and
-  generation retirement still have gaps. Do not merge that follow-up wholesale.
+- The 32-failure sweep now has a first-failure triage, not completed dispositions.
+  The residency fixture stops before measurements because it omits real source
+  admission. Its pre-existing failure does not clear later code. Q10's four
+  passes exercise synthetic observer histories, not a running service cell.
+- Native N1 still infers current production from availability and loses exact
+  parent issuance. Repair A1c's demanded native custody without adopting the
+  temporary effective compiler projection; that would widen semantic roles.
+- Q2/Q3/Q6/Q7/Q8/Q9 contain useful owner and representation improvements, but
+  several migrations stop before their real consumer. The publication guard has
+  a new failed-settlement regression; off-checkout native preparation was lost.
+  The current review assigns bounded repairs and the necessary replacement tests.
 
-The source audit ran no new builds or tests. Retained evidence is under
-`/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`; the useful starting
-records are `final-join/TOOLCHAIN-SWEEP.md`, `reviews/A1C-TIP-FINDING.md` and the
-adversarial parcel reviews. Findings in a dirty instrumentation checkout are not
-evidence about this joined source.
+The current review ran no new builds or tests. The incoming handoff reports
+runtime/toolchain compilation, Q9 1/1, Q10 4/4 and residency 0/1 at `de12466597`;
+Haskell selectors and the full `session` target were not rerun there. Retained
+evidence is under `/srv/swarm/evidence/inanna/shared-warm-compiler-20261019/`,
+especially `completion/` and `post-de124-review/`. Findings in other revisions
+or dirty instrumentation checkouts retain their own scope.
 
 ## Delivery tree and ownership
 
@@ -83,6 +91,11 @@ have the runtime-publication owner: lifecycle workers send focused shared-bounda
 commits for that owner to receive before continuing, rather than independently
 rewriting the same constructors. Native-selection owns selection policy; the
 service leaf consumes its API and does not add a second resolver.
+
+For the current wave, the engine integrator owns the complete R1/S1/actor
+behavior across these files. It receives bounded leaf edits but must not leave
+bootstrap, executable sealing or the caller patch unowned because a file belongs
+to another leaf. Follow `next-wave.md` for the ready assignments and order.
 
 ### First dispatch and successive folds
 

@@ -67,8 +67,10 @@ the split smoke and the compile-fail controls retire.
 
 ### Decision
 
-Outcome **a**. The guarantee is live on the service-side single-checkout path.
-Keep the existing test as the named contract; delete only the split smoke.
+Outcome **a**. Preserve the residency guarantee on the new service path.
+At `de12466597`, the fixture fails at missing source admission before reaching
+its measurements. Repair it through the real source transaction, then retain
+its independent bound; the existing failure is not execution evidence.
 
 ### What the retired split smoke did and did not prove
 
@@ -76,9 +78,10 @@ Keep the existing test as the named contract; delete only the split smoke.
 (`prepared_residency.rs:836`) compiles one certified bind with `run_turn`, takes
 `snapshot_run_prepared`, calls `compile_off_checkout`, then
 `revalidate_and_run_prepared`, and asserts `Completed`. That is a mechanism
-smoke test. Its off-checkout mechanism has no successor by design. Its positive
-risk — a certified item can be installed and run — is the success leg of the B-05
-item-install contract below. It is not a residency assertion.
+smoke test, not a residency assertion. The split API retires, but off-checkout
+compiler/native preparation remains required through the existing operation
+owner. The replacement also tests independent permitted machine progress while
+that work is blocked, plus fresh source/base checks on installation.
 
 ### Replacement contract
 
@@ -137,8 +140,8 @@ than one item, the bound becomes `live_bindings + installed_this_cell + N`;
 ### Why not retirement
 
 The split smoke is retired; the residency risk is not. The production collection
-mechanism and its only between-turn call site survive, and an existing executed
-contract already covers them. Deleting the test file or the split smoke without
+mechanism and its between-turn call site survive, but the current fixture has
+not reached its assertions. Deleting the test file or the split smoke without
 retaining `prepared_session_residency_stays_bounded_across_many_turns` would be
 the guarantee loss the ledger warns about.
 
@@ -226,7 +229,9 @@ failure, not only a second call the compiler can see.
 ### Guarantees to preserve
 
 1. **Affine consumption.** One prepared item/install is consumed at most once.
-   A started, failed or refused item remains burned; it is never replayed.
+   A started item remains consumed after failure or abandonment and never replays.
+   A crossed preflight refusal before admission must not consume the rightful
+   owner's still-valid item. Test these transitions independently.
 2. **Stale-image refusal.** An item compiled against a superseded public view or
    compile-view digest must not install into the new view.
 3. **Crossed-candidate refusal.** An item from one cell/prefix/program must not
