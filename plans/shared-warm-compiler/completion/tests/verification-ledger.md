@@ -1,7 +1,6 @@
 # Joined discovery and notebook gates
 
-Source frontier and actual input receipts: root
-`24d8e0a9607d1a01377214d1a417ee6b324cb2f1`.
+Source frontier and actual input receipts: root `644c769540`.
 Execution remains blocked on the engine/assembly joined repair checkpoint.
 Use the existing warm receiving checkout; do not provision a cold lane.
 Record its actual clean OID before admission and keep each output directory fresh.
@@ -31,17 +30,18 @@ These service-resource runs do not replace one exact frozen-bundle qualification
 | Private source/END/current-view checks | Actual all-five handlers use `query_scoped_world` → `run_admitted_world_scope_inspection`; final answer install remains on the shared source/current checker. No caller result restamping. |
 | Retirement DTOs | Actor/Preparation and SourceBinding schema, Rust bridge codec and actual GHC ReloadCodec/presenter controls have separate 3/3 receipts. Replacement settlement schema `80a13b9a14` removes unpublished `BPublishedAUnsettled` and appends nonempty owner-issued operational obligations; official mirrors/consumer qualification are pending P. Observation DTOs do not qualify default reload ownership. |
 | Public default reload | P `43edad` joined compilation passes 62 actions; actual SourceSlot control passes 1/1. These results do not establish public default success/refusal/caller-loss behavior; that gate remains open. Four-notebook unavailable-reload cases cannot substitute. |
-| Exact native support | Actual `value-type-demand-24d8`: two executed, one passed (crossed/retired-owner refusal), one failed (JSON-input history), command exit 1. Unused and used JSON preparation/execution succeed inside the failed history; its final wrong-payload oracle incorrectly expects Delivered rather than direct initial Rejected. Root's bounded oracle repair is under independent D review and remains pending execution. W `f25` five-consumer exact-binding migration is source-only with incomplete tests. |
+| Exact native support | Actual `initial-rejection-644c`: two executed, two passed, command exit 0. The JSON history covers unused input, used input, authored wrong-payload rejection without publishing a binding, input retirement and unchanged public state. The separate case refuses crossed/retired owners. The corrected oracle distinguishes initial rejection from failure after an effect response. W `f25` five-consumer exact-binding migration remains separately unqualified. |
 | Haskell World reuse | H `11352` mixed history now reaches Rust's same-program repeated-SourceOriginal guard; R is implementing that repair. SOURCE-cycle history separately fails for missing demanded prior source body; H completion-basis/worklist/writer repair is in flight. Neither complete history passes. |
 | Host-binding finite-route deletion | L's actual World fixture migration advances the three controls beyond the old `MissingPublishedCompilerWorld` setup failure to checked-source observation mismatch: authored 319 bytes versus rendered 4056. Minimal carry repair is approved, not executed acceptance. Original 0/3 did not reach mount behavior. |
 | Native planner | N `49e` production/cfg compilation passes; actual same-key control passes 1/1. Refusal-stage correction remains pending; this is not whole actor-history acceptance. |
 | Runner evidence safety | `8c4f456b83` / `75c500c87d` are already joined as root `21f67a0a7c` / `7bcfb4d00f`: reused/concurrent roots refuse before reports mutate, and property wrappers follow issued stream paths with byte/hash checks. Root additionally carries explicit diagnostic environment forwarding. No merge remains pending and no native Rust execution claim follows from the 186 Python passes. |
 
 The actual input receipts are under
-`/srv/swarm/evidence/inanna/world-json-input-acceptance-20261020/value-type-demand-24d8/`.
-Both record compiler cleanup confirmed and diagnostic evidence incomplete; the
-JSON-input case fails at its final wrong-payload oracle. Its unused/used positives
-are internal history assertions, not additional separately counted cases.
+`/srv/swarm/evidence/inanna/world-json-input-acceptance-20261020/initial-rejection-644c/`.
+Both record exit 0, one executed and passed case each, compiler cleanup confirmed,
+and diagnostic evidence incomplete. The JSON variants are internal history
+assertions, not additional separately counted cases. The earlier `value-type-demand-24d8`
+failure is retained alongside this corrected-oracle run.
 Preserve failed observations and corrected procedure/fixture premises separately.
 Do not transfer earlier component counts onto the current root.
 
