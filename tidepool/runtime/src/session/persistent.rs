@@ -1838,26 +1838,7 @@ impl PersistentSession {
             tidepool_toolchain::compiler_world::CompilerWorldBindings::from_published_bindings(
                 scope.0, bindings,
             )?;
-        use tidepool_toolchain::compiler_world::{
-            CompilerWorldLexicalSurface, WorldDeclarationSelection,
-        };
-        let declaration =
-            if let Some(projection) = self.lib().current_declaration_projection_in(scope) {
-                Some(WorldDeclarationSelection::Joined(
-                    projection.receipt().clone(),
-                ))
-            } else if let Some(recovered) = self.lib().current_recovered_declaration_in(scope) {
-                Some(WorldDeclarationSelection::Recovered(recovered))
-            } else {
-                if self.lib().current_module_in(scope).is_some() {
-                    return Err(SessionError::UncertifiedCompilerWorldDeclaration(scope));
-                }
-                None
-            };
-        let lexical = CompilerWorldLexicalSurface::from_publication(
-            self.lib().workbench_imports_in(scope).into_specs(),
-            declaration,
-        )?;
+        let lexical = self.capture_compiler_world_lexical_in(scope)?;
         Ok(AdmittedInspectionWorld {
             custody: super::inspection::InspectionWorldCustody {
                 original_source: original_source.clone(),
@@ -1883,6 +1864,32 @@ impl PersistentSession {
             },
             observation: None,
         })
+    }
+
+    fn capture_compiler_world_lexical_in(
+        &self,
+        scope: ScopeId,
+    ) -> Result<tidepool_toolchain::compiler_world::CompilerWorldLexicalSurface, SessionError> {
+        use tidepool_toolchain::compiler_world::{
+            CompilerWorldLexicalSurface, WorldDeclarationSelection,
+        };
+        let declaration =
+            if let Some(projection) = self.lib().current_declaration_projection_in(scope) {
+                Some(WorldDeclarationSelection::Joined(
+                    projection.receipt().clone(),
+                ))
+            } else if let Some(recovered) = self.lib().current_recovered_declaration_in(scope) {
+                Some(WorldDeclarationSelection::Recovered(recovered))
+            } else {
+                if self.lib().current_module_in(scope).is_some() {
+                    return Err(SessionError::UncertifiedCompilerWorldDeclaration(scope));
+                }
+                None
+            };
+        Ok(CompilerWorldLexicalSurface::from_publication(
+            self.lib().workbench_imports_in(scope).into_specs(),
+            declaration,
+        )?)
     }
 
     pub(super) fn inspection_world_base_is_current(
@@ -9220,6 +9227,7 @@ impl PersistentSession {
                         prepared.scope.0,
                         Vec::new(),
                     )?,
+                    lexical: self.capture_compiler_world_lexical_in(prepared.scope)?,
                 },
             });
         }
@@ -9238,40 +9246,40 @@ impl PersistentSession {
         &mut self,
         prepared: super::PreparedNotebookGenerationWithWorld,
         publication: &Arc<super::PublicationDecision>,
+        source: &super::RuntimeSourcePublicationView,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.commit_notebook_generation_world_mode(prepared, publication, on_visible, false)
+        self.commit_notebook_generation_world_mode(prepared, publication, source, on_visible, false)
     }
 
     pub fn commit_notebook_generation_with_world_continuing(
         &mut self,
         prepared: super::PreparedNotebookGenerationWithWorld,
         publication: &Arc<super::PublicationDecision>,
+        source: &super::RuntimeSourcePublicationView,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
-        self.commit_notebook_generation_world_mode(prepared, publication, on_visible, true)
+        self.commit_notebook_generation_world_mode(prepared, publication, source, on_visible, true)
     }
 
     fn commit_notebook_generation_world_mode(
         &mut self,
         prepared: super::PreparedNotebookGenerationWithWorld,
         publication: &Arc<super::PublicationDecision>,
+        source: &super::RuntimeSourcePublicationView,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
         continuing: bool,
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
         let super::PreparedNotebookGenerationWithWorld { prepared, world } = prepared;
-        let leases = [
-            world.association.base.original_source.clone(),
-            world.association.base.target.clone(),
-        ];
-        super::RuntimeLexicalScopeLease::with_source_leases(leases, |_| {
-            Ok(self.commit_notebook_generation_with_completion(
+        let target = world.association.base.target.clone();
+        source.with_current(&target, || {
+            self.commit_notebook_generation_with_completion(
                 prepared,
                 publication,
                 on_visible,
                 continuing,
                 Some(world),
-            ))
+            )
         })?
     }
 
