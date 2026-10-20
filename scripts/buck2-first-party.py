@@ -840,7 +840,11 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         resources.extend(["toolchains//:ghc", "//bridge/haskell:declaration_join_consumer"])
     if package_name == "tidepool-toolchain" and target_name == "prepared_fixture":
         env["TIDEPOOL_PREPARED_FIXTURE_COMPILER"] = "$(exe //tidepool/toolchain:prepared-fixture)"
-        resources.append("//tidepool/toolchain:prepared-fixture")
+        env["TIDEPOOL_INTROSPECTION_FRONT_DOOR_FIXTURE_DIR"] = "$(location //bridge/haskell:introspection_front_door_prepared)"
+        resources.extend([
+            "//tidepool/toolchain:prepared-fixture",
+            "//bridge/haskell:introspection_front_door_prepared",
+        ])
     if package_name == "tidepool-toolchain" and unit:
         env["TIDEPOOL_CATALOG_TEST_PYTHON"] = "$(exe toolchains//:python)"
         env["TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT"] = "$(location //build/package:qualification_script)"
@@ -927,6 +931,7 @@ NATIVE_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_GENERATED_SURFACE_FIXTURES",
     "TIDEPOOL_GHC",
     "TIDEPOOL_HASKELL_ACTORS_DIR",
+    "TIDEPOOL_INTROSPECTION_FRONT_DOOR_FIXTURE_DIR",
     "TIDEPOOL_JEV_SOURCE_DIR",
     "TIDEPOOL_JEV_WORKSPACE_DIR",
     "TIDEPOOL_JOIN_PROOF_BIN",
@@ -1054,6 +1059,8 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=(),
 def compile_fail_cases(package, library):
     directory = pathlib.Path(package["manifest_path"]).parent
     extra_dependencies = {
+        "checked_cell_request_digest_is_issued": (),
+        "checked_cell_request_inventory_is_issued": (),
         "native_group_issuer_is_not_artifact": (),
         "native_group_issuer_fields_are_private": (),
         "compiler_cell_requires_settled": (),
