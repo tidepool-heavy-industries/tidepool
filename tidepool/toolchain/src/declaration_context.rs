@@ -10237,7 +10237,7 @@ impl ExactDeclarationContext {
             }
         }
         Ok(Self::from_facts(DeclarationContextFacts {
-            compiler_support: selected.support_for_owners(owners.into_iter().collect())?,
+            compiler_support: selected.type_interfaces_for_owners(owners.into_iter().collect())?,
             producer,
             lexical: Default::default(),
             original_instance_environment: OriginalInstanceEnvironment::Unknown,

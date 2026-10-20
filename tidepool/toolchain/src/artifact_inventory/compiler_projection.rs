@@ -739,6 +739,11 @@ pub(crate) struct SelectedCompilerInterfaces<'a> {
     selected: &'a AdmittedCompilerRoles,
 }
 
+enum InterfaceProjectionPurpose {
+    PreserveCustody,
+    TypeNames,
+}
+
 impl SelectedCompilerInterfaces<'_> {
     pub(crate) fn get(&self, owner: &ExactModuleIdentity) -> Option<&Arc<ArtifactEntry>> {
         self.selected.get(owner).map(|row| &row.interface.1)
@@ -761,6 +766,23 @@ impl SelectedCompilerInterfaces<'_> {
     pub(crate) fn support_for_owners(
         &self,
         owners: Vec<ExactModuleIdentity>,
+    ) -> Result<CompilerSourceSupport, CompileError> {
+        self.project_interfaces(owners, InterfaceProjectionPurpose::PreserveCustody)
+    }
+
+    /// Only the signature/witness-authenticated type boundary requests this
+    /// projection. Its execution owner is retained separately by that caller.
+    pub(crate) fn type_interfaces_for_owners(
+        &self,
+        owners: Vec<ExactModuleIdentity>,
+    ) -> Result<CompilerSourceSupport, CompileError> {
+        self.project_interfaces(owners, InterfaceProjectionPurpose::TypeNames)
+    }
+
+    fn project_interfaces(
+        &self,
+        owners: Vec<ExactModuleIdentity>,
+        purpose: InterfaceProjectionPurpose,
     ) -> Result<CompilerSourceSupport, CompileError> {
         let mut projection = CompilerInputProjection::default();
         let mut pending = owners;
@@ -795,18 +817,24 @@ impl SelectedCompilerInterfaces<'_> {
             .map(|row| (row.interface.0.artifact, Arc::clone(&row.interface.1)))
             .collect();
         projection.entries_from_artifacts(&entries)?;
-        // This closure already has exact admitted canonical binding rows.
-        // General select_owners also retains original carriers and their native
-        // custody; type evidence neither needs nor grants that wider support.
-        let empty = self.artifacts.inventory().empty_view();
-        let artifacts = if selected.is_empty() {
-            empty
-        } else {
-            let additions = selected
-                .values()
-                .map(|row| (self.artifacts.clone(), row.clone()))
-                .collect::<Vec<_>>();
-            empty.append_type_interfaces(&additions)?
+        let artifacts = match purpose {
+            InterfaceProjectionPurpose::PreserveCustody => {
+                self.select_owners(projection.roles.keys().cloned().collect())?
+            }
+            InterfaceProjectionPurpose::TypeNames => {
+                // The validated type closure already has exact admitted rows.
+                // Execution remains with the original source/checked-value owner.
+                let empty = self.artifacts.inventory().empty_view();
+                if selected.is_empty() {
+                    empty
+                } else {
+                    let additions = selected
+                        .values()
+                        .map(|row| (self.artifacts.clone(), row.clone()))
+                        .collect::<Vec<_>>();
+                    empty.append_type_interfaces(&additions)?
+                }
+            }
         };
         for row in selected.values_mut() {
             row.retain_acquisitions(&artifacts)?;
@@ -5116,6 +5144,7 @@ mod tests {
                 [2; 32],
             );
             let native = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+            let native_id = native.descriptor.id;
             let required = Arc::new(ArtifactEntry::canonical(
                 crate::certified_products::fixture_module_interface(
                     [2; 32],
@@ -5143,6 +5172,22 @@ mod tests {
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap();
             let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+            let execution = Arc::new(
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                    [2; 32],
+                    source.artifacts(),
+                    source.projection.clone(),
+                )
+                .unwrap(),
+            );
+            let original =
+                crate::declaration_context::ValidatedOriginalSource::inputs_from(&execution);
+            assert!(execution
+                .artifact_view()
+                .entries()
+                .iter()
+                .any(|entry| entry.descriptor.id == native_id && entry.is_native()));
+            let signature = type_signature(&owner.unit, &owner.module);
             let birth_edges = scope_proof::take_ancestry_edge_visits();
             assert!(
                 birth_edges >= groups as usize,
@@ -5163,13 +5208,12 @@ mod tests {
             let before = inventory.metrics();
             type_query_work::take();
             scope_proof::take_ancestry_edge_visits();
-            let projected = source
-                .selected_interfaces()
-                .unwrap()
-                .support_for_owners(vec![owner])
+            let projected_context = original
+                .project_type_interfaces(&[], &[&signature])
                 .unwrap();
+            let projected = projected_context.compiler_source_support();
             let (changed, owners) = baseline
-                .with_type_interfaces(&[&projected], [2; 32])
+                .with_type_interfaces(&[projected], [2; 32])
                 .unwrap();
             let maintained = changed.type_interface_metadata(&metadata, &owners).unwrap();
             let work = type_query_work::take();
@@ -5185,6 +5229,12 @@ mod tests {
             assert!(projected.native_offers.is_empty());
             assert!(projected.native_availability.rows().next().is_none());
             assert_eq!(changed.artifacts.retained_payload_handles(), 2);
+            assert!(Arc::ptr_eq(&original.execution_context(), &execution));
+            assert!(execution
+                .artifact_view()
+                .entries()
+                .iter()
+                .any(|entry| entry.descriptor.id == native_id && entry.is_native()));
             if let Some(expected) = semantic_work {
                 assert_eq!(work, expected);
             }

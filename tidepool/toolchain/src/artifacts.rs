@@ -8462,6 +8462,32 @@ mod module_product_tests {
                 .expect("actual binding native program");
             assert_eq!(native.item().binders(), &["answer"]);
             assert!(native.value_interface().is_some());
+            let value = native.value_interface_certificate().unwrap();
+            let [signature] = native.item().signatures() else {
+                panic!("the actual Int binding has one checked signature")
+            };
+            let types = crate::declaration_context::ExactDeclarationContext::checked_value_type_interfaces(
+                &value, signature,
+            )
+            .expect("actual checked-value type projection");
+            assert!(
+                types.compiler_input_roles().is_empty(),
+                "Int has only package type owners"
+            );
+            assert_eq!(
+                types.toolchain_identity_sha256(),
+                value
+                    .certified_interface()
+                    .interface()
+                    .toolchain_identity_sha256()
+            );
+            assert!(
+                Arc::ptr_eq(&value, &native.value_interface_certificate().unwrap()),
+                "type projection preserves the actual compiled value owner"
+            );
+            value
+                .world_type_parts()
+                .expect("the original value retains its actual row input owners");
             program
                 .validate_typed_entries()
                 .expect("actual native entry belongs to normalized item");
