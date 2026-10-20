@@ -64,6 +64,13 @@ Changing completion must not rewrite an earlier Original's certificate or ID.
 Transport may deduplicate identical package preparation requests; it must not
 collapse the requesters' distinct links.
 
+Use the existing inventory `ArtifactBinding` for package product plus exact
+issued dependency edges, wrapped by a package-kind-checked owner. Existing atomic
+scope issuance handles cycles. A demander/root slot is an incoming edge, not a
+new package instance identity: two HOME callers of the same exact package binding
+in B must share B's instance. Preserve prior bindings when demand grows; do not
+introduce completion-wide or per-root graph hashes as another identity system.
+
 ### W: immutable definitions and images
 
 Package products retain actual defining bytes/version and full code-affecting
@@ -114,6 +121,12 @@ as far as necessary. A typed package branch must not expose a HOME owner through
 an optional/default accessor. Keep source authorization exhaustive at consumers.
 No second retention table with separate retirement/rollback rules.
 
+First factor the existing physical root (instance, value, handle and signature)
+from HOME evidence without changing behavior. Then add an exhaustive package
+evidence branch to the same custody/admission path. Toolchain-owned binding
+authority stays in the runtime's held selection; codegen receives only the
+necessary validated facts and does not acquire a toolchain dependency.
+
 ### L3: delete alternate routes
 
 Remove global package advertisement, selected-import fallback, checked-ledger
@@ -122,6 +135,12 @@ and cache-only durable variants. Preserve actual `BindingEntry` captures.
 The deletion is complete only when later cells, not just startup, use the new
 owner. Tests of the removed cache must be migrated to the production contracts
 they were intended to establish or removed if that contract no longer exists.
+
+Remove the public `PreparedSourceEntry::compiled()` escape after replacing its
+actor consumers with narrow warnings/source-selection metadata operations. Runtime
+may retain private access. The two native probe helpers currently converting
+`entry.compiled().code()` to ordinary startup must use the actual closed source
+transaction and installation path instead.
 
 ## Work partition and join order
 
