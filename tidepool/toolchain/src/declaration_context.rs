@@ -5873,7 +5873,7 @@ pub(crate) struct ExactCompilationRequest {
 #[derive(Clone, Default)]
 struct ProgramSourceSupportState {
     program_support: Option<ProgramSourceSupport>,
-    program_source_lexical: Vec<ExactLexicalNode>,
+    program_source_lexical: crate::exact_context::ExactLexicalSnapshot,
     source_selected_support: BTreeSet<ExactModuleIdentity>,
 }
 
@@ -6077,7 +6077,7 @@ impl ProgramSourceSupportState {
                 .into_iter()
                 .filter(|(owner, _)| fresh_owners.contains(owner)),
         )?;
-        self.program_source_lexical = program_source_lexical;
+        self.program_source_lexical = self.program_source_lexical.replace(program_source_lexical)?;
         self.program_support = Some(program_support);
         self.source_selected_support
             .extend(selected_originals.into_keys());
@@ -9398,21 +9398,11 @@ impl WorldProgramSegment {
                             .expect("validated generated owner")
             }),
         )?);
-        for node in lexical {
-            match self
-                .continuation
-                .program
-                .program_source_lexical
-                .iter()
-                .find(|old| old.owner == node.owner)
-            {
-                Some(old) if old != &node => {
-                    return Err(failure("program support changed its selected source graph"))
-                }
-                Some(_) => {}
-                None => self.continuation.program.program_source_lexical.push(node),
-            }
-        }
+        self.continuation.program.program_source_lexical = self
+            .continuation
+            .program
+            .program_source_lexical
+            .append_issued(lexical)?;
         self.continuation
             .program
             .source_selected_support
@@ -9551,16 +9541,14 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
     }
 
     /// Issue segment original products from this already-decoded world source
-    /// owner. `raw` and `receipt` must be decoded exactly once from the same
-    /// captured common outputs this receipt names. Cold support, certified
+    /// owner. Its named captured products are decoded here exactly once.
+    /// Prefix support, certified
     /// groups and native permission are projected through the demanded owner;
     /// no `ExactCompilationRequest` or finite baseline is manufactured.
     // boundary: see CELL-PREPARATION-BOUNDARY.md
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn issue_segment_originals(
         self,
-        receipt: crate::certified_products::CertifiedReceipt,
-        raw: crate::certified_products::ParsedModuleProducts,
         candidates: Option<&crate::module_candidates::CandidateSet>,
         selected_values: &crate::artifacts::SelectedSessionValueOwners,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
@@ -9568,6 +9556,33 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         continuation: WorldProgramContinuation,
     ) -> Result<WorldProgramSegment, CompileError> {
         let program = self.program;
+        let outputs = self.binding.stage.outputs();
+        let stage_root = program.directory().path().join(
+            outputs
+                .source_receipt()
+                .relative()
+                .parent()
+                .ok_or_else(|| failure("World stage source output has no namespace"))?,
+        );
+        validation
+            .record_captured_bytes(&self.package_imports_path, &self.package_imports)
+            .map_err(|error| failure(error.to_string()))?;
+        let raw = crate::certified_products::ParsedModuleProducts::decode_with_operation(
+            crate::checked_cell::world_output_bytes(program, outputs.module_products().relative())?,
+            &self.package_imports,
+            validation.inventory.clone(),
+        )
+        .map_err(compiler_evidence_failure)?;
+        let receipt = crate::certified_products::decode_segment_originals_with_operation(
+            crate::checked_cell::world_output_bytes(
+                program,
+                outputs.certified_products().relative(),
+            )?,
+            &stage_root,
+            &validation.inventory,
+        )
+        .map_err(compiler_evidence_failure)?;
+
         let operation = program.validation().inventory.as_ref();
         let demand = self.demand_inputs(&continuation.inputs)?;
         let groups = demand.certify_receipt_groups(&receipt, validation)?;
@@ -9626,15 +9641,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             raw,
             receipt,
             admission,
-            &program.directory().path().join(
-                self.binding
-                    .stage
-                    .outputs()
-                    .source_receipt()
-                    .relative()
-                    .parent()
-                    .ok_or_else(|| failure("World stage source output has no namespace"))?,
-            ),
+            &stage_root,
             program.producer_identity_bytes(),
             &self.aliases,
             authored.as_ref(),
@@ -9654,10 +9661,6 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             aliases: self.aliases,
             continuation,
         })
-    }
-
-    pub(crate) fn package_imports(&self) -> (&Path, &Arc<[u8]>) {
-        (&self.package_imports_path, &self.package_imports)
     }
 }
 

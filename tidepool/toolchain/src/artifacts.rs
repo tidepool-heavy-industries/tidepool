@@ -897,43 +897,9 @@ pub fn prepare_world_cell_program(
         let original = stage.identity().original_owner().is_some();
         let stage_produced =
             produced_outputs.for_segment(first..if original { first } else { end })?;
-        let stage_root = root.join(
-            stage
-                .outputs()
-                .source_receipt()
-                .relative()
-                .parent()
-                .ok_or_else(|| {
-                    CompileError::ExtractFailed("World stage source output has no namespace".into())
-                })?,
-        );
         let decoded =
             crate::declaration_context::decode_world_source_receipt(&program, stage.index())?;
-        let (packages_path, packages) = decoded.package_imports();
-        validation
-            .record_captured_bytes(packages_path, packages)
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        let raw = certified_products::ParsedModuleProducts::decode_with_operation(
-            checked_cell::world_output_bytes(
-                &program,
-                stage.outputs().module_products().relative(),
-            )?,
-            packages,
-            validation.inventory.clone(),
-        )
-        .map_err(compiler_evidence_failure)?;
-        let receipt = certified_products::decode_segment_originals_with_operation(
-            checked_cell::world_output_bytes(
-                &program,
-                stage.outputs().certified_products().relative(),
-            )?,
-            &stage_root,
-            &validation.inventory,
-        )
-        .map_err(compiler_evidence_failure)?;
         let mut segment = decoded.issue_segment_originals(
-            receipt,
-            raw,
             None,
             &selected_values,
             Some(&stage_produced),

@@ -23,7 +23,9 @@ fn lexical_append_shares_unchanged_facts_and_refuses_changed_adjacency() {
             owner: owner(width),
             imports: vec![owner(0)],
         };
+        LEXICAL_APPEND_WORK.with(|work| work.set((0, 0)));
         let next = baseline.append_issued([added.clone()]).unwrap();
+        assert_eq!(LEXICAL_APPEND_WORK.with(Cell::get), (1, 1));
         assert_eq!(next.facts.len(), width + 1);
         assert_eq!(baseline.facts.len(), width);
         for (key, fact) in &baseline.facts {
@@ -41,6 +43,22 @@ fn lexical_append_shares_unchanged_facts_and_refuses_changed_adjacency() {
             .replace(baseline.iter().cloned().chain([added]).collect())
             .unwrap();
         assert_eq!(next, recomputed);
+        LEXICAL_APPEND_WORK.with(|work| work.set((0, 0)));
+        let overlap = next
+            .append_issued([
+                baseline.get(&owner(0)).unwrap().clone(),
+                ExactLexicalNode {
+                    owner: owner(width + 1),
+                    imports: vec![owner(width)],
+                },
+            ])
+            .unwrap();
+        assert_eq!(LEXICAL_APPEND_WORK.with(Cell::get), (2, 1));
+        assert_eq!(overlap.facts.len(), width + 2);
+        assert!(Arc::ptr_eq(
+            &next.facts[&owner(0)].node,
+            &overlap.facts[&owner(0)].node
+        ));
     }
 }
 

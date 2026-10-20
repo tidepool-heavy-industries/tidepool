@@ -384,3 +384,44 @@ the ordered fold: build `acb47003-efd8-463c-8cd1-2929556e37f0`, same executed
 Rust SHA as the three controls above. It exercises actual prepared native
 evidence plus the matching compiler END and post-END cancellation refusal.
 Command: `swarm-build just test-native //tidepool/toolchain:toolchain_world_native_seal_test --output-dir /srv/swarm/evidence/inanna/world-stage-ordered-fold-native-20261020 --retain-artifacts`.
+
+
+## Stage decoder and lexical owner follow-up
+
+The source receipt issuer now decodes its own two authenticated named stage
+outputs from the already captured bytes. Callers cannot supply independently
+parsed module products or a certificate from another stage. The old borrowed
+package-output getter and corresponding artifacts-layer parsing were removed;
+no additional read, raw tree or certifier was added. Actual missing/swapped/late
+raw-output replay controls belong to the checked receiver and remain pending.
+
+The existing program-source lexical field now uses ExactLexicalSnapshot.
+Finite replacement retains replacement semantics; World updates append only
+the actual incoming rows. Existing borrowed slice consumers use its explicit
+lazy observation. At 1/32/128 prior rows the append control observes one supplied
+row and one fresh immutable fact; overlapping input observes two supplied rows
+and one fresh fact. Equal and conflicting adjacency, unchanged snapshot sharing
+and independent recomputation remain checked. The unchanged finite import
+history oracle passed with the two lexical controls: 3/3, exit 0, build
+`54e90d13-61fc-4d7e-a87d-07234b364546`, executed Rust SHA
+`42eb1ee2b67808ce3e0b82ac2f3cf2dbead77d0e0cd2bcd8b1d7ef92fac9909a`.
+Evidence: `/srv/swarm/evidence/inanna/world-stage-lexical-field-controls-exact-20261020`.
+The first invocation named the history case incorrectly; counted discovery
+refused that selection before execution. It is not included in the passing
+count. The correct path is
+`declaration_context::tests::program_source_support_history::bounded_artifact_and_original_import_histories_match_set_oracle`.
+
+The actual mixed consumer fixture is being qualified separately. It first
+exposed a missing declared renderer source closure, then a missing canonical
+whole-cell template marker. Both are confirmed fixture setup defects, repaired
+by capturing the real declared facade library bodies and using the maintained
+canonical template shape. Build `10383170-3d3e-4195-8197-e504402ee2c2` compiled
+and reached a producer policy refusal: WorldDownsweepGraph marks captured
+`Tidepool/Aeson/Scientific.hs` as generating code while the admitted flags do
+not. Quasiquotes, Template Haskell, static pointers and external preprocessing
+were all false. The cause is with the Haskell owner; native mixed admission has
+not been reached and no policy is weakened here. Exact stderr is retained at
+`/srv/swarm/evidence/inanna/world-stage-mixed-canonical-template-20261020/171cda3b8d0b174296a588fc09cb6c7cce74ba26a7b587f9b4256a11a719bfa2/artifacts/compiler-transactions/.tmpXGKEj4/compiler.stderr`.
+The original diagnostic files remain present even though the transaction's
+product-file roster excludes its own stderr/report files. An initial hypothesis
+of diagnostic deletion was disproved by direct observation.
