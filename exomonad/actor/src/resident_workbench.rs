@@ -23263,6 +23263,10 @@ pub(crate) mod request_tests {
         let mut third = reserve(preparations.next().unwrap());
         let expected = third.expected_generation().unwrap().clone();
         let target = third.prepared.candidate.scope.clone();
+        assert!(!target
+            .source_admission()
+            .same_owner(expected.scope.source_admission()));
+        let original_source = expected.scope.clone();
         let mut third_original = capture(&mut third);
         let (entered, started) = std::sync::mpsc::sync_channel(0);
         let (release, finish) = std::sync::mpsc::sync_channel(0);
@@ -23275,12 +23279,30 @@ pub(crate) mod request_tests {
             started
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap();
-            assert!(
-                target.admit_source().is_ok(),
-                "B actually settled before A failed"
-            );
+            // This probe runs after B settlement. A whole-DAG fresh admission
+            // can still refuse the intentionally fenced original source A.
+            let observed_b = target.source_admission().fence().and_then(|fence| {
+                fence
+                    .reopen_with(target.original_source(), |reopen| {
+                        reopen.commit();
+                        Ok::<(), std::convert::Infallible>(())
+                    })
+                    .map(|settled| match settled {
+                        Ok(_) => (),
+                        Err(never) => match never {},
+                    })
+            });
+            let original_still_closed = original_source.admit_source().is_err();
             drop(preparation);
             release.send(()).unwrap();
+            assert!(
+                observed_b.is_ok(),
+                "B's actual own gate did not reopen: {observed_b:?}"
+            );
+            assert!(
+                original_still_closed,
+                "the scoped B exercise cannot reopen A"
+            );
         });
         let error = third
             .refuse_retirement(&mut third_original, "actual partial source settlement")
