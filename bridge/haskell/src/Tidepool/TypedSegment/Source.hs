@@ -38,7 +38,7 @@ import GHC.Types.Name.Occurrence (mkVarOcc, occNameString, delFromOccEnv)
 import GHC.Types.Name.Reader
   ( RdrName, isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc
   , GlobalRdrEnv, mkGlobalRdrEnv, mkLocalVanillaGRE, Parent(NoParent)
-  , plusGlobalRdrEnv, shadowNames )
+  , plusGlobalRdrEnv, shadowNames, extendGlobalRdrEnv )
 import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan, mkRealSrcLoc)
 import GHC.Unit.Types (interactiveUnit, mkModule)
 import GHC.Unit.Module (mkModuleName)
@@ -110,7 +110,7 @@ updateSegmentDemandScope environment changes initial = foldM update initial chan
       pure $ case replacement of
         Nothing -> SegmentDemandScope removed remaining
         Just binding -> SegmentDemandScope
-          (plusGlobalRdrEnv (mkGlobalRdrEnv [mkLocalVanillaGRE NoParent name]) removed)
+          (extendGlobalRdrEnv removed (mkLocalVanillaGRE NoParent name))
           (Map.insert name (alias,binding) remaining)
 
 -- GHC owns the complete module and local lexical scopes, including class
