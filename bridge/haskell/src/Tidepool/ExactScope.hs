@@ -14,7 +14,7 @@ module Tidepool.ExactScope
   , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, canonicalProofOriginalBody, relocateCanonicalInterfaceProof, revalidateCanonicalProofInputs
   , captureFinalizedSourceOriginals, compilationOriginalSourceImports
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
-  , canonicalCertificatePath, canonicalCertificateSha256, canonicalCertificateBytes, canonicalCoreArtifact
+  , canonicalCertificatePath, canonicalCertificateSha256, canonicalCertificateBytes, canonicalCoreArtifact, canonicalInterfaceInput
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
   , canonicalRequirements, canonicalOrigin, canonicalSourceImports, isSourceOriginal, normalizeInterfaceEvidence
   , canonicalProofMatchesOwner
@@ -395,6 +395,9 @@ canonicalCertificateBytes = toStrictByteString . encodeCanonicalModuleCertificat
 
 canonicalCoreArtifact :: CanonicalInterfaceProof -> Maybe CanonicalCoreArtifact
 canonicalCoreArtifact = proofCoreArtifact
+
+canonicalInterfaceInput :: CanonicalInterfaceProof -> (ExactIfaceArtifact,FilePath,String)
+canonicalInterfaceInput = proofInterfaceInput
 
 canonicalHomeUnits :: CanonicalInterfaceProof -> Set.Set String
 canonicalHomeUnits = certificateHomeUnits . canonicalFacts

@@ -75,7 +75,8 @@ import Tidepool.ExactScope
   , ExactScope, scopeManifestPath, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
   , canonicalCertificatePath, canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope, captureCanonicalProofs, CanonicalInterfaceUse(..)
   , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, admittedInterfaceCoreBody, extendExactScopeInputs, ExactInterfaceEvidence(..) )
-import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifactsWithOutputs, finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, localFinalizedPackageBody, localFinalizedPackageEvidence, matchesCapturedFinalization, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts)
+import Tidepool.FinalizedModuleArtifacts (captureFinalizedModuleArtifacts, captureFinalizedModuleTypeInterfaces, emptyFinalizedModuleArtifacts, finalizedTypeInterfaces, materializeFinalizedModuleArtifactsWithOutputs, finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedPackageEvidence, matchesCapturedFinalization, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts, FinalizedArtifactFailure(..))
+import Tidepool.HomeProducts (AdmittedFinalizedOriginal, admitCompiledCanonicalOriginal, admittedOriginalProof, CandidateCoreFailure(..))
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts, newPreparedOriginalInterfaceArtifacts, retainTypeInterfaceCaptures, retainedTypeInterfaceBody)
 import Tidepool.GhcPipeline
   ( pprPipelineResult, pprFinalizedModules, pprPackageImports, preparedFreshDependencies, prHscEnv, prResultType, PipelineSelection(..)
@@ -270,6 +271,10 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   let heldDirectory = work </> "capture-before-materialization"
   createDirectory heldDirectory
   heldInterfaces <- newPreparedOriginalInterfaceArtifacts prepared heldDirectory
+  missingReceipt <- try (captureFinalizedModuleTypeInterfaces heldInterfaces env (Map.singleton name finalized)
+    (emptyFinalizedModuleArtifacts env)) :: IO (Either FinalizedArtifactFailure FinalizedModuleArtifacts)
+  assert (case missingReceipt of Left (MissingFinalizedInterface _ actual) -> actual == "FinalizedCoreFixture"; _ -> False)
+    "nonfresh TYPE capture invented an input receipt from a compiler finalization"
   ((held, issuedOutputs), publicationCounts) <- withTiming $ captureDiagnostics $ do
     held <- captureFinalizedModuleArtifacts heldInterfaces env (pprFinalizedModules prepared)
       (pprPackageImports prepared) (preparedFreshDependencies prepared) heldDirectory
@@ -283,6 +288,20 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   let admissions = finalizedLocalAdmissions held
       packageMap = pprPackageImports prepared
       packageBytes = sum (map (BS.length . artifactBytes . localFinalizedPackageBody) (Map.elems admissions))
+      inputArtifacts = [artifact | admission <- Map.elems admissions
+        , let (artifact,_,_) = localFinalizedInterface admission]
+      readTypeInput artifact = case Map.lookup (exactUnit artifact,exactModule artifact) admissions of
+        Just admission | let (actual,_,_) = localFinalizedInterface admission, actual == artifact ->
+          pure (localFinalizedInterfaceBody admission)
+        _ -> fail "TYPE input differs from its actual issued original interface"
+  typeInputs <- newOriginalInterfaceArtifactsWithReader readTypeInput env Map.empty inputArtifacts [] [] work
+  typeOnly <- captureFinalizedModuleTypeInterfaces typeInputs env (pprFinalizedModules prepared)
+    (emptyFinalizedModuleArtifacts env)
+  assert (Map.null (finalizedLocalAdmissions typeOnly)
+      && Map.size (finalizedTypeInterfaces typeOnly) == Map.size (pprFinalizedModules prepared))
+    "TYPE-only capture issued an original admission or lost its interface custody"
+  (_,typeOutputs) <- materializeFinalizedModuleArtifactsWithOutputs (work </> "type-only") typeOnly
+  assert (null typeOutputs) "TYPE-only custody materialized original/native output payloads"
   assert (captureCount "finalized_package_encoding_attempts" publicationCounts == fromIntegral (Map.size admissions)
       && captureCount "finalized_package_encoding_completions" publicationCounts == fromIntegral (Map.size admissions)
       && captureCount "finalized_package_encoded_bytes" publicationCounts == fromIntegral packageBytes)
@@ -336,6 +355,24 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   originalCoreBody <- admittedInterfaceCoreBody (ModuleInterfaceAdmission proof)
   rawBytes <- requireRight =<< captureFinalizedCore finalized
   assert (bytes == artifactBytes rawBytes) "certification did not retain the original finalized Core bytes"
+  roots <- maybe (fail "canonical admission control lost its compiler package facts") pure
+    (Map.lookup name (pprPackageImports prepared))
+  canonical <- admitCompiledCanonicalOriginal env proof finalized roots
+  assert (admittedOriginalProof canonical == proof)
+    "compiled canonical admission replaced its selected original proof"
+  changedCore <- newFinalizedModule env (finalizedHomeModInfo finalized) guts {cg_binds=[]}
+  rejectedCore <- try (admitCompiledCanonicalOriginal env proof changedCore roots)
+    :: IO (Either CandidateCoreFailure AdmittedFinalizedOriginal)
+  assert (case rejectedCore of Left CandidateOriginalCoreMismatch -> True; _ -> False)
+    "same interface with a different original Core passed canonical admission"
+  let changedRoots = roots {packageInterfaces = case packageInterfaces roots of
+        [] -> []
+        root:rest -> root {packagePath=packagePath root ++ ".foreign"}:rest}
+  assert (changedRoots /= roots) "canonical package refusal did not change a real package owner"
+  rejectedPackages <- try (admitCompiledCanonicalOriginal env proof finalized changedRoots)
+    :: IO (Either CandidateCoreFailure AdmittedFinalizedOriginal)
+  assert (case rejectedPackages of Left CandidateOriginalPackagesMismatch -> True; _ -> False)
+    "canonical admission accepted another package witness"
   let emptyStubs = ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [] [])
       initializer = mkInitializerStubLabel (cg_module guts) (fsLit "canonical_test_init")
       nonemptyStubs =

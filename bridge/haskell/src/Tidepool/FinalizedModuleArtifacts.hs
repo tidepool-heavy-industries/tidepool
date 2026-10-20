@@ -5,6 +5,8 @@
 -- Receipts name bounded materialized views without duplicating bodies inline.
 module Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts
+  , FinalizedArtifactFailure(..)
+  , captureFinalizedModuleTypeInterfaces, finalizedTypeInterfaces
   , materializeFinalizedModuleArtifacts, materializeFinalizedModuleArtifactsWithOutputs
   , emptyFinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals, finalizedValueInterfaceSeals
   , LocalFinalizedAdmission, finalizedLocalAdmissions
@@ -40,7 +42,7 @@ import Tidepool.ArtifactBytes
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..), DependencySource(..))
 import Tidepool.BoundedRead (FileObservations, withFileObservations, readFileAtMost)
 import Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBody, originalInterfaceSha256, originalSessionInterfaces, originalProducedSessionInterfaces )
+  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBody, originalInterfaceSha256, originalRetainedInterface, originalSessionInterfaces, originalProducedSessionInterfaces )
 import Tidepool.FinalizedModule (FinalizedModule, finalizedHomeModInfo, homeInterfaceUsageOwners)
 import Tidepool.FinalizedCore (captureFinalizedCore, isUnsupportedFinalizedCore)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, decodeCapturedPackageImports)
@@ -91,8 +93,12 @@ data CapturedModules = CapturedModules FilePath [CapturedModule]
 data CapturedValueInterface = CapturedValueInterface
   T.Text T.Text ArtifactBytes ArtifactBytes [(T.Text,T.Text,T.Text)]
 
+data CapturedTypeInterface = CapturedTypeInterface
+  ExactIfaceArtifact ArtifactBytes [(T.Text,T.Text,T.Text)]
+
 -- Selected type interfaces never enter the original source/native inventory.
-data FinalizedModuleArtifacts = FinalizedModuleArtifacts [T.Text] (Maybe CapturedModules) [CapturedValueInterface]
+data FinalizedModuleArtifacts = FinalizedModuleArtifacts
+  [T.Text] (Maybe CapturedModules) [CapturedValueInterface] [CapturedTypeInterface]
 
 -- Only this owner can project an admission from a completed capture. There is
 -- no decoder or public constructor: serialized descriptors cannot mint it.
@@ -102,7 +108,7 @@ data LocalFinalizedAdmission = LocalFinalizedAdmission [T.Text] FilePath Capture
 -- Owner-free targets still carry the complete compiler home-unit census.
 emptyFinalizedModuleArtifacts :: HscEnv -> FinalizedModuleArtifacts
 emptyFinalizedModuleArtifacts env = FinalizedModuleArtifacts
-  (map (T.pack . unitIdString) (Set.toAscList (hsc_all_home_unit_ids env))) Nothing []
+  (map (T.pack . unitIdString) (Set.toAscList (hsc_all_home_unit_ids env))) Nothing [] []
 
 -- Held capture owns bodies and logical output paths; only materialization
 -- writes packet files and issues output checks.
@@ -218,7 +224,7 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
         | CapturedModule _ _ _ iface packages' core _ _ <- rows]
         + sum [size iface + size package | CapturedValueInterface _ _ iface package _ <- values]
   when (total > payloadLimit) $ throwIO (FinalizedPayloadTooLarge "aggregate")
-  pure (FinalizedModuleArtifacts homeUnits (Just (CapturedModules absoluteDirectory rows)) values)
+  pure (FinalizedModuleArtifacts homeUnits (Just (CapturedModules absoluteDirectory rows)) values [])
   where
     originalKey original = let owner = mi_module (hm_iface (finalizedHomeModInfo original))
       in (unitString (moduleUnit owner),moduleNameString (moduleName owner))
@@ -231,6 +237,52 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
       pure body
     size = artifactLength
 
+-- Nonfresh compiler interfaces remain available to type witnesses without
+-- issuing source hashes, defining Core, local original admissions or output
+-- files. Their existing selected input owner retains transport authority.
+captureFinalizedModuleTypeInterfaces
+  :: OriginalInterfaceArtifacts -> HscEnv -> Map.Map ModuleName FinalizedModule
+  -> FinalizedModuleArtifacts -> IO FinalizedModuleArtifacts
+captureFinalizedModuleTypeInterfaces originals env selected artifacts@(FinalizedModuleArtifacts units captured values previous) = do
+  let originalOwners = Map.keysSet (finalizedLocalAdmissions artifacts)
+  rows <- forM (Map.toAscList selected) $ \(key,original) -> do
+    let iface = hm_iface (finalizedHomeModInfo original)
+        owner = mi_module iface
+        unit = unitString (moduleUnit owner)
+        name = moduleNameString (moduleName owner)
+    unless (moduleNameString key == name) (throwIO (FinalizedOwnerKeyMismatch unit name))
+    unless (T.pack unit `elem` units) (throwIO (InvalidFinalizedHomeOwner unit name))
+    when ((unit,name) `Set.member` originalOwners) (throwIO (DuplicateFinalizedOwner unit name))
+    (artifact,body) <- maybe (throwIO (MissingFinalizedInterface unit name)) pure
+      (originalRetainedInterface originals owner)
+    actual <- originalInterfaceBody originals owner
+      >>= maybe (throwIO (MissingFinalizedInterface unit name)) pure
+    unless (actual == body && (exactUnit artifact,exactModule artifact) == (unit,name)
+        && exactSha256 artifact == artifactSha256 body
+        && exactRequirements artifact == homeInterfaceUsageOwners env iface)
+      (throwIO (MissingFinalizedInterface unit name))
+    when (artifactLength body <= 0 || artifactLength body > interfaceLimit)
+      (throwIO (FinalizedPayloadTooLarge "type interface"))
+    requirements <- forM (homeInterfaceUsageOwners env iface) $ \(requiredUnit,requiredName) -> do
+      unless (T.pack requiredUnit `elem` units) (throwIO (MissingFinalizedDependency requiredUnit requiredName))
+      sha <- originalInterfaceSha256 originals (mkModule (stringToUnit requiredUnit) (mkModuleName requiredName))
+        >>= maybe (throwIO (MissingFinalizedDependency requiredUnit requiredName)) pure
+      pure (T.pack requiredUnit,T.pack requiredName,T.pack sha)
+    pure (CapturedTypeInterface artifact body requirements)
+  let allTypes = previous ++ rows
+  forM_ (duplicates [(exactUnit artifact,exactModule artifact) | CapturedTypeInterface artifact _ _ <- allTypes]) $ \(unit,name) ->
+    throwIO (DuplicateFinalizedOwner unit name)
+  when (length allTypes + length (capturedRows artifacts) > 128)
+    (throwIO FinalizedInventoryTooLarge)
+  let total = sum [artifactLength body | CapturedTypeInterface _ body _ <- allTypes]
+        + sum [artifactLength interface + artifactLength package + maybe 0 artifactLength core
+          | CapturedModule _ _ _ interface package core _ _ <- capturedRows artifacts]
+        + sum [artifactLength interface + artifactLength package
+          | CapturedValueInterface _ _ interface package _ <- values]
+  when (total > payloadLimit)
+    (throwIO (FinalizedPayloadTooLarge "type aggregate"))
+  pure (FinalizedModuleArtifacts units captured values allTypes)
+
 -- Each packet owns every relative payload it encodes, even when projection
 -- reuses a finalization captured for another packet in the same transaction.
 -- Destination-local exclusive publication preserves the captured bytes and
@@ -241,7 +293,7 @@ materializeFinalizedModuleArtifacts directory artifacts =
 
 materializeFinalizedModuleArtifactsWithOutputs :: FilePath -> FinalizedModuleArtifacts
   -> IO (FinalizedModuleArtifacts,[(FilePath,BS.ByteString)])
-materializeFinalizedModuleArtifactsWithOutputs directory artifacts@(FinalizedModuleArtifacts units captured values) =
+materializeFinalizedModuleArtifactsWithOutputs directory artifacts@(FinalizedModuleArtifacts units captured values types) =
   case captured of
     Nothing -> pure (artifacts,[])
     Just (CapturedModules _ rows) -> do
@@ -283,16 +335,17 @@ materializeFinalizedModuleArtifactsWithOutputs directory artifacts@(FinalizedMod
         unless (owned == bytes) $
           throwIO (CapturedFinalizedPayloadChanged output)
         pure (output,bytes)
-      pure (FinalizedModuleArtifacts units (Just (CapturedModules destination rows)) values,outputs)
+      pure (FinalizedModuleArtifacts units (Just (CapturedModules destination rows)) values types,outputs)
 
 payloadPath :: FilePath -> String -> ArtifactBytes -> FilePath
 payloadPath directory suffix body = directory </> (artifactSha256 body ++ ".finalized." ++ suffix)
 finalizedInterfaceSeals :: FinalizedModuleArtifacts -> [((T.Text,T.Text),T.Text)]
 finalizedInterfaceSeals artifacts =
-  finalizedValueInterfaceSeals artifacts ++ [((unit,name),T.pack (artifactSha256 body)) | CapturedModule unit name _ body _ _ _ _ <- capturedRows artifacts]
+  finalizedValueInterfaceSeals artifacts ++ [((T.pack unit,T.pack name),T.pack (exactSha256 artifact))
+    | ((unit,name),(artifact,_)) <- Map.toAscList (finalizedTypeInterfaces artifacts)]
 
 finalizedValueInterfaceSeals :: FinalizedModuleArtifacts -> [((T.Text,T.Text),T.Text)]
-finalizedValueInterfaceSeals (FinalizedModuleArtifacts _ _ values) =
+finalizedValueInterfaceSeals (FinalizedModuleArtifacts _ _ values _) =
   [((unit,name),T.pack (artifactSha256 body)) | CapturedValueInterface unit name body _ _ <- values]
 
 decodeValueRequirements :: D.Decoder s [(String,String)]
@@ -305,11 +358,18 @@ decodeValueRequirements = do
     (,) <$> (T.unpack <$> D.decodeString) <*> (T.unpack <$> D.decodeString)
 
 finalizedLocalAdmissions :: FinalizedModuleArtifacts -> Map.Map (String,String) LocalFinalizedAdmission
-finalizedLocalAdmissions (FinalizedModuleArtifacts units captured _) = case captured of
+finalizedLocalAdmissions (FinalizedModuleArtifacts units captured _ _) = case captured of
   Nothing -> Map.empty
   Just (CapturedModules directory rows) -> Map.fromList
     [((T.unpack unit,T.unpack name),LocalFinalizedAdmission units directory row)
     | row@(CapturedModule unit name _ _ _ _ _ _) <- rows]
+
+finalizedTypeInterfaces :: FinalizedModuleArtifacts -> Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
+finalizedTypeInterfaces artifacts@(FinalizedModuleArtifacts _ _ _ types) = Map.union
+  (Map.map (\proof -> let (artifact,_,_) = localFinalizedInterface proof
+    in (artifact,localFinalizedInterfaceBody proof)) (finalizedLocalAdmissions artifacts))
+  (Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,body))
+    | CapturedTypeInterface artifact body _ <- types])
 
 localFinalizedInterface :: LocalFinalizedAdmission -> (ExactIfaceArtifact,FilePath,String)
 localFinalizedInterface admission@(LocalFinalizedAdmission _ directory
@@ -368,7 +428,7 @@ localFinalizedCoreBody :: LocalFinalizedAdmission -> Maybe ArtifactBytes
 localFinalizedCoreBody (LocalFinalizedAdmission _ _ (CapturedModule _ _ _ _ _ body _ _)) = body
 
 capturedRows :: FinalizedModuleArtifacts -> [CapturedModule]
-capturedRows (FinalizedModuleArtifacts _ captured _) = case captured of
+capturedRows (FinalizedModuleArtifacts _ captured _ _) = case captured of
   Nothing -> []
   Just (CapturedModules _ rows) -> rows
 
@@ -376,7 +436,7 @@ payloadSha :: ArtifactBytes -> String
 payloadSha = artifactSha256
 
 encodeFinalizedModuleArtifacts :: FinalizedModuleArtifacts -> Encoding
-encodeFinalizedModuleArtifacts artifacts@(FinalizedModuleArtifacts units _ values) =
+encodeFinalizedModuleArtifacts artifacts@(FinalizedModuleArtifacts units _ values _) =
   array [encodeString "tidepool-ghc-finalized-module-v2",list encodeString units
     ,list encodeModule (capturedRows artifacts),list encodeValue (sortOn valueOwner values)]
   where
