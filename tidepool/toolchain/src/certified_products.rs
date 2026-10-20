@@ -2775,6 +2775,7 @@ pub(crate) struct CertifiedSourceSelection {
     private_native: crate::declaration_context::RequestNativeAvailability,
     private_advertised: crate::declaration_context::AdvertisedNativeOriginals,
     input_origin: CertifiedInputOrigin,
+    resolved_originals: Option<Arc<ResolvedOriginalBindings>>,
 }
 
 /// A physically bound product of this selection's completed compiler request.
@@ -3277,6 +3278,7 @@ impl CertifiedSourceSelection {
             private_native: Default::default(),
             private_advertised: Default::default(),
             input_origin: CertifiedInputOrigin::NewProducts,
+            resolved_originals: None,
         }
     }
 
@@ -3341,6 +3343,7 @@ impl CertifiedSourceSelection {
             Self::from_compiler_projection(inputs.projection(), &metadata.retained, operation)?;
         selected.input_origin =
             CertifiedInputOrigin::Continuation(inputs.shared_compiler_source_support());
+        selected.resolved_originals = inputs.resolved_originals().cloned();
         selected.private_native = inputs.private_native_availability();
         selected.private_advertised = inputs.advertised_native_originals();
         for role in inputs.projection().roles() {
@@ -4710,6 +4713,70 @@ fn resolve_receipt_owner(
     )
 }
 
+/// Symbol membership resolved by one actual request input owner. Later product
+/// certification consumes these issued coordinates instead of selecting again.
+#[derive(Debug)]
+pub(crate) struct ResolvedOriginalBindings {
+    basis: Arc<crate::artifact_inventory::CompilerSourceSupport>,
+    operation: Arc<InventoryOperation>,
+    uses: BTreeMap<ReceiptImportOwner, (CachedHomeOwner, u32)>,
+}
+
+impl ResolvedOriginalBindings {
+    pub(crate) fn issue<'a>(
+        basis: Arc<crate::artifact_inventory::CompilerSourceSupport>,
+        operation: Arc<InventoryOperation>,
+        imports: impl IntoIterator<Item = &'a ReceiptImportOwner>,
+    ) -> CertResult<Arc<Self>> {
+        let mut uses = BTreeMap::new();
+        for import in imports {
+            let ReceiptImportOwner::OriginalBinding {
+                unit,
+                module,
+                interface,
+                original,
+                binder,
+            } = import
+            else {
+                continue;
+            };
+            if uses.contains_key(import) {
+                continue;
+            }
+            operation.reserve::<(ReceiptImportOwner, (CachedHomeOwner, u32))>(1)?;
+            let resolved = resolve_selected_original_binding(
+                &basis,
+                &crate::declaration_join::ExactModuleIdentity {
+                    unit: unit.clone(),
+                    module: module.clone(),
+                },
+                *interface,
+                *original,
+                binder,
+                &operation,
+            )?;
+            uses.insert(import.clone(), resolved);
+        }
+        Ok(Arc::new(Self {
+            basis,
+            operation,
+            uses,
+        }))
+    }
+
+    pub(crate) fn belongs_to(
+        &self,
+        source: &Arc<crate::artifact_inventory::CompilerSourceSupport>,
+        operation: &Arc<InventoryOperation>,
+    ) -> bool {
+        Arc::ptr_eq(&self.basis, source) && Arc::ptr_eq(&self.operation, operation)
+    }
+
+    pub(crate) fn get(&self, import: &ReceiptImportOwner) -> Option<&(CachedHomeOwner, u32)> {
+        self.uses.get(import)
+    }
+}
+
 /// Resolve only one selected Original's authenticated symbol membership. The
 /// exact acquired pair is checked before body permission; custody and names
 /// cannot choose another Original or supply an absent permission.
@@ -4805,20 +4872,22 @@ fn resolve_receipt_owner_with_validation(
                 owner: owner.clone(),
                 reason: InputDecisionRefusal::MissingContinuationOwner,
             })?;
-            let (source, _) = selected.continuation_input(&owner)?.ok_or_else(|| {
-                CertificationError::InputDecision {
-                    owner: owner.clone(),
-                    reason: InputDecisionRefusal::RoleMismatch,
-                }
-            })?;
-            let (native, ordinal) = resolve_selected_original_binding(
-                source,
-                &owner,
+            let import = ReceiptImportOwner::OriginalBinding {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
                 interface,
                 original,
-                &binder,
-                &validation.inventory,
-            )?;
+                binder: binder.clone(),
+            };
+            let (native, ordinal) = selected
+                .resolved_originals
+                .as_ref()
+                .and_then(|resolved| resolved.get(&import))
+                .ok_or_else(|| CertificationError::InputDecision {
+                    owner: owner.clone(),
+                    reason: InputDecisionRefusal::MissingContinuationOwner,
+                })?;
+            let ordinal = *ordinal;
             // The item receipt must still agree with this selected continuation.
             selected.receipt_source_owner(
                 &owner.unit,
@@ -13266,17 +13335,27 @@ pub(crate) mod tests {
             ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
         };
         use crate::declaration_join::ExactLexicalNode;
-        let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(b"original-binding-test").sha256();
+        let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            b"original-binding-test",
+        )
+        .sha256();
         let product = fixture_finalized_product(
-            full_native_fixture("BoundOriginal", vec![(7, vec![]), (11, vec![])], 1), producer);
+            full_native_fixture("BoundOriginal", vec![(7, vec![]), (11, vec![])], 1),
+            producer,
+        );
         let entry = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
         let other_product = fixture_finalized_product(
-            full_native_fixture("OtherSelected", vec![(7, vec![])], 2), producer);
+            full_native_fixture("OtherSelected", vec![(7, vec![])], 2),
+            producer,
+        );
         let other_entry = Arc::new(ArtifactEntry::original(producer, other_product).unwrap());
         let projection = CompilerInputProjection::from_issued_entries(&[entry.clone(), other_entry.clone()]).unwrap();
         let inventory = ArtifactInventory::default();
         let physical = inventory
-            .admit_shared(&inventory.empty_view(), vec![entry.clone(), other_entry.clone()])
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![entry.clone(), other_entry.clone()],
+            )
             .unwrap();
         let operation = Arc::new(InventoryOperation::new(Default::default()));
         let mut selected = CertifiedSourceSelection::from_compiler_projection(
@@ -13408,7 +13487,7 @@ pub(crate) mod tests {
         let primary = source.compiler_primary_input(&owner).unwrap().unwrap();
         let interface = primary.interface();
         let original = primary.original().unwrap();
-        let selection =
+        let mut selection =
             CertifiedSourceSelection::from_compiler_inputs(request.compiler_inputs(), &operation)
                 .unwrap();
         let membership = request
@@ -13426,6 +13505,29 @@ pub(crate) mod tests {
                 original,
                 binder: binder.clone(),
             };
+            let resolved = ResolvedOriginalBindings::issue(
+                request.compiler_inputs().shared_compiler_source_support(),
+                Arc::clone(&operation),
+                [&receipt],
+            );
+            if !permitted {
+                assert!(
+                    matches!(resolved, Err(CertificationError::OriginalAvailability(reason))
+                    if reason.owner == *product.owner() && reason.original_ordinal == ordinal)
+                );
+                continue;
+            }
+            let resolved = resolved.unwrap();
+            assert!(resolved.belongs_to(
+                &request.compiler_inputs().shared_compiler_source_support(),
+                &operation
+            ));
+            let foreign_operation = Arc::new(InventoryOperation::new(Default::default()));
+            assert!(!resolved.belongs_to(
+                &request.compiler_inputs().shared_compiler_source_support(),
+                &foreign_operation
+            ));
+            selection.resolved_originals = Some(resolved);
             let result = resolve_receipt_owner_with_validation(
                 receipt,
                 &sources,

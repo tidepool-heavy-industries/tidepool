@@ -512,9 +512,14 @@ impl TargetNativeInputs {
         groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
     ) -> Result<CertifiedTargetNativeInputs, CompileError> {
         if !groups.matches_view(self.artifacts()) {
-            return Err(failure("native group products belong to another target acquisition"));
+            return Err(failure(
+                "native group products belong to another target acquisition",
+            ));
         }
-        Ok(CertifiedTargetNativeInputs { target: self, groups })
+        Ok(CertifiedTargetNativeInputs {
+            target: self,
+            groups,
+        })
     }
 
     pub(crate) fn artifacts(&self) -> &ArtifactView {
@@ -658,9 +663,9 @@ impl<'a> ResolvedNativeSourceTarget<'a> {
         if !self.target.groups().contains(&binding) {
             return Err(failure("native source row is outside its resolved target"));
         }
-        self.groups.get(binding).ok_or_else(|| {
-            failure("selected native binding lacks its exact certified product")
-        })
+        self.groups
+            .get(binding)
+            .ok_or_else(|| failure("selected native binding lacks its exact certified product"))
     }
 }
 
@@ -6444,6 +6449,19 @@ fn admitted_closure_with_operation(
     roots: impl Iterator<Item = InventoryNodeKey>,
     operation: Option<&tidepool_repr::execution_schema::InventoryOperation>,
 ) -> Result<(imbl::OrdSet<InventoryNodeKey>, NativeClosureWork), CompileError> {
+    admitted_closure_observing(state, roots, operation, |_, _, _| Ok(()))
+}
+
+fn admitted_closure_observing(
+    state: &InventoryState,
+    roots: impl Iterator<Item = InventoryNodeKey>,
+    operation: Option<&tidepool_repr::execution_schema::InventoryOperation>,
+    mut observe: impl FnMut(
+        InventoryNodeKey,
+        InventoryNodeKey,
+        &ArtifactDependency,
+    ) -> Result<(), CompileError>,
+) -> Result<(imbl::OrdSet<InventoryNodeKey>, NativeClosureWork), CompileError> {
     let reserve_pending = || -> Result<(), CompileError> {
         if let Some(operation) = operation {
             // Two slots cover Vec capacity growth before each push.
@@ -6481,7 +6499,8 @@ fn admitted_closure_with_operation(
         seen.insert(id);
         work.nodes += 1;
         state.graph_visits.fetch_add(1, Ordering::Relaxed);
-        for (target, _) in state.outgoing(id) {
+        for (target, label) in state.outgoing(id) {
+            observe(id, target, label)?;
             if let Some(operation) = operation {
                 crate::host_work::checkpoint()?;
                 operation
