@@ -503,6 +503,17 @@ mod retirement_tests {
             stopped.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+
+        async fn handle_supervisor_evt(
+            &self,
+            _myself: RactorRef<()>,
+            _event: ractor::SupervisionEvent,
+            _stopped: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            // Like LocalActor, this parent handles child exit independently of
+            // its own lifetime. Ractor's default instead stops the supervisor.
+            Ok(())
+        }
     }
 
     fn retain_native(state: &mut RunState, cell: ractor::ActorCell, issued_to: ActorRef) {
