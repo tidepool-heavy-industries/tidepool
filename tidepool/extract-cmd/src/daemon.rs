@@ -6841,7 +6841,12 @@ tidepool-reuse-error: witness failed\n";
                 connection.read_exact(&mut command).unwrap();
                 assert_eq!(command, [TRANSACTION_REQUEST]);
                 let (_, argv) = read_request(&mut connection).unwrap();
-                assert_eq!(argv, [OsString::from(expected)]);
+                assert_eq!(
+                    ExtractRequest::decode_worker_argv(&argv)
+                        .unwrap()
+                        .cli_argv(),
+                    [OsString::from(expected)]
+                );
                 connection.write_all(&[TRANSACTION_OUTPUT]).unwrap();
                 write_response(&mut connection, 0, expected.as_bytes(), b"").unwrap();
             }
@@ -7130,7 +7135,12 @@ tidepool-reuse-error: witness failed\n";
                 let mut header = [0; 40];
                 stream.read_exact(&mut header).unwrap();
                 let (_, argv) = read_request(&mut stream).unwrap();
-                assert_eq!(argv, [OsString::from("same-request")]);
+                assert_eq!(
+                    ExtractRequest::decode_worker_argv(&argv)
+                        .unwrap()
+                        .cli_argv(),
+                    [OsString::from("same-request")]
+                );
                 if busy {
                     write_busy(&mut stream).unwrap();
                 } else {
@@ -7197,7 +7207,9 @@ tidepool-reuse-error: witness failed\n";
             stream.read_exact(&mut command).unwrap();
             assert_eq!(command, [TRANSACTION_REQUEST]);
             assert_eq!(
-                read_request(&mut stream).unwrap().1,
+                ExtractRequest::decode_worker_argv(&read_request(&mut stream).unwrap().1)
+                    .unwrap()
+                    .cli_argv(),
                 [OsString::from("same-request")]
             );
             written_tx.send(()).unwrap();
