@@ -483,7 +483,11 @@ pub fn decode_world_observation(
             let same_pin = |actual: &ScopeProvenance| {
                 actual.scope == NameScope::Current && actual.same_view(&provenance)
             };
-            let name_matches = |reference: &IdentifierRef, query: &NameQuery| {
+            // A lexical spelling can resolve through aliases or reexports to
+            // another canonical name. GHC owns that semantic relation; this
+            // codec checks shape, namespace and exact request/view correlation.
+            // It does not independently authenticate arbitrary name resolution.
+            let namespace_matches = |reference: &IdentifierRef, query: &NameQuery| {
                 !reference.module.is_empty()
                     && !reference.name.is_empty()
                     && (query.namespace == NameNamespace::Any
@@ -493,9 +497,11 @@ pub fn decode_world_observation(
             };
             match (expected.question, &reply) {
                 (WorldObservationQuestion::Info(query), ScopedReply::Info(info))
-                    if same_pin(&info.provenance) && name_matches(&info.identifier, query) => {}
+                    if same_pin(&info.provenance) && namespace_matches(&info.identifier, query) => {
+                }
                 (WorldObservationQuestion::Type(query), ScopedReply::Type(info))
-                    if same_pin(&info.provenance) && name_matches(&info.identifier, query) => {}
+                    if same_pin(&info.provenance) && namespace_matches(&info.identifier, query) => {
+                }
                 (
                     WorldObservationQuestion::RowFit(expected),
                     ScopedReply::RowFit { identifier, .. },
