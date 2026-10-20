@@ -1157,7 +1157,7 @@ mod tests {
             started
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap();
-            state.clear();
+            drop(state.drain_retired());
             release.send(()).unwrap();
         });
         let error = owner.refuse_retirement(&mut original).unwrap_err();
