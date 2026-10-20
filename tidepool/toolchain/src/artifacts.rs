@@ -882,11 +882,7 @@ pub fn prepare_world_cell_program(
         SelectedSessionValueOwners::capture(names.iter().map(std::ffi::OsStr::new))?;
     let produced_outputs =
         checked_cell::CheckedValueInputs::capture_world_produced_types(&program, &mut validation)?;
-    let decoded = crate::declaration_context::decode_world_source_receipt(
-        &program,
-        0,
-        Path::new("world-source.cbor"),
-    )?;
+    let decoded = crate::declaration_context::decode_world_source_receipt(&program, 0)?;
     let (packages_path, packages) = decoded.package_imports();
     validation
         .record_captured_bytes(packages_path, packages)
@@ -911,11 +907,11 @@ pub fn prepare_world_cell_program(
         Some(&produced_outputs),
         &mut validation,
     )?;
-    let checked = checked_cell::admit_world_executable_cell(
+    let checked = checked_cell::admit_world_cell(
         program.clone(),
-        segment.source(),
-        segment.source_text(),
+        &[(segment.source(), segment.source_text())],
         segment.aliases(),
+        BTreeMap::new(),
     )?;
     let mut artifacts =
         crate::declaration_context::bind_certified_segment_artifacts_with_validation(
@@ -948,6 +944,10 @@ pub fn prepare_world_cell_program(
             CompileError::ExtractFailed("World output lacks its reserved item".into())
         })?;
         let prepared_path = item
+            .executable()
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("World original has no executable manifest".into())
+            })?
             .manifest()
             .keys()
             .find(|path| {

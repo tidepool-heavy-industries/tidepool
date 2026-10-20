@@ -6629,7 +6629,7 @@ impl<'a> ExactRequestIdentity<'a> {
 #[derive(Clone, Debug)]
 pub(crate) struct WorldSourceCompilationBinding {
     reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
-    segment: Arc<crate::checked_cell::CheckedTypedSegmentPlan>,
+    stage: Arc<crate::compiler_world::CheckedWorldCellStage>,
     plan_receipt_sha256: [u8; 32],
     product_context_sha256: [u8; 32],
 }
@@ -6639,17 +6639,13 @@ impl WorldSourceCompilationBinding {
     /// checked program. Raw preparation completion is not accepted here.
     pub(crate) fn from_output(
         program: &crate::compiler_world::CheckedWorldCellProgram,
-        segment_index: usize,
+        stage_index: usize,
     ) -> Result<Self, CompileError> {
         use sha2::Digest;
-        let segment = program
-            .segments()
-            .get(segment_index)
-            .ok_or_else(|| failure("world source binding has no actual prepared segment"))?;
-        let segment_sha256 = crate::execution_source::parse_digest(segment.digest())?;
-        if hex(&segment_sha256) != segment.digest() {
-            return Err(failure("world source segment digest is not canonical"));
-        }
+        let stage = program
+            .stages()
+            .get(stage_index)
+            .ok_or_else(|| failure("world source binding has no actual prepared stage"))?;
         let plan = program.reservation().plan();
         program
             .validation()
@@ -6663,15 +6659,15 @@ impl WorldSourceCompilationBinding {
             .map_err(|error| compiler_evidence_failure(error.into()))?;
         let plan_receipt_sha256: [u8; 32] = sha2::Sha256::digest(plan.receipt()).into();
         let mut context = sha2::Sha256::new();
-        context.update(b"Tidepool world source compilation context v1\0");
+        context.update(b"Tidepool world source compilation context v2\0");
         context.update(plan.world().logical_id());
         context.update(plan_receipt_sha256);
         context.update(program.reservation().admission_digest());
-        context.update(segment_sha256);
+        context.update(stage.identity().identity_bytes());
         context.update(plan.producer_sha256());
         Ok(Self {
             reservation: Arc::clone(program.reservation()),
-            segment: Arc::clone(segment),
+            stage: Arc::clone(stage),
             plan_receipt_sha256,
             product_context_sha256: context.finalize().into(),
         })
@@ -6680,8 +6676,7 @@ impl WorldSourceCompilationBinding {
 
 impl PartialEq for WorldSourceCompilationBinding {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.reservation, &other.reservation)
-            && Arc::ptr_eq(&self.segment, &other.segment)
+        Arc::ptr_eq(&self.reservation, &other.reservation) && Arc::ptr_eq(&self.stage, &other.stage)
     }
 }
 
@@ -6694,7 +6689,7 @@ pub(crate) struct WorldCompilationIdentity {
     captured_source_domain: [u8; 32],
     plan_receipt_sha256: [u8; 32],
     product_context_sha256: [u8; 32],
-    segment_digest: String,
+    stage_identity: crate::compiler_world::WorldCellStageIdentity,
 }
 
 impl WorldCompilationIdentity {
@@ -6709,7 +6704,7 @@ impl WorldCompilationIdentity {
                 .captured_source_domain(),
             plan_receipt_sha256: binding.plan_receipt_sha256,
             product_context_sha256: binding.product_context_sha256,
-            segment_digest: binding.segment.digest().to_owned(),
+            stage_identity: binding.stage.identity().clone(),
         }
     }
 
@@ -6728,7 +6723,9 @@ impl WorldCompilationIdentity {
             captured_source_domain: product_context_sha256,
             plan_receipt_sha256,
             product_context_sha256,
-            segment_digest: segment_digest.into(),
+            stage_identity: crate::compiler_world::WorldCellStageIdentity::Executable {
+                typed_digest: segment_digest.into(),
+            },
         }
     }
 }
@@ -6752,7 +6749,15 @@ impl SourceCompilationBinding<'_> {
     fn retained_text_bytes(&self) -> usize {
         match self {
             Self::Exact(identity) => identity.request_sha256.len(),
-            Self::World(binding) => binding.segment.digest().len(),
+            Self::World(binding) => match binding.stage.identity() {
+                crate::compiler_world::WorldCellStageIdentity::Executable { typed_digest } => {
+                    typed_digest.len()
+                }
+                crate::compiler_world::WorldCellStageIdentity::Declaration { owner, .. }
+                | crate::compiler_world::WorldCellStageIdentity::Prologue { owner, .. } => {
+                    owner.unit.len() + owner.module.len()
+                }
+            },
         }
     }
 }
@@ -7299,6 +7304,21 @@ pub(crate) fn consumed_source_home_imports(
 }
 
 impl ExactSourceAdmission {
+    pub(crate) fn matches_world_stage(
+        &self,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        stage_index: usize,
+        source: &str,
+    ) -> Result<bool, CompileError> {
+        Ok(
+            matches!(&self.compilation_binding, SourceCompilationBinding::World(binding)
+            if *binding == WorldSourceCompilationBinding::from_output(program, stage_index)?)
+                && self
+                    .witness
+                    .matches_source(self.witness.source_path(), source),
+        )
+    }
+
     pub(crate) fn evidence_bytes(&self) -> &[u8] {
         &self.evidence_bytes
     }
@@ -9196,17 +9216,18 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
 
 pub(crate) fn decode_world_source_receipt<'a>(
     program: &'a crate::compiler_world::CheckedWorldCellProgram,
-    segment_index: usize,
-    receipt_relative: &Path,
+    stage_index: usize,
 ) -> Result<DecodedWorldSourceReceipt<'a>, CompileError> {
     let operation = program.validation().inventory.as_ref();
-    let binding = WorldSourceCompilationBinding::from_output(program, segment_index)?;
+    let binding = WorldSourceCompilationBinding::from_output(program, stage_index)?;
     let output_root = program.directory().path();
     let common_files = program.common_files();
     let captured_files = program.captured_files();
     if !output_root.is_absolute() {
         return Err(failure("world source output owner is not absolute"));
     }
+    let receipt_reference = binding.stage.outputs().source_receipt();
+    let receipt_relative = receipt_reference.relative();
     let receipt_name = receipt_relative
         .to_str()
         .ok_or_else(|| failure("world source receipt name is not UTF-8"))?;
@@ -9228,7 +9249,8 @@ pub(crate) fn decode_world_source_receipt<'a>(
     if world_source_digest(&header[1])? != *plan.world().logical_id()
         || world_source_digest(&header[2])? != binding.plan_receipt_sha256
         || world_source_digest(&header[3])? != *binding.reservation.admission_digest()
-        || string(&header[4])? != binding.segment.digest()
+        || crate::compiler_world::WorldCellStageIdentity::decode(&header[4])?
+            != *binding.stage.identity()
     {
         return Err(failure(
             "world source receipt belongs to another preparation",
@@ -9239,14 +9261,18 @@ pub(crate) fn decode_world_source_receipt<'a>(
         let reference = row(value, 2)?;
         let name = string(&reference[0])?;
         let digest = world_source_digest(&reference[1])?;
+        if !binding.stage.contains_output(Path::new(name)) {
+            return Err(failure("world source file belongs to another stage"));
+        }
         let bytes = captured_world_source_file(name, digest, common_files, captured_files)?;
         Ok((PathBuf::from(name), digest, bytes))
     };
     let (source_relative, source_sha256, source_bytes) = resolve(&header[5])?;
     let (dependencies_relative, _, evidence_bytes) = resolve(&header[6])?;
     let (packages_relative, _, package_imports) = resolve(&header[7])?;
-    if dependencies_relative != Path::new("dependencies.json")
-        || packages_relative != Path::new("module-package-imports.cbor")
+    let namespace = PathBuf::from(format!("stage-{}", binding.stage.ordinals()[0]));
+    if dependencies_relative != namespace.join("dependencies.json")
+        || packages_relative != namespace.join("module-package-imports.cbor")
         || source_relative == dependencies_relative
         || source_relative == packages_relative
     {
@@ -9279,7 +9305,7 @@ pub(crate) fn decode_world_source_receipt<'a>(
 
 fn world_source_header(value: &Value) -> Result<&[Value], CompileError> {
     let header = row(value, 11)?;
-    if string(&header[0])? != "TPCWSOURCE2" {
+    if string(&header[0])? != "TPCWSOURCE3" {
         return Err(failure("unsupported world source receipt version"));
     }
     Ok(header)
@@ -22666,17 +22692,17 @@ mod tests {
     }
 
     #[test]
-    fn world_source_v2_refuses_old_envelopes_and_bounds_ordered_alias_copies() {
+    fn world_source_v3_refuses_old_envelopes_and_bounds_ordered_alias_copies() {
         use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
 
         let mut header = vec![Value::Null; 11];
-        header[0] = text("TPCWSOURCE2");
+        header[0] = text("TPCWSOURCE3");
         assert!(world_source_header(&Value::Array(header.clone())).is_ok());
-        header[0] = text("TPCWSOURCE1");
+        header[0] = text("TPCWSOURCE2");
         assert!(world_source_header(&Value::Array(header.clone())).is_err());
         header.pop();
         assert!(world_source_header(&Value::Array(header.clone())).is_err());
-        header[0] = text("TPCWSOURCE2");
+        header[0] = text("TPCWSOURCE3");
         assert!(world_source_header(&Value::Array(header)).is_err());
 
         let aliases = Value::Array(vec![text("/held/second"), text("/held/first")]);

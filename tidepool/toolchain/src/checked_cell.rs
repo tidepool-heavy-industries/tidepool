@@ -3385,17 +3385,18 @@ impl CheckedTypedEntry {
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     ) -> Result<Self, CompileError> {
         let item = program.item(ordinal).ok_or_else(typed_entry_failure)?;
+        let executable = item.executable().ok_or_else(typed_entry_failure)?;
         let plan = program
             .segments()
             .iter()
-            .find(|plan| plan.digest() == item.segment_digest())
+            .find(|plan| plan.digest() == executable.segment_digest())
             .ok_or_else(typed_entry_failure)?;
         let planned = plan
             .items()
             .iter()
             .find(|planned| planned.ordinal() == ordinal)
             .ok_or_else(typed_entry_failure)?;
-        if planned.generation() != item.generation() || planned.entry() != item.entry() {
+        if planned.generation() != item.generation() || planned.entry() != executable.entry() {
             return Err(typed_entry_failure());
         }
         Self::from_original_entry(
@@ -3407,8 +3408,8 @@ impl CheckedTypedEntry {
                 occurrence: plan.root().to_owned(),
                 record_parent: None,
             },
-            item.symbol().clone(),
-            item.native_ordinal(),
+            executable.symbol().clone(),
+            executable.native_ordinal(),
             target,
             owner,
             products,
@@ -4832,7 +4833,7 @@ pub(crate) fn admit_world_checked_items(
     observations: &[u8],
     reservation: &crate::cell_plan::CompilerWorldCellReservation,
     segments: &[Arc<CheckedTypedSegmentPlan>],
-    proofs: &[crate::compiler_world::WorldItemProof],
+    proofs: &[Arc<crate::compiler_world::WorldItemProof>],
     operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<Vec<CheckedItem>, CompileError> {
     let value = operation
@@ -4900,12 +4901,56 @@ pub(crate) fn admit_world_checked_items(
 
 /// Adapt the already checked World items into the common checked-cell owner.
 /// The reservation and original captured output remain retained in its basis.
-pub(crate) fn admit_world_executable_cell(
+pub(crate) fn admit_world_cell(
     program: Arc<crate::compiler_world::CheckedWorldCellProgram>,
-    source: &crate::declaration_context::ExactSourceAdmission,
-    source_text: &str,
+    sources: &[(&crate::declaration_context::ExactSourceAdmission, &str)],
     aliases: &[std::path::PathBuf],
+    planned_declarations: BTreeMap<usize, PlannedCheckedDeclaration>,
 ) -> Result<Arc<ExactCheckedCell>, CompileError> {
+    if sources.len() != program.stages().len() {
+        return Err(failure(
+            "World checked cell lacks its exact stage source admissions",
+        ));
+    }
+    for (index, (source, text)) in sources.iter().enumerate() {
+        if !source.matches_world_stage(&program, index, text)? {
+            return Err(failure(
+                "World checked cell source belongs to another stage",
+            ));
+        }
+    }
+    let mut originals = 0;
+    for item in program.items() {
+        match item.kind() {
+            crate::compiler_world::WorldItemProofKind::Executable(_) => {
+                if planned_declarations.contains_key(&item.ordinal()) {
+                    return Err(failure("World executable has a declaration certificate"));
+                }
+            }
+            crate::compiler_world::WorldItemProofKind::Declaration(proof)
+            | crate::compiler_world::WorldItemProofKind::Prologue(proof) => {
+                originals += 1;
+                let planned = planned_declarations.get(&item.ordinal()).ok_or_else(|| {
+                    failure("World original lacks its planned declaration certificate")
+                })?;
+                let product = planned.certificate.product();
+                if product.owner().unit != proof.owner().unit
+                    || product.owner().module != proof.owner().module
+                    || product.owner().skinny_iface_sha256 != *proof.iface_sha256()
+                    || planned.certificate.toolchain_identity_sha256() != *program.producer_sha256()
+                {
+                    return Err(failure(
+                        "World original certificate belongs to another owner or producer",
+                    ));
+                }
+            }
+        }
+    }
+    if planned_declarations.len() != originals {
+        return Err(failure(
+            "World declaration certificates exceed reserved originals",
+        ));
+    }
     let value_inputs = CheckedValueInputs::capture_checked(
         program
             .demanded_rows()
@@ -4938,13 +4983,23 @@ pub(crate) fn admit_world_executable_cell(
         declaration_context: program.primary_context().clone(),
         retained_projections: Vec::new(),
         receipt_digest: *program.certificate_sha256(),
-        checked_source: source_text.to_owned(),
-        evidence: vec![(source_text.to_owned(), source.evidence().clone())],
+        checked_source: program
+            .reservation()
+            .plan()
+            .items()
+            .iter()
+            .map(|item| item.source())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        evidence: sources
+            .iter()
+            .map(|(source, text)| ((*text).to_owned(), source.evidence().clone()))
+            .collect(),
         observations: program.observations().clone(),
         items: CheckedCellItems::World(program.clone()),
         include: aliases.to_vec(),
         planned_declaration: None,
-        planned_declarations: BTreeMap::new(),
+        planned_declarations,
         typed_segments: program
             .segments()
             .iter()
