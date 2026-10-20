@@ -1638,7 +1638,40 @@ impl crate::checked_cell::CellProgram {
     }
 }
 
+/// A declaration delta prepared against one exact public World owner.
+/// Runtime still authenticates its publication ticket and owns the commit.
+pub struct CompilerWorldDeclarationPublication {
+    base: Arc<CompilerWorld>,
+    advance: crate::declaration_context::WorldPrimaryProgramSupport,
+    lexical: CompilerWorldLexicalSurface,
+}
+
 impl CompilerWorld {
+    /// Prepare the common joined publication before the runtime commit claim.
+    /// The primary owner validates the facade's exact issued binding and keeps
+    /// the coherent context and inputs together in the returned product.
+    pub fn prepare_declaration_publication(
+        self: &Arc<Self>,
+        joined: &Arc<crate::declaration_join::AcceptedJoin>,
+        context: &Arc<ExactDeclarationContext>,
+        import_specs: Vec<String>,
+    ) -> Result<CompilerWorldDeclarationPublication, CompileError> {
+        let advance = self
+            .restoration
+            .primary_compiler_inputs
+            .with_declaration_projection(joined, context)?;
+        let lexical = CompilerWorldLexicalSurface::from_publication(
+            import_specs,
+            Some(WorldDeclarationSelection::Joined(joined.clone())),
+        )?
+        .with_observation(self.restoration.inputs.lexical.observation.clone())?;
+        Ok(CompilerWorldDeclarationPublication {
+            base: self.clone(),
+            advance,
+            lexical,
+        })
+    }
+
     /// Project the actual prepared runtime promotion onto the current public
     /// compiler product. Runtime still owns source gates, binding publication
     /// and the atomic installation of this prospective immutable product.
@@ -1647,6 +1680,7 @@ impl CompilerWorld {
         original_public: &Arc<Self>,
         private: &Arc<Self>,
         target_scope: u64,
+        declaration: Option<CompilerWorldDeclarationPublication>,
         visible_changes: impl IntoIterator<Item = (&'a str, Option<(tidepool_repr::SessionVarId, u64)>)>,
     ) -> Result<Arc<Self>, CompileError> {
         let position = private
@@ -1672,6 +1706,16 @@ impl CompilerWorld {
                 "public compiler projection belongs to another scope",
             ));
         }
+        let declaration = declaration
+            .map(|declaration| {
+                if !Arc::ptr_eq(&declaration.base, self) {
+                    return Err(source_failure(
+                        "declaration publication belongs to another World",
+                    ));
+                }
+                Ok((declaration.advance, declaration.lexical))
+            })
+            .transpose()?;
         let mut changes = BTreeMap::new();
         for (name, binding) in visible_changes {
             crate::host_work::checkpoint()?;
@@ -1707,7 +1751,7 @@ impl CompilerWorld {
             };
             changes.insert(name.to_owned(), fact);
         }
-        self.project_bindings(target_scope, changes, None)
+        self.project_bindings_with_declaration(target_scope, changes, None, declaration)
     }
 
     /// Extend the held primary with only canonical TYPE roles selected by

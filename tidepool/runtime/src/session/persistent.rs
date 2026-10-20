@@ -4199,10 +4199,6 @@ impl PersistentSession {
         }
         let next_epoch = self.prepare_public_visibility_advance(ticket.public_scope)?;
         let prepared = if let Some(declaration) = &ticket.declaration {
-            let binding_custody = self.resolve_native_binding_custody(
-                ticket.private_scope,
-                &declaration.binding_custody,
-            )?;
             self.bindings.prepare_authored_source_publication_in(
                 &self.scopes,
                 ticket.private_scope,
@@ -4210,7 +4206,6 @@ impl PersistentSession {
                 &ticket.write_ids,
                 &ticket.source_keys,
                 &declaration.source_domain_owners,
-                &binding_custody,
             )
         } else {
             self.bindings.prepare_exact_publication_in(
@@ -4231,12 +4226,28 @@ impl PersistentSession {
             .bindings
             .prepare_binding_publication_removals(prepared, &declared_names)
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        {
+            let projection = self
+                .bindings
+                .prepared_promotion_projection(self.scope_tree(), &prepared)
+                .map_err(SessionError::InvalidPublicBindingPromotion)?;
+            for entry in projection.retained_bindings() {
+                let entry = entry.map_err(SessionError::InvalidPublicBindingPromotion)?;
+                let handle = entry.value.handle;
+                if self
+                    .prepared()
+                    .and_then(|engine| engine.prepared_handle_of(handle.raw()))
+                    != Some(handle)
+                {
+                    return Err(SessionError::InvalidPublicBindingPromotion(
+                        tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
+                    ));
+                }
+            }
+        }
         // The final promotion witness must be taken from the SAME prepared
         // promotion that would commit. It is only meaningful after removals.
         let promoted_world = if let Some(intent) = &world_execution {
-            if ticket.declaration.is_some() {
-                return Err(SessionError::WorldCellDeclarationPublicationCapabilityMissing);
-            }
             let world = intent.world().expect("World execution was selected");
             let public = self
                 .lib()
@@ -4260,10 +4271,34 @@ impl PersistentSession {
             if projection.target_scope() != ticket.public_scope {
                 return Err(SessionError::WorldCellPublicationBaseStale);
             }
+            let declaration = ticket
+                .declaration
+                .as_ref()
+                .map(|declaration| {
+                    if !declaration
+                        .joined
+                        .evidence
+                        .matches_generation(declaration.generation)
+                    {
+                        return Err(SessionError::StaleStagedDeclaration);
+                    }
+                    let mut imports = self.lib().workbench_imports_in(ticket.public_scope);
+                    imports.extend(&declaration.joined.turn.workbench_imports);
+                    public
+                        .world
+                        .prepare_declaration_publication(
+                            declaration.joined.evidence.receipt(),
+                            &declaration.joined.context,
+                            imports.into_specs(),
+                        )
+                        .map_err(SessionError::from)
+                })
+                .transpose()?;
             let successor = public.world.promote_private_bindings(
                 &world.association.world,
                 &world.private.world,
                 ticket.public_scope.0,
+                declaration,
                 projection.visible_changes().map(|(name, entry)| {
                     (
                         name.0.as_str(),
@@ -4280,7 +4315,10 @@ impl PersistentSession {
                     scope: ticket.public_scope,
                     key: CompileViewKey {
                         library: self.lib().compile_view_identity,
-                        tip: self.lib().scope_tip(ticket.public_scope),
+                        tip: ticket.declaration.as_ref().map_or_else(
+                            || self.lib().scope_tip(ticket.public_scope),
+                            |declaration| declaration.generation,
+                        ),
                         bindings,
                         compiler_inputs: self.compiler_input_revision,
                         public_epoch: next_epoch,
@@ -6462,11 +6500,32 @@ mod checkpoint_scope_tests {
         scope: ScopeId,
         owner: CachedHomeOwner,
     ) {
-        let origin = session
+        mint_fixture_origin_with_custody(session, scope, owner, &[]);
+    }
+
+    fn mint_fixture_origin_with_custody(
+        session: &mut PersistentSession,
+        scope: ScopeId,
+        owner: CachedHomeOwner,
+        retained: &[SessionVarId],
+    ) {
+        let mut origin = session
             .bindings
             .prepare_source_owner_origin_in(&session.scopes, scope, owner)
             .unwrap();
+        let changes = session
+            .bindings
+            .prepare_declaration_binding_changes_with_custody_in(
+                &session.scopes,
+                scope,
+                &mut origin,
+                &[],
+                &[],
+                retained,
+            )
+            .unwrap();
         session.bindings.commit_source_owner_origin(origin);
+        session.bindings.commit_declaration_binding_changes(changes);
     }
 
     fn assert_unrelated_certified_turn_admitted(session: &mut PersistentSession, scope: ScopeId) {
@@ -6619,9 +6678,7 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &authored_custody,
-                &[owner],
-                &[],
-            )
+                &[owner])
             .unwrap();
         session
             .bindings
@@ -6686,9 +6743,7 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &keys_a,
-                &[owner.clone()],
-                &[],
-            )
+                &[owner.clone()])
             .unwrap();
         session.bindings.commit_exact_binding_promotion(accepted);
         let before = session.residency().unwrap();
@@ -6700,9 +6755,7 @@ mod checkpoint_scope_tests {
                 public,
                 &[],
                 &keys_b,
-                &[owner],
-                &[],
-            ),
+                &[owner]),
             Err(tidepool_codegen::binding_table::BindingPromotionError::ConflictingSourceOrigin)
         ));
         assert_eq!(session.residency().unwrap(), before);
@@ -6735,7 +6788,6 @@ mod checkpoint_scope_tests {
         let sibling = session.mint_detached_scope(public).unwrap();
         let (target, keys) = install_selected_source_fixture(&mut session, private, "a");
         let owner = selected_sources(&session, private)[0].owner().clone();
-        mint_fixture_origin(&mut session, private, owner.clone());
         let old = rooted_publication_fixture(&mut session, "captured", 826);
         let (old_id, old_handle) = (old.id, old.value.handle);
         let requirement = NativeBindingRequirement {
@@ -6780,19 +6832,25 @@ mod checkpoint_scope_tests {
         assert!(session
             .resolve_native_binding_custody(public, std::slice::from_ref(&requirement))
             .is_err());
+        let mut foreign_origin = session
+            .bindings
+            .prepare_source_owner_origin_in(&session.scopes, private, owner.clone())
+            .unwrap();
         assert!(matches!(
-            session.bindings.prepare_authored_source_publication_in(
-                &session.scopes,
-                private,
-                public,
-                &[shadow_id],
-                &keys,
-                std::slice::from_ref(&owner),
-                &[foreign_id]
-            ),
+            session
+                .bindings
+                .prepare_declaration_binding_changes_with_custody_in(
+                    &session.scopes,
+                    private,
+                    &mut foreign_origin,
+                    &[],
+                    &[],
+                    &[foreign_id],
+                ),
             Err(tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding)
         ));
         assert_eq!(session.bindings.mutation_revision(), before);
+        mint_fixture_origin_with_custody(&mut session, private, owner.clone(), &[old_id]);
         let custody = session
             .resolve_native_binding_custody(private, std::slice::from_ref(&requirement))
             .unwrap();
@@ -6806,7 +6864,6 @@ mod checkpoint_scope_tests {
                 &[shadow_id],
                 &keys,
                 &[owner],
-                &custody,
             )
             .unwrap();
         assert_eq!(session.bindings.mutation_revision(), before);
@@ -6903,9 +6960,7 @@ mod checkpoint_scope_tests {
                     public,
                     &[],
                     keys,
-                    &[owner],
-                    &[],
-                )
+                    &[owner])
                 .unwrap();
             session.bindings.commit_exact_binding_promotion(publication);
         }
@@ -6985,9 +7040,7 @@ mod checkpoint_scope_tests {
                         public,
                         &[],
                         keys,
-                        &[owner.clone()],
-                        &[],
-                    )
+                        &[owner.clone()])
                     .unwrap();
                 session.bindings.commit_exact_binding_promotion(prepared);
             }

@@ -150,7 +150,7 @@ pub(crate) enum PublicationEvidence {
 }
 
 impl PublicationEvidence {
-    fn receipt(&self) -> &Arc<AcceptedJoin> {
+    pub(super) fn receipt(&self) -> &Arc<AcceptedJoin> {
         match self {
             Self::NewJoin(receipt) => receipt,
             Self::ReusedProjection { projection, .. } => projection.receipt(),
@@ -210,8 +210,6 @@ pub(super) struct PreparedDeclarationPublication {
     pub(super) joined: JoinedDeclaration,
     pub(super) declared_names: Vec<String>,
     pub(super) source_domain_owners: Vec<tidepool_repr::execution_schema::CachedHomeOwner>,
-    pub(super) binding_custody:
-        Vec<tidepool_toolchain::artifact_inventory::NativeBindingRequirement>,
 }
 
 fn invalid_at(path: &Path, detail: impl Into<String>) -> SessionError {
@@ -1587,7 +1585,6 @@ impl AcceptedDeclarationPublication {
             .collect();
         let declaration = PreparedDeclarationPublication {
             source_domain_owners,
-            binding_custody,
             generation: base.reservation.generation,
             declared_names,
             joined: JoinedDeclaration {
