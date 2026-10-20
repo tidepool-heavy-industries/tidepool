@@ -14842,10 +14842,28 @@ mod tests {
                 .unwrap();
             if !child_reusable {
                 let broader = retained.artifacts();
-                let missing_private = inventory.admit_certified_with_demand(
-                    &broader,
-                    vec![Arc::new(root.clone())],
-                    NativeArtifactDemand::ScopeInterfaces,
+                let interfaces = inventory
+                    .admit_certified_with_demand(
+                        &broader,
+                        vec![Arc::new(root.clone())],
+                        NativeArtifactDemand::ScopeInterfaces,
+                        &receipt,
+                    )
+                    .unwrap();
+                assert!(interfaces.selected_native_groups().is_empty());
+                assert!(interfaces
+                    .roots()
+                    .iter()
+                    .all(|root| matches!(root, InventoryNodeKey::Artifact(_))));
+                let mut unproved = inventory
+                    .bind_segment(&interfaces, vec![Arc::new(root.clone())], &receipt)
+                    .unwrap();
+                let imports = [issued_source(&root, 12)];
+                let missing_private = inventory.admit_bound_target(
+                    &mut unproved,
+                    &inventory.empty_view(),
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
                     &receipt,
                 );
                 assert!(
@@ -14853,7 +14871,7 @@ mod tests {
                     if matches!(&error.failure,
                         ArtifactInventoryFailure::MissingDependency { required, dependency: ArtifactDependency::NativeGroup { dependent_ordinal: 12, required_ordinal: 7 }, .. }
                         if required == &child.descriptor.owner)),
-                    "missing private proof returned {missing_private:?}"
+                    "missing private proof at executable demand returned {missing_private:?}"
                 );
             }
             receipt
