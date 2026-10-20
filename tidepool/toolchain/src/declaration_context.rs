@@ -16514,6 +16514,7 @@ mod tests {
 
     #[test]
     fn compiler_role_conflict_diagnostics_preserve_shared_and_overlapping_births() {
+        use crate::exact_context::NativeOfferSnapshotBody;
         let root = identity("fixture", "Alpha");
         let dependency = identity("fixture", "Beta");
         let mut source = published_original_choice_history_fixture().clone();
@@ -16536,7 +16537,7 @@ mod tests {
                 imports: vec![],
             });
         });
-        let publish = |revision| {
+        let publish = |source: &ExactDeclarationContext, revision| {
             let prior = source
                 .issue_published_source_original(revision, "beta-input", &dependency)
                 .unwrap();
@@ -16552,9 +16553,66 @@ mod tests {
                 .snapshot_roles()[&root]
                 .clone()
         };
-        let first = publish("beta-first");
+        let first = publish(&source, "beta-first");
         let repeated = first.clone();
-        let overlapping = publish("beta-second");
+        let equivalent = publish(&source, "beta-second");
+        let original = first.original().unwrap();
+        let full = source
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == original)
+            .unwrap();
+        assert!(full.is_full());
+        let partial = full
+            .within_projection(
+                source.compiler_input_projection(),
+                &ArtifactInventory::default().empty_view(),
+            )
+            .unwrap()
+            .unwrap();
+        let (
+            NativeOfferSnapshotBody::Full(full_graph),
+            NativeOfferSnapshotBody::Partial(partial_graph),
+        ) = (full.snapshot_facts().body, partial.snapshot_facts().body)
+        else {
+            panic!("the checked withdrawal must change Full to Partial")
+        };
+        assert!(full_graph.snapshot().as_ref() == partial_graph.snapshot().as_ref());
+        let offers = source
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .map(|offer| {
+                if offer.original() == original {
+                    partial.clone()
+                } else {
+                    offer.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let projection = source.compiler_input_projection().clone();
+        let support = recover_fixture_compiler_support(
+            projection.clone(),
+            source.artifact_view().clone(),
+            offers,
+        )
+        .unwrap();
+        let rows = RequestNativeAvailability::issue_checked(
+            &projection,
+            support.artifacts(),
+            support.native_offers(),
+        )
+        .unwrap();
+        let partial_source = ExactDeclarationContext::from_authenticated_execution_support(
+            source.owner.facts.producer,
+            support.retain_normalized_availability(&rows).unwrap(),
+            source.lexical_graph().to_vec(),
+            target,
+            &[],
+        )
+        .unwrap();
+        let overlapping = publish(&partial_source, "beta-first");
         let authority = |role: &CompilerInputRole| match role {
             CompilerInputRole::PublishedSourceOriginal {
                 native_authority, ..
@@ -16563,8 +16621,15 @@ mod tests {
         };
         let first_authority = authority(&first);
         let repeated_authority = authority(&repeated);
+        let equivalent_authority = authority(&equivalent);
         let overlapping_authority = authority(&overlapping);
         assert!(Arc::ptr_eq(&first_authority, &repeated_authority));
+        assert!(!Arc::ptr_eq(&first_authority, &equivalent_authority));
+        assert_eq!(
+            first_authority.commitment(),
+            equivalent_authority.commitment(),
+            "first birth projects dependency publication markers to reusable originals"
+        );
         assert!(!Arc::ptr_eq(&first_authority, &overlapping_authority));
         assert_ne!(
             first_authority.commitment(),
@@ -16574,11 +16639,25 @@ mod tests {
         assert_eq!(first.original(), overlapping.original());
         let first_dependency = first_authority.roles[&dependency].as_role();
         let overlapping_dependency = overlapping_authority.roles[&dependency].as_role();
-        assert!(first_dependency.is_published_source_original());
-        assert!(overlapping_dependency.is_published_source_original());
+        assert!(matches!(
+            first_dependency,
+            CompilerInputRole::ReusableOriginal { .. }
+        ));
+        assert!(matches!(
+            overlapping_dependency,
+            CompilerInputRole::ReusableOriginal { .. }
+        ));
         assert_eq!(
             first_dependency.original(),
             overlapping_dependency.original()
+        );
+        assert_eq!(
+            first_authority.native_availability[&original].mode,
+            NativeTransportMode::Full
+        );
+        assert_eq!(
+            overlapping_authority.native_availability[&original].mode,
+            NativeTransportMode::IssuedGroups
         );
         let incoming = CompilerInputRole::InterfaceOnly {
             interface: source.compiler_input_projection().snapshot_roles()[&dependency].interface(),
@@ -16641,10 +16720,12 @@ mod tests {
         };
         let first = write_conflict(first);
         let repeated = write_conflict(repeated);
+        let equivalent = write_conflict(equivalent);
         let overlapping = write_conflict(overlapping);
         assert_eq!(first, repeated);
+        assert_eq!(first, equivalent);
         assert_ne!(first, overlapping);
-        assert!(first.len().abs_diff(overlapping.len()) < 128);
+        assert!(first.len().abs_diff(overlapping.len()) < 256);
     }
 
     proptest::proptest! {
