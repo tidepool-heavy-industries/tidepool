@@ -3590,7 +3590,7 @@ struct HostInputRetirement {
     input: MountedHostInput,
     _lease: tidepool_runtime::session::resident::BindingLease,
     background_retire: Box<dyn FnOnce() + Send>,
-    retire_private: Option<Box<dyn FnOnce() -> futures_util::future::BoxFuture<'static, Result<(), ResidentActorWorkbenchError>> + Send>>,
+    retire_private: Option<Box<dyn FnOnce(tidepool_runtime::session::PendingHostValueWrite) -> futures_util::future::BoxFuture<'static, Result<tidepool_runtime::session::PendingHostValueWrite, ResidentActorWorkbenchError>> + Send>>,
     write: Option<tidepool_runtime::session::PendingHostValueWrite>,
     private: Option<Arc<tidepool_runtime::session::PrivateExecutionAdmission>>,
 }
@@ -3638,14 +3638,15 @@ impl HostInputRetirement {
             let context = context.clone();
             let binder = input.binder.clone();
             let private = private.clone();
-            Box::new(move || -> futures_util::future::BoxFuture<'static, Result<(), ResidentActorWorkbenchError>> {
+            Box::new(move |write| -> futures_util::future::BoxFuture<'static, Result<tidepool_runtime::session::PendingHostValueWrite, ResidentActorWorkbenchError>> {
                 Box::pin(async move {
                     access.with_machine(context, move |session, _, _| {
-                        session.retire_private_host_binding_owner(&private, &binder)
-                            .map_err(ResidentActorWorkbenchError::Resident)
+                        session.retire_private_host_binding_owner(&private, &binder, &write)
+                            .map_err(ResidentActorWorkbenchError::Resident)?;
+                        Ok(write)
                     }).await
                 })
-            }) as Box<dyn FnOnce() -> futures_util::future::BoxFuture<'static, Result<(), ResidentActorWorkbenchError>> + Send>
+            }) as Box<dyn FnOnce(tidepool_runtime::session::PendingHostValueWrite) -> futures_util::future::BoxFuture<'static, Result<tidepool_runtime::session::PendingHostValueWrite, ResidentActorWorkbenchError>> + Send>
         });
         Self {
             input,
@@ -3673,11 +3674,11 @@ impl HostInputRetirement {
         let retire = self.retire_private.take().ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol("host input lacks its original private retirement owner".into())
         })?;
-        retire().await?;
+        let write = self.write.take().expect("original private input write");
+        self.write = Some(retire(write).await?);
         // The exact owner has completed retirement under its source gates.
         // Abandonment continues to use generic cleanup through Drop.
         self.background_retire = Box::new(|| {});
-        self.write.take();
         Ok(())
     }
 
@@ -8587,26 +8588,21 @@ where
                     .session_root()
                     .map_err(ResidentActorWorkbenchError::Resident)?
                     .to_path_buf();
-                let write = session
-                    .mount_checked_host_input(
-                        &carrier,
-                        match &payload {
-                            OwnedHostPayload::Json(value) => HostPayload::Json(value),
-                            OwnedHostPayload::Text(value) => HostPayload::Text(value),
-                            OwnedHostPayload::Job(value) => HostPayload::Job(value),
-                        },
-                        settlement,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let host_payload = match &payload {
+                    OwnedHostPayload::Json(value) => HostPayload::Json(value),
+                    OwnedHostPayload::Text(value) => HostPayload::Text(value),
+                    OwnedHostPayload::Job(value) => HostPayload::Job(value),
+                };
+                let write = match private.as_ref().filter(|_| hidden) {
+                    Some(execution) => session.mount_private_hidden_host_input(execution, &carrier, host_payload, settlement),
+                    None => session.mount_checked_host_input(&carrier, host_payload, settlement),
+                }.map_err(ResidentActorWorkbenchError::Resident)?;
                 let scope = context.placement.lexical_scope;
                 let presentation = match &payload {
                     OwnedHostPayload::Job(job) => {
                         session.tag_host_text_binding_in(scope, &binder, job.clone())
                     }
-                    _ if hidden => match private.as_ref() {
-                        Some(execution) => session.hide_private_host_binding_in(execution, &binder),
-                        None => session.hide_host_binding_in(scope, &binder),
-                    },
+                    _ if hidden && private.is_none() => session.hide_host_binding_in(scope, &binder),
                     _ => Ok(()),
                 };
                 if let Err(error) = presentation {
@@ -8878,16 +8874,17 @@ where
             tidepool_runtime::session::turn::finish_world_cell_plan_admitted(settled)
                 .map_err(ResidentActorWorkbenchError::WorldInspection)
         })).await.map_err(ResidentActorWorkbenchError::Join)??;
-        let admission = self.access.with_compiler_machine(context.clone(), move |session, context, _, _| {
+        let (admission, leased_input) = self.access.with_compiler_machine(context.clone(), move |session, context, _, _| {
             let admitted = match purpose {
                 CellPreparationPurpose::HostCarrier { binding, expected } => session.admit_world_planned_host_carrier_cell_in(
                     context.placement.lexical_scope, plan, binding, expected,
                 ),
-                CellPreparationPurpose::PrivateExecution(execution) => session.admit_world_planned_cell_for_execution(
-                    execution.admission.clone(), plan,
+                CellPreparationPurpose::PrivateExecution(execution) => session.admit_world_planned_cell_with_input(
+                    execution.admission.clone(), plan, leased_input.as_ref().and_then(|input| input.write.as_ref()),
                 ),
             };
-            admitted.map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))
+            let admission = admitted.map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
+            Ok((admission, leased_input))
         }).await?;
         let check_specification = specification.clone();
         let check_admission = admission.clone();
