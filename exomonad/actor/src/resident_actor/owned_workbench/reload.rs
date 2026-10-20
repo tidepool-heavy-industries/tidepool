@@ -17,6 +17,17 @@ fn unreadable(error: impl std::fmt::Display) -> SourceError {
     SourceError::SourceUnreadable(error.to_string())
 }
 
+pub(crate) fn reload_publication_result(
+    result: Result<ActorGenerationCommit, ResidentActorWorkbenchError>,
+) -> Result<ActorGenerationCommit, SourceError> {
+    match result {
+        Err(error) if error.requires_recovery() => {
+            Ok(ActorGenerationCommit::Unconfirmed(error.to_string()))
+        }
+        result => result.map_err(unreadable),
+    }
+}
+
 impl<H, O> CoherentReloadOperation<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -59,8 +70,8 @@ where
                     crate::resident_workbench::ActorGenerationPublication::Terminal
                 },
             )
-            .await
-            .map_err(unreadable)?;
+            .await;
+        let result = reload_publication_result(result)?;
         match result {
             ActorGenerationCommit::Published {
                 generation,

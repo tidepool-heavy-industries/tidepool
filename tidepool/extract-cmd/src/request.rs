@@ -3,8 +3,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v24";
-const MAGIC: &[u8; 8] = b"TPREQ024";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v25";
+const MAGIC: &[u8; 8] = b"TPREQ025";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -25,6 +25,7 @@ pub enum ExactInputsAcquisition {
     Resident(String),
     /// Strict cold-world descriptor; input descriptors retain their existing owner.
     Complete(PathBuf),
+    Successor { predecessor: String, realization: String, descriptor: PathBuf },
 }
 
 impl ExactInputsRequest {
@@ -34,6 +35,7 @@ impl ExactInputsRequest {
             && match &self.acquisition {
                 ExactInputsAcquisition::Resident(reference) => valid(reference),
                 ExactInputsAcquisition::Complete(path) => path.to_str().is_some_and(valid),
+                ExactInputsAcquisition::Successor { predecessor, realization, descriptor } => valid_world_identity(predecessor) && valid(realization) && descriptor.to_str().is_some_and(valid),
             }
     }
 }
@@ -874,16 +876,16 @@ impl ExtractRequest {
                 Some("--inspect-search") => request.fields.push(Field::InspectSearch(
                     text_value(&mut args, "--inspect-search")?.into(),
                 )),
-                Some(option @ ("--inspect-browse-bounded" | "--inspect-browse-expanded-bounded")) => {
+                Some(
+                    option @ ("--inspect-browse-bounded" | "--inspect-browse-expanded-bounded"),
+                ) => {
                     let raw = text_value(&mut args, option)?;
                     let (module, budget) = bounded_value(&raw, option)?;
-                    request
-                        .fields
-                        .push(Field::InspectBrowseBounded(
-                            module,
-                            option == "--inspect-browse-expanded-bounded",
-                            budget,
-                        ));
+                    request.fields.push(Field::InspectBrowseBounded(
+                        module,
+                        option == "--inspect-browse-expanded-bounded",
+                        budget,
+                    ));
                 }
                 Some("--inspect-search-bounded") => {
                     let raw = text_value(&mut args, "--inspect-search-bounded")?;
@@ -980,9 +982,7 @@ impl ExtractRequest {
                     let expanded = match decoder.byte()? {
                         0 => false,
                         1 => true,
-                        other => {
-                            return Err(ProtocolError::InvalidBrowseExpansion(other))
-                        }
+                        other => return Err(ProtocolError::InvalidBrowseExpansion(other)),
                     };
                     Field::InspectBrowseBounded(module, expanded, nonzero_budget(decoder.u32()?)?)
                 }
@@ -1012,6 +1012,7 @@ impl ExtractRequest {
                     let acquisition = match decoder.byte()? {
                         0 => ExactInputsAcquisition::Resident(decoder.string()?),
                         1 => ExactInputsAcquisition::Complete(PathBuf::from(decoder.os_string()?)),
+                        2 => ExactInputsAcquisition::Successor { predecessor: decoder.string()?, realization: decoder.string()?, descriptor: PathBuf::from(decoder.os_string()?) },
                         _ => return Err(ProtocolError::InvalidExactInputs),
                     };
                     Field::EnsureExactInputs(ExactInputsRequest { root, acquisition })
@@ -1412,8 +1413,11 @@ impl ExtractRequest {
     }
 
     pub(crate) fn inspect_browse_bounded(&mut self, module: &str, expanded: bool, budget: u32) {
-        self.fields
-            .push(Field::InspectBrowseBounded(module.to_owned(), expanded, budget));
+        self.fields.push(Field::InspectBrowseBounded(
+            module.to_owned(),
+            expanded,
+            budget,
+        ));
     }
 
     pub(crate) fn inspect_search(&mut self, query: &str) {
@@ -1613,10 +1617,14 @@ impl ExtractRequest {
     }
 
     pub fn encode(&self) -> Vec<u8> {
+        self.encode_with_grant(self.execution_grant)
+    }
+
+    fn encode_with_grant(&self, grant: ExecutionGrant) -> Vec<u8> {
         let mut out = MAGIC.to_vec();
         out.push(self.workload.wire_tag());
-        out.extend_from_slice(&self.execution_grant.jobs.to_le_bytes());
-        out.extend_from_slice(&self.execution_grant.capabilities.to_le_bytes());
+        out.extend_from_slice(&grant.jobs.to_le_bytes());
+        out.extend_from_slice(&grant.capabilities.to_le_bytes());
         push_u32(&mut out, self.fields.len());
         for field in &self.fields {
             encode_field(&mut out, field);
@@ -1625,7 +1633,14 @@ impl ExtractRequest {
     }
 
     pub(crate) fn worker_argv(&self) -> Vec<OsString> {
-        vec![WORKER_REQUEST_FLAG.into(), hex(&self.encode()).into()]
+        self.worker_argv_with_grant(self.execution_grant)
+    }
+
+    pub(crate) fn worker_argv_with_grant(&self, grant: ExecutionGrant) -> Vec<OsString> {
+        vec![
+            WORKER_REQUEST_FLAG.into(),
+            hex(&self.encode_with_grant(grant)).into(),
+        ]
     }
 }
 
@@ -2041,6 +2056,12 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
                 ExactInputsAcquisition::Complete(path) => {
                     out.push(1);
                     push_frame(out, path.as_os_str());
+                }
+                ExactInputsAcquisition::Successor { predecessor, realization, descriptor } => {
+                    out.push(2);
+                    push_frame(out, OsStr::new(predecessor));
+                    push_frame(out, OsStr::new(realization));
+                    push_frame(out, descriptor.as_os_str());
                 }
             }
         }

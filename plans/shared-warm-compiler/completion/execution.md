@@ -97,10 +97,43 @@ V owns the complete joined path across crate boundaries:
 No synthetic ExactCompilationRequest, broad baseline census, second certifier,
 new evaluator or cross-crate trusted-value constructor. Runtime owns execution
 authority; compiler source descriptions and transport identity cannot grant it.
+Original A and receiving B may have identical source descriptions, or share a
+source lease. Keep their labeled descriptions authenticated, and check the actual
+transaction, target lease and current gates in runtime admission. Descriptive
+inequality is not an authority check.
 Missing runtime capabilities remain explicit refusals until their actual owners
 issue them. Remove the finite resident route when the joined replacement lands,
 including bootstrap, renderer, recovery and tests. Declared batch build actions
 remain distinct real consumers.
+
+### Lexical state and item prefixes
+
+The logical World must retain authored lexical state, not infer it from module
+dependency edges. Cold acquisition captures ordered normalized `SourceImports`
+and the selected declaration facade's exact interface and exports from the
+existing accepted-join or recovery owner. Authenticate the facade against the
+same primary-context selection. Use an explicit absent declaration; ambient
+custody cannot fill it. Adding this required semantic root warrants the planned
+World format revision and explicit rejection of incomplete older products.
+
+Haskell owns import interpretation and protected-preamble shadowing. Preserve
+qualified, hiding and empty imports. The protected static preamble remains a
+recipe input, while current binding heads come from the existing binding root;
+do not introduce another all-values inventory or reconstruct finite turn imports.
+
+Each item carries its own checked lexical, interface and native prefix alongside
+its output. Whole-cell typechecking may inspect later declarations, but that
+does not publish later bindings or imports into an earlier item's execution
+context. Never seal every item against the final completed context. Successful
+runtime settlement supplies that item's actual delta; successor acquisition
+names its exact predecessor and authenticated prefix, not the latest namespace.
+
+The engine receives a native-assembly leaf owning the existing `artifacts` and
+checked-item assembly. Reuse captured value-interface certification, original
+product issuance and native preparation. A shared internal issuer is preferable
+to copying the finite continuation machinery. If batch and World plan forms
+remain at a shared boundary, expose one exhaustive borrowed plan sum rather than
+two independent optional accessors. The resident caller must have one route.
 
 ## Publication and lifecycle
 
@@ -114,6 +147,13 @@ uncertainty fence with None; retain prerequisite uncertainty once. Preserve exac
 attempt comparison and installed-state marking even when lower world selection
 has changed. Source A/B, gate-only revocation, preview Open admission, late cleanup
 and physical release remain separate controls.
+
+Reserve the prepared generation and its publication guard together in one affine
+owner; publishing consumes that owner rather than accepting an independently
+supplied candidate and guard. Preserve observed body completion separately from
+an outer checkout, task-join or owner failure. A sampled publication phase does
+not prove that an unobserved body stopped without committing. Both the primary
+failure and the resulting uncertainty must reach the ordinary reload consumer.
 
 Later renderer observers receive the same typed terminal meaning, including
 unconfirmed close and producer loss. Retired state cannot launch another producer.

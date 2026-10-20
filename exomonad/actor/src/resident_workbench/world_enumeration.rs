@@ -150,41 +150,31 @@ where
                 Ok(ScopeBindingsSnapshot::Ready { current, answer })
             })
             .await?;
-        let outcome = match snapshot {
-            ScopeBindingsSnapshot::Stale { expected, current } => {
-                ScopeBindingsOutcome::ScopeChanged {
-                    before: expected,
-                    after: current,
-                }
-            }
-            ScopeBindingsSnapshot::Refused(error) => ScopeBindingsOutcome::Error(error),
-            ScopeBindingsSnapshot::Ready { current, answer } => {
-                // An enumeration answer describes exactly the view it read.
-                // Re-observe that view after the machine was released.
-                let recheck_source = source.clone();
-                let observed = self
-                    .access
-                    .with_machine(context.clone(), move |session, context, _| {
-                        let view = actor_compile_view(session, context, &recheck_source)?;
-                        Ok(structured_provenance(
-                            &view,
-                            &recheck_source,
-                            NameScope::Current,
-                        ))
-                    })
-                    .await?;
-                if !observed.same_view(&current) {
-                    ScopeBindingsOutcome::ScopeChanged {
-                        before: current,
-                        after: observed,
-                    }
-                } else {
-                    ScopeBindingsOutcome::Names(answer, current)
-                }
-            }
-        };
         self.access
-            .with_continuation_machine(context, move |session, _, _, settlement| {
+            .with_continuation_machine(context, move |session, context, _, settlement| {
+                let outcome = match snapshot {
+                    ScopeBindingsSnapshot::Stale { expected, current } => {
+                        ScopeBindingsOutcome::ScopeChanged {
+                            before: expected,
+                            after: current,
+                        }
+                    }
+                    ScopeBindingsSnapshot::Refused(error) => ScopeBindingsOutcome::Error(error),
+                    ScopeBindingsSnapshot::Ready { current, answer } => {
+                        // Validate and resume under the same machine checkout so
+                        // publication cannot move between the check and delivery.
+                        let view = actor_compile_view(session, context, &source)?;
+                        let observed = structured_provenance(&view, &source, NameScope::Current);
+                        if !observed.same_view(&current) {
+                            ScopeBindingsOutcome::ScopeChanged {
+                                before: current,
+                                after: observed,
+                            }
+                        } else {
+                            ScopeBindingsOutcome::Names(answer, current)
+                        }
+                    }
+                };
                 session
                     .resume_classified(hole, outcome, settlement)
                     .map_err(classify_resumption)

@@ -194,6 +194,9 @@ impl CompilerWorldCellPlan {
     pub fn world(&self) -> &crate::compiler_world::CompilerWorld {
         &self.world
     }
+    pub fn world_owned(&self) -> &Arc<crate::compiler_world::CompilerWorld> {
+        &self.world
+    }
     pub fn recipe(&self) -> &tidepool_extract_cmd::WorldCellRecipe {
         &self.recipe
     }

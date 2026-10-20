@@ -1540,6 +1540,7 @@ impl ModuleCandidateOffer {
         primary: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
         bindings: crate::compiler_world::CompilerWorldBindings,
         sources: Arc<crate::compiler_world::CapturedCompilerSources>,
+        lexical: crate::compiler_world::CompilerWorldLexicalSurface,
     ) -> Result<crate::compiler_world::CompilerWorldOpenInputs, CompileError> {
         let visible_rows = bindings.cold_rows()?;
         let primary = checked_offer_context(primary)?;
@@ -1549,6 +1550,7 @@ impl ModuleCandidateOffer {
             visible_rows,
             bindings,
             sources,
+            lexical,
             directory,
         )
     }
@@ -8338,15 +8340,14 @@ mod module_product_tests {
                 let source = WorldSourceSelection::new(
                     *sources.seal(),
                     "native-world-source",
-                    crate::declaration_join::ExactModuleIdentity {
-                        unit: "main".into(),
-                        module: "Module".into(),
-                    },
                 )?;
                 let inputs = ModuleCandidateOffer::compiler_world_inputs(
                     None,
                     CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
                     sources,
+                    crate::compiler_world::CompilerWorldLexicalSurface::from_publication(
+                        Vec::new(), None,
+                    )?,
                 )?;
                 let world = crate::compiler_world::open_world(inputs, &endpoint)?;
                 let plan = crate::compiler_world::plan_cell(

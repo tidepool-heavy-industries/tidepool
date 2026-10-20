@@ -143,48 +143,61 @@ pub(super) struct CertifiedNativeDemandAcquisition {
     pub(super) offers: Vec<IssuedNativeOffer>,
 }
 
-/// The chosen binding and closure checked against its issuing snapshot and the
-/// installed scope graph. This is acquisition evidence, not an independent grant.
-pub(super) struct VerifiedNativeBinding {
-    /// `None` only for a current product whose physical completion authorizes
-    /// this admission to issue the product's own new binding. Its exact scope
-    /// does not exist at resolution time; the plan issues it under that scope.
-    pub(super) binding: Option<NativeGroupBinding>,
-    pub(super) provenance: NativeBindingProvenance,
-    /// Dependency evidence for a not-yet-issued current product. An immutable
-    /// completion graph names each historical child exactly; a selection that
-    /// carries no such proof must fall back to the product entry's recorded
-    /// rows and the exact owner index.
-    pub(super) dependencies: NativeProductDependencies,
+/// An issued binding retains its exact carrier pair and acquisition closure.
+/// Only physical current output can request a not-yet-issued group.
+pub(super) enum VerifiedNativeBinding {
+    Issued(IssuedNativeBinding),
+    NewCurrent {
+        dependencies: NativeProductDependencies,
+    },
+}
+
+/// Constructed only with the matching acquisition owner below.
+pub(super) struct IssuedNativeBinding {
+    binding: NativeGroupBinding,
+    carrier: ArtifactBinding,
+    canonical: ArtifactBinding,
     closure: BTreeSet<InventoryNodeKey>,
 }
 
-/// The exact native dependency evidence available for a current product whose
-/// own group binding has not been issued yet.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) enum NativeProductDependencies {
-    /// Not a pending current product, or the dependency graph is not consulted.
-    #[default]
-    Unused,
-    /// Exact labeled edges carried by the product's immutable completion graph.
-    Exact(Vec<(NativeGroupEdge, NativeGroupBinding)>),
-    /// The selection carries no requirement proof; the product entry's
-    /// authenticated rows and the exact owner index remain the only evidence.
-    RecordedRows,
+impl VerifiedNativeBinding {
+    pub(super) fn binding(&self) -> Option<NativeGroupBinding> {
+        match self {
+            Self::Issued(issued) => Some(issued.binding),
+            Self::NewCurrent { .. } => None,
+        }
+    }
+
+    pub(super) fn carrier_pair(&self) -> Option<(ArtifactBinding, ArtifactBinding)> {
+        match self {
+            Self::Issued(issued) => Some((issued.carrier, issued.canonical)),
+            Self::NewCurrent { .. } => None,
+        }
+    }
+
+    fn closure_nodes(&self) -> impl Iterator<Item = &InventoryNodeKey> {
+        match self {
+            Self::Issued(issued) => Some(&issued.closure),
+            Self::NewCurrent { .. } => None,
+        }
+        .into_iter()
+        .flatten()
+    }
+
+    #[cfg(test)]
+    fn closure(&self) -> &BTreeSet<InventoryNodeKey> {
+        match self {
+            Self::Issued(issued) => &issued.closure,
+            Self::NewCurrent { .. } => panic!("new current group has no issued closure"),
+        }
+    }
 }
 
-/// Why the inventory binds one exact native group. Each variant is constructed
-/// by the owner that holds the fact: a carried root choice, an authenticated
-/// parent's labeled edge, or a physical product completion. Provenance is not
-/// inferred from an ordinal's presence, an owner name, or canonical equality.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativeBindingProvenance {
-    Root,
-    Historical {
-        parent: NativeGroupKey,
-        edge: NativeGroupEdge,
-    },
-    CurrentProduct,
+/// Dependency targets for a physically completed, not-yet-issued product.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum NativeProductDependencies {
+    Exact(Vec<(NativeGroupEdge, NativeGroupBinding)>),
+    RecordedRows,
 }
 
 /// One exact labeled native dependency edge from a parent group.
@@ -204,142 +217,6 @@ pub(super) struct NativeHistoricalDemand {
     pub(super) edge: NativeGroupEdge,
 }
 
-/// Completion evidence for a current-product demand, captured before the
-/// inventory lock. Three distinct facts can certify one exact product: an
-/// entry already retained by the selection, a pending product's own
-/// transaction-held requirement over an entry supplied to this admission, or
-/// the product's issued availability row. A merely retained candidate is none
-/// of these and cannot issue a binding.
-pub(super) struct NativeProductCompletions {
-    retained: Vec<Arc<ArtifactEntry>>,
-    pending: BTreeMap<ArtifactId, BTreeSet<tidepool_repr::execution_schema::CachedHomeOwner>>,
-    issued: BTreeSet<(ArtifactId, tidepool_repr::execution_schema::CachedHomeOwner)>,
-    refusal: Option<CompileError>,
-}
-
-impl NativeProductCompletions {
-    /// Certification path: the selection's completed entries must already be
-    /// retained by the bound view, and pending requirements are matched
-    /// against the exact entries supplied to this admission.
-    pub(super) fn from_bound_selection(
-        selection: &crate::certified_products::CertifiedSourceSelection,
-        artifacts: &ArtifactView,
-        supplied: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    ) -> Self {
-        let (retained, refusal) = match selection.complete_native_entries(artifacts) {
-            Ok(entries) => (entries, None),
-            Err(error) => (
-                Vec::new(),
-                Some(CompileError::CompilerEvidence(Box::new(error))),
-            ),
-        };
-        Self::with_evidence(selection, supplied, retained, refusal)
-    }
-
-    /// Admission path: the supplied entries have not been retained by a view
-    /// yet, so completion comes from the selection's own pending requirement
-    /// over those exact entries or from its issued current-product row.
-    pub(super) fn from_pending_selection(
-        selection: &crate::certified_products::CertifiedSourceSelection,
-        supplied: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    ) -> Self {
-        Self::with_evidence(selection, supplied, Vec::new(), None)
-    }
-
-    fn with_evidence(
-        selection: &crate::certified_products::CertifiedSourceSelection,
-        supplied: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-        retained: Vec<Arc<ArtifactEntry>>,
-        refusal: Option<CompileError>,
-    ) -> Self {
-        let mut pending = BTreeMap::new();
-        for proof in selection.new_product_native_requirements() {
-            let Some(entry) = supplied.get(&proof.original) else {
-                continue;
-            };
-            let ArtifactPayload::Original(product) = &entry.payload else {
-                continue;
-            };
-            pending
-                .entry(proof.original)
-                .or_insert_with(BTreeSet::new)
-                .insert(product.owner().clone());
-        }
-        let issued = selection
-            .issued_native_availability()
-            .map(|row| (row.original_artifact_id(), row.original_owner().clone()))
-            .collect();
-        Self {
-            retained,
-            pending,
-            issued,
-            refusal,
-        }
-    }
-
-    pub(super) fn empty() -> Self {
-        Self {
-            retained: Vec::new(),
-            pending: BTreeMap::new(),
-            issued: BTreeSet::new(),
-            refusal: None,
-        }
-    }
-
-    /// Require this exact entry to be a completed product. Retained entries are
-    /// compared by pointer or value; pending and issued facts are keyed by the
-    /// artifact identity and owner the selection recorded, never by name or
-    /// canonical bytes. The returned fact decides which evidence may name the
-    /// binding; a candidate without one of these facts is not a completion.
-    fn completes(
-        &mut self,
-        key: NativeGroupKey,
-        entry: &Arc<ArtifactEntry>,
-    ) -> Result<Option<NativeProductCompletion>, CompileError> {
-        let owner = &entry.descriptor.owner;
-        let ArtifactPayload::Original(product) = &entry.payload else {
-            return Ok(None);
-        };
-        let product_owner = product.owner();
-        if self.retained.iter().any(|completed| {
-            completed.descriptor.id == key.artifact
-                && &completed.descriptor.owner == owner
-                && (Arc::ptr_eq(completed, entry) || completed.as_ref() == entry.as_ref())
-        }) {
-            return Ok(Some(NativeProductCompletion::Retained));
-        }
-        if self
-            .pending
-            .get(&key.artifact)
-            .is_some_and(|owners| owners.contains(product_owner))
-        {
-            return Ok(Some(NativeProductCompletion::Pending));
-        }
-        if self
-            .issued
-            .contains(&(key.artifact, product_owner.clone()))
-        {
-            return Ok(Some(NativeProductCompletion::Issued));
-        }
-        if let Some(error) = self.refusal.take() {
-            return Err(error);
-        }
-        Ok(None)
-    }
-}
-
-/// The exact completion fact that authorized one current-product binding.
-/// Candidate availability alone is not one of these facts.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NativeProductCompletion {
-    /// The bound view already retained this selection-completed entry.
-    Retained,
-    /// The selection's own pending transaction requirement covered the entry.
-    Pending,
-    /// The selection's issued availability row names this exact original.
-    Issued,
-}
-
 /// Bind demanded input bodies through their original opaque owner. Carrier-only
 /// views do not become proof owners, and availability does not add demand roots.
 pub(super) fn bind_certified_input_demand(
@@ -349,7 +226,6 @@ pub(super) fn bind_certified_input_demand(
     incoming: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     demanded: &BTreeSet<NativeGroupKey>,
     selection: &crate::certified_products::CertifiedSourceSelection,
-    completions: &mut NativeProductCompletions,
 ) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
     bind_input_demand(
         state,
@@ -358,11 +234,12 @@ pub(super) fn bind_certified_input_demand(
         incoming,
         demanded,
         NativeDemandSource::Certified(selection),
-        completions,
     )
 }
 
-fn module_identity(owner: &tidepool_repr::execution_schema::CachedHomeOwner) -> ExactModuleIdentity {
+fn module_identity(
+    owner: &tidepool_repr::execution_schema::CachedHomeOwner,
+) -> ExactModuleIdentity {
     ExactModuleIdentity {
         unit: owner.unit.clone(),
         module: owner.module.clone(),
@@ -371,17 +248,6 @@ fn module_identity(owner: &tidepool_repr::execution_schema::CachedHomeOwner) -> 
 
 fn root_refusal(key: NativeGroupKey, cause: NativeAdmissionRefusal) -> CompileError {
     native_admission_failure(key, cause)
-}
-
-fn is_current_product_not_completed(error: &CompileError) -> bool {
-    matches!(
-        error,
-        CompileError::ArtifactInventory(error)
-            if matches!(
-                &error.native_refusal,
-                Some(NativeAdmissionRefusal::CurrentProductNotCompleted { .. })
-            )
-    )
 }
 
 /// Root provenance: consume the root's carried exact chosen binding. Missing,
@@ -400,9 +266,7 @@ pub(super) fn verified_root_choice(
         Ok(None) => {
             return Err(root_refusal(
                 key,
-                NativeAdmissionRefusal::RootChoiceMissing {
-                    owner: identity,
-                },
+                NativeAdmissionRefusal::RootChoiceMissing { owner: identity },
             ))
         }
         Err(CertificationError::InputDecision { reason, .. }) => {
@@ -426,9 +290,7 @@ pub(super) fn verified_root_choice(
         InputNativeDecision::UnissuedPolicy => {
             return Err(root_refusal(
                 key,
-                NativeAdmissionRefusal::RootChoiceMissing {
-                    owner: identity,
-                },
+                NativeAdmissionRefusal::RootChoiceMissing { owner: identity },
             ))
         }
     };
@@ -457,7 +319,9 @@ pub(super) fn verified_root_choice(
     // whether that chosen binding was actually issued here; it never selects a
     // different candidate when this one is absent.
     match selection.native_group_candidates(key, owner) {
-        Ok(NativeGroupCandidates::IssuedAvailability(candidates)) if candidates.contains(chosen) => {
+        Ok(NativeGroupCandidates::IssuedAvailability(candidates))
+            if candidates.contains(chosen) =>
+        {
             Ok(*chosen)
         }
         Ok(NativeGroupCandidates::IssuedAvailability(_)) => Err(root_refusal(
@@ -501,74 +365,20 @@ fn root_evidence_refusal(
     }
 }
 
-/// Current-product provenance: only matching physical completion, exact entry
-/// identity, and the continuation's own issued row may name a new product
-/// binding. A retained requirement proof or a successful evaluation alone is
-/// not a completion certificate.
+/// Resolve the own binding of a positively completed product. A carried own
+/// binding is reused; only an unissued current group may receive a new binding.
 pub(super) fn verified_current_product(
-    selection: &crate::certified_products::CertifiedSourceSelection,
-    key: NativeGroupKey,
-    owner: &tidepool_repr::execution_schema::CachedHomeOwner,
-    entry: &Arc<ArtifactEntry>,
-    completions: &mut NativeProductCompletions,
+    current: &crate::certified_products::CurrentProductRef<'_>,
 ) -> Result<Option<NativeGroupBinding>, CompileError> {
-    let identity = module_identity(owner);
-    match selection.continuation_input(&identity) {
-        // A carried input row is a root, not a product completion.
-        Ok(Some(_)) | Err(_) => {
-            return Err(native_admission_failure(
-                key,
-                NativeAdmissionRefusal::CurrentProductNotCompleted {
-                    original: key.artifact,
-                    original_ordinal: key.original_ordinal,
-                },
-            ))
-        }
-        Ok(None) => {}
-    }
-    let Some(completion) = completions.completes(key, entry)? else {
-        return Err(native_admission_failure(
-            key,
-            NativeAdmissionRefusal::CurrentProductNotCompleted {
-                original: key.artifact,
-                original_ordinal: key.original_ordinal,
-            },
-        ));
-    };
-    // Only the evidence that certified this completion may name its binding.
-    // A retained or pending product has no issued row yet; its exact entry
-    // authorizes this admission to issue the binding under its own scope. An
-    // issued product reads the row that recorded its exact group.
-    let bindings = match completion {
-        NativeProductCompletion::Retained | NativeProductCompletion::Pending => {
-            if entry.native_group_ordinals.contains(&key.original_ordinal) {
-                return Ok(None);
-            }
-            BTreeSet::new()
-        }
-        NativeProductCompletion::Issued => {
-            let mut groups = BTreeSet::new();
-            let mut issuing_rows = 0;
-            for row in selection.issued_native_availability() {
-                if row.original_artifact_id() != key.artifact || row.original_owner() != owner {
-                    continue;
-                }
-                issuing_rows += 1;
-                if let Some(support) = row.dependency_support(key, owner) {
-                    groups.extend(support.groups());
-                }
-            }
-            if issuing_rows == 0 {
-                return Err(native_admission_failure(
-                    key,
-                    NativeAdmissionRefusal::CurrentProductNotCompleted {
-                        original: key.artifact,
-                        original_ordinal: key.original_ordinal,
-                    },
-                ));
-            }
-            groups
-        }
+    use crate::certified_products::NativeGroupCandidates;
+    let key = current.key();
+    let candidates = current
+        .own_group_candidates()
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+    let bindings = match candidates {
+        NativeGroupCandidates::NewProduct(groups) if groups.is_empty() => return Ok(None),
+        NativeGroupCandidates::NewProduct(groups)
+        | NativeGroupCandidates::IssuedAvailability(groups) => groups,
     };
     let mut bindings = bindings.into_iter();
     let Some(chosen) = bindings.next() else {
@@ -669,14 +479,16 @@ struct NewProductGroupEdge {
 /// graph the selection carries. A proof that is not live, or whose edge the
 /// parent entry does not record, is refused rather than repaired by a
 /// canonical match or a sibling candidate.
-fn new_product_group_edges(
+fn new_product_group_edges<'a>(
     state: &InventoryState,
+    parent_view: &ArtifactView,
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    selection: &crate::certified_products::CertifiedSourceSelection,
+    requirements: impl IntoIterator<Item = &'a NativeOriginalRequirement>,
 ) -> Result<Vec<NewProductGroupEdge>, CompileError> {
     let mut claims = BTreeSet::new();
-    for proof in selection.new_product_native_requirements() {
+    for proof in requirements {
         let graph = proof.selection.graph_selection();
+        validate_issued_selection(state, &parent_view.read_projection(state).nodes, graph)?;
         let parent_entry = entries.get(&proof.original).ok_or_else(|| {
             admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
                 artifact: proof.original,
@@ -740,11 +552,15 @@ fn new_product_group_edges(
                         },
                     ));
                 }
-                let child_entry = state.interned(&child.binding.artifact()).ok_or_else(|| {
-                    admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
-                        artifact: child.binding.artifact(),
-                    })
-                })?;
+                let child_entry = parent_view
+                    .lease
+                    .payloads
+                    .get(&child.binding.artifact())
+                    .ok_or_else(|| {
+                        admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
+                            artifact: child.binding.artifact(),
+                        })
+                    })?;
                 let recorded = parent_entry
                     .native_requirements_for(parent.original_ordinal)
                     .iter()
@@ -804,18 +620,19 @@ fn new_product_group_edges(
 /// through the exact owner index, which refuses competing children.
 fn current_product_dependencies(
     state: &InventoryState,
+    parent_view: &ArtifactView,
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    selection: &crate::certified_products::CertifiedSourceSelection,
-    parent: NativeGroupKey,
+    current: &crate::certified_products::CurrentProductRef<'_>,
 ) -> Result<NativeProductDependencies, CompileError> {
-    if !selection
-        .new_product_native_requirements()
+    let parent = current.key();
+    if !current
+        .requirements()
         .any(|proof| proof.original == parent.artifact)
     {
         return Ok(NativeProductDependencies::RecordedRows);
     }
     Ok(NativeProductDependencies::Exact(
-        new_product_group_edges(state, entries, selection)?
+        new_product_group_edges(state, parent_view, entries, current.requirements())?
             .into_iter()
             .filter(|claim| claim.parent == parent)
             .map(|claim| (claim.edge, claim.child))
@@ -823,47 +640,165 @@ fn current_product_dependencies(
     ))
 }
 
-/// A child demanded directly by a receiving target can still be supplied by
-/// exactly one authenticated new-product edge. Competing exact parents refuse.
-fn new_product_historical_claims(
-    state: &InventoryState,
-    entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    selection: &crate::certified_products::CertifiedSourceSelection,
-    child: NativeGroupKey,
-) -> Result<Vec<(NativeGroupKey, NativeGroupEdge, NativeGroupBinding)>, CompileError> {
-    Ok(new_product_group_edges(state, entries, selection)?
-        .into_iter()
-        .filter(|claim| {
-            claim.child.binding.artifact() == child.artifact
-                && claim.child.original_ordinal == child.original_ordinal
-        })
-        .map(|claim| (claim.parent, claim.edge, claim.child))
-        .collect())
+/// One exact group's authenticated acquisition owner. Immutable graph facts
+/// may be shared globally; payload custody always comes from this owner.
+struct NativeSupportRef<'a> {
+    snapshot: &'a crate::exact_context::ExactSelectionSnapshot,
+    payloads: &'a imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+    offer: Option<&'a IssuedNativeOffer>,
 }
 
-/// Retain one exact group's immutable payload closure so this admission can
-/// interpret a historical child without importing another view's roots.
-fn retain_exact_closure(
-    state: &InventoryState,
-    entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    incoming: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
-    group: NativeGroupBinding,
-) -> Result<BTreeSet<InventoryNodeKey>, CompileError> {
-    let owned = admitted_closure(state, std::iter::once(InventoryNodeKey::Group(group)));
-    for node in &owned {
-        let InventoryNodeKey::Artifact(binding) = node else {
-            continue;
-        };
-        let payload = state
-            .interned(&binding.artifact)
-            .ok_or_else(|| failure("issued native dependency payload missing"))?;
-        let retained = match incoming.get(&binding.artifact).or_else(|| entries.get(&binding.artifact)) {
-            Some(previous) => ArtifactEntry::merge_catalog_input_custody(previous, &payload)?,
-            None => payload,
-        };
-        incoming.insert(binding.artifact, retained);
+impl<'a> NativeSupportRef<'a> {
+    fn checked(
+        state: &InventoryState,
+        parent: &'a ArtifactView,
+        group: NativeGroupBinding,
+        support: crate::certified_products::CertifiedNativeGroupSupport<'a>,
+    ) -> Result<Self, CompileError> {
+        match support {
+            crate::certified_products::CertifiedNativeGroupSupport::Issued(offer) => {
+                if !offer.contains_checked_group(group) {
+                    return Err(failure("issued native contribution lacks demanded group"));
+                }
+                Ok(Self {
+                    snapshot: offer.custody_snapshot(),
+                    payloads: &offer.custody_lease().payloads,
+                    offer: Some(offer),
+                })
+            }
+            crate::certified_products::CertifiedNativeGroupSupport::NewProductDependency(proof) => {
+                validate_issued_selection(
+                    state,
+                    &parent.read_projection(state).nodes,
+                    proof.selection.graph_selection(),
+                )?;
+                if !proof
+                    .selection
+                    .graph_selection()
+                    .native_groups
+                    .contains(&group)
+                {
+                    return Err(failure("native dependency is outside its product proof"));
+                }
+                Ok(Self {
+                    snapshot: &parent.lease.selection,
+                    payloads: &parent.lease.payloads,
+                    offer: None,
+                })
+            }
+        }
     }
-    Ok(owned.iter().copied().collect())
+
+    fn outgoing(
+        &self,
+        source: InventoryNodeKey,
+    ) -> impl Iterator<Item = (InventoryNodeKey, ArtifactDependency)> + '_ {
+        let rows = self
+            .snapshot
+            .scopes
+            .get(&source.selection())
+            .into_iter()
+            .flat_map(move |scope| {
+                let rows = &scope.proof().dependencies;
+                let start = rows.partition_point(|(from, _, _)| *from < source);
+                rows[start..]
+                    .iter()
+                    .take_while(move |(from, _, _)| *from == source)
+            });
+        rows.map(|(_, target, edge)| (*target, edge.clone()))
+    }
+
+    fn closure(
+        &self,
+        group: NativeGroupBinding,
+    ) -> Result<BTreeSet<InventoryNodeKey>, CompileError> {
+        self.snapshot
+            .nodes_from_seeds([InventoryNodeKey::Group(group)])
+            .map_err(|_| failure("issued native dependency closure missing"))
+    }
+
+    fn carrier_pair(
+        &self,
+        group: NativeGroupBinding,
+        canonical: ArtifactId,
+    ) -> Result<(ArtifactBinding, ArtifactBinding), CompileError> {
+        let unique = |bindings: BTreeSet<ArtifactBinding>, artifact| {
+            if bindings.len() != 1 {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::BindingAmbiguity { artifact },
+                ));
+            }
+            Ok(*bindings.first().unwrap())
+        };
+        let carrier = unique(
+            self.outgoing(InventoryNodeKey::Group(group))
+                .filter_map(|(target, edge)| match target {
+                    InventoryNodeKey::Artifact(binding)
+                        if binding.artifact == group.binding.artifact()
+                            && edge == ArtifactDependency::Interface =>
+                    {
+                        Some(binding)
+                    }
+                    _ => None,
+                })
+                .collect(),
+            group.binding.artifact(),
+        )?;
+        let canonical = unique(
+            self.outgoing(InventoryNodeKey::Artifact(carrier))
+                .filter_map(|(target, edge)| match target {
+                    InventoryNodeKey::Artifact(binding)
+                        if binding.artifact == canonical
+                            && edge == ArtifactDependency::Interface =>
+                    {
+                        Some(binding)
+                    }
+                    _ => None,
+                })
+                .collect(),
+            canonical,
+        )?;
+        Ok((carrier, canonical))
+    }
+
+    fn retain_payloads(
+        &self,
+        entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        incoming: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+        owned: &BTreeSet<InventoryNodeKey>,
+    ) -> Result<(), CompileError> {
+        for node in owned {
+            let InventoryNodeKey::Artifact(binding) = node else {
+                continue;
+            };
+            let payload = self.payloads.get(&binding.artifact).ok_or_else(|| {
+                failure("issued native dependency payload missing from its owner")
+            })?;
+            let retained = match incoming
+                .get(&binding.artifact)
+                .or_else(|| entries.get(&binding.artifact))
+            {
+                Some(previous) => ArtifactEntry::merge_catalog_input_custody(previous, payload)?,
+                None => Arc::clone(payload),
+            };
+            incoming.insert(binding.artifact, retained);
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn issued_carrier_pair(
+    parent: &ArtifactView,
+    group: NativeGroupBinding,
+    canonical: ArtifactId,
+) -> Result<(ArtifactBinding, ArtifactBinding), CompileError> {
+    let support = NativeSupportRef {
+        snapshot: &parent.lease.selection,
+        payloads: &parent.lease.payloads,
+        offer: None,
+    };
+    support.closure(group)?;
+    support.carrier_pair(group, canonical)
 }
 
 #[derive(Clone, Copy)]
@@ -901,7 +836,6 @@ fn bind_input_demand(
     mut incoming: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     demanded: &BTreeSet<NativeGroupKey>,
     source: NativeDemandSource<'_>,
-    completions: &mut NativeProductCompletions,
 ) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
     let namespace = parent.namespace();
     let mut retained_offers = Vec::new();
@@ -930,98 +864,50 @@ fn bind_input_demand(
                     return Err(native_admission_failure(
                         *key,
                         NativeAdmissionRefusal::InputPermissionDenied {
-                            body_present: entry.native_group_ordinals.contains(&key.original_ordinal),
+                            body_present: entry
+                                .native_group_ordinals
+                                .contains(&key.original_ordinal),
                             selected_original: namespace.get(&key.artifact).copied(),
                         },
                     ));
                 }
-                // The selection's own fact decides which provenance constructor
-                // applies. A carried input row is a root; no carried row means
-                // the only remaining issuer is a physical product completion.
+                // Roots consume their input owner. Current output requires a
+                // positively bound product row; absence of an input is not one.
+                // TODO(N1): consume exact issued/current outcomes directly and
+                // replace the historical fallback with owner-issued edges;
+                // equal-payload independent parents must keep distinct children.
                 let carried = selection
                     .continuation_input(&module_identity(owner))
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-                let (chosen, provenance, dependencies) = match carried {
+                let (chosen, dependencies) = match carried {
                     Some(_) => (
                         Some(verified_root_choice(selection, *key, owner, entry)?),
-                        NativeBindingProvenance::Root,
-                        NativeProductDependencies::Unused,
+                        NativeProductDependencies::RecordedRows,
                     ),
-                    None => match verified_current_product(
-                        selection,
-                        *key,
-                        owner,
-                        entry,
-                        completions,
-                    ) {
-                        Ok(Some(chosen)) => (
-                            Some(chosen),
-                            NativeBindingProvenance::CurrentProduct,
-                            NativeProductDependencies::Unused,
-                        ),
-                        Ok(None) => (
-                            None,
-                            NativeBindingProvenance::CurrentProduct,
-                            current_product_dependencies(state, entries, selection, *key)?,
-                        ),
-                        Err(error) if is_current_product_not_completed(&error) => {
-                            // A child reached only through another product's
-                            // completed edge is historical, never a replacement
-                            // current product discovered from broad custody.
-                            let claims =
-                                new_product_historical_claims(state, entries, selection, *key)?;
-                            let mut chosen: Option<(
-                                NativeGroupBinding,
-                                NativeGroupKey,
-                                NativeGroupEdge,
-                            )> = None;
-                            for (parent, edge, child) in claims {
-                                let parent_entry = entries.get(&parent.artifact).ok_or_else(|| {
-                                    failure("historical parent entry is outside custody")
-                                })?;
-                                let demand = NativeHistoricalDemand {
-                                    parent,
-                                    required_owner: module_identity(owner),
-                                    edge,
-                                };
-                                let exact = BTreeSet::from([child]);
-                                let resolved = verified_historical_child(
-                                    parent_entry,
-                                    entry,
-                                    &demand,
-                                    &exact,
-                                )?;
-                                if chosen
-                                    .as_ref()
-                                    .is_some_and(|previous| previous.0 != resolved)
-                                {
-                                    return Err(admission_failure(
-                                        ArtifactInventoryFailure::BindingAmbiguity {
-                                            artifact: key.artifact,
-                                        },
-                                    ));
-                                }
-                                chosen = Some((resolved, parent, edge));
-                            }
-                            let Some((child, parent, edge)) = chosen else {
-                                return Err(error);
-                            };
-                            let owned =
-                                retain_exact_closure(state, entries, &mut incoming, child)?;
-                            prebound.insert(
-                                *key,
-                                VerifiedNativeBinding {
-                                    binding: Some(child),
-                                    provenance: NativeBindingProvenance::Historical {
-                                        parent,
-                                        edge,
+                    None => match (|| {
+                        let current = selection
+                            .current_product(*key, entry)
+                            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
+                            .ok_or_else(|| {
+                                native_admission_failure(
+                                    *key,
+                                    NativeAdmissionRefusal::CurrentProductNotCompleted {
+                                        original: key.artifact,
+                                        original_ordinal: key.original_ordinal,
                                     },
-                                    dependencies: NativeProductDependencies::Unused,
-                                    closure: owned,
-                                },
-                            );
-                            continue;
+                                )
+                            })?;
+                        match verified_current_product(&current)? {
+                            Some(chosen) => {
+                                Ok((Some(chosen), NativeProductDependencies::RecordedRows))
+                            }
+                            None => Ok((
+                                None,
+                                current_product_dependencies(state, parent, entries, &current)?,
+                            )),
                         }
+                    })() {
+                        Ok(resolved) => resolved,
                         Err(error) => return Err(error),
                     },
                 };
@@ -1030,18 +916,27 @@ fn bind_input_demand(
                 let Some(chosen) = chosen else {
                     if let NativeProductDependencies::Exact(edges) = &dependencies {
                         for (_, child) in edges {
-                            retain_exact_closure(state, entries, &mut incoming, *child)?;
+                            let proof = selection
+                                .new_product_native_requirements()
+                                .find(|proof| {
+                                    proof
+                                        .selection
+                                        .graph_selection()
+                                        .native_groups
+                                        .contains(child)
+                                })
+                                .ok_or_else(|| {
+                                    failure("exact native child lost its product proof")
+                                })?;
+                            let support = NativeSupportRef::checked(state, parent, *child, crate::certified_products::CertifiedNativeGroupSupport::NewProductDependency(proof))?;
+                            support.retain_payloads(
+                                entries,
+                                &mut incoming,
+                                &support.closure(*child)?,
+                            )?;
                         }
                     }
-                    prebound.insert(
-                        *key,
-                        VerifiedNativeBinding {
-                            binding: None,
-                            provenance,
-                            dependencies,
-                            closure: BTreeSet::new(),
-                        },
-                    );
+                    prebound.insert(*key, VerifiedNativeBinding::NewCurrent { dependencies });
                     continue;
                 };
                 let support = selection
@@ -1055,7 +950,7 @@ fn bind_input_demand(
                             NativeAdmissionRefusal::InputIssuedSupportMissing { candidate: chosen },
                         )
                     })?;
-                vec![(chosen, support, provenance)]
+                vec![(chosen, support)]
             }
             NativeDemandSource::Catalog {
                 catalog,
@@ -1112,10 +1007,6 @@ fn bind_input_demand(
                         (
                             group,
                             crate::certified_products::CertifiedNativeGroupSupport::Issued(support),
-                            NativeBindingProvenance::Historical {
-                                parent: demands[0].parent,
-                                edge: demands[0].edge,
-                            },
                         )
                     })
                     .collect()
@@ -1128,85 +1019,12 @@ fn bind_input_demand(
         );
         let candidate_count = supports.len();
         let mut compatible = Vec::new();
-        for (group, support, provenance) in supports {
-            let node = InventoryNodeKey::Group(group);
-            let (owned, payloads, retained_offer) = match support {
-                crate::certified_products::CertifiedNativeGroupSupport::Issued(offer) => {
-                    if !offer.contains_checked_group(group) {
-                        return Err(failure("issued native contribution lacks demanded group"));
-                    }
-                    (
-                        offer
-                            .custody_snapshot()
-                            .nodes_from_seeds([node])
-                            .map_err(|_| failure("issued native dependency closure missing"))?,
-                        &offer.custody_lease().payloads,
-                        Some(offer),
-                    )
-                }
-                crate::certified_products::CertifiedNativeGroupSupport::NewProductDependency(
-                    proof,
-                ) => {
-                    validate_issued_selection(
-                        state,
-                        &parent.read_projection(state).nodes,
-                        proof.selection.graph_selection(),
-                    )?;
-                    (
-                        admitted_closure(state, [node].into_iter())
-                            .iter()
-                            .copied()
-                            .collect(),
-                        &parent.lease.payloads,
-                        None,
-                    )
-                }
-            };
-            // Candidate compatibility is read from its issuing snapshot. A
-            // receiving inventory need not yet know these exact historical scopes.
-            let outgoing = |source: InventoryNodeKey| {
-                if let Some(offer) = retained_offer {
-                    let snapshot = offer.custody_snapshot();
-                    let proof = snapshot
-                        .scopes
-                        .get(&source.selection())
-                        .expect("checked closure retains each scope")
-                        .proof();
-                    let start = proof
-                        .dependencies
-                        .partition_point(|(from, _, _)| *from < source);
-                    proof.dependencies[start..]
-                        .iter()
-                        .take_while(|(from, _, _)| *from == source)
-                        .map(|(_, target, edge)| (*target, edge.clone()))
-                        .collect::<Vec<_>>()
-                } else {
-                    state
-                        .outgoing(source)
-                        .map(|(target, edge)| (target, edge.clone()))
-                        .collect()
-                }
-            };
-            let carriers = outgoing(node)
-                .into_iter()
-                .filter_map(|(target, edge)| match target {
-                    InventoryNodeKey::Artifact(carrier)
-                        if carrier.artifact == key.artifact
-                            && edge == ArtifactDependency::Interface =>
-                    {
-                        Some(carrier)
-                    }
-                    _ => None,
-                })
-                .collect::<BTreeSet<_>>();
-            if carriers.len() != 1 {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::BindingAmbiguity {
-                        artifact: key.artifact,
-                    },
-                ));
-            }
-            let carrier = *carriers.first().unwrap();
+        for (group, support) in supports {
+            let support = NativeSupportRef::checked(state, parent, group, support)?;
+            let owned = support.closure(group)?;
+            let (carrier, canonical_binding) = support.carrier_pair(group, canonical)?;
+            let payloads = support.payloads;
+            let retained_offer = support.offer;
             if namespace
                 .get(&key.artifact)
                 .is_some_and(|selected| *selected != carrier)
@@ -1218,39 +1036,26 @@ fn bind_input_demand(
             {
                 continue;
             }
-            if outgoing(InventoryNodeKey::Artifact(carrier))
-                .into_iter()
-                .any(|(target, edge)| {
-                    let InventoryNodeKey::Artifact(binding) = target else {
-                        return false;
-                    };
-                    if binding.artifact != canonical || edge != ArtifactDependency::Interface {
-                        return false;
-                    }
-                    // Consuming an issued historical body does not requalify it
-                    // as Full in the receiving namespace. A canonical-only role
-                    // can use its unchanged exact closure with the same type
-                    // bytes. Explicit Original selection still binds its scope.
-                    let historical_interface = retained_offer.is_some()
-                        && !namespace.contains_key(&key.artifact)
-                        && source.interface_only_artifact(&entry.descriptor.owner)
-                            == Some(canonical);
-                    let matches = namespace
-                        .get(&canonical)
-                        .is_none_or(|selected| *selected == binding || historical_interface);
-                    if !matches {
-                        tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                            stage = "input_demand_canonical_scope", ?key, ?group, ?carrier,
-                            issued_canonical = ?binding,
-                            selected_canonical = ?namespace.get(&canonical),
-                            "issued native carrier has another canonical binding scope");
-                    }
-                    matches
-                })
+            // An interface-only receiving role may retain the issued body's
+            // unchanged historical canonical binding without selecting Original.
+            let historical_interface = retained_offer.is_some()
+                && !namespace.contains_key(&key.artifact)
+                && source.interface_only_artifact(&entry.descriptor.owner) == Some(canonical);
+            if namespace
+                .get(&canonical)
+                .is_none_or(|selected| *selected == canonical_binding || historical_interface)
             {
-                compatible.push((group, payloads, owned, retained_offer, provenance));
+                compatible.push((
+                    group,
+                    carrier,
+                    canonical_binding,
+                    payloads,
+                    owned,
+                    retained_offer,
+                ));
             }
         }
+
         if compatible.len() > 1 {
             return Err(admission_failure(
                 ArtifactInventoryFailure::BindingAmbiguity {
@@ -1258,7 +1063,8 @@ fn bind_input_demand(
                 },
             ));
         }
-        let Some((group, payloads, owned, retained_offer, provenance)) = compatible.pop() else {
+        let Some((group, carrier, canonical, payloads, owned, retained_offer)) = compatible.pop()
+        else {
             tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                 stage = "input_demand_carrier", ?key, owner = ?product.owner(),
                 selected_carrier = ?namespace.get(&key.artifact),
@@ -1346,12 +1152,12 @@ fn bind_input_demand(
         }
         prebound.insert(
             *key,
-            VerifiedNativeBinding {
-                binding: Some(group),
-                provenance,
-                dependencies: NativeProductDependencies::Unused,
+            VerifiedNativeBinding::Issued(IssuedNativeBinding {
+                binding: group,
+                carrier,
+                canonical,
                 closure: owned,
-            },
+            }),
         );
         if let Some(offer) = retained_offer {
             retained_offers.push(offer.clone());
@@ -1442,7 +1248,6 @@ pub(super) fn bind_fresh_product_dependencies(
             consumed_namespace,
             historical: &historical,
         },
-        &mut NativeProductCompletions::empty(),
     )?;
     acquired.retain_dependency_groups(entries, consumed_namespace, required)?;
     Ok(acquired)
@@ -1458,7 +1263,7 @@ impl CertifiedNativeDemandAcquisition {
         for binding in self.bindings.values() {
             // Historical children follow this exact acquired owner. These are
             // dependency edges for new bodies, never executable request roots.
-            for node in &binding.closure {
+            for node in binding.closure_nodes() {
                 if let InventoryNodeKey::Group(group) = node {
                     let entry = self
                         .entries
@@ -3497,22 +3302,21 @@ mod normalized_dependency_tests {
                     consumed_namespace: &namespace,
                     historical: &historical,
                 },
-                &mut NativeProductCompletions::empty(),
             )
             .unwrap();
             assert_eq!(acquired.bindings.len(), 1);
             assert_eq!(
-                acquired.bindings[demanded.first().unwrap()].binding,
+                acquired.bindings[demanded.first().unwrap()].binding(),
                 Some(issued_binding)
             );
             assert_eq!(
-                acquired.bindings[demanded.first().unwrap()].closure,
-                issuer_closure
+                acquired.bindings[demanded.first().unwrap()].closure(),
+                &issuer_closure
             );
             let verified = &acquired.bindings[demanded.first().unwrap()];
-            let verified_binding = verified.binding.expect("exact historical binding");
+            let verified_binding = verified.binding().expect("exact historical binding");
             assert!(verified
-                .closure
+                .closure()
                 .contains(&InventoryNodeKey::Group(verified_binding)));
             // The old consumer is an independently executed closure oracle.
             // Count it separately so a zero-work assertion has a positive control.
@@ -3524,7 +3328,7 @@ mod normalized_dependency_tests {
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
-            assert_eq!(verified.closure, reference);
+            assert_eq!(*verified.closure(), reference);
             assert!(state.graph_visits.load(Ordering::Relaxed) > before_reference);
             let mut expected = BTreeMap::<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>::new();
             for node in &reference {
@@ -3572,8 +3376,8 @@ mod normalized_dependency_tests {
                     artifact: hidden_id,
                     original_ordinal: 7
                 }]
-                    .closure,
-                reference
+                    .closure(),
+                &reference
             );
             drop(state);
             assert_eq!(parent.capture_graph_selection(), before_selection);
@@ -3631,7 +3435,6 @@ mod normalized_dependency_tests {
                     consumed_namespace: &effective_namespace,
                     historical: &historical,
                 },
-                &mut NativeProductCompletions::empty(),
             );
             if permitted {
                 let acquired =
@@ -3641,7 +3444,7 @@ mod normalized_dependency_tests {
                         artifact: hidden_id,
                         original_ordinal: 7
                     }]
-                        .binding,
+                        .binding(),
                     Some(expected_group)
                 );
                 assert_eq!(
@@ -3649,8 +3452,8 @@ mod normalized_dependency_tests {
                         artifact: hidden_id,
                         original_ordinal: 7
                     }]
-                        .closure,
-                    expected_closure
+                        .closure(),
+                    &expected_closure
                 );
                 let mut required = BTreeMap::new();
                 acquired
@@ -3673,9 +3476,9 @@ mod normalized_dependency_tests {
             drop(state);
             assert_eq!(receiving.capture_graph_selection(), before_receiving);
         }
-        // Carry the same historical offer through an actual compiler request
-        // and bound target. Catalogue admission alone does not cover this later
-        // certified-selection consumer.
+        // Carry the same historical offer through an actual compiler request.
+        // Its private body permission cannot substitute for a direct root choice;
+        // the parent-edge acquisition above remains independently accepted.
         let hidden_owner = canonical.descriptor.owner.clone();
         let visible = interfaces
             .support_for_owners(vec![hidden_owner.clone()])
@@ -3714,7 +3517,8 @@ mod normalized_dependency_tests {
                 "entry_7",
             ),
         }];
-        let admitted = inventory
+        let before_bound = fixed.observed_binding_state();
+        let error = inventory
             .admit_bound_target(
                 &mut fixed,
                 &inventory.empty_view(),
@@ -3722,12 +3526,16 @@ mod normalized_dependency_tests {
                 vec![],
                 &selection,
             )
-            .unwrap();
-        assert!(admitted
-            .artifacts
-            .roots()
-            .contains(&InventoryNodeKey::Group(expected_group)));
-        assert!(!admitted.artifacts.namespace().contains_key(&hidden_id));
+            .err()
+            .expect("a direct private Input demand lacks a root choice or current product");
+        assert!(
+            matches!(error, CompileError::ArtifactInventory(ref error)
+            if error.native_refusal == Some(NativeAdmissionRefusal::CurrentProductNotCompleted {
+                original: hidden_id, original_ordinal: 7,
+            })),
+            "a sole private issued candidate cannot bypass root choice: {error:?}"
+        );
+        assert_eq!(fixed.observed_binding_state(), before_bound);
         assert_eq!(receiving.capture_graph_selection(), before_receiving);
 
         let empty_source = CompilerSourceSupport::empty();
@@ -3768,7 +3576,6 @@ mod normalized_dependency_tests {
                     consumed_namespace: &namespace,
                     historical: &historical,
                 },
-                &mut NativeProductCompletions::empty(),
             )
             .err()
             .expect("unissued native demand must refuse");
@@ -3859,6 +3666,7 @@ mod normalized_dependency_tests {
     ) -> (
         Arc<ArtifactEntry>,
         crate::certified_products::CertifiedSourceSelection,
+        NativeGroupBinding,
     ) {
         let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
         let product = fixture_finalized_product(
@@ -3883,6 +3691,9 @@ mod normalized_dependency_tests {
                 }]),
             )
             .unwrap();
+        let issued = artifacts.capture_graph_selection().native_groups;
+        assert_eq!(issued.len(), 1);
+        let expected_binding = *issued.iter().next().unwrap();
         let ArtifactPayload::Original(original) = &entry.payload else {
             unreachable!();
         };
@@ -3921,12 +3732,13 @@ mod normalized_dependency_tests {
                 &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
             )
             .unwrap();
-        (entry, selection)
+        (entry, selection, expected_binding)
     }
 
     #[test]
     fn absent_root_choice_refuses_a_sole_pending_candidate() {
-        let (entry, selection) = pending_selection(b"absent-root-choice", "AbsentRootChoice", 5, 90);
+        let (entry, selection) =
+            pending_selection(b"absent-root-choice", "AbsentRootChoice", 5, 90);
         let key = NativeGroupKey {
             artifact: entry.descriptor.id,
             original_ordinal: 5,
@@ -4008,32 +3820,16 @@ mod normalized_dependency_tests {
     }
 
     #[test]
-    fn retained_pending_candidate_is_not_a_current_product_completion() {
-        let (entry, selection) =
-            pending_projection_selection(b"non-completion", "NonCompletion", 5, 94);
+    fn bound_current_product_preserves_its_carried_own_binding() {
+        let (entry, selection, expected_binding) =
+            pending_projection_selection(b"current-own-binding", "CurrentOwnBinding", 5, 94);
         let key = NativeGroupKey {
             artifact: entry.descriptor.id,
             original_ordinal: 5,
         };
-        let ArtifactPayload::Original(product) = &entry.payload else {
-            unreachable!();
-        };
-        assert!(
-            !selection
-                .native_group_candidates(key, product.owner())
-                .unwrap()
-                .bindings()
-                .is_empty(),
-            "a retained candidate alone must not certify completion"
-        );
-        let mut completions = NativeProductCompletions::empty();
-        let error =
-            verified_current_product(&selection, key, product.owner(), &entry, &mut completions)
-                .expect_err("an uncompleted pending product cannot issue a binding");
-        assert_eq!(
-            native_refusal_reason(&error),
-            "current_product_not_completed"
-        );
+        let current = selection.current_product(key, &entry).unwrap().unwrap();
+        let binding = verified_current_product(&current).unwrap().unwrap();
+        assert_eq!(binding, expected_binding);
     }
 
     #[test]
@@ -4043,16 +3839,10 @@ mod normalized_dependency_tests {
             artifact: entry.descriptor.id,
             original_ordinal: 5,
         };
-        let ArtifactPayload::Original(product) = &entry.payload else {
-            unreachable!();
-        };
-        let supplied = BTreeMap::from([(entry.descriptor.id, Arc::clone(&entry))]);
-        let mut completions =
-            NativeProductCompletions::from_pending_selection(&selection, &supplied);
-        let binding =
-            verified_current_product(&selection, key, product.owner(), &entry, &mut completions)
-                .expect("issued completion authorizes its own product binding")
-                .expect("issued completion names an existing exact binding");
+        let current = selection.current_product(key, &entry).unwrap().unwrap();
+        let binding = verified_current_product(&current)
+            .expect("issued completion authorizes its own product binding")
+            .expect("issued completion names an existing exact binding");
         assert_eq!(binding.binding.artifact(), entry.descriptor.id);
         assert_eq!(binding.original_ordinal, 5);
     }

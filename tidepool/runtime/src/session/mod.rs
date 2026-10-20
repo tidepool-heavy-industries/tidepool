@@ -428,6 +428,8 @@ pub enum SessionError {
     MissingDeclarationLibrary,
     #[error("scope {0:?} has no current published compiler world")]
     MissingPublishedCompilerWorld(ScopeId),
+    #[error("scope {0:?} has no certified selected declaration facade for its compiler world")]
+    UncertifiedCompilerWorldDeclaration(ScopeId),
     #[error("world-owned execution requires service cell preparation")]
     WorldCellRequiresServicePreparation,
     #[error("world cell item {ordinal} requires an observation-name reservation")]
