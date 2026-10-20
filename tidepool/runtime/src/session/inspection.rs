@@ -13,7 +13,7 @@ use crate::{timing, CompileError};
 
 use super::assemble_inspection_module;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum InspectionQuery {
     TypeOf(String),
     /// No production query plan constructs this; the resident workbench uses
@@ -51,6 +51,76 @@ pub enum InspectionQuery {
     },
 }
 
+/// Query equality keeps full structural comparison except for the compile
+/// view a structured query was planned against: two plans over the same view
+/// identity are the same work even when their scope labels differ.
+impl PartialEq for InspectionQuery {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::TypeOf(left), Self::TypeOf(right)) => left == right,
+            (Self::Info(left), Self::Info(right)) => left == right,
+            (Self::TypeSearch(left), Self::TypeSearch(right)) => left == right,
+            (
+                Self::TypeSearchBounded {
+                    pattern: left,
+                    budget: left_budget,
+                },
+                Self::TypeSearchBounded {
+                    pattern: right,
+                    budget: right_budget,
+                },
+            ) => left == right && left_budget == right_budget,
+            (Self::ScopeBrowse, Self::ScopeBrowse) => true,
+            (Self::ScopeBrowseBounded(left), Self::ScopeBrowseBounded(right)) => left == right,
+            (
+                Self::Browse {
+                    module: left,
+                    expanded: left_expanded,
+                },
+                Self::Browse {
+                    module: right,
+                    expanded: right_expanded,
+                },
+            ) => left == right && left_expanded == right_expanded,
+            (
+                Self::BrowseBounded {
+                    module: left,
+                    expanded: left_expanded,
+                    budget: left_budget,
+                },
+                Self::BrowseBounded {
+                    module: right,
+                    expanded: right_expanded,
+                    budget: right_budget,
+                },
+            ) => left == right && left_expanded == right_expanded && left_budget == right_budget,
+            (
+                Self::StructuredInfo {
+                    query: left,
+                    provenance: left_provenance,
+                },
+                Self::StructuredInfo {
+                    query: right,
+                    provenance: right_provenance,
+                },
+            ) => left == right && left_provenance.same_view(right_provenance),
+            (
+                Self::StructuredType {
+                    query: left,
+                    provenance: left_provenance,
+                },
+                Self::StructuredType {
+                    query: right,
+                    provenance: right_provenance,
+                },
+            ) => left == right && left_provenance.same_view(right_provenance),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for InspectionQuery {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NameScope {
     Current,
@@ -72,7 +142,10 @@ pub struct NameQuery {
     pub name: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Full provenance for diagnostics and wire answers. Deliberately not
+/// `PartialEq`: staleness is decided by [`ViewIdentity`] (`same_view`), and a
+/// structural comparison would silently reintroduce the scope-label bug.
+#[derive(Clone, Debug)]
 pub struct ScopeProvenance {
     pub scope: NameScope,
     pub generation: u64,
@@ -126,12 +199,22 @@ pub struct TypeExpression {
     pub constraints: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct TypeInfo {
     pub identifier: IdentifierRef,
     pub expression: TypeExpression,
     pub provenance: ScopeProvenance,
 }
+
+impl PartialEq for TypeInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.identifier == other.identifier
+            && self.expression == other.expression
+            && self.provenance.same_view(&other.provenance)
+    }
+}
+
+impl Eq for TypeInfo {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldInfo {
@@ -183,13 +266,24 @@ pub enum DeclarationInfo {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct IdentifierInfo {
     pub identifier: IdentifierRef,
     pub declaration: DeclarationInfo,
     pub parent: Option<IdentifierRef>,
     pub provenance: ScopeProvenance,
 }
+
+impl PartialEq for IdentifierInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.identifier == other.identifier
+            && self.declaration == other.declaration
+            && self.parent == other.parent
+            && self.provenance.same_view(&other.provenance)
+    }
+}
+
+impl Eq for IdentifierInfo {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QueryError {

@@ -65,7 +65,7 @@ pub(super) const QUERY_RESULT_LIMIT: usize = 256;
 /// A decoded compiler question. The wire enum lives in
 /// `generated::introspection`; this type is the actor's own closed set so
 /// planning and projection do not depend on generated spelling.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) enum CompilerQuery {
     CurrentScopeView,
     ScopeBindings {
@@ -89,6 +89,84 @@ pub(crate) enum CompilerQuery {
         pattern: String,
     },
 }
+
+fn same_expected_scope(
+    left: &Option<ScopeProvenance>,
+    right: &Option<ScopeProvenance>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => left.same_view(right),
+        _ => false,
+    }
+}
+
+/// A pin names a view, not a label: two requests pinned to the same view
+/// identity are the same query even when their scope labels differ.
+impl PartialEq for CompilerQuery {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::CurrentScopeView, Self::CurrentScopeView) => true,
+            (
+                Self::ScopeBindings {
+                    expected_scope: left,
+                },
+                Self::ScopeBindings {
+                    expected_scope: right,
+                },
+            ) => same_expected_scope(left, right),
+            (
+                Self::ModuleExports {
+                    expected_scope: left_scope,
+                    module: left_module,
+                },
+                Self::ModuleExports {
+                    expected_scope: right_scope,
+                    module: right_module,
+                },
+            ) => same_expected_scope(left_scope, right_scope) && left_module == right_module,
+            (
+                Self::RowFit {
+                    expected_scope: left_scope,
+                    identifier: left_identifier,
+                    module: left_module,
+                },
+                Self::RowFit {
+                    expected_scope: right_scope,
+                    identifier: right_identifier,
+                    module: right_module,
+                },
+            ) => {
+                same_expected_scope(left_scope, right_scope)
+                    && left_identifier == right_identifier
+                    && left_module == right_module
+            }
+            (
+                Self::TypeOfExpression {
+                    expected_scope: left_scope,
+                    expression: left_expression,
+                },
+                Self::TypeOfExpression {
+                    expected_scope: right_scope,
+                    expression: right_expression,
+                },
+            ) => same_expected_scope(left_scope, right_scope) && left_expression == right_expression,
+            (
+                Self::TypeSearch {
+                    expected_scope: left_scope,
+                    pattern: left_pattern,
+                },
+                Self::TypeSearch {
+                    expected_scope: right_scope,
+                    pattern: right_pattern,
+                },
+            ) => same_expected_scope(left_scope, right_scope) && left_pattern == right_pattern,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for CompilerQuery {}
 
 impl CompilerQuery {
     /// Admit one `rowFit` reference: parse the wire's defining-module string
@@ -438,7 +516,17 @@ impl From<InspectionAvailability> for FitAvailability {
 /// One `rowFit` answer: the measured availability together with the identifier
 /// it describes and the compile view it was measured in. The view is the entry
 /// snapshot, never a re-read after the query.
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl PartialEq for Fit {
+    fn eq(&self, other: &Self) -> bool {
+        self.availability == other.availability
+            && self.identifier == other.identifier
+            && self.provenance.same_view(&other.provenance)
+    }
+}
+
+impl Eq for Fit {}
+
+#[derive(Clone, Debug)]
 pub(super) struct Fit {
     availability: FitAvailability,
     identifier: IdentifierRef,
@@ -470,7 +558,18 @@ impl From<InfoEntry> for NameEntry {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl PartialEq for NameList {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+            && self.observed == other.observed
+            && self.limit == other.limit
+            && self.provenance.same_view(&other.provenance)
+    }
+}
+
+impl Eq for NameList {}
+
+#[derive(Clone, Debug)]
 pub(super) struct NameList {
     entries: Vec<NameEntry>,
     observed: usize,
@@ -544,7 +643,18 @@ impl From<RuntimeTypeMatch> for TypeMatch {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl PartialEq for TypeMatches {
+    fn eq(&self, other: &Self) -> bool {
+        self.matches == other.matches
+            && self.observed == other.observed
+            && self.limit == other.limit
+            && self.provenance.same_view(&other.provenance)
+    }
+}
+
+impl Eq for TypeMatches {}
+
+#[derive(Clone, Debug)]
 pub(super) struct TypeMatches {
     matches: Vec<TypeMatch>,
     observed: usize,
@@ -574,7 +684,18 @@ impl TypeMatches {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl PartialEq for ExpressionType {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.display == other.display
+            && self.availability == other.availability
+            && self.provenance.same_view(&other.provenance)
+    }
+}
+
+impl Eq for ExpressionType {}
+
+#[derive(Clone, Debug)]
 pub(super) struct ExpressionType {
     source: String,
     display: String,
@@ -1709,7 +1830,7 @@ mod tests {
                 CompilerPlan::Answered(CompilerQueryAnswer::Fit(fit)) => {
                     assert_eq!(fit.availability, FitAvailability::Unknown, "{stale}");
                     assert_eq!(fit.identifier, identifier(stale, "local"), "{stale}");
-                    assert_eq!(fit.provenance, view, "{stale}");
+                    assert!(fit.provenance.same_view(&view), "{stale}");
                 }
                 CompilerPlan::Answered(_) => {
                     panic!("{stale}: expected a fit answer, got another held-view answer")
@@ -1980,7 +2101,7 @@ mod tests {
                 matches!(
                     answer,
                     CompilerQueryAnswer::ScopeChanged { before: ref seen_before, after: ref seen_after }
-                        if *seen_before == before && *seen_after == after
+                        if seen_before.same_view(&before) && seen_after.same_view(&after)
                 ),
                 "{query:?} reinterpreted a stale view"
             );
@@ -2002,7 +2123,7 @@ mod tests {
                 matches!(
                     answer,
                     CompilerQueryAnswer::ScopeChanged { before: ref seen_before, after: ref seen_after }
-                        if *seen_before == stale && *seen_after == entry_view
+                        if seen_before.same_view(&stale) && seen_after.same_view(&entry_view)
                 ),
                 "{query:?} accepted a stale pin"
             );
@@ -2025,7 +2146,7 @@ mod tests {
                 matches!(
                     answer,
                     CompilerQueryAnswer::ScopeChanged { before: ref seen_before, after: ref seen_after }
-                        if *seen_before == stale && *seen_after == entry_view
+                        if seen_before.same_view(&stale) && seen_after.same_view(&entry_view)
                 ),
                 "{query:?} reported the moved view instead of refusing the stale pin at entry"
             );
@@ -2083,7 +2204,7 @@ mod tests {
                 )]))),
             ),
             CompilerQueryAnswer::ScopeChanged { before: ref seen_before, after: ref seen_after }
-                if *seen_before == pinned && *seen_after == moved
+                if seen_before.same_view(&pinned) && seen_after.same_view(&moved)
         ));
     }
 
@@ -2097,7 +2218,7 @@ mod tests {
             later,
             BatchOutcome::Infrastructure("must not be consulted".into()),
         );
-        assert!(matches!(answer, CompilerQueryAnswer::ScopeView(ref seen) if *seen == before));
+        assert!(matches!(answer, CompilerQueryAnswer::ScopeView(ref seen) if seen.same_view(&before)));
     }
 
     #[test]
@@ -2118,7 +2239,7 @@ mod tests {
             CompilerQueryAnswer::Fit(fit) => {
                 assert_eq!(fit.availability, FitAvailability::Polymorphic);
                 assert_eq!(fit.identifier, requested);
-                assert_eq!(fit.provenance, entry_view);
+                assert!(fit.provenance.same_view(&entry_view));
             }
             other => panic!("expected a row fit, got {}", answer_name(&other)),
         }
@@ -2457,7 +2578,7 @@ mod tests {
                 assert_eq!(expression.source, "1 + 1");
                 assert_eq!(expression.display, "Int");
                 assert_eq!(expression.availability, FitAvailability::Polymorphic);
-                assert_eq!(expression.provenance, before);
+                assert!(expression.provenance.same_view(&before));
             }
             other => panic!("expected an expression type, got {}", answer_name(&other)),
         }
@@ -2508,7 +2629,7 @@ mod tests {
                 // than the budget: "at least limit", never an unjustified total.
                 assert_eq!(names.observed, names.limit);
                 assert_eq!(names.limit, QUERY_RESULT_LIMIT);
-                assert_eq!(names.provenance, entry_view);
+                assert!(names.provenance.same_view(&entry_view));
             }
             other => panic!("expected a name list, got {}", answer_name(&other)),
         }
@@ -2534,7 +2655,7 @@ mod tests {
                 assert_eq!(names.entries[0].reference, identity);
                 assert_eq!(names.observed, 1);
                 assert_eq!(names.limit, QUERY_RESULT_LIMIT);
-                assert_eq!(names.provenance, entry_view);
+                assert!(names.provenance.same_view(&entry_view));
             }
             other => panic!("expected a name list, got {}", answer_name(&other)),
         }
@@ -2568,7 +2689,7 @@ mod tests {
             CompilerQueryAnswer::Matches(matches) => {
                 assert_eq!(matches.observed, 1);
                 assert_eq!(matches.limit, QUERY_RESULT_LIMIT);
-                assert_eq!(matches.provenance, entry_view);
+                assert!(matches.provenance.same_view(&entry_view));
                 assert_eq!(matches.matches[0].quality, TypeMatchQuality::Usable);
                 assert_eq!(
                     matches.matches[0].availability,
