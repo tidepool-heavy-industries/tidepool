@@ -1858,7 +1858,14 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
                           ,"readLaterStage value = readFirstStage value"]
                         ,[(0,PlannedBind 61),(1,PlannedDeclaration 62)
                           ,(2,PlannedBind 63),(3,PlannedDeclaration 64)]
-                        ,["exec","declaration","exec","declaration"])] $ \(label,source,caseSlots,kinds) -> do
+                        ,["exec","declaration","exec","declaration"])
+                      ,("source-family",unlines ["import qualified CacheEntry"
+                          ,"import qualified CacheEven"
+                          ,"readBootStage :: CacheEven.Payload Bool -> Bool"
+                          ,"readBootStage value = value && CacheEntry.result"
+                          ,"let bootAnswerStage = readBootStage True"]
+                        ,[(0,PlannedPrologue 71),(1,PlannedDeclaration 72),(2,PlannedBind 73)]
+                        ,["prologue","declaration","exec"])] $ \(label,source,caseSlots,kinds) -> do
                       let ownRecipe = recipe {worldCellSource=source}
                           ownDirectory = work </> ("world-stages-" ++ label)
                           ownPlan = planRequest {worldCellPlanRecipe=ownRecipe
@@ -1944,7 +1951,7 @@ worldCellAdmissionParse = withTiming $ withScratch $ \work ->
       outcome `seq` pure ()
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
-      unless (admissionParses == replicate 7 1)
+      unless (admissionParses == replicate 8 1)
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 
@@ -1967,7 +1974,13 @@ writeWorldCellAdmissionPacket handles work producer profile parcelBytes = do
       _ -> fail "empty Materializer context omitted its empty map"
     _ -> fail "empty Materializer Context descriptor changed"
   pairs <- reachable [primary,association,emptyBinding,lexical] (contextBlocks ++ emptyBlocks)
-  let sources = "TPCSRC01" <> BS.replicate 8 0
+  captured <- forM ["CacheEven.hs","CacheEven.hs-boot","CacheOdd.hs","CacheEntry.hs"] $ \name -> do
+    body <- BS.readFile ("test-source-boot/fixtures" </> name)
+    pure (BS8.pack name,body)
+  let word32 value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..3 :: Int]]
+      frame bytes = word32 (BS.length bytes) <> bytes
+      sources = "TPCSRC01" <> frame "world-stage-source" <> word32 1 <> word32 (length captured)
+        <> foldMap (\(name,body) -> frame name <> frame body) captured
       sourcePath = work </> "world-admission-sources.bin"
       text = TString . T.pack
       blocks values = TList [TList [TBytes cid,TBytes body] | (cid,body) <- values]

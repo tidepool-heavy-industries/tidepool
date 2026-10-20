@@ -96,7 +96,7 @@ import GHC.Iface.Make (mkIfaceTc, mkPartialIface, mkFullIface)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Unit.Finder (initFinderCache, addHomeModuleToFinder)
 import GHC.Unit.Module.ModIface (set_mi_extra_decls, mi_iface_hash)
-import GHC.Unit.Module.Deps (imp_mods, dep_direct_mods, dep_orphs, dep_finsts)
+import GHC.Unit.Module.Deps (imp_mods)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import Codec.CBOR.Encoding qualified as WorldEncoding
 import Codec.CBOR.Write (toStrictByteString)
@@ -2581,7 +2581,7 @@ restoreWorldCellPrefixHomes environment (WorldCellPrefix _ homes graph _ _ _ _) 
           unless (sameWorldCellHome existing home) (throwIO WorldCellCorrupt)
           pure existing
       _ <- addHomeModuleToFinder (hsc_FC current) (hsc_home_unit current)
-        (GWIB (moduleName owner) NotBoot) (ms_location summary)
+        (GWIB (moduleName owner) (if ms_hsc_src summary == HsBootFile then IsBoot else NotBoot)) (ms_location summary)
       pure (hscUpdateHPT (\table -> addToHpt table (moduleName owner) selected) current)
 
 sameWorldCellHome :: HomeModInfo -> HomeModInfo -> Bool
@@ -2598,11 +2598,15 @@ restoreWorldCellPrefixFor summary environment prefix@(WorldCellPrefix _ _ graph 
       ready <- restoreWorldCellPrefixHomes environment prefix
       let retained = mgModSummaries' graph
           present = Set.fromList (map mkNodeKey (mgModSummaries' (hsc_mod_graph ready)))
-          addEdges (ModuleNode edges current) =
-            let imported = [mkNodeKey retainedNode | retainedNode@(ModuleNode _ retainedSummary) <- retained
-                  , ms_mod retainedSummary `Set.member` sourceImportOwners current]
-                inherited = [dependency | ModuleNode dependencies retainedSummary <- retained
-                  , ms_mod retainedSummary == ms_mod current, dependency <- dependencies]
+          retainedKeys = Set.fromList (map mkNodeKey retained)
+          imports = Map.fromList
+            [(mkNodeKey node,Set.fromList (sourceImportNodeKeys current))
+              | node@(ModuleNode _ current) <- mgModSummaries' (hsc_mod_graph ready)]
+          addEdges node@(ModuleNode edges current) =
+            let imported = Set.toList (Map.findWithDefault Set.empty (mkNodeKey node) imports
+                  `Set.intersection` retainedKeys)
+                inherited = [dependency | retainedNode@(ModuleNode dependencies _) <- retained
+                  , mkNodeKey retainedNode == mkNodeKey node, dependency <- dependencies]
             in ModuleNode (Set.toList (Set.fromList (edges ++ imported ++ inherited))) current
           addEdges node = node
           current = map addEdges (mgModSummaries' (hsc_mod_graph ready))
@@ -2610,46 +2614,61 @@ restoreWorldCellPrefixFor summary environment prefix@(WorldCellPrefix _ _ graph 
       pure ready {hsc_mod_graph=mkModuleGraph (current ++ missing)}
   where owners = Set.fromList [ms_mod retained | ModuleNode _ retained <- mgModSummaries' graph]
 
--- Extend only the new Original's actual lexical/interface-instance closure.
--- Existing nodes and homes stay owned; unrelated inventory modules are never
--- copied into the private prefix.
+-- Retain the successful graph projection, including SOURCE/boot identity.
+-- Virtual locations keep these completed nodes out of Make without retaining
+-- paths or buffers owned by an earlier stage's disposable source directory.
 retainWorldCellOriginal :: HscEnv -> HomePackageTable -> ModuleGraph -> HomeModInfo
   -> IO (HomePackageTable,ModuleGraph)
 retainWorldCellOriginal environment homes graph original = do
-  (retained,_,added) <- visit homes known [] (mi_module (hm_iface original))
-  pure (retained,mkModuleGraph (mgModSummaries' graph ++ reverse added))
+  root <- case [node | node@(ModuleNode _ summary) <- completed
+      , ms_mod summary == mi_module (hm_iface original), ms_hsc_src summary == HsSrcFile] of
+    [node] -> pure (mkNodeKey node)
+    _ -> throwIO WorldCellCorrupt
+  let selected = visit Set.empty [root]
+      added = [virtualize selected node | node <- completed
+        , mkNodeKey node `Set.member` selected, mkNodeKey node `Set.notMember` known]
+      modules = Set.fromList [ms_mod summary | ModuleNode _ summary <- added]
+  retained <- foldM retainHome homes (Set.toList modules)
+  pure (retained,mkModuleGraph (mgModSummaries' graph ++ added))
   where
-    known = Set.fromList [ms_mod summary | ModuleNode _ summary <- mgModSummaries' graph]
-    homeUnit = homeUnitAsUnit (hsc_home_unit environment)
-    visit table seen added owner
-      | owner `Set.member` seen = pure (table,seen,added)
-      | otherwise = do
-          home <- if owner == mi_module (hm_iface original) then pure original
-            else maybe (throwIO WorldCellCorrupt) pure
-              (lookupHpt (hsc_HPT environment) (moduleName owner))
-          unless (mi_module (hm_iface home) == owner) (throwIO WorldCellCorrupt)
-          forM_ (lookupHpt table (moduleName owner)) $ \previous ->
-            unless (sameWorldCellHome previous home) (throwIO WorldCellCorrupt)
-          let iface = hm_iface home
-              dependencies = Set.toAscList (Set.fromList
-                ([mkModule (stringToUnit (unitIdString unit)) (gwib_mod name)
-                  | (unit,name) <- Set.toList (dep_direct_mods (mi_deps iface))]
-                  ++ dep_orphs (mi_deps iface) ++ dep_finsts (mi_deps iface)))
-              lexical dependency = moduleUnit dependency == homeUnit && case
-                  parseSessionModule (moduleNameString (moduleName dependency)) of
-                Just selected -> smKind selected /= ValMod
-                Nothing -> True
-              selected = filter lexical dependencies
-              artifact = ExactIfaceArtifact (unitString (moduleUnit owner))
-                (moduleNameString (moduleName owner))
-                ("<private-world-prefix>/" ++ moduleNameString (moduleName owner) ++ ".hi") "" []
-              summary = exactInterfaceSummary environment artifact
-              edge dependency = NodeKey_Module (ModNodeKeyWithUid
-                (GWIB (moduleName dependency) NotBoot) (toUnitId (moduleUnit dependency)))
-              node = ModuleNode (map edge selected) summary
-              withHome = addToHpt table (moduleName owner) home
-          foldM (\(current,visited,nodes) dependency -> visit current visited nodes dependency)
-            (withHome,Set.insert owner seen,node:added) selected
+    completed = mgModSummaries' (hsc_mod_graph environment)
+    prior = mgModSummaries' graph
+    nodes = Map.fromList [(mkNodeKey node,node) | node <- completed ++ prior]
+    known = Set.fromList (map mkNodeKey prior)
+    dependencies = Map.fromListWith Set.union
+      [(mkNodeKey node,Set.fromList (nodeDependencies False node ++ sourceImportNodeKeys summary))
+        | node@(ModuleNode _ summary) <- completed ++ prior]
+    lexical (ModuleNode _ summary) = case
+        parseSessionModule (moduleNameString (ms_mod_name summary)) of
+      Just selected -> smKind selected /= ValMod
+      Nothing -> True
+    lexical _ = True
+    visit seen [] = seen
+    visit seen (key:rest)
+      | key `Set.member` seen = visit seen rest
+      | otherwise = case Map.lookup key nodes of
+          Just node | lexical node -> visit (Set.insert key seen)
+            (Set.toList (Map.findWithDefault Set.empty key dependencies) ++ rest)
+          _ -> visit seen rest
+    retainHome table owner = do
+      home <- if owner == mi_module (hm_iface original) then pure original
+        else maybe (throwIO WorldCellCorrupt) pure
+          (lookupHpt (hsc_HPT environment) (moduleName owner))
+      unless (mi_module (hm_iface home) == owner) (throwIO WorldCellCorrupt)
+      forM_ (lookupHpt table (moduleName owner)) $ \previous ->
+        unless (sameWorldCellHome previous home) (throwIO WorldCellCorrupt)
+      pure (addToHpt table (moduleName owner) home)
+    virtualize selected node@(ModuleNode originalEdges summary) =
+      let owner = ms_mod summary
+          artifact = ExactIfaceArtifact (unitString (moduleUnit owner))
+            (moduleNameString (moduleName owner))
+            ("<private-world-prefix>/" ++ moduleNameString (moduleName owner) ++ ".hi") "" []
+          location = ms_location (exactInterfaceSummary environment artifact)
+          imported = Set.fromList (sourceImportNodeKeys summary) `Set.intersection` selected
+          edges = Set.toList (Set.fromList originalEdges `Set.union` imported)
+      in ModuleNode edges summary
+        {ms_location=location, ms_parsed_mod=Nothing, ms_hspp_file=ml_hi_file location, ms_hspp_buf=Nothing}
+    virtualize _ node = node
 
 worldCellPrefixOriginalBindings :: WorldCellPrefix -> Map.Map Name SymbolIdentity
 worldCellPrefixOriginalBindings (WorldCellPrefix _ homes _ _ _ _ _) = Map.fromList
@@ -2693,7 +2712,7 @@ advanceWorldCellPrefix _ question offset current _ selection completed environme
     Nothing -> pure (homesWithValues,graph,inventories)
     Just (planned,inventory) -> do
       home <- evaluate (lookupHpt (hsc_HPT environment) (mkModuleName (plannedModule planned))) >>= maybe (throwIO WorldCellCorrupt) evaluate
-      (retained,extended) <- retainWorldCellOriginal environment homesWithValues graph home
+      (retained,extended) <- retainWorldCellOriginal (prHscEnv (pprPipelineResult result)) homesWithValues graph home
       pure (retained,extended,inventories ++ [inventory])
   nextScope <- updateSegmentDemandScope environment [(alias,Just (WorldPriorBinding value)) | (alias,value) <- additions] scope
   pure (WorldCellPrefix (cursor+1) nextHomes nextGraph nextInventories nextScope inherited WorldStagePending)
@@ -3516,14 +3535,19 @@ sourceLoadDependencyGraph graph = Map.fromListWith Set.union
   where
     nodes = mgModSummaries' graph
     keys = Set.fromList (map mkNodeKey nodes)
-    excludedImports summary =
-      [mkNodeKey (ModuleNode [] summary {ms_mod=owner, ms_hsc_src=sourceKind})
-      | (sourceKind, imports) <- [(HsSrcFile,ms_textual_imps summary),(HsBootFile,ms_srcimps summary)]
-      , (qualifier,name) <- imports
-      , Just owner <- [case qualifier of
-          NoPkgQual -> Just (mkModule (moduleUnit (ms_mod summary)) (unLoc name))
-          ThisPkg unit -> Just (mkModule (stringToUnit (unitIdString unit)) (unLoc name))
-          OtherPkg _ -> Nothing]]
+    excludedImports = sourceImportNodeKeys
+
+-- Actual import edges keep SOURCE and ordinary keys distinct. The separate
+-- load-deferral graph also pairs boot siblings, but those are not GHC edges.
+sourceImportNodeKeys :: ModSummary -> [NodeKey]
+sourceImportNodeKeys summary =
+  [mkNodeKey (ModuleNode [] summary {ms_mod=owner, ms_hsc_src=sourceKind})
+  | (sourceKind, imports) <- [(HsSrcFile,ms_textual_imps summary),(HsBootFile,ms_srcimps summary)]
+  , (qualifier,name) <- imports
+  , Just owner <- [case qualifier of
+      NoPkgQual -> Just (mkModule (moduleUnit (ms_mod summary)) (unLoc name))
+      ThisPkg unit -> Just (mkModule (stringToUnit (unitIdString unit)) (unLoc name))
+      OtherPkg _ -> Nothing]]
 
 sourceDependencyGraph :: ModuleGraph -> Map.Map Module (Set.Set Module)
 sourceDependencyGraph graph = Map.fromListWith Set.union
