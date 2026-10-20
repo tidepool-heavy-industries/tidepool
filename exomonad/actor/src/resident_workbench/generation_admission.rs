@@ -3007,7 +3007,13 @@ mod tests {
         if let Some(disposed) = &disposed {
             publisher = publisher.with_disposal_probe(disposed.clone());
         }
-        let target = prepared.candidate.installation.source_dependency().generation().unwrap().clone();
+        let target = prepared
+            .candidate
+            .installation
+            .source_dependency()
+            .generation()
+            .unwrap()
+            .clone();
         let preparation = publisher.into_retirement_preparation(
             prepared,
             publication.clone(),

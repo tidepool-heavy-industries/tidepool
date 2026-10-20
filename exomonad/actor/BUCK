@@ -774,7 +774,6 @@ tidepool_rust_test_cases(
     visibility = ["PUBLIC"],
 )
 
-
 tidepool_rust_test_cases(
     name = "actor_world_declaration_publication_test",
     binary = ":exomonad_actor_unit_tests",
