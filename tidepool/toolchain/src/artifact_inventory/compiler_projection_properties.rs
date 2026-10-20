@@ -696,9 +696,10 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
         )
         .unwrap();
         let support = CompilerSourceSupport::close_complete_output(&output).unwrap();
-        let expected = catalog
-            .closure(ORDINALS.map(|ordinal| (0, version, ordinal)))
-            .into_iter()
+        // All three current outputs retain their complete selected bodies here;
+        // the later target demand independently selects only its exact closure.
+        let expected = (0..MODULES)
+            .flat_map(|module| ORDINALS.map(|ordinal| (module, version, ordinal)))
             .map(|group| catalog.key(group))
             .collect::<BTreeSet<_>>();
         assert_eq!(support.artifacts().selected_native_groups(), expected);
