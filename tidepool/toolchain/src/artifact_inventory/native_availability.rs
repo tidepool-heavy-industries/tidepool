@@ -1731,6 +1731,26 @@ impl NativeOfferContribution {
         original_group_children_in_scope(&state, &self.reachable, group, operation)
     }
 
+    pub(crate) fn original_group_retained_binding(
+        &self,
+        group: NativeGroupBinding,
+        identity: &tidepool_repr::execution_schema::SymbolIdentity,
+        generation: u64,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<ArtifactBinding, CompileError> {
+        let lease = self.offer().custody_lease();
+        let state = lease.inventory.0.lock().expect("inventory lock");
+        original_group_retained_binding_in_scope(
+            &state,
+            &lease.payloads,
+            &self.reachable,
+            group,
+            identity,
+            generation,
+            operation,
+        )
+    }
+
     pub(crate) fn contains_group(&self, group: NativeGroupBinding) -> bool {
         self.reachable.contains(&ArtifactBindingNode::Group(group))
     }

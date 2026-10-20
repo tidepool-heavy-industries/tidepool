@@ -2280,6 +2280,7 @@ impl IssuedNativePermissionDelta {
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct NativePackageObligation {
     pub(crate) demander: crate::artifact_inventory::NativeGroupBinding,
+    pub(crate) global_index: u32,
     pub(crate) identity: tidepool_repr::execution_schema::SymbolIdentity,
     pub(crate) interface_digest: [u8; 32],
 }
@@ -2289,6 +2290,7 @@ pub(crate) struct NativePackageObligation {
 pub(crate) struct SelectedNativeGroupRow {
     product: PendingCertifiedGroup,
     dependencies: Vec<crate::artifact_inventory::NativeGroupBinding>,
+    imports: Arc<[crate::certified_products::SelectedNativeImport]>,
 }
 
 impl SelectedNativeGroupRow {
@@ -2297,6 +2299,9 @@ impl SelectedNativeGroupRow {
     }
     pub(crate) fn dependencies(&self) -> &[crate::artifact_inventory::NativeGroupBinding] {
         &self.dependencies
+    }
+    pub(crate) fn imports(&self) -> &[crate::certified_products::SelectedNativeImport] {
+        &self.imports
     }
 }
 
@@ -2720,7 +2725,7 @@ impl DemandNativeInputs {
                     }
                 }
             }
-            let additional = group_validation
+            let certification = group_validation
                 .certify_selected_scope(
                     crate::certified_products::SelectedOriginalGroupScope::Contribution(
                         contribution,
@@ -2729,7 +2734,17 @@ impl DemandNativeInputs {
                     validation,
                 )
                 .map_err(compiler_evidence_failure)?;
-            for (binding, row) in additional {
+            let mut issued_imports = certification.imports;
+            for (binding, previous) in &certified {
+                if let Some(imports) = issued_imports.get(binding) {
+                    if imports.as_ref() != previous.imports.as_ref() {
+                        return Err(failure(
+                            "selected native binding changed its ordered imports",
+                        ));
+                    }
+                }
+            }
+            for (binding, row) in certification.additional {
                 budget.reserve::<(
                     crate::artifact_inventory::NativeGroupBinding,
                     PendingCertifiedGroup,
@@ -2742,6 +2757,9 @@ impl DemandNativeInputs {
                         SelectedNativeGroupRow {
                             product: row,
                             dependencies,
+                            imports: issued_imports.remove(&binding).ok_or_else(|| {
+                                failure("selected native group lost its ordered imports")
+                            })?,
                         },
                     )
                     .is_some()
@@ -2763,7 +2781,7 @@ impl DemandNativeInputs {
                     "certified receipt row differs from its exact group binding",
                 ));
             }
-            for import in group.product.imports() {
+            for (index, import) in group.product.imports().iter().enumerate() {
                 if let crate::certified_products::PendingImportOwner::Package {
                     binder,
                     interface_digest,
@@ -2780,6 +2798,9 @@ impl DemandNativeInputs {
                     )?;
                     package_obligations.insert(NativePackageObligation {
                         demander: *binding,
+                        global_index: u32::try_from(index).map_err(|_| {
+                            failure("native package import index exceeds its format")
+                        })?,
                         identity: binder.clone(),
                         interface_digest: *interface_digest,
                     });
@@ -5363,7 +5384,8 @@ pub(crate) struct RetainedArtifactMaterialization {
     _directory: Option<Arc<tempfile::TempDir>>,
     _parents: Vec<Arc<Self>>,
     rows: imbl::OrdMap<ArtifactId, Arc<RetainedArtifactRow>>,
-    groups: imbl::OrdMap<crate::artifact_inventory::NativeGroupBinding, Arc<PendingCertifiedGroup>>,
+    groups:
+        imbl::OrdMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
     execution_scope: Option<Arc<Value>>,
     graph_paths: Arc<BTreeMap<[u8; 32], Arc<OwnedExecutionGraphFile>>>,
     #[cfg(test)]
@@ -5381,7 +5403,8 @@ struct OwnedExecutionGraphFile {
 
 struct MaterializationFacts<'a> {
     rows: BTreeMap<ArtifactId, &'a Arc<RetainedArtifactRow>>,
-    groups: BTreeMap<crate::artifact_inventory::NativeGroupBinding, &'a Arc<PendingCertifiedGroup>>,
+    groups:
+        BTreeMap<crate::artifact_inventory::NativeGroupBinding, &'a Arc<IssuedSelectedNativeGroup>>,
     graph_paths: BTreeMap<[u8; 32], &'a Arc<OwnedExecutionGraphFile>>,
     observed: Vec<&'a RetainedArtifactMaterialization>,
 }
@@ -5921,7 +5944,7 @@ impl RetainedArtifactMaterialization {
     fn selected_group_refs<'a>(
         owners: impl IntoIterator<Item = &'a Self>,
         selected: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
-    ) -> BTreeMap<crate::artifact_inventory::NativeGroupBinding, &'a Arc<PendingCertifiedGroup>>
+    ) -> BTreeMap<crate::artifact_inventory::NativeGroupBinding, &'a Arc<IssuedSelectedNativeGroup>>
     {
         let mut groups = BTreeMap::new();
         let mut visited = BTreeSet::new();
@@ -13972,12 +13995,30 @@ pub(crate) fn validate_artifact_view_groups_with_validation(
         .map_err(compiler_evidence_failure)
 }
 
+/// One immutable exact occurrence, retaining shared code and its ordered links.
+#[derive(Debug, Clone, PartialEq)]
+struct IssuedSelectedNativeGroup {
+    product: Arc<PendingCertifiedGroup>,
+    imports: Arc<[crate::certified_products::SelectedNativeImport]>,
+}
+
+impl std::ops::Deref for IssuedSelectedNativeGroup {
+    type Target = PendingCertifiedGroup;
+    fn deref(&self) -> &Self::Target {
+        &self.product
+    }
+}
+
 /// Certified physical groups stay paired with the exact bindings selected by
 /// the same view. Independent scoped edges may share one physical group row.
 pub(crate) struct CertifiedArtifactGroupBindings {
     view: crate::artifact_inventory::NativeGroupViewStamp,
     groups: Arc<[PendingCertifiedGroup]>,
     bindings: BTreeMap<crate::artifact_inventory::NativeGroupBinding, usize>,
+    imports: BTreeMap<
+        crate::artifact_inventory::NativeGroupBinding,
+        Arc<[crate::certified_products::SelectedNativeImport]>,
+    >,
 }
 
 impl std::fmt::Debug for CertifiedArtifactGroupBindings {
@@ -13998,7 +14039,9 @@ impl std::ops::Deref for CertifiedArtifactGroupBindings {
 
 impl PartialEq for CertifiedArtifactGroupBindings {
     fn eq(&self, other: &Self) -> bool {
-        self.groups == other.groups && self.bindings == other.bindings
+        self.groups == other.groups
+            && self.bindings == other.bindings
+            && self.imports == other.imports
     }
 }
 
@@ -14006,12 +14049,16 @@ impl CertifiedArtifactGroupBindings {
     /// Repackage only rows already certified for these exact scoped bindings.
     fn from_issued_rows(
         view: &ArtifactView,
-        rows: &BTreeMap<crate::artifact_inventory::NativeGroupBinding, &Arc<PendingCertifiedGroup>>,
+        rows: &BTreeMap<
+            crate::artifact_inventory::NativeGroupBinding,
+            &Arc<IssuedSelectedNativeGroup>,
+        >,
     ) -> Result<Self, CompileError> {
         let (stamp, selected) = view.selected_native_binding_rows();
         let mut groups: Vec<PendingCertifiedGroup> = Vec::new();
         let mut positions = BTreeMap::<NativeGroupKey, usize>::new();
         let mut bindings = BTreeMap::new();
+        let mut imports = BTreeMap::new();
         for binding in selected {
             let row = rows
                 .get(&binding)
@@ -14021,7 +14068,7 @@ impl CertifiedArtifactGroupBindings {
                 original_ordinal: binding.original_ordinal,
             };
             let index = if let Some(index) = positions.get(&key).copied() {
-                if !groups[index].same_issuance(row) {
+                if !groups[index].same_issuance(&row.product) {
                     return Err(failure(
                         "scoped aliases have competing physical row issuers",
                     ));
@@ -14029,22 +14076,24 @@ impl CertifiedArtifactGroupBindings {
                 index
             } else {
                 let index = groups.len();
-                groups.push((***row).clone());
+                groups.push((*row.product).clone());
                 positions.insert(key, index);
                 index
             };
             bindings.insert(binding, index);
+            imports.insert(binding, Arc::clone(&row.imports));
         }
         Ok(Self {
             view: stamp,
             groups: groups.into(),
             bindings,
+            imports,
         })
     }
 
     fn shared_rows(
         &self,
-    ) -> imbl::OrdMap<crate::artifact_inventory::NativeGroupBinding, Arc<PendingCertifiedGroup>>
+    ) -> imbl::OrdMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>
     {
         let rows = self
             .groups
@@ -14054,7 +14103,15 @@ impl CertifiedArtifactGroupBindings {
             .collect::<Vec<_>>();
         self.bindings
             .iter()
-            .map(|(binding, index)| (*binding, rows[*index].clone()))
+            .map(|(binding, index)| {
+                (
+                    *binding,
+                    Arc::new(IssuedSelectedNativeGroup {
+                        product: rows[*index].clone(),
+                        imports: Arc::clone(&self.imports[binding]),
+                    }),
+                )
+            })
             .collect()
     }
 
@@ -14069,6 +14126,13 @@ impl CertifiedArtifactGroupBindings {
         self.bindings
             .get(&binding)
             .map(|index| &self.groups[*index])
+    }
+
+    pub(crate) fn imports(
+        &self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<&[crate::certified_products::SelectedNativeImport]> {
+        self.imports.get(&binding).map(AsRef::as_ref)
     }
 
     pub(crate) fn matches_view(&self, view: &ArtifactView) -> bool {
@@ -14260,7 +14324,34 @@ fn certify_artifact_view_groups(
             validation,
         )
         .map_err(compiler_evidence_failure)?;
-    for (binding, group) in additional {
+    let imports = additional.imports;
+    let check_links = |binding, prior: &[crate::certified_products::SelectedNativeImport]| {
+        if imports.get(&binding).map(AsRef::as_ref) != Some(prior) {
+            return Err(failure(
+                "artifact view changed an issued native import destination",
+            ));
+        }
+        Ok(())
+    };
+    match bound_baseline {
+        Some(CertifiedNativeGroupBaseline::Demand(groups)) => {
+            for (binding, row) in groups.selected_rows() {
+                check_links(*binding, row.imports())?;
+            }
+        }
+        Some(CertifiedNativeGroupBaseline::Target(groups)) => {
+            for (binding, prior) in &groups.imports {
+                check_links(*binding, prior)?;
+            }
+        }
+        Some(CertifiedNativeGroupBaseline::InitialRequest(request)) => {
+            for (binding, prior) in &request.groups.imports {
+                check_links(*binding, prior)?;
+            }
+        }
+        _ => {}
+    }
+    for (binding, group) in additional.additional {
         let key = NativeGroupKey {
             artifact: binding.binding.artifact(),
             original_ordinal: binding.original_ordinal,
@@ -14297,6 +14388,7 @@ fn certify_artifact_view_groups(
         view: view_stamp,
         groups: current.into(),
         bindings,
+        imports,
     })
 }
 

@@ -656,6 +656,20 @@ impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
 }
 
 impl<'a> ResolvedNativeSourceTarget<'a> {
+    pub(crate) fn group_imports(
+        &self,
+        binding: NativeGroupBinding,
+    ) -> Result<&'a [crate::certified_products::SelectedNativeImport], CompileError> {
+        if !self.target.groups().contains(&binding) {
+            return Err(failure(
+                "native source links are outside their resolved target",
+            ));
+        }
+        self.groups
+            .imports(binding)
+            .ok_or_else(|| failure("selected native binding lacks its ordered import links"))
+    }
+
     pub(crate) fn group(
         &self,
         binding: NativeGroupBinding,
@@ -5727,6 +5741,73 @@ fn original_group_children_in_scope(
     Ok(children)
 }
 
+fn original_group_retained_binding_in_scope(
+    state: &InventoryState,
+    payloads: &imbl::OrdMap<ArtifactId, Arc<ArtifactEntry>>,
+    owned: &imbl::OrdSet<InventoryNodeKey>,
+    group: NativeGroupBinding,
+    identity: &tidepool_repr::execution_schema::SymbolIdentity,
+    generation: u64,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<ArtifactBinding, CompileError> {
+    let source = InventoryNodeKey::Group(group);
+    if !owned.contains(&source) {
+        return Err(failure(
+            "retained import parent is outside its exact selection",
+        ));
+    }
+    let mut selected = None;
+    for (target, edge) in state.outgoing(source) {
+        crate::host_work::checkpoint()?;
+        operation
+            .charge(1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let ArtifactDependency::NativeBinding {
+            dependent_ordinal,
+            generation: required_generation,
+            namespace,
+            occurrence,
+            record_parent,
+        } = edge
+        else {
+            continue;
+        };
+        if *dependent_ordinal != group.original_ordinal
+            || *required_generation != generation
+            || namespace != &identity.namespace
+            || occurrence != &identity.occurrence
+            || record_parent != &identity.record_parent
+        {
+            continue;
+        }
+        let InventoryNodeKey::Artifact(binding) = target else {
+            return Err(failure("retained import edge lacks artifact binding"));
+        };
+        let entry = payloads
+            .get(&binding.artifact)
+            .ok_or_else(|| failure("retained import lacks payload custody"))?;
+        if entry.descriptor.owner.unit != identity.unit
+            || entry.descriptor.owner.module != identity.module
+        {
+            continue;
+        }
+        if !owned.contains(&target) {
+            return Err(failure(
+                "retained import edge is outside its exact selection",
+            ));
+        }
+        if selected.is_some_and(|previous| previous != binding) {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::BindingAmbiguity {
+                    artifact: binding.artifact,
+                },
+            ));
+        }
+        selected = Some(binding);
+    }
+    selected.ok_or_else(|| failure("selected retained import lacks its exact binding edge"))
+}
+
 #[derive(Default)]
 struct NativeRequirementCollector {
     bindings: BTreeSet<NativeBindingRequirement>,
@@ -7510,6 +7591,25 @@ impl ArtifactView {
     ) -> Result<Vec<NativeGroupBinding>, CompileError> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         original_group_children_in_scope(&state, self.selected_nodes(&state), group, operation)
+    }
+
+    pub(crate) fn original_group_retained_binding(
+        &self,
+        group: NativeGroupBinding,
+        identity: &tidepool_repr::execution_schema::SymbolIdentity,
+        generation: u64,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<ArtifactBinding, CompileError> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        original_group_retained_binding_in_scope(
+            &state,
+            &self.lease.payloads,
+            self.selected_nodes(&state),
+            group,
+            identity,
+            generation,
+            operation,
+        )
     }
 
     pub(crate) fn contains_issued_native_group(&self, group: NativeGroupBinding) -> bool {
