@@ -384,39 +384,101 @@ fn reload_publication_keeps_typed_outcomes_and_actor_authority() {
             .unwrap();
         assert_eq!(variant.fields.types(), fields.iter().collect::<Vec<_>>());
     }
-    let retirement_state = reload
+    let source_state = reload
         .type_defs
         .iter()
         .find(|ty| ty.name == "ReloadRetirementState")
         .unwrap();
-    let TypeShape::Sum { variants } = &retirement_state.shape else {
-        panic!("retirement settlement facts must remain distinct constructors")
+    let TypeShape::Sum { variants } = &source_state.shape else {
+        panic!("source outcome sum")
     };
     assert_eq!(
-        variants
-            .iter()
-            .map(|variant| variant.ctor)
-            .collect::<Vec<_>>(),
+        variants.iter().map(|v| v.ctor).collect::<Vec<_>>(),
         [
             "ReloadAReopened",
             "ReloadRetirementFenced",
-            "ReloadBPublished",
-            "ReloadBPublishedAUnsettled",
+            "ReloadBPublished"
         ]
     );
-    let published_fields = vec![HsType::list(HsType::Text), HsType::list(HsType::Text)];
+    let settlement = reload
+        .type_defs
+        .iter()
+        .find(|ty| ty.name == "ReloadOperationalSettlement")
+        .unwrap();
+    let TypeShape::Sum { variants } = &settlement.shape else {
+        panic!("operational settlement must be a nonempty sum")
+    };
     assert_eq!(
-        variants[2].fields.types(),
-        published_fields.iter().collect::<Vec<_>>()
+        variants.iter().map(|v| v.ctor).collect::<Vec<_>>(),
+        ["ReloadOperationalSettled", "ReloadOperationalUnsettled"]
     );
-    let unsettled_fields = vec![
-        HsType::list(HsType::Text),
-        HsType::list(HsType::Text),
-        HsType::Named("ReloadRetirementStage"),
+    assert!(variants[0].fields.types().is_empty());
+    let fields = [
+        HsType::Named("ReloadRetirementObligation"),
+        HsType::list(HsType::Named("ReloadRetirementObligation")),
     ];
     assert_eq!(
-        variants[3].fields.types(),
-        unsettled_fields.iter().collect::<Vec<_>>()
+        variants[1].fields.types(),
+        fields.iter().collect::<Vec<_>>()
+    );
+    let observation = reload
+        .type_defs
+        .iter()
+        .find(|ty| ty.name == "ReloadObligationObservation")
+        .unwrap();
+    let TypeShape::Sum { variants } = &observation.shape else {
+        panic!("observation sum")
+    };
+    assert_eq!(
+        variants.iter().map(|v| v.ctor).collect::<Vec<_>>(),
+        [
+            "ReloadObligationPending",
+            "ReloadObligationUnconfirmed",
+            "ReloadObligationRefused"
+        ]
+    );
+    let obligation = reload
+        .type_defs
+        .iter()
+        .find(|ty| ty.name == "ReloadRetirementObligation")
+        .unwrap();
+    let TypeShape::Sum { variants } = &obligation.shape else {
+        panic!("obligation sum")
+    };
+    assert_eq!(
+        variants.iter().map(|v| v.ctor).collect::<Vec<_>>(),
+        [
+            "ReloadCandidateSettlementObligation",
+            "ReloadOriginalRetirementObligation",
+            "ReloadPhysicalCleanupObligation",
+            "ReloadPublicationNotificationObligation",
+            "ReloadSourceDeliveryObligation",
+            "ReloadDiagnosticDeliveryObligation"
+        ]
+    );
+    for (index, variant) in variants.iter().enumerate() {
+        let expected = if index == 4 {
+            vec![
+                HsType::Named("ReloadResource"),
+                HsType::Named("ReloadObligationObservation"),
+            ]
+        } else {
+            vec![HsType::Named("ReloadObligationObservation")]
+        };
+        assert_eq!(variant.fields.types(), expected.iter().collect::<Vec<_>>());
+    }
+    let receipt = reload
+        .type_defs
+        .iter()
+        .find(|ty| ty.name == "ReloadRetirementReceipt")
+        .unwrap();
+    let TypeShape::Record { fields } = &receipt.shape else {
+        panic!("receipt record")
+    };
+    assert_eq!(fields.len(), 10);
+    assert_eq!(
+        fields.last().unwrap().ty,
+        HsType::Named("ReloadOperationalSettlement")
     );
     let generated = tidepool_protocol::actor_generated_files();
     let decoder = generated

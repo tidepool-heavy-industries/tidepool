@@ -15,6 +15,7 @@ module Tidepool.Reload
   , ReloadCauseKind (..), ReloadCause (..), ReloadStopOutcome (..)
   , ReloadCleanupOutcome (..), ReloadResourceOutcome (..)
   , ReloadRetirementStage (..), ReloadRetirementState (..), ReloadRetirementReceipt (..)
+  , ReloadObligationObservation (..), ReloadRetirementObligation (..), ReloadOperationalSettlement (..)
   , reloadSource, reloadSourceWith, reloadHandler, reloadPresenter
   ) where
 import Control.Monad.Freer (Eff, Member)
@@ -34,6 +35,7 @@ import Tidepool.Effects.Core
   , ReloadCauseKind (..), ReloadCause (..), ReloadStopOutcome (..)
   , ReloadCleanupOutcome (..), ReloadResourceOutcome (..)
   , ReloadRetirementStage (..), ReloadRetirementState (..), ReloadRetirementReceipt (..)
+  , ReloadObligationObservation (..), ReloadRetirementObligation (..), ReloadOperationalSettlement (..)
   )
 
 -- | Optional hosted reload arguments. Surface consent and service retirement
@@ -100,8 +102,8 @@ refusalCategorySummary category = case category of
   AuthorityDenied -> "authority denied"
 
 retirementSummary :: ReloadRetirementReceipt -> Text
-retirementSummary (ReloadRetirementReceipt previous candidate operation state blockers outcomes diff primary secondary) =
-  stateSummary <> maybe "" (\op -> " Operation " <> operationSummary op <> ".") operation
+retirementSummary (ReloadRetirementReceipt previous candidate operation state blockers outcomes diff primary secondary settlement) =
+  stateSummary <> " " <> settlementSummary settlement <> maybe "" (\op -> " Operation " <> operationSummary op <> ".") operation
     <> sections "Blockers" (map blockerSummary blockers)
     <> sections "Resource outcomes" (map outcomeSummary outcomes)
     <> maybe "" (\cause -> " Primary: " <> causeSummary cause <> ".") primary
@@ -110,21 +112,37 @@ retirementSummary (ReloadRetirementReceipt previous candidate operation state bl
     revision (SourceRevision identity _ _) = identity
     stateSummary = case state of
       ReloadAReopened -> "Source " <> revision previous <> " reopened; candidate " <> revision candidate
-        <> " was not published. All initiated stops and cleanup settled; stopped resources remain stopped."
+        <> " was not published; stopped resources remain stopped."
       ReloadRetirementFenced stage ->
         "Reload remains fenced at " <> stageSummary stage <> "; reconcile before retry."
       ReloadBPublished _ warnings -> "Published source " <> revision candidate <> surfaceSummary diff
         <> " Notebook reset; re-import modules and recreate notebook bindings before use."
         <> sections "Warnings" warnings
-      ReloadBPublishedAUnsettled _ warnings stage ->
-        "Published source " <> revision candidate <> surfaceSummary diff
-          <> "; previous source " <> revision previous <> " retirement remains unsettled at "
-          <> stageSummary stage <> "; reconcile before retry."
-          <> " Notebook reset; re-import modules and recreate notebook bindings before use."
-          <> sections "Warnings" warnings
     surfaceSummary (ReloadSurfaceDiff added removed changed) =
       " (tools added " <> number (length added) <> ", removed " <> number (length removed)
         <> ", changed " <> number (length changed) <> ")."
+
+settlementSummary :: ReloadOperationalSettlement -> Text
+settlementSummary settlement = case settlement of
+  ReloadOperationalSettled -> "Operational obligations settled."
+  ReloadOperationalUnsettled first rest ->
+    "Operational obligations unsettled; reconcile before retry."
+      <> sections "Outstanding obligations" (map obligationSummary (first : rest))
+
+obligationSummary :: ReloadRetirementObligation -> Text
+obligationSummary obligation = case obligation of
+  ReloadCandidateSettlementObligation observation -> observed "candidate settlement" observation
+  ReloadOriginalRetirementObligation observation -> observed "original retirement" observation
+  ReloadPhysicalCleanupObligation observation -> observed "physical cleanup" observation
+  ReloadPublicationNotificationObligation observation -> observed "publication notification" observation
+  ReloadSourceDeliveryObligation resource observation ->
+    observed ("source delivery for " <> resourceSummary resource) observation
+  ReloadDiagnosticDeliveryObligation observation -> observed "diagnostic delivery" observation
+  where
+    observed label observation = label <> " " <> case observation of
+      ReloadObligationPending -> "pending"
+      ReloadObligationUnconfirmed -> "unconfirmed"
+      ReloadObligationRefused -> "refused"
 
 sections :: Text -> [Text] -> Text
 sections _ [] = ""

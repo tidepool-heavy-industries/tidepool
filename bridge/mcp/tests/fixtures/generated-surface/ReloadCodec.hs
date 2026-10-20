@@ -60,25 +60,31 @@ main = do
             (ReloadDisplayAcknowledgementUnconfirmed "packet acknowledgement lost")
         , ReloadCollateralBlocker actor nextActor ReloadPhysicalSupervision
         ]
-      receipt state effects = ReloadRetirement (ReloadRetirementReceipt
+      receiptWith settlement state effects = ReloadRetirement (ReloadRetirementReceipt
         (SourceRevision "frozen-A" 0 []) (SourceRevision "frozen-B" 0 [])
-        (Just operation) state blockers effects diff (Just (primaryFor state)) (secondaryFor state))
+        (Just operation) state blockers effects diff (Just (primaryFor state)) (secondaryFor state) settlement)
+      receipt = receiptWith ReloadOperationalSettled
       primaryFor state = case state of
         ReloadAReopened -> ReloadCause ReloadRetirementBlocked "known live blocker"
         ReloadRetirementFenced _ -> cause
         ReloadBPublished _ _ -> ReloadCause ReloadContinuationFailed "receipt display failed"
-        ReloadBPublishedAUnsettled _ _ _ -> cause
       secondaryFor state = case state of
         ReloadBPublished _ _ -> [ReloadCause ReloadContinuationFailed "response delivery failed"]
-        ReloadBPublishedAUnsettled _ _ _ -> [ReloadCause ReloadContinuationFailed "response delivery failed"]
         _ -> [ReloadCause ReloadPublicationFailed "publication uncommitted"]
       render state effects = reloadPresenter (Right (receipt state effects))
+      outstanding = ReloadOperationalUnsettled
+        (ReloadOriginalRetirementObligation ReloadObligationUnconfirmed)
+        [ ReloadCandidateSettlementObligation ReloadObligationPending
+        , ReloadPhysicalCleanupObligation ReloadObligationRefused
+        , ReloadPublicationNotificationObligation ReloadObligationPending
+        , ReloadSourceDeliveryObligation actor ReloadObligationUnconfirmed
+        , ReloadDiagnosticDeliveryObligation ReloadObligationRefused
+        ]
+      publishedUnsettled = reloadPresenter (Right (receiptWith outstanding
+        (ReloadBPublished ["Changed"] ["repair projection"]) [stopped, pending]))
       reopened = render ReloadAReopened [stopped, refused]
       fenced = render (ReloadRetirementFenced ReloadResourceCleanup) [stopped, pending, unknown]
       published = render (ReloadBPublished ["Changed"] ["repair projection"]) [stopped]
-      publishedUnsettled = render
-        (ReloadBPublishedAUnsettled ["Changed"] ["repair projection"] ReloadResourceCleanup)
-        [stopped, pending]
   mapM_ (\fragment -> assert (fragment `T.isInfixOf` reopened)
     ("partial stop receipt lost " ++ T.unpack fragment))
     [ "frozen-A reopened", "frozen-B was not published", "actor 42/7: stop confirmed, cleanup confirmed"
@@ -97,25 +103,54 @@ main = do
   assert ("Notebook reset" `T.isInfixOf` published) "published reset contract lost"
   assert ("Warnings: repair projection" `T.isInfixOf` published) "published warnings lost"
   mapM_ (\fragment -> assert (fragment `T.isInfixOf` publishedUnsettled)
-    "known publication with unsettled retirement lost its exact facts")
-    [ "Published source frozen-B"
-    , "previous source frozen-A retirement remains unsettled at physical cleanup"
-    , "reconcile before retry", "Notebook reset", "Warnings: repair projection"
-    , "Primary: acknowledgement unconfirmed", "Secondary causes: continuation failed"
+    "known publication with outstanding obligations lost an independent observation")
+    [ "Published source frozen-B", "Notebook reset", "Warnings: repair projection"
+    , "Operational obligations unsettled", "original retirement unconfirmed"
+    , "candidate settlement pending", "physical cleanup refused"
+    , "publication notification pending", "source delivery for actor 42/7 unconfirmed"
+    , "diagnostic delivery refused", "Primary: continuation failed"
     ]
   assert (not ("was not published" `T.isInfixOf` publishedUnsettled)
     && not ("reopened" `T.isInfixOf` publishedUnsettled))
-    "known B publication was presented as uncommitted or A reopened"
-  let unsettledState = ReloadBPublishedAUnsettled ["Changed"] ["repair projection"] ReloadResourceCleanup
-  assert (fromJSON (toJSON unsettledState) == Success unsettledState)
-    "known publication with unsettled retirement did not roundtrip"
-  assert (toJSON unsettledState == object
-    [ "tag" .= ("ReloadBPublishedAUnsettled" :: String)
-    , "contents" .= (["Changed"] :: [T.Text], ["repair projection"] :: [T.Text], ReloadResourceCleanup)
-    ]) "unsettled publication lost changed modules, warnings or stage"
-  assert (toJSON unsettledState /= toJSON (ReloadBPublished ["Changed"] ["repair projection"])
-    && toJSON unsettledState /= toJSON (ReloadRetirementFenced ReloadResourceCleanup))
-    "known publication, confirmed settlement and unknown selection collapsed"
+    "operational uncertainty changed known source publication"
+  assert ("Operational obligations settled" `T.isInfixOf` published)
+    "a retained terminal cause was mistaken for outstanding work"
+  let observations = [ReloadObligationPending, ReloadObligationUnconfirmed, ReloadObligationRefused]
+      obligations = concatMap (\observation ->
+        [ ReloadCandidateSettlementObligation observation
+        , ReloadOriginalRetirementObligation observation
+        , ReloadPhysicalCleanupObligation observation
+        , ReloadPublicationNotificationObligation observation
+        , ReloadSourceDeliveryObligation actor observation
+        , ReloadDiagnosticDeliveryObligation observation
+        ]) observations
+      settlements = ReloadOperationalSettled :
+        [ReloadOperationalUnsettled obligation [] | obligation <- obligations]
+      sourceStates = [ReloadAReopened, ReloadRetirementFenced ReloadResourceCleanup,
+        ReloadBPublished ["Changed"] ["repair projection"]]
+  mapM_ (\settlement -> assert (fromJSON (toJSON settlement) == Success settlement)
+    "operational settlement or nonempty typed obligation did not roundtrip") settlements
+  mapM_ (\state -> mapM_ (\settlement ->
+    let value = receiptWith settlement state [stopped]
+    in assert (fromJSON (toJSON value) == Success value)
+      "source outcome and operational settlement did not roundtrip independently") settlements) sourceStates
+  assert (toJSON (ReloadOperationalUnsettled
+    (ReloadSourceDeliveryObligation actor ReloadObligationPending) []) /=
+    toJSON (ReloadOperationalUnsettled
+      (ReloadSourceDeliveryObligation nextActor ReloadObligationPending) []))
+    "source delivery obligation lost its exact resource"
+  case (fromJSON (object ["tag" .= ("ReloadOperationalUnsettled" :: String),
+    "contents" .= ([] :: [Value])]) :: Result ReloadOperationalSettlement) of
+    Error _ -> pure ()
+    Success _ -> fail "unsettled accepted without its mandatory first obligation"
+  let noCause = ReloadRetirement (ReloadRetirementReceipt
+        (SourceRevision "frozen-A" 0 []) (SourceRevision "frozen-B" 0 [])
+        (Just operation) ReloadAReopened [] [] diff Nothing [] outstanding)
+      noCauseSummary = reloadPresenter (Right noCause)
+  assert ("frozen-A reopened" `T.isInfixOf` noCauseSummary
+    && "Operational obligations unsettled" `T.isInfixOf` noCauseSummary
+    && not ("Operational obligations settled" `T.isInfixOf` noCauseSummary))
+    "source outcome or missing cause incorrectly implied operational settlement"
   assert ("Primary: retirement blocked" `T.isInfixOf` reopened) "reopened receipt lost primary cause"
   assert ("Secondary causes: continuation failed" `T.isInfixOf` published) "published receipt lost secondary cause"
   assert (toJSON (receipt ReloadAReopened []) /=

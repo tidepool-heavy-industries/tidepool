@@ -486,14 +486,15 @@ mod context_constructor_tests {
     fn reload_retirement_receipts_preserve_settlement_and_exact_coordinates() {
         use super::{
             RlBlocker, RlBlockerReason, RlCause, RlCauseKind, RlCleanupOutcome, RlLifetimeEdge,
-            RlNativeIdentity, RlOperation, RlReservation, RlResource, RlResourceOutcome,
+            RlNativeIdentity, RlObligationObservation, RlOperation, RlOperationalSettlement,
+            RlReservation, RlResource, RlResourceOutcome, RlRetirementObligation,
             RlRetirementReceipt, RlRetirementStage, RlRetirementState, RlStopOutcome,
             RlSurfaceDiff, SrReloadOutcome, SrRevision,
         };
         let mut table = DataConTable::new();
         let constructors = [
             ("ReloadRetirement", 1),
-            ("ReloadRetirementReceipt", 9),
+            ("ReloadRetirementReceipt", 10),
             ("SourceRevision", 3),
             ("ReloadOperation", 3),
             ("ReloadSurfaceDiff", 3),
@@ -543,7 +544,17 @@ mod context_constructor_tests {
             ("ReloadActorCompilerResource", 2),
             ("ReloadPreparationCompilerResource", 2),
             ("ReloadSourceBindingResource", 2),
-            ("ReloadBPublishedAUnsettled", 3),
+            ("ReloadOperationalSettled", 0),
+            ("ReloadOperationalUnsettled", 2),
+            ("ReloadCandidateSettlementObligation", 1),
+            ("ReloadOriginalRetirementObligation", 1),
+            ("ReloadPhysicalCleanupObligation", 1),
+            ("ReloadPublicationNotificationObligation", 1),
+            ("ReloadSourceDeliveryObligation", 2),
+            ("ReloadDiagnosticDeliveryObligation", 1),
+            ("ReloadObligationPending", 0),
+            ("ReloadObligationUnconfirmed", 0),
+            ("ReloadObligationRefused", 0),
         ];
         table
             .extend_checked(
@@ -693,6 +704,7 @@ mod context_constructor_tests {
             },
             primary: None,
             secondary: vec![],
+            settlement: RlOperationalSettlement::ReloadOperationalSettled,
         };
         let partial = vec![
             RlResourceOutcome {
@@ -742,14 +754,6 @@ mod context_constructor_tests {
                 ),
                 vec![partial[0].clone()],
             ),
-            (
-                RlRetirementState::ReloadBPublishedAUnsettled(
-                    vec!["Changed".into()],
-                    vec!["projection repair".into()],
-                    RlRetirementStage::ReloadResourceCleanup,
-                ),
-                partial.clone(),
-            ),
         ];
         let mut encoded_cases = vec![];
         let mut decoded_cases = vec![];
@@ -767,10 +771,6 @@ mod context_constructor_tests {
                 RlRetirementState::ReloadBPublished(_, _) => RlCause {
                     kind: RlCauseKind::ReloadContinuationFailed,
                     detail: "receipt display failed after commit".into(),
-                },
-                RlRetirementState::ReloadBPublishedAUnsettled(_, _, _) => RlCause {
-                    kind: RlCauseKind::ReloadAcknowledgementUnconfirmed,
-                    detail: "A retirement owner retained after B publication".into(),
                 },
             });
             receipt.secondary = vec![RlCause {
@@ -792,6 +792,118 @@ mod context_constructor_tests {
             decoded_cases.push(decoded);
             encoded_cases.push(encoded);
         }
+        let mut settlements = vec![RlOperationalSettlement::ReloadOperationalSettled];
+        for observation in [
+            RlObligationObservation::ReloadObligationPending,
+            RlObligationObservation::ReloadObligationUnconfirmed,
+            RlObligationObservation::ReloadObligationRefused,
+        ] {
+            for obligation in [
+                RlRetirementObligation::ReloadCandidateSettlementObligation(observation.clone()),
+                RlRetirementObligation::ReloadOriginalRetirementObligation(observation.clone()),
+                RlRetirementObligation::ReloadPhysicalCleanupObligation(observation.clone()),
+                RlRetirementObligation::ReloadPublicationNotificationObligation(
+                    observation.clone(),
+                ),
+                RlRetirementObligation::ReloadSourceDeliveryObligation(
+                    resources[0].clone(),
+                    observation.clone(),
+                ),
+                RlRetirementObligation::ReloadDiagnosticDeliveryObligation(observation.clone()),
+            ] {
+                let value = obligation.to_value(&table).unwrap();
+                assert_eq!(
+                    RlRetirementObligation::from_value(&value, &table).unwrap(),
+                    obligation
+                );
+                let HaskellValue::Con(tag, mut fields) = value else {
+                    panic!("obligation constructor")
+                };
+                fields.pop();
+                assert!(RlRetirementObligation::from_value(
+                    &HaskellValue::Con(tag, fields),
+                    &table
+                )
+                .is_err());
+                settlements.push(RlOperationalSettlement::ReloadOperationalUnsettled(
+                    obligation,
+                    vec![],
+                ));
+            }
+        }
+        settlements.push(RlOperationalSettlement::ReloadOperationalUnsettled(
+            RlRetirementObligation::ReloadSourceDeliveryObligation(
+                resources[0].clone(),
+                RlObligationObservation::ReloadObligationPending,
+            ),
+            vec![RlRetirementObligation::ReloadDiagnosticDeliveryObligation(
+                RlObligationObservation::ReloadObligationUnconfirmed,
+            )],
+        ));
+        let other_resource = RlOperationalSettlement::ReloadOperationalUnsettled(
+            RlRetirementObligation::ReloadSourceDeliveryObligation(
+                resources[1].clone(),
+                RlObligationObservation::ReloadObligationPending,
+            ),
+            vec![],
+        );
+        let first_resource = RlOperationalSettlement::ReloadOperationalUnsettled(
+            RlRetirementObligation::ReloadSourceDeliveryObligation(
+                resources[0].clone(),
+                RlObligationObservation::ReloadObligationPending,
+            ),
+            vec![],
+        );
+        assert_ne!(
+            first_resource.to_value(&table).unwrap(),
+            other_resource.to_value(&table).unwrap()
+        );
+        for state in [
+            RlRetirementState::ReloadAReopened,
+            RlRetirementState::ReloadRetirementFenced(RlRetirementStage::ReloadResourceCleanup),
+            RlRetirementState::ReloadBPublished(
+                vec!["Changed".into()],
+                vec!["projection repair".into()],
+            ),
+        ] {
+            receipt.state = state;
+            for settlement in &settlements {
+                receipt.settlement = settlement.clone();
+                // Causes remain independent, including a terminal error with Settled
+                // and outstanding work with no cause yet observed.
+                for primary in [
+                    None,
+                    Some(RlCause {
+                        kind: RlCauseKind::ReloadContinuationFailed,
+                        detail: "terminal response failure".into(),
+                    }),
+                ] {
+                    receipt.primary = primary;
+                    let value = receipt.to_value(&table).unwrap();
+                    assert_eq!(
+                        RlRetirementReceipt::from_value(&value, &table).unwrap(),
+                        receipt
+                    );
+                }
+            }
+        }
+        assert!(RlOperationalSettlement::from_value(
+            &HaskellValue::Con(DataConId(100), vec![]),
+            &table
+        )
+        .is_err());
+        let mut missing_first = first_resource.to_value(&table).unwrap();
+        let HaskellValue::Con(_, fields) = &mut missing_first else {
+            panic!("settlement constructor")
+        };
+        fields.clear();
+        assert!(RlOperationalSettlement::from_value(&missing_first, &table).is_err());
+        let mut missing_receipt_settlement = receipt.to_value(&table).unwrap();
+        let HaskellValue::Con(_, fields) = &mut missing_receipt_settlement else {
+            panic!("receipt constructor")
+        };
+        fields.pop();
+        assert!(RlRetirementReceipt::from_value(&missing_receipt_settlement, &table).is_err());
         for mut encoded in encoded_cases {
             let HaskellValue::Con(_, fields) = &mut encoded else {
                 panic!("receipt constructor missing")
@@ -799,18 +911,6 @@ mod context_constructor_tests {
             fields.push(HaskellValue::Con(DataConId(100), vec![]));
             assert!(SrReloadOutcome::from_value(&encoded, &table).is_err());
         }
-        let mut unsettled = RlRetirementState::ReloadBPublishedAUnsettled(
-            vec!["Changed".into()],
-            vec!["projection repair".into()],
-            RlRetirementStage::ReloadResourceCleanup,
-        )
-        .to_value(&table)
-        .unwrap();
-        let HaskellValue::Con(_, fields) = &mut unsettled else {
-            panic!("retirement state constructor missing")
-        };
-        fields.pop();
-        assert!(RlRetirementState::from_value(&unsettled, &table).is_err());
     }
 
     #[test]
