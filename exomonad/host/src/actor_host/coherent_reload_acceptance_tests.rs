@@ -661,7 +661,7 @@ async fn authored_cell(
         )
         .await
         .unwrap();
-    if id == "use-b" {
+    if matches!(id, "use-b" | "execute-frozen-b") {
         assert_use_b_with_constituents(host, &next.settled_output(id));
     } else {
         assert_true_page(host, &next.settled_output(id));
