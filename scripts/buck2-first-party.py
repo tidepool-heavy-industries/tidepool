@@ -1267,13 +1267,14 @@ def runtime_test_cases(binary):
         f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 30,",
         f"    test_rule_timeout_ms = {(len(tests) * 30 + 60) * 1000},", '    visibility = ["PUBLIC"],', ")", "",
     ])]
+    lifetime_env, lifetime_resources, lifetime_worker = compiler_service_test_inputs("tidepool-runtime", "runtime_world_lifetime_tests")
     lifetime_test = "session::persistent::checkpoint_scope_tests::completed_world_holds_exact_source_custody_until_install_and_abandonment"
     rules.append("\n".join([
         "tidepool_rust_test_cases(", '    name = "runtime_world_lifetime_tests",',
         f"    binary = {json.dumps(':' + binary)},",
         f"    exact_tests = [{json.dumps(lifetime_test)}],",
         "    expected_count = 1,", "    ignored = True,", "    jobs = 1,", "    timeout = 180,",
-        "    test_rule_timeout_ms = 240000,", compiler_arguments,
+        "    test_rule_timeout_ms = 240000,", runtime_arguments(lifetime_env, lifetime_resources, lifetime_worker),
         "    case_compiler_modes = {" + json.dumps(lifetime_test) + ': "owned-resident"},',
         '    visibility = ["PUBLIC"],', ")", "",
     ]))
