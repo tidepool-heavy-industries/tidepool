@@ -2218,6 +2218,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generation_population_reports_actual_unclassified_child_without_stopping_it() {
+        use crate::local_actor::run_control::{
+            GenerationCollateralIdentity, GenerationLifetimeEdge,
+        };
+        struct PhysicalChild;
+        impl ractor::Actor for PhysicalChild {
+            type Msg = ();
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _myself: ractor::ActorRef<()>,
+                (): (),
+            ) -> Result<(), ractor::ActorProcessingErr> {
+                Ok(())
+            }
+        }
+
+        let mut history = History::new();
+        let dependency = generation(&mut history, NotebookGenerationId::INITIAL, None);
+        let (directory, directory_task) = crate::LocalActorDirectory::start().await.unwrap();
+        let reservation = directory
+            .reserve_source_actor(
+                &SourceDependency::Generation(dependency.clone()),
+                crate::Incarnation::FIRST,
+            )
+            .await
+            .unwrap();
+        let identity = reservation.identity();
+        let terminal = reservation.terminal().clone();
+        let (start_entered, starting) = tokio::sync::oneshot::channel();
+        let (start_release, continue_start) = tokio::sync::oneshot::channel();
+        let (stopped_entered, stopped) = tokio::sync::oneshot::channel();
+        let (stopped_release, continue_stop) = tokio::sync::oneshot::channel();
+        let spawning = tokio::spawn(crate::local_actor::spawn_reserved_local_actor(
+            None,
+            PopulationBehavior {
+                start_entered: Some(start_entered),
+                start_release: Some(continue_start),
+                stopped_entered: Some(stopped_entered),
+                stopped_release: Some(continue_stop),
+                realm: crate::CleanupComponentOutcome::Confirmed,
+            },
+            reservation,
+            directory.clone(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(10), starting)
+            .await
+            .unwrap()
+            .unwrap();
+        let parent = directory.resolve(identity).await.unwrap().unwrap();
+        let (child, child_task) = <PhysicalChild as ractor::Actor>::spawn_linked(
+            None,
+            PhysicalChild,
+            (),
+            parent.address().get_cell(),
+        )
+        .await
+        .unwrap();
+        let fence = dependency.fence().unwrap();
+        let population = directory.generation_population(&fence).await.unwrap();
+        assert_eq!(population.resources.len(), 1);
+        assert_eq!(population.collateral.len(), 1);
+        assert_eq!(
+            population.collateral[0].affected,
+            GenerationCollateralIdentity::UnclassifiedPhysical(child.get_id())
+        );
+        assert_eq!(
+            population.collateral[0].edge,
+            GenerationLifetimeEdge::PhysicalSupervision
+        );
+        assert!(terminal.get().is_none());
+        assert!(terminal.requested_shutdown().is_none());
+        assert_ne!(child.get_status(), ractor::ActorStatus::Stopped);
+        fence.reopen().unwrap();
+        drop(SourceDependency::Generation(dependency).claim().unwrap());
+
+        child
+            .stop_and_wait(None, Some(std::time::Duration::from_secs(2)))
+            .await
+            .unwrap();
+        child_task.await.unwrap();
+        start_release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+            .await
+            .unwrap()
+            .unwrap();
+        stopped_release.send(()).unwrap();
+        let (_, task) = spawning.await.unwrap().unwrap();
+        task.await.unwrap();
+        directory.stop_owner_for_test().await;
+        directory_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn generation_population_preserves_abandoned_source_reservation_uncertainty() {
         use crate::local_actor::run_control::{
             GenerationResourceIdentity as Identity, GenerationResourceState as State,
