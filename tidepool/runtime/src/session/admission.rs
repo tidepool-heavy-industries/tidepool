@@ -2320,6 +2320,7 @@ impl PersistentSession {
     ) -> Result<(), SessionError> {
         let store = self.held_admission_store()?;
         let prefix = admission.prefix();
+        prefix.settled.checkpoint()?;
         let mut state = prefix.state.lock();
         let scope = prefix.admission.scope;
         if prefix.admission.host_carrier() != Some((binding, expected))
@@ -2511,6 +2512,7 @@ impl PersistentSession {
         // before any declaration can commit against that scope's old view.
         self.reap_admission_leases();
         let prefix = &admission.prefix;
+        prefix.settled.checkpoint()?;
         let mut state = prefix.state.lock();
         let scope = prefix.admission.scope;
         let item = &admission.item;
