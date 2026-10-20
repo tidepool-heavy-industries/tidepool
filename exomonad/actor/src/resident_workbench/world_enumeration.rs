@@ -86,14 +86,22 @@ enum ScopeBindingsSnapshot {
 }
 
 
-/// A caller-pinned view is stale when its full triple — scope, publication
-/// generation and content fingerprint — no longer matches the view the
-/// machine currently holds. `Nothing` never pins.
+/// Whether two provenances describe one compiler view. `scope` names the
+/// question that produced the provenance (`Current` for `scopeBindings`, a
+/// `PublicModule` for `info`), not a property of the view. It travels as
+/// payload in `ScopeChanged` but must not decide staleness.
+fn view_matches(left: &ScopeProvenance, right: &ScopeProvenance) -> bool {
+    left.generation == right.generation && left.fingerprint == right.fingerprint
+}
+
+/// A caller-pinned view is stale when its publication generation or content
+/// fingerprint no longer matches the view the machine currently holds.
+/// `Nothing` never pins.
 fn pinned_scope_moved(
     expected: Option<ScopeProvenance>,
     current: &ScopeProvenance,
 ) -> Option<ScopeProvenance> {
-    expected.filter(|expected| expected != current)
+    expected.filter(|expected| !view_matches(expected, current))
 }
 
 impl<H, O> ResidentActorWorkbench<H, O>
@@ -172,7 +180,7 @@ where
                         ))
                     })
                     .await?;
-                if observed != current {
+                if !view_matches(&observed, &current) {
                     ScopeBindingsOutcome::ScopeChanged {
                         before: current,
                         after: observed,
@@ -224,5 +232,17 @@ mod tests {
             pinned_scope_moved(Some(stale.clone()), &current),
             Some(stale)
         );
+    }
+
+    #[test]
+    fn pinned_public_module_scope_at_the_same_view_is_not_stale() {
+        let current = provenance(7, "current");
+        let pinned = ScopeProvenance {
+            scope: NameScope::PublicModule("Data.Maybe".into()),
+            ..current.clone()
+        };
+        // `None` routes the snapshot to `Names`; `ScopeChanged` is reserved for
+        // a moved generation or fingerprint.
+        assert_eq!(pinned_scope_moved(Some(pinned), &current), None);
     }
 }
