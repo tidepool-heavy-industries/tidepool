@@ -497,6 +497,20 @@ mod storage_tests {
                 RecoveryArtifactError::Unavailable(_)
             ))
         ));
+        let mut acquisition =
+            crate::declaration_context::RecoveredArtifactAcquisition::new(root.path());
+        let payloads = [
+            crate::declaration_context::RecoveryPayloadReference::PackageCode(reference.clone()),
+        ];
+        let descriptors = [
+            crate::artifact_inventory::ArtifactDescriptor::from_recovery_package_code(&reference),
+        ];
+        let mut capture = || acquisition.capture_payloads_bound(&payloads, &descriptors, &[], &[]);
+        assert!(
+            matches!(capture(), Err(crate::declaration_context::RecoveryInventoryError::Certification(
+            crate::CompileError::CompilerEvidence(error))) if matches!(error.as_ref(),
+                CertificationError::CapturedModulePayload(RecoveryArtifactError::Unavailable(_))))
+        );
         std::fs::create_dir_all(root.path().join("package-code")).unwrap();
         std::fs::write(
             root.path().join(&reference.envelope_path),
@@ -509,6 +523,11 @@ mod storage_tests {
                 RecoveryArtifactError::DigestMismatch(_)
             ))
         ));
+        assert!(
+            matches!(capture(), Err(crate::declaration_context::RecoveryInventoryError::Certification(
+            crate::CompileError::CompilerEvidence(error))) if matches!(error.as_ref(),
+                CertificationError::CapturedModulePayload(RecoveryArtifactError::DigestMismatch(_))))
+        );
     }
 
     #[test]

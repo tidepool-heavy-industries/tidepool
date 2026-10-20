@@ -4386,11 +4386,20 @@ impl RecoveredArtifactAcquisition {
         // Original certificates retain their own canonical companion even when
         // that companion is not separately listed by the requesting snapshot.
         for reference in references {
-            let RecoveryPayloadReference::Original(original) = reference else { continue; };
-            let Some(interface) = &original.module_interface else { continue; };
+            let RecoveryPayloadReference::Original(original) = reference else {
+                continue;
+            };
+            let Some(interface) = &original.module_interface else {
+                continue;
+            };
             let companion = RecoveryPayloadReference::Canonical(interface.clone());
-            if indexed.get(&companion.id()).is_some_and(|held| held != &companion) {
-                return Err(failure("recovery payload identity has conflicting exact references").into());
+            if indexed
+                .get(&companion.id())
+                .is_some_and(|held| held != &companion)
+            {
+                return Err(
+                    failure("recovery payload identity has conflicting exact references").into(),
+                );
             }
             indexed.insert(companion.id(), companion);
         }
@@ -5397,7 +5406,9 @@ impl CertifiedInterfaceInputs {
                 .get(&owner)
                 .ok_or_else(|| failure("recovery inspection interface is outside its owner"))?;
             let (bytes, packages) = match &entry.payload {
-                ArtifactPayload::PackageCode(_) => return Err(failure("package code is not a compiler interface")),
+                ArtifactPayload::PackageCode(_) => {
+                    return Err(failure("package code is not a compiler interface"))
+                }
                 ArtifactPayload::Original(product) => {
                     (product.interface_bytes(), product.package_imports_bytes())
                 }
@@ -6326,7 +6337,9 @@ impl RetainedArtifactRow {
     ) -> Result<Vec<original_inputs::OriginalInputPart>, CompileError> {
         use original_inputs::{OriginalInputKind as Kind, OriginalInputPart};
         let (interface, packages) = match &entry.payload {
-            ArtifactPayload::PackageCode(_) => return Err(failure("package code is not an Original input")),
+            ArtifactPayload::PackageCode(_) => {
+                return Err(failure("package code is not an Original input"))
+            }
             ArtifactPayload::Original(product) => {
                 (product.interface_bytes(), product.package_imports_bytes())
             }
@@ -10977,7 +10990,9 @@ fn scope_interface_evidence(
         return Err(failure("interface evidence kind differs from payload"));
     }
     let interface = match &entry.payload {
-        ArtifactPayload::PackageCode(_) => return Err(failure("package code has no compiler interface evidence")),
+        ArtifactPayload::PackageCode(_) => {
+            return Err(failure("package code has no compiler interface evidence"))
+        }
         ArtifactPayload::Canonical(interface) => interface,
         ArtifactPayload::Original(product) => product
             .module_interface()
@@ -12043,7 +12058,8 @@ impl ExactDeclarationContext {
                 }
                 ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
                 | ArtifactPayload::Original(_)
-                | ArtifactPayload::Canonical(_) | ArtifactPayload::PackageCode(_) => None,
+                | ArtifactPayload::Canonical(_)
+                | ArtifactPayload::PackageCode(_) => None,
             })
             .collect()
     }
@@ -12132,7 +12148,8 @@ impl ExactDeclarationContext {
                 }
                 ArtifactPayload::Interface(_, JoinedInterfaceRole::LexicalJoin)
                 | ArtifactPayload::Original(_)
-                | ArtifactPayload::Canonical(_) | ArtifactPayload::PackageCode(_) => None,
+                | ArtifactPayload::Canonical(_)
+                | ArtifactPayload::PackageCode(_) => None,
             })
             .collect()
     }
@@ -12518,7 +12535,8 @@ impl ExactDeclarationContext {
                         }
                         ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
                         | ArtifactPayload::Original(_)
-                        | ArtifactPayload::Canonical(_) | ArtifactPayload::PackageCode(_) => None,
+                        | ArtifactPayload::Canonical(_)
+                        | ArtifactPayload::PackageCode(_) => None,
                     })
                     .map(|(descriptor, join)| {
                         Value::Array(vec![
@@ -12696,7 +12714,8 @@ impl ExactDeclarationContext {
                         }
                         ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
                         | ArtifactPayload::Original(_)
-                        | ArtifactPayload::Canonical(_) | ArtifactPayload::PackageCode(_) => None,
+                        | ArtifactPayload::Canonical(_)
+                        | ArtifactPayload::PackageCode(_) => None,
                     })
                     .map(|(descriptor, join)| {
                         Value::Array(vec![
@@ -12829,7 +12848,9 @@ impl ExactDeclarationContext {
                 continue;
             }
             let (iface, packages) = match &entry.payload {
-                ArtifactPayload::PackageCode(_) => return Err(failure("package code is not a declaration artifact")),
+                ArtifactPayload::PackageCode(_) => {
+                    return Err(failure("package code is not a declaration artifact"))
+                }
                 ArtifactPayload::Original(product) => {
                     let snapshot = artifact
                         .product
@@ -13956,7 +13977,9 @@ impl ExactDeclarationContext {
                             ArtifactPayload::Original(product) => product
                                 .module_interface()
                                 .and_then(|interface| interface.original_input_origins()),
-                            ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
+                            ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => {
+                                None
+                            }
                         };
                         original_inputs::encode_image(
                             &image_producer,
