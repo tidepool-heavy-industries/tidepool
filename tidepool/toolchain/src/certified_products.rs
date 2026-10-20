@@ -18225,6 +18225,17 @@ pub(crate) mod tests {
         .unwrap();
         let output = OriginalCompilerInputs::from_selection(&original, &issued).unwrap();
         let closure = original.selected_original_closure(&issued).unwrap();
+        eprintln!(
+            "initial completed native rows: R={} G={}",
+            output
+                .native_availability()
+                .issued_row(r_entry.descriptor.id)
+                .is_some(),
+            output
+                .native_availability()
+                .issued_row(g_entry.descriptor.id)
+                .is_some(),
+        );
         let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
         let support = completed.certify_original_closure(&closure).unwrap_or_else(|error| {
             panic!(
