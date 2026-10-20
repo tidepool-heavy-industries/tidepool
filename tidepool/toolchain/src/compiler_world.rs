@@ -724,7 +724,6 @@ pub struct CompilerWorldRestoration {
     profile: [u8; 32],
     descriptor: PathBuf,
     input_files: imbl::Vector<Arc<std::fs::File>>,
-    inherited_directories: imbl::Vector<Arc<tempfile::TempDir>>,
     successor: Option<WorldSuccessorAcquisition>,
 }
 
@@ -1061,17 +1060,16 @@ impl crate::checked_cell::CellProgram {
             world_text("TPCWSUCC4"), world_blob(&product), world_array(changed_blocks),
             world_array(Vec::new()), world_array(visible_changes), acquisition,
         ]))?)?;
-        let mut input_files = prior.input_files.clone();
-        input_files.extend(files.iter().cloned());
-        let mut inherited_directories = prior.inherited_directories.clone();
-        inherited_directories.push_back(prior.inputs.directory.clone());
+        // The descriptor exports only this delta. Current checked rows retain
+        // their own immutable input slices; cold recovery regenerates transport
+        // from those owners, independently of all predecessor descriptors.
+        let input_files = files.iter().cloned().collect();
         let restoration = Arc::new(CompilerWorldRestoration {
             logical_id, inputs, product: product.into(), primary_root: prior.primary_root.clone(),
             primary_blocks, primary_associations: prior.primary_associations.clone(),
             primary_compiler_inputs: prior.primary_compiler_inputs.clone(), bindings,
             binding_rows: row_roots, lexical_root: prior.lexical_root,
             producer: prior.producer, profile: prior.profile, descriptor, input_files,
-            inherited_directories,
             successor: Some(WorldSuccessorAcquisition { predecessor: *predecessor.logical_id(),
                 realization: predecessor.realization.clone(), files, cold: Mutex::new(None) }),
         });
@@ -2075,7 +2073,6 @@ impl CompilerWorldOpenInputs {
             profile,
             descriptor,
             input_files: files,
-            inherited_directories: imbl::Vector::new(),
             successor: None,
         }))
     }
