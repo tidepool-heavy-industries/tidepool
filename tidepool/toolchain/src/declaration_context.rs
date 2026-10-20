@@ -22304,11 +22304,12 @@ mod tests {
         let products = ["ScopedMaterialization", "OtherMaterialization"].map(|module| {
             crate::certified_products::tests::recovered_witness_fixtures(&[
                 crate::certified_products::fixture_finalized_product(
-                    crate::certified_products::tests::original_groups_fixture(
+                    crate::certified_products::tests::original_groups_fixture_with_interface(
                         module,
                         vec![(7, vec![])],
                         7,
                         &BTreeMap::new(),
+                        format!("{module} materialization interface").into_bytes(),
                     ),
                     producer_sha,
                 ),
@@ -22318,17 +22319,21 @@ mod tests {
         });
         let baseline = crate::certified_products::tests::recovered_witness_fixtures(&[
             crate::certified_products::fixture_finalized_product(
-                crate::certified_products::tests::original_groups_fixture(
+                crate::certified_products::tests::original_groups_fixture_with_interface(
                     "ScopedRequestBaseline",
                     vec![],
                     7,
                     &BTreeMap::new(),
+                    b"ScopedRequestBaseline materialization interface".to_vec(),
                 ),
                 producer_sha,
             ),
         ])
         .remove(0)
         .product;
+        let interface_ids = products.iter().chain(std::iter::once(&baseline))
+            .map(|product| product.owner().skinny_iface_sha256).collect::<BTreeSet<_>>();
+        assert_eq!(interface_ids.len(), 3, "different module interfaces must not alias sidecar filenames");
         let inputs = match support_offer(&[baseline]) {
             CompilerSupportFixture::Complete(inputs) => inputs,
             _ => unreachable!(),
