@@ -408,9 +408,9 @@ fn publish_checked_fixture(
         let ticket = match publication {
             crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
             crate::session::ExecutionPublication::Declarations(base) => {
-                let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
-                    base.certify(settlement)
-                        .expect("certify the checked declaration/value publication")
+                let crate::session::CertifiedDeclarationPublication::Accepted(accepted) = base
+                    .certify(settlement)
+                    .expect("certify the checked declaration/value publication")
                 else {
                     panic!("checked fixture publication must be accepted");
                 };
@@ -1023,15 +1023,18 @@ fn try_check_fixture_cell(
             &includes,
             settlement,
         )?;
-        Ok::<_, turn::CellCheckFailure>(resident.admit_planned_cell_for_execution(
-            execution,
-            plan,
-        .expect("admit checked fixture bindings with their selected interfaces"))
-            specification.clone(),
-            specification.specification_digest(),
-            recipe.digest(),
-            includes,
-            None,
+        Ok::<_, turn::CellCheckFailure>(
+            resident
+                .admit_planned_cell_for_execution(
+                    execution,
+                    plan,
+                    specification.clone(),
+                    specification.specification_digest(),
+                    recipe.digest(),
+                    includes,
+                    None,
+                )
+                .expect("admit checked fixture bindings with their selected interfaces"),
         )
     })?;
     let (checked, program) = tidepool_testing::with_settlement(|settlement| {
@@ -1301,10 +1304,7 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
     })
     .unwrap();
     let item = checked.checked_item(0).unwrap();
-    let prefix = resident
-        .begin_cell_program(program)
-        .unwrap()
-        .unwrap();
+    let prefix = resident.begin_cell_program(program).unwrap().unwrap();
     let reservation = source_action(resident, |resident, _| {
         resident.admit_checked_item(prefix.clone(), item).unwrap()
     });
@@ -1424,13 +1424,14 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
         panic!("the producer must bind one Eff value");
     };
     assert!(matches!(
-        source_action(&mut source, |source, settlement| source.run_bind_with_sites(
-            "evaluatedReceiveValue",
-            compiled.code(),
-            binder,
-            source_view.next_value_generation(),
-            settlement
-        ))
+        source_action(&mut source, |source, settlement| source
+            .run_bind_with_sites(
+                "evaluatedReceiveValue",
+                compiled.code(),
+                binder,
+                source_view.next_value_generation(),
+                settlement
+            ))
         .unwrap(),
         ResidentOutcome::Completed { .. }
     ));
@@ -1472,13 +1473,14 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
         "the independent receiver did not issue the producer's receive site"
     );
     assert!(matches!(
-        source_action(&mut receiver, |receiver, settlement| receiver.run_projected_bind_with_sites(
-            "receiveValueRunner",
-            runner.code(),
-            &bound,
-            receiver_view.next_value_generation(),
-            settlement
-        ))
+        source_action(&mut receiver, |receiver, settlement| receiver
+            .run_projected_bind_with_sites(
+                "receiveValueRunner",
+                runner.code(),
+                &bound,
+                receiver_view.next_value_generation(),
+                settlement
+            ))
         .unwrap(),
         ResidentOutcome::BindingsCommitted { .. }
     ));
@@ -1544,11 +1546,12 @@ fn resident_parcel_executes_evaluated_receive_value_after_producer_retirement() 
     assert_eq!(receiver.parked_count(), 1);
     assert_eq!(receiver.stowed_roots_count(), 1);
     assert!(matches!(
-        source_action(&mut receiver, |receiver, settlement| receiver.resume_classified(
-            hole.clone(),
-            serde_json::json!("custody reply"),
-            settlement
-        )),
+        source_action(&mut receiver, |receiver, settlement| receiver
+            .resume_classified(
+                hole.clone(),
+                serde_json::json!("custody reply"),
+                settlement
+            )),
         Err(ResidentResumeError::Rejected(ResidentError::Prepared(
             PreparedRuntimeError::AnswerDelivery {
                 delivery: SiteDelivery::LiveReentry,
@@ -2155,13 +2158,14 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             panic!("each selected-site fixture item binds one value");
         };
         assert!(matches!(
-            source_action(&mut source, |source, settlement| source.run_bind_with_sites(
-                "selectedSiteFixture",
-                compiled.code(),
-                binder,
-                reservation.generation(),
-                settlement
-            ))
+            source_action(&mut source, |source, settlement| source
+                .run_bind_with_sites(
+                    "selectedSiteFixture",
+                    compiled.code(),
+                    binder,
+                    reservation.generation(),
+                    settlement
+                ))
             .unwrap(),
             ResidentOutcome::Completed { .. }
         ));
@@ -2377,13 +2381,14 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             panic!("retained import control binds one alias");
         };
         assert!(matches!(
-            source_action(&mut source, |source, settlement| source.run_bind_with_sites(
-                "retainedSiteAlias",
-                compiled.code(),
-                binder,
-                reservation.generation(),
-                settlement,
-            ))
+            source_action(&mut source, |source, settlement| source
+                .run_bind_with_sites(
+                    "retainedSiteAlias",
+                    compiled.code(),
+                    binder,
+                    reservation.generation(),
+                    settlement,
+                ))
             .unwrap(),
             ResidentOutcome::Completed { .. }
         ));
@@ -3690,9 +3695,9 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         .expect("prepare a pure display from the original ordinary compiler evidence")
     {
         turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
-        turn::ActivationPreviewCompilation::Opaque => panic!(
-            "the genuine ordinary home dictionary must expose its rendered display"
-        ),
+        turn::ActivationPreviewCompilation::Opaque => {
+            panic!("the genuine ordinary home dictionary must expose its rendered display")
+        }
         turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => panic!(
             "the genuine ordinary home dictionary must retain complete original instance evidence"
         ),
@@ -4260,7 +4265,10 @@ fn activation_preview_revoked_original_lease_refuses_before_spend() {
             break;
         }
     }
-    assert!(last_submission.is_some(), "parent retained its last request");
+    assert!(
+        last_submission.is_some(),
+        "parent retained its last request"
+    );
     let template = turn::assemble_activation_preview_module(512);
     let turn::ActivationPreviewCompilation::Ready(first) = compile_activation_preview(
         children[0].1.clone(),
@@ -4276,7 +4284,10 @@ fn activation_preview_revoked_original_lease_refuses_before_spend() {
     // unspent, so the refusal cannot strand it in the bound phase.
     let revoked_scope = children[1].1.scope_lease.scope();
     let retired = children[1].0.retire_scope(revoked_scope);
-    assert_eq!(retired.scopes_retired, 1, "the detached preview scope retires");
+    assert_eq!(
+        retired.scopes_retired, 1,
+        "the detached preview scope retires"
+    );
     let refused = turn::bind_activation_renderer(
         children[1].1.clone(),
         &SharedActivationRenderer::Renderable(cached.clone()),
@@ -4342,13 +4353,10 @@ fn activation_preview_failed_execution_admission_after_spend_stays_consumed() {
         .with_scoped_injection();
     let admission = resident.admit_activation_preview(mounted, view).unwrap();
     let template = turn::assemble_activation_preview_module(512);
-    let turn::ActivationPreviewCompilation::Ready(compiled) = compile_activation_preview(
-        admission.clone(),
-        &template,
-        512,
-        &fixture.recipe.include,
-    )
-    .unwrap() else {
+    let turn::ActivationPreviewCompilation::Ready(compiled) =
+        compile_activation_preview(admission.clone(), &template, 512, &fixture.recipe.include)
+            .unwrap()
+    else {
         panic!("package input is renderable")
     };
     let CompiledActivationPreview { bound, renderer } = compiled;
@@ -4426,13 +4434,14 @@ fn display_owner_preserves_checked_segment_capture_demand_across_value_prefix() 
                 panic!("middle item binds one unrelated value")
             };
             assert!(matches!(
-                source_action(&mut source, |source, settlement| source.run_bind_with_sites(
-                    "displayPrefix",
-                    producer.code(),
-                    binder,
-                    reservation.generation(),
-                    settlement,
-                ))
+                source_action(&mut source, |source, settlement| source
+                    .run_bind_with_sites(
+                        "displayPrefix",
+                        producer.code(),
+                        binder,
+                        reservation.generation(),
+                        settlement,
+                    ))
                 .unwrap(),
                 ResidentOutcome::Completed { .. }
             ));
