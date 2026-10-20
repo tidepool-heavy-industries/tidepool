@@ -32,14 +32,6 @@ pub(crate) enum GenerationRetirementRequestError {
     NotEnqueued,
     #[error("the admitted operation cannot be represented in the reload receipt")]
     OperationCoordinate,
-    #[error("generation retirement reply is unavailable without an observed terminal owner")]
-    ReplyUnavailable,
-}
-
-impl GenerationRetirementRequestError {
-    pub(crate) fn requires_recovery(&self) -> bool {
-        matches!(self, Self::ReplyUnavailable)
-    }
 }
 
 pub(super) enum GenerationRetirementBeginReply {
@@ -381,19 +373,23 @@ impl RunControlClient {
                 drop(message);
                 return Err(GenerationRetirementRequestError::NotEnqueued);
             }
-            Err(_) => return Err(GenerationRetirementRequestError::ReplyUnavailable),
+            Err(_) => {
+                return Ok(metadata.unavailable(
+                    "the transport returned no actual unreserved payload; admission is unobserved",
+                ))
+            }
         }
         tokio::select! {
             biased;
             reply = &mut receiver => match reply {
                 Ok(reply) => reply,
-                Err(_) => self.native_cleanup.retirement_reply(&metadata).ok_or(GenerationRetirementRequestError::ReplyUnavailable),
+                Err(_) => Ok(self.native_cleanup.retirement_reply(&metadata).unwrap_or_else(|| metadata.unavailable("the accepted retirement reply was lost without a matching terminal observation"))),
             },
             _ = self.native_cleanup.wait_for_terminal() => {
                 // The normal final reply may race with successful finalization.
                 // Terminal observation never substitutes a fabricated success.
                 if let Ok(reply) = receiver.try_recv() { return reply; }
-                self.native_cleanup.retirement_reply(&metadata).ok_or(GenerationRetirementRequestError::ReplyUnavailable)
+                Ok(self.native_cleanup.retirement_reply(&metadata).unwrap_or_else(|| metadata.unavailable("the terminal owner has no available final receipt for the accepted retirement")))
             }
         }
     }
@@ -1684,11 +1680,13 @@ impl RunState {
                     &mut reply,
                 );
                 if let Some(reply) = reply {
-                    let error = match outcome {
-                        Err(error) => GenerationRetirementRequestError::Admission(error),
-                        Ok(_) => GenerationRetirementRequestError::ReplyUnavailable,
+                    let result = match outcome {
+                        Err(error) => Err(GenerationRetirementRequestError::Admission(error)),
+                        Ok(_) => Ok(reply
+                            .metadata
+                            .unavailable("the admitted retirement has no final reply owner")),
                     };
-                    let _ = reply.sender.send(Err(error));
+                    let _ = reply.sender.send(result);
                 } else if outcome.is_err() {
                     self.notify_generation_retirement(actor);
                 }
